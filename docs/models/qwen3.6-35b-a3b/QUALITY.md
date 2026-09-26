@@ -28,17 +28,29 @@ for 1, 7, 100 and 512 tokens on both projection shapes, requiring every
 slot written, relative error < 1e-2, and byte-identical output across two
 runs. The op test also checks the dense mode of the BF16 WMMA GEMM against
 the FP32-activation GEMV for 1, 100 and 512 rows (relative error < 1e-2,
-every row written).
+every row written). It also checks the routed F16 expert GEMM (Q8_0 and
+Q6_K, 16- and 48-row tiles) and the paired gate/up GEMM (Q8_0 and Q6_K, 64-
+and 128-row tiles) against per-slot GEMV references, requiring every output
+written and relative error below 1e-2 (routed) and 5e-3 (paired).
+
+## MTP head
+
+`qwen_mtp_gpu_test`, run with the 35B GGUF as both base and draft, compares
+the GPU MTP layer with the CPU reference (hidden cosine > 0.999, selected
+logits within 2.0) and checks reset determinism. Measured on UD-Q8_K_XL:
+hidden cosine 0.999992 (RMSE 0.0108, max abs 0.0414), selected-logit max abs
+error 0.0102.
 
 ## Reproduce
 
 Build the `gpu-test` preset and run the binaries inside the ROCm container:
 
 ```sh
-cmake --build --preset gpu-test --target qwen35ba3b_target_test qwen35ba3b_moe_ops_test --parallel 16
-GUFO_QWEN35BA3B_MODEL=path/to/Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL.gguf \
-  ./build/gpu-test/bin/qwen35ba3b_target_test
+cmake --build --preset gpu-test --target qwen35ba3b_target_test qwen35ba3b_moe_ops_test qwen_mtp_gpu_test --parallel 8
+export GUFO_QWEN35BA3B_MODEL=path/to/Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL.gguf
+./build/gpu-test/bin/qwen35ba3b_target_test
 ./build/gpu-test/bin/qwen35ba3b_moe_ops_test
+./build/gpu-test/bin/qwen_mtp_gpu_test "$GUFO_QWEN35BA3B_MODEL" "$GUFO_QWEN35BA3B_MODEL"
 ```
 
 A missing-weight skip is not a pass.
