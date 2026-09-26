@@ -92,8 +92,12 @@ TextPreparedPrompt PrepareQwenPrompt(
   // Agent clients may discard an interrupted assistant entirely and append
   // the next user turn directly after tool results. Preserve a checkpoint
   // before the generation suffix even when reasoning itself is retained.
+  // With thinking enabled the suffix ends in "<think>\n"; a later turn that
+  // renders this assistant with empty reasoning emits "<think>\n\n", which
+  // BPE merges into one token, so the full prompt is no longer a prefix.
   std::size_t cache_prefix = 0;
-  if (!options.preserve_thinking || !request.tools.empty()) {
+  if (!options.preserve_thinking || options.enable_thinking ||
+      !request.tools.empty()) {
     const auto generation = tokenizer.Encode(
         tokenization::GenerationPrompt(options.enable_thinking),
         {.add_bos = false, .add_eos = false, .parse_special_tokens = true});

@@ -86,6 +86,8 @@ def main():
                         help="Resume after a completed tool response")
     parser.add_argument("--discard-assistant", action="store_true",
                         help="Drop the interrupted assistant and send '.' like an agent client")
+    parser.add_argument("--drop-reasoning", action="store_true",
+                        help="Omit reasoning_content from replayed assistants like OpenAI clients")
     parser.add_argument("--prefix-repetitions", type=int, default=32,
                         help="Length of the synthetic shared system prefix")
     parser.add_argument("--case", action="append", choices=CASES,
@@ -150,8 +152,8 @@ def main():
                         "parameters": {"type": "object", "properties": {}}}}]
                 initial = {**body, "messages": list(messages), "cache_prompt": False}
                 assistant, elapsed = call(args.url, initial, field)
-                if not preserve:
-                    assistant.pop("reasoning_content")
+                if not preserve or args.drop_reasoning:
+                    assistant.pop("reasoning_content", None)
                 if not args.discard_assistant:
                     messages.append(assistant)
                 messages.append({"role": "user", "content":
@@ -173,8 +175,8 @@ def main():
                 # A one-shot full prefill has different matrix shapes; report
                 # that comparison separately from exact cache/history replay.
                 replayed_assistant, _ = call(args.url, initial, field)
-                if not preserve:
-                    replayed_assistant.pop("reasoning_content")
+                if not preserve or args.drop_reasoning:
+                    replayed_assistant.pop("reasoning_content", None)
                 if replayed_assistant != assistant:
                     raise RuntimeError(f"{name}: cold interrupted stream did not replay")
                 replayed = call(args.url, body)
@@ -192,6 +194,7 @@ def main():
                     raise RuntimeError(f"{name}: third-turn snapshot changed seeded output")
                 report = {"case": name, "request": body, "sha256": digest(resumed),
                           "discard_assistant": args.discard_assistant,
+                          "drop_reasoning": args.drop_reasoning,
                           "interrupt_seconds": elapsed, **measured, "exact": True,
                           "full_prefill_equal": digest(resumed) == digest(cold),
                           "followup": {"request": followup_body,

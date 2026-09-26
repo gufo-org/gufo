@@ -150,7 +150,8 @@ the result can still populate the cache. DeepSeek and Qwen tool requests retain
 a checkpoint before the assistant-generation suffix, including when a client
 drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
 also accounts for tokenization changes where adjacent user/tool turns join.
-Qwen requests that remove previous reasoning retain this checkpoint too.
+Qwen requests that remove previous reasoning or enable thinking retain this
+checkpoint too.
 Exact live continuations reuse generated tokens. The server reports cached
 and newly processed tokens separately; resuming from the checkpoint processes
 the short suffix. System instructions, tool definitions and image identities
