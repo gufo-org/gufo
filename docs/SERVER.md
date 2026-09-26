@@ -10,7 +10,7 @@ versioned contract: supported fields behave as documented, and unsupported
 fields return explicit errors.
 
 Chat Completions is the main API, including streaming, images and tools.
-Responses supports text with optional streaming; Anthropic Messages exposes a
+Responses supports text and image inputs with optional streaming; Anthropic Messages exposes a
 synchronous text subset.
 The reference protocols are:
 
@@ -260,7 +260,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/models` | List loaded model aliases and capabilities |
-| `POST` | `/v1/responses` | Text, optional SSE streaming |
+| `POST` | `/v1/responses` | Text/images, structured output, optional SSE streaming |
 | `POST` | `/v1/chat/completions` | Main chat, streaming, image and tool API |
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
 | `GET` | `/health` | Process liveness (aliases: `/v1/health`, `/healthz`) |
@@ -433,13 +433,14 @@ request limits, cancellation, cache accounting and completion state.
 
 ## Responses API Subset
 
-`POST /v1/responses` accepts `model`, `input` as text or text-message arrays,
-`instructions`, `max_output_tokens`, `stream`, and the shared sampling controls.
+`POST /v1/responses` accepts `model`, `input` as text or message arrays,
+`instructions`, `max_output_tokens`, `stream`, `reasoning.effort`,
+`text.format`, and the shared sampling controls. Message content supports
+`input_text` and `input_image` with an `image_url` (HTTPS or a data URL).
 Clients supply the complete conversation, including prior Gufo `output` items
 when retaining reasoning. `store` and `background` must be false
-when present. Images, tools, structured output, server-side conversations and
-`previous_response_id` are rejected on this route. Use Chat Completions for images
-and tools.
+when present. Tools, server-side conversations and `previous_response_id`
+remain unsupported on this route; use Chat Completions for tools.
 
 Responses report `incomplete` with reason `max_output_tokens` when generation
 hits its limit. Otherwise they report `completed`. `stream: true` sends typed
@@ -541,37 +542,51 @@ and return explicit errors.
 
 Chat Completions accepts `response_format: {"type":"json_object"}` or
 `{"type":"json_schema","json_schema":{"name":"Reply","strict":true,"schema":…}}`.
-Tokens are constrained during AR and speculative decoding (DFlash2, MTP and
-DSpark). A completed response contains valid JSON; `finish_reason: "length"`
-can contain an incomplete prefix. Images, streaming, sampling and caching work
-with the same request format. The schema and its supplied description are
-included in the prompt, so changing them also changes the reusable prefix.
+Responses uses `text: {"format":{"type":"json_schema","name":"Reply","strict":true,"schema":…}}`.
+The official SDK supports typed parsing and streaming through
+`client.chat.completions.parse/stream(response_format=Model)` and
+`client.responses.parse/stream(text_format=Model)`.
 
-The supported subset is objects with `properties`, `required` and
-`additionalProperties:false`; arrays with `items`, `minItems` and `maxItems`;
-primitive types and nullable types; primitive `enum`/`const`; `anyOf`; and
-acyclic local `$defs`/`$ref`. Strict schemas require every property; use null
-for optional values. Fields are generated in schema order. Unsupported keywords
-return HTTP 400 `invalid_response_format`, including inside unused definitions.
-Limits: 64 KiB schemas, 8 KiB descriptions, 16 levels of schema expansion,
-128 expanded properties, 256 enum/const values, 512-byte literals, and explicit
-array bounds up to 256. Arrays without `maxItems` have no element limit.
-`json_object` allows up to 16 nested containers. Compiled programs, token masks
-and transitions have bounded caches/work limits.
+Constraints apply before target sampling in AR, DFlash2, MTP and DSpark.
+Thinking follows the model/request default and precedes the constrained answer;
+reasoning stays separate from JSON content. Streaming, image inputs, independent
+concurrent requests and continuation caches use the same decoding path.
+A stop sequence or token limit can interrupt JSON or a tool call; check the
+finish reason before parsing. Changing the schema changes the cached prompt prefix.
+Output token budgets include reasoning: Chat returns `finish_reason: "length"`,
+and Responses returns `status: "incomplete"` with reason `max_output_tokens`.
 
-Structured requests disable omitted thinking. Explicit thinking, active tools
-and stop strings are rejected; use `tool_choice:"none"` for declared but inactive
-tools. Ordinary requests retain their existing behavior. The official SDK's
-`client.chat.completions.parse(..., response_format=YourPydanticModel)` and
-`client.chat.completions.stream(...)` use this schema interface.
+Supported schema features:
+
+- Objects, arrays, primitive/nullable types, primitive `enum`/`const`, and `anyOf`.
+- Recursive local `$ref`/`$defs`, including references to the root.
+- Numeric bounds, exclusive bounds and exact decimal `multipleOf`.
+- String `pattern`, `minLength`/`maxLength`, and formats `date-time`, `time`,
+  `date`, `duration`, `email`, `hostname`, `ipv4`, `ipv6`, `uuid`.
+- Array `minItems`/`maxItems`; large bounds compile without enumerating elements.
+
+The root must resolve to an object. Objects require `additionalProperties:false`;
+strict schemas require every property (use null for optional values). Keys follow
+schema order. Numeric generation uses decimal notation. Unsupported keywords,
+external references and unusable reference cycles return a validation error.
+Schemas allow 5,000 properties, 1,000 enum values and 120,000 characters in
+property/definition names and enum/const strings, with a 2 MiB document limit.
+Regex evaluation and grammar caches have bounded resource budgets.
+
+Chat Completions can choose declared tools with `auto` or require one with
+`required`. Strict tool arguments follow their parameter schema;
+`response_format` governs the final answer. Quoted markup in argument values
+stays literal.
 
 References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create),
 [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
 and [llama.cpp grammar sampling](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/sampling.cpp).
 Gufo applies the grammar before filtering/normalizing the target distribution;
 proposal probabilities remain those actually sampled by each draft backend.
-Verify with `tools/serving/check-openai-sdk.py --suite structured` (add `--vision`
-for an image-capable server).
+Verify with `tools/serving/check-openai-sdk.py --suite structured` or
+`--suite structured-limits` (add `--vision` for an image-capable server).
+The independent schema oracle runs with
+`nix develop -c python tests/core/json_schema_oracle.py build/cpu-test/json_constraint_test`.
 
 Admission groups text requests by the socket peer's IP address across chat and
 compatibility endpoints. Caller-provided identity headers do not affect quotas;

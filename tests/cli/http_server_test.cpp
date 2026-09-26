@@ -432,7 +432,7 @@ void TestCompatibilityRequests() {
   ExpectStatus(server.Post("/v1/completions", R"({"prompt":["one","two"]})"),
                400);
   ExpectStatus(server.Post("/v1/responses",
-                           R"({"input":[{"role":"user","content":[
+                           R"({"input":[{"role":"assistant","content":[
                            {"type":"input_text","text":"describe"},
                            {"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]})"),
                400);
@@ -447,6 +447,20 @@ void TestCompatibilityRequests() {
                            R"({"messages":[{"role":"user","content":"hi"}]})"),
                501);
   assert(server.backend->calls == calls);
+
+  const auto structured =
+      response_body(server.Post("/v1/responses",
+                                R"({"input":[{"role":"user","content":[
+        {"type":"input_text","text":"describe"},
+        {"type":"input_image","image_url":"data:image/png;base64,AA=="}]}],
+        "reasoning":{"effort":"none"},
+        "text":{"format":{"type":"json_schema","name":"answer","strict":true,
+          "schema":{"type":"object","properties":{"score":{"type":"integer","minimum":1,"maximum":5}},
+          "required":["score"],"additionalProperties":false}}}})"));
+  const auto request = server.backend->LastCall().chat;
+  assert(request.response_format && request.reasoning.enabled == false &&
+         request.messages.back().images.size() == 1 &&
+         request.messages.back().images[0].offset == 8);
 
   const auto response = response_body(server.Post(
       "/v1/responses",

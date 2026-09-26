@@ -108,6 +108,7 @@ add_library(gufo_core STATIC
   src/core/gguf_reader.cpp
   src/core/gguf_identity.cpp
   src/core/json_constraint.cpp
+  src/core/json_schema_lexeme.cpp
   src/core/sampling.cpp
   src/models/minimax_h3/audio_vae.cpp
   src/models/minimax_h3/denoiser.cpp
@@ -133,7 +134,7 @@ target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_definitions(gufo_core PRIVATE
   GUFO_FFMPEG_EXECUTABLE="${GUFO_FFMPEG_EXECUTABLE}"
   GUFO_FFPROBE_EXECUTABLE="${GUFO_FFPROBE_EXECUTABLE}")
-target_link_libraries(gufo_core PUBLIC ICU::uc Threads::Threads
+target_link_libraries(gufo_core PUBLIC ICU::uc ICU::i18n Threads::Threads
   PNG::PNG JPEG::JPEG CURL::libcurl OpenSSL::Crypto)
 
 add_subdirectory(src/models/qwen)
