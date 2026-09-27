@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import copy
 import json
 import io
 import os
@@ -14,11 +15,12 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
 from gufo import serving_bench
+from gufo.model_bench.artifacts import public_command
 from gufo.model_bench.charts import render_charts
 from gufo.model_bench.config import BenchConfig, load_config
 from gufo.model_bench.llm import Session, _measure_depth, run_loading, run_multi, run_single, run_table
 from gufo.model_bench.render import _serving_rate, layout_for, parse_table, render_table
-from gufo.model_bench.servers import Server
+from gufo.model_bench.servers import Server, Tp2Server
 
 
 def check(condition, message):
@@ -214,6 +216,67 @@ check(
     == serving_bench.hashlib.sha256(b"one two").hexdigest(),
     "completion text is retained only as a hash",
 )
+
+class JsonResponse:
+    status = 200
+
+    def __init__(self, payload):
+        self.payload = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return self.payload
+
+
+def fake_json_urlopen(request, timeout):
+    del timeout
+    body = json.loads(request.data)
+    check(body["stream"] is False and "stream_options" not in body,
+          "TP2 non-streaming requests omit SSE-only fields")
+    return JsonResponse({
+        "choices": [{"message": {"content": "one two"}}],
+        "usage": GUFO_USAGE,
+        "timings": LLAMA_TIMINGS,
+    })
+
+
+serving_bench.urllib.request.urlopen = fake_json_urlopen
+try:
+    non_streaming = serving_bench.run_request(
+        base_url="https://private.example", model="test-model", prompt="hello",
+        max_tokens=2, temperature=0.0, timeout_seconds=5.0,
+        client_id="test", concurrency=1, repetition=0, request_index=0,
+        stream=False,
+    )
+finally:
+    serving_bench.urllib.request.urlopen = original_urlopen
+check(non_streaming.completion_sha256 ==
+      serving_bench.hashlib.sha256(b"one two").hexdigest(),
+      "non-streaming completions retain the same hash contract")
+check(non_streaming.decode_tokens_per_second == 200.0,
+      "non-streaming terminal timings are parsed")
+
+serving_bench.urllib.request.urlopen = fake_json_urlopen
+try:
+    json_corpus = serving_bench.run_corpus_benchmark(
+        base_url="https://private.example", model="test-model",
+        cases=[serving_bench.PromptCase("json", "structured", "return JSON")],
+        workload_id="json-corpus-v1", max_tokens=2, temperature=0.0,
+        concurrency_levels=[1], warmup_rounds=0, repetitions=1,
+        timeout_seconds=5.0, fingerprint=fingerprint,
+        source_revision="a" * 40, source_dirty=False, suite_bytes=b"json",
+        stream=False, build_mode="container-gpu-tp2",
+    )
+finally:
+    serving_bench.urllib.request.urlopen = original_urlopen
+check(json_corpus["workload"]["transport"] == "openai-chat-completions-json"
+      and json_corpus["source"]["buildMode"] == "container-gpu-tp2",
+      "corpus reports retain JSON transport and container build identity")
 
 corpus_rounds = []
 original_corpus_round = serving_bench._run_corpus_round
@@ -578,6 +641,92 @@ check(server.failure_exit_code is None and server.stop.called,
 server.process.poll.return_value = -9
 server.__exit__(RuntimeError, RuntimeError("connection closed"), None)
 check(server.failure_exit_code == -9, "an actual process failure remains distinguishable")
+
+check(
+    public_command([
+        "gufo", "--tp-control-token", "secret",
+        "--tp-bootstrap-host", "10.0.0.1",
+        "--model", "/models/target.gguf",
+    ]) == [
+        "gufo", "--tp-control-token", "<redacted>",
+        "--tp-bootstrap-host", "<redacted>", "--model", "target.gguf",
+    ],
+    "TP2 credentials and endpoints must not enter retained artifacts",
+)
+
+tp2_config = load_config(ROOT, "qwen3.8-flash-next")
+tp2_config.data = copy.deepcopy(tp2_config.data)
+tp2_config.data["gufo"]["tp2"] = {
+    "remote_host": "box2",
+    "bootstrap_host": "10.0.0.1",
+    "container_image": "gufo-tp2-dev:7.2.3",
+    "workspace": str(ROOT),
+    "container_workspace": "/workspace/gufo",
+    "binary": "build/gpu-tp2/gufo",
+    "control_token": "unit-test-token",
+}
+tp2_config.files = {
+    "gguf": {"default": ROOT / "models" / "target.gguf"},
+    "mtp": {"default": ROOT / "models" / "mtp.gguf"},
+}
+tp2_session = Session(
+    tp2_config, "gufo", gufo_binary=Path("gufo"), reference_binary="llama-server",
+    source={}, fingerprint={}, log_dir=Path("/tmp"), document="", todo_only=False,
+)
+local_tp2, remote_tp2, local_cleanup_tp2, cleanup_tp2, remote_host_tp2, _ = tp2_session._tp2_commands(
+    tp2_config.table("single-mtp"), mode="mtp", context=4096, sessions=1,
+    port=18080, tag="single",
+)
+check(remote_host_tp2 == "box2"
+      and local_cleanup_tp2[:3] == ["podman", "rm", "-f"]
+      and cleanup_tp2[:3] == ["podman", "rm", "-f"],
+      "TP2 command records both container cleanup operations")
+check("--tp-world-size" in local_tp2 and local_tp2[local_tp2.index("--tp-rank") + 1] == "0"
+      and remote_tp2[remote_tp2.index("--tp-rank") + 1] == "1",
+      "TP2 commands assign distinct ranks")
+check(remote_tp2[remote_tp2.index("--tp-bootstrap-host") + 1] == "10.0.0.1",
+      "rank 1 receives the rank-0 bootstrap address")
+check("/workspace/gufo/models/target.gguf" in local_tp2
+      and "/workspace/gufo/models/mtp.gguf" in local_tp2,
+      "TP2 translates host model paths into the mounted workspace")
+check(local_tp2[local_tp2.index("--max-pending") + 1] == "1"
+      and local_tp2.count("--max-pending-per-client") == 1
+      and local_tp2[local_tp2.index("--max-pending-per-client") + 1] == "1",
+      "TP2 overrides the published C8 scheduling arguments")
+check(public_command(local_tp2).count("<redacted>") == 1,
+      "TP2 token is redacted from the combined command")
+check("--tp-cache-reuse" not in local_tp2,
+      "TP2 caches by default, without a cache flag")
+tp2_session.check_tp2_scope(tp2_config.table("single-ar"), depths=[4096])
+check(True, "TP2 accepts cached depths")
+try:
+    tp2_session.check_tp2_scope(tp2_config.table("multi-ar"), users=2)
+except RuntimeError as failure:
+    check("C1" in str(failure), "TP2 C>1 remains explicitly unqualified")
+else:
+    raise AssertionError("TP2 C>1 scope must remain rejected")
+check(
+    Tp2Server(Server([], "/ready", Path("/unused")), ["podman", "run", "a b"],
+             remote_host="box2", remote_log_path=Path("/unused-rank1"))._ssh_command(
+                 ["podman", "run", "a b"])[-1] == "exec podman run 'a b'",
+    "remote TP2 commands are shell-quoted exactly once",
+)
+cleanup_events = []
+cleanup_local = Server([], "/ready", Path("/unused"))
+cleanup_local.process = MagicMock()
+cleanup_remote_process = MagicMock()
+cleanup_server = Tp2Server(
+    cleanup_local, ["remote"], remote_host="box2",
+    remote_log_path=Path("/unused-rank1"),
+    local_cleanup_command=["podman", "rm", "-f", "rank0"],
+    remote_cleanup_command=["podman", "rm", "-f", "rank1"],
+)
+cleanup_server.remote_process = cleanup_remote_process
+with patch("gufo.model_bench.servers.subprocess.run", side_effect=lambda command, **kwargs: cleanup_events.append(("run", command[0])) or MagicMock()), \
+     patch("gufo.model_bench.servers._stop_process", side_effect=lambda process: cleanup_events.append(("stop", "remote" if process is cleanup_remote_process else "local"))):
+    cleanup_server.stop()
+check(cleanup_events == [("run", "ssh"), ("stop", "remote"), ("run", "podman"), ("stop", "local")],
+      "TP2 cleanup removes remote and local containers before reaping clients")
 
 
 def fake_urlopen_diverging(request, timeout):

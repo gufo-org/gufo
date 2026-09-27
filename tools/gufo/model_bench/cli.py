@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from gufo.serving_bench import load_fingerprint, source_identity
+from gufo.serving_bench import source_identity
 
 from .config import TARGETS, BenchConfig, load_config, parse_file_args
 
@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", action="append", default=[], help="restrict to a mode: ar or the speculative mode")
     run.add_argument("--context", type=int, default=None,
                      help="override the single-user tables' context capacity (e.g. to fit a reference server in RAM)")
+    run.add_argument("--request-transport", choices=("sse", "json"), default=None,
+                     help="override the HTTP request transport (TP2 requires json)")
 
     render = sub.add_parser("render", help="rewrite marked tables in BENCHMARKS.md from artifacts")
     render.add_argument("--table", action="append", default=[])
@@ -111,22 +113,28 @@ def cmd_run(config: BenchConfig, args: argparse.Namespace) -> int:
     from . import llm
 
     root = config.root
+    if args.target == "gufo" and config.data.get("gufo", {}).get("tp2") and args.artifacts_dir is None:
+        raise SystemExit(
+            "TP2 experiments require --artifacts-dir; published artifacts are reserved for the single-host topology"
+        )
     gufo_binary = args.gufo if args.gufo.is_absolute() else (root / args.gufo)
     if not gufo_binary.exists():
         raise SystemExit(f"Gufo binary not found: {gufo_binary} (run `nix build`)")
     reference_binary = args.reference_binary or config.data["reference"]["server"]
     revision, dirty = source_identity(root)
-    fingerprint = load_fingerprint(None, gufo_binary)
     document = config.benchmarks_path.read_text(encoding="utf-8") if config.benchmarks_path.exists() else ""
+    build_mode = "container-gpu-tp2" if args.target == "gufo" and config.data.get("gufo", {}).get("tp2") else "nix-release"
     session = llm.Session(
         config, args.target, gufo_binary=gufo_binary, reference_binary=reference_binary,
-        source={"revision": revision, "dirty": dirty, "buildMode": "nix-release"},
-        fingerprint=fingerprint, log_dir=(args.log_dir if args.log_dir.is_absolute() else root / args.log_dir),
+        source={"revision": revision, "dirty": dirty, "buildMode": build_mode},
+        fingerprint={}, log_dir=(args.log_dir if args.log_dir.is_absolute() else root / args.log_dir),
         document=document, todo_only=args.todo, drop_caches=args.drop_caches,
         repetitions=args.repetitions, fresh=args.fresh,
         depths=[int(d) for d in args.depths.split(",")] if args.depths else None,
         modes=args.mode or None, context=args.context,
+        request_transport=args.request_transport,
     )
+    session.fingerprint = session.runtime_fingerprint()
     wanted = _table_ids(args.table)
     tables = [t for t in config.tables() if not wanted or t.id in wanted]
     unknown = wanted - {t.id for t in config.tables()}
