@@ -46,8 +46,6 @@ decoders batched; more wait up to `--max-pending`, the rest get HTTP 429.
 
 Limits:
 
-- Concurrent MTP requests advance in batched single-token steps; batched
-  multi-token decoding is not mirrored.
 - A lost peer or a disagreement fails the request with HTTP 500, and a lost
   peer fails every later request, but the process keeps running and `/ready`
   stays green: restart both ranks.
@@ -92,8 +90,10 @@ and both ranks meet in the call's exchanges. Token selection reads only logits
 and stays on rank 0. A request opens with `kSingle` (prompt, sampling
 configuration and prepared images) and closes with `kEnd`. Mirrored calls:
 
-- prefill chunks, single and batched advances, and one multi-token MTP cycle,
-  which carries rank 0's sampler draw state so both ranks draw alike;
+- prefill chunks, single and batched advances, and single and batched
+  multi-token MTP cycles. A cycle carries rank 0's sampler draw state so both
+  ranks draw alike; a batch also carries the draft count rank 0 chose from its
+  own cycle timings;
 - state resets, and binding a state to its request's prompt context (images
   can reset the state);
 - snapshot, restore, prefix reuse and cancellation preparation, each
@@ -159,8 +159,9 @@ On both hosts, from one commit (record it and the binary hash):
    client disconnects during decode and prefill behave as on one host.
 4. A multi-turn cached chat restores its whole prompt on replay; cached token
    counts match one host (outputs may differ after a few turns).
-5. Two, four and eight concurrent requests each equal their one-at-a-time
-   output; the queue bound returns 429; a long prefill runs beside decoders.
+5. Two, four and eight concurrent requests, AR and MTP, each equal their
+   one-at-a-time output, seeded sampled ones too; the queue bound returns 429;
+   a long prefill runs beside decoders.
 6. Images: a request, its cached repeat, a follow-up and two images in one
    request match one host's answers.
 7. Disk cache (`--cache-disk` on both ranks): after both ranks restart,
