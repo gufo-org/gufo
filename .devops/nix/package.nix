@@ -11,6 +11,8 @@
   openssl,
   ffmpeg-headless,
   rocmPackages,
+  rdma-core ? null,
+  enableTp2Rdma ? false,
   version,
 }:
 
@@ -37,7 +39,10 @@ let
       || relativePath == "tests/models"
       || relativePath == "tests/models/deepseek_v4_flash"
       || relativePath == "tests/models/deepseek_v4_flash/fixtures"
-      || relativePath == "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json";
+      || relativePath == "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
+      || relativePath == "tests/models/qwen38_flash_next"
+      || lib.hasPrefix "tests/models/qwen38_flash_next/" relativePath
+      || relativePath == "tests/cli/tp_control_test.cpp";
   };
 in
 stdenv.mkDerivation {
@@ -66,7 +71,7 @@ stdenv.mkDerivation {
     rocmPackages.rocprim
     rocmPackages.rocwmma
     rocmPackages.rocblas
-  ];
+  ] ++ lib.optionals enableTp2Rdma [ rdma-core rdma-core.dev ];
 
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
@@ -75,7 +80,7 @@ stdenv.mkDerivation {
     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
     "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
-  ];
+  ] ++ lib.optionals enableTp2Rdma [ "-DGUFO_ENABLE_TP2_RDMA=ON" ];
 
   doInstallCheck = true;
   installCheckPhase = ''
@@ -88,6 +93,10 @@ stdenv.mkDerivation {
     test ! -e $out/bin/gufo-kernel-bench
     test -f $out/share/licenses/gufo/LICENSE
     test -f $out/share/licenses/gufo/third-party/LICENSE.ds4
+    ${lib.optionalString enableTp2Rdma ''
+      test -e ${rdma-core.dev}/lib/libibverbs.so
+      test -f $out/share/licenses/gufo/third-party/rdma-core/COPYING.GPL2
+    ''}
 
     runHook postInstallCheck
   '';

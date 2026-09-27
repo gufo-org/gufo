@@ -14,6 +14,7 @@ endfunction()
 
 add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
+add_qwen38_flash_next_test(tp_partition gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(mtp_sampling gufo_core "cpu")
 
 add_executable(qwen38_flash_next_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)
@@ -41,6 +42,19 @@ if (ENGINE_ENABLE_HIP)
     gufo_qwen38_flash_next)
   add_custom_target(qwen38_flash_next_model_tests
     DEPENDS qwen38_flash_next_session_test qwen38_flash_next_snapshot_test)
+
+  add_executable(qwen38_flash_next_tp_probe EXCLUDE_FROM_ALL tp_probe.cpp)
+  target_link_libraries(qwen38_flash_next_tp_probe PRIVATE
+    gufo_qwen38_flash_next)
+
+  # Batched-decode probe: the same program on both ranks over one RDMA pair,
+  # with no control channel, scheduler or executor.
+  if (GUFO_ENABLE_TP2_RDMA)
+    add_executable(qwen38_flash_next_tp_batched_probe EXCLUDE_FROM_ALL
+      tp_batched_probe.cpp)
+    target_link_libraries(qwen38_flash_next_tp_batched_probe PRIVATE
+      gufo_qwen38_flash_next hip::host)
+  endif()
 
   add_executable(qwen38_flash_next_gpu_probe EXCLUDE_FROM_ALL gpu_probe.cpp
     mtp_audit.cpp)

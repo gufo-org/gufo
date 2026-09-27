@@ -8,6 +8,7 @@ set(gufo_pr_targets
   bench_cli_test prompt_cli_test eval_http_client_test
   qwen_tokenizer_test qwen_chat_template_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
+  qwen38_flash_next_tp_partition_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test
   qwen3_asr_config_test qwen3_asr_audio_api_test
   qwen3_tts_config_test qwen3_tts_audio_api_test
@@ -16,9 +17,11 @@ set(gufo_pr_targets
 set(gufo_pr_tests ${gufo_pr_targets})
 list(REMOVE_ITEM gufo_pr_tests
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
+  qwen38_flash_next_tp_partition_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test)
 list(APPEND gufo_pr_tests
   "qwen38_flash_next\\.config" "qwen38_flash_next\\.mtp_sampling"
+  "qwen38_flash_next\\.tp_partition"
   "ds4\\.sampling" "ds4\\.template" "ds4\\.cli"
   gufo_version gufo_help serve_cli_test eval_http_test)
 list(JOIN gufo_pr_tests "|" gufo_pr_pattern)

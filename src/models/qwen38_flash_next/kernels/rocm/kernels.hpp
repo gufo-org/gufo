@@ -159,15 +159,17 @@ void W8A8GemmWave64(const void* w, const void* x_tiled, float* out,
 bool HcDownF16Gemm(const void* w, const void* x_tiled, __half* out,
                    std::uint32_t n_tokens, hipStream_t stream);
 
-/// Stacked Q8_0 QKV projection [13312,2560], head normalization and RoPE.
-/// Writes Q/gates in F32 and K/V caches in F16, preserving separate rounding.
-/// Fixed geometry: 24 query heads, two KV heads, 256 dimensions, 64 rotary.
-/// Requires at least 1024 tokens; cache capacity must include position +
-/// tokens.
+/// Stacked Q8_0 QKV projection [(2 * heads + 2 * kv_heads) * 256, 2560],
+/// head normalization and RoPE: all of the model's 24 query and two KV heads,
+/// or a TP rank's whole query groups. Writes Q/gates in F32 and K/V caches in
+/// F16, preserving separate rounding. Fixed geometry: 256 dimensions, 64
+/// rotary. Requires at least 1024 tokens; cache capacity must include
+/// position + tokens.
 bool AttentionF16Gemm(const void* weights, const __half* input,
                       const float* q_gamma, const float* k_gamma, float* query,
                       float* gate, __half* keys, __half* values,
-                      std::uint32_t n_tokens, const std::uint32_t* position,
+                      std::uint32_t n_tokens, std::uint32_t heads,
+                      std::uint32_t kv_heads, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
                       const qwen::vision::DeviceRope* rope = nullptr);
 
@@ -456,10 +458,27 @@ void MtpHidden(const float* base, const float* alt, const std::int32_t* row,
                float* dst, std::uint32_t n_tokens, std::uint32_t width,
                hipStream_t stream);
 
-/// Add the projected embedding once to each projected hidden branch.
-void MtpAddEmbedding(const float* embedding, float* residual,
-                     std::uint32_t n_tokens, std::uint32_t hidden,
-                     std::uint32_t streams, hipStream_t stream);
+/// residual[t] += addend[t] for each of `n_tokens` rows, broadcasting the
+/// `hidden`-float addend row over the row's `streams` consecutive slices.
+/// MTP adds its projected embedding to every hidden branch this way; the TP
+/// all-reduce adds the peer's partial with `streams` = 1.
+void AddRowsBroadcast(const float* addend, float* residual,
+                      std::uint32_t n_tokens, std::uint32_t hidden,
+                      std::uint32_t streams, hipStream_t stream);
+
+/// Copies `count` floats of a partial into a host-visible send window, then
+/// publishes `value` in `ready` once every block's copy is visible to the
+/// host. `arrivals` counts finished blocks and must start at zero; the last
+/// block resets it.
+void StagePartial(const float* partial, float* send, std::size_t count,
+                  std::uint32_t* arrivals, std::uint64_t* ready,
+                  std::uint64_t value, hipStream_t stream);
+
+/// Holds the stream until host-written `flag` reaches `value`. After `ticks`
+/// of the device wall clock it sets `timed_out` and lets the stream go on.
+void WaitValue(const std::uint64_t* flag, std::uint64_t value,
+               std::uint64_t ticks, std::uint32_t* timed_out,
+               hipStream_t stream);
 
 inline constexpr std::uint32_t kArgmaxParts = 64;
 struct ArgmaxCandidate {

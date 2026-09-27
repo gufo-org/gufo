@@ -387,6 +387,95 @@ double Compare(std::uint32_t n_tokens, std::uint32_t start_pos, bool masked,
   return worst;
 }
 
+/// A TP rank holds one KV head and its twelve query heads. From the rank's
+/// slice of the queries, gates and caches, the one-KV-head kernel must give
+/// exactly the full kernel's output for those heads, on either rank.
+void CheckRankSlices(std::uint32_t n_tokens, std::uint32_t start_pos,
+                     bool masked, bool sparse, std::uint32_t seed) {
+  constexpr std::uint32_t kRankQ = kQWidth / kKvHeads;
+  const std::uint32_t n_kv = start_pos + n_tokens;
+  const std::uint32_t mask_words = ((n_kv + kRatio - 1) / kRatio + 31) / 32;
+  const std::size_t q_count = std::size_t(n_tokens) * kQWidth;
+  const std::size_t kv_count = std::size_t(n_kv) * kKvWidth;
+  const auto qv = MakeValues(q_count, seed, 4.0F);
+  const auto gate = MakeValues(q_count, seed ^ 0x5555U, 3.0F);
+  std::vector<__half> kh(kv_count), vh(kv_count);
+  {
+    const auto kf = MakeValues(kv_count, seed ^ 0xAAAAU, 1.0F);
+    const auto vf = MakeValues(kv_count, seed ^ 0x3333U, 1.0F);
+    for (std::size_t i = 0; i < kv_count; ++i) {
+      kh[i] = __float2half(kf[i]);
+      vh[i] = __float2half(vf[i]);
+    }
+  }
+  std::vector<std::uint32_t> mask(std::size_t(n_tokens) * mask_words);
+  std::uint32_t state = seed ^ 0x77777777U;
+  for (std::uint32_t& word : mask) {
+    word = NextRandom(&state) & NextRandom(&state);
+    if (sparse) {
+      word &= NextRandom(&state) & NextRandom(&state);
+    }
+  }
+  HipBuffer<float> d_q(q_count), d_gate(q_count), d_full(q_count);
+  HipBuffer<__half> d_k(kv_count), d_v(kv_count);
+  HipBuffer<std::uint32_t> d_mask(mask.size());
+  Upload(&d_q, qv);
+  Upload(&d_gate, gate);
+  Upload(&d_k, kh);
+  Upload(&d_v, vh);
+  Upload(&d_mask, mask);
+  const std::uint32_t* mask_ptr = masked ? d_mask.get() : nullptr;
+  if (!q::WmmaCausalAttention(d_q.get(), d_gate.get(), d_k.get(), d_v.get(),
+                              mask_ptr, mask_words, d_full.get(), n_tokens,
+                              start_pos, kHeads, kKvHeads, kDim, kRatio,
+                              nullptr)) {
+    throw std::runtime_error("WMMA attention rejected the model geometry");
+  }
+  const auto full = Download(&d_full, q_count);
+  for (std::uint32_t rank = 0; rank < kKvHeads; ++rank) {
+    std::vector<float> rq(std::size_t(n_tokens) * kRankQ);
+    std::vector<float> rgate(rq.size());
+    for (std::size_t t = 0; t < n_tokens; ++t) {
+      std::copy_n(qv.begin() + t * kQWidth + rank * kRankQ, kRankQ,
+                  rq.begin() + t * kRankQ);
+      std::copy_n(gate.begin() + t * kQWidth + rank * kRankQ, kRankQ,
+                  rgate.begin() + t * kRankQ);
+    }
+    std::vector<__half> rk(std::size_t(n_kv) * kDim), rv(rk.size());
+    for (std::size_t t = 0; t < n_kv; ++t) {
+      std::copy_n(kh.begin() + t * kKvWidth + rank * kDim, kDim,
+                  rk.begin() + t * kDim);
+      std::copy_n(vh.begin() + t * kKvWidth + rank * kDim, kDim,
+                  rv.begin() + t * kDim);
+    }
+    HipBuffer<float> d_rq(rq.size()), d_rgate(rq.size()), d_out(rq.size());
+    HipBuffer<__half> d_rk(rk.size()), d_rv(rv.size());
+    Upload(&d_rq, rq);
+    Upload(&d_rgate, rgate);
+    Upload(&d_rk, rk);
+    Upload(&d_rv, rv);
+    if (!q::WmmaCausalAttention(d_rq.get(), d_rgate.get(), d_rk.get(),
+                                d_rv.get(), mask_ptr, mask_words, d_out.get(),
+                                n_tokens, start_pos, kHeads / kKvHeads, 1, kDim,
+                                kRatio, nullptr)) {
+      throw std::runtime_error("WMMA attention rejected a rank's heads");
+    }
+    const auto out = Download(&d_out, rq.size());
+    for (std::size_t t = 0; t < n_tokens; ++t) {
+      if (std::memcmp(out.data() + t * kRankQ,
+                      full.data() + t * kQWidth + rank * kRankQ,
+                      kRankQ * sizeof(float)) != 0) {
+        throw std::runtime_error(
+            "a rank's attention heads differ from the "
+            "full kernel's");
+      }
+    }
+  }
+  std::cout << "rank attention n=" << n_tokens << " start=" << start_pos
+            << (masked ? (sparse ? " sparse" : " masked") : " dense")
+            << ": both ranks exact\n";
+}
+
 void CheckChunks(std::uint32_t n, std::uint32_t split) {
   const std::size_t count = std::size_t(n) * kQWidth;
   HipBuffer<float> queries(count), gates(count), full(count), chunked(count);
@@ -438,6 +527,11 @@ int main() {
   try {
     CheckChunks(136, 94);
     CheckChunks(2048, 1025);
+    CheckRankSlices(100, 0, false, false, 0x51C3U);
+    CheckRankSlices(77, 51, true, false, 0x51C4U);
+    CheckRankSlices(96, 4096, true, true, 0x51C5U);
+    CheckRankSlices(7, 65533, true, true, 0x51C6U);
+    CheckRankSlices(5, 131069, true, true, 0x51C7U);
     CheckPreparation(1, 0, 64);
     CheckPreparation(8, 4096, 64);
     CheckPreparation(65, 131069, 64);

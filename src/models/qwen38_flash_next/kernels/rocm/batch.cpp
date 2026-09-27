@@ -54,6 +54,11 @@ WeightType EmbeddingType(core::GgmlType type) {
 
 Executor::Scratch Executor::RowScratch(const Scratch& b,
                                        std::uint32_t offset) const {
+  return RowScratch(b, offset, MixerHeads::All(config()));
+}
+
+Executor::Scratch Executor::RowScratch(const Scratch& b, std::uint32_t offset,
+                                       const MixerHeads& heads) const {
   const Config& c = config();
   const std::size_t r = offset;
   auto s = b;
@@ -66,23 +71,23 @@ Executor::Scratch Executor::RowScratch(const Scratch& b,
   s.mixed += r * c.hidden_size;
   s.inject += r * c.hc_count * HcInjectParts(c.hidden_size);
   s.block_out += r * c.hidden_size;
-  s.qkv += r * c.SsmConvChannels();
-  s.z += r * c.SsmValueDim();
-  s.qkvz += r * (c.SsmConvChannels() + c.SsmValueDim());
-  s.alpha_beta += r * 2 * c.ssm_num_v_heads;
-  s.qn += r * c.SsmKeyDim();
-  s.kn += r * c.SsmKeyDim();
-  s.gdn_raw += r * c.SsmValueDim();
-  s.gdn_out += r * c.SsmValueDim();
-  s.qg += r * (2 * c.AttentionQDim() + 2 * c.AttentionKvDim());
-  s.q += r * c.AttentionQDim();
-  s.attn_gate += r * c.AttentionQDim();
-  s.k += r * c.AttentionKvDim();
-  s.v += r * c.AttentionKvDim();
+  s.qkv += r * heads.SsmConvChannels();
+  s.z += r * heads.SsmValueDim();
+  s.qkvz += r * (heads.SsmConvChannels() + heads.SsmValueDim());
+  s.alpha_beta += r * 2 * heads.ssm_v;
+  s.qn += r * heads.SsmKeyDim();
+  s.kn += r * heads.SsmKeyDim();
+  s.gdn_raw += r * heads.SsmValueDim();
+  s.gdn_out += r * heads.SsmValueDim();
+  s.qg += r * (2 * heads.AttentionQDim() + 2 * heads.AttentionKvDim());
+  s.q += r * heads.AttentionQDim();
+  s.attn_gate += r * heads.AttentionQDim();
+  s.k += r * heads.AttentionKvDim();
+  s.v += r * heads.AttentionKvDim();
   s.iq += r * c.indexer_heads * c.indexer_head_dim;
   s.ik += r * c.indexer_head_dim;
   s.mask += r * mask_words_;
-  s.ctx += r * c.AttentionQDim();
+  s.ctx += r * heads.AttentionQDim();
   if (c.ple_layer >= 0) {
     s.ple_emb += r * c.PleEmbeddingDim();
     s.ple_key += r * c.HcDim();
@@ -279,8 +284,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                         error)) {
         return false;
       }
-      MtpAddEmbedding(s_.mtp_eproj, s_.mtp_res, count, c.hidden_size,
-                      c.hc_count, stream_);
+      AddRowsBroadcast(s_.mtp_eproj, s_.mtp_res, count, c.hidden_size,
+                       c.hc_count, stream_);
       i = end;
     }
     UseScratch(base);
@@ -388,7 +393,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
   }
   const auto status = hipStreamSynchronize(stream_);
   UseScratch(base);
-  if (!ok || !Check(status, error))
+  if (!ok || !Check(status, error) ||
+      (options_.reduce_status && !options_.reduce_status(error)))
     return false;
   for (const auto& item : items) {
     if (item.session->Cancelled())
@@ -508,7 +514,8 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
   }
   const auto status = hipStreamSynchronize(stream_);
   UseScratch(base);
-  if (!ok || !Check(status, error))
+  if (!ok || !Check(status, error) ||
+      (options_.reduce_status && !options_.reduce_status(error)))
     return false;
   for (std::size_t i = 0; i < items.size(); ++i) {
     if (items[i].session->Cancelled())
@@ -614,6 +621,11 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
   if (rows <= kDecodeRows)
     return Moe(l, x, out, rows, error);
   const auto& c = config();
+  if (options_.moe_observer) {
+    options_.moe_observer(
+        x, static_cast<std::size_t>(rows) * c.hidden_size * sizeof(float),
+        stream_);
+  }
   const Scratch base = s_;
   if (!DenseBatch(l.router, x, base.router, rows, error))
     return false;
@@ -621,26 +633,39 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
              c.num_experts, c.num_experts_used, stream_);
   if (!GatedDenseBatch(l.shexp_up, l.shexp_gate, x, base.shexp_up, rows,
                        error) ||
-      !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error))
+      !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error)) {
     return false;
+  }
+  // A split shared expert leaves each rank a partial; a whole one belongs to
+  // rank zero, and peers run it only to keep their activation staging state
+  // in step, then drop the output (see Executor::Moe).
+  if (model_->tp_rank() != 0 && !l.shexp_split &&
+      !Check(hipMemsetAsync(
+                 base.shexp_out, 0,
+                 static_cast<std::size_t>(rows) * c.hidden_size * sizeof(float),
+                 stream_),
+             error)) {
+    return false;
+  }
   if (l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
       l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
     // Share expert weights across request boundaries while retaining the
     // scalar Q8 activation quantization and dot-product reduction.
     if (qfn_mmq_moe_gated_vec(static_cast<int>(l.ffn_gate_exps.type),
                               l.ffn_gate_exps.data, l.ffn_up_exps.data, x,
-                              base.ids, base.gate_e, c.expert_ff, c.hidden_size,
-                              rows, c.num_experts, c.num_experts_used,
-                              stream_) != 0 ||
-        qfn_mmq_moe_vec(
-            static_cast<int>(l.ffn_down_exps.type), l.ffn_down_exps.data,
-            base.gate_e, base.ids, base.down_e, c.hidden_size, c.expert_ff,
-            rows * c.num_experts_used, c.num_experts, 1, stream_) != 0)
+                              base.ids, base.gate_e, l.ffn_gate_exps.rows,
+                              c.hidden_size, rows, l.ffn_gate_exps.experts,
+                              c.num_experts_used, stream_) != 0 ||
+        qfn_mmq_moe_vec(static_cast<int>(l.ffn_down_exps.type),
+                        l.ffn_down_exps.data, base.gate_e, base.ids,
+                        base.down_e, c.hidden_size, l.ffn_gate_exps.rows,
+                        rows * c.num_experts_used, l.ffn_down_exps.experts, 1,
+                        stream_) != 0)
       return Fail(error, "batched routed vector projection failed");
     MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
                 c.num_experts_used, c.hidden_size, stream_);
-    return true;
+    return AllReduce(out, rows, error);
   }
   for (std::uint32_t r = 0; r < rows; r += kDecodeRows) {
     UseScratch(RowScratch(base, r));
@@ -651,7 +676,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
     if (!ok)
       return false;
   }
-  return true;
+  return AllReduce(out, rows, error);
 }
 
 bool Executor::ForwardBatch(std::span<const BatchItem> items,
@@ -844,20 +869,24 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           return false;
         }
       }
+      // The mixer rows have this rank's head widths, which are the whole
+      // model's unless the heads are split across ranks.
+      const MixerHeads& heads = l.heads;
       std::uint32_t gdn_active = 0;
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto& item = items[i];
         auto& session = *item.session;
         const auto n = static_cast<std::uint32_t>(item.tokens.size());
-        auto view = RowScratch(base, offsets[i]);
+        auto view = RowScratch(base, offsets[i], heads);
         if (!l.linear && l.attn_qkv.empty()) {
           view.qg = base.qg + static_cast<std::size_t>(offsets[i]) * 2 *
-                                  c.AttentionQDim();
+                                  heads.AttentionQDim();
         }
         UseScratch(view);
         if (!session.CheckCancellation(nullptr)) {
           auto* output = l.linear ? s_.gdn_out : s_.ctx;
-          const auto width = l.linear ? c.SsmValueDim() : c.AttentionQDim();
+          const auto width =
+              l.linear ? heads.SsmValueDim() : heads.AttentionQDim();
           if (!Check(hipMemsetAsync(output, 0,
                                     std::size_t{n} * width * sizeof(float),
                                     stream_),
@@ -870,12 +899,12 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
             const auto& state = session.linear_[il];
             batch_gdn_host_[il * kBatchSessions + i] = {
                 l.ssm_in.empty() ? view.qkv : view.qkvz,
-                l.ssm_in.empty() ? view.z : view.qkvz + c.SsmConvChannels(),
+                l.ssm_in.empty() ? view.z : view.qkvz + heads.SsmConvChannels(),
                 view.alpha_beta, state.conv_state,
                 // Short convolution saves history in registers, so each
                 // request needs only its own token rows of staging.
                 base.conv_scratch +
-                    std::size_t{offsets[i]} * c.SsmConvChannels(),
+                    std::size_t{offsets[i]} * heads.SsmConvChannels(),
                 view.qn, view.kn, view.gdn_raw, state.state, view.gdn_out,
                 item.speculative ? state.state_snapshots : RollbackRows{},
                 item.speculative ? state.conv_snapshots : RollbackRows{}, n};
@@ -901,17 +930,19 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         const auto offset = il * kBatchSessions;
         if (!GatedDeltaNetBatch(
                 batch_gdn_ + offset, items.size(), max_tokens, gdn_active,
-                l.ssm_in.empty() ? c.SsmConvChannels() : l.ssm_in.rows,
-                l.ssm_in.empty() ? c.SsmValueDim() : l.ssm_in.rows,
+                l.ssm_in.empty() ? heads.SsmConvChannels() : l.ssm_in.rows,
+                l.ssm_in.empty() ? heads.SsmValueDim() : l.ssm_in.rows,
                 l.ssm_conv1d.f32(), l.ssm_a.f32(), l.ssm_dt.f32(),
-                l.ssm_norm.f32(), c.ssm_num_k_heads, c.ssm_num_v_heads,
-                c.rms_eps, stream_))
+                l.ssm_norm.f32(), heads.ssm_k, heads.ssm_v, c.rms_eps, stream_))
           return Fail(error, "batched GatedDeltaNet launch failed");
       }
       UseScratch(base);
+      // With split heads each rank's projection is a partial the second
+      // exchange of the layer completes.
       if (!DenseBatch(l.linear ? l.ssm_out : l.attn_out,
                       l.linear ? base.gdn_out : base.ctx, base.block_out, rows,
-                      error)) {
+                      error) ||
+          (l.mixer_split && !AllReduce(base.block_out, rows, error, false))) {
         return false;
       }
       CombineBatch(base.res, l.hc_ffn.norm.f32(), rows);
@@ -956,7 +987,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   }
   const auto status = hipStreamSynchronize(stream_);
   UseScratch(base);
-  if (!ok || !Check(status, error)) {
+  if (!ok || !Check(status, error) ||
+      (options_.reduce_status && !options_.reduce_status(error))) {
     return false;
   }
   for (std::size_t i = 0; i < items.size(); ++i) {

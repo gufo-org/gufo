@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen38_flash_next/distributed/tp_partition.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
@@ -33,8 +34,45 @@ struct DeviceMixer {
   DeviceTensor inject;
 };
 
+/// The heads of a GDN or attention block one rank computes: all of them on
+/// one host and in the draft block, the rank's share of every trunk layer
+/// under TP.
+struct MixerHeads {
+  std::uint32_t ssm_k{0};     ///< GDN key heads
+  std::uint32_t ssm_v{0};     ///< GDN value heads
+  std::uint32_t ssm_dim{0};   ///< GDN head width
+  std::uint32_t attn{0};      ///< attention query heads
+  std::uint32_t attn_kv{0};   ///< attention KV heads
+  std::uint32_t attn_dim{0};  ///< attention head width
+
+  [[nodiscard]] static MixerHeads All(const Config& c) noexcept {
+    return {c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
+            c.num_heads,       c.num_kv_heads,    c.head_dim};
+  }
+  [[nodiscard]] std::uint32_t SsmKeyDim() const noexcept {
+    return ssm_k * ssm_dim;
+  }
+  [[nodiscard]] std::uint32_t SsmValueDim() const noexcept {
+    return ssm_v * ssm_dim;
+  }
+  [[nodiscard]] std::uint32_t SsmConvChannels() const noexcept {
+    return 2 * SsmKeyDim() + SsmValueDim();
+  }
+  [[nodiscard]] std::uint32_t AttentionQDim() const noexcept {
+    return attn * attn_dim;
+  }
+  [[nodiscard]] std::uint32_t AttentionKvDim() const noexcept {
+    return attn_kv * attn_dim;
+  }
+};
+
 struct DeviceLayer {
   bool linear{false};
+  /// The heads of this layer's GDN or attention block this rank computes.
+  MixerHeads heads;
+  /// Under TP the block's heads are split across ranks, so its output
+  /// projection yields this rank's partial, which a second sum completes.
+  bool mixer_split{false};
   DeviceMixer hc_attn;
   DeviceMixer hc_ffn;
 
@@ -56,6 +94,12 @@ struct DeviceLayer {
   DeviceTensor router;
   DeviceTensor ffn_gate_exps, ffn_up_exps, ffn_down_exps, shexp_gate, shexp_up,
       shexp_down;
+  /// Under TP the shared expert is split across ranks: this rank holds its
+  /// share of the intermediate rows of gate/up and the matching columns of
+  /// down, so its output is a partial the MoE all-reduce completes. False when
+  /// the weights cannot be split on a block boundary; then every rank holds
+  /// the whole shared expert and only rank zero keeps its output.
+  bool shexp_split{false};
   DeviceTensor nextn_enorm, nextn_hnorm, nextn_fc_embedding, nextn_fc_hidden;
   DeviceMixer nextn_head;
 };
@@ -72,7 +116,8 @@ public:
   [[nodiscard]] static std::unique_ptr<DeviceModel> Upload(
       const ModelWeights& weights, const core::GgufReader& reader,
       const MtpWeights* mtp, const core::GgufReader* mtp_reader,
-      std::string* error_msg = nullptr);
+      std::string* error_msg = nullptr,
+      const distributed::TpPartition* partition = nullptr);
 
   const Config& config() const noexcept { return config_; }
   const DeviceTensor& token_embd() const noexcept { return token_embd_; }
@@ -81,7 +126,15 @@ public:
   const std::vector<DeviceLayer>& layers() const noexcept { return layers_; }
   [[nodiscard]] bool has_mtp() const noexcept { return has_mtp_; }
   const DeviceLayer& mtp() const noexcept { return mtp_; }
+  /// The heads of every trunk layer on this rank; the session state of the
+  /// trunk's GDN and attention layers has this geometry.
+  const MixerHeads& trunk_heads() const noexcept { return trunk_heads_; }
+  [[nodiscard]] bool trunk_split() const noexcept { return trunk_split_; }
   [[nodiscard]] std::size_t resident_bytes() const noexcept { return bytes_; }
+  [[nodiscard]] std::uint32_t tp_rank() const noexcept { return tp_rank_; }
+  [[nodiscard]] std::uint32_t tp_world_size() const noexcept {
+    return tp_world_size_;
+  }
   /// Widest K among the BF16/F16 matrices (activation staging for hipBLAS).
   [[nodiscard]] std::size_t max_half_cols() const noexcept {
     return max_half_cols_;
@@ -101,8 +154,12 @@ private:
   std::vector<DeviceLayer> layers_;
   DeviceLayer mtp_;
   bool has_mtp_{false};
+  MixerHeads trunk_heads_;
+  bool trunk_split_{false};
   std::vector<void*> allocations_;
   std::size_t bytes_{0};
+  std::uint32_t tp_rank_{0};
+  std::uint32_t tp_world_size_{1};
   std::size_t max_half_cols_{1};
   std::size_t max_q8_cols_{32};
 };

@@ -22,7 +22,10 @@
 
       gufoPackages = forAllSystems (
         system:
-        pkgs.${system}.callPackage ./.devops/nix/scope.nix { inherit version; }
+        pkgs.${system}.callPackage ./.devops/nix/scope.nix {
+          inherit version;
+          pkgs = pkgs.${system};
+        }
       );
 
       llamaReferences = forAllSystems (
@@ -115,6 +118,7 @@
         in
         {
           default = base;
+          tp2-rdma = gufoPackages.${system}.tp2-rdma;
           # Optional benchmark packages: excluded from Gufo, the default
           # development shell and hosted checks.
           ds4-reference = pkgs.${system}.callPackage ./.devops/nix/ds4-reference.nix { };
@@ -147,7 +151,10 @@
               ];
             };
           };
-
+          tp2-rdma = pkgs.${system}.mkShell {
+            inputsFrom = [ self.packages.${system}.tp2-rdma ];
+            packages = [ pkgs.${system}.clang-tools ];
+          };
         }
       );
 

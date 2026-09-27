@@ -76,12 +76,16 @@ Q8Weights MakeWeights(std::size_t m, std::size_t k, std::uint32_t seed,
 }
 
 // Reuse the wide projection fixture to check the fused convolution through
-// its actual consumer, including the state carried into the next chunk.
+// its actual consumer, including the state carried into the next chunk: the
+// model's 16 key and 48 value heads, or a TP rank's 8 and 24.
 void CheckSsmProjection(const void* w, const __half* x, float* projected,
                         const std::vector<float>& reference,
-                        std::uint32_t batch) {
-  constexpr std::uint32_t m = 16384, k = 2560, channels = 10240;
-  constexpr std::uint32_t kh = 16, vh = 48, d = 128, value_dim = vh * d;
+                        std::uint32_t batch, std::uint32_t kh,
+                        std::uint32_t vh) {
+  constexpr std::uint32_t k = 2560, d = 128;
+  const std::uint32_t value_dim = vh * d;
+  const std::uint32_t channels = 2 * kh * d + value_dim;
+  const std::uint32_t m = channels + value_dim;
   const std::size_t conv_count = std::size_t(batch) * channels;
   const std::size_t state_count = std::size_t(vh) * d * d;
   const std::size_t out_count = std::size_t(batch) * value_dim;
@@ -205,12 +209,16 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
   std::cout << "fused SSM convolution, output, state and replay are exact\n";
 }
 
+/// `heads` query heads over `kv_heads` KV heads: the model's 24 over two, or
+/// a TP rank's 12 over one.
 void CheckAttentionProjection(const void* weights, const __half* input,
-                              const float* projected, std::uint32_t batch) {
+                              const float* projected, std::uint32_t batch,
+                              std::uint32_t heads, std::uint32_t kv_heads) {
   constexpr std::uint32_t start = 131069;
-  const std::size_t query_bytes = (std::size_t(batch) * 6144 + 16) * 4;
+  const std::uint32_t rows = 2 * (heads + kv_heads) * 256;
+  const std::size_t query_bytes = (std::size_t(batch) * heads * 256 + 16) * 4;
   const std::size_t cache_bytes =
-      (std::size_t(start + batch) * 512 + 16) * sizeof(__half);
+      (std::size_t(start + batch) * kv_heads * 256 + 16) * sizeof(__half);
   struct Buffers {
     std::vector<void*> pointers;
     ~Buffers() {
@@ -243,12 +251,12 @@ void CheckAttentionProjection(const void* weights, const __half* input,
   CheckHip(hipMemcpy(device_gamma, gamma.data(), gamma.size() * 4,
                      hipMemcpyHostToDevice),
            "attention norm weights");
-  if (!q::PrepareAttention(projected, 13312, device_gamma, device_gamma + 256,
+  if (!q::PrepareAttention(projected, rows, device_gamma, device_gamma + 256,
                            static_cast<float*>(expected[0]) + 8,
                            static_cast<float*>(expected[1]) + 8,
                            static_cast<__half*>(expected[2]) + 8,
-                           static_cast<__half*>(expected[3]) + 8, batch, 24, 2,
-                           256, 64, position, 1e7F, 1e-6F, nullptr))
+                           static_cast<__half*>(expected[3]) + 8, batch, heads,
+                           kv_heads, 256, 64, position, 1e7F, 1e-6F, nullptr))
     throw std::runtime_error("attention preparation rejected the model shape");
   hipStream_t stream = nullptr;
   hipGraph_t graph = nullptr;
@@ -260,8 +268,8 @@ void CheckAttentionProjection(const void* weights, const __half* input,
                            static_cast<float*>(actual[0]) + 8,
                            static_cast<float*>(actual[1]) + 8,
                            static_cast<__half*>(actual[2]) + 8,
-                           static_cast<__half*>(actual[3]) + 8, batch, position,
-                           1e7F, 1e-6F, stream))
+                           static_cast<__half*>(actual[3]) + 8, batch, heads,
+                           kv_heads, position, 1e7F, 1e-6F, stream))
     throw std::runtime_error("attention fusion rejected the model shape");
   CheckHip(hipStreamEndCapture(stream, &graph), "attention capture end");
   CheckHip(hipGraphInstantiate(&replay, graph, nullptr, nullptr, 0),
@@ -289,8 +297,8 @@ void CheckAttentionProjection(const void* weights, const __half* input,
                           static_cast<float*>(actual[0]) + 8,
                           static_cast<float*>(actual[1]) + 8,
                           static_cast<__half*>(actual[2]) + 8,
-                          static_cast<__half*>(actual[3]) + 8, 1023, position,
-                          1e7F, 1e-6F, nullptr))
+                          static_cast<__half*>(actual[3]) + 8, 1023, heads,
+                          kv_heads, position, 1e7F, 1e-6F, nullptr))
     throw std::runtime_error("attention fusion accepted a short batch");
   CheckHip(hipGraphExecDestroy(replay), "attention graph free");
   CheckHip(hipGraphDestroy(graph), "attention graph definition free");
@@ -550,17 +558,19 @@ double Run(std::size_t batch, std::size_t m, std::size_t k, std::uint32_t seed,
             << worst_f16_vs_mmq << ", worst |W8A8 - F64| " << worst_vs_ref
             << ", worst |F16 - F64| " << worst_f16 << " (reference scale "
             << ref_scale << ")\n";
-  if (m == 16384 && k == 2560 && batch >= 1024) {
+  if ((m == 16384 || m == 8192) && k == 2560 && batch >= 1024) {
     CheckSsmProjection(d_w, d_x_half, d_f16, f16,
-                       static_cast<std::uint32_t>(batch));
+                       static_cast<std::uint32_t>(batch), m == 16384 ? 16 : 8,
+                       m == 16384 ? 48 : 24);
   }
   if (m == 320 && k == 10240 && batch >= 96) {
     CheckHcDownProjection(d_w, d_tiled, d_w8,
                           static_cast<std::uint32_t>(batch));
   }
-  if (m == 13312 && k == 2560 && batch >= 1024) {
+  if ((m == 13312 || m == 6656) && k == 2560 && batch >= 1024) {
     CheckAttentionProjection(d_w, d_x_half, d_f16,
-                             static_cast<std::uint32_t>(batch));
+                             static_cast<std::uint32_t>(batch),
+                             m == 13312 ? 24 : 12, m == 13312 ? 2 : 1);
   }
   (void)hipFree(d_w);
   (void)hipFree(d_x);
@@ -854,7 +864,11 @@ int main() {
     ok = Run(2049, 2560, 6144, 0x25606144U, 2) < 1e-2 && ok;
     // Wide SSM projection: two K blocks per stage, with a partial token tile.
     ok = Run(2049, 16384, 2560, 0x16384256U, 2) < 1e-2 && ok;
+    // A TP rank's GDN heads: 8 key and 24 value heads.
+    ok = Run(2049, 8192, 2560, 0x8192256U, 2) < 1e-2 && ok;
     ok = Run(2049, 13312, 2560, 0x13312256U, 2) < 1e-2 && ok;
+    // A TP rank's attention heads: 12 query heads over one KV head.
+    ok = Run(2049, 6656, 2560, 0x6656256U, 2) < 1e-2 && ok;
     // HC up: the grouped grid, including the last partial token tile.
     ok = Run(2049, 10240, 320, 0x8A8A320U, 2) < 1e-2 && ok;
     // HC down fusion: its first supported batch and a partial final tile.

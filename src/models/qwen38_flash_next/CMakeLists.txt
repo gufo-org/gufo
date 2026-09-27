@@ -1,12 +1,36 @@
 # Qwen3.8-Flash-Next (qwen4exp) model package. The scalar oracle is built
 # only by explicit validation targets, not by production or routine checks.
+option(GUFO_ENABLE_TP2_RDMA
+  "Build the Qwen3.8-Flash-Next TP=2 native RDMA adapter" OFF)
+
 add_library(gufo_qwen38_flash_next STATIC
   config.cpp
   ngram.cpp
-  weights.cpp)
+  weights.cpp
+  distributed/tp_partition.cpp)
 
 target_include_directories(gufo_qwen38_flash_next PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_qwen38_flash_next PUBLIC gufo_core Threads::Threads)
+
+if (GUFO_ENABLE_TP2_RDMA)
+  if (NOT ENGINE_ENABLE_HIP)
+    message(FATAL_ERROR
+      "GUFO_ENABLE_TP2_RDMA requires ENGINE_ENABLE_HIP")
+  endif()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(IBVERBS REQUIRED IMPORTED_TARGET libibverbs)
+  add_library(gufo_qwen38_flash_next_rdma STATIC
+    kernels/rocm/verbs.cpp)
+  target_compile_features(gufo_qwen38_flash_next_rdma PRIVATE cxx_std_20)
+  target_include_directories(gufo_qwen38_flash_next_rdma PRIVATE
+    ${PROJECT_SOURCE_DIR})
+  target_link_libraries(gufo_qwen38_flash_next_rdma PRIVATE
+    PkgConfig::IBVERBS Threads::Threads ${CMAKE_DL_LIBS} hip::host)
+  target_link_libraries(gufo_qwen38_flash_next PRIVATE
+    gufo_qwen38_flash_next_rdma)
+  target_compile_definitions(gufo_qwen38_flash_next PUBLIC
+    GUFO_ENABLE_TP2_RDMA=1)
+endif()
 
 add_library(gufo_qwen38_flash_next_reference STATIC EXCLUDE_FROM_ALL
   cpu_ops.cpp reference.cpp)

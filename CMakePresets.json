@@ -61,6 +61,15 @@
         "ENGINE_ENABLE_HIP": "ON",
         "GUFO_BUILD_TOOLS": "ON"
       }
+    },
+    {
+      "name": "gpu-tp2",
+      "displayName": "gfx1151 TP=2 RDMA Tests",
+      "description": "GPU correctness build with the optional native RDMA adapter",
+      "inherits": "gpu-test",
+      "cacheVariables": {
+        "GUFO_ENABLE_TP2_RDMA": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -83,6 +92,11 @@
       "name": "gpu-test",
       "displayName": "gfx1151 GPU Tests",
       "configurePreset": "gpu-test"
+    },
+    {
+      "name": "gpu-tp2",
+      "displayName": "gfx1151 TP=2 RDMA Tests",
+      "configurePreset": "gpu-tp2"
     },
     {
       "name": "pr",

@@ -18,6 +18,8 @@
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 
+struct ihipStream_t;
+
 namespace gufo::core {
 class GgufReader;
 }
@@ -29,6 +31,7 @@ struct MtpWeights;
 class NgramTable;
 struct MtpCandidateLogits;
 namespace rocm {
+class Communicator;
 class DeviceModel;
 class Executor;
 class Session;
@@ -45,6 +48,15 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  /// Optional two-rank expert-parallel identity. World size one preserves the
+  /// existing single-rank path and needs no communicator.
+  std::uint32_t tp_rank = 0;
+  std::uint32_t tp_world_size = 1;
+  int hip_device = 0;
+  std::shared_ptr<rocm::Communicator> communicator;
+  /// Diagnostic observer for MoE inputs and outputs; see Executor::Options. The
+  /// stream parameter is a `hipStream_t`, spelled without the HIP headers.
+  std::function<void(const float*, std::size_t, ihipStream_t*)> moe_observer;
 };
 
 class Session;
@@ -72,7 +84,13 @@ public:
   [[nodiscard]] std::int32_t EosToken() const noexcept;
   [[nodiscard]] bool IsStopToken(std::int32_t token) const noexcept;
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
+  /// Prompt tokens one prefill step feeds: under TP, up to two trunk
+  /// batches run as an overlapped pair.
   [[nodiscard]] std::uint32_t PrefillCapacity() const noexcept;
+  /// The first trunk batch's rows when a prefill step of `tokens` runs as a
+  /// pair, else 0.
+  [[nodiscard]] std::uint32_t PrefillPairLead(
+      std::uint32_t tokens) const noexcept;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
@@ -80,6 +98,13 @@ public:
   [[nodiscard]] std::uint32_t DecodeConcurrency() const noexcept {
     return options_.decode_concurrency;
   }
+  [[nodiscard]] std::uint32_t TpRank() const noexcept {
+    return options_.tp_rank;
+  }
+  [[nodiscard]] std::uint32_t TpWorldSize() const noexcept {
+    return options_.tp_world_size;
+  }
+  [[nodiscard]] int HipDevice() const noexcept { return options_.hip_device; }
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] const Config& config() const noexcept;
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
@@ -212,6 +237,8 @@ public:
                                      std::string* error_msg = nullptr);
 
 private:
+  [[nodiscard]] bool RestoreSnapshotPayload(
+      std::span<const std::uint8_t> payload, std::string* error_msg);
   friend class Model;
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
 

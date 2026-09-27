@@ -19,6 +19,7 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | hipCUB | Headers compiled into kernels | `BSD-3-Clause` | ROCm 7.2.3; flake.lock | [ROCm/hipCUB](https://github.com/ROCm/hipCUB) |
 | rocPRIM | Headers compiled into kernels | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocm-libraries](https://github.com/ROCm/rocm-libraries) |
 | rocWMMA | Headers compiled into kernels | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocWMMA](https://github.com/ROCm/rocWMMA) |
+| rdma-core / libibverbs | Optional TP=2 RDMA adapter; dynamically linked | `GPL-2.0-only OR Linux-OpenIB` | 63.0; pinned nixpkgs | [linux-rdma/rdma-core](https://github.com/linux-rdma/rdma-core) |
 | Composable Kernel | Adapted short-attention arithmetic; no library/header dependency | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/composable_kernel](https://github.com/ROCm/composable_kernel) |
 | ICU | Linked; Unicode normalization/tokenization | `Unicode-3.0` | 78.3; flake.lock | [unicode-org/icu](https://github.com/unicode-org/icu) |
 | curl / libcurl | Linked; image HTTPS and evaluation client | `curl` | 8.21.0; flake.lock | [curl/curl](https://github.com/curl/curl) |
@@ -36,6 +37,9 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 
 Upstream license texts are retained in `licenses/` and
 [src/models/deepseek_v4_flash/LICENSE.ds4](src/models/deepseek_v4_flash/LICENSE.ds4).
+The optional TP=2 adapter retains the rdma-core dual-license, GPL-2 and
+OpenIB.org BSD texts and the libibverbs copyright notice under
+`licenses/rdma-core/`.
 CMake installs these with `LICENSE`, `NOTICE` and this inventory under
 `share/licenses/gufo`. Preserve embedded copyright notices when modifying
 adapted code. Model-private changes and import boundaries are recorded in the

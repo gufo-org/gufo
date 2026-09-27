@@ -44,6 +44,10 @@ REQUIRED_EVALUATION_COMPONENTS = {
     "ROCprofiler SDK / ROCTx",
 }
 
+OPTIONAL_RUNTIME_COMPONENTS = {
+    "rdma-core / libibverbs",
+}
+
 
 def parse_third_party_notices(notices_path: Path) -> Dict[str, Dict[str, str]]:
     """Parse THIRD_PARTY_NOTICES.md markdown table into structured component data."""
@@ -94,6 +98,12 @@ def verify_dependencies(
                 f"Required evaluation dependency '{req}' is missing from "
                 f"{notices_file.name}"
             )
+    for req in OPTIONAL_RUNTIME_COMPONENTS:
+        if not any(req.lower() in name.lower() for name in components):
+            errors.append(
+                f"Optional runtime dependency '{req}' is missing from "
+                f"{notices_file.name}"
+            )
 
     # 2. Check package.nix inputs consistency
     if package_nix_file.is_file():
@@ -107,6 +117,12 @@ def verify_dependencies(
         ]:
             if dep not in pkg_content:
                 errors.append(f"Expected dependency '{dep}' missing from {package_nix_file.name}")
+        for binding in ("rdma-core ? null", "enableTp2Rdma", "GUFO_ENABLE_TP2_RDMA"):
+            if binding not in pkg_content:
+                errors.append(
+                    f"Optional TP2 RDMA binding '{binding}' missing from "
+                    f"{package_nix_file.name}"
+                )
 
     # 3. Check evaluation-only dependencies in the pinned development shell.
     if flake_nix_file.is_file():
@@ -128,6 +144,10 @@ def verify_dependencies(
                     f"Expected ROCm evaluation binding '{binding}' missing "
                     f"from {flake_nix_file.name}"
                 )
+        if "tp2-rdma" not in flake_content:
+            errors.append(
+                f"Optional TP2 RDMA package binding missing from {flake_nix_file.name}"
+            )
 
     # 4. Check for invalid or empty SPDX licenses
     for name, info in components.items():

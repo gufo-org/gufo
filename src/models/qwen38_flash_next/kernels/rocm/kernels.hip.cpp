@@ -3,6 +3,7 @@
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <hipcub/block/block_radix_sort.hpp>
@@ -2525,13 +2526,58 @@ __global__ void MtpHiddenKernel(const float* base, const float* alt,
   }
 }
 
-__global__ void MtpAddEmbeddingKernel(const float* embedding, float* residual,
-                                      std::uint32_t hidden,
-                                      std::uint32_t streams) {
+__global__ void AddRowsBroadcastKernel(const float* addend, float* residual,
+                                       std::uint32_t hidden,
+                                       std::uint32_t streams) {
   const std::uint32_t t = blockIdx.x;
   for (std::uint32_t i = threadIdx.x; i < streams * hidden; i += blockDim.x) {
     residual[static_cast<std::size_t>(t) * streams * hidden + i] +=
-        embedding[static_cast<std::size_t>(t) * hidden + i % hidden];
+        addend[static_cast<std::size_t>(t) * hidden + i % hidden];
+  }
+}
+
+// Every thread's copies reach the system scope before its block is counted;
+// the last block to finish publishes `value`, so the host that reads it also
+// sees the whole partial.
+__global__ void StagePartialKernel(const float* __restrict__ partial,
+                                   float* __restrict__ send, std::size_t count,
+                                   std::uint32_t* arrivals,
+                                   std::uint64_t* ready, std::uint64_t value) {
+  const std::size_t stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+  const std::size_t first =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t vectors = count / 4;
+  for (std::size_t i = first; i < vectors; i += stride) {
+    reinterpret_cast<float4*>(send)[i] =
+        reinterpret_cast<const float4*>(partial)[i];
+  }
+  for (std::size_t i = vectors * 4 + first; i < count; i += stride) {
+    send[i] = partial[i];
+  }
+  __threadfence_system();
+  __syncthreads();
+  if (threadIdx.x == 0 && __hip_atomic_fetch_add(arrivals, 1u, __ATOMIC_ACQ_REL,
+                                                 __HIP_MEMORY_SCOPE_SYSTEM) +
+                                  1 ==
+                              gridDim.x) {
+    __hip_atomic_store(arrivals, 0u, __ATOMIC_RELAXED,
+                       __HIP_MEMORY_SCOPE_SYSTEM);
+    __hip_atomic_store(ready, value, __ATOMIC_RELEASE,
+                       __HIP_MEMORY_SCOPE_SYSTEM);
+  }
+}
+
+__global__ void WaitValueKernel(const std::uint64_t* flag, std::uint64_t value,
+                                std::uint64_t ticks, std::uint32_t* timed_out) {
+  const std::uint64_t start = wall_clock64();
+  while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) <
+         value) {
+    if (wall_clock64() - start > ticks) {
+      __hip_atomic_store(timed_out, 1u, __ATOMIC_RELAXED,
+                         __HIP_MEMORY_SCOPE_SYSTEM);
+      return;
+    }
+    __builtin_amdgcn_s_sleep(1);
   }
 }
 
@@ -2677,8 +2723,6 @@ constexpr std::uint32_t kWmmaHeadDim = 256;
 constexpr std::uint32_t kWmmaQueryHeads = 24;
 constexpr std::uint32_t kWmmaKvHeads = 2;
 constexpr std::uint32_t kWmmaGqa = kWmmaQueryHeads / kWmmaKvHeads;
-constexpr std::uint32_t kWmmaAttnWidth = kWmmaQueryHeads * kWmmaHeadDim;
-constexpr std::uint32_t kWmmaKvWidth = kWmmaKvHeads * kWmmaHeadDim;
 constexpr std::uint32_t kWmmaHeads = 2;  // query heads per block, divides GQA
 // Sixteen queries keep the causal-tail accumulator in registers.
 constexpr std::uint32_t kWmmaQueryRows = 16;
@@ -2698,7 +2742,7 @@ constexpr std::uint32_t kWmmaMaxMaskWords = 2048;
 /// four selections overlap far less than 32 (measured at 16k depth: 846
 /// versus 2,478 selected blocks against 512 per query).
 template<std::uint32_t kQueryRows, std::uint32_t kKeys, bool kPackHeads,
-         bool kLateV = false>
+         bool kLateV = false, std::uint32_t kKvHeads = kWmmaKvHeads>
 __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
     const float* __restrict__ q, const float* __restrict__ gate,
     const __half* __restrict__ k_cache, const __half* __restrict__ v_cache,
@@ -2709,6 +2753,10 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   // geometry constant throughout the key sweep.
   constexpr std::uint32_t ratio = kWmmaRatio;
   constexpr std::uint32_t kHeadDim = kWmmaHeadDim;
+  // A TP rank holds whole query groups of fewer KV heads; each head's work is
+  // unchanged, only the row widths follow the heads present.
+  constexpr std::uint32_t kAttnWidth = kKvHeads * kWmmaGqa * kWmmaHeadDim;
+  constexpr std::uint32_t kKvWidth = kKvHeads * kWmmaHeadDim;
   constexpr std::uint32_t kRowBlocks = kPackHeads
                                            ? (kQueryRows * kWmmaGqa + 15) / 16
                                            : (kQueryRows / 16) * kWmmaHeads;
@@ -2740,10 +2788,10 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   // This improves cache reuse without changing any query's key sweep.
   const std::uint32_t linear = blockIdx.y * gridDim.x + blockIdx.x;
   const std::uint32_t query_group =
-      first_query_group + (kPackHeads ? linear / kWmmaKvHeads : blockIdx.x);
+      first_query_group + (kPackHeads ? linear / kKvHeads : blockIdx.x);
   const std::uint32_t query_start = query_group * kQueryRows;
   const std::uint32_t kv_head =
-      kPackHeads ? linear % kWmmaKvHeads : blockIdx.y / (kWmmaGqa / kWmmaHeads);
+      kPackHeads ? linear % kKvHeads : blockIdx.y / (kWmmaGqa / kWmmaHeads);
   const std::uint32_t first_query_head =
       kPackHeads ? kv_head * kWmmaGqa
                  : (kv_head * kWmmaGqa) +
@@ -2785,8 +2833,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
     const std::uint32_t local_query = row_query(s_rb, sub);
     const bool live = row_live(s_rb, sub);
     const float* q_row =
-        q +
-        (static_cast<std::size_t>(live ? local_query : 0) * kWmmaAttnWidth) +
+        q + (static_cast<std::size_t>(live ? local_query : 0) * kAttnWidth) +
         (static_cast<std::size_t>(live ? row_head(s_rb, sub) : 0) * kHeadDim);
 #pragma unroll
     for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
@@ -2963,8 +3010,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
     const std::uint32_t key_position = tile_key(tile, v_key);
     const bool live = key_position < context_end;
     const auto* src =
-        v_base +
-        (static_cast<std::size_t>(live ? key_position : 0) * kWmmaKvWidth);
+        v_base + (static_cast<std::size_t>(live ? key_position : 0) * kKvWidth);
 #pragma unroll
     for (std::uint32_t j = 0; j < kVRegs; ++j) {
       dst[j] = live ? *reinterpret_cast<const uint4*>(src + (j * 8))
@@ -2982,8 +3028,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       dst[n] =
           live ? *reinterpret_cast<const uint4*>(
                      k_base +
-                     (static_cast<std::size_t>(key_position) * kWmmaKvWidth) +
-                     d8)
+                     (static_cast<std::size_t>(key_position) * kKvWidth) + d8)
                : make_uint4(0u, 0u, 0u, 0u);
     }
   };
@@ -3216,7 +3261,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
         }
         const float denominator = row_sum[(rb * 16) + row];
         const std::size_t offset =
-            (static_cast<std::size_t>(row_query(rb, row)) * kWmmaAttnWidth) +
+            (static_cast<std::size_t>(row_query(rb, row)) * kAttnWidth) +
             (static_cast<std::size_t>(row_head(rb, row)) * kHeadDim) +
             (dim_tile * 16) + sub;
         float value =
@@ -4729,6 +4774,9 @@ struct AttentionProjectionOutput {
   float theta;
   float eps;
   const qwen::vision::DeviceRope* rope;
+  /// Query and KV heads of the projection: all of them, or a TP rank's.
+  unsigned heads;
+  unsigned kv_heads;
 };
 
 /// Dense F16 WMMA GEMM over Q8_0 or F16 weights: block = BM rows x BN tokens,
@@ -4746,7 +4794,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
     const __half* xn = nullptr, __half* mixed_half = nullptr,
     void* mixed_q8 = nullptr, const float* conv_w = nullptr,
-    float* conv_out = nullptr, AttentionProjectionOutput attention = {}) {
+    float* conv_out = nullptr, AttentionProjectionOutput attention = {},
+    std::uint32_t conv_channels = 0) {
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
   constexpr int kRowTiles = BM / 16;
@@ -4988,15 +5037,23 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   if constexpr (kAttention) {
     static_assert(BM == 256 && BN == 128 && BK == 2 && WM == 8 && WN == 1);
     static_assert(!kHcMix && !kSsmConv && kRowGroup == 1);
-    constexpr unsigned stride = 36, dim = 256, width = 6144, kvwidth = 512;
+    constexpr unsigned stride = 36, dim = 256;
+    const unsigned width = attention.heads * dim;
+    const unsigned kvwidth = attention.kv_heads * dim;
     float* scratch = reinterpret_cast<float*>(s_lds);
     float* tile = scratch + wave_id * 16 * stride;
+    // Row tiles: each query head's query then gate, the key heads, the value
+    // heads.
     const unsigned projection_head = r_block / 256;
-    const bool query = projection_head < 48 && (projection_head % 2) == 0;
-    const bool key = projection_head >= 48 && projection_head < 50;
-    const bool gate = projection_head < 48 && (projection_head % 2) == 1;
-    const unsigned head =
-        projection_head < 48 ? projection_head / 2 : projection_head % 2;
+    const unsigned qg_tiles = 2 * attention.heads;
+    const bool query = projection_head < qg_tiles && (projection_head % 2) == 0;
+    const bool key = projection_head >= qg_tiles &&
+                     projection_head < qg_tiles + attention.kv_heads;
+    const bool gate = projection_head < qg_tiles && (projection_head % 2) == 1;
+    const unsigned head = projection_head < qg_tiles ? projection_head / 2
+                          : key
+                              ? projection_head - qg_tiles
+                              : projection_head - qg_tiles - attention.kv_heads;
 #pragma unroll
     for (int j = 0; j < kWaveTokTiles; ++j) {
 #pragma unroll
@@ -5212,7 +5269,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
           static_assert(BM == 256 && BN == 128 && BK == 2 && WM == 8 &&
                         WN == 1);
           static_assert(!kHcMix && kRowGroup == 1);
-          constexpr std::uint32_t channels = 10240;
+          // The convolved q|k|v rows precede the gate rows.
+          const std::uint32_t channels = conv_channels;
           if (tok < batch) {
 #pragma unroll
             for (int v = 0; v < 4; ++v) {
@@ -5277,21 +5335,25 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 bool AttentionF16Gemm(const void* weights, const __half* input,
                       const float* q_gamma, const float* k_gamma, float* query,
                       float* gate, __half* keys, __half* values,
-                      std::uint32_t n_tokens, const std::uint32_t* position,
+                      std::uint32_t n_tokens, std::uint32_t heads,
+                      std::uint32_t kv_heads, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
                       const qwen::vision::DeviceRope* rope) {
   if (n_tokens < 1024 || weights == nullptr || input == nullptr ||
       q_gamma == nullptr || k_gamma == nullptr || query == nullptr ||
       gate == nullptr || keys == nullptr || values == nullptr ||
-      position == nullptr)
+      position == nullptr || heads == 0 || kv_heads == 0)
     return false;
-  const AttentionProjectionOutput output{q_gamma, k_gamma,  query, gate, keys,
-                                         values,  position, theta, eps,  rope};
+  const AttentionProjectionOutput output{q_gamma, k_gamma, query,    gate,
+                                         keys,    values,  position, theta,
+                                         eps,     rope,    heads,    kv_heads};
+  // One 256-row tile per query, gate, key or value head.
+  const std::uint32_t tiles = 2 * (heads + kv_heads);
   hipLaunchKernelGGL(
       (DenseF16GEMMKernel<256, 128, 2, 8, 1, 1, false, false, true>),
-      dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
-      input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr, nullptr,
-      nullptr, output);
+      dim3((n_tokens + 127) / 128, tiles), dim3(kThreads), 0, stream, weights,
+      input, nullptr, n_tokens, tiles * 256, 2560, nullptr, nullptr, nullptr,
+      nullptr, nullptr, output);
   return true;
 }
 
@@ -5380,14 +5442,16 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
                      hipStream_t stream) {
-  if (n_tokens < 1024 || m != 16384 || k != 2560 || channels != 10240 ||
-      kernel != kSsmConvTaps) {
+  // The model's projection or a TP rank's share of its heads.
+  if (n_tokens < 1024 || k != 2560 || m % 256 != 0 || channels % 32 != 0 ||
+      channels == 0 || channels >= m || kernel != kSsmConvTaps) {
     return false;
   }
   hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 1, false, true>),
                      dim3((n_tokens + 127) / 128, m / 256), dim3(kThreads), 0,
                      stream, w, x, qkvz, n_tokens, m, k, nullptr, nullptr,
-                     nullptr, conv_w, convolved);
+                     nullptr, conv_w, convolved, AttentionProjectionOutput{},
+                     channels);
   hipLaunchKernelGGL(
       SsmConvBoundaryKernel,
       dim3(Blocks(channels),
@@ -5747,8 +5811,10 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t kv_heads, std::uint32_t d,
                          std::uint32_t ratio, hipStream_t stream,
                          bool last_only) {
-  if (heads != kWmmaQueryHeads || kv_heads != kWmmaKvHeads ||
-      d != kWmmaHeadDim || ratio != kWmmaRatio || n_tokens == 0 ||
+  // One host holds both KV heads; a TP rank holds one with its query group.
+  if ((kv_heads != kWmmaKvHeads && kv_heads != 1) ||
+      heads != kv_heads * kWmmaGqa || d != kWmmaHeadDim ||
+      ratio != kWmmaRatio || n_tokens == 0 ||
       (mask != nullptr && mask_words > kWmmaMaxMaskWords)) {
     return false;
   }
@@ -5758,10 +5824,22 @@ bool WmmaCausalAttention(const float* q, const float* gate,
         last_only ? (n_tokens - 1) / kPackedQueries : 0;
     const dim3 grid(
         (n_tokens + kPackedQueries - 1) / kPackedQueries - first_group,
-        kWmmaKvHeads);
+        kv_heads);
     // At deep sparse windows, staging the current V before fetching the
     // next one shortens their overlapping register lifetimes.
-    if (start_pos >= 65536) {
+    const bool late = start_pos >= 65536;
+    if (kv_heads == 1 && late) {
+      hipLaunchKernelGGL(
+          (WmmaCausalAttentionKernel<kPackedQueries, kWmmaKeys, true, true, 1>),
+          grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask,
+          mask_words, out, start_pos, n_tokens, first_group);
+    } else if (kv_heads == 1) {
+      hipLaunchKernelGGL((WmmaCausalAttentionKernel<kPackedQueries, kWmmaKeys,
+                                                    true, false, 1>),
+                         grid, dim3(kThreads), 0, stream, q, gate, k_cache,
+                         v_cache, mask, mask_words, out, start_pos, n_tokens,
+                         first_group);
+    } else if (late) {
       hipLaunchKernelGGL(
           (WmmaCausalAttentionKernel<kPackedQueries, kWmmaKeys, true, true>),
           grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask,
@@ -5778,11 +5856,18 @@ bool WmmaCausalAttention(const float* q, const float* gate,
       last_only ? (n_tokens - 1) / kWmmaQueryRows : 0;
   const dim3 grid(
       (n_tokens + kWmmaQueryRows - 1) / kWmmaQueryRows - first_group,
-      kWmmaKvHeads * (kWmmaGqa / kWmmaHeads));
-  hipLaunchKernelGGL(
-      (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false>), grid,
-      dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask, mask_words,
-      out, start_pos, n_tokens, first_group);
+      kv_heads * (kWmmaGqa / kWmmaHeads));
+  if (kv_heads == 1) {
+    hipLaunchKernelGGL(
+        (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false, false, 1>),
+        grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask,
+        mask_words, out, start_pos, n_tokens, first_group);
+  } else {
+    hipLaunchKernelGGL(
+        (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false>), grid,
+        dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask, mask_words,
+        out, start_pos, n_tokens, first_group);
+  }
   return true;
 }
 
@@ -5859,11 +5944,28 @@ void MtpHidden(const float* base, const float* alt, const std::int32_t* row,
                      base, alt, row, dst, width);
 }
 
-void MtpAddEmbedding(const float* embedding, float* residual,
-                     std::uint32_t n_tokens, std::uint32_t hidden,
-                     std::uint32_t streams, hipStream_t stream) {
-  hipLaunchKernelGGL(MtpAddEmbeddingKernel, dim3(n_tokens), dim3(kThreads), 0,
-                     stream, embedding, residual, hidden, streams);
+void AddRowsBroadcast(const float* addend, float* residual,
+                      std::uint32_t n_tokens, std::uint32_t hidden,
+                      std::uint32_t streams, hipStream_t stream) {
+  hipLaunchKernelGGL(AddRowsBroadcastKernel, dim3(n_tokens), dim3(kThreads), 0,
+                     stream, addend, residual, hidden, streams);
+}
+
+void StagePartial(const float* partial, float* send, std::size_t count,
+                  std::uint32_t* arrivals, std::uint64_t* ready,
+                  std::uint64_t value, hipStream_t stream) {
+  const std::size_t threads = std::max<std::size_t>(1, count / 4);
+  const auto blocks = static_cast<unsigned>(
+      std::min<std::size_t>(1024, (threads + kThreads - 1) / kThreads));
+  hipLaunchKernelGGL(StagePartialKernel, dim3(blocks), dim3(kThreads), 0,
+                     stream, partial, send, count, arrivals, ready, value);
+}
+
+void WaitValue(const std::uint64_t* flag, std::uint64_t value,
+               std::uint64_t ticks, std::uint32_t* timed_out,
+               hipStream_t stream) {
+  hipLaunchKernelGGL(WaitValueKernel, dim3(1), dim3(1), 0, stream, flag, value,
+                     ticks, timed_out);
 }
 
 void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,

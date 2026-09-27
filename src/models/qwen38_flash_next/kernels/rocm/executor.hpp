@@ -19,6 +19,7 @@
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/communicator.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
@@ -136,13 +137,56 @@ private:
 /// sized once for `max_batch` tokens; longer prompts are fed in chunks.
 class Executor {
 public:
+  /// A two-rank sum split into its start and its finish, so the GPU computes
+  /// other rows while a partial is in flight. `start` queues the exchange of
+  /// the partial at `data`, pending on the stream; `finish` waits for the
+  /// oldest started exchange and adds the peer's partial into `data` on the
+  /// stream. Sums finish in the order they started.
+  struct SplitReduce {
+    std::function<bool(const float*, std::size_t, hipStream_t, std::string*)>
+        start;
+    std::function<bool(float*, std::size_t, hipStream_t, std::string*)> finish;
+  };
+
   struct Options {
+    int device_index{0};
+    /// Rows of one trunk batch; longer prompts are fed in chunks.
     std::uint32_t max_batch{1};
     /// Rows of logits (and hidden states) a Forward call may return.
     std::uint32_t max_logit_rows{1};
     /// Longest speculative batch; bounds the recurrent snapshot storage.
     std::uint32_t max_speculative{1};
+    /// GPU-visible sum reduction used by the routed-expert boundary. The
+    /// callback is required only when DeviceModel carries world_size > 1.
+    std::function<bool(float*, std::size_t, hipStream_t, std::string*)>
+        all_reduce;
+    /// The same sum, split. When set, a prefill chunk holds two trunk
+    /// batches that run a layer apart, so each batch's exchange overlaps the
+    /// other's computation (see PrefillChunk).
+    SplitReduce split_reduce;
+    /// Called once the stream has drained after sums were queued: false with
+    /// the first failure among them. Required with all_reduce under TP.
+    std::function<bool(std::string*)> reduce_status;
+    /// Diagnostic observer called with every MoE input and, under TP, every
+    /// reduced MoE output, in forward order: a device buffer of rows x hidden
+    /// floats pending on the given stream. Null in production; probes set it
+    /// to compare ranks layer by layer.
+    std::function<void(const float*, std::size_t, hipStream_t)> moe_observer;
   };
+
+  /// The two-rank all-reduce over `communicator` for rows of `hidden` floats,
+  /// queued on the stream without blocking the host: the GPU stages its
+  /// partial, waits for the peer's and adds it. Failures surface through
+  /// TwoRankReduceStatus once the stream has drained.
+  [[nodiscard]] static std::function<bool(float*, std::size_t, hipStream_t,
+                                          std::string*)>
+  TwoRankAllReduce(std::shared_ptr<Communicator> communicator,
+                   std::uint32_t hidden);
+  [[nodiscard]] static std::function<bool(std::string*)> TwoRankReduceStatus(
+      std::shared_ptr<Communicator> communicator);
+  /// The overlapped form of TwoRankAllReduce.
+  [[nodiscard]] static SplitReduce TwoRankSplitReduce(
+      std::shared_ptr<Communicator> communicator, std::uint32_t hidden);
 
   ~Executor();
   [[nodiscard]] hipStream_t stream() const noexcept { return stream_; }
@@ -165,13 +209,15 @@ public:
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
 
-  /// Appends `tokens` (at most max_batch) to the session and returns the
-  /// logits of the last `n_logits` tokens in `logits` (n_logits * vocab
-  /// floats, host memory). A null `logits` keeps the rows on the GPU for
-  /// verification. The final wide residual of those tokens stays on
-  /// the device for MtpForward. kVerify permits Rollback (at most
-  /// max_speculative rows). kPrefill uses consistent prompt arithmetic at
-  /// every chunk width.
+  /// Appends `tokens` (at most max_batch, or PrefillChunk for kPrefill) to
+  /// the session and returns the logits of the last `n_logits` tokens in
+  /// `logits` (n_logits * vocab floats, host memory). A null `logits` keeps
+  /// the rows on the GPU for verification. The final wide residual of those
+  /// tokens stays on the device for MtpForward. kVerify permits Rollback (at
+  /// most max_speculative rows). kPrefill uses consistent prompt arithmetic at
+  /// every chunk width. A prefill that PairLead splits runs as two trunk
+  /// batches with the same results as two calls; the draft block then keeps
+  /// the second batch's rows.
   [[nodiscard]] bool Forward(Session& session,
                              std::span<const std::int32_t> tokens,
                              std::uint32_t n_logits, float* logits,
@@ -280,10 +326,33 @@ public:
   [[nodiscard]] std::uint32_t max_batch() const noexcept {
     return options_.max_batch;
   }
+  /// Tokens one prefill Forward takes: two trunk batches with a split
+  /// reduce, else one.
+  [[nodiscard]] std::uint32_t PrefillChunk() const noexcept {
+    return options_.split_reduce.start ? 2 * options_.max_batch
+                                       : options_.max_batch;
+  }
+  /// With a split reduce, a prefill chunk of `n` tokens runs as two trunk
+  /// batches of about half each, so each batch's sums cross the link while
+  /// the other computes; returns the first batch's rows, or 0 when the chunk
+  /// runs as one batch (without a split reduce, or too short to repay a
+  /// second pass over each layer's weights: measured on Q4 TP2 with MTP, a
+  /// pair lost 6% at 258 tokens and gained 3% at 378 and 12% at 543).
+  [[nodiscard]] std::uint32_t PairLead(std::uint32_t n) const noexcept {
+    constexpr std::uint32_t kPairMinTokens = 384;
+    return options_.split_reduce.start && n >= kPairMinTokens &&
+                   n <= PrefillChunk()
+               ? (n + 1) / 2
+               : 0;
+  }
   [[nodiscard]] std::uint32_t max_speculative() const noexcept {
     return options_.max_speculative;
   }
   [[nodiscard]] bool has_mtp() const noexcept { return model_->has_mtp(); }
+  /// The heads of every trunk layer on this rank (see DeviceModel).
+  [[nodiscard]] const MixerHeads& trunk_heads() const noexcept {
+    return model_->trunk_heads();
+  }
 
 private:
   Executor() = default;
@@ -353,9 +422,11 @@ private:
   bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
                 bool speculative, std::string* error_msg) const;
   bool WaitPle(std::string* error_msg) const;
+  /// `emb_row` is the batch's first row of the fetched n-gram embeddings; a
+  /// later batch of the same fetch relies on the first one's wait.
   bool Ple(const DeviceLayer& l, Session& s, std::uint32_t n_tokens, float* res,
            bool speculative, std::string* error_msg,
-           bool embeddings_ready = false) const;
+           bool embeddings_ready = false, std::uint32_t emb_row = 0) const;
   bool LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                        const float* x, float* out, std::uint32_t n_tokens,
                        bool speculative, std::string* error_msg,
@@ -370,9 +441,14 @@ private:
                  std::uint32_t max_context, bool sparse, std::string* error_msg,
                  bool last_only = false, bool projections_ready = false,
                  bool project_output = true) const;
+  /// Without `reduce`, a distributed rank's output stays its partial.
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
-           bool last_only = false) const;
+           bool last_only = false, bool reduce = true) const;
+  /// Sums `rows` rows of a partial across ranks; `observe` reports a MoE
+  /// output to options_.moe_observer.
+  bool AllReduce(float* data, std::size_t rows, std::string* error_msg,
+                 bool observe = true) const;
   /// Runs routed experts after the router and shared expert are ready.
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
                   std::uint32_t n_tokens, std::string* error_msg) const;
@@ -387,6 +463,35 @@ private:
                    std::uint32_t start_pos, std::uint32_t pool_grid,
                    std::uint32_t first_layer, std::uint32_t end_layer,
                    std::string* error_msg) const;
+  /// A prefill chunk that PairLead splits after `lead` rows (see Forward):
+  /// runs the two trunk batches a layer apart, then the draft block over
+  /// both.
+  bool ForwardPair(Session& session, std::span<const std::int32_t> tokens,
+                   std::uint32_t lead, std::uint32_t n_logits, float* logits,
+                   std::string* error_msg) const;
+  /// One trunk batch as the layers see it.
+  struct TrunkBatch {
+    std::uint32_t n;
+    std::uint32_t start_pos;
+    std::uint32_t pool_grid;
+    bool sparse;
+    bool speculative;
+    Session::Control* control;  ///< the positions its kernels read
+    std::uint32_t emb_row;      ///< its first fetched n-gram row
+  };
+  /// A trunk layer's GDN or attention block with its PLE and mixer, the
+  /// output in s_.block_out. A split block's output is this rank's partial;
+  /// with `reduce` it is summed across ranks here.
+  bool MixerPart(Session& session, std::uint32_t il, const TrunkBatch& batch,
+                 bool normed, bool reduce, std::string* error_msg) const;
+  /// The layer on to its MoE output in s_.block_out: the combine after the
+  /// block, the FFN mixer and the experts. Without `reduce`, a distributed
+  /// rank's output is still its partial.
+  bool MoePart(std::uint32_t il, std::uint32_t n_tokens, bool reduce,
+               std::string* error_msg) const;
+  /// The layer's final combine; returns whether it also normed the residual
+  /// for the next mixer.
+  bool LayerBack(std::uint32_t il, std::uint32_t n_tokens) const;
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
                const float* hidden_source, MtpTrace* trace) const;
@@ -396,6 +501,8 @@ private:
   bool Run(Session& session, std::uint64_t key, bool graph,
            const std::function<bool()>& body, std::string* error_msg,
            bool synchronize = true) const;
+  /// Waits for the stream, then for the outcome of the sums queued on it.
+  bool Drain(const char* what, std::string* error_msg) const;
 
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
@@ -488,7 +595,20 @@ private:
   mutable Scratch s_{};
   [[nodiscard]] Scratch RowScratch(const Scratch& base,
                                    std::uint32_t offset) const;
+  /// The same view for rows whose GDN and attention activations have the
+  /// widths of `heads`, such as a trunk batch of this rank's split heads.
+  [[nodiscard]] Scratch RowScratch(const Scratch& base, std::uint32_t offset,
+                                   const MixerHeads& heads) const;
   void UseScratch(const Scratch& scratch) const;
+  /// The second trunk batch of a prefill pair: its own residual, layer
+  /// output and injection rows, which stay live while the first batch runs;
+  /// every other buffer is shared.
+  [[nodiscard]] Scratch PairScratch(const Scratch& base) const;
+  float* pair_res_{nullptr};
+  float* pair_block_out_{nullptr};
+  float* pair_inject_{nullptr};
+  /// The second batch's positions; the first uses the session's.
+  Session::Control* pair_control_{nullptr};
   bool DenseBatch(const DeviceTensor& w, const float* x, float* out,
                   std::uint32_t rows, std::string* error_msg) const;
   bool GatedDenseBatch(const DeviceTensor& up, const DeviceTensor& gate,
@@ -521,6 +641,7 @@ private:
   mutable std::vector<std::uint32_t> host_rows_;
   mutable bool ple_pending_{false};
   // Pinned host staging the launched (or captured) work reads and writes.
+  // control_host_[1] holds a prefill pair's second batch.
   Session::Control* control_host_{nullptr};
   std::int32_t* tokens_host_{nullptr};
   std::uint32_t* counts_host_{nullptr};

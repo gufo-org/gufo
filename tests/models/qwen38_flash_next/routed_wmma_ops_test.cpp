@@ -479,9 +479,9 @@ bool Ok(const Result& r) {
          r.mmq_vs_ref < 1e-2 * r.scale;
 }
 
-void CheckVectorGrouping(bool down = false) {
+void CheckVectorGrouping(bool down = false, int down_cols = 640) {
   constexpr int experts = 8;
-  const int cols = down ? 640 : 2560;
+  const int cols = down ? down_cols : 2560;
   const int tokens = down ? 640 : 64;
   const int used = down ? 1 : 3;
   constexpr std::size_t guard = 16;
@@ -711,6 +711,8 @@ int main() {
   try {
     CheckVectorGrouping();
     CheckVectorGrouping(true);
+    // A TP2 rank's share of every expert: 320 of the 640 intermediate units.
+    CheckVectorGrouping(true, 320);
     CheckPairedMmq();
     bool ok = true;
     // Gate/up view: 64 experts, top-10, 640 x 2560 Q4_K.
@@ -744,6 +746,24 @@ int main() {
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x16160004U,
                 16)) &&
          ok;
+    // A TP2 rank's share of every expert: gate/up keep 320 of 640 output rows
+    // (a half-filled final 128-row tile), down keeps 320 of 640 inputs.
+    for (const std::uint32_t tile : {48U, 16U}) {
+      ok = Ok(Run(q::WeightType::kQ4_K, 300, 10, 64, 320, 2560, 0x32000001U,
+                  tile)) &&
+           ok;
+      ok = Ok(Run(q::WeightType::kQ5_K, 300, 10, 64, 320, 2560, 0x32000002U,
+                  tile)) &&
+           ok;
+    }
+    for (const std::uint32_t tile : {64U, 16U}) {
+      ok = Ok(Run(q::WeightType::kQ5_1, 3000, 1, 64, 2560, 320, 0x32000003U,
+                  tile)) &&
+           ok;
+      ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 320, 0x32000004U,
+                  tile)) &&
+           ok;
+    }
     return ok ? 0 : 1;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
