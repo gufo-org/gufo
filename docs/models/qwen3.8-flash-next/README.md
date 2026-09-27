@@ -35,6 +35,25 @@ for explicit effort/thinking overrides. Native context is 262144; YaRN extension
 is unsupported. Memory grows with used context and selected rollback depth;
 admission reserves the configured capacity before creating sessions.
 
+## Full Q8
+
+The loader also reads the `Q8_0` checkpoint (six shards, about 188 GB), whose
+per-layer token embedding table is `Q8_0` rather than IQ4_NL or BF16; the
+table stays host-side and is decoded row by row as before. The checkpoint does
+not fit one 128 GB host, so it needs two-host tensor parallelism (TP2).
+SHA-256 of the files it was qualified with:
+
+| Artifact | SHA-256 |
+|---|---|
+| `Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf` | `2dabcbb53ca537a7947bc7d20414fd464eeaf4d66d43021b5b2556cc87544ad2` |
+| `Qwen3.8-Flash-Next-Q8_0-00002-of-00006.gguf` | `494ca4ed3dbf97bc28da88af3890b8877b9032f909812d00c0526a9ca5e91d2e` |
+| `Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf` | `34efd79a80a1ce540a517a5d56171924b66ce1c38b04c904f17ad6d8ef17cf20` |
+| `Qwen3.8-Flash-Next-Q8_0-00004-of-00006.gguf` | `bfa634025fabbd2658bf7694bc80b90e571699c768723f844c934c7ef06c691a` |
+| `Qwen3.8-Flash-Next-Q8_0-00005-of-00006.gguf` | `232a8f14cc0fa4262e7efe8593774b136fe40909e39c7a020342ddaa27259a97` |
+| `Qwen3.8-Flash-Next-Q8_0-00006-of-00006.gguf` | `538a93bca918064983409a41187ad4c68640f9aced6f29564da8f551bf86d7a5` |
+
+See [Quality](QUALITY.md#full-q8) for how it compares with Q4 and llama.cpp.
+
 ## Images
 
 Use this model's `mmproj-BF16.gguf`, discovered beside the target or selected

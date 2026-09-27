@@ -20,6 +20,36 @@ the same build, request budget, capacity and sampling configuration; live cost
 timings only steer greedy decoding. Draft sampling uses the full Q8 head's
 top 64 logits; upstream draft-sampler equivalence is not claimed.
 
+## Full Q8
+
+**Lowest perplexity of all runs, but llama.cpp differs from Gufo more than Q4
+differs from Q8.** WikiText-2 test set, first eight 1024-token windows (4,088
+scored positions), against next-token log-probs saved by
+`llama-perplexity --kl-divergence-base` from a llama.cpp build (`-fa on`, F16
+KV, RPC over the same two hosts) on the same model files. Gufo ran two-host
+TP2.
+
+| Perplexity | Q4 | Q8 |
+| --- | --- | --- |
+| Gufo, TP2 | 2.1093 | 2.0957 |
+| Gufo, one host | 2.1168 | does not fit |
+| llama.cpp | 2.1311 | 2.1218 |
+
+| Pair (reference first) | Mean KL | Same top token |
+| --- | --- | --- |
+| Gufo Q4 one host, Gufo Q4 TP2 | 0.019 | 97.1% |
+| llama.cpp Q8, llama.cpp Q4 | 0.060 | 94.4% |
+| Gufo Q8, Gufo Q4 | 0.070 | 94.0% |
+| llama.cpp Q4, Gufo Q4 | 0.090 | 93.0% |
+| llama.cpp Q8, Gufo Q8 | 0.093 | 93.1% |
+
+Q4 to Q8 moves Gufo about as much as it
+moves llama.cpp, but the two implementations differ by more than that on both
+quantizations; which one is closer to the original model needs an official
+reference. Per-layer embeddings matter: Gufo without them scores
+6.13. `qwen38_flash_next.ngram` checks Q8 rows (cold, cached, batched and
+unaligned reads, truncation and invalid dimensions).
+
 ## Vision
 
 **One Gufo encoder comparison fails:** relative L2 **6.47%** versus official
