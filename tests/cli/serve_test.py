@@ -46,8 +46,8 @@ def main():
         "serve", "llm", "--model", "missing", "--tp-world-size", "2",
         "--tp-rank", "0", "--tp-bootstrap-port", "18515",
         "--tp-control-port", "18516", "--tp-control-token", "test",
-        "--request-timeout-ms", "1000",
-    ], 2, "TP2 currently requires no timeout")
+        "--cache-disk", "/tmp/unused-tp2-cache",
+    ], 2, "TP2 does not support the disk cache")
     text = check(["transcribe", "--help"], 0, "--prompt")
     assert "--context" in text
 

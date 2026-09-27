@@ -1207,10 +1207,8 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: TP2 requires --tp-control-token\n";
       return 2;
     }
-    if (tp_world_size == 2 &&
-        (request_timeout_ms != 0 || !cache_disk_directory.empty())) {
-      std::cerr << "Error: TP2 currently requires no timeout and no disk "
-                   "cache\n";
+    if (tp_world_size == 2 && !cache_disk_directory.empty()) {
+      std::cerr << "Error: TP2 does not support the disk cache yet\n";
       return 2;
     }
 

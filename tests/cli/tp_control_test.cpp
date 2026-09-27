@@ -521,14 +521,22 @@ int main() {
     mismatch_client_thread.join();
     Require(!mismatch_server_handshake && !mismatch_client_handshake,
             "TP control rejects a " + what + " mismatch");
+    // Both ranks name the setting, so either log tells the operator what to
+    // change.
+    Require(server_error.find(what) != std::string::npos &&
+                client_error.find(what) != std::string::npos,
+            "TP control names the " + what + " mismatch: " + server_error +
+                " / " + client_error);
   };
-  refuses_mismatch("draft-width", [](TpControlConfig& config) {
+  refuses_mismatch("draft tokens", [](TpControlConfig& config) {
     config.max_draft_tokens = 3;
   });
-  refuses_mismatch("session-count",
+  refuses_mismatch("sessions",
                    [](TpControlConfig& config) { config.sessions = 4; });
   refuses_mismatch("vision",
                    [](TpControlConfig& config) { config.vision = true; });
+  refuses_mismatch("context",
+                   [](TpControlConfig& config) { config.max_context = 8192; });
 
   const auto broker_port = FreePort();
   std::shared_ptr<TpControlChannel> broker_client;

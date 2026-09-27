@@ -671,13 +671,35 @@ bool TpControlChannel::Handshake(const TpControlConfig& config,
   }
   peer_token.assign(reinterpret_cast<const char*>(peer.data() + offset),
                     auth_size);
-  if (rank != 1U - config.rank || world != config.world_size ||
-      context != config.max_context ||
-      prefill_chunk != config.prefill_chunk_tokens ||
-      draft != config.max_draft_tokens || mtp != (config.use_mtp ? 1U : 0U) ||
-      sessions != config.sessions || vision != (config.vision ? 1U : 0U) ||
-      peer_token != auth_token_) {
-    SetError(error, "TP control hello configuration mismatch");
+  // Name every setting the ranks disagree on: both must be started with the
+  // same model options, and a bare mismatch leaves the operator guessing.
+  std::string mismatch;
+  const auto differs = [&](bool different, const char* what, std::uint64_t mine,
+                           std::uint64_t peers) {
+    if (different) {
+      mismatch += std::string(mismatch.empty() ? "" : ", ") + what + " " +
+                  std::to_string(mine) + " here, " + std::to_string(peers) +
+                  " on the peer";
+    }
+  };
+  differs(rank != 1U - config.rank, "rank", config.rank, rank);
+  differs(world != config.world_size, "world size", config.world_size, world);
+  differs(context != config.max_context, "context", config.max_context,
+          context);
+  differs(prefill_chunk != config.prefill_chunk_tokens, "prefill chunk",
+          config.prefill_chunk_tokens, prefill_chunk);
+  differs(mtp != (config.use_mtp ? 1U : 0U), "MTP", config.use_mtp ? 1U : 0U,
+          mtp);
+  differs(draft != config.max_draft_tokens, "draft tokens",
+          config.max_draft_tokens, draft);
+  differs(sessions != config.sessions, "sessions", config.sessions, sessions);
+  differs(vision != (config.vision ? 1U : 0U), "vision (--mmproj)",
+          config.vision ? 1U : 0U, vision);
+  if (peer_token != auth_token_) {
+    mismatch += std::string(mismatch.empty() ? "" : ", ") + "control token";
+  }
+  if (!mismatch.empty()) {
+    SetError(error, "TP control hello configuration mismatch: " + mismatch);
     return false;
   }
   snapshot_budget_bytes_ =
