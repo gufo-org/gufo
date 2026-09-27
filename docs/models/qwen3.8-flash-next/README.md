@@ -29,6 +29,19 @@ requests use deterministic acceptance/cost control for seeded replay; all-greedy
 C>1 batches may use measured cycle costs. Each request keeps private caches,
 rollback and RNG. See [MTP qualification](QUALITY.md).
 
+`--prompt-lookup` adds copied proposals to single-session MTP decoding. After
+each MTP draft, the context (committed tokens plus the chain so far) is matched
+against the request's own earlier tokens by its last three tokens; when the
+best of the 16 most recent occurrences matches at least 12 tokens back, the
+tokens that followed it fill the rest of the chain and drafting stops. Copies
+are verified like any draft: greedy text is byte-identical, and sampled
+requests treat each copied token as a point-mass proposal under the same
+rejection sampling, so outputs keep the target distribution. Shorter matches
+propose nothing; at temperature 1 an ungated 3-token rule displaced accepted
+MTP drafts and was slower on every workload measured. The index is private to
+the session and rebuilt after reset or snapshot restore. Timings report
+`lookup_n` / `lookup_n_accepted`.
+
 The official template defaults to thinking on, `xhigh` effort and preserving
 prior reasoning. Use the [reasoning controls](../../SERVER.md#reasoning-controls)
 for explicit effort/thinking overrides. Native context is 262144; YaRN extension

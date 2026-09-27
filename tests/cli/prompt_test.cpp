@@ -94,6 +94,13 @@ void TestInvalidFlags() {
   const std::array<const char*, 2> policy_without_backend = {"--draft-policy",
                                                              "adaptive"};
   assert(!gufo::cli::ParsePromptOptions(policy_without_backend, &err));
+  const std::array<const char*, 1> lookup_without_mtp = {"--prompt-lookup"};
+  assert(!gufo::cli::ParsePromptOptions(lookup_without_mtp, &err));
+  assert(err.find("prompt-lookup") != std::string::npos);
+  const std::array<const char*, 5> lookup = {
+      "--speculative", "mtp", "--mtp-model", "mtp.gguf", "--prompt-lookup"};
+  const auto lookup_parsed = gufo::cli::ParsePromptOptions(lookup, &err);
+  assert(lookup_parsed.has_value() && lookup_parsed->prompt_lookup);
 
   const std::array<const char*, 2> args8 = {"--chat-template", "qwen"};
   assert(!gufo::cli::ParsePromptOptions(args8, &err).has_value());

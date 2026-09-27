@@ -17,6 +17,7 @@
 #include "src/models/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
+#include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
 class GgufReader;
@@ -45,6 +46,11 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  /// Single-session prompt lookup: after an MTP draft, a match of 12+ tokens
+  /// in the context proposes the tokens that followed it (PromptLookup).
+  /// Verification is unchanged: greedy text is byte-identical and sampled
+  /// outputs keep the target distribution.
+  bool prompt_lookup = false;
 };
 
 class Session;
@@ -134,8 +140,9 @@ public:
   };
   /// Greedy decoding verifies deterministic drafts. Sampled decoding draws
   /// compact MTP proposals and uses target/draft rejection with a residual
-  /// correction. History contains only committed tokens; stochastic RNG
-  /// consumption includes proposal and verification draws. A
+  /// correction. Prompt lookup appends copied tokens to the chain as
+  /// point-mass proposals. History contains only committed tokens; stochastic
+  /// RNG consumption includes proposal and verification draws. A
   /// one-token budget or a model without MTP uses ordinary decoding.
   /// Benchmarks may continue past EOS by setting stop_at_eos to false.
   [[nodiscard]] bool DecodeStep(std::size_t max_tokens,
@@ -189,6 +196,9 @@ public:
     std::uint64_t cycles{0};
     std::uint64_t drafted{0};
     std::uint64_t accepted{0};
+    /// Of drafted/accepted: proposals copied by prompt lookup.
+    std::uint64_t lookup{0};
+    std::uint64_t lookup_accepted{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
@@ -238,6 +248,8 @@ private:
                      std::string* error_msg, bool defer_head = false,
                      std::optional<std::uint32_t> batch_drafts = {});
   static void AppendDraft(PendingDecode& pending);
+  /// Prompt lookup: appends copied proposals up to `cap` chain tokens.
+  bool AppendLookup(PendingDecode& pending, std::size_t cap);
   bool FinishDecode(const DecodeRequest& request, const PendingDecode& pending,
                     std::string* error_msg);
 
@@ -249,6 +261,8 @@ private:
   std::vector<float> verify_logits_;
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
+  /// Index of tokens_ for ModelOptions::prompt_lookup.
+  PromptLookup lookup_;
   SpeculativeStats stats_;
   std::vector<std::uint8_t> image_identity_;
   bool valid_{true};

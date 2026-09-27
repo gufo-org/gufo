@@ -242,6 +242,10 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
         opt.min_draft_tokens = count;
         return true;
       });
+  parser.AddFlag("", "--prompt-lookup",
+                 "Qwen3.8-Flash-Next MTP: after a draft, propose the tokens "
+                 "that followed a 12+ token match earlier in the context",
+                 "Speculative", &opt.prompt_lookup);
   RegisterSamplingOptions(parser, &opt.sampling, "Sampling", false);
   parser.AddFlag("-v", "--verbose",
                  "Print detailed timing, latency breakdown, and tok/s metrics",
@@ -930,6 +934,7 @@ int RunQwen38FlashNextBenchmark(
           .max_context = static_cast<std::uint32_t>(required_context),
           .mtp_model_path = mtp ? options.mtp_model_path : "",
           .max_draft_tokens = std::max<std::uint32_t>(1, options.draft_tokens),
+          .prompt_lookup = options.prompt_lookup,
       },
       &error);
   if (model == nullptr) {
@@ -1119,7 +1124,10 @@ int RunQwen38FlashNextBenchmark(
           std::cerr << "Qwen3.8-Flash-Next tg depth=" << depth
                     << " cycles=" << stats.cycles
                     << " drafted=" << stats.drafted
-                    << " accepted=" << stats.accepted << " output_sha256="
+                    << " accepted=" << stats.accepted
+                    << " lookup_proposed=" << stats.lookup
+                    << " lookup_accepted=" << stats.lookup_accepted
+                    << " output_sha256="
                     << crypto::Sha256Hex(
                            std::span(reinterpret_cast<const std::uint8_t*>(
                                          generated.data()),
@@ -1218,6 +1226,11 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
     return std::nullopt;
   }
+  if (opt.prompt_lookup && opt.speculative_backend != "mtp") {
+    if (error_msg != nullptr)
+      *error_msg = "--prompt-lookup requires --speculative mtp";
+    return std::nullopt;
+  }
   if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
     if (error_msg != nullptr)
       *error_msg =
@@ -1261,6 +1274,10 @@ int RunBench(std::span<const char* const> args) {
       std::move(reader_owner));
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (opt.prompt_lookup && !IsQwen38FlashNext(*reader)) {
+    std::cerr << "Error: --prompt-lookup supports only Qwen3.8-Flash-Next\n";
+    return 1;
+  }
   if (IsDeepSeekV4Flash(*reader)) {
     return RunDeepSeekBenchmark(opt, reader, model_load_start);
   }
