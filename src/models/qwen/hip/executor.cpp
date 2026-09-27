@@ -72,6 +72,10 @@ QwenGpuExecutor::QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
 
 QwenGpuExecutor::~QwenGpuExecutor() {
   (void)hipStreamSynchronize(arena_.stream);
+  for (const auto event : prefill_events_) {
+    if (event)
+      (void)hipEventDestroy(event);
+  }
   if (d_verification_logits_ != nullptr) {
     (void)hipFree(d_verification_logits_);
   }

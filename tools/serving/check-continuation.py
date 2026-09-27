@@ -188,7 +188,13 @@ def main():
                 measured = metrics(resumed)
                 if measured["cached"] < 128:
                     raise RuntimeError(f"{name}: interrupted conversation lost its prefix: {measured}")
-                if args.discard_assistant and measured["prefill"] > 16:
+                # With preservation disabled, the next user turn removes
+                # reasoning from the preceding tool cycle too. Its short
+                # suffix must be recomputed; the earlier image/user prefix
+                # must remain cached.
+                rewritten_tool_reasoning = args.tools and not preserve
+                max_suffix = 96 if rewritten_tool_reasoning else 16
+                if args.discard_assistant and measured["prefill"] > max_suffix:
                     raise RuntimeError(f"{name}: discarded assistant caused re-prefill: {measured}")
                 repeated = call(args.url, body)
                 cold = call(args.url, {**body, "cache_prompt": False})
@@ -223,6 +229,7 @@ def main():
                 report = {"case": name, "request": body, "sha256": digest(resumed),
                           "discard_assistant": args.discard_assistant,
                           "drop_reasoning": args.drop_reasoning,
+                          "rewritten_tool_reasoning": rewritten_tool_reasoning,
                           "append_image": args.append_image,
                           "interrupt_seconds": elapsed, **measured, "exact": True,
                           "full_prefill_equal": digest(resumed) == digest(cold),

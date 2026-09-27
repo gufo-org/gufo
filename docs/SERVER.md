@@ -167,6 +167,9 @@ Appending an image reuses the preceding text/image state in RAM or on disk;
 changing, removing or moving an earlier image invalidates checkpoints after it.
 New images get a checkpoint before assistant framing so later turns do not
 encode or prefill them again.
+With `preserve_thinking=false`, a new user turn removes reasoning from the
+preceding tool cycle. Gufo retains the state before that cycle and processes
+its changed suffix again.
 
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.

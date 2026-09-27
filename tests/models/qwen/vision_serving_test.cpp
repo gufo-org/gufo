@@ -287,6 +287,20 @@ void CheckAppendSnapshotOracle(
       restored.ConfigureVision(full, encoder);
       restored.RestoreSnapshot(*snapshot);
       restored.ConfigureVision(full, encoder);
+      int cancellation_checks = 0;
+      restored.SetCancellationCheck([&] { return ++cancellation_checks == 5; });
+      bool cancelled = false;
+      try {
+        (void)restored.ForwardPromptBatch(tokens.subspan(count), count);
+      } catch (const std::runtime_error& error) {
+        cancelled = std::string_view(error.what()) == "Qwen prefill cancelled";
+      }
+      Require(cancelled && cancellation_checks == 5,
+              "prefill must observe cancellation within the layer stack");
+      // Exercise bounded submission too, against the uncancellable executor.
+      restored.SetCancellationCheck([] { return false; });
+      restored.RestoreSnapshot(*snapshot);
+      restored.ConfigureVision(full, encoder);
       (void)delayed.ForwardPromptBatch(tokens.subspan(count), count);
       (void)attached.ForwardPromptBatch(tokens.subspan(count), count);
       (void)restored.ForwardPromptBatch(tokens.subspan(count), count);

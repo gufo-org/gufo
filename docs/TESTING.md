@@ -73,6 +73,7 @@ and run it with `MODEL DRAFT_OR_DASH IMAGE_DIRECTORY --append-only`.
 The directory needs `red.png` and `blue.png`. This compares complete target
 logits when images are attached early or after a cached prefix, including
 snapshot restoration and sampled Flash-Next MTP replay.
+Qwen27B also checks exact restoration after cancellation between layers.
 Use the [HTTP continuation check](SERVER.md#hip-execution)
 for cancellation, thinking controls and disk restart.
 

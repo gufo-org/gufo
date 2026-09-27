@@ -8,6 +8,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 #include "src/models/qwen/vision/prompt.hpp"
 
@@ -153,6 +154,73 @@ void TestRendering() {
   for (auto offset : offsets)
     assert(text->substr(offset, 13) == "<|image_pad|>");
 }
+
+void TestToolReasoningCheckpoint() {
+  using namespace gufo::tokenization;
+  std::vector<std::string> vocab;
+  for (int i = 0; i < 256; ++i)
+    vocab.emplace_back(1, static_cast<char>(i));
+  std::unordered_map<std::string, TokenId> specials;
+  for (const auto* token : {"<|im_start|>", "<|im_end|>", "<think>", "</think>",
+                            "<|vision_start|>", "<|vision_end|>"}) {
+    specials[token] = static_cast<TokenId>(vocab.size());
+    vocab.emplace_back(token);
+  }
+  const auto tokenizer =
+      QwenTokenizer::CreateFromVocabulary(vocab, {}, specials);
+  assert(tokenizer);
+  const auto pixels = std::make_shared<
+      const std::vector<std::uint8_t>>(gufo::core::ReadImageUrl(
+      "data:image/png;base64,"
+      "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAYklEQVR4nO3PMQ0AIADAMEAD"
+      "/jUiAREcDcmqYJtn7/GzpQNeNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWg"
+      "NaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaBdCLsBmEpLi1UAAAAASUVORK5CYII="));
+  for (const bool images : {false, true}) {
+    for (const bool thinking : {false, true}) {
+      for (const bool preserve : {false, true}) {
+        for (const auto* thought : {"", "Read the fixture."}) {
+          std::vector<ChatMessage> messages{
+              {ChatRole::kUser, "Read the fixture."},
+              {ChatRole::kAssistant, "", "", thought},
+              {ChatRole::kTool, "The fixture is ready."}};
+          messages[1].tool_calls.push_back({"call", "read_fixture", {}});
+          if (images)
+            messages[0].images.push_back({0, pixels});
+          ChatTemplateOptions options;
+          options.enable_thinking = thinking;
+          options.preserve_thinking = preserve;
+          const auto prompt =
+              Prepare(*tokenizer, messages, {}, options, "fixture", 4096);
+          messages.emplace_back(ChatRole::kUser, ".");
+          const auto continued =
+              Prepare(*tokenizer, messages, {}, options, "fixture", 4096);
+          const auto stable =
+              std::span(prompt.tokens).first(prompt.stable_prefix_tokens);
+          assert(std::ranges::equal(
+              stable, std::span(continued.tokens).first(stable.size())));
+          if (images)
+            assert(prompt.stable_prefix_tokens >= prompt.rope.PrefixLength());
+          std::string error;
+          std::size_t expected_bytes = 0;
+          messages.pop_back();
+          const auto rendered = QwenChatTemplate::Render(
+              messages, {}, options, &error, nullptr, &expected_bytes);
+          assert(rendered);
+          if (!preserve) {
+            const auto first_assistant =
+                rendered->find("<|im_start|>assistant\n");
+            assert(expected_bytes == first_assistant);
+            assert(prompt.stable_prefix_tokens <
+                   continued.stable_prefix_tokens);
+          } else {
+            assert(expected_bytes ==
+                   rendered->size() - GenerationPrompt(thinking).size());
+          }
+        }
+      }
+    }
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -160,6 +228,7 @@ int main(int argc, char** argv) {
     TestPositionLayout();
     TestPreprocessing();
     TestRendering();
+    TestToolReasoningCheckpoint();
     TestImageTransportLimits();
     if (argc == 1) {
       std::cout << "vision input, layout and rendering: passed\n";

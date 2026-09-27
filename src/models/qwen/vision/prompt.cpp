@@ -250,9 +250,10 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
                const tokenization::ChatTemplateOptions& options,
                std::string_view encoder_identity, std::uint32_t max_context) {
   std::vector<std::size_t> offsets;
+  std::size_t stable_prefix_bytes = 0;
   std::string error;
   const auto rendered = tokenization::QwenChatTemplate::Render(
-      messages, tools, options, &error, &offsets);
+      messages, tools, options, &error, &offsets, &stable_prefix_bytes);
   if (!rendered)
     throw std::invalid_argument(error);
   Prompt prompt;
@@ -307,6 +308,14 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
     }
   }
   append(std::string_view(*rendered).substr(cursor));
+  // The boundary starts an assistant special token, after every image.
+  // Encode only the mutable suffix; never decode or resize images twice.
+  const auto suffix = tokenizer.Encode(
+      std::string_view(*rendered).substr(stable_prefix_bytes), tok_options);
+  if (suffix.size() > prompt.tokens.size() ||
+      !std::ranges::equal(suffix, std::span(prompt.tokens).last(suffix.size())))
+    throw std::logic_error("Qwen stable prefix is not a token boundary");
+  prompt.stable_prefix_tokens = prompt.tokens.size() - suffix.size();
   prompt.rope.Validate(max_context);
   if (!prompt.images.empty()) {
     const auto digest = identity.Finish();
