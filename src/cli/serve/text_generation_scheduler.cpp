@@ -651,6 +651,19 @@ struct TextGenerationScheduler::Impl {
                          std::memory_order_release);
     const auto decode_start = Clock::now();
     const auto selection = request->runner_request.SelectNext();
+    if (request->preview_token) {
+      // A multi-token step published this first token as its preview, then
+      // waited for its prompt snapshot; a single-token step advances it now.
+      const auto preview = *std::exchange(request->preview_token, std::nullopt);
+      if (selection.stop || selection.token != preview) {
+        throw std::runtime_error("first-token preview disagrees with decoding");
+      }
+      request->result.decode_ms +=
+          std::chrono::duration<double, std::milli>(Clock::now() - decode_start)
+              .count();
+      request->advance_pending = true;
+      return PrepareDecode(request);
+    }
     if (selection.stop) {
       request->result.decode_ms +=
           std::chrono::duration<double, std::milli>(Clock::now() - decode_start)
@@ -738,7 +751,10 @@ struct TextGenerationScheduler::Impl {
 
   void StepDecode(const std::shared_ptr<ScheduledRequest>& request) {
     consecutive_active_prefill_chunks = 0;
-    if (multi_token_decode) {
+    // A token a batched single-token step selected, but could not advance
+    // while the prompt snapshot was captured, advances before the request
+    // takes multi-token steps again.
+    if (multi_token_decode && !request->advance_pending) {
       StepMultiTokenDecode(request);
       return;
     }

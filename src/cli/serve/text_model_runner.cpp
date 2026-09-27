@@ -332,9 +332,17 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
 
 ContinuationCache::SnapshotSupport MakeSnapshotSupport(
     ValidatedRunner* validated) {
-  if (validated == nullptr || !validated->descriptor.capabilities.snapshot ||
-      !validated->descriptor.capabilities.fork) {
+  if (validated == nullptr) {
     return {};
+  }
+  // The runner decides what may be reused, with or without snapshots.
+  auto state_reusable = [validated](const ContinuationState& state) {
+    return validated->runner->CanReuse(
+        dynamic_cast<const TextRunnerState&>(state));
+  };
+  if (!validated->descriptor.capabilities.snapshot ||
+      !validated->descriptor.capabilities.fork) {
+    return {.state_reusable = std::move(state_reusable)};
   }
   return {
       .restore =
@@ -356,6 +364,14 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
             return resources.retained_snapshot_capacity_bytes.value_or(0);
           },
       .on_event = EmitSnapshotEvent,
+      .state_reusable = std::move(state_reusable),
+      .snapshot_reusable =
+          [validated](const ContinuationSnapshot& snapshot) {
+            const auto* text_snapshot =
+                dynamic_cast<const TextRunnerSnapshot*>(&snapshot);
+            return text_snapshot != nullptr &&
+                   validated->runner->CanReuse(*text_snapshot);
+          },
   };
 }
 
@@ -1135,6 +1151,10 @@ TextRunnerPool::~TextRunnerPool() = default;
 
 const TextModelRunner& TextRunnerPool::runner() const noexcept {
   return *impl_->validated.runner;
+}
+
+void TextRunnerPool::ClearCache() {
+  impl_->cache.Clear();
 }
 
 std::size_t TextRunnerPool::capacity() const noexcept {

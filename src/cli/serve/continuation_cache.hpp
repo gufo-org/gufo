@@ -90,11 +90,19 @@ public:
       std::function<void(ContinuationState&, const ContinuationSnapshot&)>;
   using SnapshotCapacity = std::function<std::size_t()>;
   using SnapshotEventSink = std::function<void(const SnapshotEvent&)>;
+  using StateReusable = std::function<bool(const ContinuationState&)>;
+  using SnapshotReusable = std::function<bool(const ContinuationSnapshot&)>;
 
   struct SnapshotSupport {
     SnapshotRestore restore;
     SnapshotCapacity capacity_bytes;
     SnapshotEventSink on_event;
+    /// False while a retained live state or snapshot must not be reused yet;
+    /// an unset check allows every one. Consulted, under the cache lock,
+    /// whenever a request looks up a prefix. Only the state check applies
+    /// without snapshot support.
+    StateReusable state_reusable;
+    SnapshotReusable snapshot_reusable;
   };
 
   class Lease {
@@ -196,6 +204,8 @@ public:
       const std::function<void(ContinuationState&)>& prepare_state = {},
       bool reuse_prompt = true);
 
+  /// Drop all reuse state. Requires no outstanding leases or reservations.
+  void Clear();
   [[nodiscard]] std::size_t capacity() const noexcept;
   [[nodiscard]] std::size_t snapshot_capacity_bytes() const noexcept;
   [[nodiscard]] std::size_t retained_snapshot_bytes() const noexcept;

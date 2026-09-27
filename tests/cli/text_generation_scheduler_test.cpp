@@ -92,6 +92,15 @@ struct FakeControl {
     Expect(entered, "timed out waiting for blocked prefill");
   }
 
+  void WaitForCaptureFinished(TextRunnerToken label) {
+    std::unique_lock<std::mutex> lock(mutex);
+    const bool finished = condition.wait_for(lock, kTestTimeout, [&] {
+      return std::ranges::find(finished_captures, label) !=
+             finished_captures.end();
+    });
+    Expect(finished, "timed out waiting for a prompt capture to finish");
+  }
+
   void ReleaseAdvance() {
     {
       const std::lock_guard<std::mutex> lock(mutex);
@@ -136,6 +145,8 @@ struct FakeControl {
   std::condition_variable condition;
   std::vector<Event> events;
   std::vector<std::vector<TextRunnerToken>> advance_batches;
+  // Labels whose asynchronous prompt capture finished, in order.
+  std::vector<TextRunnerToken> finished_captures;
   std::optional<TextRunnerToken> block_advance_label;
   std::optional<TextRunnerToken> block_prefill_label;
   std::optional<TextRunnerToken> throw_advance_label;
@@ -164,6 +175,22 @@ struct FakeControl {
   std::uint32_t max_context{128};
   std::optional<std::size_t> stop_after;
   std::function<void()> snapshot_callback;
+};
+
+// Records its label as a finished capture when its thread exits.
+struct CaptureExit {
+  ~CaptureExit() {
+    if (!control)
+      return;
+    {
+      const std::lock_guard<std::mutex> lock(control->mutex);
+      control->finished_captures.push_back(label);
+    }
+    control->condition.notify_all();
+  }
+
+  std::shared_ptr<FakeControl> control;
+  TextRunnerToken label{0};
 };
 
 class FakeState final : public TextRunnerState {
@@ -387,6 +414,12 @@ public:
       const TextRunnerState& state) const override {
     if (control_->snapshot_callback)
       control_->snapshot_callback();
+    // The pool runs a prompt capture on its own thread, whose future becomes
+    // ready when this returns and before the thread exits. Recorded at thread
+    // exit, a capture is one the scheduler already sees as finished.
+    thread_local CaptureExit capture_exit;
+    capture_exit.control = control_;
+    capture_exit.label = RequireFakeState(state).label;
     return std::make_unique<SnapshotState>(RequireFakeState(state));
   }
   void RestoreOrFork(
@@ -1460,6 +1493,84 @@ void TestSnapshotDoesNotBlockOtherRequests() {
   }
 }
 
+// A runner with multi-token decoding and batched single-token advances, but
+// no batched multi-token decoding (TP2 serving), mixes both step kinds within
+// one request. A step of either kind can end waiting for the prompt snapshot;
+// the other kind must then continue the request exactly.
+void TestMixedStepsContinueAfterPromptCapture() {
+  const auto mixed = [] {
+    auto control = std::make_shared<FakeControl>();
+    control->multi_token_decode = true;
+    control->batched_multi_token_decode = false;
+    control->supports_batched_advance = true;
+    control->preview_first_token = true;
+    return control;
+  };
+  // A multi-token step previews the first token, then waits for the capture;
+  // the request resumes in a batched single-token step.
+  {
+    auto control = mixed();
+    std::binary_semaphore entered(0), release(0);
+    std::atomic<unsigned> captures{0};
+    control->snapshot_callback = [&] {
+      if (captures.fetch_add(1) == 0) {
+        entered.release();
+        release.acquire();
+      }
+    };
+    control->block_advance_label = 2;
+    auto scheduler = MakeScheduler(control, 2);
+    auto first = scheduler->Submit({1, 10}, 7, 0.0F);
+    Expect(entered.try_acquire_for(kTestTimeout),
+           "the previewed request captures its prompt");
+    auto second = scheduler->Submit({2, 20}, 30, 0.0F);
+    control->WaitForAdvance(2);
+    release.release();
+    // The scheduler sees a capture finish only between steps. Holding the
+    // peer until the capture has finished keeps it decoding when the preview
+    // resumes; otherwise it can finish first and the preview advances alone.
+    control->WaitForCaptureFinished(1);
+    control->ReleaseAdvance();
+    Expect(first.Wait().tokens == ExpectedTokens(1, 7),
+           "a preview is advanced once by a batched step");
+    Expect(second.Wait().tokens == ExpectedTokens(2, 30),
+           "the batched peer keeps its output");
+    const auto batches = control->AdvanceBatches();
+    Expect(std::ranges::any_of(batches,
+                               [](const auto& batch) {
+                                 return std::ranges::find(batch, 1) !=
+                                        batch.end();
+                               }),
+           "the previewed request advanced in a batch");
+  }
+  // A batched single-token step selects a token, then waits for the capture;
+  // the request resumes alone, where it takes multi-token steps.
+  {
+    auto control = mixed();
+    std::binary_semaphore entered(0), release(0);
+    std::atomic<unsigned> captures{0};
+    control->snapshot_callback = [&] {
+      if (captures.fetch_add(1) == 1) {
+        entered.release();
+        release.acquire();
+      }
+    };
+    control->block_advance_label = 2;
+    auto scheduler = MakeScheduler(control, 2);
+    auto second = scheduler->Submit({2, 20}, 12, 0.0F);
+    control->WaitForAdvance(2);
+    auto first = scheduler->Submit({1, 10}, 7, 0.0F);
+    control->ReleaseAdvance();
+    Expect(entered.try_acquire_for(kTestTimeout),
+           "the batched request captures its prompt");
+    Expect(second.Wait().tokens == ExpectedTokens(2, 12),
+           "the peer finishes while the capture waits");
+    release.release();
+    Expect(first.Wait().tokens == ExpectedTokens(1, 7),
+           "a selected token advances before multi-token steps");
+  }
+}
+
 void TestCapturesAtCapacityAllowQueuedProgress() {
   for (const bool multi : {false, true}) {
     for (const std::size_t capacity : {1U, 2U, 4U}) {
@@ -1606,6 +1717,7 @@ int main() {
     }
   }
   TestCapturesAtCapacityAllowQueuedProgress();
+  TestMixedStepsContinueAfterPromptCapture();
   TestShutdownCancelsRunnerAcquisition();
   TestSnapshotDoesNotBlockOtherRequests();
   TestFirstTokenPrecedesSnapshotAndPreservesBudget();

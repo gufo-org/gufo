@@ -283,6 +283,15 @@ public:
   /// Retain a safe executed frontier when cancellation interrupts publication
   /// of a completed speculative block. Called with cancellation checks cleared.
   virtual void PrepareCancellation(TextRunnerState&) const {}
+  /// False while a retained continuation must not be reused yet. A TP2 rank-0
+  /// runner withholds what a request computed until its peer agreed with it.
+  /// Consulted whenever a request looks up a reusable prefix.
+  [[nodiscard]] virtual bool CanReuse(const TextRunnerState&) const {
+    return true;
+  }
+  [[nodiscard]] virtual bool CanReuse(const TextRunnerSnapshot&) const {
+    return true;
+  }
 
   /// Captures an immutable exact continuation at CheckpointPosition(state).
   ///
@@ -401,6 +410,7 @@ public:
   TextRunnerPool(TextRunnerPool&&) = delete;
   TextRunnerPool& operator=(TextRunnerPool&&) = delete;
 
+  void ClearCache();
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
   [[nodiscard]] TextExecutionPlan SelectDecodePlan(
