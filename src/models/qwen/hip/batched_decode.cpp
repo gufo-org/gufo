@@ -143,13 +143,23 @@ void LaunchMoeFfn(const models::QwenLayerWeights& layer,
 
   if (view.gate_exps.type == core::GgmlType::kQ8_0 &&
       view.up_exps.type == core::GgmlType::kQ8_0) {
-    if (qfn_mmq_moe_gated_vec(
-            kGgmlQ8_0, view.gate_exps.data, view.up_exps.data,
-            scratch.decode.normed.data(), moe.ids.data(), moe.gate_e.data(),
-            static_cast<int>(expert_ff), static_cast<int>(hidden),
-            static_cast<int>(batch_size), static_cast<int>(n_experts),
-            static_cast<int>(n_used), stream) != 0) {
-      throw std::runtime_error("MoE gated expert projection failed");
+    // The Q8_0 gated vector kernel takes at most 8 token rows per launch
+    // (MMVQ_MAX_BATCH_SIZE), but concurrent verification stacks up to
+    // kMaxDecodeBatch rows per session. Rows are independent, so launch
+    // row slices over the token-major activations, ids and outputs.
+    constexpr std::size_t kGatedVecMaxRows = 8;
+    for (std::size_t row = 0; row < batch_size; row += kGatedVecMaxRows) {
+      const std::size_t rows = std::min(kGatedVecMaxRows, batch_size - row);
+      if (qfn_mmq_moe_gated_vec(
+              kGgmlQ8_0, view.gate_exps.data, view.up_exps.data,
+              scratch.decode.normed.data() + row * hidden,
+              moe.ids.data() + row * n_used,
+              moe.gate_e.data() + row * n_used * expert_ff,
+              static_cast<int>(expert_ff), static_cast<int>(hidden),
+              static_cast<int>(rows), static_cast<int>(n_experts),
+              static_cast<int>(n_used), stream) != 0) {
+        throw std::runtime_error("MoE gated expert projection failed");
+      }
     }
   } else {
     LaunchMoeSlotSwigluGemv(

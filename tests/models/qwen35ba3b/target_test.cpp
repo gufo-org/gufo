@@ -121,6 +121,69 @@ void CheckPrefillDecodeParity(
          "prefill and single-step decode disagree on the next token");
 }
 
+// Concurrent speculative verification stacks every session's draft rows into
+// one MoE batch (up to 8 sessions x 8 rows). Three sessions with 8 + 8 + 7
+// rows exceed the Q8_0 gated vector kernel's 8-row launch limit and leave a
+// partial slice; each row must agree with that session verifying alone.
+void CheckConcurrentVerification(
+    const std::shared_ptr<const gufo::hip::QwenGpuModel>& model) {
+  constexpr std::array<std::size_t, 3> kRows{8, 8, 7};
+  std::vector<std::unique_ptr<Executor>> sessions;
+  std::vector<std::vector<Token>> tokens;
+  std::vector<std::uint32_t> positions;
+  std::vector<std::unique_ptr<gufo::hip::QwenGpuSnapshot>> snapshots;
+  std::vector<std::vector<std::vector<float>>> expected;
+  for (std::size_t s = 0; s < kRows.size(); ++s) {
+    std::string error;
+    sessions.push_back(Executor::Create(model, &error, 4096));
+    Expect(sessions.back() != nullptr, error);
+    auto& session = *sessions.back();
+    tokens.push_back(session.GetTokenizer().Encode(kTexts[s % kTexts.size()]));
+    Expect(tokens.back().size() > kRows[s] + 4, "fixture text is too short");
+    const auto position =
+        static_cast<std::uint32_t>(tokens.back().size() - kRows[s]);
+    positions.push_back(position);
+    session.Reset();
+    (void)session.ForwardPromptBatch(std::span(tokens.back()).first(position));
+    snapshots.push_back(session.SaveSnapshot(position));
+    (void)session.ForwardVerificationChunk(
+        std::span(tokens.back()).subspan(position), position, true);
+    auto& rows = expected.emplace_back();
+    for (std::size_t r = 0; r < kRows[s]; ++r) {
+      const auto view = session.CopyVerificationLogits(r);
+      rows.emplace_back(view.begin(), view.end());
+    }
+    session.RestoreSnapshot(*snapshots.back());
+  }
+
+  std::vector<gufo::hip::QwenGpuVerificationItem> items;
+  for (std::size_t s = 0; s < sessions.size(); ++s) {
+    items.push_back({sessions[s].get(),
+                     std::span(tokens[s]).subspan(positions[s]), positions[s],
+                     true});
+  }
+  const auto predictions = Executor::ForwardVerificationBatch(items);
+  Expect(predictions.size() == sessions.size(),
+         "concurrent verification must answer every session");
+  for (std::size_t s = 0; s < sessions.size(); ++s) {
+    Expect(predictions[s].size() == kRows[s],
+           "concurrent verification row count mismatch");
+    for (std::size_t r = 0; r < kRows[s]; ++r) {
+      const auto view = sessions[s]->CopyVerificationLogits(r);
+      const std::vector<float> actual(view.begin(), view.end());
+      const auto result =
+          gufo::testing::CompareLogits(expected[s][r], actual, 5e-2F, 5e-2F);
+      Expect(result.finite, "concurrent verification logits must be finite");
+      Expect(result.top1_match,
+             "concurrent verification changed the greedy token: session " +
+                 std::to_string(s) + " row " + std::to_string(r) + ": " +
+                 result.details);
+    }
+  }
+  std::cout << "concurrent verification: sessions=" << sessions.size()
+            << " rows=" << kRows[0] + kRows[1] + kRows[2] << " top1 match\n";
+}
+
 }  // namespace
 
 int main() {
@@ -141,6 +204,7 @@ int main() {
 
     CheckCpuGpuLogitParity(model, *reader);
     CheckPrefillDecodeParity(model);
+    CheckConcurrentVerification(model);
   } catch (const std::exception& e) {
     std::cerr << "qwen35ba3b_target_test: " << e.what() << "\n";
     return 1;
