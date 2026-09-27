@@ -185,6 +185,11 @@ add_library(gufo_logging STATIC src/cli/serve/logging.cpp)
 target_include_directories(gufo_logging PUBLIC ${PROJECT_SOURCE_DIR})
 target_compile_features(gufo_logging PUBLIC cxx_std_20)
 
+add_library(gufo_tp_control STATIC src/cli/serve/tp_control.cpp)
+target_include_directories(gufo_tp_control PUBLIC ${PROJECT_SOURCE_DIR})
+target_compile_features(gufo_tp_control PUBLIC cxx_std_20)
+target_link_libraries(gufo_tp_control PUBLIC gufo_core Threads::Threads)
+
 add_library(gufo_http STATIC
   src/cli/serve/image_api.cpp
   src/cli/serve/audio_asr_api.cpp
@@ -211,10 +216,16 @@ add_executable(gufo
   src/cli/serve/continuation_disk_store.cpp
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
+  src/cli/serve/tp_executor.cpp
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+target_link_libraries(gufo PRIVATE
+  gufo_diagnostics gufo_core gufo_llm_cli gufo_http gufo_tp_control
+  CURL::libcurl)
+if (GUFO_ENABLE_TP2_RDMA)
+  target_compile_definitions(gufo PRIVATE GUFO_ENABLE_TP2_RDMA=1)
+endif()
 target_compile_definitions(gufo PRIVATE
   GUFO_VERSION="${GUFO_VERSION}"
   GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
@@ -334,6 +345,33 @@ if (BUILD_TESTING)
   target_link_libraries(arg_parser_test PRIVATE gufo_core)
   add_test(NAME arg_parser_test COMMAND arg_parser_test)
   set_tests_properties(arg_parser_test PROPERTIES LABELS "cpu;cli")
+
+  add_executable(tp_control_test tests/cli/tp_control_test.cpp)
+  target_link_libraries(tp_control_test PRIVATE gufo_tp_control)
+  add_test(NAME tp_control_test COMMAND tp_control_test)
+  set_tests_properties(tp_control_test PROPERTIES LABELS "cpu;tp2" TIMEOUT 10)
+
+  # A measurement, not a gate: it asserts no threshold and never fails on a
+  # slow result, so it is labelled `perf` and kept out of the correctness run.
+  add_executable(tp_instruction_latency_test
+    tests/cli/tp_instruction_latency_test.cpp)
+  target_link_libraries(tp_instruction_latency_test PRIVATE gufo_tp_control)
+  add_test(NAME tp_instruction_latency_test
+    COMMAND tp_instruction_latency_test)
+  set_tests_properties(tp_instruction_latency_test PROPERTIES
+    LABELS "cpu;tp2;perf" TIMEOUT 300)
+
+  add_executable(tp_executor_test
+    tests/cli/tp_executor_test.cpp
+    src/cli/serve/continuation_cache.cpp
+    src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/text_model_runner.cpp
+    src/cli/serve/text_generation_scheduler.cpp
+    src/cli/serve/tp_executor.cpp)
+  target_link_libraries(tp_executor_test PRIVATE
+    gufo_logging gufo_core gufo_tp_control)
+  add_test(NAME tp_executor_test COMMAND tp_executor_test)
+  set_tests_properties(tp_executor_test PROPERTIES LABELS "cpu;tp2" TIMEOUT 60)
 
   add_executable(json_test tests/core/json_test.cpp)
   target_link_libraries(json_test PRIVATE gufo_core)

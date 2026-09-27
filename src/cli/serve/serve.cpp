@@ -29,9 +29,13 @@
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/tp_control.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
+#endif
+#ifdef GUFO_ENABLE_TP2_RDMA
+#include "src/models/qwen38_flash_next/kernels/rocm/verbs.hpp"
 #endif
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_jobs.hpp"
@@ -468,6 +472,14 @@ void PrintServeHelp(std::string_view program_name,
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
+    std::uint32_t tp_rank = 0;
+    std::uint32_t tp_world_size = 1;
+    std::uint32_t tp_device = 0;
+    std::uint32_t tp_gid_index = 0;
+    std::uint32_t tp_bootstrap_port = 18515;
+    std::uint32_t tp_control_port = 18516;
+    std::string tp_bootstrap_host;
+    std::string tp_control_token;
     bool log_progress = false;
 
     gufo::cli::ArgParser parser(
@@ -487,6 +499,26 @@ void PrintServeHelp(std::string_view program_name,
         "-c", "--context", "N",
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
+    parser.AddOption("", "--tp-world-size", "N",
+                     "Qwen3.8-Flash-Next TP world size (1 or 2)", "TP2",
+                     &tp_world_size);
+    parser.AddOption("", "--tp-rank", "N", "TP rank (0 or 1)", "TP2", &tp_rank);
+    parser.AddOption("", "--tp-bootstrap-host", "HOST",
+                     "Rank-1 address of the rank-0 RDMA bootstrap", "TP2",
+                     &tp_bootstrap_host);
+    parser.AddOption("", "--tp-bootstrap-port", "N",
+                     "TCP bootstrap port (default: 18515)", "TP2",
+                     &tp_bootstrap_port);
+    parser.AddOption("", "--tp-control-port", "N",
+                     "TCP worker control port (default: 18516)", "TP2",
+                     &tp_control_port);
+    parser.AddOption("", "--tp-control-token", "TOKEN",
+                     "Shared token for TP worker authentication", "TP2",
+                     &tp_control_token);
+    parser.AddOption("", "--tp-device", "N", "HIP device index", "TP2",
+                     &tp_device);
+    parser.AddOption("", "--tp-gid-index", "N", "InfiniBand GID index", "TP2",
+                     &tp_gid_index);
 
     // Sampling Defaults
     parser.AddOption(
@@ -921,6 +953,14 @@ int RunServe(std::span<const char* const> args) {
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
+    std::uint32_t tp_rank = 0;
+    std::uint32_t tp_world_size = 1;
+    std::uint32_t tp_device = 0;
+    std::uint32_t tp_gid_index = 0;
+    std::uint32_t tp_bootstrap_port = 18515;
+    std::uint32_t tp_control_port = 18516;
+    std::string tp_bootstrap_host;
+    std::string tp_control_token;
     bool log_progress = false;
 
     gufo::cli::ArgParser llm_parser(
@@ -939,6 +979,27 @@ int RunServe(std::span<const char* const> args) {
         "-c", "--context", "N",
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
+    llm_parser.AddOption("", "--tp-world-size", "N",
+                         "Qwen3.8-Flash-Next TP world size (1 or 2)", "TP2",
+                         &tp_world_size);
+    llm_parser.AddOption("", "--tp-rank", "N", "TP rank (0 or 1)", "TP2",
+                         &tp_rank);
+    llm_parser.AddOption("", "--tp-bootstrap-host", "HOST",
+                         "Rank-1 address of the rank-0 RDMA bootstrap", "TP2",
+                         &tp_bootstrap_host);
+    llm_parser.AddOption("", "--tp-bootstrap-port", "N",
+                         "TCP bootstrap port (default: 18515)", "TP2",
+                         &tp_bootstrap_port);
+    llm_parser.AddOption("", "--tp-control-port", "N",
+                         "TCP worker control port (default: 18516)", "TP2",
+                         &tp_control_port);
+    llm_parser.AddOption("", "--tp-control-token", "TOKEN",
+                         "Shared token for TP worker authentication", "TP2",
+                         &tp_control_token);
+    llm_parser.AddOption("", "--tp-device", "N", "HIP device index", "TP2",
+                         &tp_device);
+    llm_parser.AddOption("", "--tp-gid-index", "N", "InfiniBand GID index",
+                         "TP2", &tp_gid_index);
     llm_parser.AddOption(
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
@@ -1116,6 +1177,91 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: --model <PATH> is required\n";
       return 2;
     }
+    if (tp_world_size != 1 && tp_world_size != 2) {
+      std::cerr << "Error: --tp-world-size must be 1 or 2\n";
+      return 2;
+    }
+    if (tp_world_size == 1 && tp_rank != 0) {
+      std::cerr << "Error: single-rank TP requires --tp-rank 0\n";
+      return 2;
+    }
+    if (tp_rank >= tp_world_size) {
+      std::cerr << "Error: --tp-rank must be less than --tp-world-size\n";
+      return 2;
+    }
+    if (tp_world_size == 2 && (tp_rank == 1 && tp_bootstrap_host.empty())) {
+      std::cerr << "Error: rank one requires --tp-bootstrap-host\n";
+      return 2;
+    }
+    if (tp_bootstrap_port == 0 || tp_bootstrap_port > 65535 ||
+        tp_control_port == 0 || tp_control_port > 65535 ||
+        tp_bootstrap_port == tp_control_port ||
+        tp_device >
+            static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+        tp_gid_index > std::numeric_limits<std::uint8_t>::max()) {
+      std::cerr << "Error: invalid TP2 network/device options\n";
+      return 2;
+    }
+    if (tp_world_size == 2 &&
+        (tp_control_token.empty() || tp_control_token.size() > 4096)) {
+      std::cerr << "Error: TP2 requires --tp-control-token\n";
+      return 2;
+    }
+    if (tp_world_size == 2 &&
+        (request_timeout_ms != 0 || !cache_disk_directory.empty() ||
+         !vision_model_path.empty())) {
+      std::cerr << "Error: TP2 currently requires no timeout, no disk cache "
+                   "and no vision\n";
+      return 2;
+    }
+
+    server::TextTpConfig tp_config{
+        .rank = tp_rank,
+        .world_size = tp_world_size,
+        .hip_device = static_cast<int>(tp_device),
+        .auth_token = tp_control_token,
+    };
+    std::shared_ptr<models::qwen38_flash_next::rocm::Communicator>
+        tp_communicator;
+    std::shared_ptr<server::TpControlChannel> tp_control;
+    if (tp_world_size == 2) {
+#ifdef GUFO_ENABLE_TP2_RDMA
+      const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
+          .rank = tp_rank,
+          .world_size = tp_world_size,
+          .bootstrap_host = tp_bootstrap_host,
+          .bootstrap_port = static_cast<std::uint16_t>(tp_bootstrap_port),
+          .device_index = tp_device,
+          .gid_index = tp_gid_index,
+      };
+      std::string tp_error;
+      tp_communicator =
+          models::qwen38_flash_next::rocm::CreateIbrverbsCommunicator(
+              rdma_config, &tp_error);
+      if (!tp_communicator) {
+        std::cerr << "Error creating TP2 RDMA communicator: " << tp_error
+                  << '\n';
+        return 1;
+      }
+      tp_control =
+          tp_rank == 0
+              ? server::TpControlChannel::Listen(
+                    static_cast<std::uint16_t>(tp_control_port), &tp_error)
+              : server::TpControlChannel::Connect(
+                    tp_bootstrap_host,
+                    static_cast<std::uint16_t>(tp_control_port), &tp_error);
+      if (!tp_control) {
+        std::cerr << "Error creating TP2 worker control channel: " << tp_error
+                  << '\n';
+        return 1;
+      }
+#else
+      std::cerr << "Error: this build has no TP2 RDMA support\n";
+      return 2;
+#endif
+    }
+    tp_config.communicator = tp_communicator;
+    tp_config.control = tp_control;
     std::string err;
     ModelLoadLog load_log("text", model);
     backend = std::make_shared<server::InferenceBackend>();
@@ -1145,7 +1291,7 @@ int RunServe(std::span<const char* const> args) {
                            .staging_capacity_bytes = cache_disk_staging_bytes,
                            .model_artifact_fingerprint = {},
                        },
-                       vision_model_path)) {
+                       vision_model_path, tp_config)) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
       return 1;
     }
@@ -1168,6 +1314,16 @@ int RunServe(std::span<const char* const> args) {
         std::to_string(backend->max_context()) + " speculative=" + speculation +
         " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
         " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled"));
+#if defined(ENGINE_ENABLE_HIP)
+    if (tp_world_size == 2 && tp_rank == 1) {
+      std::string worker_error;
+      if (!backend->run_worker(&worker_error)) {
+        std::cerr << "TP worker failed: " << worker_error << '\n';
+        return 1;
+      }
+      return 0;
+    }
+#endif
   }
 
   server::HttpServer server(

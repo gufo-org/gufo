@@ -24,13 +24,17 @@ class Model;
 
 namespace gufo::models::qwen38_flash_next {
 class Model;
+namespace rocm {
+class Communicator;
 }
+}  // namespace gufo::models::qwen38_flash_next
 
 namespace gufo::tokenization {
 class QwenTokenizer;
 }
 
 namespace gufo::server {
+class TpControlChannel;
 
 enum class TextSpeculativeBackend : std::uint8_t {
   kDisabled,
@@ -46,6 +50,15 @@ struct TextSpeculativeConfig {
   std::uint32_t min_draft_tokens{1};
   speculative::DFlashDraftPolicy dflash_policy{
       speculative::DFlashDraftPolicy::kAdaptive};
+};
+
+struct TextTpConfig {
+  std::uint32_t rank{0};
+  std::uint32_t world_size{1};
+  int hip_device{0};
+  std::shared_ptr<models::qwen38_flash_next::rocm::Communicator> communicator;
+  std::shared_ptr<TpControlChannel> control;
+  std::string auth_token;
 };
 
 struct TextDiskCacheConfig {
@@ -80,7 +93,8 @@ public:
             TextSchedulerPolicy scheduler_policy = {},
             const TextSpeculativeConfig& speculative_config = {},
             const TextDiskCacheConfig& disk_cache_config = {},
-            const std::string& vision_model_path = {});
+            const std::string& vision_model_path = {},
+            const TextTpConfig& tp_config = {});
 
 #if defined(ENGINE_ENABLE_HIP)
   /// Installs a previously loaded model without duplicating mapped weights.
@@ -109,7 +123,11 @@ public:
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
             TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {});
+            TextDiskCacheConfig disk_cache_config = {},
+            const TextTpConfig& tp_config = {});
+
+  /// Runs the rank-1 TP2 worker loop until the control channel closes.
+  [[nodiscard]] bool run_worker(std::string* error);
 #endif
 
   /// Stable model identifier used in API responses.
