@@ -12,6 +12,8 @@
 #include <fstream>
 #include <vector>
 
+#include "src/core/quant/ggml_dequant.hpp"
+
 namespace q = gufo::models::qwen38_flash_next;
 
 namespace {
@@ -277,6 +279,109 @@ void TestQuantizedRows() {
   std::filesystem::remove(path);
 }
 
+// The production Q8_0 format must use the canonical 32/34-byte row layout on
+// cold, cached, asynchronous and batched reads. The unaligned offset and
+// repeated/interior/final row IDs catch an incorrect row stride immediately.
+void TestQ8Rows() {
+  const auto path =
+      std::filesystem::temp_directory_path() / "qwen38_ngram_q8.bin";
+  constexpr std::uint32_t dim = 160;
+  constexpr std::uint32_t rows = 129;
+  constexpr std::uint64_t offset = 4096 + 90;
+  constexpr std::size_t blocks = dim / 32;
+  const auto code = [](std::uint32_t row, std::uint32_t block,
+                       std::uint32_t col) {
+    return static_cast<std::int8_t>(
+        static_cast<int>((row * 17 + block * 29 + col * 13) % 255) - 127);
+  };
+  const auto scale = [](std::uint32_t row) {
+    return row % 2 == 0 ? 0.5F : -2.0F;
+  };
+  {
+    std::ofstream file(path, std::ios::binary);
+    file.seekp(offset);
+    for (std::uint32_t row = 0; row < rows; ++row) {
+      for (std::uint32_t block = 0; block < blocks; ++block) {
+        gufo::quant::block_q8_0 value{};
+        value.d = row % 2 == 0 ? 0x3800 : 0xC000;
+        for (std::uint32_t col = 0; col < 32; ++col) {
+          value.qs[col] = code(row, block, col);
+        }
+        file.write(reinterpret_cast<const char*>(&value), sizeof(value));
+      }
+    }
+    Check(file.good(), "Q8_0 fixture written");
+  }
+  std::string error;
+  auto table =
+      OpenTable(path, offset, rows, dim, gufo::core::GgmlType::kQ8_0, &error);
+  Check(table != nullptr, error.c_str());
+  if (table) {
+    Check(table->RowBytes() == 170, "Q8_0 row geometry");
+    const auto expected = [&](std::uint32_t row, std::uint32_t col) {
+      return scale(row) * static_cast<float>(code(row, col / 32, col % 32));
+    };
+    const auto gather = [&](std::span<const std::uint32_t> ids,
+                            const char* label) {
+      std::vector<float> out(ids.size() * dim + 16, -123.0F);
+      Check(table->Read(ids, std::span(out).first(ids.size() * dim)), label);
+      for (std::size_t i = 0; i < ids.size(); ++i) {
+        for (std::uint32_t col = 0; col < dim; ++col) {
+          Check(out[i * dim + col] == expected(ids[i], col),
+                "Q8_0 exact decoded value");
+        }
+      }
+      for (std::size_t i = ids.size() * dim; i < out.size(); ++i) {
+        Check(out[i] == -123.0F, "Q8_0 output guard");
+      }
+    };
+
+    const std::array<std::uint32_t, 8> warm{0,  1,   7,        63,
+                                            64, 127, rows - 2, rows - 1};
+    gather(warm, "Q8_0 cold gather");
+    gather(warm, "Q8_0 cached gather");
+    const std::array<std::uint32_t, 7> mixed{rows - 1, 3, 64, 0,
+                                             rows - 1, 2, 128};
+    gather(mixed, "Q8_0 mixed gather");
+
+    std::vector<float> expected_async(warm.size() * dim);
+    Check(table->Read(warm, expected_async), "Q8_0 async baseline");
+    std::vector<float> async(warm.size() * dim + 16, -123.0F);
+    Check(table->StartRead(warm, std::span(async).first(warm.size() * dim)),
+          "Q8_0 asynchronous gather starts");
+    Check(!table->StartRead(warm, std::span(async).first(warm.size() * dim)),
+          "Q8_0 overlapping gather rejected");
+    Check(table->WaitRead(), "Q8_0 asynchronous gather completes");
+    for (std::size_t i = 0; i < expected_async.size(); ++i) {
+      Check(async[i] == expected_async[i], "Q8_0 asynchronous value");
+    }
+    for (std::size_t i = expected_async.size(); i < async.size(); ++i) {
+      Check(async[i] == -123.0F, "Q8_0 asynchronous output guard");
+    }
+
+    std::vector<std::uint32_t> wide_ids(rows * 8 + 17);
+    for (std::size_t i = 0; i < wide_ids.size(); ++i) {
+      wide_ids[i] = static_cast<std::uint32_t>((i * 109 + 19) % rows);
+    }
+    gather(wide_ids, "Q8_0 batched gather");
+
+    auto invalid = OpenTable(path, offset, rows, dim - 1,
+                             gufo::core::GgmlType::kQ8_0, &error);
+    Check(!invalid, "Q8_0 rejects a non-block-aligned row dimension");
+    invalid.reset();
+
+    // Every warm row remains encoded in the bounded cache, so a truncated
+    // backing file must not invalidate an already-read gather.
+    std::filesystem::resize_file(path, 0);
+    gather(warm, "Q8_0 cached gather after truncation");
+    const std::array<std::uint32_t, 1> missing{rows};
+    std::vector<float> missing_out(dim);
+    Check(!table->Read(missing, missing_out), "Q8_0 missing row rejected");
+  }
+  table.reset();
+  std::filesystem::remove(path);
+}
+
 // Widely spaced rows exercise cache eviction, including simultaneous readers
 // whose compressed rows map to the same bounded-cache slot.
 void TestDistantRows() {
@@ -367,6 +472,7 @@ int main() {
   TestHash();
   TestTable();
   TestQuantizedRows();
+  TestQ8Rows();
   TestDistantRows();
   if (failures != 0) {
     std::fprintf(stderr, "%d failures\n", failures);
