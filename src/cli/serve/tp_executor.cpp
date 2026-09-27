@@ -1,9 +1,11 @@
 #include "src/cli/serve/tp_executor.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <exception>
 #include <limits>
+#include <random>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -45,6 +47,10 @@ void SetError(std::string* error, std::string message) {
       return "batched advance";
     case TpInstructionOp::kPromptContext:
       return "prompt context";
+    case TpInstructionOp::kPersist:
+      return "persist";
+    case TpInstructionOp::kRestoreDisk:
+      return "disk restore";
     case TpInstructionOp::kEnd:
       return "end";
     case TpInstructionOp::kNone:
@@ -96,6 +102,34 @@ void DigestTpContext(TpExecutionDigest& digest,
   for (const auto byte : identity) {
     digest.Add(byte);
   }
+}
+
+// Rank 0's half of a disk-cache payload starts with this header: magic,
+// format, reserved, rank 1's file key, the writing process and the request
+// that produced the snapshot.
+constexpr std::array<std::uint8_t, 8> kPersistMagic = {'G', 'U', 'F', 'O',
+                                                       'T', 'P', '2', 'R'};
+constexpr std::uint32_t kPersistFormat = 1;
+constexpr std::size_t kPersistHeaderBytes = 8 + 4 + 4 + 8 + 8 + 8;
+
+void PutLe(std::uint8_t* out, std::uint64_t value, int bytes) {
+  for (int i = 0; i < bytes; ++i)
+    out[i] = static_cast<std::uint8_t>(value >> (8 * i));
+}
+
+std::uint64_t GetLe(const std::uint8_t* in, int bytes) {
+  std::uint64_t value = 0;
+  for (int i = 0; i < bytes; ++i)
+    value |= std::uint64_t{in[i]} << (8 * i);
+  return value;
+}
+
+std::uint64_t RandomNonzero() {
+  std::random_device device;
+  std::uint64_t value = 0;
+  while (value == 0)
+    value = (std::uint64_t{device()} << 32) ^ device();
+  return value;
 }
 
 /// Forward calls exchange partials, so they run inside a collective scope.
@@ -169,7 +203,9 @@ void DigestTpFailure(TpExecutionDigest& digest) {
 
 bool TpCacheAcknowledged(TpInstructionOp op) noexcept {
   return op == TpInstructionOp::kSnapshot || op == TpInstructionOp::kRestore ||
-         op == TpInstructionOp::kReuse || op == TpInstructionOp::kCancelPrepare;
+         op == TpInstructionOp::kReuse ||
+         op == TpInstructionOp::kCancelPrepare ||
+         op == TpInstructionOp::kRestoreDisk;
 }
 
 void TpControlInstructionSink::Synchronize(std::uint64_t sequence,
@@ -327,6 +363,7 @@ TpMirroredRunner::TpMirroredRunner(std::shared_ptr<TextModelRunner> inner,
   }
   const auto capabilities = inner_->Descriptor().capabilities;
   multi_token_decode_ = capabilities.multi_token_decode;
+  nonce_ = RandomNonzero();
 }
 
 void TpMirroredRunner::BeginRequest(std::uint64_t sequence) {
@@ -539,7 +576,13 @@ TextRunnerDescriptor TpMirroredRunner::Descriptor() const {
   auto& capabilities = descriptor.capabilities;
   capabilities.batched_multi_token_decode = false;
   capabilities.batched_multi_token_decode_max_width = 0;
-  descriptor.persistence.reset();
+  if (descriptor.persistence.has_value()) {
+    // Rank 0's files hold its half and name rank 1's: neither a one-host
+    // server nor a lone rank can restore them.
+    constexpr std::string_view kMarker = "tp2=rank0-mirror-v1\n";
+    auto& identity = descriptor.persistence->compatibility_identity;
+    identity.insert(identity.end(), kMarker.begin(), kMarker.end());
+  }
   return descriptor;
 }
 
@@ -904,8 +947,10 @@ std::uint64_t TpMirroredRunner::CacheCall(
   try {
     sink_->Synchronize(sequence, sent, local);
   } catch (...) {
-    // A failed capture is a skipped snapshot on both ranks, not a failed call.
-    if (instruction.op != TpInstructionOp::kSnapshot) {
+    // A failed capture is a skipped snapshot on both ranks, and a failed disk
+    // restore a cache miss (the cache resets the state), not a failed call.
+    if (instruction.op != TpInstructionOp::kSnapshot &&
+        instruction.op != TpInstructionOp::kRestoreDisk) {
       Record(sequence, DigestTpFailure);
     }
     throw;
@@ -1016,6 +1061,109 @@ bool TpMirroredRunner::CanReuse(const TextRunnerSnapshot& snapshot) const {
   return !rejected_.contains(handle->producer);
 }
 
+std::size_t TpMirroredRunner::PersistentSnapshotPayloadBytes(
+    const TextRunnerSnapshot& snapshot) const {
+  const auto* handle = dynamic_cast<const SnapshotHandle*>(&snapshot);
+  if (handle == nullptr || handle->owner.get() != this)
+    throw std::invalid_argument("foreign TP snapshot");
+  return kPersistHeaderBytes +
+         inner_->PersistentSnapshotPayloadBytes(*handle->inner);
+}
+
+std::vector<std::uint8_t> TpMirroredRunner::BeginPersist(
+    const TextRunnerSnapshot& snapshot) const {
+  const auto* handle = dynamic_cast<const SnapshotHandle*>(&snapshot);
+  if (handle == nullptr || handle->owner.get() != this)
+    throw std::invalid_argument("foreign TP snapshot");
+  const auto key = RandomNonzero();
+  {
+    const std::lock_guard<std::recursive_mutex> call_lock(call_mutex_);
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!failure_.empty())
+      throw std::runtime_error("TP instruction channel failed: " + failure_);
+    // What rank 1 rejected never reaches the disk. A snapshot of a request
+    // still running is written, and checked again if restored in this
+    // process.
+    if (rejected_.contains(handle->producer))
+      throw std::runtime_error("TP snapshot of a rejected request");
+    // Rank 1 persists its half in the background: the snapshot outlives the
+    // write there, and a failed write only makes a later restore a miss.
+    const TpInstruction instruction{.op = TpInstructionOp::kPersist,
+                                    .snapshot_id = handle->id,
+                                    .file_key = key};
+    std::string error;
+    if (!sink_->Send(0, instruction, nullptr, &error)) {
+      failure_ = "snapshot persist send failed: " + error;
+      throw std::runtime_error(failure_);
+    }
+  }
+  std::vector<std::uint8_t> header(kPersistHeaderBytes);
+  std::copy(kPersistMagic.begin(), kPersistMagic.end(), header.begin());
+  PutLe(header.data() + 8, kPersistFormat, 4);
+  PutLe(header.data() + 16, key, 8);
+  PutLe(header.data() + 24, nonce_, 8);
+  PutLe(header.data() + 32, handle->producer, 8);
+  return header;
+}
+
+std::size_t TpMirroredRunner::SerializePersistentSnapshot(
+    const TextRunnerSnapshot& snapshot,
+    std::span<std::uint8_t> destination) const {
+  const auto bytes = PersistentSnapshotPayloadBytes(snapshot);
+  if (destination.size() < bytes)
+    throw std::invalid_argument("TP persistent snapshot destination too small");
+  const auto header = BeginPersist(snapshot);
+  std::copy(header.begin(), header.end(), destination.begin());
+  const auto& handle = dynamic_cast<const SnapshotHandle&>(snapshot);
+  return header.size() + inner_->SerializePersistentSnapshot(
+                             *handle.inner, destination.subspan(header.size()));
+}
+
+void TpMirroredRunner::StreamPersistentSnapshot(
+    const TextRunnerSnapshot& snapshot, const SnapshotSink& sink) const {
+  const auto header = BeginPersist(snapshot);
+  sink(header);
+  const auto& handle = dynamic_cast<const SnapshotHandle&>(snapshot);
+  inner_->StreamPersistentSnapshot(*handle.inner, sink);
+}
+
+void TpMirroredRunner::RestorePersistentSnapshot(
+    TextRunnerState& state, std::span<const std::uint8_t> payload) const {
+  if (payload.size() < kPersistHeaderBytes ||
+      !std::equal(kPersistMagic.begin(), kPersistMagic.end(),
+                  payload.begin()) ||
+      GetLe(payload.data() + 8, 4) != kPersistFormat)
+    throw std::invalid_argument("not a TP2 disk-cache payload");
+  const auto key = GetLe(payload.data() + 16, 8);
+  const auto nonce = GetLe(payload.data() + 24, 8);
+  const auto producer = GetLe(payload.data() + 32, 8);
+  if (key == 0)
+    throw std::invalid_argument("TP2 disk-cache payload names no file");
+  const std::lock_guard<std::recursive_mutex> call_lock(call_mutex_);
+  auto& mirrored = Mirrored(state);
+  if (nonce == nonce_) {
+    // Written by this process: as for a snapshot in memory, a rejected
+    // producer makes the file a miss, and one without a verdict yet makes
+    // the restoring request depend on it.
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (rejected_.contains(producer))
+      throw std::runtime_error("TP snapshot of a request rank 1 rejected");
+    const auto lease = leases_.find(mirrored.id());
+    if (lease != leases_.end() && producer != 0 && producer != lease->second &&
+        unsettled_.contains(producer)) {
+      dependencies_[lease->second].insert(producer);
+    }
+  }
+  (void)CacheCall(mirrored.id(),
+                  {.op = TpInstructionOp::kRestoreDisk,
+                   .state = mirrored.id(),
+                   .file_key = key},
+                  [&] {
+                    inner_->RestorePersistentSnapshot(
+                        mirrored.inner(), payload.subspan(kPersistHeaderBytes));
+                  });
+}
+
 /// One open request on rank 1: what it needs to execute rank 0's calls for it
 /// and to judge them.
 struct TpExecutor::Request {
@@ -1053,9 +1201,11 @@ struct TpExecutor::Request {
 
 TpExecutor::TpExecutor(std::shared_ptr<TextModelRunner> runner,
                        std::size_t state_count, std::size_t snapshot_budget,
-                       std::shared_ptr<TpCallScope> scope)
+                       std::shared_ptr<TpCallScope> scope,
+                       std::shared_ptr<TpDiskStore> disk)
     : runner_(std::move(runner)),
       scope_(std::move(scope)),
+      disk_(std::move(disk)),
       snapshot_budget_(snapshot_budget) {
   if (runner_ == nullptr || state_count == 0) {
     throw std::invalid_argument("TP executor needs a runner and a state");
@@ -1205,6 +1355,7 @@ bool TpExecutor::ExecuteIdle(const TpInstruction& instruction,
                              std::string* error) {
   if (instruction.op != TpInstructionOp::kInvalidate &&
       instruction.op != TpInstructionOp::kDrop &&
+      instruction.op != TpInstructionOp::kPersist &&
       instruction.op != TpInstructionOp::kPromptContext) {
     SetError(error, "TP worker received a model call outside a request");
     return false;
@@ -1212,6 +1363,13 @@ bool TpExecutor::ExecuteIdle(const TpInstruction& instruction,
   try {
     if (instruction.op == TpInstructionOp::kDrop) {
       DropSnapshot(instruction.snapshot_id);
+    } else if (instruction.op == TpInstructionOp::kPersist) {
+      // Best effort, like rank 0's write: a snapshot rank 1 skipped or a
+      // write it cannot queue only makes a later restore of the file a miss.
+      const auto found = snapshots_.find(instruction.snapshot_id);
+      if (disk_ != nullptr && found != snapshots_.end()) {
+        (void)disk_->PersistAsync(instruction.file_key, runner_, found->second);
+      }
     } else if (instruction.op == TpInstructionOp::kPromptContext) {
       runner_->SetPromptContext(StateFor(instruction.state), nullptr);
     } else {
@@ -1293,6 +1451,12 @@ bool TpExecutor::ExecuteCall(std::uint64_t sequence, Request& request,
       case TpInstructionOp::kCancelPrepare:
         runner_->PrepareCancellation(state);
         break;
+      case TpInstructionOp::kRestoreDisk:
+        choice.reset();
+        if (disk_ == nullptr)
+          throw std::runtime_error("rank 1 has no disk cache");
+        disk_->Restore(instruction.file_key, *runner_, state);
+        break;
       case TpInstructionOp::kPromptContext:
         DigestTpContext(request.digest, request.images);
         runner_->SetPromptContext(state, request.images);
@@ -1359,6 +1523,7 @@ bool TpExecutor::ExecuteCall(std::uint64_t sequence, Request& request,
         break;
       }
       case TpInstructionOp::kAdvanceBatch:
+      case TpInstructionOp::kPersist:
       case TpInstructionOp::kEnd:
       case TpInstructionOp::kNone:
         throw std::logic_error("TP instruction has no model call");
@@ -1367,8 +1532,11 @@ bool TpExecutor::ExecuteCall(std::uint64_t sequence, Request& request,
     call_error = "rank 1 " + std::string(OpName(instruction.op)) +
                  " failed: " + exception.what();
     // A failed capture only means no snapshot: the acknowledgement makes
-    // rank 0 skip it too and drop the ID, and neither state changed.
-    if (instruction.op != TpInstructionOp::kSnapshot) {
+    // rank 0 skip it too and drop the ID, and neither state changed. A failed
+    // disk restore is a cache miss: rank 0's cache resets the state on both
+    // ranks and prefills instead.
+    if (instruction.op != TpInstructionOp::kSnapshot &&
+        instruction.op != TpInstructionOp::kRestoreDisk) {
       DigestTpFailure(request.digest);
       request.Note(call_error);
     }

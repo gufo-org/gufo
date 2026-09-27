@@ -217,6 +217,7 @@ add_executable(gufo
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
   src/cli/serve/tp_executor.cpp
+  src/cli/serve/tp_disk_store.cpp
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
@@ -367,7 +368,8 @@ if (BUILD_TESTING)
     src/cli/serve/continuation_disk_store.cpp
     src/cli/serve/text_model_runner.cpp
     src/cli/serve/text_generation_scheduler.cpp
-    src/cli/serve/tp_executor.cpp)
+    src/cli/serve/tp_executor.cpp
+    src/cli/serve/tp_disk_store.cpp)
   target_link_libraries(tp_executor_test PRIVATE
     gufo_logging gufo_core gufo_tp_control)
   add_test(NAME tp_executor_test COMMAND tp_executor_test)

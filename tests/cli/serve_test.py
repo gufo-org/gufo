@@ -45,9 +45,8 @@ def main():
     check([
         "serve", "llm", "--model", "missing", "--tp-world-size", "2",
         "--tp-rank", "0", "--tp-bootstrap-port", "18515",
-        "--tp-control-port", "18516", "--tp-control-token", "test",
-        "--cache-disk", "/tmp/unused-tp2-cache",
-    ], 2, "TP2 does not support the disk cache")
+        "--tp-control-port", "18516",
+    ], 2, "TP2 requires --tp-control-token")
     text = check(["transcribe", "--help"], 0, "--prompt")
     assert "--context" in text
 

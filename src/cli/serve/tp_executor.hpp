@@ -17,6 +17,7 @@
 
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/cli/serve/tp_control.hpp"
+#include "src/cli/serve/tp_disk_store.hpp"
 
 namespace gufo::server {
 
@@ -210,6 +211,20 @@ public:
   [[nodiscard]] bool CanReuse(const TextRunnerState& state) const override;
   [[nodiscard]] bool CanReuse(
       const TextRunnerSnapshot& snapshot) const override;
+  /// The disk cache holds rank 0's half of each snapshot behind a header that
+  /// names rank 1's half (a file key) and the request that produced it.
+  /// Writing it tells rank 1 to persist its half under the key; restoring it
+  /// restores both halves, or neither.
+  [[nodiscard]] std::size_t PersistentSnapshotPayloadBytes(
+      const TextRunnerSnapshot& snapshot) const override;
+  [[nodiscard]] std::size_t SerializePersistentSnapshot(
+      const TextRunnerSnapshot& snapshot,
+      std::span<std::uint8_t> destination) const override;
+  void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
+                                const SnapshotSink& sink) const override;
+  void RestorePersistentSnapshot(
+      TextRunnerState& state,
+      std::span<const std::uint8_t> payload) const override;
 
 private:
   class State;
@@ -227,6 +242,10 @@ private:
   };
 
   void Drop(std::uint64_t id) const noexcept;
+  /// Tells rank 1 to persist its half of `snapshot` and returns the header
+  /// of rank 0's half.
+  [[nodiscard]] std::vector<std::uint8_t> BeginPersist(
+      const TextRunnerSnapshot& snapshot) const;
   /// Runs a cache call on both ranks and returns the request it belongs to.
   std::uint64_t CacheCall(std::uint32_t state, const TpInstruction& instruction,
                           const std::function<void()>& local) const;
@@ -269,6 +288,9 @@ private:
       dependencies_;
   mutable std::condition_variable settled_;
   mutable std::string failure_;
+  /// Names this process in the disk-cache files it writes, so a restore in the
+  /// same process can check the producing request's verdict.
+  std::uint64_t nonce_{0};
 };
 
 /// Rank 1's side of a TP2 pair: executes rank 0's instructions on its own
@@ -279,7 +301,8 @@ public:
   TpExecutor(
       std::shared_ptr<TextModelRunner> runner, std::size_t state_count,
       std::size_t snapshot_budget = std::numeric_limits<std::size_t>::max(),
-      std::shared_ptr<TpCallScope> scope = {});
+      std::shared_ptr<TpCallScope> scope = {},
+      std::shared_ptr<TpDiskStore> disk = {});
   ~TpExecutor();
 
   using Respond = std::function<bool(const TpControlResponse&, std::string*)>;
@@ -323,6 +346,7 @@ private:
 
   std::shared_ptr<TextModelRunner> runner_;
   std::shared_ptr<TpCallScope> scope_;
+  std::shared_ptr<TpDiskStore> disk_;
   std::vector<std::unique_ptr<TextRunnerState>> states_;
   std::unordered_map<std::uint64_t, std::unique_ptr<Request>> requests_;
   std::uint64_t next_index_{0};
@@ -330,7 +354,8 @@ private:
   const std::size_t snapshot_budget_;
   std::size_t snapshot_bytes_{0};
   void DropSnapshot(std::uint64_t id);
-  std::unordered_map<std::uint64_t, std::unique_ptr<TextRunnerSnapshot>>
+  /// Shared with the disk store while it persists one.
+  std::unordered_map<std::uint64_t, std::shared_ptr<TextRunnerSnapshot>>
       snapshots_;
 };
 

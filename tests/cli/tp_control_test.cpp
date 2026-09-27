@@ -305,6 +305,20 @@ int main() {
        .kind = TpControlCommandKind::kInstruction,
        .instruction = {
            .op = TpInstructionOp::kPromptContext, .index = 20, .state = 3}});
+  // The disk cache: persisting a snapshot happens between requests, a disk
+  // restore within one; both name rank 1's file by its key.
+  round_trip({.sequence = 0,
+              .kind = TpControlCommandKind::kInstruction,
+              .instruction = {.op = TpInstructionOp::kPersist,
+                              .index = 21,
+                              .snapshot_id = 19,
+                              .file_key = 0xfedcba9876543210ULL}});
+  round_trip({.sequence = command.sequence,
+              .kind = TpControlCommandKind::kInstruction,
+              .instruction = {.op = TpInstructionOp::kRestoreDisk,
+                              .index = 22,
+                              .state = 2,
+                              .file_key = 0xfedcba9876543210ULL}});
   const TpControlResponse ack{.instruction_index = 17,
                               .sequence = command.sequence,
                               .error = "capture failed",
@@ -344,6 +358,21 @@ int main() {
   refuses("a client id", with([](auto& bad) { bad.client_id = "probe"; }));
   refuses("a prompt context",
           with([](auto& bad) { bad.prompt_context = {1, 2, 3}; }));
+  refuses("a file key outside the disk cache",
+          with([](auto& bad) { bad.instruction.file_key = 5; }));
+  refuses("a persist without a file key", with([](auto& bad) {
+            bad.sequence = 0;
+            bad.instruction = {.op = TpInstructionOp::kPersist,
+                               .snapshot_id = 4};
+          }));
+  refuses("a disk restore without a file key", with([](auto& bad) {
+            bad.instruction = {.op = TpInstructionOp::kRestoreDisk};
+          }));
+  refuses("a disk restore outside a request", with([](auto& bad) {
+            bad.sequence = 0;
+            bad.instruction = {.op = TpInstructionOp::kRestoreDisk,
+                               .file_key = 9};
+          }));
   refuses("a prompt-context binding with a token", with([](auto& bad) {
             bad.instruction = {.op = TpInstructionOp::kPromptContext,
                                .token = 4};
@@ -544,6 +573,8 @@ int main() {
                    [](TpControlConfig& config) { config.sessions = 4; });
   refuses_mismatch("vision",
                    [](TpControlConfig& config) { config.vision = true; });
+  refuses_mismatch("disk cache",
+                   [](TpControlConfig& config) { config.disk_cache = true; });
   refuses_mismatch("context",
                    [](TpControlConfig& config) { config.max_context = 8192; });
 

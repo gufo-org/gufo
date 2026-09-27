@@ -414,12 +414,6 @@ bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
 
 bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
                               std::string* error_msg) {
-  if (model_->options_.tp_world_size > 1) {
-    AssignError(
-        error_msg,
-        "distributed Flash-Next serialized snapshots are not supported");
-    return false;
-  }
   return RestoreSnapshotPayload(payload, error_msg);
 }
 

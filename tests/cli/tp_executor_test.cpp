@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <limits>
@@ -94,6 +95,8 @@ using CallLog = std::vector<std::string>;
 struct ToyOptions {
   bool mtp{false};
   bool cache{false};
+  /// Offer persistent snapshots, for the disk cache.
+  bool persist{false};
   bool fail_capture_once{false};
   bool fail_restore_once{false};
   std::size_t cache_budget{4096};
@@ -167,10 +170,12 @@ public:
   void CountCancellationCheck() const { ++cancellation_checks_; }
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
-    return {.model_id = "toy",
-            .state_abi = "toy-v1",
-            .max_context = 256,
-            .capabilities = TextRunnerCapabilities{
+    return {
+        .model_id = "toy",
+        .state_abi = "toy-v1",
+        .max_context = 256,
+        .capabilities =
+            TextRunnerCapabilities{
                 .incremental_prefill = true,
                 .snapshot = options_.cache,
                 .fork = options_.cache,
@@ -178,7 +183,41 @@ public:
                 .incremental_text_is_exact = true,
                 .multi_token_decode = options_.mtp,
                 .prefix_reuse = options_.cache,
-            }};
+            },
+        .persistence =
+            options_.persist
+                ? std::optional<gufo::server::TextRunnerPersistenceDescriptor>(
+                      {.compatibility_identity = {'t', 'o', 'y'},
+                       .payload_version = 1})
+                : std::nullopt};
+  }
+  std::size_t PersistentSnapshotPayloadBytes(
+      const gufo::server::TextRunnerSnapshot& snapshot) const override {
+    return dynamic_cast<const ToySnapshot&>(snapshot).tokens.size() * 4;
+  }
+  std::size_t SerializePersistentSnapshot(
+      const gufo::server::TextRunnerSnapshot& snapshot,
+      std::span<std::uint8_t> destination) const override {
+    const auto& tokens = dynamic_cast<const ToySnapshot&>(snapshot).tokens;
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+      for (int byte = 0; byte < 4; ++byte) {
+        destination[i * 4 + byte] =
+            static_cast<std::uint8_t>(tokens[i] >> (8 * byte));
+      }
+    }
+    return tokens.size() * 4;
+  }
+  void RestorePersistentSnapshot(
+      TextRunnerState& state,
+      std::span<const std::uint8_t> payload) const override {
+    auto& toy = Toy(state);
+    toy.tokens.assign(payload.size() / 4, 0);
+    for (std::size_t i = 0; i < toy.tokens.size(); ++i) {
+      for (int byte = 0; byte < 4; ++byte) {
+        toy.tokens[i] |= TextRunnerToken{payload[i * 4 + byte]} << (8 * byte);
+      }
+    }
+    Record("disk restore " + std::to_string(toy.tokens.size()));
   }
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
     return {.resident_weights_bytes = 0,
@@ -424,8 +463,10 @@ void ToyState::SetCancellationCheck(const CancellationCheck&) {
 /// between them. Both ranks hold `sessions` states.
 class Pair {
 public:
+  /// With `disk0` and `disk1`, each rank keeps a disk cache there.
   Pair(ToyOptions rank0_options, ToyOptions rank1_options,
-       std::size_t sessions = 1)
+       std::size_t sessions = 1, std::filesystem::path disk0 = {},
+       std::filesystem::path disk1 = {})
       : inner0_(std::make_shared<ToyRunner>(rank0_options)),
         runner1_(std::make_shared<ToyRunner>(rank1_options)) {
     const auto port = FreePort();
@@ -443,9 +484,11 @@ public:
         .world_size = 2,
         .max_context = 256,
         .auth_token = "executor-test",
-        .sessions = static_cast<std::uint32_t>(sessions)};
+        .sessions = static_cast<std::uint32_t>(sessions),
+        .disk_cache = !disk0.empty()};
     TpControlConfig rank1 = rank0;
     rank1.rank = 1;
+    rank1.disk_cache = !disk1.empty();
     bool server_ok = false;
     bool client_ok = false;
     std::thread handshake(
@@ -459,9 +502,26 @@ public:
         std::make_shared<gufo::server::TpResponseBroker>(server_, sessions + 8);
     sink_ = std::make_shared<TpControlInstructionSink>(server_, broker_);
     mirrored_ = std::make_shared<TpMirroredRunner>(inner0_, sink_);
-    pool_ = std::make_shared<TextRunnerPool>(mirrored_, sessions);
+    std::optional<gufo::server::TextRunnerDiskCacheOptions> disk_options;
+    if (!disk0.empty()) {
+      disk_options = gufo::server::TextRunnerDiskCacheOptions{
+          .directory = disk0, .capacity_bytes = 1U << 20};
+    }
+    pool_ = std::make_shared<TextRunnerPool>(mirrored_, sessions,
+                                             std::move(disk_options));
     scheduler_ = std::make_shared<TextGenerationScheduler>(pool_);
-    executor_ = std::make_unique<TpExecutor>(runner1_, sessions);
+    if (!disk1.empty()) {
+      const auto persistence = runner1_->Descriptor().persistence;
+      disk1_ = std::make_shared<gufo::server::TpDiskStore>(
+          gufo::server::TpDiskStore::Options{
+              .directory = disk1,
+              .capacity_bytes = 1U << 20,
+              .staging_capacity_bytes = 1U << 20},
+          persistence->compatibility_identity, persistence->payload_version);
+    }
+    executor_ = std::make_unique<TpExecutor>(
+        runner1_, sessions, std::numeric_limits<std::size_t>::max(),
+        std::shared_ptr<TpCallScope>{}, disk1_);
     worker_ = std::thread([this] { Work(); });
   }
 
@@ -592,6 +652,17 @@ public:
   }
 
   std::size_t snapshots() const { return worker_snapshots_.load(); }
+  /// Waits until rank 1 has written `entries` disk-cache files.
+  void WaitForRank1Disk(std::size_t entries) const {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (disk1_->entry_count() < entries &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    disk1_->Flush();
+    Require(disk1_->entry_count() >= entries, "rank 1 persists its half");
+  }
   std::size_t open_requests() const { return worker_open_.load(); }
   void ClearCache() {
     pool_->ClearCache();
@@ -647,6 +718,7 @@ private:
   std::shared_ptr<TpControlInstructionSink> sink_;
   std::shared_ptr<TpMirroredRunner> mirrored_;
   std::shared_ptr<TextGenerationScheduler> scheduler_;
+  std::shared_ptr<gufo::server::TpDiskStore> disk1_;
   std::unique_ptr<TpExecutor> executor_;
   std::thread worker_;
   std::string worker_failure_;
@@ -1309,6 +1381,51 @@ int main() {
     Require(Count(pair.rank0().Log(), "context") > 0,
             what + ": the image context reaches the model");
     pair.RequireSameCalls(what);
+  }
+
+  // The disk cache: each rank persists its own half of a snapshot, a restart
+  // of both restores both halves, and a missing half is only a cache miss.
+  for (const bool mtp : {false, true}) {
+    const std::string what = mtp ? "MTP disk cache" : "AR disk cache";
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("tp2-disk-test-" + std::to_string(::getpid()) +
+                       (mtp ? "-mtp" : "-ar"));
+    std::filesystem::remove_all(root);
+    const auto disk0 = root / "rank0";
+    const auto disk1 = root / "rank1";
+    const ToyOptions persist{.mtp = mtp, .cache = true, .persist = true};
+    std::vector<TextRunnerToken> first;
+    {
+      Pair pair(persist, persist, 1, disk0, disk1);
+      const auto run = pair.Run(prompt, 6, {}, {}, {}, true);
+      Require(run.worker_error.empty(), what + ": " + run.worker_error);
+      first = run.result.tokens;
+      pair.WaitForRank1Disk(1);
+      pair.RequireSameCalls(what + " save");
+    }
+    {
+      Pair pair(persist, persist, 1, disk0, disk1);
+      const auto run = pair.Run(prompt, 6, {}, {}, {}, true);
+      Require(run.worker_error.empty(), what + ": " + run.worker_error);
+      Require(run.result.tokens == first && run.result.cache_disk_hit &&
+                  run.result.cached_prompt_tokens > 0,
+              what + ": a restart restores both halves from disk");
+      Require(Count(pair.rank0().Log(), "disk restore") == 1,
+              what + ": rank 0 restores its half once");
+      pair.RequireSameCalls(what + " restore");
+    }
+    for (const auto& file : std::filesystem::directory_iterator(disk1)) {
+      std::filesystem::remove(file.path());
+    }
+    {
+      Pair pair(persist, persist, 1, disk0, disk1);
+      const auto run = pair.Run(prompt, 6, {}, {}, {}, true);
+      Require(run.worker_error.empty(),
+              what + ": a missing half fails nothing: " + run.worker_error);
+      Require(run.result.tokens == first && !run.result.cache_disk_hit,
+              what + ": a missing half is a miss");
+    }
+    std::filesystem::remove_all(root);
   }
 
   // A prompt context rank 1 cannot rebuild fails that request only.

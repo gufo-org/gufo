@@ -29,6 +29,8 @@ struct TpControlConfig {
   /// Both ranks load the vision encoder, or neither: rank 1 encodes the images
   /// of every request itself.
   bool vision{false};
+  /// Both ranks keep a disk cache (`--cache-disk`), or neither.
+  bool disk_cache{false};
 };
 
 enum class TpControlCommandKind : std::uint8_t {
@@ -71,6 +73,15 @@ enum class TpInstructionOp : std::uint8_t {
   /// the model state to the request's prompt context (its images, if any), as
   /// the pool does whenever it leases a state; with sequence 0 it clears it.
   kPromptContext = 12,
+  /// Persist the snapshot `snapshot_id` to rank 1's disk cache under
+  /// `file_key`, in the background. Rank 0 writes its own half of the same
+  /// snapshot to its disk cache; a failed or skipped write on rank 1 only
+  /// turns a later restore into a cache miss. Sent with sequence 0.
+  kPersist = 13,
+  /// Restore the state from rank 1's disk-cache file `file_key`, as rank 0
+  /// restores its own half. Acknowledged; a failure makes both ranks treat the
+  /// entry as a miss.
+  kRestoreDisk = 14,
 };
 
 /// One member of a batched instruction: a request, the state it leases, and
@@ -100,6 +111,8 @@ struct TpInstruction {
   std::uint64_t snapshot_id{0};
   /// kAdvanceBatch only: two to eight members on distinct states.
   std::vector<TpBatchMember> batch;
+  /// kPersist and kRestoreDisk only: names the snapshot's file on both ranks.
+  std::uint64_t file_key{0};
 
   bool operator==(const TpInstruction&) const = default;
 };

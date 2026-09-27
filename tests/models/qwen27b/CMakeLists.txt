@@ -40,6 +40,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/tp_executor.cpp
+    ${PROJECT_SOURCE_DIR}/src/cli/serve/tp_disk_store.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
   target_link_libraries(qwen_serving_test_support PUBLIC gufo_logging
     gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_tp_control
