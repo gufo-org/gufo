@@ -3,6 +3,7 @@
 
 #include <stdexcept>
 
+#include "qfn_mmq.h"
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
@@ -11,8 +12,6 @@
 #include "src/models/qwen/hip/ops/moe.hpp"
 #include "src/models/qwen/modules/modules.hpp"
 #include "src/models/qwen/modules/moe.hpp"
-
-#include "qfn_mmq.h"
 
 namespace gufo::hip {
 
@@ -47,16 +46,14 @@ void ExecuteMoeDecodeStep(hipStream_t stream, const QwenMoeScratch& moe,
   // Routed experts. The MMQ gated kernel fuses gate+up+SwiGLU for the formats
   // it covers; anything else takes the per-slot warp GEMV.
   constexpr int kGgmlQ8_0 = static_cast<int>(core::GgmlType::kQ8_0);
-  const bool mmq_gated =
-      view.gate_exps.type == core::GgmlType::kQ8_0 &&
-      view.up_exps.type == core::GgmlType::kQ8_0;
+  const bool mmq_gated = view.gate_exps.type == core::GgmlType::kQ8_0 &&
+                         view.up_exps.type == core::GgmlType::kQ8_0;
   if (mmq_gated) {
-    if (qfn_mmq_moe_gated_vec(kGgmlQ8_0, view.gate_exps.data,
-                              view.up_exps.data, x, moe.ids.data(),
-                              moe.gate_e.data(), static_cast<int>(expert_ff),
-                              static_cast<int>(hidden), 1,
-                              static_cast<int>(n_experts),
-                              static_cast<int>(n_used), stream) != 0) {
+    if (qfn_mmq_moe_gated_vec(
+            kGgmlQ8_0, view.gate_exps.data, view.up_exps.data, x,
+            moe.ids.data(), moe.gate_e.data(), static_cast<int>(expert_ff),
+            static_cast<int>(hidden), 1, static_cast<int>(n_experts),
+            static_cast<int>(n_used), stream) != 0) {
       throw std::runtime_error("MoE gated expert projection failed");
     }
   } else {
@@ -80,9 +77,8 @@ void ExecuteMoeDecodeStep(hipStream_t stream, const QwenMoeScratch& moe,
                       moe.gate_e.data(), moe.ids.data(), moe.down_e.data(),
                       hidden, expert_ff, n_used, 1, stream);
   }
-  LaunchMoeEpilogue(moe.down_e.data(), moe.weights.data(),
-                    moe.shexp_out.data(), moe.shexp_gate.data(), out, 1,
-                    n_used, hidden, stream);
+  LaunchMoeEpilogue(moe.down_e.data(), moe.weights.data(), moe.shexp_out.data(),
+                    moe.shexp_gate.data(), out, 1, n_used, hidden, stream);
 }
 
 void EmitDecodeRouteTelemetry(const models::QwenModelWeights& weights,

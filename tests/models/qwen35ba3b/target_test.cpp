@@ -49,9 +49,8 @@ struct CpuReference {
         kv(weights.config.FullAttentionLayerCount(),
            weights.config.num_key_value_heads, 8192, weights.config.head_dim),
         ssm(weights.config.num_layers, weights.config.SsmQkvSize(),
-            weights.config.ssm_conv_kernel,
-            weights.config.ssm_time_step_rank, weights.config.ssm_state_size,
-            weights.config.SsmValueSize()),
+            weights.config.ssm_conv_kernel, weights.config.ssm_time_step_rank,
+            weights.config.ssm_state_size, weights.config.SsmValueSize()),
         arena(weights.config) {}
 
   std::span<const float> Step(Token token, std::uint32_t pos) {
@@ -69,8 +68,8 @@ void CheckCpuGpuLogitParity(
   Expect(executor != nullptr, error);
 
   for (const char* text : kTexts) {
-    auto cpu_weights = gufo::models::QwenModelWeights::LoadFromGguf(reader,
-                                                                    &error);
+    auto cpu_weights =
+        gufo::models::QwenModelWeights::LoadFromGguf(reader, &error);
     Expect(cpu_weights.has_value(), error);
     const auto tokens = executor->GetTokenizer().Encode(text);
     Expect(tokens.size() >= 12, "parity fixture must tokenize");
@@ -83,19 +82,19 @@ void CheckCpuGpuLogitParity(
     // Teacher forcing on identical prefixes. The GPU exposes logits for the
     // final prefilled position only, so each position re-prefills its prefix.
     for (std::size_t p = 0; p < kSteps; ++p) {
-      const auto cpu_logits = cpu.Step(tokens[p], static_cast<std::uint32_t>(p));
+      const auto cpu_logits =
+          cpu.Step(tokens[p], static_cast<std::uint32_t>(p));
       executor->Reset();
       (void)executor->ForwardPromptBatch(std::span(tokens).first(p + 1), 0,
                                          true);
       const auto view = executor->CopyLastLogits();
       Expect(!view.empty(), "GPU logits must be nonempty");
       const std::vector<float> gpu_logits(view.begin(), view.end());
-      const auto result = gufo::testing::CompareLogits(cpu_logits, gpu_logits,
-                                                       5e-2F, 5e-2F);
+      const auto result =
+          gufo::testing::CompareLogits(cpu_logits, gpu_logits, 5e-2F, 5e-2F);
       Expect(result.finite, "GPU logits must be finite");
-      Expect(result.top1_match,
-             "GPU/CPU greedy mismatch at position " + std::to_string(p) +
-                 ": " + result.details);
+      Expect(result.top1_match, "GPU/CPU greedy mismatch at position " +
+                                    std::to_string(p) + ": " + result.details);
       std::cout << "pos " << p << " max_abs=" << result.max_abs_diff
                 << " rmse=" << result.root_mean_square_error << "\n";
     }
@@ -115,7 +114,8 @@ void CheckPrefillDecodeParity(
   executor->Reset();
   Token decode_next = 0;
   for (std::size_t p = 0; p < tokens.size(); ++p) {
-    decode_next = executor->ForwardToken(tokens[p], static_cast<std::uint32_t>(p));
+    decode_next =
+        executor->ForwardToken(tokens[p], static_cast<std::uint32_t>(p));
   }
   Expect(prefill_next == decode_next,
          "prefill and single-step decode disagree on the next token");
@@ -133,7 +133,8 @@ int main() {
     std::string error;
     std::shared_ptr<const gufo::core::GgufReader> reader =
         gufo::core::GgufReader::OpenFile(model_path, &error);
-    Expect(reader != nullptr, error.empty() ? "failed to open model GGUF" : error);
+    Expect(reader != nullptr,
+           error.empty() ? "failed to open model GGUF" : error);
     auto model = gufo::hip::QwenGpuModel::CreateFromGguf(reader, &error);
     Expect(model != nullptr, error);
     Expect(model->GetConfig().IsMoE(), "fixture must be a MoE model");

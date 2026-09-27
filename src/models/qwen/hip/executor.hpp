@@ -219,27 +219,27 @@ struct QwenFfnScratch {
 /// MoE routed-expert workspaces over one stable arena block (empty on dense
 /// models). Slot-indexed buffers hold batch * expert_used_count rows.
 struct QwenMoeScratch {
-  std::span<float> router_logits;        // [batch, n_experts]
-  std::span<float> shexp_gate;           // [batch]
-  std::span<std::int32_t> ids;           // [batch, n_used]
-  std::span<float> weights;              // [batch, n_used]
-  std::span<float> gate_e;               // [batch*n_used, expert_ff]
-  std::span<float> up_e;                 // [batch*n_used, expert_ff]
-  std::span<float> down_e;               // [batch*n_used, hidden]
-  std::span<float> shexp_out;            // [batch, hidden]
-  std::span<float> shexp_act;            // [batch, shared_ff]
-  std::span<std::int32_t> ids_src1;      // [batch*n_used]
-  std::span<std::int32_t> ids_dst;       // [batch*n_used]
-  std::span<std::int32_t> expert_bounds; // [n_experts + 1]
+  std::span<float> router_logits;         // [batch, n_experts]
+  std::span<float> shexp_gate;            // [batch]
+  std::span<std::int32_t> ids;            // [batch, n_used]
+  std::span<float> weights;               // [batch, n_used]
+  std::span<float> gate_e;                // [batch*n_used, expert_ff]
+  std::span<float> up_e;                  // [batch*n_used, expert_ff]
+  std::span<float> down_e;                // [batch*n_used, hidden]
+  std::span<float> shexp_out;             // [batch, hidden]
+  std::span<float> shexp_act;             // [batch, shared_ff]
+  std::span<std::int32_t> ids_src1;       // [batch*n_used]
+  std::span<std::int32_t> ids_dst;        // [batch*n_used]
+  std::span<std::int32_t> expert_bounds;  // [n_experts + 1]
   // Routed F16 expert GEMMs (Flash-Next's route): per-expert counts, buckets
   // padded to 16 rows, the (expert, token tile) map and F16 token rows.
-  std::span<std::int32_t> routed_counts;  // [n_experts], uint32 counts
-  std::span<std::int32_t> routed_bounds;  // [n_experts + 1]
-  std::span<std::int32_t> routed_cursors; // [n_experts]
-  std::span<std::int32_t> rows_token;     // [RoutedRows(slots, experts)]
-  std::span<std::int32_t> rows_slot;      // [RoutedRows(slots, experts)]
-  std::span<std::int32_t> routed_tiles;   // [RoutedTiles(slots, experts)]
-  std::span<std::uint16_t> x_half;        // [batch, hidden] F16
+  std::span<std::int32_t> routed_counts;   // [n_experts], uint32 counts
+  std::span<std::int32_t> routed_bounds;   // [n_experts + 1]
+  std::span<std::int32_t> routed_cursors;  // [n_experts]
+  std::span<std::int32_t> rows_token;      // [RoutedRows(slots, experts)]
+  std::span<std::int32_t> rows_slot;       // [RoutedRows(slots, experts)]
+  std::span<std::int32_t> routed_tiles;    // [RoutedTiles(slots, experts)]
+  std::span<std::uint16_t> x_half;         // [batch, hidden] F16
 };
 
 /// Row capacity of the routed buckets: each expert pads to 16 rows.

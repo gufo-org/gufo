@@ -46,8 +46,7 @@ std::size_t CheckedSum(std::size_t left, std::size_t right) {
 /// in GetScratchView; every section is 256-byte aligned.
 std::size_t MoeScratchBytes(const core::ModelConfig& config,
                             std::size_t batch) {
-  const std::size_t slots =
-      CheckedMultiply(batch, config.expert_used_count);
+  const std::size_t slots = CheckedMultiply(batch, config.expert_used_count);
   const std::size_t hidden = config.hidden_size;
   const std::size_t expert_ff = config.expert_ff_length;
   const std::size_t shared_ff = config.expert_shared_ff_length;
@@ -58,7 +57,8 @@ std::size_t MoeScratchBytes(const core::ModelConfig& config,
     return ((CheckedMultiply(n, sizeof(std::int32_t)) + 255) / 256) * 256;
   };
   std::size_t total = 0;
-  total = CheckedSum(total, floats(CheckedMultiply(batch, config.expert_count)));
+  total =
+      CheckedSum(total, floats(CheckedMultiply(batch, config.expert_count)));
   total = CheckedSum(total, floats(batch));
   total = CheckedSum(total, ints(slots));
   total = CheckedSum(total, floats(slots));
@@ -831,9 +831,8 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
     HIP_CHECK(hipMalloc(&d_logits, vocab_size * sizeof(float)));
     HIP_CHECK(hipMalloc(&d_prompt_tokens, std::max<std::size_t>(batch, 2) *
                                               sizeof(std::uint32_t)));
-    HIP_CHECK(
-        hipMalloc(&d_target_layer_features,
-                  kMaxTargetLayerTaps * hidden_size * sizeof(float)));
+    HIP_CHECK(hipMalloc(&d_target_layer_features,
+                        kMaxTargetLayerTaps * hidden_size * sizeof(float)));
 
     const std::size_t scratch_elements =
         batch * std::max<std::size_t>(

@@ -32,10 +32,18 @@ struct MoeLayerView {
 
 inline MoeLayerView MakeMoeView(const QwenLayerWeights& w,
                                 const core::ModelConfig& c) {
-  return MoeLayerView{w.ffn_gate_inp,  w.ffn_gate_inp_shexp, w.ffn_gate_exps,
-                      w.ffn_up_exps,   w.ffn_down_exps,      w.ffn_gate_shexp,
-                      w.ffn_up_shexp,  w.ffn_down_shexp,     c.expert_count,
-                      c.expert_used_count, c.hidden_size, c.expert_ff_length,
+  return MoeLayerView{w.ffn_gate_inp,
+                      w.ffn_gate_inp_shexp,
+                      w.ffn_gate_exps,
+                      w.ffn_up_exps,
+                      w.ffn_down_exps,
+                      w.ffn_gate_shexp,
+                      w.ffn_up_shexp,
+                      w.ffn_down_shexp,
+                      c.expert_count,
+                      c.expert_used_count,
+                      c.hidden_size,
+                      c.expert_ff_length,
                       c.expert_shared_ff_length};
 }
 

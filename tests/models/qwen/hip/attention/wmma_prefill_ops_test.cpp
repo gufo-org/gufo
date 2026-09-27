@@ -208,46 +208,46 @@ void RunCase(HeadShape shape, std::uint32_t start_pos, std::size_t batch_size,
   std::vector<float> oracle, selected;
   const std::uint32_t group = kNumHeads / kNumKvHeads;
   for (const std::uint32_t head : {0U, kNumHeads - 1})
-  for (const auto row : {std::size_t{0}, batch_size - 1}) {
-    const std::size_t kv_head = head / group;
-    const std::size_t q_base = row * attention_size + head * kHeadDim;
-    const std::size_t cache_base = kv_head * kMaxContext * kHeadDim;
-    const auto end = start_pos + row + 1;
-    std::vector<double> scores(end, -INFINITY);
-    double maximum = -INFINITY;
-    for (std::size_t key = key_begin; key < end; ++key) {
-      double dot = 0;
-      for (std::size_t dim = 0; dim < kHeadDim; ++dim) {
-        const float value =
-            key < start_pos
-                ? h_cache[cache_base + key * kHeadDim + dim]
-                : h_k[(key - start_pos) * kv_size + kv_head * kHeadDim + dim];
-        dot += double(h_q[q_base + dim]) * value;
-      }
-      scores[key] = dot / std::sqrt(double(kHeadDim));
-      maximum = std::max(maximum, scores[key]);
-    }
-    double sum = 0;
-    for (std::size_t key = key_begin; key < end; ++key) {
-      scores[key] = std::exp(scores[key] - maximum);
-      sum += scores[key];
-    }
-    for (std::size_t dim = 0; dim < kHeadDim; ++dim) {
-      double value = 0;
+    for (const auto row : {std::size_t{0}, batch_size - 1}) {
+      const std::size_t kv_head = head / group;
+      const std::size_t q_base = row * attention_size + head * kHeadDim;
+      const std::size_t cache_base = kv_head * kMaxContext * kHeadDim;
+      const auto end = start_pos + row + 1;
+      std::vector<double> scores(end, -INFINITY);
+      double maximum = -INFINITY;
       for (std::size_t key = key_begin; key < end; ++key) {
-        const float v =
-            key < start_pos
-                ? h_cache[total_kv + cache_base + key * kHeadDim + dim]
-                : h_v[(key - start_pos) * kv_size + kv_head * kHeadDim + dim];
-        value += scores[key] * v;
+        double dot = 0;
+        for (std::size_t dim = 0; dim < kHeadDim; ++dim) {
+          const float value =
+              key < start_pos
+                  ? h_cache[cache_base + key * kHeadDim + dim]
+                  : h_k[(key - start_pos) * kv_size + kv_head * kHeadDim + dim];
+          dot += double(h_q[q_base + dim]) * value;
+        }
+        scores[key] = dot / std::sqrt(double(kHeadDim));
+        maximum = std::max(maximum, scores[key]);
       }
-      value = sum > 0 ? value / sum : 0;
-      if (!want_lse)
-        value /= 1 + std::exp(-double(h_gate[q_base + dim]));
-      oracle.push_back(static_cast<float>(value));
-      selected.push_back(got[q_base + dim]);
+      double sum = 0;
+      for (std::size_t key = key_begin; key < end; ++key) {
+        scores[key] = std::exp(scores[key] - maximum);
+        sum += scores[key];
+      }
+      for (std::size_t dim = 0; dim < kHeadDim; ++dim) {
+        double value = 0;
+        for (std::size_t key = key_begin; key < end; ++key) {
+          const float v =
+              key < start_pos
+                  ? h_cache[total_kv + cache_base + key * kHeadDim + dim]
+                  : h_v[(key - start_pos) * kv_size + kv_head * kHeadDim + dim];
+          value += scores[key] * v;
+        }
+        value = sum > 0 ? value / sum : 0;
+        if (!want_lse)
+          value /= 1 + std::exp(-double(h_gate[q_base + dim]));
+        oracle.push_back(static_cast<float>(value));
+        selected.push_back(got[q_base + dim]);
+      }
     }
-  }
   Compare("FP64 original-input oracle", selected, oracle, 2e-3);
 
   // Same launch again: the prefetch must not let a register from one tile reach

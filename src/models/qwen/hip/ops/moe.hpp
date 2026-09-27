@@ -77,8 +77,8 @@ void LaunchMoeGroupSlots(const std::int32_t* ids, std::uint32_t slots,
 /// accumulated in FP32. Requires LaunchMoeGroupSlots on the same ids and
 /// n_experts first, and IsMoeGroupedBf16GemmSupported(m, k, n_experts).
 void LaunchMoeGroupedBf16Gemm(const void* w, const float* x, float* out,
-                              std::size_t m, std::size_t k,
-                              std::uint32_t slots, std::uint32_t n_experts,
+                              std::size_t m, std::size_t k, std::uint32_t slots,
+                              std::uint32_t n_experts,
                               std::uint32_t x_token_divisor,
                               const MoeGroupedScratch& scratch,
                               hipStream_t stream = nullptr);

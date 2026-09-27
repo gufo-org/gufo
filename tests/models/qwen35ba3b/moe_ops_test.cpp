@@ -14,20 +14,19 @@
 #include <string>
 #include <vector>
 
+#include "qfn_mmq.h"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/model_config.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/moe.hpp"
 #include "src/models/qwen/hip/ops/swiglu.hpp"
 #include "src/models/qwen/modules/moe.hpp"
-#include "tests/models/qwen/hip/support/device_buffer.hpp"
-#include "tests/models/qwen/hip/support/device.hpp"
-
-#include "qfn_mmq.h"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "tests/models/qwen/hip/support/device.hpp"
+#include "tests/models/qwen/hip/support/device_buffer.hpp"
 
 namespace {
 
@@ -65,8 +64,7 @@ std::uint16_t FloatToFp16Bits(float v) {
   if (exponent >= -14) {
     out = static_cast<std::uint16_t>((exponent + 15) << 10);
   }
-  const std::uint32_t rounded =
-      (mantissa >> 13) + ((mantissa >> 12) & 1U);
+  const std::uint32_t rounded = (mantissa >> 13) + ((mantissa >> 12) & 1U);
   return static_cast<std::uint16_t>(sign | out | rounded);
 }
 
@@ -122,13 +120,13 @@ struct Fixture {
   static constexpr std::uint32_t kExperts = 256;
   static constexpr std::uint32_t kUsed = 8;
 
-  std::vector<float> x;              // [hidden]
-  std::vector<float> router;         // [experts x hidden]
-  std::vector<float> shexp_gate_inp; // [hidden]
-  std::vector<float> gate_src;       // [experts x ff x hidden]
-  std::vector<float> up_src;         // [experts x ff x hidden]
-  std::vector<float> down_src;       // [experts x hidden x ff]
-  std::vector<float> shexp_src;      // dense shexp trio source
+  std::vector<float> x;               // [hidden]
+  std::vector<float> router;          // [experts x hidden]
+  std::vector<float> shexp_gate_inp;  // [hidden]
+  std::vector<float> gate_src;        // [experts x ff x hidden]
+  std::vector<float> up_src;          // [experts x ff x hidden]
+  std::vector<float> down_src;        // [experts x hidden x ff]
+  std::vector<float> shexp_src;       // dense shexp trio source
   std::vector<Q8_0Block> gate_q, up_q, down_q, shexp_gate_q, shexp_up_q,
       shexp_down_q;
 
@@ -143,22 +141,28 @@ struct Fixture {
         up_src(kExperts * kExpertFf * kHidden),
         down_src(kExperts * kHidden * kExpertFf),
         shexp_src(3 * kSharedFf * kHidden) {
-    for (auto& v : x) v = RndFloat(-1.0F, 1.0F);
-    for (auto& v : router) v = RndFloat(-1.0F, 1.0F) * 0.05F;
-    for (auto& v : shexp_gate_inp) v = RndFloat(-1.0F, 1.0F) * 0.05F;
-    for (auto& v : gate_src) v = RndFloat(-1.0F, 1.0F) * 0.1F;
-    for (auto& v : up_src) v = RndFloat(-1.0F, 1.0F) * 0.1F;
-    for (auto& v : down_src) v = RndFloat(-1.0F, 1.0F) * 0.1F;
-    for (auto& v : shexp_src) v = RndFloat(-1.0F, 1.0F) * 0.1F;
+    for (auto& v : x)
+      v = RndFloat(-1.0F, 1.0F);
+    for (auto& v : router)
+      v = RndFloat(-1.0F, 1.0F) * 0.05F;
+    for (auto& v : shexp_gate_inp)
+      v = RndFloat(-1.0F, 1.0F) * 0.05F;
+    for (auto& v : gate_src)
+      v = RndFloat(-1.0F, 1.0F) * 0.1F;
+    for (auto& v : up_src)
+      v = RndFloat(-1.0F, 1.0F) * 0.1F;
+    for (auto& v : down_src)
+      v = RndFloat(-1.0F, 1.0F) * 0.1F;
+    for (auto& v : shexp_src)
+      v = RndFloat(-1.0F, 1.0F) * 0.1F;
     gate_q = QuantizeQ8_0(gate_src.data(), kExperts * kExpertFf, kHidden);
     up_q = QuantizeQ8_0(up_src.data(), kExperts * kExpertFf, kHidden);
     down_q = QuantizeQ8_0(down_src.data(), kExperts * kHidden, kExpertFf);
     shexp_gate_q = QuantizeQ8_0(shexp_src.data(), kSharedFf, kHidden);
-    shexp_up_q = QuantizeQ8_0(shexp_src.data() + kSharedFf * kHidden,
-                              kSharedFf, kHidden);
-    shexp_down_q =
-        QuantizeQ8_0(shexp_src.data() + 2 * kSharedFf * kHidden, kHidden,
-                     kSharedFf);
+    shexp_up_q = QuantizeQ8_0(shexp_src.data() + kSharedFf * kHidden, kSharedFf,
+                              kHidden);
+    shexp_down_q = QuantizeQ8_0(shexp_src.data() + 2 * kSharedFf * kHidden,
+                                kHidden, kSharedFf);
 
     config.hidden_size = kHidden;
     config.expert_count = kExperts;
@@ -207,7 +211,8 @@ void CpuRouterTopK(const std::vector<float>& logits, std::uint32_t n_experts,
     probs[e] = std::exp(logits[e] - max_logit);
     denom += probs[e];
   }
-  for (std::uint32_t e = 0; e < n_experts; ++e) probs[e] /= denom;
+  for (std::uint32_t e = 0; e < n_experts; ++e)
+    probs[e] /= denom;
   ids.assign(k, 0);
   weights.assign(k, 0.0F);
   for (std::uint32_t slot = 0; slot < k; ++slot) {
@@ -224,19 +229,21 @@ void CpuRouterTopK(const std::vector<float>& logits, std::uint32_t n_experts,
     probs[index] = -1.0F;
   }
   float sum = 0.0F;
-  for (std::uint32_t slot = 0; slot < k; ++slot) sum += weights[slot];
+  for (std::uint32_t slot = 0; slot < k; ++slot)
+    sum += weights[slot];
   sum = std::max(sum, 6.103515625e-5F);
-  for (std::uint32_t slot = 0; slot < k; ++slot) weights[slot] /= sum;
+  for (std::uint32_t slot = 0; slot < k; ++slot)
+    weights[slot] /= sum;
 }
 
 void CheckRouterTopK(const Fixture& f, hipStream_t stream) {
   std::vector<float> logits(f.kExperts);
-  for (auto& v : logits) v = RndFloat(-3.0F, 3.0F);
+  for (auto& v : logits)
+    v = RndFloat(-3.0F, 3.0F);
   gufo::test::DeviceBuffer<float> d_logits(logits);
   gufo::test::DeviceBuffer<std::int32_t> d_ids(
       std::vector<std::int32_t>(f.kUsed, -1));
-  gufo::test::DeviceBuffer<float> d_weights(
-      std::vector<float>(f.kUsed, -1.0F));
+  gufo::test::DeviceBuffer<float> d_weights(std::vector<float>(f.kUsed, -1.0F));
   gufo::hip::LaunchMoeRouterTopK(d_logits.data(), f.kExperts, d_ids.data(),
                                  d_weights.data(), 1, f.kExperts, f.kUsed,
                                  stream);
@@ -248,18 +255,15 @@ void CheckRouterTopK(const Fixture& f, hipStream_t stream) {
   for (std::uint32_t s = 0; s < f.kUsed; ++s) {
     Expect(h_ids[s] == ref_ids[s],
            "top-k id mismatch at slot " + std::to_string(s) + ": gpu " +
-               std::to_string(h_ids[s]) + " ref " +
-               std::to_string(ref_ids[s]));
+               std::to_string(h_ids[s]) + " ref " + std::to_string(ref_ids[s]));
     Expect(std::fabs(h_weights[s] - ref_weights[s]) < 1e-5F,
            "top-k weight mismatch at slot " + std::to_string(s));
   }
   std::cout << "router top-k: OK\n";
 }
 
-void CheckDecodeMoe(const Fixture& f, hipStream_t stream,
-                    bool force_fallback) {
-  const auto view =
-      gufo::models::qwen::MakeMoeView(f.layers.front(), f.config);
+void CheckDecodeMoe(const Fixture& f, hipStream_t stream, bool force_fallback) {
+  const auto view = gufo::models::qwen::MakeMoeView(f.layers.front(), f.config);
 
   gufo::test::DeviceBuffer<float> d_x(f.x);
   gufo::test::DeviceBuffer<float> d_router_w(f.router);
@@ -269,8 +273,7 @@ void CheckDecodeMoe(const Fixture& f, hipStream_t stream,
   gufo::test::DeviceBuffer<float> d_shexp_gate(std::vector<float>(1, 0.0F));
   gufo::test::DeviceBuffer<std::int32_t> d_ids(
       std::vector<std::int32_t>(f.kUsed, 0));
-  gufo::test::DeviceBuffer<float> d_weights(
-      std::vector<float>(f.kUsed, 0.0F));
+  gufo::test::DeviceBuffer<float> d_weights(std::vector<float>(f.kUsed, 0.0F));
   gufo::test::DeviceBuffer<float> d_gate_e(
       std::vector<float>(f.kUsed * f.kExpertFf, 0.0F));
   gufo::test::DeviceBuffer<float> d_down_e(
@@ -309,18 +312,17 @@ void CheckDecodeMoe(const Fixture& f, hipStream_t stream,
   std::vector<float> ref_weights;
   CpuRouterTopK(gpu_logits, f.kExperts, f.kUsed, ref_ids, ref_weights);
   for (std::uint32_t s = 0; s < f.kUsed; ++s) {
-    Expect(h_ids[s] == ref_ids[s], "decode top-k id mismatch at slot " +
-                                       std::to_string(s) + ": gpu " +
-                                       std::to_string(h_ids[s]) + " ref " +
-                                       std::to_string(ref_ids[s]));
+    Expect(h_ids[s] == ref_ids[s],
+           "decode top-k id mismatch at slot " + std::to_string(s) + ": gpu " +
+               std::to_string(h_ids[s]) + " ref " + std::to_string(ref_ids[s]));
   }
   std::cout << "decode router: OK\n";
 
   // Shared expert.
-  gufo::hip::LaunchFusedSwiGLUGEMV(
-      d_shexp_gate_q.data(), GgmlType::kQ8_0, d_shexp_up_q.data(),
-      GgmlType::kQ8_0, d_x.data(), d_shexp_act.data(), f.kSharedFf, f.kHidden,
-      stream);
+  gufo::hip::LaunchFusedSwiGLUGEMV(d_shexp_gate_q.data(), GgmlType::kQ8_0,
+                                   d_shexp_up_q.data(), GgmlType::kQ8_0,
+                                   d_x.data(), d_shexp_act.data(), f.kSharedFf,
+                                   f.kHidden, stream);
   gufo::hip::LaunchGEMV(d_shexp_down_q.data(), GgmlType::kQ8_0,
                         d_shexp_act.data(), d_shexp_out.data(), f.kHidden,
                         f.kSharedFf, stream);
@@ -343,17 +345,16 @@ void CheckDecodeMoe(const Fixture& f, hipStream_t stream,
   for (std::uint32_t s = 0; s < f.kUsed; ++s) {
     const std::size_t expert = static_cast<std::size_t>(h_ids[s]);
     for (std::size_t r = 0; r < f.kExpertFf; ++r) {
-      const float g = DequantRowDot(f.gate_q, expert * f.kExpertFf + r,
-                                    f.kHidden, f.x);
-      const float u = DequantRowDot(f.up_q, expert * f.kExpertFf + r,
-                                    f.kHidden, f.x);
+      const float g =
+          DequantRowDot(f.gate_q, expert * f.kExpertFf + r, f.kHidden, f.x);
+      const float u =
+          DequantRowDot(f.up_q, expert * f.kExpertFf + r, f.kHidden, f.x);
       const float ref = (g / (1.0F + std::exp(-g))) * u;
-      const float got =
-          gate_e[static_cast<std::size_t>(s) * f.kExpertFf + r];
+      const float got = gate_e[static_cast<std::size_t>(s) * f.kExpertFf + r];
       Expect(std::fabs(got - ref) < 0.02F + 0.05F * std::fabs(ref),
-             "expert activation mismatch slot " + std::to_string(s) +
-                 " row " + std::to_string(r) + ": gpu " + std::to_string(got) +
-                 " ref " + std::to_string(ref));
+             "expert activation mismatch slot " + std::to_string(s) + " row " +
+                 std::to_string(r) + ": gpu " + std::to_string(got) + " ref " +
+                 std::to_string(ref));
     }
   }
   std::cout << (force_fallback ? "fallback" : "mmq") << " gated experts: OK\n";
@@ -367,9 +368,8 @@ void CheckDecodeMoe(const Fixture& f, hipStream_t stream,
     Expect(rc == 0, "qfn_mmq_moe_vec failed");
   } else {
     gufo::hip::LaunchMoeSlotGemv(d_down_q.data(), GgmlType::kQ8_0,
-                                 d_gate_e.data(), d_ids.data(),
-                                 d_down_e.data(), f.kHidden, f.kExpertFf,
-                                 f.kUsed, 1, stream);
+                                 d_gate_e.data(), d_ids.data(), d_down_e.data(),
+                                 f.kHidden, f.kExpertFf, f.kUsed, 1, stream);
   }
 
   gufo::hip::LaunchMoeEpilogue(d_down_e.data(), d_weights.data(),
@@ -394,13 +394,13 @@ void CheckDecodeMoe(const Fixture& f, hipStream_t stream,
     sum_sq += d * d;
   }
   std::cout << "decode MoE (" << (force_fallback ? "fallback" : "mmq")
-            << ") vs CPU: max_abs=" << max_abs << " rmse="
-            << std::sqrt(sum_sq / f.kHidden) << " worst_idx=" << worst
-            << " gpu=" << gpu_out[worst] << " cpu=" << cpu_out[worst] << "\n";
+            << ") vs CPU: max_abs=" << max_abs
+            << " rmse=" << std::sqrt(sum_sq / f.kHidden)
+            << " worst_idx=" << worst << " gpu=" << gpu_out[worst]
+            << " cpu=" << cpu_out[worst] << "\n";
   Expect(max_abs < 0.02 + 0.05 * std::fabs(cpu_out[worst]),
          "decode MoE output mismatch");
 }
-
 
 std::uint16_t FloatToBf16Bits(float v) {
   std::uint32_t u;
@@ -421,13 +421,12 @@ void CheckGroupedBf16(hipStream_t stream) {
     std::size_t k;
     bool per_slot_input;
   };
-  for (const Shape shape : {Shape{"gate/up", 512, 2048, false},
-                            Shape{"down", 2048, 512, true}}) {
-    Expect(gufo::hip::IsMoeGroupedBf16GemmSupported(shape.m, shape.k,
-                                                    kExperts),
+  for (const Shape shape :
+       {Shape{"gate/up", 512, 2048, false}, Shape{"down", 2048, 512, true}}) {
+    Expect(gufo::hip::IsMoeGroupedBf16GemmSupported(shape.m, shape.k, kExperts),
            "grouped BF16 shape rejected");
-    std::vector<std::uint16_t> w(static_cast<std::size_t>(kExperts) *
-                                 shape.m * shape.k);
+    std::vector<std::uint16_t> w(static_cast<std::size_t>(kExperts) * shape.m *
+                                 shape.k);
     for (auto& v : w) {
       v = FloatToBf16Bits(RndFloat(-0.05F, 0.05F));
     }
@@ -461,14 +460,13 @@ void CheckGroupedBf16(hipStream_t stream) {
       const std::uint32_t divisor = shape.per_slot_input ? 1U : kUsed;
 
       gufo::hip::LaunchMoeSlotGemv(d_w.data(), GgmlType::kBF16, d_x.data(),
-                                   d_ids.data(), d_ref.data(), shape.m,
-                                   shape.k, slots, divisor, stream);
+                                   d_ids.data(), d_ref.data(), shape.m, shape.k,
+                                   slots, divisor, stream);
       gufo::hip::LaunchMoeGroupSlots(d_ids.data(), slots, kExperts, scratch,
                                      stream);
-      gufo::hip::LaunchMoeGroupedBf16Gemm(d_w.data(), d_x.data(),
-                                          d_got.data(), shape.m, shape.k,
-                                          slots, kExperts, divisor, scratch,
-                                          stream);
+      gufo::hip::LaunchMoeGroupedBf16Gemm(d_w.data(), d_x.data(), d_got.data(),
+                                          shape.m, shape.k, slots, kExperts,
+                                          divisor, scratch, stream);
       HIP_CHECK(hipStreamSynchronize(stream));
       const auto ref = d_ref.CopyToHost();
       const auto got = d_got.CopyToHost();
@@ -498,10 +496,9 @@ void CheckGroupedBf16(hipStream_t stream) {
       gufo::test::DeviceBuffer<float> d_again(nan_fill);
       gufo::hip::LaunchMoeGroupSlots(d_ids.data(), slots, kExperts, scratch,
                                      stream);
-      gufo::hip::LaunchMoeGroupedBf16Gemm(d_w.data(), d_x.data(),
-                                          d_again.data(), shape.m, shape.k,
-                                          slots, kExperts, divisor, scratch,
-                                          stream);
+      gufo::hip::LaunchMoeGroupedBf16Gemm(
+          d_w.data(), d_x.data(), d_again.data(), shape.m, shape.k, slots,
+          kExperts, divisor, scratch, stream);
       HIP_CHECK(hipStreamSynchronize(stream));
       const auto again = d_again.CopyToHost();
       Expect(std::memcmp(again.data(), got.data(),
@@ -511,7 +508,6 @@ void CheckGroupedBf16(hipStream_t stream) {
   }
   std::cout << "grouped BF16 experts: OK\n";
 }
-
 
 /// Dense mode of the same WMMA kernel (BF16 dense projections in prefill),
 /// against the per-slot GEMV with every row routed to one matrix.
@@ -564,8 +560,6 @@ void CheckDenseBf16(hipStream_t stream) {
   std::cout << "dense BF16 WMMA: OK\n";
 }
 
-
-
 /// Random block_q6_K payload for `rows` x `cols`: arbitrary codes, int8
 /// sub-block scales and a small F16 superblock scale.
 std::vector<std::uint8_t> RandomQ6K(std::size_t rows, std::size_t cols) {
@@ -605,8 +599,8 @@ void CheckRoutedF16(hipStream_t stream) {
       std::size_t k;
       bool per_slot_input;
     };
-    for (const Shape shape : {Shape{"gate/up", 512, 2048, false},
-                              Shape{"down", 2048, 512, true}}) {
+    for (const Shape shape :
+         {Shape{"gate/up", 512, 2048, false}, Shape{"down", 2048, 512, true}}) {
       std::vector<std::uint8_t> w_bytes;
       if (type == GgmlType::kQ8_0) {
         std::vector<float> w_src(static_cast<std::size_t>(kExperts) * shape.m *
@@ -629,9 +623,8 @@ void CheckRoutedF16(hipStream_t stream) {
           // Distinct experts per token, skewed toward the first few.
           for (std::uint32_t s = 0; s < kUsed; ++s) {
             ids[t * kUsed + s] = static_cast<std::int32_t>(
-                (Rnd() % 3 == 0)
-                    ? s
-                    : (kUsed + (t + s * 5) % (kExperts - kUsed)));
+                (Rnd() % 3 == 0) ? s
+                                 : (kUsed + (t + s * 5) % (kExperts - kUsed)));
           }
         }
         const std::size_t x_rows = shape.per_slot_input ? slots : tokens;
@@ -646,9 +639,8 @@ void CheckRoutedF16(hipStream_t stream) {
             std::numeric_limits<float>::quiet_NaN());
         gufo::test::DeviceBuffer<float> d_ref(nan_fill);
         gufo::test::DeviceBuffer<float> d_got(nan_fill);
-        gufo::hip::LaunchMoeSlotGemv(d_w.data(), type, d_x.data(),
-                                     d_ids.data(), d_ref.data(), shape.m,
-                                     shape.k, slots,
+        gufo::hip::LaunchMoeSlotGemv(d_w.data(), type, d_x.data(), d_ids.data(),
+                                     d_ref.data(), shape.m, shape.k, slots,
                                      shape.per_slot_input ? 1U : kUsed, stream);
 
         gufo::test::DeviceBuffer<std::uint32_t> d_counts(kExperts);
@@ -677,8 +669,8 @@ void CheckRoutedF16(hipStream_t stream) {
                                 stream);
           routed::NarrowActivations(d_x.data(), d_x_half.data(), false,
                                     x_rows * shape.k, stream);
-          const auto* rows_in = shape.per_slot_input ? d_rows_slot.data()
-                                                     : d_rows_token.data();
+          const auto* rows_in =
+              shape.per_slot_input ? d_rows_slot.data() : d_rows_token.data();
           Expect(routed::RoutedF16Gemm(
                      d_w.data(), weight_type,
                      reinterpret_cast<const __half*>(d_x_half.data()),
@@ -704,9 +696,8 @@ void CheckRoutedF16(hipStream_t stream) {
           }
           const double rel = magnitude > 0.0 ? max_abs / magnitude : max_abs;
           std::cout << "routed F16 " << type_name << " " << shape.name
-                    << " tokens=" << tokens
-                    << " tile_rows=" << tile_rows << ": rel=" << rel
-                    << " non_finite=" << non_finite << "\n";
+                    << " tokens=" << tokens << " tile_rows=" << tile_rows
+                    << ": rel=" << rel << " non_finite=" << non_finite << "\n";
           Expect(non_finite == 0, "routed F16 GEMM left slots unwritten");
           Expect(rel < 1e-2, "routed F16 GEMM disagrees with the slot GEMV");
         }
@@ -715,7 +706,6 @@ void CheckRoutedF16(hipStream_t stream) {
   }
   std::cout << "routed F16 experts: OK\n";
 }
-
 
 float Fp16BitsToFloat(std::uint16_t h) {
   const std::uint32_t sign = (h & 0x8000U) << 16;
@@ -777,9 +767,8 @@ void CheckRoutedPair(hipStream_t stream) {
       for (std::uint32_t t = 0; t < tokens; ++t) {
         for (std::uint32_t s = 0; s < kUsed; ++s) {
           ids[t * kUsed + s] = static_cast<std::int32_t>(
-              (Rnd() % 3 == 0)
-                  ? s
-                  : (kUsed + (t + s * 5) % (kExperts - kUsed)));
+              (Rnd() % 3 == 0) ? s
+                               : (kUsed + (t + s * 5) % (kExperts - kUsed)));
         }
       }
       std::vector<float> x(tokens * kK);
@@ -809,8 +798,8 @@ void CheckRoutedPair(hipStream_t stream) {
                             d_cursors.data(), d_rows_token.data(),
                             d_rows_slot.data(), tokens, kUsed, kExperts,
                             stream);
-      routed::NarrowActivations(d_x.data(), d_x_half.data(), false,
-                                tokens * kK, stream);
+      routed::NarrowActivations(d_x.data(), d_x_half.data(), false, tokens * kK,
+                                stream);
       const auto counts = d_counts.CopyToHost();
       const auto gate_ref = d_gate_ref.CopyToHost();
       const auto up_ref = d_up_ref.CopyToHost();
@@ -830,8 +819,8 @@ void CheckRoutedPair(hipStream_t stream) {
                    reinterpret_cast<const __half*>(d_x_half.data()),
                    d_tiles.data(), static_cast<std::uint32_t>(tiles.size()),
                    pair_rows, d_bounds.data(), d_rows_token.data(),
-                   d_rows_slot.data(),
-                   reinterpret_cast<__half*>(d_out.data()), kM, kK, stream),
+                   d_rows_slot.data(), reinterpret_cast<__half*>(d_out.data()),
+                   kM, kK, stream),
                "paired routed GEMM rejected the shape");
         HIP_CHECK(hipStreamSynchronize(stream));
         const auto out = d_out.CopyToHost();

@@ -308,10 +308,9 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
                           TensorRole::kProjection,
                           prefix + "ffn_gate_shexp.weight", error_msg,
                           hidden_size) ||
-          !ValidateTensor(l.ffn_up_shexp, hidden_size * shared_ff,
-                          TensorRole::kProjection,
-                          prefix + "ffn_up_shexp.weight", error_msg,
-                          hidden_size) ||
+          !ValidateTensor(
+              l.ffn_up_shexp, hidden_size * shared_ff, TensorRole::kProjection,
+              prefix + "ffn_up_shexp.weight", error_msg, hidden_size) ||
           !ValidateTensor(l.ffn_down_shexp, shared_ff * hidden_size,
                           TensorRole::kProjection,
                           prefix + "ffn_down_shexp.weight", error_msg,

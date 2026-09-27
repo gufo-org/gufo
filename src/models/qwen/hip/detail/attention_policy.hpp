@@ -30,7 +30,8 @@ static_assert(kTiledAttentionShape27B.query_heads !=
 
 [[nodiscard]] constexpr bool IsTiledAttentionHeadShape(
     std::uint32_t query_heads, std::uint32_t kv_heads) noexcept {
-  for (const auto shape : {kTiledAttentionShape27B, kTiledAttentionShape35BA3B}) {
+  for (const auto shape :
+       {kTiledAttentionShape27B, kTiledAttentionShape35BA3B}) {
     if (query_heads == shape.query_heads && kv_heads == shape.kv_heads) {
       return true;
     }

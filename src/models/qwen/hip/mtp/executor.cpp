@@ -252,8 +252,8 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
                           layer.ffn_up.data, layer.ffn_up.type, d_normed_,
                           d_ffn_act_, config.intermediate_size, hidden,
                           stream_);
-    LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, d_ffn_act_,
-               d_ffn_out_, hidden, config.intermediate_size, stream_,
+    LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, d_ffn_act_, d_ffn_out_,
+               hidden, config.intermediate_size, stream_,
                models::qwen::QwenGemmMode::kHipMtp);
   }
   LaunchResidualAdd(d_hidden_, d_ffn_out_, d_hidden_, hidden, stream_);

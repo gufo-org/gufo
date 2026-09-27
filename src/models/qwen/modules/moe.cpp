@@ -117,8 +117,8 @@ void MoeForward(const CpuModuleContext& ctx, const MoeLayerView& view,
                std::span<float>(&gate_logit, 1));
   }
   const float shexp_gate = 1.0F / (1.0F + std::exp(-gate_logit));
-  const FfnLayerView shexp_view{view.shexp_gate, view.shexp_up,
-                                view.shexp_down, hidden, view.shared_ff};
+  const FfnLayerView shexp_view{view.shexp_gate, view.shexp_up, view.shexp_down,
+                                hidden, view.shared_ff};
   FfnForward(ctx, shexp_view, x, scratch.moe_shexp_gate, scratch.moe_shexp_up,
              scratch.moe_shexp_act, scratch.moe_shexp_out);
   for (std::size_t i = 0; i < hidden; ++i) {

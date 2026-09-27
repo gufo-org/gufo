@@ -12,7 +12,6 @@
 #include "src/models/qwen/hip/ops/moe.hpp"
 #include "src/models/qwen/hip/ops/prefill_fp16.hpp"
 #include "src/models/qwen/modules/moe.hpp"
-
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::hip {
@@ -160,8 +159,7 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                                  batch_size, shared_ff, stream);
   }
   gemm_weight(view.shexp_down, arena.d_scratch_bf16, arena.d_ffn_act,
-              moe.shexp_out.data(), hidden, shared_ff,
-              arena.d_scratch_q8_act);
+              moe.shexp_out.data(), hidden, shared_ff, arena.d_scratch_q8_act);
 
   // Tile map from the real bucket sizes: one entry per (expert, token tile)
   // of its 16-padded bucket, packed expert | tile << 16. Large chunks whose
@@ -205,11 +203,10 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     HIP_CHECK(hipMemcpyAsync(moe.routed_tiles.data(), routed_host.tiles,
                              (n_tiles + n_pair) * sizeof(std::int32_t),
                              hipMemcpyHostToDevice, stream));
-    routed::RoutedCompact(moe.ids.data(), routed_counts,
-                          moe.routed_bounds.data(), moe.routed_cursors.data(),
-                          moe.rows_token.data(), moe.rows_slot.data(),
-                          static_cast<std::uint32_t>(batch_size), n_used,
-                          n_experts, stream);
+    routed::RoutedCompact(
+        moe.ids.data(), routed_counts, moe.routed_bounds.data(),
+        moe.routed_cursors.data(), moe.rows_token.data(), moe.rows_slot.data(),
+        static_cast<std::uint32_t>(batch_size), n_used, n_experts, stream);
   }
 
   // BF16 experts group their slots by expert once per layer, on first use.
@@ -257,17 +254,16 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                     moe.rows_slot.data(), act_half, expert_ff, hidden, stream)
          : routed_down
              ? routed::RoutedF16Gemm(
-                   view.up_exps.data, *up_type, x_half,
-                   moe.routed_tiles.data(), n_tiles, tile_rows,
-                   moe.routed_bounds.data(), moe.rows_token.data(),
-                   moe.rows_slot.data(), moe.gate_e.data(), nullptr, act_half,
-                   expert_ff, hidden, stream)
+                   view.up_exps.data, *up_type, x_half, moe.routed_tiles.data(),
+                   n_tiles, tile_rows, moe.routed_bounds.data(),
+                   moe.rows_token.data(), moe.rows_slot.data(),
+                   moe.gate_e.data(), nullptr, act_half, expert_ff, hidden,
+                   stream)
              : routed::RoutedF16Gemm(
-                   view.up_exps.data, *up_type, x_half,
-                   moe.routed_tiles.data(), n_tiles, tile_rows,
-                   moe.routed_bounds.data(), moe.rows_token.data(),
-                   moe.rows_slot.data(), nullptr, moe.up_e.data(), nullptr,
-                   expert_ff, hidden, stream));
+                   view.up_exps.data, *up_type, x_half, moe.routed_tiles.data(),
+                   n_tiles, tile_rows, moe.routed_bounds.data(),
+                   moe.rows_token.data(), moe.rows_slot.data(), nullptr,
+                   moe.up_e.data(), nullptr, expert_ff, hidden, stream));
     if (!up_ok) {
       throw std::runtime_error("routed F16 expert gate/up GEMM failed");
     }
@@ -284,19 +280,17 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                              moe.gate_e.data(), expert_ff, hidden,
                              static_cast<std::uint32_t>(slots), n_experts,
                              n_used, grouped, stream);
-    LaunchMoeGroupedBf16Gemm(view.up_exps.data, arena.d_normed,
-                             moe.up_e.data(), expert_ff, hidden,
-                             static_cast<std::uint32_t>(slots), n_experts,
-                             n_used, grouped, stream);
+    LaunchMoeGroupedBf16Gemm(
+        view.up_exps.data, arena.d_normed, moe.up_e.data(), expert_ff, hidden,
+        static_cast<std::uint32_t>(slots), n_experts, n_used, grouped, stream);
     LaunchBatchedSwiGLUActivation(moe.gate_e.data(), moe.up_e.data(),
-                                  moe.gate_e.data(), nullptr,
-                                  slots * expert_ff, stream);
+                                  moe.gate_e.data(), nullptr, slots * expert_ff,
+                                  stream);
   } else {
-    LaunchMoeSlotSwigluGemv(view.gate_exps.data, view.gate_exps.type,
-                            view.up_exps.data, view.up_exps.type,
-                            arena.d_normed, moe.ids.data(), moe.gate_e.data(),
-                            expert_ff, hidden, static_cast<std::uint32_t>(slots),
-                            n_used, stream);
+    LaunchMoeSlotSwigluGemv(
+        view.gate_exps.data, view.gate_exps.type, view.up_exps.data,
+        view.up_exps.type, arena.d_normed, moe.ids.data(), moe.gate_e.data(),
+        expert_ff, hidden, static_cast<std::uint32_t>(slots), n_used, stream);
   }
 
   // The down projection reads one activation row per (token, slot).
@@ -313,11 +307,10 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                                down_half, hidden, expert_ff, stream)) {
       throw std::runtime_error("routed F16 expert down GEMM failed");
     }
-    routed::MoeEpilogueVec4F16(down_half, moe.weights.data(),
-                               moe.shexp_out.data(), moe.shexp_gate.data(), 1,
-                               arena.d_ffn_out,
-                               static_cast<std::uint32_t>(batch_size), n_used,
-                               hidden, stream);
+    routed::MoeEpilogueVec4F16(
+        down_half, moe.weights.data(), moe.shexp_out.data(),
+        moe.shexp_gate.data(), 1, arena.d_ffn_out,
+        static_cast<std::uint32_t>(batch_size), n_used, hidden, stream);
   } else {
     if (grouped_bf16(view.down_exps, hidden, expert_ff)) {
       LaunchMoeGroupedBf16Gemm(view.down_exps.data, moe.gate_e.data(),
@@ -327,8 +320,8 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     } else {
       LaunchMoeSlotGemv(view.down_exps.data, view.down_exps.type,
                         moe.gate_e.data(), moe.ids.data(), moe.down_e.data(),
-                        hidden, expert_ff, static_cast<std::uint32_t>(slots),
-                        1, stream);
+                        hidden, expert_ff, static_cast<std::uint32_t>(slots), 1,
+                        stream);
     }
     LaunchMoeEpilogue(moe.down_e.data(), moe.weights.data(),
                       moe.shexp_out.data(), moe.shexp_gate.data(),
@@ -862,99 +855,100 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       ExecuteMoePrefillChunk(arena_, scratch.moe, layer, config, batch_size,
                              gemm_weight, reads_q8_act);
     } else {
-    {
-      if (!half_prefill && !ffn_feeds_q8_only) {
-        LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
-                                     arena_.d_scratch_q8_act, batch_size,
-                                     hidden_size, arena_.stream);
-      }
-      // opt-c192-swiglu-epilogue: when ffn_down also reads the Q8_1 activation,
-      // the whole gate -> up -> SwiGLU -> quantize chain collapses into the two
-      // projections, because the up projection can apply SwiGLU against the
-      // already-written gate and emit the quantized activation from its own
-      // accumulator. The FP32 up intermediate is then dead, so its allocation
-      // is where the Q8_1 result goes -- reusing it keeps resident memory flat
-      // and avoids writing the [batch, k] activation the same kernel is
-      // reading.
-      const bool fused_dual_swiglu =
-          reads_q8_act(layer.ffn_gate) && reads_q8_act(layer.ffn_up) &&
-          layer.ffn_gate.type == layer.ffn_up.type &&
-          reads_q8_act(layer.ffn_down) &&
-          IsFusedSwiGluGemmEpilogueSupported(
-              layer.ffn_gate.type, batch_size, intermediate_size,
-              batch_size * intermediate_size * sizeof(float));
-      if (half_prefill) {
-        const bool paired = TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
-            layer.ffn_gate.type, layer.ffn_up.type, layer.ffn_gate.data,
-            layer.ffn_up.data, arena_.d_scratch_bf16, arena_.d_ffn_up,
-            batch_size, intermediate_size, hidden_size, arena_.stream);
-        if (!paired) {
-          gemm_weight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
-                      arena_.d_ffn_gate, intermediate_size, hidden_size);
-          LaunchBatchedQuantGEMMSwiGLUFp16(
-              layer.ffn_up.type, layer.ffn_up.data, arena_.d_scratch_bf16,
-              arena_.d_ffn_gate, arena_.d_ffn_up, batch_size, intermediate_size,
-              hidden_size, arena_.stream);
+      {
+        if (!half_prefill && !ffn_feeds_q8_only) {
+          LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                       arena_.d_scratch_q8_act, batch_size,
+                                       hidden_size, arena_.stream);
         }
-        ffn_down_input = arena_.d_ffn_up;
-      } else if (fused_dual_swiglu) {
-        LaunchBatchedDualQuantGEMMSwiGLUQuantizeQ8_1(
-            layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
-            arena_.d_scratch_q8_act, arena_.d_ffn_gate, arena_.d_ffn_up,
-            batch_size, intermediate_size, hidden_size, arena_.stream);
-        ffn_down_q8_act = arena_.d_ffn_up;
-      } else if (reads_q8_act(layer.ffn_gate) && reads_q8_act(layer.ffn_up) &&
-                 layer.ffn_gate.type == layer.ffn_up.type) {
-        LaunchBatchedDualQuantGEMMPreQuantized(
-            layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
-            arena_.d_scratch_q8_act, arena_.d_ffn_gate, arena_.d_ffn_up,
-            batch_size, intermediate_size, hidden_size, arena_.stream);
-      } else {
-        gemm_weight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
-                    arena_.d_ffn_gate, intermediate_size, hidden_size,
-                    arena_.d_scratch_q8_act);
+        // opt-c192-swiglu-epilogue: when ffn_down also reads the Q8_1
+        // activation, the whole gate -> up -> SwiGLU -> quantize chain
+        // collapses into the two projections, because the up projection can
+        // apply SwiGLU against the already-written gate and emit the quantized
+        // activation from its own accumulator. The FP32 up intermediate is then
+        // dead, so its allocation is where the Q8_1 result goes -- reusing it
+        // keeps resident memory flat and avoids writing the [batch, k]
+        // activation the same kernel is reading.
+        const bool fused_dual_swiglu =
+            reads_q8_act(layer.ffn_gate) && reads_q8_act(layer.ffn_up) &&
+            layer.ffn_gate.type == layer.ffn_up.type &&
+            reads_q8_act(layer.ffn_down) &&
+            IsFusedSwiGluGemmEpilogueSupported(
+                layer.ffn_gate.type, batch_size, intermediate_size,
+                batch_size * intermediate_size * sizeof(float));
+        if (half_prefill) {
+          const bool paired = TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
+              layer.ffn_gate.type, layer.ffn_up.type, layer.ffn_gate.data,
+              layer.ffn_up.data, arena_.d_scratch_bf16, arena_.d_ffn_up,
+              batch_size, intermediate_size, hidden_size, arena_.stream);
+          if (!paired) {
+            gemm_weight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
+                        arena_.d_ffn_gate, intermediate_size, hidden_size);
+            LaunchBatchedQuantGEMMSwiGLUFp16(
+                layer.ffn_up.type, layer.ffn_up.data, arena_.d_scratch_bf16,
+                arena_.d_ffn_gate, arena_.d_ffn_up, batch_size,
+                intermediate_size, hidden_size, arena_.stream);
+          }
+          ffn_down_input = arena_.d_ffn_up;
+        } else if (fused_dual_swiglu) {
+          LaunchBatchedDualQuantGEMMSwiGLUQuantizeQ8_1(
+              layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
+              arena_.d_scratch_q8_act, arena_.d_ffn_gate, arena_.d_ffn_up,
+              batch_size, intermediate_size, hidden_size, arena_.stream);
+          ffn_down_q8_act = arena_.d_ffn_up;
+        } else if (reads_q8_act(layer.ffn_gate) && reads_q8_act(layer.ffn_up) &&
+                   layer.ffn_gate.type == layer.ffn_up.type) {
+          LaunchBatchedDualQuantGEMMPreQuantized(
+              layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
+              arena_.d_scratch_q8_act, arena_.d_ffn_gate, arena_.d_ffn_up,
+              batch_size, intermediate_size, hidden_size, arena_.stream);
+        } else {
+          gemm_weight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
+                      arena_.d_ffn_gate, intermediate_size, hidden_size,
+                      arena_.d_scratch_q8_act);
 
-        gemm_weight(layer.ffn_up, arena_.d_scratch_bf16, arena_.d_normed,
-                    arena_.d_ffn_up, intermediate_size, hidden_size,
-                    arena_.d_scratch_q8_act);
+          gemm_weight(layer.ffn_up, arena_.d_scratch_bf16, arena_.d_normed,
+                      arena_.d_ffn_up, intermediate_size, hidden_size,
+                      arena_.d_scratch_q8_act);
+        }
+
+        // opt-c164-swiglu-quant: when ffn_down reads Q8_0 the only consumer of
+        // the activation is the quantized buffer, so SwiGLU can write it
+        // directly. That drops the FP32 activation and BF16 scratch round trips
+        // (about 500 MB per layer at batch 2048) and one kernel launch. Other
+        // ffn_down formats still need the FP32/BF16 forms, so they keep the
+        // unfused chain.
+        if (half_prefill || fused_dual_swiglu) {
+          // The up projection's epilogue already wrote the quantized
+          // activation.
+        } else if (reads_q8_act(layer.ffn_down)) {
+          LaunchBatchedFusedSwiGLUQuantizeQ8_1(
+              arena_.d_ffn_gate, arena_.d_ffn_up, arena_.d_scratch_q8_act,
+              batch_size, intermediate_size, arena_.stream);
+        } else {
+          LaunchBatchedSwiGLUActivation(arena_.d_ffn_gate, arena_.d_ffn_up,
+                                        arena_.d_ffn_act, arena_.d_scratch_bf16,
+                                        batch_size * intermediate_size,
+                                        arena_.stream);
+          LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                       arena_.d_scratch_q8_act, batch_size,
+                                       intermediate_size, arena_.stream);
+        }
       }
 
-      // opt-c164-swiglu-quant: when ffn_down reads Q8_0 the only consumer of
-      // the activation is the quantized buffer, so SwiGLU can write it
-      // directly. That drops the FP32 activation and BF16 scratch round trips
-      // (about 500 MB per layer at batch 2048) and one kernel launch. Other
-      // ffn_down formats still need the FP32/BF16 forms, so they keep the
-      // unfused chain.
-      if (half_prefill || fused_dual_swiglu) {
-        // The up projection's epilogue already wrote the quantized activation.
-      } else if (reads_q8_act(layer.ffn_down)) {
-        LaunchBatchedFusedSwiGLUQuantizeQ8_1(
-            arena_.d_ffn_gate, arena_.d_ffn_up, arena_.d_scratch_q8_act,
-            batch_size, intermediate_size, arena_.stream);
+      if (half_prefill) {
+        LaunchBatchedQuantGEMMResidualFp16(
+            layer.ffn_down.type, layer.ffn_down.data, ffn_down_input,
+            arena_.d_hidden, batch_size, hidden_size, intermediate_size,
+            arena_.stream);
       } else {
-        LaunchBatchedSwiGLUActivation(arena_.d_ffn_gate, arena_.d_ffn_up,
-                                      arena_.d_ffn_act, arena_.d_scratch_bf16,
-                                      batch_size * intermediate_size,
-                                      arena_.stream);
-        LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
-                                     arena_.d_scratch_q8_act, batch_size,
-                                     intermediate_size, arena_.stream);
+        gemm_weight(layer.ffn_down, ffn_down_input, arena_.d_ffn_act,
+                    arena_.d_ffn_out, hidden_size, intermediate_size,
+                    ffn_down_q8_act);
+        LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out,
+                                 arena_.d_hidden, batch_size, hidden_size,
+                                 arena_.stream);
       }
-    }
-
-    if (half_prefill) {
-      LaunchBatchedQuantGEMMResidualFp16(
-          layer.ffn_down.type, layer.ffn_down.data, ffn_down_input,
-          arena_.d_hidden, batch_size, hidden_size, intermediate_size,
-          arena_.stream);
-    } else {
-      gemm_weight(layer.ffn_down, ffn_down_input, arena_.d_ffn_act,
-                  arena_.d_ffn_out, hidden_size, intermediate_size,
-                  ffn_down_q8_act);
-      LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out,
-                               arena_.d_hidden, batch_size, hidden_size,
-                               arena_.stream);
-    }
     }  // dense FFN
 
     if (capture_prompt_hidden_) {
