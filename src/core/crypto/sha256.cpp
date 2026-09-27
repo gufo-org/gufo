@@ -46,6 +46,13 @@ std::array<std::uint8_t, 32> Sha256Hasher::Finish() {
   return result;
 }
 
+std::array<std::uint8_t, 32> Sha256Hasher::Digest() const {
+  Sha256Hasher copy;
+  if (EVP_MD_CTX_copy_ex(copy.context_.get(), context_.get()) != 1)
+    throw std::runtime_error("cannot copy SHA-256 state");
+  return copy.Finish();
+}
+
 std::string Sha256Hasher::FinishHex() {
   return DigestHex(Finish());
 }

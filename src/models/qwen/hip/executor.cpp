@@ -145,7 +145,7 @@ std::unique_ptr<QwenGpuSnapshot> QwenGpuExecutor::SaveSnapshot(
     std::uint32_t valid_context) {
   CheckReset();
   auto snapshot = arena_.SaveSnapshot(valid_context);
-  snapshot->vision_layout_ = vision_input_.layout();
+  snapshot->vision_layout_ = vision_input_.layout().Prefix(valid_context);
   return snapshot;
 }
 

@@ -110,6 +110,11 @@ TextPreparedPrompt PrepareQwenPrompt(
         "image input requires a matching --mmproj BF16 sidecar");
   auto context = std::make_shared<QwenImageContext>();
   context->cache_identity = prompt->cache_identity;
+  for (const auto& image : prompt->images) {
+    const auto identity = prompt->IdentityForPrefix(image.grid.offset);
+    context->cache_prefixes.push_back(
+        {image.grid.offset, {identity.begin(), identity.end()}});
+  }
   context->prompt = prompt;
   return {prompt->tokens, std::move(context), cache_prefix};
 }
@@ -684,7 +689,10 @@ public:
     }
     checked_add(logits_count * sizeof(float));
     checked_add(resume_tokens_.size() * sizeof(TextRunnerToken));
-    checked_add(executor_->VisionLayout().images.size() *
+    checked_add(std::ranges::count_if(executor_->VisionLayout().images,
+                                      [this](const auto& image) {
+                                        return image.offset < position_;
+                                      }) *
                 sizeof(models::qwen::vision::ImageGrid));
     if (verifier_ != nullptr) {
       checked_add(verifier_->SnapshotPayloadBytes());

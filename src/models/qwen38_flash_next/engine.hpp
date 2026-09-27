@@ -204,8 +204,9 @@ public:
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
       std::string* error_msg = nullptr) const;
   /// Replaces this session's context with a snapshot of the same model.
-  /// Image snapshots require ConfigureVision with the matching immutable
-  /// prompt first; pixel data is not serialized. Text snapshots clear images.
+  /// Image snapshots require matching consumed images via ConfigureVision;
+  /// the attached prompt may append future images. Pixels are not serialized.
+  /// Text snapshots clear images; reattach the request after restoring.
   [[nodiscard]] bool RestoreSnapshot(const SessionSnapshot& snapshot,
                                      std::string* error_msg = nullptr);
   [[nodiscard]] bool RestoreSnapshot(std::span<const std::uint8_t> payload,
@@ -250,7 +251,9 @@ private:
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
   SpeculativeStats stats_;
-  std::vector<std::uint8_t> image_identity_;
+  std::shared_ptr<const qwen::vision::Prompt> image_prompt_;
+  [[nodiscard]] std::span<const std::uint8_t> ImageIdentity(
+      std::size_t token_count) const;
   bool valid_{true};
   [[nodiscard]] bool MtpEnabled() const noexcept;
 };

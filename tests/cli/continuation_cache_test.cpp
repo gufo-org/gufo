@@ -519,7 +519,85 @@ void TestImageIdentityIsolation() {
   }
 }
 
+void TestAppendedImagesReuseOnlyCompatiblePrefixes() {
+  using namespace gufo::server;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore =
+           [](auto& state, const auto& snapshot) {
+             dynamic_cast<FakeState&>(state).value =
+                 dynamic_cast<const FakeSnapshot&>(snapshot).value;
+           },
+       .capacity_bytes = [] { return 1024; },
+       .on_event = {}},
+      4);
+  const std::vector<ContinuationToken> text{1, 2, 3};
+  const std::vector<ContinuationToken> image{1, 2, 3, 248056, 4};
+  const std::vector<ContinuationToken> appended{1, 2, 3, 248056, 4, 248056, 5};
+  const std::vector<std::uint8_t> a{10}, b{20}, ab{30};
+  const std::vector<ContinuationInputPrefix> first{{3, {}}};
+  const std::vector<ContinuationInputPrefix> second{{3, {}}, {5, a}};
+  {
+    auto lease = cache.Acquire(image, {}, a, {}, true, 0, first);
+    Expect(lease.TryReserveSnapshot(sizeof(std::size_t), text.size()),
+           "image request admits a checkpoint before its first image");
+    lease.PublishSnapshot(text, std::make_unique<FakeSnapshot>(7));
+    Expect(lease.HasSnapshotFor(text),
+           "checkpoint lookup uses the identity at the saved position");
+    dynamic_cast<FakeState&>(lease.state()).value = 70;
+    lease.Commit({}, {}, image);
+  }
+  {
+    auto lease = cache.Acquire(appended, {}, ab, {}, true, 0, second);
+    Expect(lease.cache_hit() && lease.cached_tokens() == image.size() &&
+               dynamic_cast<FakeState&>(lease.state()).value == 70,
+           "new image reuses the live first-image state");
+    Expect(lease.TryReserveSnapshot(sizeof(std::size_t), image.size()),
+           "first-image snapshot admitted");
+    lease.Commit(image, std::make_unique<FakeSnapshot>(70));
+  }
+  {
+    int attachments = 0;
+    auto attach = [&](ContinuationState&) { ++attachments; };
+    auto matching = cache.Acquire(appended, {}, ab, attach, true, 0, second);
+    auto changed = cache.Acquire(image, {}, b, {}, true, 0, first);
+    Expect(matching.cached_tokens() == image.size() &&
+               changed.cached_tokens() == text.size(),
+           "simultaneous different images choose independent safe frontiers");
+    Expect(attachments == 2, "request input is reattached after restoration");
+    Expect(dynamic_cast<FakeState&>(matching.state()).value == 70 &&
+               dynamic_cast<FakeState&>(changed.state()).value == 7 &&
+               dynamic_cast<FakeState&>(matching.state()).id !=
+                   dynamic_cast<FakeState&>(changed.state()).id,
+           "branches restore separate payloads into separate sessions");
+  }
+  {
+    auto removed = cache.Acquire(image);
+    Expect(removed.cached_tokens() == text.size(),
+           "removing an image cannot restore its computed embedding state");
+  }
+  Expect(cache.retained_snapshot_bytes() == 2 * sizeof(std::size_t),
+         "prefix identity does not duplicate snapshot payloads");
+
+  // Without an earlier checkpoint, expose token agreement even when image
+  // identity makes the available state unusable.
+  std::vector<std::size_t> direct_invalidations(1);
+  ContinuationCache direct(
+      1, [&] { return std::make_unique<FakeState>(0, &direct_invalidations); });
+  auto original = direct.Acquire(image, {}, a, {}, true, 0, first);
+  original.Commit(image);
+  auto changed = direct.Acquire(image, {}, b, {}, true, 0, first);
+  Expect(!changed.cache_hit() &&
+             changed.lookup().miss_reason == "input_changed" &&
+             changed.lookup().common_prefix_tokens == image.size() &&
+             changed.lookup().checkpoint_tokens == image.size(),
+         "image mismatch diagnostics retain the actual token agreement");
+}
+
 int main() {
+  TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
   TestColdMissThenExactExtensionHit();
   TestDivergenceInvalidatesOldState();

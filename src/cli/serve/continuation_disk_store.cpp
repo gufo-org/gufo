@@ -55,6 +55,24 @@ TextRunnerDescriptor DescriptorForInput(
   return descriptor;
 }
 
+template<class Visit>
+void VisitInputRanges(std::size_t token_count,
+                      std::span<const std::uint8_t> identity,
+                      std::span<const ContinuationInputPrefix> prefixes,
+                      Visit&& visit) {
+  std::size_t begin = 0;
+  for (const auto& prefix : prefixes) {
+    const auto end = std::min(prefix.token_count, token_count);
+    if (end < begin)
+      throw std::invalid_argument("input identity boundaries are invalid");
+    visit(begin, end, std::span<const std::uint8_t>(prefix.identity));
+    if (end == token_count)
+      return;
+    begin = end + 1;
+  }
+  visit(begin, token_count, identity);
+}
+
 constexpr std::array<std::uint8_t, 8> kMagic = {'G', 'U', 'F', 'O',
                                                 'K', 'V', 'C', '1'};
 constexpr std::uint32_t kFileVersion = 1;
@@ -1197,11 +1215,31 @@ struct ContinuationDiskStore::Impl {
     return root->second.Find(prompt).longest.value_or(entries.end());
   }
 
+  [[nodiscard]] EntryIterator FindLongestInputCandidate(
+      const TextModelRunner& runner, std::span<const TextRunnerToken> prompt,
+      std::span<const std::uint8_t> input_identity,
+      std::span<const ContinuationInputPrefix> input_prefixes) {
+    auto best = entries.end();
+    VisitInputRanges(
+        prompt.size(), input_identity, input_prefixes,
+        [&](auto begin, auto end, auto identity) {
+          const auto descriptor = DescriptorForInput(runner, identity);
+          const auto candidate =
+              FindLongestCandidate(*descriptor.persistence, prompt.first(end));
+          if (candidate != entries.end() && candidate->tokens.size() >= begin &&
+              (best == entries.end() ||
+               candidate->tokens.size() > best->tokens.size()))
+            best = candidate;
+        });
+    return best;
+  }
+
   [[nodiscard]] RestoreResult RestoreLongestPrefix(
       const TextModelRunner& runner, TextRunnerState& state,
       std::span<const TextRunnerToken> prompt,
       std::span<const std::uint8_t> input_identity,
-      std::size_t stable_prefix_tokens) {
+      std::size_t stable_prefix_tokens,
+      std::span<const ContinuationInputPrefix> input_prefixes) {
     const auto descriptor = DescriptorForInput(runner, input_identity);
     if (!descriptor.persistence.has_value()) {
       Emit(ContinuationDiskEventAction::kMiss,
@@ -1210,8 +1248,8 @@ struct ContinuationDiskStore::Impl {
     }
 
     while (true) {
-      const EntryIterator candidate =
-          FindLongestCandidate(*descriptor.persistence, prompt);
+      const EntryIterator candidate = FindLongestInputCandidate(
+          runner, prompt, input_identity, input_prefixes);
       if (candidate == entries.end()) {
         Emit(ContinuationDiskEventAction::kMiss,
              ContinuationDiskEventReason::kNotFound, 0, 0, 0);
@@ -1219,9 +1257,9 @@ struct ContinuationDiskStore::Impl {
       }
       if (stable_prefix_tokens != 0 &&
           candidate->tokens.size() > stable_prefix_tokens &&
-          FindLongestCandidate(*descriptor.persistence,
-                               prompt.first(stable_prefix_tokens)) ==
-              entries.end()) {
+          FindLongestInputCandidate(runner, prompt.first(stable_prefix_tokens),
+                                    input_identity,
+                                    input_prefixes) == entries.end()) {
         Emit(ContinuationDiskEventAction::kMiss,
              ContinuationDiskEventReason::kNotFound, 0, 0, 0);
         return {};
@@ -1302,15 +1340,29 @@ struct ContinuationDiskStore::Impl {
   [[nodiscard]] std::vector<std::size_t> SharedPrefixBoundaries(
       const TextModelRunner& runner, std::span<const TextRunnerToken> prompt,
       std::size_t min_tokens, std::size_t max_boundaries,
-      std::span<const std::uint8_t> input_identity) {
+      std::span<const std::uint8_t> input_identity,
+      std::span<const ContinuationInputPrefix> input_prefixes) {
     const auto descriptor = DescriptorForInput(runner, input_identity);
     if (!descriptor.persistence.has_value() || max_boundaries == 0) {
       return {};
     }
-    const auto root = prefixes.find(PrefixKey(*descriptor.persistence));
-    if (root == prefixes.end())
-      return {};
-    auto boundaries = root->second.Find(prompt, true).shared_boundaries;
+    std::vector<std::size_t> boundaries;
+    VisitInputRanges(
+        prompt.size(), input_identity, input_prefixes,
+        [&](auto begin, auto end, auto identity) {
+          const auto scoped = DescriptorForInput(runner, identity);
+          const auto root = prefixes.find(PrefixKey(*scoped.persistence));
+          if (root == prefixes.end())
+            return;
+          for (const auto count :
+               root->second.Find(prompt.first(end), true).shared_boundaries) {
+            if (count >= begin && count < prompt.size())
+              boundaries.push_back(count);
+          }
+        });
+    std::ranges::sort(boundaries);
+    boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
+                     boundaries.end());
     std::erase_if(boundaries,
                   [min_tokens](auto length) { return length < min_tokens; });
     // Keep the longest ones: they save the most prefill when they hit.
@@ -1465,7 +1517,8 @@ ContinuationDiskStore::RestoreLongestPrefix(
     const TextModelRunner& runner, TextRunnerState& state,
     std::span<const TextRunnerToken> prompt,
     std::span<const std::uint8_t> input_identity,
-    std::size_t stable_prefix_tokens) {
+    std::size_t stable_prefix_tokens,
+    std::span<const ContinuationInputPrefix> input_prefixes) {
   if (stable_prefix_tokens > prompt.size())
     throw std::invalid_argument("stable cache prefix exceeds prompt length");
   const ScopedOperationPermit permit(impl_->operation_gate, false);
@@ -1475,18 +1528,20 @@ ContinuationDiskStore::RestoreLongestPrefix(
     return {};
   }
   return impl_->RestoreLongestPrefix(runner, state, prompt, input_identity,
-                                     stable_prefix_tokens);
+                                     stable_prefix_tokens, input_prefixes);
 }
 
 std::vector<std::size_t> ContinuationDiskStore::SharedPrefixBoundaries(
     const TextModelRunner& runner, std::span<const TextRunnerToken> prompt,
     std::size_t min_tokens, std::size_t max_boundaries,
-    std::span<const std::uint8_t> input_identity) {
+    std::span<const std::uint8_t> input_identity,
+    std::span<const ContinuationInputPrefix> input_prefixes) {
   const ScopedOperationPermit permit(impl_->operation_gate, false);
   if (!permit)
     return {};
   return impl_->SharedPrefixBoundaries(runner, prompt, min_tokens,
-                                       max_boundaries, input_identity);
+                                       max_boundaries, input_identity,
+                                       input_prefixes);
 }
 
 bool ContinuationDiskStore::Touch(

@@ -131,6 +131,25 @@ std::uint32_t RopeLayout::PrefixLength() const {
   return last.offset + last.height * last.width;
 }
 
+RopeLayout RopeLayout::Prefix(std::uint32_t token_count) const {
+  RopeLayout prefix;
+  for (const auto& image : images) {
+    if (image.offset >= token_count)
+      break;
+    prefix.images.push_back(image);
+  }
+  return prefix;
+}
+
+std::span<const std::uint8_t> Prompt::IdentityForPrefix(
+    std::size_t token_count) const {
+  for (auto image = images.rbegin(); image != images.rend(); ++image) {
+    if (image->grid.offset < token_count)
+      return image->prefix_identity;
+  }
+  return {};
+}
+
 void RopeLayout::Validate(std::uint32_t max_context) const {
   if (images.size() > 256)
     throw std::invalid_argument("too many image grids");
@@ -283,7 +302,7 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
       identity.Update(pixels.pixels);
       prompt.tokens.insert(prompt.tokens.end(), count, kImageToken);
       prompt.rope.images.push_back(grid);
-      prompt.images.push_back({std::move(pixels), grid});
+      prompt.images.push_back({std::move(pixels), grid, identity.Digest()});
       cursor = offsets[index++] + std::string_view("<|image_pad|>").size();
     }
   }

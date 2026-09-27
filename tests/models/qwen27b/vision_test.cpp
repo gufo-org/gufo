@@ -30,6 +30,29 @@ void TestPositionLayout() {
   assert((layout.Position(21) == std::array<std::int32_t, 3>{15, 15, 15}));
   assert(layout.Delta() == -6);
   assert(layout.PrefixLength() == 21);
+  assert(layout.Prefix(5).images.empty());
+  assert(layout.Prefix(6).images.size() == 1);
+  assert(layout.Prefix(15).images.size() == 1);
+  assert(layout.Prefix(16) == layout);
+  for (std::uint32_t count = 0; count < 32; ++count) {
+    const auto prefix = layout.Prefix(count);
+    for (std::uint32_t token = 0; token < count; ++token)
+      assert(prefix.Position(token) == layout.Position(token));
+  }
+  Prompt prompt;
+  PreparedImage first, second;
+  first.grid = layout.images[0];
+  second.grid = layout.images[1];
+  first.prefix_identity.fill(1);
+  second.prefix_identity.fill(2);
+  prompt.images = {first, second};
+  assert(prompt.IdentityForPrefix(5).empty());
+  assert(
+      std::ranges::equal(prompt.IdentityForPrefix(6), first.prefix_identity));
+  assert(
+      std::ranges::equal(prompt.IdentityForPrefix(15), first.prefix_identity));
+  assert(
+      std::ranges::equal(prompt.IdentityForPrefix(16), second.prefix_identity));
   assert(
       (RopeLayout{}.Position(31) == std::array<std::int32_t, 3>{31, 31, 31}));
   bool rejected = false;

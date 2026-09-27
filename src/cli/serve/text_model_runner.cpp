@@ -529,7 +529,14 @@ struct TextRunnerPool::Request::Impl {
     // Freeze it before prefill, then process the entire new suffix together.
     // Cold requests still checkpoint before mutable assistant framing.
     auto count = cache_prefix_tokens == 0 ? prompt.size() : cache_prefix_tokens;
-    if (retain_fallback && lease.cache_hit() && prefill_offset <= count)
+    // A newly consumed image needs its own stable checkpoint. Otherwise the
+    // next assistant turn can invalidate the complete prompt's framing and
+    // force the image through prefill again from the older text frontier.
+    const bool new_images =
+        context && !std::ranges::equal(context->CacheIdentity(prefill_offset),
+                                       context->CacheIdentity(count));
+    if (retain_fallback && lease.cache_hit() && prefill_offset <= count &&
+        !new_images)
       count = prefill_offset;
     if (lease.restored_from_disk() && prefill_offset == prompt.size())
       count = prompt.size();
@@ -638,7 +645,8 @@ struct TextRunnerPool::Request::Impl {
         if (!disk_store)
           return;
         disk_capture = disk_store->ReserveCapture(
-            *runner, snapshot_tokens.size(), snapshot_bytes, InputIdentity());
+            *runner, snapshot_tokens.size(), snapshot_bytes,
+            InputIdentity(snapshot_tokens.size()));
         if (!disk_capture)
           return;
       } catch (...) {
@@ -695,10 +703,10 @@ struct TextRunnerPool::Request::Impl {
     if (disk_store && !already_persisted) {
       const auto started = std::chrono::steady_clock::now();
       try {
+        const auto identity = InputIdentity(snapshot_tokens.size());
         snapshot_metrics.disk_queued_bytes += disk_store->SaveAsync(
             runner, snapshot_tokens, prompt_snapshot,
-            {InputIdentity().begin(), InputIdentity().end()},
-            std::move(disk_capture));
+            {identity.begin(), identity.end()}, std::move(disk_capture));
       } catch (...) {
         // Earlier checkpoints may already be queued.
       }
@@ -736,13 +744,13 @@ struct TextRunnerPool::Request::Impl {
       }
       const auto prefix =
           std::span<const TextRunnerToken>(prompt).first(position);
+      const auto identity = InputIdentity(position);
       // Another request may have stored this prefix meanwhile.
-      if (disk_store->Touch(*runner, prefix, InputIdentity())) {
+      if (disk_store->Touch(*runner, prefix, identity)) {
         return;
       }
       if (!disk_store->CanSave(*runner, position,
-                               runner->SnapshotPayloadBytes(state),
-                               InputIdentity()))
+                               runner->SnapshotPayloadBytes(state), identity))
         return;
       std::shared_ptr<const TextRunnerSnapshot> snapshot =
           runner->Snapshot(state);
@@ -751,7 +759,7 @@ struct TextRunnerPool::Request::Impl {
       }
       const auto saved = disk_store->SaveAsync(
           runner, {prefix.begin(), prefix.end()}, std::move(snapshot),
-          {InputIdentity().begin(), InputIdentity().end()});
+          {identity.begin(), identity.end()});
       if (saved != 0) {
         ++snapshot_metrics.shared_prefix_snapshots;
         snapshot_metrics.shared_prefix_bytes += saved;
@@ -788,8 +796,9 @@ struct TextRunnerPool::Request::Impl {
   std::shared_ptr<const TextPromptContext> context;
   bool retain_fallback{false};
   std::size_t fallback_position{0};
-  [[nodiscard]] std::span<const std::uint8_t> InputIdentity() const {
-    return context ? std::span<const std::uint8_t>(context->cache_identity)
+  [[nodiscard]] std::span<const std::uint8_t> InputIdentity(
+      std::size_t token_count) const {
+    return context ? context->CacheIdentity(token_count)
                    : std::span<const std::uint8_t>{};
   }
   bool prompt_snapshot_attempted{false};
@@ -1372,6 +1381,10 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   const std::span<const std::uint8_t> identity =
       context ? std::span<const std::uint8_t>(context->cache_identity)
               : std::span<const std::uint8_t>{};
+  const std::span<const ContinuationInputPrefix> input_prefixes =
+      context
+          ? std::span<const ContinuationInputPrefix>(context->cache_prefixes)
+          : std::span<const ContinuationInputPrefix>{};
   // Reuse full checkpoints as well as branching fallbacks. Both cache tiers
   // ensure unmarked legacy entries leave room for the stable boundary.
   auto lease = impl_->cache.Acquire(
@@ -1382,7 +1395,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
         text_state.SetStopAtEos(stop_at_eos);
         impl_->validated.runner->SetPromptContext(text_state, context);
       },
-      reuse_prompt, cache_prefix_tokens);
+      reuse_prompt, cache_prefix_tokens, input_prefixes);
   if (!lease) {
     return {};
   }
@@ -1422,9 +1435,11 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       if (snapshot) {
         if (impl_->disk_store) {
           try {
+            const auto prefix_identity =
+                PrefixInputIdentity(identity, input_prefixes, prefix.size());
             (void)impl_->disk_store->SaveAsync(
                 impl_->validated.runner, {prefix.begin(), prefix.end()},
-                snapshot, {identity.begin(), identity.end()});
+                snapshot, {prefix_identity.begin(), prefix_identity.end()});
           } catch (...) {
             // RAM branching does not depend on optional disk admission.
           }
@@ -1446,8 +1461,11 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       const auto restored = impl_->disk_store->RestoreLongestPrefix(
           *impl_->validated.runner,
           dynamic_cast<TextRunnerState&>(lease.state()), prompt, identity,
-          cache_prefix_tokens);
+          cache_prefix_tokens, input_prefixes);
       if (restored.restored) {
+        if (context)
+          impl_->validated.runner->SetPromptContext(
+              dynamic_cast<TextRunnerState&>(lease.state()), context);
         lease.AdoptRestoredPrefix(
             restored.token_count, restored.file_bytes,
             std::chrono::duration<double, std::milli>(
@@ -1471,7 +1489,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     try {
       boundaries = impl_->disk_store->SharedPrefixBoundaries(
           *impl_->validated.runner, prompt, impl_->shared_prefix_min_tokens,
-          impl_->shared_prefix_max_boundaries, identity);
+          impl_->shared_prefix_max_boundaries, identity, input_prefixes);
     } catch (...) {
       boundaries.clear();
     }

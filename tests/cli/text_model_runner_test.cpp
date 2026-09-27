@@ -1069,6 +1069,55 @@ void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
   old.Invalidate();
 }
 
+void TestNewImageGetsAStableCheckpoint() {
+  class ContextRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+    void SetPromptContext(
+        TextRunnerState&,
+        std::shared_ptr<const gufo::server::TextPromptContext>) const override {
+    }
+  };
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<ContextRunner>(stats, 64, 256, 1024);
+  TextRunnerPool pool(runner, 1);
+  {
+    auto text = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+    while (!text.prefill_complete())
+      (void)text.Prefill(64);
+    text.Commit();
+  }
+  auto image = std::make_shared<gufo::server::TextPromptContext>();
+  image->cache_identity = {10};
+  image->cache_prefixes = {{5, {}}};
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 50, 51, 60, 61, 40, 41};
+  {
+    auto appended = pool.Acquire(prompt, {}, {}, image, true, 7);
+    Expect(appended.cached_prompt_tokens() == 3,
+           "new image restores the preceding text checkpoint");
+    Expect(!appended.Prefill(64).decode_ready,
+           "new image stops before mutable assistant framing");
+    Expect(appended.Prefill(64).decode_ready,
+           "assistant framing completes after saving the image checkpoint");
+    appended.Commit();
+  }
+  {
+    auto retry = pool.Acquire(prompt, {}, {}, image, true, 7);
+    Expect(retry.prefill_complete() && retry.cached_prompt_tokens() == 9,
+           "exact image retry keeps its complete prompt checkpoint");
+    retry.Commit();
+  }
+  {
+    auto followup = pool.Acquire({1, 2, 3, 50, 51, 60, 61, 52, 53, 40, 41}, {},
+                                 {}, image, true, 9);
+    Expect(followup.cached_prompt_tokens() == 7,
+           "rewritten assistant framing does not reprocess the earlier image");
+    Expect(followup.Prefill(64).decode_ready,
+           "unchanged images keep the single-pass warm prefill path");
+    followup.Commit();
+  }
+}
+
 void TestSharedPrefixIsLearnedAndRestoredAcrossConversations() {
   TemporaryDirectory directory;
   const TextRunnerDiskCacheOptions disk_cache{
@@ -1261,6 +1310,7 @@ void TestSnapshotCaptureFailureReleasesReservationAndKeepsRequestSuccessful() {
 }  // namespace
 
 int main() {
+  TestNewImageGetsAStableCheckpoint();
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();
   TestCancellationRetainsOnlyCompletedWork();

@@ -356,6 +356,16 @@ void TestSha256KnownVector() {
   Expect(gufo::crypto::Sha256Hex(input) ==
              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
          "shared SHA-256 implementation matches the standard vector");
+  gufo::crypto::Sha256Hasher incremental;
+  incremental.Update(std::span(input).first(1));
+  gufo::crypto::Sha256Hasher first;
+  first.Update(std::span(input).first(1));
+  Expect(incremental.Digest() == first.Finish(),
+         "prefix digest matches an independently finished hash");
+  incremental.Update(std::span(input).subspan(1));
+  const auto complete = incremental.Digest();
+  Expect(complete == incremental.Finish(),
+         "reading a prefix digest does not consume incremental state");
 
   TemporaryDirectory directory;
   const auto path = directory.path() / "artifact.gguf";
@@ -1048,7 +1058,53 @@ void TestImageIdentitySurvivesRestart() {
   Expect(!store.Touch(runner, prompt), "disk dedup respects image identity");
 }
 
+void TestAppendedImagePrefixesSurviveRestart() {
+  using gufo::server::ContinuationInputPrefix;
+  TemporaryDirectory directory;
+  FakeRunner runner("image-prefix-cache");
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 248056, 4, 5, 248056, 6};
+  const auto tokens = std::span<const TextRunnerToken>(prompt);
+  const std::vector<std::uint8_t> a{10}, b{20}, ab{30}, ba{40};
+  const std::vector<ContinuationInputPrefix> prefixes{{3, {}}, {6, a}};
+  {
+    ContinuationDiskStore store(StoreOptions(directory.path()));
+    Expect(store.Save(runner, tokens.first(3), *MakeSnapshot(runner, 10, 3))
+               .stored,
+           "text prefix persists without future image identity");
+    Expect(store.Save(runner, tokens.first(5), *MakeSnapshot(runner, 20, 5), a)
+               .stored,
+           "first-image prefix persists independently of the second image");
+    Expect(store.Save(runner, tokens, *MakeSnapshot(runner, 30, 8), ab).stored,
+           "full two-image checkpoint is persisted");
+  }
+  ContinuationDiskStore store(StoreOptions(directory.path()));
+  auto state = runner.CreateState();
+  auto result =
+      store.RestoreLongestPrefix(runner, *state, tokens, ab, 7, prefixes);
+  Expect(result.restored && result.token_count == 8 &&
+             RequireFakeState(*state).value == 30,
+         "exact disk retry finds its fallback under an earlier image identity");
+  const std::vector<std::uint8_t> ac{50};
+  result = store.RestoreLongestPrefix(runner, *state, tokens, ac, 7, prefixes);
+  Expect(result.restored && result.token_count == 5 &&
+             RequireFakeState(*state).value == 20,
+         "changing only the second image restores the first-image checkpoint");
+  const std::vector<ContinuationInputPrefix> reordered{{3, {}}, {6, b}};
+  result = store.RestoreLongestPrefix(runner, *state, tokens, ba, 7, reordered);
+  Expect(result.restored && result.token_count == 3 &&
+             RequireFakeState(*state).value == 10,
+         "reordered or changed first image restores only the text prefix");
+  result = store.RestoreLongestPrefix(runner, *state, tokens);
+  Expect(result.restored && result.token_count == 3,
+         "literal image-pad text cannot recover visual state");
+  const std::vector<ContinuationInputPrefix> moved{{2, {}}};
+  result = store.RestoreLongestPrefix(runner, *state, tokens, b, 0, moved);
+  Expect(!result.restored,
+         "moving the first image before the checkpoint invalidates reuse");
+}
+
 int main() {
+  TestAppendedImagePrefixesSurviveRestart();
   TestBoundedAsyncPersistenceDoesNotBlockLookup();
   TestIndexedPrefixLookup();
   TestImageIdentitySurvivesRestart();

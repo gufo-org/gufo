@@ -162,6 +162,12 @@ and newly processed tokens separately; resuming from the checkpoint processes
 the short suffix. System instructions, tool definitions and image identities
 must match the retained prefix.
 
+Qwen image identity is checked only for images consumed before each checkpoint.
+Appending an image reuses the preceding text/image state in RAM or on disk;
+changing, removing or moving an earlier image invalidates checkpoints after it.
+New images get a checkpoint before assistant framing so later turns do not
+encode or prefill them again.
+
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
 `--cache-disk-staging-bytes 0` (the default) selects the smallest of 1 GiB,
@@ -189,6 +195,8 @@ reasoning replay, greedy/seeded sampling, and explicit cache bypass. Use
 For persistence, enable `--cache-disk` before the check, restart the same server,
 and add `--restore /tmp/cache-check.json`.
 Use `--image /path/to/image.png` for Qwen image conversations.
+Add `--append-image` to introduce the image after a cached text turn, and
+`--reasoning-effort high` to check a specific thinking effort.
 Each case continues for a third turn; repeat `--case NAME` to select only the
 cases needed for a change.
 The check requires exact snapshot and matched-history replay. It separately
@@ -677,11 +685,13 @@ are logged even when a streaming client does not request a usage chunk.
 Errors include a stable error code; disconnects and stream failures are marked.
 On a cache miss, `cache_miss_reason` distinguishes a missing checkpoint, changed
 token prefix, changed image input, and explicit cache bypass. Common-prefix and
-nearest-checkpoint token counts explain how far the inputs agree, without
-logging prompt text. Adding tools or editing system/developer instructions near
-the beginning invalidates the later state: keep those inputs stable during an
-agent conversation. A disconnected SSE stream may never deliver its terminal
-usage chunk; proxy counters can then show zero despite generated tokens.
+nearest-checkpoint token counts report token agreement even when image
+identity differs; matching image-placeholder tokens do not imply matching
+pixels. Prompt text is not logged. Adding tools or editing system/developer
+instructions near the beginning invalidates the later state: keep those inputs
+stable during an agent conversation. A disconnected SSE stream may never
+deliver its terminal usage chunk; proxy counters can then show zero despite
+generated tokens.
 The server's cancellation log retains the actual token counts.
 
 Routine cache replacement is quiet; failed captures, disk corruption and cache

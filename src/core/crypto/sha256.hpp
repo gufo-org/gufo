@@ -18,6 +18,8 @@ class Sha256Hasher {
 public:
   Sha256Hasher();
   void Update(std::span<const std::uint8_t> bytes);
+  /// Digest the current prefix without consuming the incremental state.
+  [[nodiscard]] std::array<std::uint8_t, 32> Digest() const;
   [[nodiscard]] std::array<std::uint8_t, 32> Finish();
   /// Finishes the digest and renders it as 64 lowercase hex characters.
   [[nodiscard]] std::string FinishHex();
