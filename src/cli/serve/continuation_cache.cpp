@@ -49,6 +49,7 @@ struct ContinuationCache::Entry {
   std::vector<ContinuationToken> live_tokens;
   std::vector<std::uint8_t> live_identity;
   std::size_t snapshot_bytes{0};
+  std::size_t stable_prefix_tokens{0};
   std::uint64_t state_last_used{0};
   std::uint64_t snapshot_last_used{0};
   bool available{true};
@@ -58,6 +59,7 @@ struct ContinuationCache::Entry {
 
 struct ContinuationCache::Impl {
   std::vector<std::unique_ptr<Entry>> entries;
+  std::size_t state_count{0};
   SnapshotSupport snapshot_support;
   mutable std::mutex mutex;
   std::condition_variable condition;
@@ -100,6 +102,8 @@ ContinuationCache::Lease::Lease(Lease&& other) noexcept
       restored_from_disk_(std::exchange(other.restored_from_disk_, false)),
       reserved_snapshot_bytes_(
           std::exchange(other.reserved_snapshot_bytes_, 0)),
+      prompt_tokens_(std::exchange(other.prompt_tokens_, 0)),
+      stable_prefix_tokens_(std::exchange(other.stable_prefix_tokens_, 0)),
       input_identity_(std::move(other.input_identity_)),
       lookup_(std::exchange(other.lookup_, {})) {}
 
@@ -116,6 +120,8 @@ ContinuationCache::Lease& ContinuationCache::Lease::operator=(
     restore_ms_ = std::exchange(other.restore_ms_, 0.0);
     restored_from_disk_ = std::exchange(other.restored_from_disk_, false);
     reserved_snapshot_bytes_ = std::exchange(other.reserved_snapshot_bytes_, 0);
+    prompt_tokens_ = std::exchange(other.prompt_tokens_, 0);
+    stable_prefix_tokens_ = std::exchange(other.stable_prefix_tokens_, 0);
     input_identity_ = std::move(other.input_identity_);
     lookup_ = std::exchange(other.lookup_, {});
   }
@@ -184,9 +190,12 @@ std::size_t ContinuationCache::Lease::Commit(
   if (cache_ == nullptr) {
     throw std::logic_error("continuation cache lease is empty");
   }
+  const auto stable_prefix =
+      tokens.size() == prompt_tokens_ ? stable_prefix_tokens_ : 0;
   const std::size_t retained = cache_->Commit(
       index_, source_index_, reserved_snapshot_bytes_, std::move(tokens),
-      std::move(snapshot), std::move(input_identity_), std::move(live_tokens));
+      std::move(snapshot), std::move(input_identity_), std::move(live_tokens),
+      true, nullptr, stable_prefix);
   cache_ = nullptr;
   reserved_snapshot_bytes_ = 0;
   return retained;
@@ -199,7 +208,7 @@ std::size_t ContinuationCache::Lease::PublishSnapshot(
     throw std::logic_error("continuation cache lease is empty");
   const auto retained = cache_->Commit(
       index_, source_index_, reserved_snapshot_bytes_, std::move(tokens),
-      std::move(snapshot), input_identity_, {}, false);
+      std::move(snapshot), input_identity_, {}, false, &source_index_);
   reserved_snapshot_bytes_ = 0;
   return retained;
 }
@@ -214,7 +223,8 @@ void ContinuationCache::Lease::Invalidate() noexcept {
 
 ContinuationCache::ContinuationCache(std::size_t capacity,
                                      const StateFactory& factory,
-                                     SnapshotSupport snapshot_support)
+                                     SnapshotSupport snapshot_support,
+                                     std::size_t snapshot_capacity)
     : impl_(std::make_unique<Impl>()) {
   if (capacity == 0) {
     throw std::invalid_argument(
@@ -225,8 +235,11 @@ ContinuationCache::ContinuationCache(std::size_t capacity,
         "continuation cache state factory must be callable");
   }
   impl_->snapshot_support = std::move(snapshot_support);
+  impl_->state_count = capacity;
 
-  impl_->entries.reserve(capacity);
+  const auto entry_count =
+      impl_->snapshot_mode() ? std::max(capacity, snapshot_capacity) : capacity;
+  impl_->entries.reserve(entry_count);
   for (std::size_t index = 0; index < capacity; ++index) {
     auto state = factory();
     if (state == nullptr) {
@@ -234,6 +247,13 @@ ContinuationCache::ContinuationCache(std::size_t capacity,
           "continuation cache state factory returned null");
     }
     impl_->entries.push_back(std::make_unique<Entry>(std::move(state)));
+  }
+  // Extra immutable checkpoints share the same byte budget. They do not
+  // allocate model sessions and must never be selected as execution slots.
+  for (std::size_t index = capacity; index < entry_count; ++index) {
+    auto entry = std::make_unique<Entry>(nullptr);
+    entry->available = false;
+    impl_->entries.push_back(std::move(entry));
   }
   if (impl_->snapshot_mode() && impl_->snapshot_support.capacity_bytes) {
     try {
@@ -263,11 +283,30 @@ ContinuationCache::Lease ContinuationCache::Acquire(
     const CancellationCheck& is_cancelled,
     std::span<const std::uint8_t> input_identity,
     const std::function<void(ContinuationState&)>& prepare_state,
-    bool reuse_prompt) {
+    bool reuse_prompt, std::size_t stable_prefix_tokens) {
+  if (stable_prefix_tokens > prompt.size())
+    throw std::invalid_argument("stable cache prefix exceeds prompt length");
   while (true) {
     std::unique_lock<std::mutex> lock(impl_->mutex);
 
     const std::size_t no_entry = impl_->entries.size();
+    // Exact full-prompt hits are safe when a shorter checkpoint remains
+    // available for clients that rewrite the assistant's opening tokens, or
+    // when this full checkpoint was captured after establishing that boundary
+    // (its fallback may now live on disk). Migrate unmarked legacy entries.
+    const bool has_fallback =
+        stable_prefix_tokens == 0 ||
+        std::ranges::any_of(impl_->entries, [&](const auto& entry) {
+          return entry->valid && entry->snapshot &&
+                 (entry->tokens.size() <= stable_prefix_tokens ||
+                  (entry->stable_prefix_tokens != 0 &&
+                   entry->stable_prefix_tokens <= stable_prefix_tokens)) &&
+                 std::ranges::equal(entry->input_identity, input_identity) &&
+                 IsPrefix(entry->tokens, prompt);
+        });
+    const auto can_reuse = [&](std::size_t count) {
+      return has_fallback || count <= stable_prefix_tokens;
+    };
     std::size_t source = no_entry;
     std::size_t cached_tokens = 0;
     for (std::size_t index = 0; reuse_prompt && index < impl_->entries.size();
@@ -276,7 +315,7 @@ ContinuationCache::Lease ContinuationCache::Acquire(
       if ((!impl_->snapshot_mode() && !entry.available) || !entry.valid ||
           !std::equal(entry.input_identity.begin(), entry.input_identity.end(),
                       input_identity.begin(), input_identity.end()) ||
-          !IsPrefix(entry.tokens, prompt)) {
+          !can_reuse(entry.tokens.size()) || !IsPrefix(entry.tokens, prompt)) {
         continue;
       }
       if (source == no_entry || entry.tokens.size() > cached_tokens) {
@@ -292,6 +331,7 @@ ContinuationCache::Lease ContinuationCache::Acquire(
         const auto& entry = *impl_->entries[index];
         if (entry.available && !entry.live_tokens.empty() &&
             entry.live_tokens.size() >= cached_tokens &&
+            can_reuse(entry.live_tokens.size()) &&
             std::ranges::equal(entry.live_identity, input_identity) &&
             IsPrefix(entry.live_tokens, prompt)) {
           live_source = index;
@@ -400,6 +440,8 @@ ContinuationCache::Lease ContinuationCache::Acquire(
                   restored_snapshot_bytes, restore_ms);
       lease.input_identity_.assign(input_identity.begin(),
                                    input_identity.end());
+      lease.prompt_tokens_ = prompt.size();
+      lease.stable_prefix_tokens_ = stable_prefix_tokens;
       lease.lookup_ = lookup;
       return lease;
     }
@@ -414,7 +456,7 @@ ContinuationCache::Lease ContinuationCache::Acquire(
 }
 
 std::size_t ContinuationCache::capacity() const noexcept {
-  return impl_->entries.size();
+  return impl_->state_count;
 }
 
 std::size_t ContinuationCache::snapshot_capacity_bytes() const noexcept {
@@ -553,7 +595,8 @@ std::size_t ContinuationCache::Commit(
     std::vector<ContinuationToken> tokens,
     std::shared_ptr<const ContinuationSnapshot> snapshot,
     std::vector<std::uint8_t> input_identity,
-    std::vector<ContinuationToken> live_tokens, bool release_state) {
+    std::vector<ContinuationToken> live_tokens, bool release_state,
+    std::size_t* published_index, std::size_t stable_prefix_tokens) {
   const std::size_t token_count = tokens.size();
   const std::size_t snapshot_bytes =
       snapshot != nullptr ? snapshot->PayloadBytes() : 0;
@@ -673,10 +716,13 @@ std::size_t ContinuationCache::Commit(
           snapshot_entry.input_identity = std::move(input_identity);
           snapshot_entry.snapshot = std::move(retained_snapshot);
           snapshot_entry.snapshot_bytes = snapshot_bytes;
+          snapshot_entry.stable_prefix_tokens = stable_prefix_tokens;
           snapshot_entry.valid = !snapshot_entry.tokens.empty();
           snapshot_entry.snapshot_last_used = ++impl_->clock;
           impl_->retained_snapshot_bytes += snapshot_bytes;
           retained_bytes = snapshot_bytes;
+          if (published_index)
+            *published_index = target;
         }
         if (!retain_snapshot) {
           events.push_back(make_event(SnapshotEventAction::kSkipped,

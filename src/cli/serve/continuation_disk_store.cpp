@@ -1200,7 +1200,8 @@ struct ContinuationDiskStore::Impl {
   [[nodiscard]] RestoreResult RestoreLongestPrefix(
       const TextModelRunner& runner, TextRunnerState& state,
       std::span<const TextRunnerToken> prompt,
-      std::span<const std::uint8_t> input_identity) {
+      std::span<const std::uint8_t> input_identity,
+      std::size_t stable_prefix_tokens) {
     const auto descriptor = DescriptorForInput(runner, input_identity);
     if (!descriptor.persistence.has_value()) {
       Emit(ContinuationDiskEventAction::kMiss,
@@ -1212,6 +1213,15 @@ struct ContinuationDiskStore::Impl {
       const EntryIterator candidate =
           FindLongestCandidate(*descriptor.persistence, prompt);
       if (candidate == entries.end()) {
+        Emit(ContinuationDiskEventAction::kMiss,
+             ContinuationDiskEventReason::kNotFound, 0, 0, 0);
+        return {};
+      }
+      if (stable_prefix_tokens != 0 &&
+          candidate->tokens.size() > stable_prefix_tokens &&
+          FindLongestCandidate(*descriptor.persistence,
+                               prompt.first(stable_prefix_tokens)) ==
+              entries.end()) {
         Emit(ContinuationDiskEventAction::kMiss,
              ContinuationDiskEventReason::kNotFound, 0, 0, 0);
         return {};
@@ -1454,14 +1464,18 @@ ContinuationDiskStore::RestoreResult
 ContinuationDiskStore::RestoreLongestPrefix(
     const TextModelRunner& runner, TextRunnerState& state,
     std::span<const TextRunnerToken> prompt,
-    std::span<const std::uint8_t> input_identity) {
+    std::span<const std::uint8_t> input_identity,
+    std::size_t stable_prefix_tokens) {
+  if (stable_prefix_tokens > prompt.size())
+    throw std::invalid_argument("stable cache prefix exceeds prompt length");
   const ScopedOperationPermit permit(impl_->operation_gate, false);
   if (!permit) {
     impl_->Emit(ContinuationDiskEventAction::kMiss,
                 ContinuationDiskEventReason::kBusy, 0, 0, prompt.size());
     return {};
   }
-  return impl_->RestoreLongestPrefix(runner, state, prompt, input_identity);
+  return impl_->RestoreLongestPrefix(runner, state, prompt, input_identity,
+                                     stable_prefix_tokens);
 }
 
 std::vector<std::size_t> ContinuationDiskStore::SharedPrefixBoundaries(

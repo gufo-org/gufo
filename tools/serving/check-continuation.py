@@ -184,8 +184,11 @@ def main():
                     raise RuntimeError(f"{name}: cold conversation replay changed output")
                 if measured["accepted"] > measured["proposed"]:
                     raise RuntimeError(f"{name}: invalid speculative accounting")
+                followup_assistant = dict(resumed["choices"][0]["message"])
+                if not preserve or args.drop_reasoning:
+                    followup_assistant.pop("reasoning_content", None)
                 followup_body = {**body, "max_tokens": 8, "messages": [
-                    *body["messages"], resumed["choices"][0]["message"],
+                    *body["messages"], followup_assistant,
                     {"role": "user", "content": "What number did I ask you to reply with?"}]}
                 followup = call(args.url, followup_body)
                 if metrics(followup)["cached"] < measured["cached"]:

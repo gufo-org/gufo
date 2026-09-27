@@ -152,6 +152,9 @@ drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
 also accounts for tokenization changes where adjacent user/tool turns join.
 Qwen requests that remove previous reasoning or enable thinking retain this
 checkpoint too.
+Warm continuations checkpoint the reused frontier and prefill the new suffix
+together. A second full-prompt checkpoint enables exact retries without
+prefill; both checkpoints share the existing snapshot-memory budget.
 Exact live continuations reuse generated tokens. The server reports cached
 and newly processed tokens separately; resuming from the checkpoint processes
 the short suffix. System instructions, tool definitions and image identities

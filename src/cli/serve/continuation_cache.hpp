@@ -176,12 +176,17 @@ public:
     double restore_ms_{0.0};
     bool restored_from_disk_{false};
     std::size_t reserved_snapshot_bytes_{0};
+    std::size_t prompt_tokens_{0};
+    std::size_t stable_prefix_tokens_{0};
     std::vector<std::uint8_t> input_identity_;
     ContinuationLookup lookup_;
   };
 
+  /// Extra snapshot entries allocate no execution state; the byte budget
+  /// still bounds all retained and in-flight snapshots.
   ContinuationCache(std::size_t capacity, const StateFactory& factory,
-                    SnapshotSupport snapshot_support = {});
+                    SnapshotSupport snapshot_support = {},
+                    std::size_t snapshot_capacity = 0);
   ~ContinuationCache();
 
   ContinuationCache(const ContinuationCache&) = delete;
@@ -189,12 +194,14 @@ public:
   ContinuationCache(ContinuationCache&&) = delete;
   ContinuationCache& operator=(ContinuationCache&&) = delete;
 
+  /// A nonzero stable prefix requires a fallback at or before that boundary
+  /// before a later checkpoint can be reused (including exact retries).
   [[nodiscard]] Lease Acquire(
       std::span<const ContinuationToken> prompt,
       const CancellationCheck& is_cancelled = {},
       std::span<const std::uint8_t> input_identity = {},
       const std::function<void(ContinuationState&)>& prepare_state = {},
-      bool reuse_prompt = true);
+      bool reuse_prompt = true, std::size_t stable_prefix_tokens = 0);
 
   [[nodiscard]] std::size_t capacity() const noexcept;
   [[nodiscard]] std::size_t snapshot_capacity_bytes() const noexcept;
@@ -217,7 +224,9 @@ private:
       std::size_t reservation_bytes, std::vector<ContinuationToken> tokens,
       std::shared_ptr<const ContinuationSnapshot> snapshot,
       std::vector<std::uint8_t> input_identity,
-      std::vector<ContinuationToken> live_tokens, bool release_state = true);
+      std::vector<ContinuationToken> live_tokens, bool release_state = true,
+      std::size_t* published_index = nullptr,
+      std::size_t stable_prefix_tokens = 0);
   void Invalidate(std::size_t index, std::size_t reservation_bytes) noexcept;
 
   struct Impl;
