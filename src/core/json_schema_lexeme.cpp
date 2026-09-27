@@ -268,6 +268,10 @@ public:
         return {};
     const auto value = Decimal::Parse(bytes);
     const bool complete = text.back() != '.' && Valid(value);
+    // At the scalar budget there is no room for a completing digit. Do not
+    // admit an unfinished prefix which would fail on the next sampling step.
+    if (bytes.size() == 4096)
+      return {complete, complete};
     // Decimal prefixes cover an interval. Before the decimal point, appending
     // integer digits also shifts that interval by powers of ten.
     Decimal low = value;
@@ -440,8 +444,6 @@ public:
       if (std::string_view(key) == "format") {
         if (value->str() == "hostname")
           maximum_ = std::min(maximum_, 253U);
-        expression.pop_back();
-        expression += "\\z";
       }
       patterns.push_back(std::move(expression));
     }

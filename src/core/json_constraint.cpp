@@ -778,9 +778,11 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
   static std::map<std::shared_ptr<const JsonConstraint>,
                   std::shared_ptr<const JsonConstraint>>
       cache;
-  const std::lock_guard lock(mutex);
-  if (const auto found = cache.find(answer); found != cache.end())
-    return found->second;
+  {
+    const std::lock_guard lock(mutex);
+    if (const auto found = cache.find(answer); found != cache.end())
+      return found->second;
+  }
   auto grammar = std::shared_ptr<JsonConstraint>(new JsonConstraint(*answer));
   constexpr std::string_view end = "</think>";
   const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
@@ -807,10 +809,12 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
     }
   }
   grammar->root_ = base;
+  const std::lock_guard lock(mutex);
+  if (const auto found = cache.find(answer); found != cache.end())
+    return found->second;
   if (cache.size() >= 16)
     cache.erase(cache.begin());
-  cache.emplace(std::move(answer), grammar);
-  return grammar;
+  return cache.emplace(std::move(answer), std::move(grammar)).first->second;
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
@@ -822,10 +826,12 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
                          std::vector<Tool>, bool>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
-  const std::lock_guard lock(mutex);
   const Key key{answer, tools, required};
-  if (const auto found = cache.find(key); found != cache.end())
-    return found->second;
+  {
+    const std::lock_guard lock(mutex);
+    if (const auto found = cache.find(key); found != cache.end())
+      return found->second;
+  }
   auto grammar = std::shared_ptr<JsonConstraint>(new JsonConstraint(*answer));
   Rule alternatives;
   if (!required)
@@ -888,10 +894,12 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   check_capacity(1, 0, 0);
   grammar->root_ = grammar->rules_.size();
   grammar->rules_.push_back(std::move(alternatives));
+  const std::lock_guard lock(mutex);
+  if (const auto found = cache.find(key); found != cache.end())
+    return found->second;
   if (cache.size() >= 16)
     cache.erase(cache.begin());
-  cache.emplace(key, grammar);
-  return grammar;
+  return cache.emplace(key, std::move(grammar)).first->second;
 }
 
 JsonConstraint::State JsonConstraint::Expand(State pending) const {

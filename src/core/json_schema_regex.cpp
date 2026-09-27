@@ -314,15 +314,16 @@ private:
     switch (cp) {
       case 'd':
       case 'D':
-        property = "[\\p{Nd}]";
+        property = "[0-9]";
         break;
       case 's':
       case 'S':
-        property = "[\\p{White_Space}]";
+        // ECMA-262 WhiteSpace + LineTerminator, not ICU White_Space.
+        property = "[\\p{Zs}\\u0009-\\u000d\\u2028\\u2029\\ufeff]";
         break;
       case 'w':
       case 'W':
-        property = "[\\p{Alphabetic}\\p{Mark}\\p{Nd}\\p{Pc}\\u200c\\u200d]";
+        property = "[a-zA-Z0-9_]";
         break;
       case 'p':
       case 'P': {
@@ -397,13 +398,11 @@ private:
     const bool negate = Peek() == '^';
     if (negate)
       ++position_;
-    bool first = true;
-    while (Peek() != ']' || first) {
+    while (Peek() != ']') {
       auto cp = Take();
       if (cp == '[' || (cp == '&' && Peek() == '&'))
         Invalid("nested regex character classes are unsupported");
       auto chars = cp == '\\' ? Escape(true) : icu::UnicodeSet(cp, cp);
-      first = false;
       if (Peek() == '-' && text_.charAt(position_ + 1) != ']') {
         ++position_;
         cp = Take();
@@ -453,34 +452,17 @@ private:
         } else if (cp == '^') {
           atom.atom = e_.start;
           atom.assertion = true;
-        } else if (cp == '$' || (cp == '\\' && Peek() == 'z')) {
+        } else if (cp == '$') {
           atom.kind = Syntax::End;
           atom.assertion = true;
           atom.atom = e_.epsilon;
-          if (cp == '\\')
-            ++position_;
-          else {
-            icu::UnicodeSet newline;
-            newline.add('\n')
-                .add('\r')
-                .add('\v')
-                .add('\f')
-                .add(0x85)
-                .add(0x2028)
-                .add(0x2029);
-            const auto crlf = e_.Combine(
-                Kind::Concat, {e_.Chars(icu::UnicodeSet('\r', '\r')),
-                               e_.Chars(icu::UnicodeSet('\n', '\n'))});
-            atom.atom =
-                e_.Combine(Kind::Or, {e_.epsilon, e_.Chars(newline), crlf});
-          }
         } else if (cp == '\\') {
           atom.atom = e_.Chars(Escape(false));
         } else if (cp == '.') {
           auto chars = Scalars();
-          for (auto c : {'\n', '\r', '\v', '\f'})
+          for (auto c : {'\n', '\r'})
             chars.remove(c);
-          chars.remove(0x85).remove(0x2028).remove(0x2029);
+          chars.remove(0x2028).remove(0x2029);
           atom.atom = e_.Chars(chars);
         } else {
           if (cp < 128 &&

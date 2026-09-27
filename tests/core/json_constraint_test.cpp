@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <barrier>
 #include <cassert>
 #include <cmath>
 #include <iostream>
 #include <limits>
 #include <string_view>
+#include <thread>
 
 #include "src/core/sampling.hpp"
 
@@ -120,6 +122,14 @@ void TestPrimitiveConstraints() {
   };
   const auto pattern = compile(
       R"({"type":"string","pattern":"^@[a-zA-Z0-9_]+$","maxLength":6})");
+  const auto positive = compile(R"({"type":"number","exclusiveMinimum":0})");
+  auto number_state = positive->Start();
+  for (unsigned char byte : std::string("{\"x\":0.") + std::string(4093, '0'))
+    number_state = positive->Advance(number_state, byte);
+  assert(!number_state.empty());
+  assert(positive->Advance(number_state, '0').empty());
+  const auto last_digit = positive->Advance(number_state, '1');
+  assert(positive->Complete(positive->Advance(last_digit, '}')));
   for (const char* value : {R"("@abc")", R"("\u0040abc")", R"("@x_42")"})
     assert(Accepts(*pattern, std::string("{\"x\":") + value + "}"));
   for (const char* value :
@@ -149,8 +159,25 @@ void TestPrimitiveConstraints() {
   const auto alternatives = compile(R"({"type":"string","pattern":"^a|😀$"})");
   assert(Accepts(*alternatives, R"({"x":"\uD83D\uDE00"})"));
   const auto word = compile(R"({"type":"string","pattern":"^[\\w]+$"})");
-  assert(Accepts(*word, R"({"x":"é"})"));
-  assert(Accepts(*word, R"({"x":"\u00e9"})"));
+  assert(Accepts(*word, R"({"x":"a_Z09"})"));
+  assert(!Accepts(*word, R"({"x":"é"})"));
+  assert(!Accepts(*word, R"({"x":"\u00e9"})"));
+  const auto digit = compile(R"({"type":"string","pattern":"^\\d+$"})");
+  assert(Accepts(*digit, R"({"x":"123"})"));
+  assert(!Accepts(*digit, R"({"x":"\u0661"})"));
+  const auto whitespace = compile(R"({"type":"string","pattern":"^\\s+$"})");
+  assert(Accepts(*whitespace, R"({"x":"\ufeff\u2028\t"})"));
+  assert(!Accepts(*whitespace, R"({"x":"\u0085"})"));
+  const auto dot = compile(R"({"type":"string","pattern":"^.$"})");
+  assert(Accepts(*dot, R"({"x":"\u000b"})"));
+  assert(Accepts(*dot, R"({"x":"\u0085"})"));
+  assert(!Accepts(*dot, R"({"x":"a\n"})"));
+  assert(!Accepts(*dot, R"({"x":"\u2028"})"));
+  const auto any = compile(R"({"type":"string","pattern":"^[^]$"})");
+  assert(Accepts(*any, R"({"x":"\n"})"));
+  const auto empty = compile(R"({"type":"string","pattern":"^[]*$"})");
+  assert(Accepts(*empty, R"({"x":""})"));
+  assert(!Accepts(*empty, R"({"x":"a"})"));
   const auto spaces = compile(R"({"type":"string","pattern":"^[a b]+$"})");
   assert(Accepts(*spaces, R"({"x":"a b"})"));
   assert(Accepts(*spaces, R"({"x":"a\u0020b"})"));
@@ -306,9 +333,9 @@ void TestTokensAndSampling() {
   }
   assert(invalid_config);
   const std::vector<std::string> pieces{
-      "{\"x\":",   "true",      "false",    "}",    "INVALID",
-      "",          "{\"x\":\"", "\xe2\x94", "\x8c", "\"}",
-      "false}BAD", "false}",    "<think>"};
+      "{\"x\":",   "true",     "false", "}",   "INVALID",   "",
+      "{\"x\":\"", "\xe2\x94", "\x8c",  "\"}", "false}BAD", "false}",
+      "<think>",   "{\"x\":[", ",",     "]}"};
   auto vocabulary = std::make_shared<ConstraintVocabulary>(
       pieces.size(), [&](std::uint32_t i) {
         return ConstraintVocabulary::Piece{pieces[i], i == 5};
@@ -361,11 +388,49 @@ void TestTokensAndSampling() {
   assert(greedy.Sample(logits) == 1);
   assert(!greedy.config().can_use_unmodified_argmax());
   assert(greedy.WithoutConstraint().config().can_use_unmodified_argmax());
+  // Independent pre-masked control for the allocation-free constrained argmax.
+  // Include negative logits, ties, excluded nonfinite values and every penalty.
+  for (const auto penalties : {false, true}) {
+    SamplingConfig config{.repeat_penalty = penalties ? 1.2F : 1.0F,
+                          .frequency_penalty = penalties ? .3F : 0.0F,
+                          .presence_penalty = penalties ? .5F : 0.0F,
+                          .constraint = constraint};
+    SamplerState constrained(config, std::array<TokenId, 2>{1, 1});
+    const std::array<TokenId, 3> generated{13, 1, 14};
+    constrained.Accept(generated);
+    config.constraint.reset();
+    SamplerState control(config, std::array<TokenId, 2>{1, 1});
+    control.Accept(generated);
+    auto generated_state = constraint->grammar->Start();
+    for (auto token : generated)
+      generated_state =
+          vocabulary->Accept(*constraint->grammar, generated_state, token);
+    const auto allowed = constraint->Allowed(generated_state);
+    for (const auto score : {-3.0F, 0.0F, 1.0F}) {
+      std::fill(logits.begin(), logits.end(), INFINITY);
+      logits[1] = logits[2] = score;
+      logits[4] = NAN;
+      auto masked = logits;
+      for (std::size_t i = 0; i < masked.size(); ++i)
+        if (!(*allowed)[i])
+          masked[i] = -INFINITY;
+      const auto expected = control.Sample(masked);
+      assert(constrained.Sample(logits) == expected);
+      assert(constrained.Distribution(logits).probability(expected) == 1);
+    }
+  }
   std::fill(logits.begin(), logits.end(),
             -std::numeric_limits<float>::infinity());
   bool rejected = false;
   try {
     (void)sampler.Sample(logits);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  assert(rejected);
+  rejected = false;
+  try {
+    (void)greedy.Sample(logits);
   } catch (const std::runtime_error&) {
     rejected = true;
   }
@@ -533,6 +598,24 @@ void TestReasoningConstraint() {
   assert(Accepts(
       *JsonConstraint::WithReasoning(required),
       R"(Use the scoring tool.</think><tool_call>{"name":"score","arguments":{"value":3}}</tool_call>)"));
+
+  std::barrier ready(8);
+  std::array<std::shared_ptr<const JsonConstraint>, 8> concurrent;
+  {
+    std::vector<std::jthread> workers;
+    for (std::size_t i = 0; i < concurrent.size(); ++i)
+      workers.emplace_back([&, i] {
+        ready.arrive_and_wait();
+        concurrent[i] = JsonConstraint::WithReasoning(
+            JsonConstraint::WithTools(plain, {{"concurrent", tool}}, true));
+      });
+  }
+  for (const auto& grammar : concurrent) {
+    assert(grammar == concurrent.front());
+    assert(Accepts(
+        *grammar,
+        R"(Think.</think><tool_call>{"name":"concurrent","arguments":{"value":3}}</tool_call>)"));
+  }
 }
 
 int main(int argc, char** argv) {

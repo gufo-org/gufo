@@ -599,12 +599,14 @@ Supported schema features:
 
 The root must resolve to an object. Objects require `additionalProperties:false`;
 strict schemas require every property (use null for optional values). Keys follow
-schema order. Numeric generation uses decimal notation. Unsupported keywords,
+schema order. Numeric generation uses decimal notation, up to 4,096 bytes per
+number. Unsupported keywords,
 external references and unusable reference cycles return a validation error.
 Schemas allow 5,000 properties, 1,000 enum values and 120,000 characters in
 property/definition names and enum/const strings, with a 2 MiB document limit.
 Regex evaluation and grammar caches have bounded resource budgets.
-Patterns support Unicode classes, alternation, repetition, anchors and lookahead;
+Patterns use ECMA-262 Unicode semantics (`\w`/`\d` are ASCII; `$` is strict end)
+and support Unicode properties, alternation, repetition, anchors and lookahead;
 pattern, format and length limits are enforced together. Lookbehind,
 backreferences, inline flags, nested character classes and unbounded repetition
 of assertions return a validation error before generation. String matching uses
@@ -616,7 +618,8 @@ with `required`. Strict tool arguments follow their parameter schema;
 stays literal.
 
 References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create),
-[structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
+[structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs),
+[JSON Schema patterns](https://json-schema.org/draft/2020-12/json-schema-validation#name-pattern)
 and [llama.cpp grammar sampling](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/sampling.cpp).
 Gufo applies the grammar before filtering/normalizing the target distribution;
 proposal probabilities remain those actually sampled by each draft backend.
@@ -624,6 +627,7 @@ Verify with `tools/serving/check-openai-sdk.py --suite structured` or
 `--suite structured-limits` (add `--vision` for an image-capable server).
 The independent schema oracle runs with
 `nix develop -c python tests/core/json_schema_oracle.py build/cpu-test/json_constraint_test`.
+Add `--node /path/to/node` to compare regex semantics with V8 independently.
 
 Admission groups text requests by the socket peer's IP address across chat and
 compatibility endpoints. Caller-provided identity headers do not affect quotas;

@@ -16,9 +16,49 @@ import subprocess
 from jsonschema import Draft202012Validator, FormatChecker
 
 
+def ecmascript_cases(node):
+    """Use V8, not Python re, for ECMA-262 Unicode-mode pattern semantics."""
+    words = ["".join(chars) for n in range(4)
+             for chars in itertools.product("ab1_é\n", repeat=n)]
+    words += ["\r", "\r\n", "\v", "\f", "\u0085", "\u2028", "\u2029",
+              "\ufeff", "\u2003", "\u0301", "\u0661", "😀", "a😀", "a\n",
+              "a\r", "a\r\n", "a\u2028", "a\u2029", "a\v", "a\u0085"]
+    patterns = [r"^\w+$", r"^\W+$", r"^\d+$", r"^\D+$", r"^\s+$", r"^\S+$",
+                "^.$", "^a$", "a$", "^a", "^a.*$", "^[^]$", "^[]*$",
+                r"^[\w]+$", r"^[^\d]+$", r"^[\s]+$", r"^[\p{L}]+$",
+                r"^[\p{Script=Greek}]+$", r"^[\P{L}]+$", r"^\uD83D\uDE00$",
+                "^(?=a|b)(?:aa|b)$", "^(?!ab)[ab]+$", "^(?=.{2}$).*$",
+                "(?:^a|b$)", "^(?:a?|b){1,3}$", "^a(?=b$)b$", r"^[a b]+$"]
+    requests = [{"pattern": pattern, "minimum": minimum, "maximum": maximum,
+                 "words": words}
+                for pattern in patterns for minimum, maximum in [(0, 4), (2, 3)]]
+    reference = subprocess.run([node, "-e", r"""
+const fs = require('fs');
+const cases = JSON.parse(fs.readFileSync(0, 'utf8'));
+console.log(JSON.stringify(cases.map(c => {
+  const regex = new RegExp(c.pattern, 'u');
+  return c.words.map(s => [...s].length >= c.minimum &&
+    [...s].length <= c.maximum && regex.test(s));
+})));
+"""], input=json.dumps(requests), text=True, capture_output=True,
+        check=True, timeout=30)
+    cases = []
+    for request, expected in zip(requests, json.loads(reference.stdout)):
+        schema = {"type": "object", "properties": {"x": {
+            "type": "string", "pattern": request["pattern"],
+            "minLength": request["minimum"], "maxLength": request["maximum"]}},
+            "required": ["x"], "additionalProperties": False}
+        # Both JSON spellings must implement the same decoded-string language.
+        texts = ['{"x":' + json.dumps(word, ensure_ascii=escaped) + '}'
+                 for word in words for escaped in (False, True)]
+        cases.append((schema, texts, [valid for valid in expected for _ in range(2)]))
+    return cases
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", help="Path to json_constraint_test")
+    parser.add_argument("--node", help="Optional Node.js executable for the independent ECMA-262 oracle")
     args = parser.parse_args()
     rng = random.Random(283)
     cases = []
@@ -50,10 +90,10 @@ def main():
                  "minItems": minimum, "maxItems": limit},
                 [json.dumps([True] * count) for count in (0, 1, 2, 3, 10, 256, 257, 258)])
     words = ["", "a", "ab", "abc", "c0", "abc1", "c5abc3", "ABC", "aABC0",
-             "é", "é😀", "e\u0301😀", "@name_12", "x@name", "\n", "OK\n", "a b", "a&b"]
+             "é", "é😀", "e\u0301😀", "@name_12", "x@name", "\n", "a b", "a&b"]
     for pattern in ("^@[a-zA-Z0-9_]+$", "^(?:ab|c[0-9])+$", "[A-Z]",
                     "^(?=.*[A-Z])(?=.*[0-9]).+$", "^é😀$", "^OK$",
-                    r"^[\w]+$", r"^[\s]+$", r"^(?:(?:ab){2}|c)$", r"^[a b]+$", r"^[a&b]+$"):
+                    r"^[a-zA-Z0-9_]+$", r"^(?:(?:ab){2}|c)$", r"^[a b]+$", r"^[a&b]+$"):
         for minimum, maximum in ((0, 100), (2, 4)):
             add({"type": "string", "pattern": pattern, "minLength": minimum,
                  "maxLength": maximum},
@@ -62,7 +102,7 @@ def main():
     short_words = ["".join(chars) for n in range(5)
                    for chars in itertools.product("abcé", repeat=n)]
     for pattern in ("^(?:(?:ab){2}|c)$", "^(?:ab)+$", "^(?:[^a-c]{4}|c)$",
-                    "^a{1,3}b?$", "^a*?b+$", "a|b$", r"^[\w]{1,3}$",
+                    "^a{1,3}b?$", "^a*?b+$", "a|b$", r"^[a-zA-Z0-9_]{1,3}$",
                     "^.{2,4}$", r"^[^ab]{1,2}$", "^(a|bc){1,2}$",
                     "^(?=a|c)(?:(?:ab){2}|c)$", "^(?!ab)(?:ab|ac|b)$",
                     "^(?=.{2}$)(?!aa)[ab]+$", "^(?:a(?=b)b|c)$",
@@ -90,8 +130,7 @@ def main():
                     "^(?!ab)(?:ab|ac|b)$", "^(?=.{2}$)(?!aa)[ab]+$",
                     "^(?:a(?=b)b|c)$", "^a(?=b$)b$", "^(?!.*bb)[ab]{1,4}$",
                     "^(?:(?=a)a){2}$", "^(?:a?|b){2,4}$"):
-        # minLength=0 makes optional terminal line breaks irrelevant to these
-        # letter-only prefixes (ICU and Python differ in '$' line-break rules).
+        # Letter-only finite languages also agree with Python's regex dialect.
         for minimum, maximum in ((0, 1), (0, 2), (0, 3), (0, 4)):
             schema = {"type": "object", "properties": {
                 "x": {"type": "string", "pattern": pattern, "minLength": minimum,
@@ -102,6 +141,8 @@ def main():
             expected = [any(value.startswith(word) for value in language)
                         for word in alphabet_words]
             prefix_cases.append((schema, prefixes, expected))
+    if args.node:
+        cases.extend(ecmascript_cases(args.node))
     records = "\n".join(json.dumps({"schema": schema, "texts": texts}) for schema, texts, _ in cases)
     records += "\n" + "\n".join(json.dumps({"schema": schema, "texts": [], "prefixes": prefixes})
                               for schema, prefixes, _ in prefix_cases)

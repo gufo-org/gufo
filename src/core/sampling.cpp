@@ -530,6 +530,11 @@ void SamplerState::Accept(std::span<const TokenId> tokens) {
 SamplingDistribution SamplerState::Distribution(
     std::span<const float> logits) const {
   if (config_.constraint) {
+    if (config_.temperature == 0) {
+      config_.Validate();
+      return SamplingDistribution({{SampleConstrainedGreedy(logits), 1.0}},
+                                  1.0);
+    }
     const auto masked = ConstrainedLogits(logits);
     return WithoutConstraint().Distribution(masked);
   }
@@ -706,6 +711,37 @@ TokenId SamplerState::SampleGreedy(std::span<const float> logits) const {
   if (!found) {
     throw std::runtime_error("logit distribution contains no finite values");
   }
+  return best_token;
+}
+
+TokenId SamplerState::SampleConstrainedGreedy(
+    std::span<const float> logits) const {
+  const auto mask = config_.constraint->Allowed(constraint_state_);
+  if (logits.size() != mask->size())
+    throw std::invalid_argument(
+        "JSON constraint vocabulary differs from logits");
+  // Read the mask directly: greedy constraints need neither a copied vocabulary
+  // of masked logits nor a cloned sampler/history. Preserve token-ID tie order.
+  double best_logit = -std::numeric_limits<double>::infinity();
+  TokenId best_token = 0;
+  bool found = false;
+  for (std::size_t index = 0; index < logits.size(); ++index) {
+    if (!(*mask)[index] || !std::isfinite(logits[index]))
+      continue;
+    const double value = penalty_counts_.empty()
+                             ? static_cast<double>(logits[index])
+                             : AdjustedLogit(index, logits[index]);
+    if (!std::isfinite(value))
+      throw std::runtime_error(
+          "sampling penalties produced a non-finite logit");
+    if (value > best_logit) {
+      best_logit = value;
+      best_token = static_cast<TokenId>(index);
+      found = true;
+    }
+  }
+  if (!found)
+    throw std::runtime_error("logit distribution contains no finite values");
   return best_token;
 }
 

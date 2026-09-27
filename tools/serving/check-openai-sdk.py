@@ -731,6 +731,9 @@ def check_structured_limits(client, model, checks, vision=False):
          "Return ab. Start the value with ab.", "c"),
         ("pattern_format", {"pattern": r"^(?:999|127)\.0\.0\.1$", "format": "ipv4"},
          "Return the address 999.0.0.1, exactly.", "127.0.0.1"),
+        ("ecmascript_word", {"pattern": r"^\w+$", "enum": ["é", "a"],
+                            "maxLength": 1},
+         "Return the accented letter é.", "a"),
     ):
         bounded = {"type": "object", "properties": {"x": {"type": "string", **constraints}},
                    "required": ["x"], "additionalProperties": False}
@@ -743,6 +746,26 @@ def check_structured_limits(client, model, checks, vision=False):
         Draft202012Validator(bounded, format_checker=FormatChecker()).validate(value)
         assert value["x"] == expected, checked
         record("schema_" + name, checked)
+
+    # ECMA-262 '$' does not accept a trailing newline without multiline mode.
+    # Unsatisfiable enum/pattern intersections must fail before streaming.
+    for constraints in (
+        {"pattern": r"^\w+$", "enum": ["é"]},
+        {"pattern": r"^\d+$", "enum": ["١"]},
+        {"pattern": "^a$", "enum": ["a\n"]},
+    ):
+        invalid = {"type": "object", "properties": {"x": {"type": "string", **constraints}},
+                   "required": ["x"], "additionalProperties": False}
+        try:
+            client.chat.completions.create(**{**fresh, "max_completion_tokens": 1,
+                "response_format": {"type": "json_schema", "json_schema": {
+                    "name": "invalid_pattern_intersection", "strict": True, "schema": invalid}}},
+                stream=True)
+        except openai.BadRequestError:
+            pass
+        else:
+            raise AssertionError("empty ECMA-262 enum/pattern intersection was accepted")
+    record("schema_ecmascript_invalid_intersections", {"status": 400, "cases": 3})
 
 
 def check_response(response, reasoning):
