@@ -1,6 +1,15 @@
 // TP=2 probe: --tp-rank 0|1 --tp-world-size 2
 //              --tp-bootstrap-host HOST --tp-bootstrap-port PORT
 //              --tp-operation-id N (same on both ranks)
+// Prefill steps: --split N prefills the prompt once in one step and once as
+// N tokens then the rest, and compares each MoE input and output of the last
+// token and the final logits: a prefill must not depend on its steps.
+// --decode-tail K instead feeds the last K tokens one at a time, as decoding
+// does: a token must compute the same whether prefilled or decoded.
+
+#include <hip/hip_runtime.h>
+
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -94,6 +103,8 @@ int main(int argc, char** argv) {
   float temperature = 0.0F;
   std::int64_t seed = 7;
   std::string bootstrap_host;
+  std::uint32_t split = 0;
+  std::uint32_t decode_tail = 0;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -120,6 +131,16 @@ int main(int argc, char** argv) {
       model_path = next();
     } else if (arg == "--mtp-model") {
       mtp_path = next();
+    } else if (arg == "--decode-tail") {
+      if (!ParseUint(next(), &decode_tail)) {
+        Fail("--decode-tail requires an unsigned integer");
+        return 2;
+      }
+    } else if (arg == "--split") {
+      if (!ParseUint(next(), &split)) {
+        Fail("--split requires an unsigned integer");
+        return 2;
+      }
     } else if (arg == "--prompt") {
       prompt = next();
     } else if (arg == "--context") {
@@ -222,10 +243,120 @@ int main(int argc, char** argv) {
       .hip_device = static_cast<int>(device),
       .communicator = communicator,
   };
+  // `--split`: a hash of the last token's row at every MoE input and output.
+  struct RowHashes {
+    bool armed{false};
+    std::size_t hidden{0};
+    std::vector<std::uint64_t> hashes;
+  };
+  const auto rows = std::make_shared<RowHashes>();
+  if (split != 0 || decode_tail != 0) {
+    options.moe_observer = [rows](const float* data, std::size_t bytes,
+                                  ihipStream_t* stream) {
+      const std::size_t row = rows->hidden * sizeof(float);
+      hipStreamCaptureStatus capture = hipStreamCaptureStatusNone;
+      // A graph being captured cannot be read; its logits still compare.
+      if (!rows->armed || row == 0 || bytes < row ||
+          hipStreamIsCapturing(stream, &capture) != hipSuccess ||
+          capture != hipStreamCaptureStatusNone) {
+        return;
+      }
+      std::vector<std::uint8_t> host(row);
+      if (hipStreamSynchronize(stream) != hipSuccess ||
+          hipMemcpy(host.data(),
+                    reinterpret_cast<const char*>(data) + bytes - row, row,
+                    hipMemcpyDeviceToHost) != hipSuccess) {
+        rows->hashes.push_back(0);
+        return;
+      }
+      std::uint64_t hash = 1469598103934665603ULL;
+      for (const auto byte : host) {
+        hash = (hash ^ byte) * 1099511628211ULL;
+      }
+      rows->hashes.push_back(hash);
+    };
+  }
   auto model = q::Model::Load(model_path, options, &error);
   if (!model) {
     Fail("model load failed: " + error);
     return 1;
+  }
+  if (split != 0 || decode_tail != 0) {
+    rows->hidden = model->config().hidden_size;
+    const auto prompt_tokens = model->Tokenize(prompt);
+    if (split == 0) {
+      split =
+          decode_tail < prompt_tokens.size()
+              ? static_cast<std::uint32_t>(prompt_tokens.size()) - decode_tail
+              : 0;
+    }
+    if (split == 0 || split >= prompt_tokens.size() ||
+        prompt_tokens.size() > context) {
+      Fail("--split must fall inside the prompt, which must fit the context");
+      return 2;
+    }
+    const auto mode = model->HasMtp()
+                          ? gufo::core::SessionMode::kSpeculative
+                          : gufo::core::SessionMode::kAutoregressive;
+    const auto run = [&](bool in_two)
+        -> std::optional<
+            std::pair<std::vector<std::uint64_t>, std::vector<float>>> {
+      auto session = model->CreateSession(mode, context, &error);
+      if (!session) {
+        return std::nullopt;
+      }
+      const std::span<const std::int32_t> all(prompt_tokens);
+      if (in_two && !session->Sync(all.first(split), &error)) {
+        return std::nullopt;
+      }
+      rows->hashes.clear();
+      rows->armed = true;
+      bool ok = true;
+      if (in_two && decode_tail != 0) {
+        // Decoding: one token per forward; only the last one's observations
+        // are kept, to compare with the last row of the prefill.
+        for (std::size_t t = split; ok && t < all.size(); ++t) {
+          rows->hashes.clear();
+          ok = session->Evaluate(all[t], &error);
+        }
+      } else {
+        ok = session->Sync(all, &error);
+      }
+      rows->armed = false;
+      if (!ok) {
+        return std::nullopt;
+      }
+      const auto logits = session->Logits();
+      return std::make_pair(rows->hashes,
+                            std::vector<float>(logits.begin(), logits.end()));
+    };
+    const auto whole = run(false);
+    const auto parts = run(true);
+    if (!whole || !parts) {
+      Fail("split prefill failed: " + error);
+      return 1;
+    }
+    std::size_t first = whole->first.size();
+    for (std::size_t i = 0;
+         i < std::min(whole->first.size(), parts->first.size()); ++i) {
+      if (whole->first[i] != parts->first[i]) {
+        first = i;
+        break;
+      }
+    }
+    float max_diff = 0.0F;
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < whole->second.size(); ++i) {
+      const float diff = std::fabs(whole->second[i] - parts->second[i]);
+      differing += diff != 0.0F ? 1 : 0;
+      max_diff = std::max(max_diff, diff);
+    }
+    std::printf(
+        "rank=%u prompt=%zu split=%u observations=%zu/%zu first_difference=%zu "
+        "logits_differing=%zu max_abs_diff=%.9g\n",
+        rank, prompt_tokens.size(), split, whole->first.size(),
+        parts->first.size(), first, differing, max_diff);
+    return 0;
   }
   const auto prompt_tokens = model->Tokenize(prompt);
   if (prompt_tokens.empty() || prompt_tokens.size() > context ||
