@@ -134,6 +134,15 @@ void TestInvalidDepth() {
                                                              "adaptive"};
   Expect(!gufo::cli::ParseBenchOptions(policy_without_backend, &error),
          "a DFlash controller requires its backend");
+  const std::array<const char*, 1> lookup_without_mtp = {"--prompt-lookup"};
+  Expect(!gufo::cli::ParseBenchOptions(lookup_without_mtp, &error) &&
+             error.find("prompt-lookup") != std::string::npos,
+         "prompt lookup requires MTP");
+  const std::array<const char*, 3> lookup = {"--speculative", "mtp",
+                                             "--prompt-lookup"};
+  const auto lookup_parsed = gufo::cli::ParseBenchOptions(lookup, &error);
+  Expect(lookup_parsed.has_value() && lookup_parsed->prompt_lookup,
+         "MTP benchmarks accept prompt lookup");
 }
 
 void TestInvalidWorkload() {

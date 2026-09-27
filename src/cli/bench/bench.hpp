@@ -28,6 +28,8 @@ struct BenchOptions {
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
+  /// Qwen3.8-Flash-Next MTP prompt lookup (see its ModelOptions).
+  bool prompt_lookup{false};
   sampling::SamplingConfig sampling{.seed = 0};
   bool verbose{false};
 };
