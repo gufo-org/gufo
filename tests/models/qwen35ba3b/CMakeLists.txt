@@ -17,3 +17,14 @@ if (ENGINE_ENABLE_HIP)
   set_tests_properties(qwen35ba3b_target_test PROPERTIES
     LABELS "qwen35ba3b;gpu;hip;target;external-model" SKIP_RETURN_CODE 77)
 endif()
+
+# Timing tools (not ctests): one verification step per (sessions x rows)
+# shape, and one 4096-token prompt prefilled in chunks of several sizes.
+if (ENGINE_ENABLE_HIP)
+  add_executable(qwen35ba3b_verify_bench
+    ${CMAKE_CURRENT_SOURCE_DIR}/verify_bench.cpp)
+  target_link_libraries(qwen35ba3b_verify_bench PRIVATE gufo_core)
+  add_executable(qwen35ba3b_prefill_chunk_bench
+    ${CMAKE_CURRENT_SOURCE_DIR}/prefill_chunk_bench.cpp)
+  target_link_libraries(qwen35ba3b_prefill_chunk_bench PRIVATE gufo_core)
+endif()
