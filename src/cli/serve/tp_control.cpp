@@ -232,6 +232,9 @@ bool ReadBytes(std::span<const std::uint8_t> data, std::size_t* offset,
               instruction.prompt_size <= kMaxPromptTokens;
       break;
     case TpInstructionOp::kSnapshot:
+      // The request's call count and digest so far.
+      valid = only(false, false, true, false, true);
+      break;
     case TpInstructionOp::kRestore:
     case TpInstructionOp::kCancelPrepare:
     case TpInstructionOp::kInvalidate:

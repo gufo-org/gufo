@@ -127,7 +127,10 @@ void DigestTpCall(TpExecutionDigest& digest, const TpInstruction& instruction,
   digest.Add(instruction.snapshot_id);
   digest.Add(static_cast<std::uint32_t>(instruction.token));
   digest.Add(instruction.offset);
-  digest.Add(instruction.count);
+  // A capture carries the request's call count and digest so far, which the
+  // digest cannot include.
+  digest.Add(instruction.op == TpInstructionOp::kSnapshot ? 0
+                                                          : instruction.count);
   digest.Add(instruction.prompt_size);
   digest.Add(instruction.rng);
   digest.Add(static_cast<std::uint32_t>(instruction.pending));
@@ -369,23 +372,51 @@ bool TpMirroredRunner::EndRequest(std::uint64_t sequence, std::string* error) {
 }
 
 void TpMirroredRunner::Settle(std::uint64_t sequence, bool agreed) {
-  const std::lock_guard<std::mutex> lock(mutex_);
-  unsettled_.erase(sequence);
-  if (!agreed) {
-    rejected_.insert(sequence);
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    unsettled_.erase(sequence);
+    dependencies_.erase(sequence);
+    if (!agreed) {
+      rejected_.insert(sequence);
+    }
+  }
+  settled_.notify_all();
+}
+
+bool TpMirroredRunner::AwaitDependencies(std::uint64_t sequence) const {
+  // A dependency has released its state, so its verdict follows within one
+  // round trip once rank 1 reaches its end.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  std::unique_lock<std::mutex> lock(mutex_);
+  for (;;) {
+    const auto found = dependencies_.find(sequence);
+    if (found == dependencies_.end()) {
+      return true;
+    }
+    bool pending = false;
+    for (const auto producer : found->second) {
+      if (rejected_.contains(producer)) {
+        return false;
+      }
+      pending = pending || unsettled_.contains(producer);
+    }
+    if (!pending) {
+      return true;
+    }
+    if (settled_.wait_until(lock, deadline) == std::cv_status::timeout) {
+      return false;
+    }
   }
 }
 
-bool TpMirroredRunner::Settled(std::uint64_t producer) const {
-  return producer == 0 ||
-         (!unsettled_.contains(producer) && !rejected_.contains(producer));
-}
-
 bool TpMirroredRunner::CanReuse(const TextRunnerState& state) const {
+  // A released state is reused before its producer's verdict arrives, as on
+  // one host; the reusing request then depends on that verdict.
   const auto id = Mirrored(state).id();
   const std::lock_guard<std::mutex> lock(mutex_);
   const auto found = producers_.find(id);
-  return found == producers_.end() || Settled(found->second);
+  return found == producers_.end() || !rejected_.contains(found->second);
 }
 
 TpMirroredRunner::State& TpMirroredRunner::Mirrored(TextRunnerState& state) {
@@ -566,6 +597,12 @@ void TpMirroredRunner::SetPromptContext(
     } else {
       sequence = request->sequence;
       leases_[mirrored.id()] = sequence;
+      // The state may hold what a request rank 1 has not judged yet.
+      const auto producer = producers_.find(mirrored.id());
+      if (producer != producers_.end() && producer->second != sequence &&
+          unsettled_.contains(producer->second)) {
+        dependencies_[sequence].insert(producer->second);
+      }
     }
     const TpInstruction instruction{.op = TpInstructionOp::kPromptContext,
                                     .state = mirrored.id()};
@@ -842,6 +879,7 @@ std::uint64_t TpMirroredRunner::CacheCall(
     std::uint32_t state, const TpInstruction& instruction,
     const std::function<void()>& local) const {
   std::uint64_t sequence = 0;
+  TpInstruction sent;
   {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto lease = leases_.find(state);
@@ -855,9 +893,16 @@ std::uint64_t TpMirroredRunner::CacheCall(
     if (instruction.op != TpInstructionOp::kSnapshot) {
       producers_[state] = sequence;
     }
+    sent = instruction;
+    if (instruction.op == TpInstructionOp::kSnapshot) {
+      // Rank 1 compares the request's calls so far before it captures, so a
+      // snapshot is known to hold the same state on both ranks.
+      sent.count = ToWire(request.count, "count");
+      sent.digest = request.digest.value();
+    }
   }
   try {
-    sink_->Synchronize(sequence, instruction, local);
+    sink_->Synchronize(sequence, sent, local);
   } catch (...) {
     // A failed capture is a skipped snapshot on both ranks, not a failed call.
     if (instruction.op != TpInstructionOp::kSnapshot) {
@@ -939,6 +984,15 @@ void TpMirroredRunner::RestoreOrFork(TextRunnerState& state,
   if (!handle || handle->owner.get() != this)
     throw std::invalid_argument("foreign TP snapshot");
   auto& mirrored = Mirrored(state);
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto lease = leases_.find(mirrored.id());
+    if (lease != leases_.end() && handle->producer != 0 &&
+        handle->producer != lease->second &&
+        unsettled_.contains(handle->producer)) {
+      dependencies_[lease->second].insert(handle->producer);
+    }
+  }
   const auto sequence = CacheCall(
       mirrored.id(),
       {.op = TpInstructionOp::kRestore,
@@ -951,12 +1005,15 @@ void TpMirroredRunner::RestoreOrFork(TextRunnerState& state,
 }
 
 bool TpMirroredRunner::CanReuse(const TextRunnerSnapshot& snapshot) const {
+  // Rank 1 compared both ranks' calls before capturing, so a snapshot is
+  // reusable as soon as it exists, until its producer is rejected; a request
+  // that restores it earlier depends on that verdict.
   const auto* handle = dynamic_cast<const SnapshotHandle*>(&snapshot);
   if (handle == nullptr || handle->owner.get() != this) {
     return false;
   }
   const std::lock_guard<std::mutex> lock(mutex_);
-  return Settled(handle->producer);
+  return !rejected_.contains(handle->producer);
 }
 
 /// One open request on rank 1: what it needs to execute rank 0's calls for it
@@ -1190,6 +1247,12 @@ bool TpExecutor::ExecuteCall(std::uint64_t sequence, Request& request,
       case TpInstructionOp::kSnapshot: {
         if (instruction.snapshot_id <= last_snapshot_id_)
           throw std::logic_error("reused snapshot ID");
+        // Rank 0 sent the request's calls so far: capture only a state both
+        // ranks reached the same way, so the snapshot is reusable at once.
+        if (instruction.count != request.count ||
+            instruction.digest != request.digest.value() ||
+            !request.failure.empty())
+          throw std::runtime_error("the ranks diverged before this capture");
         last_snapshot_id_ = instruction.snapshot_id;
         const auto estimate = runner_->SnapshotPayloadBytes(state);
         if (estimate > snapshot_budget_ - snapshot_bytes_)

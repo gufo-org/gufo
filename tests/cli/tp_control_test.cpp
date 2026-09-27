@@ -284,6 +284,15 @@ int main() {
               {.sequence = command.sequence + 1, .state = 0, .token = 11},
               {.sequence = command.sequence + 2, .state = 7, .token = 0}}}};
   round_trip(batch);
+  // A capture carries the request's call count and digest so far.
+  round_trip({.sequence = command.sequence,
+              .kind = TpControlCommandKind::kInstruction,
+              .instruction = {.op = TpInstructionOp::kSnapshot,
+                              .index = 18,
+                              .state = 1,
+                              .count = 41,
+                              .digest = 0x1234,
+                              .snapshot_id = 7}});
   // Binding a state to its request's prompt context belongs to the request;
   // releasing it can happen between requests.
   round_trip(

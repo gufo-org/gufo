@@ -2934,8 +2934,8 @@ struct InferenceBackend::Impl {
     [[nodiscard]] bool finished() const noexcept { return finished_; }
 
     /// Ends the request on rank 1 (`kEnd` with rank 0's instruction count and
-    /// digest) and collects rank 1's verdict, which also decides whether other
-    /// requests may reuse what this one computed. Call once rank 0 makes no
+    /// digest) and collects rank 1's verdict, and the verdicts on any state
+    /// the request reused before they arrived. Call once rank 0 makes no
     /// further model calls for the request. Returns the first problem, or an
     /// empty string when both ranks agree.
     [[nodiscard]] std::string Finish() noexcept {
@@ -2944,6 +2944,7 @@ struct InferenceBackend::Impl {
       }
       finished_ = true;
       std::string problem;
+      bool settled = false;
       try {
         const auto note = [&](std::string message) {
           if (problem.empty()) {
@@ -2963,15 +2964,26 @@ struct InferenceBackend::Impl {
             note("TP worker failed: " + response.error);
           }
         }
-        // A request the ranks disagree about leaves states and snapshots that
-        // may differ between them; they are never reused, and the cache
-        // replaces them in time. Other requests keep theirs.
+        if (!state_->tp_runner->AwaitDependencies(sequence_)) {
+          note("TP request reused a state rank 1 rejected");
+        }
+        // A request the ranks disagree about leaves a state that may differ
+        // between them; it is never reused, and the cache replaces it in
+        // time. Other requests keep theirs.
         state_->tp_runner->Settle(sequence_, problem.empty());
+        settled = true;
       } catch (...) {
         try {
           if (problem.empty()) {
             problem = "TP request end failed";
           }
+        } catch (...) {
+        }
+      }
+      if (!settled) {
+        // Requests that reused this one's state wait for its verdict.
+        try {
+          state_->tp_runner->Settle(sequence_, false);
         } catch (...) {
         }
       }

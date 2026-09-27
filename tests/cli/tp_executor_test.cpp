@@ -4,7 +4,7 @@
 // correct when both ranks record the same calls with the same results, for
 // greedy, sampled, stopped, cancelled, multi-token, concurrent and batched
 // requests, when rank 1 reports the divergences it is meant to catch, and when
-// no request reuses what another computed before rank 1 agreed with it.
+// a request that reused what rank 1 then rejected fails too.
 
 #include "src/cli/serve/tp_executor.hpp"
 
@@ -479,9 +479,30 @@ public:
     std::string worker_error;
   };
 
+  /// A request that finished on rank 0 but has not ended on rank 1 yet.
+  struct Open {
+    std::uint64_t sequence{0};
+    Outcome outcome;
+  };
+
   /// Runs one request as serving does. `submitted` runs once the scheduler
   /// has the request.
   Outcome Run(
+      std::vector<TextRunnerToken> prompt, std::size_t max_tokens,
+      gufo::sampling::SamplingConfig sampling = {},
+      std::vector<std::string> stop_sequences = {},
+      TextGenerationScheduler::CancellationCheck is_cancelled = {},
+      bool reuse = false, std::size_t prefix = 0,
+      const std::function<void()>& submitted = {},
+      std::shared_ptr<const gufo::server::TextPromptContext> images = {}) {
+    return Close(RunOpen(std::move(prompt), max_tokens, std::move(sampling),
+                         std::move(stop_sequences), std::move(is_cancelled),
+                         reuse, prefix, submitted, std::move(images)));
+  }
+
+  /// Runs a request on rank 0 without ending it, as when the next request
+  /// arrives before rank 1's verdict on this one.
+  Open RunOpen(
       std::vector<TextRunnerToken> prompt, std::size_t max_tokens,
       gufo::sampling::SamplingConfig sampling = {},
       std::vector<std::string> stop_sequences = {},
@@ -516,21 +537,32 @@ public:
     if (submitted) {
       submitted();
     }
-    Outcome outcome;
-    std::string local_error;
+    Open open{.sequence = sequence};
     try {
-      outcome.result = request.Wait();
+      open.outcome.result = request.Wait();
     } catch (const std::exception& exception) {
-      local_error = exception.what();
+      open.outcome.worker_error = exception.what();
     }
+    return open;
+  }
+
+  /// Ends a request on rank 1 and settles it as serving does.
+  Outcome Close(Open open) {
+    const auto sequence = open.sequence;
+    Outcome outcome = std::move(open.outcome);
+    const std::string local_error = std::move(outcome.worker_error);
+    std::string error;
     Require(mirrored_->EndRequest(sequence, &error), "end: " + error);
     TpControlResponse response;
     Require(broker_->WaitForResponse(sequence, &response, &error),
             "response: " + error);
     Require(response.sequence == sequence, "response sequence");
-    mirrored_->Settle(sequence, response.error.empty());
-    outcome.worker_error =
-        response.error.empty() ? local_error : response.error;
+    const bool dependencies = mirrored_->AwaitDependencies(sequence);
+    mirrored_->Settle(sequence, response.error.empty() && dependencies);
+    outcome.worker_error = !response.error.empty() ? response.error
+                           : !dependencies
+                               ? std::string("reused a rejected state")
+                               : local_error;
     return outcome;
   }
 
@@ -846,9 +878,15 @@ int main() {
         {.op = TpInstructionOp::kRestore, .snapshot_id = 1},
         {.op = TpInstructionOp::kDrop, .snapshot_id = 1}};
     gufo::server::TpExecutionDigest digest;
-    for (const auto& call : calls) {
+    for (std::size_t index = 0; index < calls.size(); ++index) {
+      auto& call = calls[index];
       const std::vector<TextRunnerToken> prefix{5, 9};
       gufo::server::DigestTpCall(digest, call, prefix);
+      if (call.op == TpInstructionOp::kSnapshot) {
+        // As rank 0 sends it: the request's calls so far.
+        call.count = static_cast<std::uint32_t>(index + 1);
+        call.digest = digest.value();
+      }
       if (call.op == TpInstructionOp::kPrefill)
         gufo::server::DigestTpPrefill(
             digest, {.consumed_tokens = 2, .decode_ready = true}, 2);
@@ -924,8 +962,8 @@ int main() {
 
   // The mirrored runner alone: every call belongs to the request its state is
   // leased to, forwards bind their instruction's collective scope, a batch is
-  // one instruction, and what a request computed is reused only once rank 1
-  // agreed with it.
+  // one instruction, and a request that reuses what another computed depends
+  // on rank 1's verdict on it.
   {
     auto toy = std::make_shared<ToyRunner>(ToyOptions{.cache = true});
     auto sink = std::make_shared<CaptureSink>();
@@ -959,11 +997,13 @@ int main() {
             sink->sent[1].sequence == 8 && sink->sent[2].sequence == 7 &&
             sink->sent[3].sequence == 8,
         "each call names the request its state is leased to");
-    Require(!runner->CanReuse(*first),
-            "a running request's state is not reusable");
     const auto snapshot = runner->Snapshot(*first);
-    Require(!runner->CanReuse(*snapshot),
-            "a running request's snapshot is not reusable");
+    Require(runner->CanReuse(*snapshot),
+            "a snapshot is reusable as soon as it is captured");
+    Require(sink->sent.back().instruction.op == TpInstructionOp::kSnapshot &&
+                sink->sent.back().instruction.count == 3 &&
+                sink->sent.back().instruction.digest != 0,
+            "a capture carries the request's call count and digest");
 
     std::exception_ptr failures[2];
     const gufo::server::TextRunnerAdvance advances[] = {
@@ -993,20 +1033,32 @@ int main() {
     Require(scope->began == forwards,
             "every forward binds its instruction's collective scope");
 
+    const auto second_snapshot = runner->Snapshot(*second);
     std::string error;
     Require(runner->EndRequest(7, &error) && runner->EndRequest(8, &error),
             error);
     Require(!runner->EndRequest(7, &error), "a request ends once");
-    Require(!runner->CanReuse(*first) && !runner->CanReuse(*snapshot),
-            "an ended request is reusable only after its verdict");
+    Require(runner->CanReuse(*first) && runner->CanReuse(*second),
+            "an ended request's state is reusable before its verdict");
+    // Requests that reuse those states depend on the verdicts.
+    runner->BeginRequest(9);
+    runner->BeginRequest(10);
+    runner->SetPromptContext(*first, std::make_shared<TpRequestContext>(9));
+    runner->SetPromptContext(*second, std::make_shared<TpRequestContext>(10));
     runner->Settle(7, true);
     runner->Settle(8, false);
+    Require(runner->AwaitDependencies(9),
+            "a request that reused an agreed state stands");
+    Require(!runner->AwaitDependencies(10),
+            "a request that reused a rejected state fails too");
     Require(runner->CanReuse(*first) && runner->CanReuse(*snapshot),
             "an agreed request's state and snapshot are reusable");
-    Require(!runner->CanReuse(*second),
-            "a rejected request's state is never reusable");
+    Require(!runner->CanReuse(*second) && !runner->CanReuse(*second_snapshot),
+            "a rejected request's state and snapshot are not reused");
     second->Invalidate();
     Require(runner->CanReuse(*second), "a reset state is clean");
+    Require(runner->EndRequest(9, &error) && runner->EndRequest(10, &error),
+            error);
     bool unleased = false;
     try {
       runner->Advance(*first, 5);
@@ -1158,6 +1210,29 @@ int main() {
                 reused.result.tokens == recomputed.result.tokens,
             "an agreed recomputation is reused: " + reused.worker_error);
     pair.RequireSameCalls("rejected continuation");
+  }
+
+  // A request reuses what the previous one left before rank 1's verdict on
+  // it arrives, as on one host, and stands or falls with that verdict.
+  for (const bool reject : {false, true}) {
+    const std::string what =
+        reject ? "reuse before a rejection" : "reuse before a verdict";
+    ToyOptions rank1{.cache = true};
+    if (reject) {
+      rank1.diverge_at = prompt.size() + 2;
+    }
+    Pair pair({.cache = true}, rank1);
+    auto first = pair.RunOpen(prompt, 6, {}, {}, {}, true);
+    auto second = pair.RunOpen(prompt, 6, {}, {}, {}, true);
+    Require(second.outcome.result.cached_prompt_tokens == prompt.size(),
+            what + ": the second request reuses the first one's prompt");
+    const auto first_end = pair.Close(std::move(first));
+    const auto second_end = pair.Close(std::move(second));
+    Require(first_end.worker_error.empty() != reject,
+            what + ": the first request's verdict: " + first_end.worker_error);
+    Require(
+        second_end.worker_error.empty() != reject,
+        what + ": the second request follows it: " + second_end.worker_error);
   }
 
   // Concurrent requests: each call names its request, concurrent AR decoders

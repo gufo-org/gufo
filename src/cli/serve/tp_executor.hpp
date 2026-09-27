@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_TP_EXECUTOR_HPP_
 #define GUFO_SERVER_TP_EXECUTOR_HPP_
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -130,8 +131,10 @@ struct TpRequestContext final : TextPromptContext {
 /// aborting between layers would strand rank 1 inside an exchange, so
 /// cancellation acts only between calls, where the scheduler already checks.
 ///
-/// What a request computed is reused by no other request until rank 1 agreed
-/// with it (`Settle`), so a disagreement never spreads through the cache.
+/// A request may reuse what another computed before rank 1 judged it; it then
+/// fails if rank 1 rejects that producer (`AwaitDependencies`), and nothing a
+/// rejected request left is reused (`CanReuse`), so a disagreement never
+/// spreads through the cache.
 class TpMirroredRunner final
     : public TextModelRunner,
       public std::enable_shared_from_this<TpMirroredRunner> {
@@ -149,9 +152,13 @@ public:
   /// Sends `kEnd` with the request's instruction count and digest and
   /// releases its state. Returns false when the send failed.
   [[nodiscard]] bool EndRequest(std::uint64_t sequence, std::string* error);
-  /// Records rank 1's verdict on an ended request. What the request computed
-  /// becomes reusable once rank 1 agreed, and never if it did not.
+  /// Records rank 1's verdict on an ended request, which must include
+  /// `AwaitDependencies`. A state it left is not reused once rank 1 disagreed.
   void Settle(std::uint64_t sequence, bool agreed);
+  /// Waits for the verdicts on the requests whose live state `sequence`
+  /// reused before their verdict arrived; false when rank 1 rejected one, or
+  /// a verdict did not arrive in time. The request then fails too.
+  [[nodiscard]] bool AwaitDependencies(std::uint64_t sequence) const;
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override;
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override;
@@ -239,8 +246,6 @@ private:
   void SendInvalidate(std::uint32_t state) const noexcept;
   void Record(std::uint64_t sequence,
               const std::function<void(TpExecutionDigest&)>& add) const;
-  /// Under `mutex_`: whether what `producer` computed may be reused.
-  [[nodiscard]] bool Settled(std::uint64_t producer) const;
 
   std::shared_ptr<TextModelRunner> inner_;
   std::shared_ptr<TpInstructionSink> sink_;
@@ -259,6 +264,10 @@ private:
   /// Requests rank 1 has not judged yet, and those it disagreed with.
   mutable std::unordered_set<std::uint64_t> unsettled_;
   mutable std::unordered_set<std::uint64_t> rejected_;
+  /// Request to the unjudged requests whose live state it reused.
+  mutable std::unordered_map<std::uint64_t, std::unordered_set<std::uint64_t>>
+      dependencies_;
+  mutable std::condition_variable settled_;
   mutable std::string failure_;
 };
 
