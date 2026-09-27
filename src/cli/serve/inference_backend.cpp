@@ -122,8 +122,7 @@ TextPreparedPrompt PrepareQwenPrompt(
   // the next user turn directly after tool results. Preserve a checkpoint
   // before the generation suffix even when reasoning itself is retained.
   std::size_t cache_prefix = 0;
-  if (request.cache_prompt &&
-      (!options.preserve_thinking || !request.tools.empty())) {
+  if (!options.preserve_thinking || !request.tools.empty()) {
     const auto generation = tokenizer.Encode(
         tokenization::GenerationPrompt(options.enable_thinking),
         {.add_bos = false, .add_eos = false, .parse_special_tokens = true});
