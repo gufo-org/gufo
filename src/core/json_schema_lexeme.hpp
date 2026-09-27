@@ -2,6 +2,7 @@
 #define GUFO_CORE_JSON_SCHEMA_LEXEME_HPP_
 
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include "src/core/json.hpp"
@@ -18,6 +19,12 @@ public:
   };
   virtual ~JsonSchemaLexeme() = default;
   virtual Match Check(std::string_view bytes) const = 0;
+  virtual Match Advance(std::string& state, unsigned char byte) const {
+    state += static_cast<char>(byte);
+    return Check(state);
+  }
+  virtual bool CacheTransitions() const { return false; }
+  virtual void CanonicalMaskState(std::string&, std::size_t) const {}
   virtual bool AcceptValue(const json::Value& value) const {
     return Check(value.dump()).complete;
   }

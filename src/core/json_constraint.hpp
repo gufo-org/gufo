@@ -49,6 +49,9 @@ public:
 private:
   JsonConstraint() = default;
   friend class JsonConstraintCompiler;
+  friend class ConstraintVocabulary;
+  friend struct TokenConstraint;
+  State CanonicalMaskState(const State& state, std::size_t token_bytes) const;
   State Expand(State state) const;
   std::vector<Rule> rules_;
   std::vector<std::bitset<256>> classes_;
@@ -74,6 +77,7 @@ public:
   [[nodiscard]] std::size_t size() const { return pieces_.size(); }
 
 private:
+  friend struct TokenConstraint;
   struct Edge {
     std::uint32_t child;
     unsigned char byte;
@@ -84,6 +88,7 @@ private:
   };
   std::vector<Node> trie_{1};
   std::vector<Piece> pieces_;
+  std::size_t max_token_bytes_{0};
 };
 
 struct TokenConstraint {

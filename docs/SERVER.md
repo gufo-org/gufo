@@ -604,9 +604,14 @@ external references and unusable reference cycles return a validation error.
 Schemas allow 5,000 properties, 1,000 enum values and 120,000 characters in
 property/definition names and enum/const strings, with a 2 MiB document limit.
 Regex evaluation and grammar caches have bounded resource budgets.
+Patterns support Unicode classes, alternation, repetition, anchors and lookahead;
+pattern, format and length limits are enforced together. Lookbehind,
+backreferences, inline flags, nested character classes and unbounded repetition
+of assertions return a validation error before generation. String matching uses
+incremental state and reuses token masks when the remaining length permits it.
 
-Chat Completions can choose declared tools with `auto` or require one with
-`required`. Strict tool arguments follow their parameter schema;
+Structured Chat Completions can choose declared tools with `auto` or require one
+with `required`. Strict tool arguments follow their parameter schema;
 `response_format` governs the final answer. Quoted markup in argument values
 stays literal.
 

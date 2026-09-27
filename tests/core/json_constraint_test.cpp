@@ -151,11 +151,50 @@ void TestPrimitiveConstraints() {
   const auto word = compile(R"({"type":"string","pattern":"^[\\w]+$"})");
   assert(Accepts(*word, R"({"x":"é"})"));
   assert(Accepts(*word, R"({"x":"\u00e9"})"));
+  const auto spaces = compile(R"({"type":"string","pattern":"^[a b]+$"})");
+  assert(Accepts(*spaces, R"({"x":"a b"})"));
+  assert(Accepts(*spaces, R"({"x":"a\u0020b"})"));
+  const auto lengths =
+      compile(R"({"type":"string","minLength":2,"maxLength":2})");
+  for (auto text : {R"({"x":"ab"})", R"({"x":"é😀"})",
+                    R"({"x":"\u00e9\uD83D\uDE00"})", R"({"x":"\\\""})"})
+    assert(Accepts(*lengths, text));
+  for (auto text : {R"({"x":""})", R"({"x":"a"})", R"({"x":"abc"})",
+                    R"({"x":"\uD83D\uDE00"})", R"({"x":"e\u0301😀"})"})
+    assert(!Accepts(*lengths, text));
+  for (auto text : {R"({"x":"\uDC00a"})", R"({"x":"\uD800\u0000a"})",
+                    "{\"x\":\"\xe0\x80\x80"
+                    "a\"}",
+                    "{\"x\":\"\xed\xa0\x80"
+                    "a\"}",
+                    "{\"x\":\"\xf4\x90\x80\x80"
+                    "a\"}"})
+    assert(!Accepts(*lengths, text));
+  assert(Accepts(*lengths, R"({"x":"\uD800\uDFFFa"})"));
   const auto bounded_alternatives = compile(
       R"({"type":"string","pattern":"^(?:(?:ab){2}|c)$","maxLength":3})");
   assert(Accepts(*bounded_alternatives, R"({"x":"c"})"));
   assert(!prefix_allowed(*bounded_alternatives, R"({"x":"a)"));
   assert(!prefix_allowed(*bounded_alternatives, R"({"x":"\u0061)"));
+  const auto lookahead = compile(
+      R"({"type":"string","pattern":"^(?=a|c)(?:(?:ab){2}|c)$","maxLength":3})");
+  assert(Accepts(*lookahead, R"({"x":"c"})"));
+  assert(!prefix_allowed(*lookahead, R"({"x":"a)"));
+  assert(!prefix_allowed(*lookahead, R"({"x":"\u0061)"));
+  const auto intersection = compile(
+      R"({"type":"string","pattern":"^(?:999|127)\\.0\\.0\\.1$","format":"ipv4"})");
+  assert(Accepts(*intersection, R"({"x":"127.0.0.1"})"));
+  assert(!prefix_allowed(*intersection, R"({"x":"9)"));
+  assert(!prefix_allowed(*intersection, R"({"x":"\u0039)"));
+  const auto negative =
+      compile(R"({"type":"string","pattern":"^(?!.*bb)[ab]{1,4}$"})");
+  assert(Accepts(*negative, R"({"x":"aba"})"));
+  assert(!prefix_allowed(*negative, R"({"x":"abb)"));
+  const auto letters =
+      compile(R"({"type":"string","pattern":"^\\p{L}+$","maxLength":3})");
+  assert(Accepts(*letters, R"({"x":"é中a"})"));
+  assert(Accepts(*letters, R"({"x":"\u00e9\u4e2da"})"));
+  assert(!Accepts(*letters, R"({"x":"123"})"));
   const auto large_repeat = compile(
       R"({"type":"string","pattern":"^(?:a{500}|b{1,500})$","maxLength":3})");
   assert(Accepts(*large_repeat, R"({"x":"bbb"})"));
@@ -333,6 +372,105 @@ void TestTokensAndSampling() {
   assert(rejected);
 }
 
+void TestStringMaskCache() {
+  const std::vector<std::string> pieces{
+      "{\"x\":\"",      "a",    "abcdef", "\"}",  "\\u0061",
+      "\\uD83D\\uDE00", "\xc2", "\x80",   "a\"}", ""};
+  auto vocabulary = std::make_shared<ConstraintVocabulary>(
+      pieces.size(), [&](std::uint32_t i) {
+        return ConstraintVocabulary::Piece{pieces[i], i == pieces.size() - 1};
+      });
+  for (bool pattern : {false, true}) {
+    auto schema = parse(R"({
+      "type":"object","properties":{"x":{
+        "type":"string","minLength":1,"maxLength":48}},
+      "required":["x"],"additionalProperties":false})");
+    if (pattern)
+      schema["properties"]["x"]["pattern"] = "^[a-z]+$";
+    TokenConstraint constraint;
+    constraint.grammar = JsonConstraint::Compile(schema, true);
+    constraint.vocabulary = vocabulary;
+    auto at = [&](std::size_t count) {
+      auto state = vocabulary->Accept(*constraint.grammar,
+                                      constraint.grammar->Start(), 0);
+      for (std::size_t i = 0; i < count; ++i)
+        state = vocabulary->Accept(*constraint.grammar, state, 1);
+      return state;
+    };
+    const auto one = at(1), five = at(5);
+    assert(one != five);
+    assert(constraint.Allowed(one) == constraint.Allowed(five));
+    const auto near = at(47);
+    const auto mask = constraint.Allowed(near);
+    assert((*mask)[1] && !(*mask)[2] && (*mask)[3] && (*mask)[4]);
+    assert((*mask)[5] == !pattern);
+    assert(!(*mask)[9]);
+    auto last = vocabulary->Accept(*constraint.grammar, near, 4);
+    const auto full = constraint.Allowed(last);
+    assert(!(*full)[1] && !(*full)[2] && (*full)[3] && !(*full)[4]);
+    if (!pattern) {
+      auto partial = vocabulary->Accept(*constraint.grammar, near, 6);
+      assert((*constraint.Allowed(partial))[7]);
+      assert(!(*constraint.Allowed(partial))[3]);
+      partial = vocabulary->Accept(*constraint.grammar, partial, 7);
+      assert(*constraint.Allowed(partial) == *full);
+    }
+  }
+  {
+    const auto schema = parse(R"({
+      "type":"object","properties":{"x":{"type":"string","minLength":48,
+      "maxLength":96}},"required":["x"],"additionalProperties":false})");
+    TokenConstraint constraint;
+    constraint.grammar = JsonConstraint::Compile(schema, true);
+    constraint.vocabulary = vocabulary;
+    auto state =
+        vocabulary->Accept(*constraint.grammar, constraint.grammar->Start(), 0);
+    const auto empty = constraint.Allowed(state);
+    for (int i = 0; i < 16; ++i)
+      state = vocabulary->Accept(*constraint.grammar, state, 1);
+    assert(constraint.Allowed(state) == empty);
+    assert(!(*empty)[3] && !(*empty)[8]);
+    for (int i = 16; i < 47; ++i)
+      state = vocabulary->Accept(*constraint.grammar, state, 1);
+    const auto near = constraint.Allowed(state);
+    assert(near != empty && !(*near)[3] && (*near)[8]);
+    state = vocabulary->Accept(*constraint.grammar, state, 1);
+    assert((*constraint.Allowed(state))[3]);
+  }
+  // Character limits count Unicode scalars, not escaped bytes, and do not
+  // impose the old 64 KiB serialized-prefix ceiling.
+  auto schema = parse(R"({
+    "type":"object","properties":{"x":{"type":"string","minLength":70000,
+    "maxLength":70000}},"required":["x"],"additionalProperties":false})");
+  auto grammar = JsonConstraint::Compile(schema, true);
+  const auto content = std::string(69999, 'a') + "\\uD83D\\uDE00";
+  assert(Accepts(*grammar, "{\"x\":\"" + content + "\"}"));
+  assert(!Accepts(*grammar, "{\"x\":\"" + content + "a\"}"));
+  // Large minLength must not require one allocated DFA frontier per character.
+  schema["properties"]["x"]["pattern"] = "^(?:ab)+$";
+  schema["properties"]["x"]["minLength"] = 1048575;
+  schema["properties"]["x"]["maxLength"] = 1048576;
+  grammar = JsonConstraint::Compile(schema, true);
+  assert(!grammar->Start().empty());
+}
+
+void TestUnsupportedPatterns() {
+  for (const auto pattern : {R"((a)\1)", "(?<=a)b", "(?i)a", "[a&&b]",
+                             "(?:(?=a)a)*", "^\\bword\\b$"}) {
+    auto schema = parse(R"({
+      "type":"object","properties":{"x":{"type":"string"}},
+      "required":["x"],"additionalProperties":false})");
+    schema["properties"]["x"]["pattern"] = pattern;
+    bool rejected = false;
+    try {
+      (void)JsonConstraint::Compile(schema, true);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+}
+
 void TestReasoningConstraint() {
   const auto plain = JsonConstraint::Object();
   const auto grammar = JsonConstraint::WithReasoning(plain);
@@ -368,7 +506,8 @@ void TestReasoningConstraint() {
     "type":"object","properties":{"value":{"type":"integer","minimum":1,"maximum":5}},
     "required":["value"],"additionalProperties":false})"),
                                             true);
-  const auto mixed = JsonConstraint::WithTools(plain, {{"score", tool}}, false);
+  const auto mixed = JsonConstraint::WithTools(
+      plain, {{"score", tool}, {"rating", tool}, {"metadata", plain}}, false);
   assert(Accepts(*mixed, "{\"final\":true}"));
   assert(Accepts(
       *mixed,
@@ -379,6 +518,15 @@ void TestReasoningConstraint() {
   assert(!Accepts(
       *mixed,
       R"(<tool_call>{"name":"unknown","arguments":{"value":3}}</tool_call>)"));
+  assert(Accepts(
+      *mixed,
+      R"(<tool_call>{"name":"rating","arguments":{"value":4}}</tool_call>)"));
+  assert(!Accepts(
+      *mixed,
+      R"(<tool_call>{"name":"rating","arguments":{"value":0}}</tool_call>)"));
+  assert(Accepts(
+      *mixed,
+      R"(<tool_call>{"name":"metadata","arguments":{"extra":true}}</tool_call>)"));
   const auto required =
       JsonConstraint::WithTools(plain, {{"score", tool}}, true);
   assert(!Accepts(*required, "{\"final\":true}"));
@@ -423,6 +571,8 @@ int main(int argc, char** argv) {
   TestIntegerBoundsAndRecursion();
   TestPrimitiveConstraints();
   TestTokensAndSampling();
+  TestStringMaskCache();
+  TestUnsupportedPatterns();
   TestReasoningConstraint();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";

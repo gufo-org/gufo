@@ -555,14 +555,16 @@ private:
         Invalid("maximum enum/const value count is 1000");
       Sequence choices;
       std::size_t enum_characters = 0;
+      std::shared_ptr<const JsonSchemaLexeme> number_check, string_check;
       for (const auto& value : values) {
         if (!std::ranges::any_of(
                 types, [&](const auto& t) { return MatchesType(value, t); }))
           Invalid("enum/const value does not match its type");
         if (value.is_number()) {
-          auto check = JsonSchemaLexeme::Number(
-              schema, std::ranges::find(types, "number") == types.end());
-          if (!check->AcceptValue(value))
+          if (!number_check)
+            number_check = JsonSchemaLexeme::Number(
+                schema, std::ranges::find(types, "number") == types.end());
+          if (!number_check->AcceptValue(value))
             continue;
         }
         if (value.is_string()) {
@@ -573,8 +575,9 @@ private:
             Invalid(
                 "an enum with more than 250 entries is limited to 15000 string "
                 "characters");
-          auto check = JsonSchemaLexeme::String(schema);
-          if (!check->AcceptValue(value))
+          if (!string_check)
+            string_check = JsonSchemaLexeme::String(schema);
+          if (!string_check->AcceptValue(value))
             continue;
         }
         choices.push_back(Literal(value.dump()));
@@ -827,7 +830,18 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   Rule alternatives;
   if (!required)
     alternatives.push_back({answer->root_});
+  auto check_capacity = [&](std::size_t rules, std::size_t classes,
+                            std::size_t lexemes) {
+    auto fits = [](std::size_t current, std::size_t extra) {
+      return current <= kMaxRules && extra <= kMaxRules - current;
+    };
+    if (!fits(grammar->rules_.size(), rules) ||
+        !fits(grammar->classes_.size(), classes) ||
+        !fits(grammar->lexemes_.size(), lexemes))
+      Invalid("combined tool grammar exceeds its resource budget");
+  };
   auto literal = [&](std::string_view text) {
+    check_capacity(1, 0, 0);
     Sequence bytes;
     for (unsigned char byte : text)
       bytes.push_back(kTerminal | byte);
@@ -836,9 +850,18 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     return id;
   };
   const auto end = literal("}</tool_call>");
+  std::map<const JsonConstraint*, std::uint32_t> imported{
+      {answer.get(), answer->root_}};
   for (const auto& [name, arguments] : tools) {
     const auto begin = literal(
         "<tool_call>{\"name\":" + json::Value(name).dump() + ",\"arguments\":");
+    if (const auto found = imported.find(arguments.get());
+        found != imported.end()) {
+      alternatives.push_back({begin, found->second, end});
+      continue;
+    }
+    check_capacity(arguments->rules_.size(), arguments->classes_.size(),
+                   arguments->lexemes_.size());
     const auto rules = grammar->rules_.size();
     const auto classes = grammar->classes_.size();
     const auto lexemes = grammar->lexemes_.size();
@@ -858,9 +881,11 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
                        : symbol + rules;
       grammar->rules_.push_back(std::move(rule));
     }
-    alternatives.push_back(
-        {begin, static_cast<std::uint32_t>(arguments->root_ + rules), end});
+    const auto root = static_cast<std::uint32_t>(arguments->root_ + rules);
+    imported.emplace(arguments.get(), root);
+    alternatives.push_back({begin, root, end});
   }
+  check_capacity(1, 0, 0);
   grammar->root_ = grammar->rules_.size();
   grammar->rules_.push_back(std::move(alternatives));
   if (cache.size() >= 16)
@@ -910,9 +935,8 @@ JsonConstraint::State JsonConstraint::Advance(const State& state,
     const auto symbol = stack.symbols.back();
     if (symbol & kLexeme) {
       auto candidate = stack;
-      candidate.lexeme += static_cast<char>(byte);
       const auto result =
-          lexemes_.at(symbol & ~kLexeme)->Check(candidate.lexeme);
+          lexemes_.at(symbol & ~kLexeme)->Advance(candidate.lexeme, byte);
       if (result.prefix)
         next.push_back(candidate);
       if (result.complete) {
@@ -933,6 +957,19 @@ bool JsonConstraint::Complete(const State& state) const {
       state, [](const auto& stack) { return stack.symbols.empty(); });
 }
 
+JsonConstraint::State JsonConstraint::CanonicalMaskState(
+    const State& state, std::size_t token_bytes) const {
+  auto canonical = state;
+  for (auto& stack : canonical)
+    if (!stack.symbols.empty() && (stack.symbols.back() & kLexeme))
+      lexemes_.at(stack.symbols.back() & ~kLexeme)
+          ->CanonicalMaskState(stack.lexeme, token_bytes);
+  std::ranges::sort(canonical);
+  canonical.erase(std::unique(canonical.begin(), canonical.end()),
+                  canonical.end());
+  return canonical;
+}
+
 ConstraintVocabulary::ConstraintVocabulary(std::uint32_t size,
                                            const Reader& reader) {
   if (size == 0 || size > 1048576)
@@ -950,6 +987,7 @@ ConstraintVocabulary::ConstraintVocabulary(std::uint32_t size,
     if (piece.text.size() > 4096)
       throw std::invalid_argument(
           "constraint vocabulary token exceeds 4096 bytes");
+    max_token_bytes_ = std::max(max_token_bytes_, piece.text.size());
     std::uint32_t node = 0;
     for (unsigned char byte : piece.text) {
       auto& edges = trie_[node].edges;
@@ -993,10 +1031,9 @@ std::vector<std::uint8_t> ConstraintVocabulary::Allowed(
   states.emplace_back(state);
   std::map<JsonConstraint::State, std::uint32_t> intern{{{}, 0}, {state, 1}};
   std::size_t work = 0;
-  // Lexical predicates carry the current scalar. Unlike a grammar's string
-  // loop, distinct word suffixes cannot be interned into one state. Walk these
-  // branches with depth-bounded scratch instead of allocating a 256-way
-  // transition table for every vocabulary prefix.
+  // Numeric predicates retain their scalar text; strings use compact lexer/DFA
+  // states. Walk numeric branches with depth-bounded scratch rather than
+  // allocating a 256-way transition table for every vocabulary prefix.
   auto direct = [&](auto&& self, std::uint32_t node,
                     const JsonConstraint::State& current) -> void {
     if (++work > kMaxWork)
@@ -1011,8 +1048,10 @@ std::vector<std::uint8_t> ConstraintVocabulary::Allowed(
   };
   auto walk = [&](auto&& self, std::uint32_t node,
                   std::uint32_t current) -> void {
-    if (std::ranges::any_of(states[current].state, [](const auto& stack) {
-          return !stack.symbols.empty() && (stack.symbols.back() & kLexeme);
+    if (std::ranges::any_of(states[current].state, [&](const auto& stack) {
+          return !stack.symbols.empty() && (stack.symbols.back() & kLexeme) &&
+                 !grammar.lexemes_.at(stack.symbols.back() & ~kLexeme)
+                      ->CacheTransitions();
         })) {
       direct(direct, node, states[current].state);
       return;
@@ -1025,11 +1064,15 @@ std::vector<std::uint8_t> ConstraintVocabulary::Allowed(
       auto& transition = states[current].next[edge.byte];
       if (transition == UINT32_MAX) {
         auto next = grammar.Advance(states[current].state, edge.byte);
+        if (states.size() >= 8192 && !intern.contains(next)) {
+          // Cache capacity is an optimization limit, not a language limit.
+          if (!next.empty())
+            direct(direct, edge.child, next);
+          continue;
+        }
         auto [found, inserted] = intern.emplace(next, states.size());
         transition = found->second;
         if (inserted) {
-          if (states.size() >= 8192)
-            throw std::runtime_error("JSON transition cache limit exceeded");
           states.emplace_back(std::move(next));
         }
       }
@@ -1061,16 +1104,18 @@ JsonConstraint::State ConstraintVocabulary::Accept(
 
 std::shared_ptr<const std::vector<std::uint8_t>> TokenConstraint::Allowed(
     const JsonConstraint::State& state) const {
+  auto canonical =
+      grammar->CanonicalMaskState(state, vocabulary->max_token_bytes_);
   {
     const std::lock_guard lock(mutex_);
-    if (const auto found = masks_.find(state); found != masks_.end())
+    if (const auto found = masks_.find(canonical); found != masks_.end())
       return found->second;
   }
   auto mask = std::make_shared<const std::vector<std::uint8_t>>(
-      vocabulary->Allowed(*grammar, state));
+      vocabulary->Allowed(*grammar, canonical));
   const std::lock_guard lock(mutex_);
   if (masks_.size() >= 16)
     masks_.erase(masks_.begin());
-  return masks_.emplace(state, std::move(mask)).first->second;
+  return masks_.emplace(std::move(canonical), std::move(mask)).first->second;
 }
 }  // namespace gufo::sampling

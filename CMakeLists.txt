@@ -109,6 +109,7 @@ add_library(gufo_core STATIC
   src/core/gguf_identity.cpp
   src/core/json_constraint.cpp
   src/core/json_schema_lexeme.cpp
+  src/core/json_schema_regex.cpp
   src/core/sampling.cpp
   src/models/minimax_h3/audio_vae.cpp
   src/models/minimax_h3/denoiser.cpp

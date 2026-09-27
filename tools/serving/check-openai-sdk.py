@@ -723,16 +723,26 @@ def check_structured_limits(client, model, checks, vision=False):
     assert checked["finish"] == "stop", checked
     Draft202012Validator(bounded).validate(json.loads(checked["text"]))
     record("schema_unicode_bounds", checked)
-    alternatives = {"type": "object", "properties": {"x": {
-        "type": "string", "pattern": "^(?:(?:ab){2}|c)$", "maxLength": 3}},
-        "required": ["x"], "additionalProperties": False}
-    checked = chat_result(client, {**fresh, "max_completion_tokens": 32,
-        "messages": [{"role": "user", "content": "Return ab. Start the value with ab."}],
-        "response_format": {"type": "json_schema", "json_schema": {
-            "name": "bounded_alternatives", "strict": True, "schema": alternatives}}}, True)
-    assert checked["finish"] == "stop", checked
-    Draft202012Validator(alternatives).validate(json.loads(checked["text"]))
-    record("schema_alternative_length", checked)
+    from jsonschema import FormatChecker
+    for name, constraints, prompt, expected in (
+        ("alternative_length", {"pattern": "^(?:(?:ab){2}|c)$", "maxLength": 3},
+         "Return ab. Start the value with ab.", "c"),
+        ("lookahead_length", {"pattern": "^(?=a|c)(?:(?:ab){2}|c)$", "maxLength": 3},
+         "Return ab. Start the value with ab.", "c"),
+        ("pattern_format", {"pattern": r"^(?:999|127)\.0\.0\.1$", "format": "ipv4"},
+         "Return the address 999.0.0.1, exactly.", "127.0.0.1"),
+    ):
+        bounded = {"type": "object", "properties": {"x": {"type": "string", **constraints}},
+                   "required": ["x"], "additionalProperties": False}
+        checked = chat_result(client, {**fresh, "max_completion_tokens": 32,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": name, "strict": True, "schema": bounded}}}, True)
+        assert checked["finish"] == "stop", checked
+        value = json.loads(checked["text"])
+        Draft202012Validator(bounded, format_checker=FormatChecker()).validate(value)
+        assert value["x"] == expected, checked
+        record("schema_" + name, checked)
 
 
 def check_response(response, reasoning):

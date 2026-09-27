@@ -50,10 +50,10 @@ def main():
                  "minItems": minimum, "maxItems": limit},
                 [json.dumps([True] * count) for count in (0, 1, 2, 3, 10, 256, 257, 258)])
     words = ["", "a", "ab", "abc", "c0", "abc1", "c5abc3", "ABC", "aABC0",
-             "é", "é😀", "e\u0301😀", "@name_12", "x@name", "\n", "OK\n"]
+             "é", "é😀", "e\u0301😀", "@name_12", "x@name", "\n", "OK\n", "a b", "a&b"]
     for pattern in ("^@[a-zA-Z0-9_]+$", "^(?:ab|c[0-9])+$", "[A-Z]",
                     "^(?=.*[A-Z])(?=.*[0-9]).+$", "^é😀$", "^OK$",
-                    r"^[\w]+$", r"^[\s]+$", r"^(?:(?:ab){2}|c)$"):
+                    r"^[\w]+$", r"^[\s]+$", r"^(?:(?:ab){2}|c)$", r"^[a b]+$", r"^[a&b]+$"):
         for minimum, maximum in ((0, 100), (2, 4)):
             add({"type": "string", "pattern": pattern, "minLength": minimum,
                  "maxLength": maximum},
@@ -63,7 +63,12 @@ def main():
                    for chars in itertools.product("abcé", repeat=n)]
     for pattern in ("^(?:(?:ab){2}|c)$", "^(?:ab)+$", "^(?:[^a-c]{4}|c)$",
                     "^a{1,3}b?$", "^a*?b+$", "a|b$", r"^[\w]{1,3}$",
-                    "^.{2,4}$", r"^[^ab]{1,2}$", "^(a|bc){1,2}$"):
+                    "^.{2,4}$", r"^[^ab]{1,2}$", "^(a|bc){1,2}$",
+                    "^(?=a|c)(?:(?:ab){2}|c)$", "^(?!ab)(?:ab|ac|b)$",
+                    "^(?=.{2}$)(?!aa)[ab]+$", "^(?:a(?=b)b|c)$",
+                    "^a(?=b$)b$", "^(?!.*bb)[ab]{1,4}$",
+                    "^(?:(?=a)a){2}$", "(?:^ab|c$)", "^(?:a?|b){2,4}$",
+                    "^(?!.*bb)(?:.{1,3}|(?:.{0,2}[ab]{0,2}|(?:ab|b)?[^a]{0,2}){0,2}[^a]{0,2}){1,3}(?:a?|b){0,2}$"):
         for minimum, maximum in ((0, 3), (2, 4), (3, 3)):
             add({"type": "string", "pattern": pattern, "minLength": minimum,
                  "maxLength": maximum},
@@ -81,7 +86,10 @@ def main():
     alphabet_words = ["".join(chars) for n in range(5)
                       for chars in itertools.product("abc", repeat=n)]
     for pattern in ("^(?:(?:ab){2}|c)$", "^(?:ab)+$", "^(?:a{2,3}|b[ac])$",
-                    "^(?:a{500}|b{1,500})$"):
+                    "^(?:a{500}|b{1,500})$", "^(?=a|c)(?:(?:ab){2}|c)$",
+                    "^(?!ab)(?:ab|ac|b)$", "^(?=.{2}$)(?!aa)[ab]+$",
+                    "^(?:a(?=b)b|c)$", "^a(?=b$)b$", "^(?!.*bb)[ab]{1,4}$",
+                    "^(?:(?=a)a){2}$", "^(?:a?|b){2,4}$"):
         # minLength=0 makes optional terminal line breaks irrelevant to these
         # letter-only prefixes (ICU and Python differ in '$' line-break rules).
         for minimum, maximum in ((0, 1), (0, 2), (0, 3), (0, 4)):
