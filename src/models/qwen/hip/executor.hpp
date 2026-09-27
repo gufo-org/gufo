@@ -517,6 +517,7 @@ public:
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   void SetCancellationCheck(std::function<bool()> check) {
     cancellation_check_ = std::move(check);
+    vision_input_.SetCancellationCheck(cancellation_check_);
   }
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;

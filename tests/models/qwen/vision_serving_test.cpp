@@ -288,7 +288,30 @@ void CheckAppendSnapshotOracle(
       restored.RestoreSnapshot(*snapshot);
       restored.ConfigureVision(full, encoder);
       int cancellation_checks = 0;
-      restored.SetCancellationCheck([&] { return ++cancellation_checks == 5; });
+      restored.SetCancellationCheck([&] { return ++cancellation_checks >= 5; });
+      bool vision_cancelled = false;
+      try {
+        (void)restored.ForwardPromptBatch(tokens.subspan(count), count);
+      } catch (const std::runtime_error& error) {
+        vision_cancelled =
+            std::string_view(error.what()) == "vision encoding cancelled";
+      }
+      Require(vision_cancelled && cancellation_checks == 5,
+              "prefill must observe cancellation inside image encoding");
+      restored.SetCancellationCheck({});
+      restored.RestoreSnapshot(*snapshot);
+      restored.ConfigureVision(full, encoder);
+      (void)restored.ForwardPromptBatch(tokens.subspan(count), count);
+      (void)delayed.ForwardPromptBatch(tokens.subspan(count), count);
+      (void)attached.ForwardPromptBatch(tokens.subspan(count), count);
+      equal_logits(delayed.CopyLastLogits(), restored.CopyLastLogits());
+
+      // The completed image embedding is reusable after restoration, so the
+      // next cancellation reaches the text layers rather than the encoder.
+      restored.RestoreSnapshot(*snapshot);
+      restored.ConfigureVision(full, encoder);
+      cancellation_checks = 0;
+      restored.SetCancellationCheck([&] { return ++cancellation_checks >= 5; });
       bool cancelled = false;
       try {
         (void)restored.ForwardPromptBatch(tokens.subspan(count), count);
@@ -301,8 +324,6 @@ void CheckAppendSnapshotOracle(
       restored.SetCancellationCheck([] { return false; });
       restored.RestoreSnapshot(*snapshot);
       restored.ConfigureVision(full, encoder);
-      (void)delayed.ForwardPromptBatch(tokens.subspan(count), count);
-      (void)attached.ForwardPromptBatch(tokens.subspan(count), count);
       (void)restored.ForwardPromptBatch(tokens.subspan(count), count);
       equal_logits(delayed.CopyLastLogits(), attached.CopyLastLogits());
       equal_logits(delayed.CopyLastLogits(), restored.CopyLastLogits());
