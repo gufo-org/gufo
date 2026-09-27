@@ -100,6 +100,13 @@ private:
     }
   };
 
+  /// Merge table entry: the rank that orders merges, and the token the pair
+  /// merges into (kInvalidTokenId when the vocabulary has no such token).
+  struct Merge {
+    std::uint32_t rank;
+    TokenId token;
+  };
+
   QwenTokenizer() = default;
 
   void InitializeByteTokens(bool eager_decoded_tokens = true);
@@ -109,9 +116,10 @@ private:
   std::vector<std::string> id_to_token_;
   std::vector<std::string> id_to_decoded_token_;
   std::unordered_map<std::string, TokenId> token_to_id_;
-  std::unordered_map<std::pair<TokenId, TokenId>, std::uint32_t, PairHash>
-      merge_ranks_;
+  std::unordered_map<std::pair<TokenId, TokenId>, Merge, PairHash> merge_ranks_;
   std::unordered_map<std::string, TokenId> special_token_to_id_;
+  /// Special tokens in one contiguous list, scanned per Encode call.
+  std::vector<std::pair<std::string, TokenId>> special_token_list_;
   std::unordered_map<TokenId, bool> is_special_token_;
 
   std::array<TokenId, 256> byte_tokens_{};
