@@ -2,10 +2,14 @@
 
 #include <arpa/inet.h>
 
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -19,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -744,6 +749,7 @@ int RunServe(std::span<const char* const> args) {
   std::string parse_err;
 
   std::shared_ptr<server::InferenceBackend> backend;
+  bool tp_rank_zero = false;
   std::shared_ptr<server::VideoJobService> video_jobs;
   std::shared_ptr<server::TtsService> tts;
   std::shared_ptr<server::AsrService> asr;
@@ -1217,6 +1223,16 @@ int RunServe(std::span<const char* const> args) {
     std::shared_ptr<models::qwen38_flash_next::rocm::Communicator>
         tp_communicator;
     std::shared_ptr<server::TpControlChannel> tp_control;
+    if (tp_world_size == 2 && tp_rank == 1) {
+      // Rank 1 serves nothing and keeps nothing worth saving: stop at once on
+      // SIGINT or SIGTERM, also while loading. As a container's PID 1 it
+      // would otherwise ignore them.
+      struct sigaction stop{};
+      stop.sa_handler = [](int) { std::_Exit(0); };
+      ::sigemptyset(&stop.sa_mask);
+      (void)::sigaction(SIGTERM, &stop, nullptr);
+      (void)::sigaction(SIGINT, &stop, nullptr);
+    }
     if (tp_world_size == 2) {
 #ifdef GUFO_ENABLE_TP2_RDMA
       const models::qwen38_flash_next::rocm::IbrverbsConfig rdma_config{
@@ -1317,6 +1333,7 @@ int RunServe(std::span<const char* const> args) {
       return 0;
     }
 #endif
+    tp_rank_zero = tp_world_size == 2;
   }
 
   server::HttpServer server(
@@ -1332,7 +1349,34 @@ int RunServe(std::span<const char* const> args) {
     std::cerr << "Error starting HTTP server: " << err << "\n";
     return 1;
   }
+  // Rank 0 of a TP2 pair whose peer or link is gone fails every request, so
+  // it exits for a supervisor to restart both ranks; rank 1 exits on its own.
+  // Requests that already failed get a moment to deliver their errors. The
+  // exit skips teardown, which could wait on an exchange the peer never ends.
+  std::atomic<bool> serving{true};
+  std::thread pair_watch;
+  if (tp_rank_zero) {
+    pair_watch = std::thread([&serving, backend] {
+      while (serving.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const auto failure = backend->tp_failure();
+        if (failure.empty()) {
+          continue;
+        }
+        server::Logger::Error(
+            "server", "event=tp_pair_lost action=exit reason=" + failure);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::cerr.flush();
+        std::fflush(nullptr);
+        std::_Exit(1);
+      }
+    });
+  }
   server.run(/*handle_signals=*/true);
+  serving.store(false, std::memory_order_release);
+  if (pair_watch.joinable()) {
+    pair_watch.join();
+  }
   return 0;
 }
 

@@ -3918,9 +3918,25 @@ std::string InferenceBackend::model_id() const {
 
 bool InferenceBackend::ready() const {
 #if defined(ENGINE_ENABLE_HIP)
-  return impl_->Snapshot() != nullptr;
+  return impl_->Snapshot() != nullptr && tp_failure().empty();
 #else
   return false;
+#endif
+}
+
+std::string InferenceBackend::tp_failure() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr || state->tp_runner == nullptr) {
+    return {};
+  }
+  auto failure = state->tp_runner->Failure();
+  if (failure.empty() && state->response_broker != nullptr) {
+    failure = state->response_broker->Failure();
+  }
+  return failure;
+#else
+  return {};
 #endif
 }
 

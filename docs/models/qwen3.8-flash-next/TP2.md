@@ -46,9 +46,11 @@ decoders batched; more wait up to `--max-pending`, the rest get HTTP 429.
 
 Limits:
 
-- A lost peer or a disagreement fails the request with HTTP 500, and a lost
-  peer fails every later request, but the process keeps running and `/ready`
-  stays green: restart both ranks.
+- A disagreement fails its request with HTTP 500. A lost peer or link makes
+  both ranks exit with status 1; rank 0 first turns `/ready` red and gives
+  failed requests a second to report. Run both ranks under a supervisor that
+  restarts them (for example systemd `Restart=always`): each waits about 30 s
+  for the other before loading the model, so restarted ranks pair up again.
 - Each session holds a full-context state on each rank. Full Q8 (six `Q8_0`
   shards, which do not fit one host) at 262,144 tokens uses 87 GB of each
   host's 127 GB GPU memory with four sessions and 103 GB with eight.
@@ -167,5 +169,7 @@ On both hosts, from one commit (record it and the binary hash):
 7. Disk cache (`--cache-disk` on both ranks): after both ranks restart,
    `tools/serving/check-continuation.py --restore` restores its greedy cases
    from disk with the same outputs.
-8. Killing rank 1 mid-request returns 500 promptly.
+8. Killing rank 1 mid-request returns 500 promptly, and rank 0 then exits
+   with status 1; killing rank 0 makes rank 1 exit with status 1. SIGTERM
+   stops either rank promptly.
 9. For speed, report the median of several warm requests.

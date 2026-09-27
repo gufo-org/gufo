@@ -130,6 +130,11 @@ public:
   [[nodiscard]] bool run_worker(std::string* error);
 #endif
 
+  /// Rank 0 of a TP2 pair: why the pair broke (rank 1 or the link was lost),
+  /// or empty. Once it did, every later request fails and the server is not
+  /// ready.
+  [[nodiscard]] std::string tp_failure() const;
+
   /// Stable model identifier used in API responses.
   [[nodiscard]] std::string model_id() const override;
   [[nodiscard]] bool ready() const override;

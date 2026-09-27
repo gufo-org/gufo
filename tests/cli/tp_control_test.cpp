@@ -690,6 +690,7 @@ int main() {
               nine_response.tokens == std::vector<std::int32_t>{19} &&
               eleven_response.tokens == std::vector<std::int32_t>{11},
           "TP broker routes out-of-order responses by sequence");
+  Require(broker.Failure().empty(), "a working TP broker reports no failure");
 
   Require(broker.RegisterPendingResponse(12, &server_error), server_error);
   const TpControlResponse unexpected{.sequence = 13, .tokens = {130}};
@@ -700,6 +701,8 @@ int main() {
           "TP broker fails closed on an unknown response");
   Require(!broker.RegisterPendingResponse(14, &server_error),
           "TP broker rejects registrations after poisoning");
+  Require(broker.Failure().find("unknown or duplicate") != std::string::npos,
+          "a poisoned TP broker reports why");
 
   const auto interrupt_port = FreePort();
   std::shared_ptr<TpControlChannel> interrupt_client;
@@ -804,6 +807,19 @@ int main() {
               server_error);
   Require(idle_received.tokens == idle_response.tokens,
           "TP broker delivers the response that arrived after the idle wait");
+  Require(idle_broker.Failure().empty(), "an idle TP pair is not a lost peer");
+
+  // Rank 1 going away is noticed without any request in flight, so rank 0 can
+  // exit rather than fail every later request.
+  idle_client.reset();
+  const auto lost_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (idle_broker.Failure().empty() &&
+         std::chrono::steady_clock::now() < lost_deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  Require(idle_broker.Failure().find("receive failed") != std::string::npos,
+          "an idle TP broker reports a lost peer: " + idle_broker.Failure());
 
   Require(server->port() == port && client->port() == port,
           "TP control service port");

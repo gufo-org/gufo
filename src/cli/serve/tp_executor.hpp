@@ -160,6 +160,8 @@ public:
   /// reused before their verdict arrived; false when rank 1 rejected one, or
   /// a verdict did not arrive in time. The request then fails too.
   [[nodiscard]] bool AwaitDependencies(std::uint64_t sequence) const;
+  /// Why the instruction channel failed, or empty while it works.
+  [[nodiscard]] std::string Failure() const;
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override;
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override;

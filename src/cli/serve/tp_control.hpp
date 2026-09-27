@@ -287,6 +287,9 @@ public:
                                      TpControlResponse* response,
                                      std::string* error);
   void FailAll(std::string reason);
+  /// Why the broker stopped, or empty while it works: once the channel to
+  /// rank 1 fails, every later request would fail too.
+  [[nodiscard]] std::string Failure() const;
 
 private:
   struct Impl;

@@ -1340,6 +1340,18 @@ void TpResponseBroker::FailAll(std::string reason) {
   }
 }
 
+std::string TpResponseBroker::Failure() const {
+  if (!impl_) {
+    return "TP response broker is stopped";
+  }
+  const std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (!impl_->poisoned && !impl_->stopping) {
+    return {};
+  }
+  return impl_->failure.empty() ? "TP response broker is stopped"
+                                : impl_->failure;
+}
+
 std::uint16_t TpControlChannel::port() const noexcept {
   return port_;
 }

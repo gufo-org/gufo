@@ -481,6 +481,11 @@ bool TpMirroredRunner::AwaitDependencies(std::uint64_t sequence) const {
   }
 }
 
+std::string TpMirroredRunner::Failure() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return failure_;
+}
+
 bool TpMirroredRunner::CanReuse(const TextRunnerState& state) const {
   // A released state is reused before its producer's verdict arrives, as on
   // one host; the reusing request then depends on that verdict.
