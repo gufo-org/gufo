@@ -38,6 +38,9 @@ void TestJsonLanguage() {
         R"({"a":"\uD83Dx"})", R"({"a":"\uD83D\u0000"})", "{\"x\":\"\n\"}",
         "{\"x\":\"\xc0\x80\"}", "{\"x\":\"\xed\xa0\x80\"}"})
     assert(!Accepts(*grammar, invalid));
+  assert(Accepts(*grammar, std::string(32, '\n') + "{}"));
+  assert(!Accepts(*grammar, std::string(33, '\n') + "{}"));
+  assert(Accepts(*grammar, "{\"text\":\"" + std::string(100, ' ') + "\"}"));
 }
 
 void TestSchemaLanguage() {
@@ -99,6 +102,8 @@ void TestRejectedSchemas() {
        R"({"type":"object","properties":{},"additionalProperties":false,"oneOf":[]})",
        R"({"type":"object","properties":{"x":{"type":"string","pattern":"["}},"additionalProperties":false,"required":["x"]})",
        R"({"type":"object","properties":{"x":{"type":"integer"}},"additionalProperties":false})",
+       R"({"type":"object","properties":{"x":{"type":"string","anyOf":[true,{"type":"string"}]}},"required":["x"],"additionalProperties":false})",
+       R"({"type":"object","properties":{"x":{"type":"string","anyOf":[{"anyOf":"invalid"},{"type":"string"}]}},"required":["x"],"additionalProperties":false})",
        R"({"type":"object","properties":{"x":{"type":"array","items":{"type":"null"},"minItems":2,"maxItems":1}},"required":["x"],"additionalProperties":false})",
        R"({"type":"object","properties":{"x":{"$ref":"https://example.invalid/schema"}},"required":["x"],"additionalProperties":false})",
        R"({"type":"object","properties":{},"additionalProperties":false,"$defs":{"x":{"$ref":"#/$defs/x"}}})",
@@ -111,6 +116,82 @@ void TestRejectedSchemas() {
     }
     assert(rejected);
   }
+}
+
+void TestSchemaIntersections() {
+  const auto grammar = JsonConstraint::Compile(parse(R"({
+    "type":"object","properties":{
+      "tag":{"$ref":"#/$defs/tag","pattern":"b","minLength":2,"maxLength":3},
+      "n":{"$ref":"#/$defs/n","maximum":7},
+      "record":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"boolean"}},
+        "required":["a","b"],"additionalProperties":false,
+        "enum":[{"b":true,"a":1},{"a":2,"b":false}]},
+      "list":{"type":"array","items":{"type":"integer","minimum":0},
+        "enum":[[1,2],[-1],[2]],"minItems":2}
+    },"required":["tag","n","record","list"],"additionalProperties":false,
+    "$defs":{"tag":{"type":"string","pattern":"^a","maxLength":8},
+             "n":{"type":"integer","minimum":2,"maximum":10}}
+  })"),
+                                               true);
+  assert(
+      Accepts(*grammar,
+              R"({"tag":"ab","n":7,"record":{"a":1,"b":true},"list":[1, 2]})"));
+  for (const char* text :
+       {R"({"tag":"ac","n":7,"record":{"a":1,"b":true},"list":[1,2]})",
+        R"({"tag":"ab","n":8,"record":{"a":1,"b":true},"list":[1,2]})",
+        R"({"tag":"ab","n":7,"record":{"a":1,"b":false},"list":[1,2]})",
+        R"({"tag":"ab","n":7,"record":{"a":1,"b":true},"list":[2]})"})
+    assert(!Accepts(*grammar, text));
+  const auto boundaries = JsonConstraint::Compile(parse(R"({
+    "type":"object","properties":{"x":{"type":"string","pattern":"\\bcat\\b"},
+    "y":{"type":"string","pattern":"^\\u{1f600}\\cJ\\0$"}},
+    "required":["x","y"],"additionalProperties":false})"),
+                                                  true);
+  assert(Accepts(*boundaries, R"({"x":"cat!","y":"😀\n\u0000"})"));
+  assert(!Accepts(*boundaries, R"({"x":"cats","y":"😀\n\u0000"})"));
+  const auto any = JsonConstraint::Compile(parse(R"({
+    "type":"object","properties":{"x":{"anyOf":[
+      {"type":"integer","minimum":1},{"type":"integer","minimum":4}],
+      "maximum":5}},"required":["x"],"additionalProperties":false})"),
+                                           true);
+  assert(Accepts(*any, "{\"x\":5}"));
+  assert(!Accepts(*any, "{\"x\":6}"));
+  const auto partial = JsonConstraint::Compile(parse(R"({
+    "type":"object","properties":{"x":{"anyOf":[
+      {"type":"integer","minimum":6},{"type":"integer","minimum":1}],
+      "maximum":5}},"required":["x"],"additionalProperties":false})"),
+                                               true);
+  assert(Accepts(*partial, "{\"x\":2}"));
+  assert(!Accepts(*partial, "{\"x\":6}"));
+  const auto dead = JsonConstraint::Compile(parse(R"({
+    "type":"object","properties":{"x":{"anyOf":[
+      {"type":"string","pattern":"^a$","minLength":2},
+      {"type":"string","const":"b"}]}},
+    "required":["x"],"additionalProperties":false})"),
+                                            true);
+  auto state = dead->Start();
+  for (unsigned char byte : std::string_view("{\"x\":\"a"))
+    state = dead->Advance(state, byte);
+  assert(state.empty());
+  assert(Accepts(*dead, "{\"x\":\"b\"}"));
+  const auto multiples = JsonConstraint::Compile(parse(R"({
+    "type":"object","properties":{"x":{"$ref":"#/$defs/N","multipleOf":0.3}},
+    "required":["x"],"additionalProperties":false,
+    "$defs":{"N":{"type":"number","multipleOf":0.2}}})"),
+                                                 true);
+  assert(Accepts(*multiples, R"({"x":0.6})"));
+  assert(Accepts(*multiples, R"({"x":-1.20})"));
+  assert(!Accepts(*multiples, R"({"x":0.3})"));
+  assert(!Accepts(*multiples, R"({"x":0.4})"));
+  const auto formats = JsonConstraint::Compile(parse(R"({
+    "type":"object","properties":{"x":{"$ref":"#/$defs/S","format":"hostname",
+      "pattern":"^127"}},
+    "required":["x"],"additionalProperties":false,
+    "$defs":{"S":{"type":"string","format":"ipv4"}}})"),
+                                               true);
+  assert(Accepts(*formats, R"({"x":"127.0.0.1"})"));
+  assert(!Accepts(*formats, R"({"x":"192.168.1.1"})"));
+  assert(!Accepts(*formats, R"({"x":"127.example"})"));
 }
 
 void TestPrimitiveConstraints() {
@@ -520,8 +601,8 @@ void TestStringMaskCache() {
 }
 
 void TestUnsupportedPatterns() {
-  for (const auto pattern : {R"((a)\1)", "(?<=a)b", "(?i)a", "[a&&b]",
-                             "(?:(?=a)a)*", "^\\bword\\b$"}) {
+  for (const auto pattern :
+       {R"((a)\1)", "(?<=a)b", "(?i)a", "(?:(?=a)a)*", R"(\_)", R"(\01)"}) {
     auto schema = parse(R"({
       "type":"object","properties":{"x":{"type":"string"}},
       "required":["x"],"additionalProperties":false})");
@@ -598,6 +679,44 @@ void TestReasoningConstraint() {
   assert(Accepts(
       *JsonConstraint::WithReasoning(required),
       R"(Use the scoring tool.</think><tool_call>{"name":"score","arguments":{"value":3}}</tool_call>)"));
+  const auto automatic =
+      JsonConstraint::WithTools(nullptr, {{"score", tool}}, false, true);
+  const std::string call =
+      R"(<tool_call>{"name":"score","arguments":{"value":3}}</tool_call>)";
+  assert(Accepts(*automatic, "Ordinary prose."));
+  assert(Accepts(*automatic, "First: " + call + "\n" + call));
+  assert(!Accepts(
+      *automatic,
+      R"(First: <tool_call>{"name":"score","arguments":{"value":6}}</tool_call>)"));
+  assert(!Accepts(*automatic,
+                  R"(<tool_call>{"name":"other","arguments":{}}</tool_call>)"));
+  const auto single =
+      JsonConstraint::WithTools(nullptr, {{"score", tool}}, true, false);
+  assert(Accepts(*single, call));
+  assert(!Accepts(*single, "Ordinary prose."));
+  assert(!Accepts(*single, call + call));
+  const std::vector<std::string> tool_pieces{
+      "Hello ",
+      "<tool_",
+      "call>{\"name\":\"score\",\"arguments\":{\"value\":",
+      "3}}</tool_call>",
+      "6}}</tool_call>",
+      ""};
+  auto tool_vocabulary = std::make_shared<ConstraintVocabulary>(
+      tool_pieces.size(), [&](std::uint32_t i) {
+        return ConstraintVocabulary::Piece{tool_pieces[i], i == 5};
+      });
+  auto state = automatic->Start();
+  auto allowed = tool_vocabulary->Allowed(*automatic, state);
+  assert(allowed[0] && allowed[1] && allowed[5]);
+  for (const auto token : {0, 1, 2})
+    state = tool_vocabulary->Accept(*automatic, state, token);
+  allowed = tool_vocabulary->Allowed(*automatic, state);
+  assert(allowed[3] && !allowed[4] && !allowed[5]);
+  const auto abandoned = state;
+  state = tool_vocabulary->Accept(*automatic, state, 3);
+  assert(tool_vocabulary->Allowed(*automatic, state)[5]);
+  assert(tool_vocabulary->Allowed(*automatic, abandoned) == allowed);
 
   std::barrier ready(8);
   std::array<std::shared_ptr<const JsonConstraint>, 8> concurrent;
@@ -650,6 +769,7 @@ int main(int argc, char** argv) {
   }
   TestJsonLanguage();
   TestSchemaLanguage();
+  TestSchemaIntersections();
   TestRejectedSchemas();
   TestIntegerBoundsAndRecursion();
   TestPrimitiveConstraints();

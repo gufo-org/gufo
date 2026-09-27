@@ -56,10 +56,22 @@ void SetError(std::string* error, std::string message) {
 std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling) {
-  if (!request.response_format)
+  bool strict_tools = request.constrained_tools;
+  for (const auto& tool : request.tools)
+    if (!tool.definition_json.empty()) {
+      const auto definition = json::parse(tool.definition_json);
+      const auto* function = definition.find("function");
+      strict_tools |= function && function->find("strict") &&
+                      function->find("strict")->as_bool();
+    }
+  if (!request.response_format &&
+      (request.tools.empty() ||
+       request.tool_choice == ChatRequest::ToolChoice::kNone ||
+       (!strict_tools && request.parallel_tool_calls)))
     return std::nullopt;
   auto constrained = request;
-  auto instruction = request.response_format->prompt();
+  auto instruction = request.response_format ? request.response_format->prompt()
+                                             : std::string();
   auto grammar = request.response_format;
   if (!request.tools.empty() &&
       request.tool_choice != ChatRequest::ToolChoice::kNone) {
@@ -95,13 +107,15 @@ std::optional<ChatRequest> ConstrainChatRequest(
     }
     grammar = sampling::JsonConstraint::WithTools(
         grammar, std::move(tools),
-        request.tool_choice == ChatRequest::ToolChoice::kRequired);
+        request.tool_choice == ChatRequest::ToolChoice::kRequired,
+        !request.response_format && request.parallel_tool_calls);
     instruction +=
         "\nIf a tool is needed, respond using the JSON tool-call form "
         "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
         "tool_call>. "
-        "The JSON response schema applies to the final answer; "
-        "tool arguments follow the chosen function's schema.";
+        "Tool arguments must follow the chosen function's schema.";
+    if (request.response_format)
+      instruction += " The JSON response schema applies to the final answer.";
   }
   if (!request.response_format_description.empty())
     instruction.insert(0, request.response_format_description + "\n\n");

@@ -31,7 +31,23 @@ icu::UnicodeSet Scalars() {
   return set.remove(0xd800, 0xdfff);
 }
 
-enum class Kind { Empty, Epsilon, Chars, Start, Or, And, Not, Concat, Repeat };
+bool Word(UChar32 cp) {
+  return (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
+         (cp >= '0' && cp <= '9') || cp == '_';
+}
+
+enum class Kind {
+  Empty,
+  Epsilon,
+  Chars,
+  Start,
+  Boundary,
+  Or,
+  And,
+  Not,
+  Concat,
+  Repeat
+};
 struct Expression {
   Kind kind;
   std::vector<Id> children{};
@@ -51,8 +67,16 @@ public:
     all = Repeat(any, 0, kInfinite);
   }
   Id empty, epsilon, start, any, all{kDead};
+  bool word_boundaries{false};
   std::vector<icu::UnicodeSet> classes;
 
+  Id Boundary(bool positive) {
+    word_boundaries = true;
+    icu::UnicodeSet words('a', 'z');
+    words.add('A', 'Z').add('0', '9').add('_');
+    Chars(std::move(words));  // Include word membership in the DFA alphabet.
+    return Add({Kind::Boundary, {}, positive ? 1U : 0U});
+  }
   Id Chars(icu::UnicodeSet set) {
     set.remove(0xd800, 0xdfff);
     if (set.isEmpty())
@@ -129,7 +153,8 @@ public:
       return empty;
     return Add({Kind::Repeat, {child}, low, high});
   }
-  bool Nullable(Id id, bool at_start) const {
+  bool Nullable(Id id, bool at_start, bool previous_word = false,
+                bool next_word = false) const {
     const auto& node = nodes_[id];
     switch (node.kind) {
       case Kind::Empty:
@@ -139,22 +164,26 @@ public:
         return true;
       case Kind::Start:
         return at_start;
+      case Kind::Boundary:
+        return (previous_word != next_word) == (node.low != 0);
       case Kind::Not:
-        return !Nullable(node.children[0], at_start);
+        return !Nullable(node.children[0], at_start, previous_word, next_word);
       case Kind::Or:
-        return std::ranges::any_of(node.children,
-                                   [&](Id c) { return Nullable(c, at_start); });
+        return std::ranges::any_of(node.children, [&](Id c) {
+          return Nullable(c, at_start, previous_word, next_word);
+        });
       case Kind::And:
       case Kind::Concat:
-        return std::ranges::all_of(node.children,
-                                   [&](Id c) { return Nullable(c, at_start); });
+        return std::ranges::all_of(node.children, [&](Id c) {
+          return Nullable(c, at_start, previous_word, next_word);
+        });
       case Kind::Repeat:
         return node.low == 0;
     }
     return false;
   }
-  Id Derive(Id id, UChar32 cp, bool at_start) {
-    const auto key = std::tuple{id, cp, at_start};
+  Id Derive(Id id, UChar32 cp, bool at_start, bool previous_word) {
+    const auto key = std::tuple{id, cp, at_start, previous_word};
     if (const auto found = derivatives_.find(key); found != derivatives_.end())
       return found->second;
     // Add() may move the node vector while deriving children.
@@ -164,29 +193,31 @@ public:
       case Kind::Empty:
       case Kind::Epsilon:
       case Kind::Start:
+      case Kind::Boundary:
         break;
       case Kind::Chars:
         result = classes[node.low].contains(cp) ? epsilon : empty;
         break;
       case Kind::Not:
-        result = Not(Derive(node.children[0], cp, at_start));
+        result = Not(Derive(node.children[0], cp, at_start, previous_word));
         break;
       case Kind::Or:
       case Kind::And: {
         std::vector<Id> parts;
         for (auto child : node.children)
-          parts.push_back(Derive(child, cp, at_start));
+          parts.push_back(Derive(child, cp, at_start, previous_word));
         result = Combine(node.kind, std::move(parts));
         break;
       }
       case Kind::Concat: {
         std::vector<Id> choices;
         for (std::size_t i = 0; i < node.children.size(); ++i) {
-          std::vector<Id> suffix{Derive(node.children[i], cp, at_start)};
+          std::vector<Id> suffix{
+              Derive(node.children[i], cp, at_start, previous_word)};
           suffix.insert(suffix.end(), node.children.begin() + i + 1,
                         node.children.end());
           choices.push_back(Combine(Kind::Concat, std::move(suffix)));
-          if (!Nullable(node.children[i], at_start))
+          if (!Nullable(node.children[i], at_start, previous_word, Word(cp)))
             break;
         }
         result = Combine(Kind::Or, std::move(choices));
@@ -195,7 +226,7 @@ public:
       case Kind::Repeat:
         result = Combine(
             Kind::Concat,
-            {Derive(node.children[0], cp, at_start),
+            {Derive(node.children[0], cp, at_start, previous_word),
              Repeat(node.children[0], node.low ? node.low - 1 : 0,
                     node.high == kInfinite ? kInfinite : node.high - 1)});
         break;
@@ -242,7 +273,7 @@ private:
   std::vector<Expression> nodes_;
   std::vector<std::uint64_t> minimums_;
   std::map<Expression, Id> ids_;
-  std::map<std::tuple<Id, UChar32, bool>, Id> derivatives_;
+  std::map<std::tuple<Id, UChar32, bool, bool>, Id> derivatives_;
 };
 
 struct Syntax {
@@ -361,7 +392,33 @@ private:
           Invalid("word-boundary regex assertions are unsupported");
         cp = '\b';
         break;
+      case '0':
+        if (Peek() >= '0' && Peek() <= '9')
+          Invalid("legacy octal regex escapes are unsupported");
+        cp = 0;
+        break;
+      case 'c':
+        cp = Take();
+        if (!((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z')))
+          Invalid("regex control escape requires an ASCII letter");
+        cp %= 32;
+        break;
       case 'u':
+        if (Peek() == '{') {
+          ++position_;
+          cp = 0;
+          unsigned digits = 0;
+          while (Peek() != '}') {
+            ++digits;
+            cp = (cp << 4) | Hex(1);
+            if (cp > 0x10ffff)
+              Invalid("invalid regex Unicode code point");
+          }
+          ++position_;
+          if (!digits)
+            Invalid("empty regex Unicode code point");
+          break;
+        }
         cp = Hex(4);
         if (cp >= 0xd800 && cp <= 0xdbff) {
           if (Take() != '\\' || Take() != 'u')
@@ -376,8 +433,9 @@ private:
         cp = Hex(2);
         break;
       default:
-        if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
-            (cp >= '0' && cp <= '9'))
+        if (cp > 127 || (std::string_view("^$\\.*+?()[]{}|/").find(cp) ==
+                             std::string_view::npos &&
+                         !(in_class && cp == '-')))
           Invalid("unsupported regex escape or backreference");
     }
     if (property.empty())
@@ -400,8 +458,6 @@ private:
       ++position_;
     while (Peek() != ']') {
       auto cp = Take();
-      if (cp == '[' || (cp == '&' && Peek() == '&'))
-        Invalid("nested regex character classes are unsupported");
       auto chars = cp == '\\' ? Escape(true) : icu::UnicodeSet(cp, cp);
       if (Peek() == '-' && text_.charAt(position_ + 1) != ']') {
         ++position_;
@@ -457,7 +513,12 @@ private:
           atom.assertion = true;
           atom.atom = e_.epsilon;
         } else if (cp == '\\') {
-          atom.atom = e_.Chars(Escape(false));
+          if (Peek() == 'b' || Peek() == 'B') {
+            atom.atom = e_.Boundary(Take() == 'b');
+            atom.assertion = true;
+          } else {
+            atom.atom = e_.Chars(Escape(false));
+          }
         } else if (cp == '.') {
           auto chars = Scalars();
           for (auto c : {'\n', '\r'})
@@ -607,7 +668,7 @@ std::shared_ptr<const JsonSchemaRegex> JsonSchemaRegex::Compile(
     impl->alphabet[found->second].add(first, last);
   }
 
-  using Key = std::pair<Id, bool>;
+  using Key = std::tuple<Id, bool, bool>;
   std::map<Key, Id> ids;
   std::vector<Key> pending;
   std::vector<Id> depths;
@@ -623,10 +684,11 @@ std::shared_ptr<const JsonSchemaRegex> JsonSchemaRegex::Compile(
     }
     return found->second;
   };
-  intern({root, true}, 0);
+  intern({root, true, false}, 0);
   for (Id i = 0; i < pending.size(); ++i) {
-    const auto [expression, at_start] = pending[i];
-    impl->states[i].accepting = expressions.Nullable(expression, at_start);
+    const auto [expression, at_start, previous_word] = pending[i];
+    impl->states[i].accepting =
+        expressions.Nullable(expression, at_start, previous_word);
     // BFS discovers each state at its minimum reachable length. Beyond the
     // schema's maxLength no transition can contribute to an accepted value.
     if (depths[i] >= maximum) {
@@ -634,11 +696,14 @@ std::shared_ptr<const JsonSchemaRegex> JsonSchemaRegex::Compile(
       continue;
     }
     for (const auto& chars : impl->alphabet) {
-      auto derivative =
-          expressions.Derive(expression, chars.charAt(0), at_start);
-      const auto next = derivative == expressions.empty
-                            ? kDead
-                            : intern({derivative, false}, depths[i] + 1);
+      auto derivative = expressions.Derive(expression, chars.charAt(0),
+                                           at_start, previous_word);
+      const auto next =
+          derivative == expressions.empty
+              ? kDead
+              : intern({derivative, false,
+                        expressions.word_boundaries && Word(chars.charAt(0))},
+                       depths[i] + 1);
       impl->states[i].next.push_back(next);
     }
   }

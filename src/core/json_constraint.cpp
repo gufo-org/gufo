@@ -42,7 +42,7 @@ public:
       bits.set(i);
       grammar_->classes_.push_back(bits);
     }
-    ws_ = Repeat(Class(" \t\r\n"));
+    ws_ = Optional(Lexeme(JsonSchemaLexeme::Whitespace()));
     const auto digits = Class("0123456789");
     const auto hex = Class("0123456789abcdefABCDEF");
     const auto hex_tail = Seq({hex, hex});
@@ -120,11 +120,6 @@ public:
         }
       }
     }
-    for (const auto& [schema, rule] : compiled_) {
-      (void)schema;
-      if (!productive[rule])
-        Invalid("recursive schema has no finite value");
-    }
     std::vector<unsigned char> visited(grammar_->rules_.size());
     auto check = [&](auto&& self, std::uint32_t id) -> void {
       if (visited[id] == 1)
@@ -145,6 +140,15 @@ public:
     };
     for (std::size_t id = 0; id < grammar_->rules_.size(); ++id)
       check(check, id);
+    if (!productive[grammar_->root_])
+      throw JsonSchemaEmpty("JSON Schema: schema has no finite value");
+    // Discard impossible alternatives before they can admit dead prefixes.
+    for (auto& rule : grammar_->rules_)
+      std::erase_if(rule, [&](const auto& sequence) {
+        return std::ranges::any_of(sequence, [&](auto symbol) {
+          return !(symbol & kLeaf) && !productive[symbol];
+        });
+      });
     (void)grammar_->Start();
     return std::move(grammar_);
   }
@@ -236,6 +240,10 @@ private:
     return Seq({Byte('{'), ws_, Optional(members), ws_, Byte('}')});
   }
   static bool MatchesType(const json::Value& value, std::string_view type) {
+    if (type == "object")
+      return value.is_object();
+    if (type == "array")
+      return value.is_array();
     if (type == "string")
       return value.is_string();
     if (type == "boolean")
@@ -248,6 +256,308 @@ private:
       return value.is_number() &&
              std::floor(value.as_double()) == value.as_double();
     return false;
+  }
+  static bool EqualValue(const json::Value& a, const json::Value& b) {
+    if (a.is_number() && b.is_number())
+      return a.as_double() == b.as_double();
+    if (a.is_object() && b.is_object()) {
+      if (a.size() != b.size())
+        return false;
+      return std::ranges::all_of(a.members(), [&](const auto& member) {
+        const auto* other = b.find(member.first);
+        return other && EqualValue(member.second, *other);
+      });
+    }
+    if (a.is_array() && b.is_array())
+      return a.size() == b.size() &&
+             std::equal(a.items().begin(), a.items().end(), b.items().begin(),
+                        EqualValue);
+    return a.dump() == b.dump();
+  }
+  const json::Value& Store(json::Value schema) {
+    if (derived_.size() >= kMaxRules)
+      Invalid("schema expansion exceeds its resource budget");
+    derived_.push_back(std::move(schema));
+    return derived_.back();
+  }
+  static json::Value Without(const json::Value& schema,
+                             std::initializer_list<std::string_view> keys) {
+    auto result = json::Value::object();
+    for (const auto& [key, value] : schema.members())
+      if (std::ranges::find(keys, key) == keys.end())
+        result.append_member(key, value);
+    return result;
+  }
+  json::Value Conjoin(const json::Value& left, const json::Value& right,
+                      unsigned depth = 0) {
+    if (depth > 64)
+      Invalid("schema intersection exceeds its reference budget");
+    Keys(left);
+    Keys(right);
+    if (const auto* ref = left.find("$ref"))
+      return Conjoin(Conjoin(*Reference(*ref), Without(left, {"$ref", "$defs"}),
+                             depth + 1),
+                     right, depth + 1);
+    if (const auto* ref = right.find("$ref"))
+      return Conjoin(left,
+                     Conjoin(*Reference(*ref),
+                             Without(right, {"$ref", "$defs"}), depth + 1),
+                     depth + 1);
+    if (const auto* any = left.find("anyOf")) {
+      auto result = json::Value::object();
+      auto branches = json::Value::array();
+      const auto siblings = Conjoin(Without(left, {"anyOf"}), right, depth + 1);
+      for (const auto& branch : any->items()) {
+        try {
+          branches.push_back(Conjoin(branch, siblings, depth + 1));
+        } catch (const JsonSchemaEmpty&) {
+        }
+      }
+      if (branches.empty())
+        throw JsonSchemaEmpty("JSON Schema: schema intersection is empty");
+      result["anyOf"] = std::move(branches);
+      return result;
+    }
+    if (right.contains("anyOf"))
+      return Conjoin(right, left, depth + 1);
+    if (const auto* format = right.find("format");
+        format && left.contains("format") &&
+        !EqualValue(*left.find("format"), *format)) {
+      if (!format->is_string())
+        Invalid("format must be a string");
+      return Conjoin(
+          left,
+          Conjoin(Without(right, {"format"}),
+                  JsonSchemaLexeme::Format(format->str()), depth + 1),
+          depth + 1);
+    }
+    auto result = left;
+    for (const auto& [key, value] : right.members()) {
+      const auto* previous = left.find(key);
+      if (key == "title" || key == "description" || !previous) {
+        result[key] = value;
+        continue;
+      }
+      if (EqualValue(*previous, value))
+        continue;
+      if (key == "minimum" || key == "exclusiveMinimum" || key == "minLength" ||
+          key == "minItems" || key == "maximum" || key == "exclusiveMaximum" ||
+          key == "maxLength" || key == "maxItems") {
+        if (!previous->is_number() || !value.is_number())
+          Invalid("bounds must be numbers");
+        const bool lower = key.starts_with("min") || key == "exclusiveMinimum";
+        result[key] = lower
+                          ? std::max(previous->as_double(), value.as_double())
+                          : std::min(previous->as_double(), value.as_double());
+      } else if (key == "multipleOf") {
+        result[key] = JsonSchemaLexeme::IntersectMultipleOf(*previous, value);
+      } else if (key == "pattern") {
+        if (!previous->is_string() || !value.is_string())
+          Invalid("pattern must be a string");
+        result[key] = "(?=[\\s\\S]*(?:" + previous->str() +
+                      "))(?=[\\s\\S]*(?:" + value.str() + "))";
+      } else if (key == "required") {
+        if (!previous->is_array() || !value.is_array())
+          Invalid("required must be an array");
+        for (const auto& field : value.items())
+          if (std::ranges::none_of(previous->items(), [&](const auto& old) {
+                return EqualValue(old, field);
+              }))
+            result[key].push_back(field);
+      } else if (key == "enum") {
+        if (!previous->is_array() || !value.is_array())
+          Invalid("enum must be an array");
+        result[key] = json::Value::array();
+        for (const auto& item : previous->items())
+          if (std::ranges::any_of(value.items(), [&](const auto& other) {
+                return EqualValue(item, other);
+              }))
+            result[key].push_back(item);
+        if (result[key].empty())
+          throw JsonSchemaEmpty("JSON Schema: enum intersection is empty");
+      } else if (key == "type") {
+        auto types = [](const json::Value& t) {
+          return t.is_array() ? t.items() : json::Value::Array{t};
+        };
+        auto common = json::Value::array();
+        for (const auto& a : types(*previous))
+          for (const auto& b : types(value))
+            if (EqualValue(a, b))
+              common.push_back(a);
+            else if ((a.str() == "number" && b.str() == "integer") ||
+                     (a.str() == "integer" && b.str() == "number"))
+              common.push_back("integer");
+        if (common.empty())
+          throw JsonSchemaEmpty(
+              "JSON Schema: schema constraints have no common type");
+        result[key] = common.size() == 1 ? common.items()[0] : common;
+      } else if (key == "items") {
+        result[key] = Conjoin(*previous, value, depth + 1);
+      } else if (key == "properties") {
+        if (!previous->is_object() || !value.is_object())
+          Invalid("properties must be an object");
+        const bool left_closed = left.contains("additionalProperties") &&
+                                 !left.find("additionalProperties")->as_bool();
+        const bool right_closed =
+            right.contains("additionalProperties") &&
+            !right.find("additionalProperties")->as_bool();
+        auto properties = json::Value::object();
+        for (const auto& [name, child] : previous->members()) {
+          if (const auto* other = value.find(name))
+            properties.append_member(name, Conjoin(child, *other, depth + 1));
+          else if (!right_closed)
+            properties.append_member(name, child);
+        }
+        if (!left_closed)
+          for (const auto& [name, child] : value.members())
+            if (!previous->contains(name))
+              properties.append_member(name, child);
+        result[key] = std::move(properties);
+      } else {
+        if (key == "const")
+          throw JsonSchemaEmpty("JSON Schema: const intersection is empty");
+        Invalid("incompatible schema constraints for " + key);
+      }
+    }
+    if (const auto* properties = result.find("properties")) {
+      auto allowed = json::Value::object();
+      for (const auto& [name, child] : properties->members()) {
+        const auto permits = [&](const json::Value& schema) {
+          const auto* closed = schema.find("additionalProperties");
+          const auto* fields = schema.find("properties");
+          return !closed || closed->as_bool() ||
+                 (fields && fields->contains(name));
+        };
+        if (permits(left) && permits(right))
+          allowed.append_member(name, child);
+      }
+      result["properties"] = std::move(allowed);
+    }
+    return result;
+  }
+  // Finite enum/const values still have to satisfy every sibling constraint.
+  // Return objects in schema property order, independent of enum key order.
+  std::optional<json::Value> ValueFor(const json::Value& schema,
+                                      const json::Value& value,
+                                      std::size_t depth = 0) {
+    if (depth > 256)
+      Invalid("enum/const reference expansion exceeds its resource budget");
+    auto result = value;
+    if (const auto* ref = schema.find("$ref")) {
+      auto referenced = ValueFor(*Reference(*ref), value, depth + 1);
+      if (!referenced)
+        return {};
+      result = std::move(*referenced);
+    }
+    if (const auto* any = schema.find("anyOf")) {
+      bool matched = false;
+      for (const auto& branch : any->items()) {
+        try {
+          if (auto candidate = ValueFor(branch, value, depth + 1)) {
+            result = std::move(*candidate);
+            matched = true;
+            break;
+          }
+        } catch (const JsonSchemaEmpty&) {
+        }
+      }
+      if (!matched)
+        return {};
+    }
+    if (const auto* type = schema.find("type")) {
+      if (type->is_string()
+              ? !MatchesType(value, type->str())
+              : !std::ranges::any_of(type->items(), [&](const auto& t) {
+                  return MatchesType(value, t.str());
+                }))
+        return {};
+    }
+    if (const auto* enumeration = schema.find("enum");
+        enumeration &&
+        !std::ranges::any_of(enumeration->items(), [&](const auto& item) {
+          return EqualValue(value, item);
+        }))
+      return {};
+    if (const auto* constant = schema.find("const");
+        constant && !EqualValue(value, *constant))
+      return {};
+    if (value.is_string() || value.is_number()) {
+      auto& check = value_checks_[&schema];
+      if (!check)
+        check = value.is_string() ? JsonSchemaLexeme::String(schema)
+                                  : JsonSchemaLexeme::Number(schema, false);
+      if (!check->AcceptValue(value))
+        return {};
+    } else if (value.is_array()) {
+      if ((schema.contains("minItems") &&
+           value.size() < schema.find("minItems")->as_size()) ||
+          (schema.contains("maxItems") &&
+           value.size() > schema.find("maxItems")->as_size()))
+        return {};
+      if (const auto* items = schema.find("items")) {
+        result = json::Value::array();
+        for (const auto& item : value.items()) {
+          auto candidate = ValueFor(*items, item, depth + 1);
+          if (!candidate)
+            return {};
+          result.push_back(std::move(*candidate));
+        }
+      }
+    } else if (value.is_object()) {
+      if (const auto* required = schema.find("required"))
+        for (const auto& key : required->items())
+          if (!value.contains(key.str()))
+            return {};
+      static const auto no_properties = json::Value::object();
+      const auto* properties = schema.find("properties");
+      if (!properties && schema.contains("additionalProperties") &&
+          !schema.find("additionalProperties")->as_bool())
+        properties = &no_properties;
+      if (properties) {
+        result = json::Value::object();
+        for (const auto& [name, child] : properties->members()) {
+          if (const auto* item = value.find(name)) {
+            auto candidate = ValueFor(child, *item, depth + 1);
+            if (!candidate)
+              return {};
+            result.append_member(name, std::move(*candidate));
+          }
+        }
+        for (const auto& [name, item] : value.members())
+          if (!properties->contains(name)) {
+            if (schema.contains("additionalProperties") &&
+                !schema.find("additionalProperties")->as_bool())
+              return {};
+            result.append_member(name, item);
+          }
+      }
+    }
+    return result;
+  }
+  std::uint32_t ValueLiteral(const json::Value& value) {
+    if (!value.is_object() && !value.is_array())
+      return Literal(value.dump());
+    Sequence parts{Byte(value.is_object() ? '{' : '['), ws_};
+    bool comma = false;
+    auto separator = [&] {
+      if (comma)
+        parts.insert(parts.end(), {ws_, Byte(','), ws_});
+      comma = true;
+    };
+    if (value.is_object()) {
+      for (const auto& [name, item] : value.members()) {
+        separator();
+        parts.insert(parts.end(), {Literal(json::Value(name).dump()), ws_,
+                                   Byte(':'), ws_, ValueLiteral(item)});
+      }
+    } else {
+      for (const auto& item : value.items()) {
+        separator();
+        parts.push_back(ValueLiteral(item));
+      }
+    }
+    parts.insert(parts.end(), {ws_, Byte(value.is_object() ? '}' : ']')});
+    return Seq(std::move(parts));
   }
   std::uint32_t Primitive(std::string_view type) {
     if (type == "string")
@@ -311,7 +621,8 @@ private:
       choices.push_back(Seq(std::move(longer)));
     }
     if (choices.empty())
-      Invalid("numeric bounds describe an empty interval");
+      throw JsonSchemaEmpty(
+          "JSON Schema: numeric bounds describe an empty interval");
     return Alt(choices);
   }
   std::uint32_t Integer(const json::Value& schema) {
@@ -400,7 +711,8 @@ private:
              ? !low->negative
              : (low->negative ? compare(low->digits, high->digits) < 0
                               : compare(low->digits, high->digits) > 0)))
-      Invalid("numeric bounds describe an empty interval");
+      throw JsonSchemaEmpty(
+          "JSON Schema: numeric bounds describe an empty interval");
     Sequence choices;
     if (!high || !high->negative) {
       choices.push_back(
@@ -419,6 +731,8 @@ private:
     return Alt(choices);
   }
   void Keys(const json::Value& schema) {
+    if (!schema.is_object())
+      Invalid("each schema must be an object");
     static const std::set<std::string_view> allowed{"type",
                                                     "properties",
                                                     "required",
@@ -447,6 +761,8 @@ private:
         Invalid("unsupported keyword: " + key);
       if ((key == "title" || key == "description") && !value.is_string())
         Invalid(key + " must be a string");
+      if (key == "anyOf" && (!value.is_array() || value.empty()))
+        Invalid("anyOf needs at least one branch");
     }
   }
   std::uint32_t Visit(const json::Value& schema, std::size_t depth) {
@@ -454,8 +770,12 @@ private:
       return found->second;
     const auto id = New();
     compiled_[&schema] = id;
-    const auto body = VisitBody(schema, depth);
-    grammar_->rules_[id] = {{body}};
+    try {
+      const auto body = VisitBody(schema, depth);
+      grammar_->rules_[id] = {{body}};
+    } catch (const JsonSchemaEmpty&) {
+      grammar_->rules_[id] = {};
+    }
     return id;
   }
   void CountStrings(std::string_view value) {
@@ -465,6 +785,18 @@ private:
       Invalid(
           "property/definition names and enum/const strings exceed 120000 "
           "characters");
+  }
+  void CountValueStrings(const json::Value& value) {
+    if (value.is_string())
+      CountStrings(value.str());
+    else if (value.is_array())
+      for (const auto& item : value.items())
+        CountValueStrings(item);
+    else if (value.is_object())
+      for (const auto& [name, item] : value.members()) {
+        CountStrings(name);
+        CountValueStrings(item);
+      }
   }
   std::uint32_t VisitBody(const json::Value& schema, std::size_t depth) {
     if (!schema.is_object())
@@ -481,26 +813,26 @@ private:
       }
     }
     if (const auto* ref = schema.find("$ref")) {
-      for (const auto& [key, value] : schema.members()) {
-        (void)value;
-        if (key != "$ref" && key != "title" && key != "description" &&
-            key != "$defs")
-          Invalid("$ref siblings are not supported");
-      }
-      return Visit(*Reference(*ref), depth);
+      const auto siblings =
+          Without(schema, {"$ref", "$defs", "title", "description"});
+      return siblings.empty()
+                 ? Visit(*Reference(*ref), depth)
+                 : Visit(Store(Conjoin(*Reference(*ref), siblings)), depth);
     }
     if (const auto* any = schema.find("anyOf")) {
-      for (const auto& [key, value] : schema.members()) {
-        (void)value;
-        if (key != "anyOf" && key != "title" && key != "description" &&
-            key != "$defs")
-          Invalid("anyOf siblings are not supported");
-      }
       if (!any->is_array() || any->size() == 0)
         Invalid("anyOf needs at least one branch");
+      const auto siblings =
+          Without(schema, {"anyOf", "$defs", "title", "description"});
       Sequence branches;
-      for (const auto& value : any->items())
-        branches.push_back(Visit(value, depth + 1));
+      for (const auto& value : any->items()) {
+        try {
+          branches.push_back(
+              Visit(siblings.empty() ? value : Store(Conjoin(value, siblings)),
+                    depth + 1));
+        } catch (const JsonSchemaEmpty&) {
+        }
+      }
       return Alt(branches);
     }
     const auto* type = schema.find("type");
@@ -540,9 +872,10 @@ private:
         Invalid("string constraint on a non-string schema");
     }
     if (schema.contains("enum") || schema.contains("const")) {
-      if (object || array ||
-          (schema.contains("enum") && schema.contains("const")))
-        Invalid("enum/const supports one primitive constraint per schema");
+      // Validate the entire underlying schema even when the finite choices
+      // would otherwise hide malformed properties, items or predicates.
+      const auto& base = Store(Without(schema, {"enum", "const", "$defs"}));
+      Visit(base, depth);
       json::Value::Array values;
       if (const auto* enumeration = schema.find("enum")) {
         if (!enumeration->is_array() || enumeration->size() == 0)
@@ -555,35 +888,31 @@ private:
         Invalid("maximum enum/const value count is 1000");
       Sequence choices;
       std::size_t enum_characters = 0;
-      std::shared_ptr<const JsonSchemaLexeme> number_check, string_check;
       for (const auto& value : values) {
+        CountValueStrings(value);
         if (!std::ranges::any_of(
                 types, [&](const auto& t) { return MatchesType(value, t); }))
           Invalid("enum/const value does not match its type");
-        if (value.is_number()) {
-          if (!number_check)
-            number_check = JsonSchemaLexeme::Number(
-                schema, std::ranges::find(types, "number") == types.end());
-          if (!number_check->AcceptValue(value))
-            continue;
-        }
         if (value.is_string()) {
-          CountStrings(value.str());
           enum_characters += std::ranges::count_if(
               value.str(), [](unsigned char c) { return (c & 0xc0) != 0x80; });
           if (values.size() > 250 && enum_characters > 15000)
             Invalid(
                 "an enum with more than 250 entries is limited to 15000 string "
                 "characters");
-          if (!string_check)
-            string_check = JsonSchemaLexeme::String(schema);
-          if (!string_check->AcceptValue(value))
-            continue;
         }
-        choices.push_back(Literal(value.dump()));
+        if (const auto* constant = schema.find("const");
+            constant && !EqualValue(value, *constant))
+          continue;
+        try {
+          if (auto canonical = ValueFor(base, value))
+            choices.push_back(ValueLiteral(*canonical));
+        } catch (const JsonSchemaEmpty&) {
+        }
       }
       if (choices.empty())
-        Invalid("enum/const has no value satisfying its constraints");
+        throw JsonSchemaEmpty(
+            "JSON Schema: enum/const has no value satisfying its constraints");
       return Alt(choices);
     }
     Sequence alternatives;
@@ -718,7 +1047,7 @@ private:
     const auto maximum =
         bound("maxItems", std::numeric_limits<std::uint32_t>::max());
     if (minimum > maximum)
-      Invalid("minItems exceeds maxItems");
+      throw JsonSchemaEmpty("JSON Schema: minItems exceeds maxItems");
     const auto item = Visit(*items, depth + 1);
     if (maximum == 0)
       return Seq({Byte('['), ws_, Byte(']')});
@@ -738,6 +1067,9 @@ private:
   std::uint32_t ws_, string_, integer_, number_, bool_, null_;
   std::map<std::size_t, std::uint32_t> generic_values_;
   std::map<const json::Value*, std::uint32_t> compiled_;
+  std::deque<json::Value> derived_;
+  std::map<const json::Value*, std::shared_ptr<const JsonSchemaLexeme>>
+      value_checks_;
   std::size_t properties_{0}, enum_values_{0}, string_characters_{0};
 };
 
@@ -819,22 +1151,25 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
-    bool required) {
+    bool required, bool parallel) {
   if (tools.empty())
     return answer;
   using Key = std::tuple<std::shared_ptr<const JsonConstraint>,
-                         std::vector<Tool>, bool>;
+                         std::vector<Tool>, bool, bool>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
-  const Key key{answer, tools, required};
+  const Key key{answer, tools, required, parallel};
   {
     const std::lock_guard lock(mutex);
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
-  auto grammar = std::shared_ptr<JsonConstraint>(new JsonConstraint(*answer));
+  const bool plain_answer = !answer;
+  auto grammar = std::shared_ptr<JsonConstraint>(
+      new JsonConstraint(answer ? *answer : *Object()));
+  grammar->stop_only_when_complete_ = !plain_answer && !parallel;
   Rule alternatives;
-  if (!required)
+  if (!required && answer)
     alternatives.push_back({answer->root_});
   auto check_capacity = [&](std::size_t rules, std::size_t classes,
                             std::size_t lexemes) {
@@ -855,15 +1190,63 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     grammar->rules_.push_back({std::move(bytes)});
     return id;
   };
+  constexpr std::string_view marker = "<tool_call>";
   const auto end = literal("}</tool_call>");
-  std::map<const JsonConstraint*, std::uint32_t> imported{
-      {answer.get(), answer->root_}};
+  const auto calls = static_cast<std::uint32_t>(grammar->rules_.size());
+  grammar->rules_.push_back({});
+  // In tool-only mode ordinary text remains unconstrained until a canonical
+  // call marker. The small prefix automaton is carried by the request grammar,
+  // including across tokens, speculative rollback and sampler copies.
+  auto text = [&](std::uint32_t target) {
+    check_capacity(marker.size(), marker.size() * 256, 0);
+    const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
+    grammar->rules_.resize(base + marker.size());
+    for (std::size_t prefix = 0; prefix < marker.size(); ++prefix) {
+      grammar->rules_[base + prefix].push_back({});
+      std::array<std::bitset<256>, marker.size() + 1> transitions;
+      for (unsigned byte = 0; byte < 256; ++byte) {
+        std::string candidate(marker.substr(0, prefix));
+        candidate += static_cast<char>(byte);
+        auto matched = std::min(candidate.size(), marker.size());
+        while (matched && !candidate.ends_with(marker.substr(0, matched)))
+          --matched;
+        transitions[matched].set(byte);
+      }
+      for (std::size_t matched = 0; matched <= marker.size(); ++matched) {
+        if (transitions[matched].none() ||
+            (matched == marker.size() && target == UINT32_MAX))
+          continue;
+        const auto terminal = kTerminal | grammar->classes_.size();
+        grammar->classes_.push_back(transitions[matched]);
+        grammar->rules_[base + prefix].push_back(
+            {static_cast<std::uint32_t>(terminal),
+             matched == marker.size()
+                 ? target
+                 : base + static_cast<std::uint32_t>(matched)});
+      }
+    }
+    return base;
+  };
+  const auto prose = plain_answer ? text(calls) : UINT32_MAX;
+  const auto after = plain_answer
+                         ? (parallel ? prose : text(UINT32_MAX))
+                         : static_cast<std::uint32_t>(grammar->rules_.size());
+  if (!plain_answer) {
+    grammar->rules_.push_back({{}});
+    if (parallel) {
+      const auto begin = literal(marker);
+      grammar->rules_[after].push_back({begin, calls});
+    }
+  }
+  std::map<const JsonConstraint*, std::uint32_t> imported;
+  if (answer)
+    imported.emplace(answer.get(), answer->root_);
   for (const auto& [name, arguments] : tools) {
-    const auto begin = literal(
-        "<tool_call>{\"name\":" + json::Value(name).dump() + ",\"arguments\":");
+    const auto begin =
+        literal("{\"name\":" + json::Value(name).dump() + ",\"arguments\":");
     if (const auto found = imported.find(arguments.get());
         found != imported.end()) {
-      alternatives.push_back({begin, found->second, end});
+      grammar->rules_[calls].push_back({begin, found->second, end, after});
       continue;
     }
     check_capacity(arguments->rules_.size(), arguments->classes_.size(),
@@ -889,8 +1272,12 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     }
     const auto root = static_cast<std::uint32_t>(arguments->root_ + rules);
     imported.emplace(arguments.get(), root);
-    alternatives.push_back({begin, root, end});
+    grammar->rules_[calls].push_back({begin, root, end, after});
   }
+  if (plain_answer && !required)
+    alternatives.push_back({prose});
+  else
+    alternatives.push_back({literal(marker), calls});
   check_capacity(1, 0, 0);
   grammar->root_ = grammar->rules_.size();
   grammar->rules_.push_back(std::move(alternatives));
@@ -942,9 +1329,11 @@ JsonConstraint::State JsonConstraint::Advance(const State& state,
       continue;
     const auto symbol = stack.symbols.back();
     if (symbol & kLexeme) {
+      const auto& lexeme = lexemes_.at(symbol & ~kLexeme);
+      if (!lexeme->AllowsByte(byte))
+        continue;
       auto candidate = stack;
-      const auto result =
-          lexemes_.at(symbol & ~kLexeme)->Advance(candidate.lexeme, byte);
+      const auto result = lexeme->Advance(candidate.lexeme, byte);
       if (result.prefix)
         next.push_back(candidate);
       if (result.complete) {
@@ -1022,7 +1411,8 @@ std::vector<std::uint8_t> ConstraintVocabulary::Allowed(
   if (grammar.Complete(state)) {
     for (std::size_t i = 0; i < pieces_.size(); ++i)
       mask[i] = pieces_[i].stop;
-    return mask;
+    if (grammar.stop_only_when_complete_)
+      return mask;
   }
   // Intern the grammar states reached while walking the token trie. Long word
   // tokens share both trie prefixes and string-body transitions; expanding a

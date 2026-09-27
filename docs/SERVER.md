@@ -587,11 +587,14 @@ A stop sequence or token limit can interrupt JSON or a tool call; check the
 finish reason before parsing. Changing the schema changes the cached prompt prefix.
 Output token budgets include reasoning: Chat returns `finish_reason: "length"`,
 and Responses returns `status: "incomplete"` with reason `max_output_tokens`.
+Whitespace between JSON elements is bounded to prevent formatting loops; string
+contents are unchanged.
 
 Supported schema features:
 
-- Objects, arrays, primitive/nullable types, primitive `enum`/`const`, and `anyOf`.
-- Recursive local `$ref`/`$defs`, including references to the root.
+- Objects, arrays, primitive/nullable types, `enum`/`const` values and `anyOf`.
+- Recursive local `$ref`/`$defs`, including references to the root. Sibling
+  bounds, patterns, types and finite choices are intersected rather than discarded.
 - Numeric bounds, exclusive bounds and exact decimal `multipleOf`.
 - String `pattern`, `minLength`/`maxLength`, and formats `date-time`, `time`,
   `date`, `duration`, `email`, `hostname`, `ipv4`, `ipv6`, `uuid`.
@@ -606,16 +609,19 @@ Schemas allow 5,000 properties, 1,000 enum values and 120,000 characters in
 property/definition names and enum/const strings, with a 2 MiB document limit.
 Regex evaluation and grammar caches have bounded resource budgets.
 Patterns use ECMA-262 Unicode semantics (`\w`/`\d` are ASCII; `$` is strict end)
-and support Unicode properties, alternation, repetition, anchors and lookahead;
+and support Unicode properties/code-point escapes, alternation, repetition,
+anchors, word boundaries and lookahead;
 pattern, format and length limits are enforced together. Lookbehind,
-backreferences, inline flags, nested character classes and unbounded repetition
+backreferences, inline flags and unbounded repetition
 of assertions return a validation error before generation. String matching uses
 incremental state and reuses token masks when the remaining length permits it.
 
-Structured Chat Completions can choose declared tools with `auto` or require one
-with `required`. Strict tool arguments follow their parameter schema;
-`response_format` governs the final answer. Quoted markup in argument values
-stays literal.
+Chat Completions enforces function `strict:true` even without `response_format`.
+`auto` permits ordinary prose or constrained calls; `required` requires a call,
+and a function-valued `tool_choice` selects exactly one call to that function.
+`parallel_tool_calls:false` prevents additional calls, including non-strict tools. `response_format`
+governs the final answer independently. Quoted markup in arguments stays literal;
+incomplete calls are not returned as executable tool calls.
 
 References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create),
 [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs),

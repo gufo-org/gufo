@@ -187,9 +187,35 @@ Decimal AddUnit(const Decimal& value, int scale) {
   return next;
 }
 
+class WhitespaceLexeme final : public JsonSchemaLexeme {
+public:
+  WhitespaceLexeme() : JsonSchemaLexeme(" \t\r\n") {}
+  // Bound formatting work, never whitespace within a JSON string. Every JSON
+  // value still has an admitted (compact) serialization.
+  Match Check(std::string_view bytes) const override {
+    std::string state;
+    Match result{true, false};
+    for (unsigned char byte : bytes) {
+      result = Advance(state, byte);
+      if (!result.prefix && !result.complete)
+        return {};
+    }
+    return result;
+  }
+  Match Advance(std::string& state, unsigned char byte) const override {
+    const auto count = state.empty() ? 0 : static_cast<unsigned char>(state[0]);
+    if (count >= 32 || !AllowsByte(byte))
+      return {};
+    state.assign(1, static_cast<char>(count + 1));
+    return {count + 1 < 32, true};
+  }
+  bool CacheTransitions() const override { return true; }
+};
+
 class NumberLexeme final : public JsonSchemaLexeme {
 public:
-  NumberLexeme(const json::Value& schema, bool integer) : integer_(integer) {
+  NumberLexeme(const json::Value& schema, bool integer)
+      : JsonSchemaLexeme("0123456789-."), integer_(integer) {
     for (const auto* key : {"minimum", "maximum", "exclusiveMinimum",
                             "exclusiveMaximum", "multipleOf"}) {
       const auto* entry = schema.find(key);
@@ -218,7 +244,8 @@ public:
       if (comparison > 0 ||
           (comparison == 0 &&
            (lower_->exclusive || upper_->exclusive || !Valid(lower_->value))))
-        Invalid("numeric constraints describe an empty interval");
+        throw JsonSchemaEmpty(
+            "JSON Schema: numeric constraints describe an empty interval");
     }
     if (integer_) {
       if (!multiple_)
@@ -239,7 +266,8 @@ public:
       }
     }
     if (lower_ && upper_ && multiple_ && !GridPoint(*lower_, *upper_))
-      Invalid("numeric constraints contain no multipleOf value");
+      throw JsonSchemaEmpty(
+          "JSON Schema: numeric constraints contain no multipleOf value");
   }
   bool AcceptValue(const json::Value& value) const override {
     return value.is_number() && Valid(Decimal::Parse(value.dump()));
@@ -430,7 +458,7 @@ public:
       }
     }
     if (minimum_ > maximum_)
-      Invalid("minLength exceeds maxLength");
+      throw JsonSchemaEmpty("JSON Schema: minLength exceeds maxLength");
     std::vector<std::string> patterns;
     for (const auto* key : {"pattern", "format"}) {
       const auto* value = schema.find(key);
@@ -456,7 +484,8 @@ public:
       regex_ = JsonSchemaRegex::Compile(patterns, maximum_);
     }
     if (!regex_->CanFinish(regex_->Start(), minimum_, maximum_))
-      Invalid("string predicates and lengths have no matching value");
+      throw JsonSchemaEmpty(
+          "JSON Schema: string predicates and lengths have no matching value");
   }
 
   bool CacheTransitions() const override { return true; }
@@ -720,6 +749,47 @@ private:
 std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::String(
     const json::Value& schema) {
   return std::make_shared<StringLexeme>(schema);
+}
+std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Whitespace() {
+  static const auto whitespace = std::make_shared<WhitespaceLexeme>();
+  return whitespace;
+}
+
+json::Value JsonSchemaLexeme::IntersectMultipleOf(const json::Value& a,
+                                                  const json::Value& b) {
+  for (const auto* value : {&a, &b})
+    if (!value->is_number() || !std::isfinite(value->as_double()) ||
+        value->as_double() <= 0)
+      Invalid("multipleOf must be a positive finite number");
+  auto left = Decimal::Parse(a.dump()), right = Decimal::Parse(b.dump());
+  // Put both steps on the same integer grid, then compute the exact LCM.
+  const int scale = std::max(left.scale, right.scale);
+  left.digits.append(scale - left.scale, '0');
+  right.digits.append(scale - right.scale, '0');
+  left.scale = right.scale = 0;
+  auto x = left, y = right;
+  while (y.digits != "0") {
+    auto remainder = Divide(x, y).second;
+    x = std::move(y);
+    y = Decimal{std::move(remainder), 0, false};
+  }
+  auto common = Product(Decimal{Divide(left, x).first, 0, false}, right.digits);
+  common.scale += scale;
+  common.Normalize();
+  const auto result =
+      json::parse(common.digits + "e" + std::to_string(-common.scale));
+  if (!result.is_number() || !std::isfinite(result.as_double()) ||
+      Compare(Decimal::Parse(result.dump()), common) != 0)
+    Invalid("combined multipleOf exceeds the exact schema-number range");
+  return result;
+}
+
+json::Value JsonSchemaLexeme::Format(std::string_view format) {
+  auto schema = json::Value::object();
+  schema["pattern"] = FormatPattern(format);
+  if (format == "hostname")
+    schema["maxLength"] = 253;
+  return schema;
 }
 std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Number(
     const json::Value& schema, bool integer) {

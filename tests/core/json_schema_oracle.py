@@ -22,13 +22,18 @@ def ecmascript_cases(node):
              for chars in itertools.product("ab1_é\n", repeat=n)]
     words += ["\r", "\r\n", "\v", "\f", "\u0085", "\u2028", "\u2029",
               "\ufeff", "\u2003", "\u0301", "\u0661", "😀", "a😀", "a\n",
-              "a\r", "a\r\n", "a\u2028", "a\u2029", "a\v", "a\u0085"]
+              "a\r", "a\r\n", "a\u2028", "a\u2029", "a\v", "a\u0085",
+              "\0", "[", "&", "-", " cat!", "cats", "a cat b"]
     patterns = [r"^\w+$", r"^\W+$", r"^\d+$", r"^\D+$", r"^\s+$", r"^\S+$",
                 "^.$", "^a$", "a$", "^a", "^a.*$", "^[^]$", "^[]*$",
                 r"^[\w]+$", r"^[^\d]+$", r"^[\s]+$", r"^[\p{L}]+$",
                 r"^[\p{Script=Greek}]+$", r"^[\P{L}]+$", r"^\uD83D\uDE00$",
                 "^(?=a|b)(?:aa|b)$", "^(?!ab)[ab]+$", "^(?=.{2}$).*$",
-                "(?:^a|b$)", "^(?:a?|b){1,3}$", "^a(?=b$)b$", r"^[a b]+$"]
+                "(?:^a|b$)", "^(?:a?|b){1,3}$", "^a(?=b$)b$", r"^[a b]+$",
+                r"\b", r"\B", r"\bcat\b", r"^\b[ab]+\b$", r"a\Bb",
+                r"(?=\ba)a", r"^(?!\ba)[ab]+$", r"\Bé\B",
+                r"^\u{1f600}$", r"^\cJ$", r"^\0$", r"^[\b\0]$",
+                r"^[a&&b]$", r"^[[a]$"]
     requests = [{"pattern": pattern, "minimum": minimum, "maximum": maximum,
                  "words": words}
                 for pattern in patterns for minimum, maximum in [(0, 4), (2, 3)]]
@@ -72,6 +77,55 @@ def main():
         texts = ['{"x":' + value + '}' for value in values]
         expected = [validator.is_valid(json.loads(text, parse_float=Decimal)) for text in texts]
         cases.append((schema, texts, expected))
+
+    add({"type": "object", "properties": {"a": {"type": "integer"},
+         "b": {"type": "boolean"}}, "required": ["a", "b"],
+         "additionalProperties": False,
+         "enum": [{"b": True, "a": 1}, {"a": 2, "b": False}]},
+        [json.dumps({"a": a, "b": b}) for a in (0, 1, 2) for b in (False, True)])
+    add({"type": "array", "items": {"type": "integer", "minimum": 0},
+         "minItems": 2, "enum": [[1, 2], [-1], [2], [0, 3]]},
+        ["[]", "[1,2]", "[-1]", "[2]", "[0,3]", "[1,3]"])
+    add({"type": "string", "enum": ["a", "b"], "const": "b"},
+        ['"a"', '"b"', '"c"'])
+    add({"type": "object", "additionalProperties": False,
+         "enum": [{"unexpected": 1}, {}]}, ['{}', '{"unexpected":1}'])
+    add({"type": "array", "items": {"type": "integer", "minimum": 2, "maximum": 1},
+         "enum": [[1], []]}, ['[]', '[1]', '[2]'])
+    add({"anyOf": [{"type": "string", "pattern": "^a$", "minLength": 2},
+                  {"type": "string", "const": "b"}]},
+        ['""', '"a"', '"aa"', '"b"', '"c"'])
+    for _ in range(40):
+        low, high = sorted(rng.sample(range(-10, 11), 2))
+        property_schema = {"$ref": "#/$defs/N", "minimum": low, "maximum": high}
+        schema = {"type": "object", "properties": {"x": property_schema},
+                  "required": ["x"], "additionalProperties": False,
+                  "$defs": {"N": {"type": "integer", "minimum": -5, "maximum": 5}}}
+        values = [json.dumps({"x": i}) for i in range(-12, 13)]
+        validator = Draft202012Validator(schema)
+        expected = [validator.is_valid(json.loads(text)) for text in values]
+        if any(expected):
+            cases.append((schema, values, expected))
+    add({"anyOf": [{"type": "integer", "minimum": 1},
+                  {"type": "integer", "minimum": 10}], "maximum": 5},
+        [str(i) for i in range(12)])
+    for a, b in ((.2, .3), (.25, .4), (1.2, .18), (2, 3), (10, 25), (1e-4, 2e-4)):
+        add({"$defs": {"N": {"type": "number", "multipleOf": a}},
+             "$ref": "#/properties/x/$defs/N", "multipleOf": b,
+             "minimum": -2, "maximum": 2},
+            [str(Decimal(i) / 100) for i in range(-210, 211)])
+    for a, b in (("hostname", "ipv4"), ("ipv4", "hostname"),
+                 ("hostname", "uuid"), ("hostname", "date")):
+        add({"$defs": {"S": {"type": "string", "format": a}},
+             "$ref": "#/properties/x/$defs/S", "format": b,
+             "pattern": "^[0-9]", "maxLength": 40},
+            [json.dumps(s) for s in ("127.0.0.1", "example.com", "-bad",
+             "256.0.0.1", "2024-02-29", "2023-02-29", "1:::2",
+             "12345678-1234-1234-1234-123456789abc")])
+    add({"$defs": {"S": {"type": "string", "format": "date"}},
+         "anyOf": [{"$ref": "#/properties/x/$defs/S", "format": "ipv4"},
+                   {"type": "string", "const": "fallback"}]},
+        ['"2024-02-29"', '"127.0.0.1"', '"fallback"'])
 
     for integer in (False, True):
         for _ in range(100):

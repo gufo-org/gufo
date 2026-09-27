@@ -398,6 +398,8 @@ def check_structured_outputs(client, model, checks, vision=False):
         items: list[Item] = Field(min_length=1, max_length=2)
         note: str | None
 
+    check_strict_tools(client, model, checks)
+
     def record(name, value):
         checks[name] = value
         print(f"CHECK {name}", file=sys.stderr, flush=True)
@@ -605,6 +607,94 @@ def check_structured_outputs(client, model, checks, vision=False):
         assert responses_image.output_parsed.color == "blue", responses_image
         record("schema_responses_image", {"text": responses_image.output_text,
                                          "usage": responses_image.usage.to_dict()})
+
+
+def check_strict_tools(client, model, checks):
+    """Strict arguments work without imposing a JSON response on ordinary text."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    literal = "<think>literal</think></tool_call>"
+    schema = {"type": "object", "properties": {
+        "value": {"type": "string", "const": literal}},
+        "required": ["value"], "additionalProperties": False}
+    tool = {"type": "function", "function": {
+        "name": "record", "strict": True, "parameters": schema}}
+    common = dict(model=model, tools=[tool], parallel_tool_calls=False,
+                  messages=[{"role": "user", "content":
+                             "Call record once with the required value. No explanation."}],
+                  temperature=0, seed=41, max_completion_tokens=96,
+                  extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+
+    def record(name, result):
+        checks[name] = result
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+        return result
+
+    def signature(result):
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        function = result["tools"][0]["function"]
+        assert function["name"] == "record", result
+        assert json.loads(function["arguments"]) == {"value": literal}, result
+        assert not result["reasoning"], result
+        return (result["text"], function["name"], function["arguments"])
+
+    for choice in ("required", {"type": "function", "function": {"name": "record"}}):
+        result = record("strict_tool_" + ("required" if isinstance(choice, str) else "forced"),
+                        chat_result(client, {**common, "tool_choice": choice}, True))
+        signature(result)
+    sampled = {**common, "tool_choice": "required", "temperature": .7, "top_p": .8,
+               "presence_penalty": .3, "frequency_penalty": .2,
+               "extra_body": {**common["extra_body"], "top_k": 20, "min_p": .05,
+                              "repeat_penalty": 1.1}}
+    baseline = chat_result(client, sampled, False)
+    expected = signature(baseline)
+    record("strict_tool_sampled", baseline)
+    parsed = client.chat.completions.parse(**sampled)
+    assert parsed.choices[0].message.tool_calls[0].function.parsed_arguments == {"value": literal}, parsed
+    record("strict_tool_sdk_parse", {"parsed": {"value": literal}})
+    with ThreadPoolExecutor(2) as pool:
+        concurrent = list(pool.map(lambda _: chat_result(client, sampled, True), range(2)))
+    assert all(signature(result) == expected for result in concurrent), concurrent
+    assert all(result["usage"]["prompt_tokens_details"]["cached_tokens"] > 0
+               for result in concurrent), concurrent
+    record("strict_tool_concurrent_replay", concurrent)
+    for limit in (2, 12):
+        partial = chat_result(client, {**sampled, "max_completion_tokens": limit}, True)
+        assert partial["finish"] == "length" and not partial["tools"], partial
+        assert not partial["text"], partial
+        record(f"strict_tool_limit_{limit}", partial)
+    stopped = chat_result(client, {**sampled, "stop": "literal"}, True)
+    assert stopped["finish"] == "stop" and not stopped["tools"], stopped
+    record("strict_tool_stop", stopped)
+    resumed = chat_result(client, sampled, True)
+    assert signature(resumed) == expected, (resumed, baseline)
+    record("strict_tool_resume", resumed)
+    followup = {**sampled, "messages": [
+        *sampled["messages"],
+        {"role": "assistant", "content": baseline["text"] or None,
+         "tool_calls": baseline["tools"]},
+        {"role": "tool", "tool_call_id": baseline["tools"][0]["id"],
+         "content": '{"saved":true}'},
+        {"role": "user", "content": "Call record once more with the required value."}]}
+    continued = chat_result(client, followup, True)
+    signature(continued)
+    assert continued["usage"]["prompt_tokens_details"]["cached_tokens"] > 0, continued
+    record("strict_tool_followup_cache", continued)
+    non_strict = {**common, "tool_choice": "required",
+                  "tools": [{"type": "function", "function": {
+                      **tool["function"], "strict": False}}]}
+    signature(record("non_strict_single_call", chat_result(client, non_strict, True)))
+    for streaming in (False, True):
+        try:
+            client.chat.completions.create(**{
+                **common, "tools": [{"type": "function", "function": {
+                    "name": "bad", "strict": True, "parameters": {"type": "object"}}}],
+                "stream": streaming})
+        except openai.BadRequestError:
+            pass
+        else:
+            raise AssertionError("invalid strict tool schema accepted without response_format")
+    record("strict_tool_invalid_schema", {"status": 400})
 
 
 def check_structured_limits(client, model, checks, vision=False):

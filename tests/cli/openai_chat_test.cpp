@@ -870,7 +870,7 @@ void TestFlatToolFieldsReachTemplate() {
       "tools":[]
     })");
     auto function = gufo::json::parse(R"({
-      "name":"f","description":"","parameters":{"type":"object"},
+      "name":"f","description":"","parameters":{"type":"object","additionalProperties":false},
       "strict":null,"vendor":{"version":2}
     })");
     function["strict"] = gufo::json::parse(strict);
@@ -1548,6 +1548,153 @@ void TestStructuredToolTruncation() {
   }
 }
 
+void TestStrictToolSchema() {
+  auto body = gufo::json::parse(R"({
+    "model":"test-model","messages":[{"role":"user","content":"call f"}],
+    "reasoning_effort":"none","parallel_tool_calls":false,
+    "tools":[{"type":"function","function":{"name":"f","strict":true,
+      "parameters":{"type":"object","properties":{"text":{"type":"string"}},
+        "required":["text"],"additionalProperties":false}}}]
+  })");
+  const std::string call =
+      R"(<tool_call>{"name":"f","arguments":{"text":"<think>x</think></tool_call>"}}</tool_call>)";
+  for (const bool stream : {false, true}) {
+    FakeBackend backend;
+    backend.pieces = {"Calling f. "};
+    for (char byte : call)
+      backend.pieces.emplace_back(1, byte);
+    backend.pieces.emplace_back(" After f.");
+    body["stream"] = stream;
+    body["tool_choice"] =
+        gufo::json::parse(R"({"type":"function","function":{"name":"f"}})");
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+    std::string output = response.body;
+    if (response.streaming_body)
+      response.streaming_body([&](std::string_view chunk) {
+        output += chunk;
+        return true;
+      });
+    Expect(response.status == 200 && backend.last_request.constrained_tools &&
+               !backend.last_request.response_format &&
+               !backend.last_request.parallel_tool_calls &&
+               backend.last_request.tool_choice ==
+                   gufo::server::ChatRequest::ToolChoice::kRequired,
+           "strict tool schemas and forced choice reach the runner "
+           "independently of response_format");
+    Expect(
+        output.find("\"finish_reason\":\"tool_calls\"") != std::string::npos &&
+            output.find("Calling f. ") != std::string::npos &&
+            output.find(" After f.") != std::string::npos &&
+            output.find("<think>x</think></tool_call>") != std::string::npos &&
+            output.find("reasoning_content") == std::string::npos,
+        "strict tool payload markers remain argument data in buffered and "
+        "streaming responses");
+  }
+  body["tool_choice"] = "auto";
+  body["parallel_tool_calls"] = true;
+  for (const bool stream : {false, true}) {
+    FakeBackend backend;
+    const auto raw = " Before " + call + " between " + call + " after <";
+    for (char byte : raw)
+      backend.pieces.emplace_back(1, byte);
+    body["stream"] = stream;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+    std::string content;
+    if (stream) {
+      response.streaming_body([&](std::string_view chunk) {
+        if (chunk == "data: [DONE]\n\n")
+          return true;
+        const auto event = gufo::json::parse(chunk.substr(6));
+        for (const auto& choice : event.find("choices")->items())
+          if (const auto* delta = choice.find("delta"))
+            content += delta->member_str("content");
+        return true;
+      });
+    } else {
+      content = gufo::json::parse(response.body)
+                    .find("choices")
+                    ->items()[0]
+                    .find("message")
+                    ->member_str("content");
+    }
+    Expect(content == " Before  between  after <",
+           "parallel strict calls preserve surrounding prose and whitespace");
+  }
+  body["parallel_tool_calls"] = false;
+  for (
+      const char* invalid :
+      {R"({"tool_choice":{"type":"function","function":{"name":"absent"}}})",
+       R"({"parallel_tool_calls":"false"})",
+       R"({"tools":[{"type":"function","function":{"name":"bad<name","parameters":{}}}]})",
+       R"({"tools":[{"type":"function","function":{"name":"f"}},{"type":"function","function":{"name":"f"}}]})",
+       R"({"tools":[{"type":"function","function":{"name":"bad","strict":true,"parameters":{"type":"object"}}}]})"}) {
+    FakeBackend backend;
+    auto request = body;
+    const auto fields = gufo::json::parse(invalid);
+    for (const auto& [key, value] : fields.members())
+      request[key] = value;
+    Expect(gufo::server::HandleOpenAiChat(Request(request.dump()), backend)
+                       .status == 400 &&
+               backend.chat_calls == 0,
+           "invalid tool constraints fail before generation");
+  }
+  body["tool_choice"] = "auto";
+  for (const bool stream : {false, true}) {
+    FakeBackend prose;
+    prose.pieces = {"A literal ", "<"};
+    body["stream"] = stream;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), prose);
+    std::string output = response.body;
+    if (response.streaming_body)
+      response.streaming_body([&](std::string_view chunk) {
+        output += chunk;
+        return true;
+      });
+    Expect(
+        response.status == 200 &&
+            (output.find("\"content\":\"<\"") != std::string::npos ||
+             output.find("\"content\":\"A literal <\"") != std::string::npos),
+        "automatic strict tools preserve ordinary text ending with a partial "
+        "marker");
+  }
+  for (std::size_t length = 1; length < call.size(); ++length) {
+    FakeBackend backend;
+    backend.pieces = {"Calling f. ", call.substr(0, length)};
+    backend.finish_reason =
+        gufo::server::TextGenerationBackend::FinishReason::kLength;
+    body["stream"] = false;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+    Expect(response.status == 200 &&
+               response.body.find("\"finish_reason\":\"length\"") !=
+                   std::string::npos &&
+               response.body.find("\"tool_calls\"") == std::string::npos,
+           "incomplete strict calls never become API tool calls");
+  }
+  FakeBackend no_arguments;
+  no_arguments.pieces = {
+      R"(<tool_call>{"name":"f","arguments":{}}</tool_call>)"};
+  body["tools"] = gufo::json::parse(
+      R"([{"type":"function","function":{"name":"f","strict":true}}])");
+  const auto response =
+      gufo::server::HandleOpenAiChat(Request(body.dump()), no_arguments);
+  Expect(response.status == 200 && no_arguments.last_request.constrained_tools,
+         "omitted parameters define a strict function without arguments");
+  body["tools"] = gufo::json::parse(
+      R"([{"type":"function","function":{"name":"f","parameters":{"type":"object"},"strict":false}}])");
+  body["parallel_tool_calls"] = false;
+  FakeBackend non_strict;
+  non_strict.pieces = no_arguments.pieces;
+  Expect(
+      gufo::server::HandleOpenAiChat(Request(body.dump()), non_strict).status ==
+              200 &&
+          non_strict.last_request.constrained_tools,
+      "parallel_tool_calls false also constrains non-strict tools");
+}
+
 void TestStopInsideToolArguments() {
   using Finish = gufo::server::TextGenerationBackend::FinishReason;
   for (const bool stream : {false, true}) {
@@ -1731,6 +1878,7 @@ int main() {
   TestStopSequencesAndDefaultFields();
   TestStructuredResponseFormat();
   TestStructuredToolTruncation();
+  TestStrictToolSchema();
   TestExplicitStopOutputFraming();
   TestStopInsideToolArguments();
   TestResponsesOutput();

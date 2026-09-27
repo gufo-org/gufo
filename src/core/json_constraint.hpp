@@ -39,7 +39,7 @@ public:
   using Tool = std::pair<std::string, std::shared_ptr<const JsonConstraint>>;
   static std::shared_ptr<const JsonConstraint> WithTools(
       std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
-      bool required);
+      bool required, bool parallel = false);
 
   [[nodiscard]] State Start() const;
   [[nodiscard]] State Advance(const State& state, unsigned char byte) const;
@@ -58,6 +58,7 @@ private:
   std::vector<std::shared_ptr<const JsonSchemaLexeme>> lexemes_;
   std::uint32_t root_{0};
   std::string prompt_;
+  bool stop_only_when_complete_{true};
 };
 
 class ConstraintVocabulary {
