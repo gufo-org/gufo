@@ -109,7 +109,11 @@ change the cache's boundaries.
 **Agreement.** Both ranks digest every call and its result; `kEnd` carries rank
 0's digest and call count, and rank 1 fails the request on a difference. Under
 greedy decoding rank 1 also checks its own argmax against every token rank 0
-advances. What a request computed is reused only after rank 1 agreed with it.
+advances. A capture carries the request's digest so far, and rank 1 captures
+only a state both ranks reached the same way. Snapshots and released states
+are reused at once, as on one host; a request that reuses what an unjudged
+request left fails too if rank 1 later rejects that request, and a rejected
+request's states and snapshots are not reused.
 
 ## Tests and probes
 
@@ -119,7 +123,10 @@ advances. What a request computed is reused only after rank 1 agreed with it.
 - `qwen38_flash_next.tp_partition` and the attention, projection and routed
   operator tests: the split against the full kernels.
 - `qwen38_flash_next_tp_probe` (`gpu-tp2`): prompt, decode and logit
-  comparison on both ranks.
+  comparison on both ranks; `--split N` checks that a prefill does not depend
+  on its steps (every layer's MoE input and output, and the logits, bit for
+  bit), `--decode-tail K` compares decoding the last K tokens with
+  prefilling them.
 - `qwen38_flash_next_tp_batched_probe` (`gpu-tp2`): batched against serial
   decoding on both ranks without the serving stack; `--allreduce-bench N`
   times the exchange.
