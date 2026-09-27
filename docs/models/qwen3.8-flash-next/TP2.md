@@ -38,14 +38,14 @@ build/gpu-tp2/gufo serve llm --model "$MODEL" --speculative mtp --mtp-model "$MT
 ```
 
 Sampling, streaming, stop sequences, tool calls, images (`--mmproj` on both
-ranks), cancellation, `--request-timeout-ms` and history reuse work as on one
-host. Cancellations and timeouts take effect between model calls, so a long
-prefill stops at its next chunk. Up to `--sessions` requests run at once, their
+ranks), cancellation, `--request-timeout-ms`, history reuse and the disk cache
+(`--cache-disk` on both ranks, each on its own disk) work as on one host.
+Cancellations and timeouts take effect between model calls, so a long prefill
+stops at its next chunk. Up to `--sessions` requests run at once, their
 decoders batched; more wait up to `--max-pending`, the rest get HTTP 429.
 
 Limits:
 
-- The disk cache (`--cache-disk`) is refused: snapshots are rank-local.
 - Concurrent MTP requests advance in batched single-token steps; batched
   multi-token decoding is not mirrored.
 - A lost peer or a disagreement fails the request with HTTP 500, and a lost
@@ -106,6 +106,19 @@ pass through the wrapper; a request's cancellation check is never passed to the
 model session, which could strand rank 1 inside an exchange; TP2 must not
 change the cache's boundaries.
 
+**Disk cache.** Each rank keeps its own half of a snapshot on its own disk.
+Rank 0's continuation disk store decides what is saved, restored and evicted,
+as on one host. Its file holds rank 0's half behind a header that names a
+random file key; when it writes the file, rank 1 persists its half under that
+key in the background. Restoring a file restores both halves, rank 1's from
+its own directory, acknowledged before rank 0 continues. Rank 1 bounds its
+directory by least-recent use within its own `--cache-disk-bytes`; a missing,
+corrupt or foreign half fails the restore on rank 1, which rank 0's store
+treats as a miss (the state is reset on both ranks and prefilled). TP2 files
+carry the rank in their cache identity, so neither a one-host server nor the
+other rank restores them. Within one process, a file of a request rank 1
+rejected is a miss, and a restore before the verdict depends on it.
+
 **Agreement.** Both ranks digest every call and its result; `kEnd` carries rank
 0's digest and call count, and rank 1 fails the request on a difference. Under
 greedy decoding rank 1 also checks its own argmax against every token rank 0
@@ -150,5 +163,8 @@ On both hosts, from one commit (record it and the binary hash):
    output; the queue bound returns 429; a long prefill runs beside decoders.
 6. Images: a request, its cached repeat, a follow-up and two images in one
    request match one host's answers.
-7. Killing rank 1 mid-request returns 500 promptly.
-8. For speed, report the median of several warm requests.
+7. Disk cache (`--cache-disk` on both ranks): after both ranks restart,
+   `tools/serving/check-continuation.py --restore` restores its greedy cases
+   from disk with the same outputs.
+8. Killing rank 1 mid-request returns 500 promptly.
+9. For speed, report the median of several warm requests.
