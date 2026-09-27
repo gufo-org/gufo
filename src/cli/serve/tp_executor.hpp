@@ -99,8 +99,18 @@ public:
 /// the pool calls when it leases a state to the request, binds the state's
 /// model calls to the request.
 struct TpRequestContext final : TextPromptContext {
-  explicit TpRequestContext(std::uint64_t sequence) : sequence(sequence) {}
+  explicit TpRequestContext(
+      std::uint64_t sequence,
+      std::shared_ptr<const TextPromptContext> images = {})
+      : sequence(sequence), images(std::move(images)) {
+    if (this->images != nullptr) {
+      cache_identity = this->images->cache_identity;
+    }
+  }
   std::uint64_t sequence;
+  /// The request's own prompt context from `PreparePrompt` (its images), which
+  /// the model sees; rank 1 receives it with the request.
+  std::shared_ptr<const TextPromptContext> images;
 };
 
 /// Rank 0's runner in a TP2 pair.
@@ -155,6 +165,10 @@ public:
   void SetPromptContext(
       TextRunnerState& state,
       std::shared_ptr<const TextPromptContext> context) const override;
+  [[nodiscard]] std::vector<std::uint8_t> EncodePromptContext(
+      const TextPromptContext& context) const override;
+  [[nodiscard]] std::shared_ptr<const TextPromptContext> DecodePromptContext(
+      std::span<const std::uint8_t> bytes) const override;
   [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
       const ChatRequest& request) const override;
   [[nodiscard]] std::string Decode(

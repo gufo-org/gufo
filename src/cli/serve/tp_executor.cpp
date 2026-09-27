@@ -43,6 +43,8 @@ void SetError(std::string* error, std::string message) {
       return "cancel-prepare";
     case TpInstructionOp::kAdvanceBatch:
       return "batched advance";
+    case TpInstructionOp::kPromptContext:
+      return "prompt context";
     case TpInstructionOp::kEnd:
       return "end";
     case TpInstructionOp::kNone:
@@ -80,6 +82,20 @@ void SetError(std::string* error, std::string message) {
   return {.op = TpInstructionOp::kAdvance,
           .state = member.state,
           .token = member.token};
+}
+
+/// Both ranks record which prompt context a state was bound to, so a request
+/// whose images reached rank 1 differently fails the agreement check.
+void DigestTpContext(TpExecutionDigest& digest,
+                     const std::shared_ptr<const TextPromptContext>& context) {
+  const std::span<const std::uint8_t> identity =
+      context != nullptr
+          ? std::span<const std::uint8_t>(context->cache_identity)
+          : std::span<const std::uint8_t>{};
+  digest.Add(identity.size());
+  for (const auto byte : identity) {
+    digest.Add(byte);
+  }
 }
 
 /// Forward calls exchange partials, so they run inside a collective scope.
@@ -531,19 +547,51 @@ void TpMirroredRunner::SetPromptContext(
   auto& mirrored = Mirrored(state);
   const auto* request = dynamic_cast<const TpRequestContext*>(context.get());
   if (context != nullptr && request == nullptr) {
-    throw std::invalid_argument("TP2 does not support prompt contexts");
+    throw std::invalid_argument("TP2 prompt context names no request");
   }
+  const auto images = request != nullptr ? request->images : nullptr;
+  // Binding a context can reset the model state, so rank 1 binds it too, at
+  // the same point in the call order.
+  const std::lock_guard<std::recursive_mutex> call_lock(call_mutex_);
   {
     const std::lock_guard<std::mutex> lock(mutex_);
+    if (!failure_.empty()) {
+      throw std::runtime_error("TP instruction channel failed: " + failure_);
+    }
+    std::uint64_t sequence = 0;
     if (request == nullptr) {
       leases_.erase(mirrored.id());
     } else if (!requests_.contains(request->sequence)) {
       throw std::logic_error("TP request context names no open request");
     } else {
-      leases_[mirrored.id()] = request->sequence;
+      sequence = request->sequence;
+      leases_[mirrored.id()] = sequence;
+    }
+    const TpInstruction instruction{.op = TpInstructionOp::kPromptContext,
+                                    .state = mirrored.id()};
+    if (sequence != 0) {
+      auto& open = requests_.at(sequence);
+      DigestTpCall(open.digest, instruction);
+      DigestTpContext(open.digest, images);
+      ++open.count;
+    }
+    std::string error;
+    if (!sink_->Send(sequence, instruction, nullptr, &error)) {
+      failure_ = error.empty() ? "send failed" : error;
+      throw std::runtime_error("TP instruction send failed: " + failure_);
     }
   }
-  inner_->SetPromptContext(mirrored.inner(), nullptr);
+  inner_->SetPromptContext(mirrored.inner(), images);
+}
+
+std::vector<std::uint8_t> TpMirroredRunner::EncodePromptContext(
+    const TextPromptContext& context) const {
+  return inner_->EncodePromptContext(context);
+}
+
+std::shared_ptr<const TextPromptContext> TpMirroredRunner::DecodePromptContext(
+    std::span<const std::uint8_t> bytes) const {
+  return inner_->DecodePromptContext(bytes);
 }
 
 TextGenerationBackend::InitialOutputState TpMirroredRunner::InitialOutputState(
@@ -928,6 +976,8 @@ struct TpExecutor::Request {
   }
 
   std::vector<TextRunnerToken> prompt;
+  /// The request's prompt context (its images), rebuilt from `kSingle`.
+  std::shared_ptr<const TextPromptContext> images;
   /// Under greedy decoding the logits are bit-identical on both ranks, so rank
   /// 1's own choice must equal every token rank 0 advances. Rank 0's token is
   /// what both ranks feed, so without this check a numerical divergence (the
@@ -1078,22 +1128,35 @@ bool TpExecutor::Open(const TpControlCommand& begin, std::string* error) {
     }
     prompt.push_back(static_cast<TextRunnerToken>(token));
   }
-  requests_.emplace(
-      begin.sequence,
-      std::make_unique<Request>(begin, std::move(prompt), states_.size()));
+  auto request =
+      std::make_unique<Request>(begin, std::move(prompt), states_.size());
+  if (!begin.prompt_context.empty()) {
+    // A context rank 1 cannot rebuild fails the request, not the pair: its
+    // calls still run, and the digest reports the difference.
+    try {
+      request->images = runner_->DecodePromptContext(begin.prompt_context);
+    } catch (const std::exception& exception) {
+      request->Note(std::string("rank 1 prompt context is invalid: ") +
+                    exception.what());
+    }
+  }
+  requests_.emplace(begin.sequence, std::move(request));
   return true;
 }
 
 bool TpExecutor::ExecuteIdle(const TpInstruction& instruction,
                              std::string* error) {
   if (instruction.op != TpInstructionOp::kInvalidate &&
-      instruction.op != TpInstructionOp::kDrop) {
+      instruction.op != TpInstructionOp::kDrop &&
+      instruction.op != TpInstructionOp::kPromptContext) {
     SetError(error, "TP worker received a model call outside a request");
     return false;
   }
   try {
     if (instruction.op == TpInstructionOp::kDrop) {
       DropSnapshot(instruction.snapshot_id);
+    } else if (instruction.op == TpInstructionOp::kPromptContext) {
+      runner_->SetPromptContext(StateFor(instruction.state), nullptr);
     } else {
       StateFor(instruction.state).Invalidate();
     }
@@ -1166,6 +1229,10 @@ bool TpExecutor::ExecuteCall(std::uint64_t sequence, Request& request,
         break;
       case TpInstructionOp::kCancelPrepare:
         runner_->PrepareCancellation(state);
+        break;
+      case TpInstructionOp::kPromptContext:
+        DigestTpContext(request.digest, request.images);
+        runner_->SetPromptContext(state, request.images);
         break;
       case TpInstructionOp::kInvalidate:
         choice.reset();

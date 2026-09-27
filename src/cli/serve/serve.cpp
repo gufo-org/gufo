@@ -1208,10 +1208,9 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     if (tp_world_size == 2 &&
-        (request_timeout_ms != 0 || !cache_disk_directory.empty() ||
-         !vision_model_path.empty())) {
-      std::cerr << "Error: TP2 currently requires no timeout, no disk cache "
-                   "and no vision\n";
+        (request_timeout_ms != 0 || !cache_disk_directory.empty())) {
+      std::cerr << "Error: TP2 currently requires no timeout and no disk "
+                   "cache\n";
       return 2;
     }
 

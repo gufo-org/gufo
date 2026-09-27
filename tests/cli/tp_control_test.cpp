@@ -133,6 +133,33 @@ int main() {
               received.prompt_tokens == command.prompt_tokens &&
               received.client_id == command.client_id,
           "TP control command round trip");
+  Require(received.prompt_context.empty(),
+          "a text-only request carries no prompt context");
+
+  // A request with images carries its prompt context, byte for byte, and a
+  // large one (pixels) crosses the channel in one frame.
+  {
+    TpControlCommand images = command;
+    images.sequence = 9;
+    images.prompt_context.resize((24U << 20) + 3);
+    for (std::size_t index = 0; index < images.prompt_context.size(); ++index) {
+      images.prompt_context[index] =
+          static_cast<std::uint8_t>(index * 2654435761U >> 13);
+    }
+    // Larger than a socket buffer, so the receiver must run while it is sent.
+    bool sent = false;
+    std::thread sender(
+        [&] { sent = server->SendCommand(images, &server_error); });
+    TpControlCommand got;
+    const bool received = client->ReceiveCommand(&got, &client_error);
+    sender.join();
+    Require(sent, server_error);
+    Require(received, client_error);
+    Require(got.prompt_context == images.prompt_context &&
+                got.prompt_tokens == images.prompt_tokens &&
+                got.client_id == images.client_id,
+            "TP control request prompt context round trip");
+  }
 
   // A C1 command carries the request's whole sampling configuration: rank 1
   // builds the same sampler for multi-token decoding, bit for bit.
@@ -257,6 +284,18 @@ int main() {
               {.sequence = command.sequence + 1, .state = 0, .token = 11},
               {.sequence = command.sequence + 2, .state = 7, .token = 0}}}};
   round_trip(batch);
+  // Binding a state to its request's prompt context belongs to the request;
+  // releasing it can happen between requests.
+  round_trip(
+      {.sequence = command.sequence,
+       .kind = TpControlCommandKind::kInstruction,
+       .instruction = {
+           .op = TpInstructionOp::kPromptContext, .index = 19, .state = 3}});
+  round_trip(
+      {.sequence = 0,
+       .kind = TpControlCommandKind::kInstruction,
+       .instruction = {
+           .op = TpInstructionOp::kPromptContext, .index = 20, .state = 3}});
   const TpControlResponse ack{.instruction_index = 17,
                               .sequence = command.sequence,
                               .error = "capture failed",
@@ -294,6 +333,12 @@ int main() {
   refuses("a cache prefix",
           with([](auto& bad) { bad.cache_prefix_tokens = 2; }));
   refuses("a client id", with([](auto& bad) { bad.client_id = "probe"; }));
+  refuses("a prompt context",
+          with([](auto& bad) { bad.prompt_context = {1, 2, 3}; }));
+  refuses("a prompt-context binding with a token", with([](auto& bad) {
+            bad.instruction = {.op = TpInstructionOp::kPromptContext,
+                               .token = 4};
+          }));
   refuses("a sampling configuration",
           with([](auto& bad) { bad.sampling.temperature = 0.5F; }));
   refuses("a draw state outside a decode",
@@ -482,6 +527,8 @@ int main() {
   });
   refuses_mismatch("session-count",
                    [](TpControlConfig& config) { config.sessions = 4; });
+  refuses_mismatch("vision",
+                   [](TpControlConfig& config) { config.vision = true; });
 
   const auto broker_port = FreePort();
   std::shared_ptr<TpControlChannel> broker_client;

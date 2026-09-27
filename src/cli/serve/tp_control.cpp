@@ -27,13 +27,17 @@ namespace gufo::server {
 namespace {
 
 constexpr std::uint32_t kMagic = 0x54504331U;  // "TPC1"
-constexpr std::uint16_t kVersion = 12;         // requests and rank-1 executor
+constexpr std::uint16_t kVersion = 13;         // requests and rank-1 executor
                                                // instructions for concurrent
                                                // requests
 constexpr std::uint16_t kHello = 1;
 constexpr std::uint16_t kCommand = 2;
 constexpr std::uint16_t kResponse = 3;
-constexpr std::size_t kMaxPayloadBytes = 16U << 20;
+// A request carries its images' pixels: up to 16 images of up to 16 MP each.
+constexpr std::size_t kMaxPayloadBytes = std::size_t{1} << 30;
+// Before the handshake a peer is not yet authenticated.
+constexpr std::size_t kMaxHelloBytes = 64U << 10;
+constexpr std::size_t kMaxPromptContextBytes = kMaxPayloadBytes - (64U << 20);
 constexpr std::size_t kMaxPromptTokens = 1U << 20;
 constexpr std::size_t kMaxBatchMembers = 8;
 constexpr std::size_t kMaxClientIdBytes = 4096;
@@ -157,7 +161,8 @@ bool ReadBytes(std::span<const std::uint8_t> data, std::size_t* offset,
 [[nodiscard]] bool HasRequestFields(const TpControlCommand& command) {
   return command.max_tokens != 0 || command.cache_prompt ||
          command.cache_prefix_tokens != 0 || !command.prompt_tokens.empty() ||
-         !command.client_id.empty() || !IsDefaultSampling(command.sampling);
+         !command.client_id.empty() || !command.prompt_context.empty() ||
+         !IsDefaultSampling(command.sampling);
 }
 
 [[nodiscard]] std::uint32_t FloatBits(float value) {
@@ -230,6 +235,7 @@ bool ReadBytes(std::span<const std::uint8_t> data, std::size_t* offset,
     case TpInstructionOp::kRestore:
     case TpInstructionOp::kCancelPrepare:
     case TpInstructionOp::kInvalidate:
+    case TpInstructionOp::kPromptContext:
       valid = only(false, false, false, false, false);
       break;
     case TpInstructionOp::kPrefill:
@@ -254,15 +260,17 @@ bool ReadBytes(std::span<const std::uint8_t> data, std::size_t* offset,
     SetError(error, "TP instruction has invalid arguments for its operation");
     return false;
   }
-  // Only a reset or a snapshot drop can happen between requests: the
-  // continuation cache makes them on its own schedule. A batch names its
-  // members' requests. Every other call belongs to a request.
+  // Only a reset, a snapshot drop or clearing a prompt context can happen
+  // between requests: the continuation cache makes them on its own schedule.
+  // A batch names its members' requests. Every other call belongs to a
+  // request.
   if (sequence == 0 && instruction.op != TpInstructionOp::kInvalidate &&
       instruction.op != TpInstructionOp::kDrop &&
+      instruction.op != TpInstructionOp::kPromptContext &&
       instruction.op != TpInstructionOp::kAdvanceBatch) {
-    SetError(
-        error,
-        "TP instruction outside a request must be a reset or snapshot drop");
+    SetError(error,
+             "TP instruction outside a request must be a reset, a snapshot "
+             "drop or a prompt-context release");
     return false;
   }
   return true;
@@ -289,6 +297,7 @@ bool ValidateTpControlCommand(const TpControlCommand& command,
         command.prompt_tokens.size() > kMaxPromptTokens ||
         command.cache_prefix_tokens > command.prompt_tokens.size() ||
         command.client_id.size() > kMaxClientIdBytes ||
+        command.prompt_context.size() > kMaxPromptContextBytes ||
         std::ranges::any_of(command.prompt_tokens,
                             [](std::int32_t token) { return token < 0; })) {
       SetError(error, "TP control request is invalid");
@@ -581,7 +590,8 @@ bool TpControlChannel::ReceiveFrame(std::uint16_t type, std::uint64_t* sequence,
   }
   offset += 4;  // version and frame type
   std::uint32_t bytes = 0;
-  if (!ReadU32(header, &offset, &bytes, error) || bytes > kMaxPayloadBytes ||
+  if (!ReadU32(header, &offset, &bytes, error) ||
+      bytes > (handshaken_ ? kMaxPayloadBytes : kMaxHelloBytes) ||
       !ReadU64(header, &offset, sequence, error)) {
     SetError(error, "TP control frame length is invalid");
     return false;
@@ -613,6 +623,7 @@ bool TpControlChannel::Handshake(const TpControlConfig& config,
   AppendU32(&payload, config.max_draft_tokens);
   AppendU32(&payload, config.use_mtp ? 1U : 0U);
   AppendU32(&payload, config.sessions);
+  AppendU32(&payload, config.vision ? 1U : 0U);
   AppendU64(&payload, config.snapshot_budget_bytes);
   AppendU32(&payload, static_cast<std::uint32_t>(config.auth_token.size()));
   payload.insert(payload.end(), config.auth_token.begin(),
@@ -640,6 +651,7 @@ bool TpControlChannel::Handshake(const TpControlConfig& config,
   std::uint32_t draft = 0;
   std::uint32_t mtp = 0;
   std::uint32_t sessions = 0;
+  std::uint32_t vision = 0;
   std::uint64_t snapshot_budget = 0;
   std::uint32_t auth_size = 0;
   std::string peer_token;
@@ -650,6 +662,7 @@ bool TpControlChannel::Handshake(const TpControlConfig& config,
       !ReadU32(peer, &offset, &draft, error) ||
       !ReadU32(peer, &offset, &mtp, error) ||
       !ReadU32(peer, &offset, &sessions, error) ||
+      !ReadU32(peer, &offset, &vision, error) ||
       !ReadU64(peer, &offset, &snapshot_budget, error) ||
       !ReadU32(peer, &offset, &auth_size, error) ||
       auth_size > kMaxAuthTokenBytes || peer.size() - offset != auth_size) {
@@ -662,7 +675,8 @@ bool TpControlChannel::Handshake(const TpControlConfig& config,
       context != config.max_context ||
       prefill_chunk != config.prefill_chunk_tokens ||
       draft != config.max_draft_tokens || mtp != (config.use_mtp ? 1U : 0U) ||
-      sessions != config.sessions || peer_token != auth_token_) {
+      sessions != config.sessions || vision != (config.vision ? 1U : 0U) ||
+      peer_token != auth_token_) {
     SetError(error, "TP control hello configuration mismatch");
     return false;
   }
@@ -690,7 +704,7 @@ bool TpControlChannel::SendCommand(const TpControlCommand& command,
 
   std::vector<std::uint8_t> payload;
   payload.reserve(96 + command.prompt_tokens.size() * sizeof(std::uint32_t) +
-                  command.client_id.size());
+                  command.client_id.size() + command.prompt_context.size());
   AppendU64(&payload, command.sequence);
   AppendU32(&payload, static_cast<std::uint32_t>(command.kind));
   // The layout after the kind is a function of the kind, so both sides derive
@@ -702,11 +716,15 @@ bool TpControlChannel::SendCommand(const TpControlCommand& command,
     AppendU32(&payload,
               static_cast<std::uint32_t>(command.prompt_tokens.size()));
     AppendU32(&payload, static_cast<std::uint32_t>(command.client_id.size()));
+    AppendU32(&payload,
+              static_cast<std::uint32_t>(command.prompt_context.size()));
     for (const auto token : command.prompt_tokens) {
       AppendU32(&payload, static_cast<std::uint32_t>(token));
     }
     payload.insert(payload.end(), command.client_id.begin(),
                    command.client_id.end());
+    payload.insert(payload.end(), command.prompt_context.begin(),
+                   command.prompt_context.end());
     const auto& config = command.sampling;
     AppendU32(&payload, FloatBits(config.temperature));
     AppendU32(&payload, static_cast<std::uint32_t>(config.top_k));
@@ -774,16 +792,20 @@ bool TpControlChannel::ReceiveCommand(TpControlCommand* command,
     std::uint32_t cache_prompt = 0;
     std::uint32_t prompt_count = 0;
     std::uint32_t client_size = 0;
+    std::uint32_t context_size = 0;
     if (!ReadU32(command_prompt_, &offset, &parsed.max_tokens, error) ||
         !ReadU32(command_prompt_, &offset, &cache_prompt, error) ||
         !ReadU32(command_prompt_, &offset, &parsed.cache_prefix_tokens,
                  error) ||
         !ReadU32(command_prompt_, &offset, &prompt_count, error) ||
         !ReadU32(command_prompt_, &offset, &client_size, error) ||
+        !ReadU32(command_prompt_, &offset, &context_size, error) ||
         cache_prompt > 1 || prompt_count == 0 ||
         prompt_count > kMaxPromptTokens || client_size > kMaxClientIdBytes ||
+        context_size > kMaxPromptContextBytes ||
         command_prompt_.size() - offset <
-            std::size_t{prompt_count} * sizeof(std::uint32_t) + client_size) {
+            std::size_t{prompt_count} * sizeof(std::uint32_t) + client_size +
+                context_size) {
       return reject("TP control request is invalid");
     }
     parsed.cache_prompt = cache_prompt != 0;
@@ -797,6 +819,11 @@ bool TpControlChannel::ReceiveCommand(TpControlCommand* command,
         reinterpret_cast<const char*>(command_prompt_.data() + offset),
         client_size);
     offset += client_size;
+    parsed.prompt_context.assign(
+        command_prompt_.begin() + static_cast<std::ptrdiff_t>(offset),
+        command_prompt_.begin() +
+            static_cast<std::ptrdiff_t>(offset + context_size));
+    offset += context_size;
     auto& config = parsed.sampling;
     std::uint32_t temperature = 0;
     std::uint32_t top_k = 0;
@@ -850,7 +877,7 @@ bool TpControlChannel::ReceiveCommand(TpControlCommand* command,
         !ReadU64(command_prompt_, &offset, &instruction.rng, error) ||
         !ReadU32(command_prompt_, &offset, &pending_bits, error) ||
         !ReadU32(command_prompt_, &offset, &batch_size, error) ||
-        op > static_cast<std::uint32_t>(TpInstructionOp::kAdvanceBatch) ||
+        op > static_cast<std::uint32_t>(TpInstructionOp::kPromptContext) ||
         batch_size > kMaxBatchMembers) {
       return reject("TP control instruction is invalid");
     }
@@ -882,6 +909,11 @@ bool TpControlChannel::ReceiveCommand(TpControlCommand* command,
     return false;
   }
   *command = std::move(parsed);
+  // A request with images can be large; do not keep its frame around.
+  if (command_prompt_.capacity() > (16U << 20)) {
+    command_prompt_.clear();
+    command_prompt_.shrink_to_fit();
+  }
   return true;
 }
 

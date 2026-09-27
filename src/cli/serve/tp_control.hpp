@@ -26,6 +26,9 @@ struct TpControlConfig {
   /// Model states per rank: both ranks create the same number, in the same
   /// order, so an instruction's state id names corresponding states.
   std::uint32_t sessions{1};
+  /// Both ranks load the vision encoder, or neither: rank 1 encodes the images
+  /// of every request itself.
+  bool vision{false};
 };
 
 enum class TpControlCommandKind : std::uint8_t {
@@ -64,6 +67,10 @@ enum class TpInstructionOp : std::uint8_t {
   /// state by its token. It belongs to the members' requests rather than to
   /// one, so it is sent with sequence 0 and each member names its request.
   kAdvanceBatch = 11,
+  /// `SetPromptContext(state, context)`: binds the state to the request, and
+  /// the model state to the request's prompt context (its images, if any), as
+  /// the pool does whenever it leases a state; with sequence 0 it clears it.
+  kPromptContext = 12,
 };
 
 /// One member of a batched instruction: a request, the state it leases, and
@@ -114,6 +121,9 @@ struct TpControlCommand {
   std::uint32_t cache_prefix_tokens{0};
   std::vector<std::int32_t> prompt_tokens;
   std::string client_id;
+  /// The request's prompt context (its images), as the runner encodes it;
+  /// empty for a text-only request.
+  std::vector<std::uint8_t> prompt_context;
   TpControlCommandKind kind{TpControlCommandKind::kSingle};
   /// kSingle only: the request's sampling configuration. Rank 1 builds the
   /// same sampler for multi-token decoding, and checks rank 0's tokens against

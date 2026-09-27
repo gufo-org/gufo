@@ -234,6 +234,17 @@ public:
       throw std::invalid_argument("model does not support this prompt context");
     }
   }
+  /// Serializes a context `PreparePrompt` made, for another process running
+  /// the same model to rebuild with `DecodePromptContext`: a TP2 peer, which
+  /// must configure its states exactly as this rank does.
+  [[nodiscard]] virtual std::vector<std::uint8_t> EncodePromptContext(
+      const TextPromptContext&) const {
+    throw std::invalid_argument("model cannot transfer this prompt context");
+  }
+  [[nodiscard]] virtual std::shared_ptr<const TextPromptContext>
+  DecodePromptContext(std::span<const std::uint8_t>) const {
+    throw std::invalid_argument("model cannot transfer this prompt context");
+  }
   [[nodiscard]] virtual TextGenerationBackend::InitialOutputState
   InitialOutputState(const ChatRequest&) const {
     return TextGenerationBackend::InitialOutputState::kAuto;

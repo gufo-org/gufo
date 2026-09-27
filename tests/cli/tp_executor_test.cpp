@@ -107,6 +107,17 @@ struct ToyOptions {
   std::optional<std::size_t> diverge_at;
   /// Rank-1 fault: report one extra draft in the next multi-token step.
   bool extra_draft_once{false};
+  /// Rank-1 fault: refuse to rebuild a request's prompt context.
+  bool fail_context_decode{false};
+};
+
+/// A toy "image": it shifts every logit of the sequence that sees it, and its
+/// shade is its cache identity.
+struct ToyContext final : gufo::server::TextPromptContext {
+  explicit ToyContext(std::uint8_t shade) : shade(shade) {
+    cache_identity = {shade};
+  }
+  std::uint8_t shade;
 };
 
 class ToySnapshot final : public gufo::server::TextRunnerSnapshot {
@@ -128,6 +139,8 @@ public:
   void SetCancellationCheck(const CancellationCheck&) override;
 
   std::vector<TextRunnerToken> tokens;
+  /// The bound context's shade, zero without one.
+  std::uint8_t shade{0};
   std::size_t id() const { return id_; }
 
 private:
@@ -207,6 +220,38 @@ public:
   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
     return std::make_unique<ToyState>(this, next_state_++);
   }
+  /// Like Flash-Next's vision prompt: a different context resets a state that
+  /// holds a sequence.
+  void SetPromptContext(TextRunnerState& state,
+                        std::shared_ptr<const gufo::server::TextPromptContext>
+                            context) const override {
+    const auto* toy = dynamic_cast<const ToyContext*>(context.get());
+    if (context != nullptr && toy == nullptr) {
+      throw std::invalid_argument("toy prompt context expected");
+    }
+    auto& target = Toy(state);
+    const std::uint8_t shade = toy != nullptr ? toy->shade : 0;
+    if (shade == 0 && target.shade == 0) {
+      return;
+    }
+    if (!target.tokens.empty() && shade != target.shade) {
+      target.tokens.clear();
+    }
+    target.shade = shade;
+    Record("context s" + std::to_string(target.id()) + " " +
+           std::to_string(shade));
+  }
+  [[nodiscard]] std::vector<std::uint8_t> EncodePromptContext(
+      const gufo::server::TextPromptContext& context) const override {
+    return {dynamic_cast<const ToyContext&>(context).shade};
+  }
+  [[nodiscard]] std::shared_ptr<const gufo::server::TextPromptContext>
+  DecodePromptContext(std::span<const std::uint8_t> bytes) const override {
+    if (options_.fail_context_decode || bytes.size() != 1) {
+      throw std::invalid_argument("injected prompt context failure");
+    }
+    return std::make_shared<ToyContext>(bytes[0]);
+  }
   void PreparePrefixReuse(
       TextRunnerState& state,
       std::span<const TextRunnerToken> prefix) const override {
@@ -265,7 +310,7 @@ public:
       TextRunnerState& state,
       gufo::sampling::SamplerState& sampler) const override {
     auto& toy = Toy(state);
-    const auto logits = Logits(toy.tokens);
+    const auto logits = Logits(toy.tokens, toy.shade);
     const auto token = static_cast<TextRunnerToken>(sampler.Sample(logits));
     if (token == kEos) {
       return {.stop = true};
@@ -298,8 +343,8 @@ public:
     // next call when sampling at random, and publish the draw state back.
     gufo::sampling::SamplerState working = sampler;
     for (std::size_t i = 0; i < std::min<std::size_t>(max_tokens, 3); ++i) {
-      const auto token =
-          static_cast<TextRunnerToken>(working.Sample(Logits(toy.tokens)));
+      const auto token = static_cast<TextRunnerToken>(
+          working.Sample(Logits(toy.tokens, toy.shade)));
       if (token == kEos) {
         step.stop = true;
         break;
@@ -309,7 +354,7 @@ public:
       produced += " " + std::to_string(token);
     }
     if (!step.stop && sampler.config().uses_random_sampling()) {
-      working.DeferSample(working.Sample(Logits(toy.tokens)));
+      working.DeferSample(working.Sample(Logits(toy.tokens, toy.shade)));
       produced += " deferred";
     }
     sampler.CopyDrawStateFrom(working);
@@ -333,8 +378,9 @@ private:
   static ToyState& Toy(TextRunnerState& state) {
     return dynamic_cast<ToyState&>(state);
   }
-  std::vector<float> Logits(const std::vector<TextRunnerToken>& tokens) const {
-    std::size_t sum = 0;
+  std::vector<float> Logits(const std::vector<TextRunnerToken>& tokens,
+                            std::uint8_t shade) const {
+    std::size_t sum = std::size_t{shade} * 5;
     for (const auto token : tokens) {
       sum += token;
     }
@@ -435,17 +481,22 @@ public:
 
   /// Runs one request as serving does. `submitted` runs once the scheduler
   /// has the request.
-  Outcome Run(std::vector<TextRunnerToken> prompt, std::size_t max_tokens,
-              gufo::sampling::SamplingConfig sampling = {},
-              std::vector<std::string> stop_sequences = {},
-              TextGenerationScheduler::CancellationCheck is_cancelled = {},
-              bool reuse = false, std::size_t prefix = 0,
-              const std::function<void()>& submitted = {}) {
+  Outcome Run(
+      std::vector<TextRunnerToken> prompt, std::size_t max_tokens,
+      gufo::sampling::SamplingConfig sampling = {},
+      std::vector<std::string> stop_sequences = {},
+      TextGenerationScheduler::CancellationCheck is_cancelled = {},
+      bool reuse = false, std::size_t prefix = 0,
+      const std::function<void()>& submitted = {},
+      std::shared_ptr<const gufo::server::TextPromptContext> images = {}) {
     const auto sequence = next_sequence_.fetch_add(1);
     TpControlCommand begin{.sequence = sequence,
                            .max_tokens = static_cast<std::uint32_t>(max_tokens),
                            .client_id = "executor-test",
                            .sampling = sampling};
+    if (images != nullptr) {
+      begin.prompt_context = mirrored_->EncodePromptContext(*images);
+    }
     for (const auto token : prompt) {
       begin.prompt_tokens.push_back(static_cast<std::int32_t>(token));
     }
@@ -455,7 +506,8 @@ public:
     Require(server_->SendCommand(begin, &error), "begin: " + error);
     mirrored_->BeginRequest(sequence);
     TextRequestMetadata metadata;
-    metadata.prompt_context = std::make_shared<TpRequestContext>(sequence);
+    metadata.prompt_context =
+        std::make_shared<TpRequestContext>(sequence, std::move(images));
     metadata.cache_prompt = reuse;
     metadata.cache_prefix_tokens = prefix;
     metadata.stop_sequences = std::move(stop_sequences);
@@ -898,9 +950,15 @@ int main() {
     runner->SetPromptContext(*second, std::make_shared<TpRequestContext>(8));
     (void)runner->Prefill(*first, short_prompt, 0, 3);
     (void)runner->Prefill(*second, short_prompt, 0, 3);
-    Require(sink->sent.size() == 2 && sink->sent[0].sequence == 7 &&
-                sink->sent[1].sequence == 8,
-            "each call names the request its state is leased to");
+    // Leasing a state binds it on rank 1 too, before the request's calls.
+    Require(
+        sink->sent.size() == 4 &&
+            sink->sent[0].instruction.op == TpInstructionOp::kPromptContext &&
+            sink->sent[0].sequence == 7 &&
+            sink->sent[1].instruction.op == TpInstructionOp::kPromptContext &&
+            sink->sent[1].sequence == 8 && sink->sent[2].sequence == 7 &&
+            sink->sent[3].sequence == 8,
+        "each call names the request its state is leased to");
     Require(!runner->CanReuse(*first),
             "a running request's state is not reusable");
     const auto snapshot = runner->Snapshot(*first);
@@ -1150,9 +1208,50 @@ int main() {
             "the next request succeeds: " + next.worker_error);
   }
 
+  // A request with images: rank 1 rebuilds its prompt context and binds it
+  // wherever rank 0 does, and the cache keeps image and text states apart.
+  for (const bool mtp : {false, true}) {
+    const std::string what = mtp ? "MTP images" : "AR images";
+    Pair pair({.mtp = mtp, .cache = true}, {.mtp = mtp, .cache = true});
+    const auto image = std::make_shared<ToyContext>(7);
+    const auto text = pair.Run(prompt, 6, {}, {}, {}, true);
+    const auto seen = pair.Run(prompt, 6, {}, {}, {}, true, 0, {}, image);
+    const auto again = pair.Run(prompt, 6, {}, {}, {}, true, 0, {}, image);
+    const auto text_again = pair.Run(prompt, 6, {}, {}, {}, true);
+    Require(text.worker_error.empty() && seen.worker_error.empty() &&
+                again.worker_error.empty() && text_again.worker_error.empty(),
+            what + ": " + text.worker_error + seen.worker_error +
+                again.worker_error + text_again.worker_error);
+    Require(seen.result.tokens != text.result.tokens,
+            what + ": the image changes the output");
+    Require(seen.result.cached_prompt_tokens == 0,
+            what + ": an image request does not reuse a text state");
+    Require(again.result.tokens == seen.result.tokens &&
+                again.result.cached_prompt_tokens == prompt.size(),
+            what + ": the same image reuses its prompt");
+    Require(text_again.result.tokens == text.result.tokens,
+            what + ": text after an image matches text alone");
+    Require(Count(pair.rank0().Log(), "context") > 0,
+            what + ": the image context reaches the model");
+    pair.RequireSameCalls(what);
+  }
+
+  // A prompt context rank 1 cannot rebuild fails that request only.
+  {
+    Pair pair({}, {.fail_context_decode = true});
+    const auto image = std::make_shared<ToyContext>(3);
+    const auto refused = pair.Run(prompt, 4, {}, {}, {}, false, 0, {}, image);
+    Require(refused.worker_error.find("prompt context") != std::string::npos,
+            "an unreadable prompt context fails the request: " +
+                refused.worker_error);
+    const auto next = pair.Run(prompt, 4);
+    Require(next.worker_error.empty(),
+            "the next request succeeds: " + next.worker_error);
+  }
+
   std::puts(
       "PASS: TP2 executor mirrors greedy, sampled, stopped, cancelled, "
-      "multi-token, concurrent and batched requests, reports divergence and "
-      "reuses only agreed continuations");
+      "multi-token, concurrent, batched and image requests, reports divergence "
+      "and reuses only agreed continuations");
   return 0;
 }

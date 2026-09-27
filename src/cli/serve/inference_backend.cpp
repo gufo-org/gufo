@@ -150,6 +150,115 @@ std::shared_ptr<const models::qwen::vision::Prompt> QwenPrompt(
   return image->prompt;
 }
 
+// A Qwen image context for a TP2 peer: the prompt's tokens, RoPE layout,
+// resized pixels and cache identity, so the peer encodes the same images.
+constexpr std::uint32_t kQwenImageContextFormat = 1;
+
+std::vector<std::uint8_t> EncodeQwenImageContext(
+    const TextPromptContext& context) {
+  const auto* image = dynamic_cast<const QwenImageContext*>(&context);
+  if (image == nullptr || image->prompt == nullptr)
+    throw std::invalid_argument("invalid Qwen prompt context");
+  const auto& prompt = *image->prompt;
+  std::vector<std::uint8_t> out;
+  const auto u32 = [&](std::uint64_t value) {
+    if (value > std::numeric_limits<std::uint32_t>::max())
+      throw std::invalid_argument("Qwen prompt context is too large");
+    for (unsigned shift = 0; shift < 32; shift += 8)
+      out.push_back(static_cast<std::uint8_t>(value >> shift));
+  };
+  const auto grid = [&](const models::qwen::vision::ImageGrid& value) {
+    u32(value.offset);
+    u32(value.height);
+    u32(value.width);
+  };
+  u32(kQwenImageContextFormat);
+  u32(prompt.cache_identity.size());
+  out.insert(out.end(), prompt.cache_identity.begin(),
+             prompt.cache_identity.end());
+  u32(prompt.tokens.size());
+  for (const auto token : prompt.tokens)
+    u32(token);
+  u32(prompt.rope.images.size());
+  for (const auto& value : prompt.rope.images)
+    grid(value);
+  u32(prompt.images.size());
+  for (const auto& value : prompt.images) {
+    grid(value.grid);
+    u32(value.pixels.width);
+    u32(value.pixels.height);
+    u32(value.pixels.pixels.size());
+    out.insert(out.end(), value.pixels.pixels.begin(),
+               value.pixels.pixels.end());
+  }
+  return out;
+}
+
+std::shared_ptr<const TextPromptContext> DecodeQwenImageContext(
+    std::span<const std::uint8_t> bytes, std::uint32_t max_context) {
+  std::size_t offset = 0;
+  const auto u32 = [&]() {
+    if (bytes.size() - offset < 4)
+      throw std::invalid_argument("Qwen prompt context is truncated");
+    std::uint32_t value = 0;
+    for (unsigned shift = 0; shift < 32; shift += 8)
+      value |= std::uint32_t{bytes[offset++]} << shift;
+    return value;
+  };
+  const auto span = [&](std::size_t size) {
+    if (bytes.size() - offset < size)
+      throw std::invalid_argument("Qwen prompt context is truncated");
+    const auto result = bytes.subspan(offset, size);
+    offset += size;
+    return result;
+  };
+  const auto grid = [&]() {
+    models::qwen::vision::ImageGrid value;
+    value.offset = u32();
+    value.height = u32();
+    value.width = u32();
+    return value;
+  };
+  if (u32() != kQwenImageContextFormat)
+    throw std::invalid_argument("Qwen prompt context format is unknown");
+  auto prompt = std::make_shared<models::qwen::vision::Prompt>();
+  const auto identity = span(u32());
+  prompt->cache_identity.assign(identity.begin(), identity.end());
+  const auto token_count = u32();
+  if (token_count == 0 || token_count > max_context)
+    throw std::invalid_argument("Qwen prompt context tokens are invalid");
+  prompt->tokens.resize(token_count);
+  for (auto& token : prompt->tokens)
+    token = u32();
+  const auto rope_count = u32();
+  if (rope_count > token_count)
+    throw std::invalid_argument("Qwen prompt context layout is invalid");
+  prompt->rope.images.resize(rope_count);
+  for (auto& value : prompt->rope.images)
+    value = grid();
+  prompt->rope.Validate(max_context);
+  const auto image_count = u32();
+  if (image_count == 0 || image_count > rope_count)
+    throw std::invalid_argument("Qwen prompt context images are invalid");
+  prompt->images.resize(image_count);
+  for (auto& value : prompt->images) {
+    value.grid = grid();
+    value.pixels.width = u32();
+    value.pixels.height = u32();
+    const auto size = u32();
+    if (std::uint64_t{value.pixels.width} * value.pixels.height * 3 != size)
+      throw std::invalid_argument("Qwen prompt context pixels are invalid");
+    const auto pixels = span(size);
+    value.pixels.pixels.assign(pixels.begin(), pixels.end());
+  }
+  if (offset != bytes.size())
+    throw std::invalid_argument("Qwen prompt context has trailing bytes");
+  auto context = std::make_shared<QwenImageContext>();
+  context->cache_identity = prompt->cache_identity;
+  context->prompt = std::move(prompt);
+  return context;
+}
+
 constexpr std::string_view kDeepSeekStateAbi =
     "deepseek-v4-flash-gfx1151-state-v4";
 constexpr std::array<std::uint8_t, 8> kQwenPersistentSnapshotMagic = {
@@ -2397,28 +2506,28 @@ public:
 
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
-    if (distributed_) {
-      for (const auto& message : request.messages) {
-        if (!message.images.empty()) {
-          throw std::invalid_argument(
-              "Qwen3.8-Flash-Next TP2 does not support image input");
-        }
-      }
-    }
-    auto prepared = PrepareQwenPrompt(request, model_->tokenizer(),
-                                      model_->VisionEncoder(), max_context_);
-    return prepared;
+    return PrepareQwenPrompt(request, model_->tokenizer(),
+                             model_->VisionEncoder(), max_context_);
   }
 
   void SetPromptContext(
       TextRunnerState& state,
       std::shared_ptr<const TextPromptContext> context) const override {
-    if (distributed_ && context != nullptr) {
-      throw std::invalid_argument(
-          "Qwen3.8-Flash-Next TP2 does not support vision prompt context");
-    }
     RequireQwenFlashNextState(state).session().ConfigureVision(
         QwenPrompt(context));
+  }
+
+  [[nodiscard]] std::vector<std::uint8_t> EncodePromptContext(
+      const TextPromptContext& context) const override {
+    return EncodeQwenImageContext(context);
+  }
+
+  [[nodiscard]] std::shared_ptr<const TextPromptContext> DecodePromptContext(
+      std::span<const std::uint8_t> bytes) const override {
+    if (model_->VisionEncoder() == nullptr) {
+      throw std::invalid_argument("image input requires --mmproj");
+    }
+    return DecodeQwenImageContext(bytes, max_context_);
   }
 
   [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
@@ -2961,7 +3070,8 @@ struct InferenceBackend::Impl {
       const CancellationCheck& is_cancelled, bool stream_output,
       const std::string& client_id, std::vector<std::string> stop_sequences,
       InitialOutputState initial, Clock::time_point request_start,
-      bool cache_prompt, std::size_t cache_prefix_tokens) const {
+      bool cache_prompt, std::size_t cache_prefix_tokens,
+      std::shared_ptr<const TextPromptContext> context) const {
     if (state->tp_runner == nullptr || state->response_broker == nullptr ||
         state->communicator == nullptr || state->scheduler == nullptr) {
       throw std::logic_error("TP2 rank 0 is not fully configured");
@@ -2998,6 +3108,9 @@ struct InferenceBackend::Impl {
         .client_id = client_id,
         .sampling = sampling,
     };
+    if (context != nullptr) {
+      begin.prompt_context = state->tp_runner->EncodePromptContext(*context);
+    }
     begin.prompt_tokens.reserve(prompt.size());
     for (const auto token : prompt) {
       if (token > static_cast<TextRunnerToken>(
@@ -3040,8 +3153,8 @@ struct InferenceBackend::Impl {
               .client_id = client_id,
               .deadline = std::nullopt,
               .request_start = request_start,
-              .prompt_context =
-                  std::make_shared<TpRequestContext>(begin.sequence),
+              .prompt_context = std::make_shared<TpRequestContext>(
+                  begin.sequence, std::move(context)),
               .cache_prompt = cache_prompt,
               .cache_prefix_tokens = cache_prefix_tokens,
               .stop_sequences = std::move(stop_sequences),
@@ -3079,13 +3192,10 @@ struct InferenceBackend::Impl {
     }
 
     if (current->control != nullptr) {
-      if (context != nullptr) {
-        throw std::invalid_argument("TP2 does not support image input");
-      }
       auto generation = StartTpRequest(
           current, std::move(prompt_tokens), max_tokens, sampling, is_cancelled,
           static_cast<bool>(on_token), client_id, stop_sequences, initial,
-          request_start, cache_prompt, cache_prefix_tokens);
+          request_start, cache_prompt, cache_prefix_tokens, std::move(context));
       return generation->Wait(on_token);
     }
 
@@ -3624,6 +3734,7 @@ bool InferenceBackend::load(
   const auto tp_world_size = model->TpWorldSize();
   const auto tp_rank = model->TpRank();
   const bool has_mtp = model->HasMtp();
+  const bool has_vision = model->VisionEncoder() != nullptr;
   try {
     auto new_state = std::make_shared<Impl::State>();
     auto runner = std::make_shared<QwenFlashNextTextRunner>(
@@ -3648,6 +3759,7 @@ bool InferenceBackend::load(
           .prefill_chunk_tokens =
               static_cast<std::uint32_t>(prefill_policy.decode_active_tokens),
           .sessions = static_cast<std::uint32_t>(session_count),
+          .vision = has_vision,
       };
       std::string control_error;
       if (!tp_config.control->Handshake(control_config, &control_error)) {
@@ -3929,14 +4041,12 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   if (state->control != nullptr) {
-    if (prompt->context != nullptr) {
-      throw std::invalid_argument("TP2 does not support image input");
-    }
     return impl_->StartTpRequest(
         state, std::move(prompt->tokens), max_tokens, sampling_config,
         is_cancelled, stream_output, client_id, request.stop_sequences,
         state->scheduler->runner().InitialOutputState(request), request_start,
-        request.cache_prompt, prompt->cache_prefix_tokens);
+        request.cache_prompt, prompt->cache_prefix_tokens,
+        std::move(prompt->context));
   }
   auto scheduled_request = state->scheduler->Submit(
       std::move(prompt->tokens), max_tokens, sampling_config, is_cancelled,

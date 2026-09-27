@@ -99,11 +99,6 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                 "TP communicator identity does not match model rank/device");
     return nullptr;
   }
-  if (options.tp_world_size > 1 && !options.vision_model_path.empty()) {
-    AssignError(error_msg,
-                "vision is not supported by the initial TP=2 Flash-Next path");
-    return nullptr;
-  }
   if (hipSetDevice(options.hip_device) != hipSuccess) {
     AssignError(error_msg, "HIP device selection failed");
     return nullptr;
@@ -144,14 +139,13 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                                std::to_string(c.context_length) + " tokens");
     return nullptr;
   }
-  if (options.tp_world_size == 1) {
-    try {
-      m->vision_ = qwen::vision::Encoder::Open(
-          model_path, options.vision_model_path, c.hidden_size);
-    } catch (const std::exception& e) {
-      AssignError(error_msg, e.what());
-      return nullptr;
-    }
+  // Under TP2 each rank runs the whole (replicated) vision encoder itself.
+  try {
+    m->vision_ = qwen::vision::Encoder::Open(
+        model_path, options.vision_model_path, c.hidden_size);
+  } catch (const std::exception& e) {
+    AssignError(error_msg, e.what());
+    return nullptr;
   }
   m->tokenizer_ =
       tokenization::QwenTokenizer::CreateFromGguf(*m->reader_, error_msg);
