@@ -124,7 +124,7 @@ struct TpRequestContext final : TextPromptContext {
 /// logits and stays local. The scheduler above is unchanged, so its stop,
 /// cancellation and length decisions reach rank 1 simply as the calls rank 0
 /// no longer makes. Several requests may be open: each call belongs to the
-/// request whose state it runs on, and one batched advance to all of them.
+/// request whose state it runs on, and a batched call to all of its members.
 ///
 /// Cache operations are acknowledged before the next forward. Snapshot bytes
 /// stay local; only their monotonic IDs cross the control channel. It never
@@ -257,7 +257,8 @@ private:
   /// call must not run then, because rank 1 would never join its exchanges.
   Sent Send(std::uint32_t state, const TpInstruction& instruction,
             std::span<const TextRunnerToken> prefill_prompt = {}) const;
-  /// Sends a batched advance, recording each member in its own request.
+  /// Sends a batched advance or decode, recording each member in its own
+  /// request.
   Sent SendBatch(TpInstruction& instruction) const;
   /// Sends a reset, which may happen between requests too. Cannot throw: the
   /// continuation cache resets states from `noexcept` paths, so a failed send

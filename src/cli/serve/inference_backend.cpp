@@ -2450,9 +2450,8 @@ public:
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = use_mtp_,
-                .batched_multi_token_decode = !distributed_ && use_mtp_,
-                .batched_multi_token_decode_max_width =
-                    !distributed_ && use_mtp_ ? 8u : 0u,
+                .batched_multi_token_decode = use_mtp_,
+                .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
                 .prefix_reuse = true,
             },
         .persistence = persistence_,
@@ -2714,11 +2713,36 @@ public:
 
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const override {
-    if (distributed_ && decodes.size() > 1) {
-      throw std::invalid_argument(
-          "Qwen3.8-Flash-Next TP2 does not support batched multi-token "
-          "decoding");
+    return RunDecodeBatch(decodes, nullptr);
+  }
+
+  [[nodiscard]] std::optional<std::uint32_t> PlanDecodeBatch(
+      std::span<const TextRunnerDecode> decodes) const override {
+    if (decodes.size() < 2 || !use_mtp_) {
+      return std::nullopt;
     }
+    std::vector<QwenFlashNextSession::DecodeRequest> requests;
+    requests.reserve(decodes.size());
+    for (const auto& decode : decodes) {
+      requests.push_back(
+          {&RequireQwenFlashNextState(decode.state.get()).session(),
+           std::min<std::size_t>(decode.max_tokens,
+                                 std::uint64_t{max_draft_tokens_} + 1),
+           &decode.sampler.get(), nullptr});
+    }
+    return QwenFlashNextSession::PlanBatch(requests);
+  }
+
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchPlanned(
+      std::span<const TextRunnerDecode> decodes,
+      std::optional<std::uint32_t> plan) const override {
+    return RunDecodeBatch(decodes, &plan);
+  }
+
+  /// `plan`, when given, fixes the batch's draft count (a TP2 peer's choice).
+  [[nodiscard]] std::vector<TextDecodeStep> RunDecodeBatch(
+      std::span<const TextRunnerDecode> decodes,
+      const std::optional<std::uint32_t>* plan) const {
     if (decodes.size() < 2 || !use_mtp_) {
       return TextModelRunner::DecodeBatch(decodes);
     }
@@ -2743,7 +2767,7 @@ public:
            &sampler, &results[i], true, &outcomes[i]});
     }
     std::string error;
-    (void)QwenFlashNextSession::DecodeBatch(requests, &error);
+    (void)QwenFlashNextSession::DecodeBatch(requests, &error, plan);
     const auto active_count = static_cast<std::size_t>(std::count_if(
         results.begin(), results.end(),
         [](const auto& result) { return !result.tokens.empty(); }));

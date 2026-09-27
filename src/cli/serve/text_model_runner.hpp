@@ -288,6 +288,19 @@ public:
       sampling::SamplerState& sampler) const;
   [[nodiscard]] virtual std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const;
+  /// The plan of a batched multi-token step: the draft count the whole batch
+  /// would use, when the runner chooses one (it may depend on timing), else
+  /// none. A TP2 peer runs the same batch with the same plan.
+  [[nodiscard]] virtual std::optional<std::uint32_t> PlanDecodeBatch(
+      std::span<const TextRunnerDecode>) const {
+    return std::nullopt;
+  }
+  /// DecodeBatch with a plan from PlanDecodeBatch, possibly made by a peer.
+  [[nodiscard]] virtual std::vector<TextDecodeStep> DecodeBatchPlanned(
+      std::span<const TextRunnerDecode> decodes,
+      std::optional<std::uint32_t>) const {
+    return DecodeBatch(decodes);
+  }
   virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;

@@ -28,6 +28,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "src/cli/serve/text_generation_scheduler.hpp"
@@ -104,8 +105,12 @@ struct ToyOptions {
   /// Runs before every prefill chunk.
   std::function<void()> prefill_hook;
   std::size_t prefill_chunk{3};
-  /// Widest batched plan offered; one offers only serial steps.
+  /// Widest batched plan offered; one offers only serial steps. With `mtp`,
+  /// multi-token steps are batched too.
   std::size_t width{1};
+  /// The draft count a greedy multi-token batch chooses on this rank, like
+  /// Flash-Next's timing-based choice: the ranks may choose differently.
+  std::optional<std::uint32_t> batch_plan;
   /// Rank-1 faults: shift the greedy choice once, at this sequence length.
   std::optional<std::size_t> diverge_at;
   /// Rank-1 fault: report one extra draft in the next multi-token step.
@@ -182,6 +187,10 @@ public:
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = options_.mtp,
+                .batched_multi_token_decode =
+                    options_.mtp && options_.width > 1,
+                .batched_multi_token_decode_max_width =
+                    options_.mtp ? options_.width : 0,
                 .prefix_reuse = options_.cache,
             },
         .persistence =
@@ -375,13 +384,57 @@ public:
     if (!options_.mtp || max_tokens < 2) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
+    return Cycle(state, max_tokens, sampler, 3);
+  }
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+      std::span<const gufo::server::TextRunnerDecode> decodes) const override {
+    return DecodeBatchPlanned(decodes, PlanDecodeBatch(decodes));
+  }
+  [[nodiscard]] std::optional<std::uint32_t> PlanDecodeBatch(
+      std::span<const gufo::server::TextRunnerDecode> decodes) const override {
+    if (decodes.size() < 2 || !options_.mtp ||
+        std::ranges::any_of(decodes, [](const auto& decode) {
+          return decode.sampler.get().config().uses_random_sampling();
+        })) {
+      return std::nullopt;
+    }
+    return options_.batch_plan;
+  }
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchPlanned(
+      std::span<const gufo::server::TextRunnerDecode> decodes,
+      std::optional<std::uint32_t> plan) const override {
+    if (decodes.size() < 2 || !options_.mtp) {
+      return TextModelRunner::DecodeBatch(decodes);
+    }
+    Record("decode batch " + std::to_string(decodes.size()) + " plan " +
+           (plan.has_value() ? std::to_string(*plan) : std::string("own")));
+    std::vector<TextDecodeStep> steps;
+    for (const auto& decode : decodes) {
+      auto step = Cycle(decode.state.get(), decode.max_tokens,
+                        decode.sampler.get(), plan.has_value() ? *plan + 1 : 3);
+      step.execution_plan = {.kind = TextExecutionPlanKind::kBatched,
+                             .physical_width = decodes.size()};
+      steps.push_back(std::move(step));
+    }
+    return steps;
+  }
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return dynamic_cast<const ToyState&>(state).tokens.size();
+  }
+
+private:
+  /// One multi-token cycle of at most `limit` tokens.
+  TextDecodeStep Cycle(TextRunnerState& state, std::size_t max_tokens,
+                       gufo::sampling::SamplerState& sampler,
+                       std::size_t limit) const {
     auto& toy = Toy(state);
     TextDecodeStep step;
     std::string produced;
     // Like Flash-Next: draw on a working copy, leave a deferred draw for the
     // next call when sampling at random, and publish the draw state back.
     gufo::sampling::SamplerState working = sampler;
-    for (std::size_t i = 0; i < std::min<std::size_t>(max_tokens, 3); ++i) {
+    for (std::size_t i = 0; i < std::min(max_tokens, limit); ++i) {
       const auto token = static_cast<TextRunnerToken>(
           working.Sample(Logits(toy.tokens, toy.shade)));
       if (token == kEos) {
@@ -397,7 +450,7 @@ public:
       produced += " deferred";
     }
     sampler.CopyDrawStateFrom(working);
-    step.draft_tokens = 3;
+    step.draft_tokens = limit;
     step.draft_accepted_tokens =
         step.selections.empty() ? 0 : step.selections.size() - 1;
     if (options_.extra_draft_once) {
@@ -408,12 +461,6 @@ public:
            std::to_string(max_tokens) + produced);
     return step;
   }
-  [[nodiscard]] std::size_t CheckpointPosition(
-      const TextRunnerState& state) const override {
-    return dynamic_cast<const ToyState&>(state).tokens.size();
-  }
-
-private:
   static ToyState& Toy(TextRunnerState& state) {
     return dynamic_cast<ToyState&>(state);
   }
@@ -1140,6 +1187,59 @@ int main() {
     Require(unleased, "an ended request releases its state");
   }
 
+  // A batched multi-token decode is one instruction carrying each member's
+  // budget and draw state and rank 0's draft plan.
+  {
+    auto toy = std::make_shared<ToyRunner>(
+        ToyOptions{.mtp = true, .width = 2, .batch_plan = 1});
+    auto sink = std::make_shared<CaptureSink>();
+    auto scope = std::make_shared<RecordingScope>();
+    auto runner = std::make_shared<TpMirroredRunner>(
+        toy, sink, std::numeric_limits<std::size_t>::max(), scope);
+    Require(runner->Descriptor().capabilities.batched_multi_token_decode,
+            "TP2 offers batched multi-token decoding");
+    auto first = runner->CreateState();
+    auto second = runner->CreateState();
+    const std::vector<TextRunnerToken> short_prompt{4, 5, 6};
+    runner->BeginRequest(7);
+    runner->BeginRequest(8);
+    runner->SetPromptContext(*first, std::make_shared<TpRequestContext>(7));
+    runner->SetPromptContext(*second, std::make_shared<TpRequestContext>(8));
+    (void)runner->Prefill(*first, short_prompt, 0, 3);
+    (void)runner->Prefill(*second, short_prompt, 0, 3);
+    gufo::sampling::SamplerState samplers[] = {
+        gufo::sampling::SamplerState{gufo::sampling::SamplingConfig{}},
+        gufo::sampling::SamplerState{gufo::sampling::SamplingConfig{}}};
+    const gufo::server::TextRunnerDecode decodes[] = {
+        {.state = *first, .max_tokens = 5, .sampler = samplers[0]},
+        {.state = *second, .max_tokens = 1, .sampler = samplers[1]}};
+    const auto steps = runner->DecodeBatch(decodes);
+    const auto& batch = sink->sent.back();
+    Require(batch.sequence == 0 &&
+                batch.instruction.op == TpInstructionOp::kDecodeBatch &&
+                batch.instruction.batch_drafts == 2 &&
+                batch.instruction.batch.size() == 2 &&
+                batch.instruction.batch[0].sequence == 7 &&
+                batch.instruction.batch[0].count == 5 &&
+                batch.instruction.batch[0].pending == -1 &&
+                batch.instruction.batch[1].sequence == 8 &&
+                batch.instruction.batch[1].state == 1 &&
+                batch.instruction.batch[1].count == 1,
+            "a batched decode is one instruction naming each member");
+    Require(steps.size() == 2 && steps[0].selections.size() == 2 &&
+                steps[1].selections.size() == 1 && !steps[0].failure &&
+                !steps[1].failure,
+            "each member decodes within the plan and its budget");
+    Require(Count(toy->Log(), "decode batch 2 plan 1") == 1,
+            "rank 0 runs the batch as one call with its plan");
+    Require(
+        !scope->began.empty() && scope->began.back() == batch.instruction.index,
+        "the batch binds its instruction's collective scope");
+    std::string error;
+    Require(runner->EndRequest(7, &error) && runner->EndRequest(8, &error),
+            error);
+  }
+
   // AR: greedy, sampled, stopped and cancelled requests on one pair.
   {
     Pair pair({}, {});
@@ -1307,12 +1407,17 @@ int main() {
         what + ": the second request follows it: " + second_end.worker_error);
   }
 
-  // Concurrent requests: each call names its request, concurrent AR decoders
-  // advance in one batched instruction, MTP decoders take turns, and every
-  // request produces what it produces alone.
+  // Concurrent requests: each call names its request, concurrent decoders run
+  // in one batched instruction, greedy MTP ones with rank 0's draft plan
+  // (rank 1 would choose another), and every request produces what it
+  // produces alone.
   const std::vector<TextRunnerToken> other{2, 4, 6, 8, 10, 12, 14};
-  for (const bool mtp : {false, true}) {
-    const auto sampling = mtp ? Sampled() : gufo::sampling::SamplingConfig{};
+  for (const auto& [what, mtp, sampled] :
+       {std::tuple{"concurrent AR", false, false},
+        std::tuple{"concurrent sampled MTP", true, true},
+        std::tuple{"concurrent greedy MTP", true, false}}) {
+    const auto sampling =
+        sampled ? Sampled() : gufo::sampling::SamplingConfig{};
     std::vector<TextRunnerToken> alone[2];
     {
       Pair solo({.mtp = mtp}, {.mtp = mtp});
@@ -1320,9 +1425,9 @@ int main() {
       alone[1] = solo.Run(other, 12, sampling).result.tokens;
     }
     SubmissionGate gate(2);
-    const std::size_t width = mtp ? 1 : 4;
-    Pair pair({.mtp = mtp, .prefill_hook = gate.Hook(), .width = width},
-              {.mtp = mtp, .width = width}, 2);
+    Pair pair(
+        {.mtp = mtp, .prefill_hook = gate.Hook(), .width = 4, .batch_plan = 1},
+        {.mtp = mtp, .width = 4, .batch_plan = 2}, 2);
     const auto submitted = [&gate] { gate.Submitted(); };
     auto first = std::async(std::launch::async, [&] {
       return pair.Run(prompt, 12, sampling, {}, {}, false, 0, submitted);
@@ -1332,15 +1437,22 @@ int main() {
     });
     const auto a = first.get();
     const auto b = second.get();
-    const std::string what = mtp ? "concurrent MTP" : "concurrent AR";
     Require(a.worker_error.empty() && b.worker_error.empty(),
-            what + ": " + a.worker_error + b.worker_error);
+            std::string(what) + ": " + a.worker_error + b.worker_error);
     Require(a.result.tokens == alone[0] && b.result.tokens == alone[1],
-            what + " requests produce what they produce alone");
-    Require((Count(pair.rank0().Log(), "batch") > 0) == !mtp,
-            what + ": AR decoders advance in batches, MTP ones in turns");
+            std::string(what) + ": requests produce what they produce alone");
+    const auto log = pair.rank0().Log();
+    Require(Count(log, mtp ? "decode batch 2" : "batch 2") > 0,
+            std::string(what) + ": decoders run in batches");
+    Require(!mtp || Count(log, std::string("decode batch 2 plan ") +
+                                   (sampled ? "own" : "1")) ==
+                        Count(log, "decode batch"),
+            std::string(what) +
+                ": a greedy batch drafts by rank 0's plan, a sampled one by "
+                "each member's history");
     pair.RequireSameCalls(what);
-    Require(pair.open_requests() == 0, what + ": rank 1 closed both requests");
+    Require(pair.open_requests() == 0,
+            std::string(what) + ": rank 1 closed both requests");
   }
 
   // The execution digest catches a result the ranks disagree on.
@@ -1444,6 +1556,6 @@ int main() {
   std::puts(
       "PASS: TP2 executor mirrors greedy, sampled, stopped, cancelled, "
       "multi-token, concurrent, batched and image requests, reports divergence "
-      "and reuses only agreed continuations");
+      "and fails requests that reused a rejected continuation");
   return 0;
 }

@@ -51,6 +51,8 @@ void SetError(std::string* error, std::string message) {
       return "persist";
     case TpInstructionOp::kRestoreDisk:
       return "disk restore";
+    case TpInstructionOp::kDecodeBatch:
+      return "batched decode";
     case TpInstructionOp::kEnd:
       return "end";
     case TpInstructionOp::kNone:
@@ -82,12 +84,42 @@ void SetError(std::string* error, std::string message) {
   return static_cast<std::int32_t>(token);
 }
 
-/// A batch member is recorded in its request exactly like the advance it
-/// replaces, so both ranks agree on a request's calls however they are batched.
-[[nodiscard]] TpInstruction MemberAdvance(const TpBatchMember& member) {
+/// A batch member is recorded in its request exactly like the advance or
+/// decode it replaces, so both ranks agree on a request's calls however they
+/// are batched.
+[[nodiscard]] TpInstruction MemberCall(TpInstructionOp op,
+                                       const TpBatchMember& member) {
+  if (op == TpInstructionOp::kDecodeBatch) {
+    return {.op = TpInstructionOp::kDecode,
+            .state = member.state,
+            .count = member.count,
+            .rng = member.rng,
+            .pending = member.pending};
+  }
   return {.op = TpInstructionOp::kAdvance,
           .state = member.state,
           .token = member.token};
+}
+
+/// The sampler's draw state as a decode instruction carries it.
+[[nodiscard]] std::int32_t PendingToWire(
+    const sampling::SamplerState::DrawState& draw) {
+  if (!draw.pending.has_value()) {
+    return -1;
+  }
+  if (*draw.pending > static_cast<sampling::TokenId>(
+                          std::numeric_limits<std::int32_t>::max())) {
+    throw std::invalid_argument("TP2 pending draw exceeds the protocol range");
+  }
+  return static_cast<std::int32_t>(*draw.pending);
+}
+
+[[nodiscard]] sampling::SamplerState::DrawState DrawFromWire(
+    std::uint64_t rng, std::int32_t pending) {
+  return {.rng = rng,
+          .pending = pending >= 0 ? std::optional<sampling::TokenId>(
+                                        static_cast<sampling::TokenId>(pending))
+                                  : std::nullopt};
 }
 
 /// Both ranks record which prompt context a state was bound to, so a request
@@ -135,7 +167,9 @@ std::uint64_t RandomNonzero() {
 /// Forward calls exchange partials, so they run inside a collective scope.
 [[nodiscard]] bool RunsForward(TpInstructionOp op) {
   return op == TpInstructionOp::kPrefill || op == TpInstructionOp::kAdvance ||
-         op == TpInstructionOp::kDecode || op == TpInstructionOp::kAdvanceBatch;
+         op == TpInstructionOp::kDecode ||
+         op == TpInstructionOp::kAdvanceBatch ||
+         op == TpInstructionOp::kDecodeBatch;
 }
 
 }  // namespace
@@ -514,7 +548,7 @@ TpMirroredRunner::Sent TpMirroredRunner::SendBatch(
   // no trace in any of them.
   for (const auto& member : instruction.batch) {
     auto& request = requests_.at(member.sequence);
-    DigestTpCall(request.digest, MemberAdvance(member));
+    DigestTpCall(request.digest, MemberCall(instruction.op, member));
     ++request.count;
     producers_[member.state] = member.sequence;
   }
@@ -573,9 +607,6 @@ void TpMirroredRunner::Record(
 
 TextRunnerDescriptor TpMirroredRunner::Descriptor() const {
   auto descriptor = inner_->Descriptor();
-  auto& capabilities = descriptor.capabilities;
-  capabilities.batched_multi_token_decode = false;
-  capabilities.batched_multi_token_decode_max_width = 0;
   if (descriptor.persistence.has_value()) {
     // Rank 0's files hold its half and name rank 1's: neither a one-host
     // server nor a lone rank can restore them.
@@ -594,9 +625,7 @@ TextRunnerResourceClaim TpMirroredRunner::ResourceClaim() const {
 }
 
 std::vector<TextExecutionPlan> TpMirroredRunner::SupportedPlans() const {
-  // Batched advances are mirrored as one instruction. Batched multi-token
-  // decoding is not (see `Descriptor`), so the scheduler advances a batch of
-  // multi-token requests one token each.
+  // Batched advances and decodes are each mirrored as one instruction.
   return inner_->SupportedPlans();
 }
 
@@ -793,19 +822,11 @@ TextDecodeStep TpMirroredRunner::DecodeStep(
   auto& mirrored = Mirrored(state);
   const auto count = ToWire(max_tokens, "decode budget");
   const auto draw = sampler.SaveDrawState();
-  if (draw.pending.has_value() &&
-      *draw.pending > static_cast<sampling::TokenId>(
-                          std::numeric_limits<std::int32_t>::max())) {
-    throw std::invalid_argument("TP2 pending draw exceeds the protocol range");
-  }
-  const auto sent = Send(
-      mirrored.id(), {.op = TpInstructionOp::kDecode,
-                      .state = mirrored.id(),
-                      .count = count,
-                      .rng = draw.rng,
-                      .pending = draw.pending.has_value()
-                                     ? static_cast<std::int32_t>(*draw.pending)
-                                     : -1});
+  const auto sent = Send(mirrored.id(), {.op = TpInstructionOp::kDecode,
+                                         .state = mirrored.id(),
+                                         .count = count,
+                                         .rng = draw.rng,
+                                         .pending = PendingToWire(draw)});
   TextDecodeStep step;
   try {
     CallScope scope(*this, sent.index);
@@ -823,10 +844,61 @@ TextDecodeStep TpMirroredRunner::DecodeStep(
 
 std::vector<TextDecodeStep> TpMirroredRunner::DecodeBatch(
     std::span<const TextRunnerDecode> decodes) const {
-  if (decodes.size() > 1) {
-    throw std::invalid_argument("TP2 does not mirror batched decoding yet");
+  if (decodes.size() < 2 || !multi_token_decode_) {
+    return TextModelRunner::DecodeBatch(decodes);
   }
-  return TextModelRunner::DecodeBatch(decodes);
+  const std::lock_guard<std::recursive_mutex> call_lock(call_mutex_);
+  // One instruction carries every member's budget and draw state, like the
+  // decode each replaces, and the batch's draft count: rank 0 chooses it from
+  // its own cycle timings, which rank 1 cannot reproduce.
+  TpInstruction instruction{.op = TpInstructionOp::kDecodeBatch};
+  std::vector<TextRunnerDecode> inner;
+  inner.reserve(decodes.size());
+  for (const auto& decode : decodes) {
+    auto& mirrored = Mirrored(decode.state.get());
+    const auto draw = decode.sampler.get().SaveDrawState();
+    instruction.batch.push_back(
+        {.state = mirrored.id(),
+         .count = ToWire(decode.max_tokens, "decode budget"),
+         .rng = draw.rng,
+         .pending = PendingToWire(draw)});
+    inner.push_back({.state = mirrored.inner(),
+                     .max_tokens = decode.max_tokens,
+                     .sampler = decode.sampler});
+  }
+  const auto plan = inner_->PlanDecodeBatch(inner);
+  instruction.batch_drafts =
+      plan.has_value() ? ToWire(std::size_t{*plan} + 1, "draft count") : 0;
+  const auto sent = SendBatch(instruction);
+  std::vector<TextDecodeStep> steps;
+  try {
+    CallScope scope(*this, sent.index);
+    steps = inner_->DecodeBatchPlanned(inner, plan);
+    scope.End();
+    if (steps.size() != decodes.size()) {
+      throw std::runtime_error(
+          "text runner returned an invalid decode batch size");
+    }
+  } catch (...) {
+    // The batch failed as a whole, including members it had decoded.
+    const auto failure = std::current_exception();
+    steps.assign(decodes.size(), TextDecodeStep{});
+    for (auto& step : steps) {
+      step.failure = failure;
+    }
+  }
+  for (std::size_t index = 0; index < decodes.size(); ++index) {
+    const auto sequence = instruction.batch[index].sequence;
+    if (steps[index].failure) {
+      Record(sequence, DigestTpFailure);
+      continue;
+    }
+    Record(sequence, [&](TpExecutionDigest& digest) {
+      DigestTpDecode(digest, steps[index],
+                     inner_->CheckpointPosition(inner[index].state.get()));
+    });
+  }
+  return steps;
 }
 
 void TpMirroredRunner::AdvanceBatch(
@@ -1285,7 +1357,8 @@ bool TpExecutor::Execute(const TpControlCommand& command,
     return false;
   }
   const auto& instruction = command.instruction;
-  if (instruction.op == TpInstructionOp::kAdvanceBatch) {
+  if (instruction.op == TpInstructionOp::kAdvanceBatch ||
+      instruction.op == TpInstructionOp::kDecodeBatch) {
     return ExecuteBatch(instruction, error);
   }
   if (command.sequence == 0) {
@@ -1504,12 +1577,7 @@ bool TpExecutor::ExecuteCall(std::uint64_t sequence, Request& request,
       case TpInstructionOp::kDecode: {
         choice.reset();
         request.sampler.RestoreDrawState(
-            {.rng = instruction.rng,
-             .pending =
-                 instruction.pending >= 0
-                     ? std::optional<sampling::TokenId>(
-                           static_cast<sampling::TokenId>(instruction.pending))
-                     : std::nullopt});
+            DrawFromWire(instruction.rng, instruction.pending));
         const auto step =
             runner_->DecodeStep(state, instruction.count, request.sampler);
         for (const auto& selection : step.selections) {
@@ -1523,6 +1591,7 @@ bool TpExecutor::ExecuteCall(std::uint64_t sequence, Request& request,
         break;
       }
       case TpInstructionOp::kAdvanceBatch:
+      case TpInstructionOp::kDecodeBatch:
       case TpInstructionOp::kPersist:
       case TpInstructionOp::kEnd:
       case TpInstructionOp::kNone:
@@ -1572,15 +1641,30 @@ bool TpExecutor::ExecuteBatch(const TpInstruction& instruction,
     }
     members.push_back(found->second.get());
   }
+  const bool decode = instruction.op == TpInstructionOp::kDecodeBatch;
   std::vector<std::exception_ptr> failures(members.size());
   std::vector<TextRunnerAdvance> advances;
-  advances.reserve(members.size());
+  std::vector<TextRunnerDecode> decodes;
+  if (decode) {
+    decodes.reserve(members.size());
+  } else {
+    advances.reserve(members.size());
+  }
   for (std::size_t index = 0; index < members.size(); ++index) {
     const auto& member = instruction.batch[index];
     auto& request = *members[index];
     ++request.count;
-    DigestTpCall(request.digest, MemberAdvance(member));
+    DigestTpCall(request.digest, MemberCall(instruction.op, member));
     auto& choice = request.own[member.state];
+    if (decode) {
+      choice.reset();
+      request.sampler.RestoreDrawState(
+          DrawFromWire(member.rng, member.pending));
+      decodes.push_back({.state = *states_[member.state],
+                         .max_tokens = member.count,
+                         .sampler = request.sampler});
+      continue;
+    }
     const auto token = static_cast<TextRunnerToken>(member.token);
     if (request.greedy &&
         (!choice.has_value() || choice->stop || choice->token != token)) {
@@ -1602,10 +1686,27 @@ bool TpExecutor::ExecuteBatch(const TpInstruction& instruction,
   if (!BeginScope(instruction.index, error)) {
     return false;
   }
+  std::vector<TextDecodeStep> steps;
   try {
-    runner_->AdvanceBatch(advances);
+    if (decode) {
+      // Rank 0's draft count, which it chose from its own timings.
+      const auto plan =
+          instruction.batch_drafts != 0
+              ? std::optional<std::uint32_t>(instruction.batch_drafts - 1)
+              : std::nullopt;
+      steps = runner_->DecodeBatchPlanned(decodes, plan);
+      if (steps.size() != members.size()) {
+        throw std::runtime_error(
+            "text runner returned an invalid decode batch size");
+      }
+      for (std::size_t index = 0; index < members.size(); ++index) {
+        failures[index] = steps[index].failure;
+      }
+    } else {
+      runner_->AdvanceBatch(advances);
+    }
   } catch (...) {
-    // The batch failed as a whole, including members it had advanced.
+    // The batch failed as a whole, including members it had run.
     const auto failure = std::current_exception();
     for (auto& member : failures) {
       if (!member) {
@@ -1629,12 +1730,21 @@ bool TpExecutor::ExecuteBatch(const TpInstruction& instruction,
         what = exception.what();
       } catch (...) {
       }
-      request.Note("rank 1 batched advance failed: " + what);
+      request.Note("rank 1 " + std::string(OpName(instruction.op)) +
+                   " failed: " + what);
       continue;
     }
-    const auto token = static_cast<TextRunnerToken>(member.token);
-    request.sampler.Accept(token);
-    DigestTpAdvance(request.digest, runner_->CheckpointPosition(state));
+    if (decode) {
+      for (const auto& selection : steps[index].selections) {
+        request.sampler.Accept(selection.token);
+      }
+      DigestTpDecode(request.digest, steps[index],
+                     runner_->CheckpointPosition(state));
+    } else {
+      const auto token = static_cast<TextRunnerToken>(member.token);
+      request.sampler.Accept(token);
+      DigestTpAdvance(request.digest, runner_->CheckpointPosition(state));
+    }
     if (request.greedy) {
       try {
         request.own[member.state] = ChooseGreedy(state);

@@ -923,7 +923,8 @@ bool Session::DecodeStep(std::size_t max_tokens,
 
 template<class Request>
 bool Session::RunIsolatedBatch(std::span<const Request> requests,
-                               std::string* error_msg) {
+                               std::string* error_msg,
+                               const std::optional<std::uint32_t>* plan) {
   if (requests.empty() || requests.size() > 8) {
     AssignError(error_msg, "batch must contain 1..8 sessions");
     return false;
@@ -977,7 +978,7 @@ bool Session::RunIsolatedBatch(std::span<const Request> requests,
   try {
     if (!active.empty()) {
       if constexpr (std::is_same_v<Request, DecodeRequest>)
-        (void)DecodeBatchImpl(active, &shared_error);
+        (void)DecodeBatchImpl(active, plan, &shared_error);
       else
         (void)EvaluateBatchImpl(active, &shared_error);
     }
@@ -1032,8 +1033,42 @@ bool Session::RunIsolatedBatch(std::span<const Request> requests,
 }
 
 bool Session::DecodeBatch(std::span<const DecodeRequest> requests,
-                          std::string* error_msg) {
-  return RunIsolatedBatch(requests, error_msg);
+                          std::string* error_msg,
+                          const std::optional<std::uint32_t>* plan) {
+  return RunIsolatedBatch(requests, error_msg, plan);
+}
+
+std::optional<std::uint32_t> Session::PlanBatch(
+    std::span<const DecodeRequest> requests) {
+  if (requests.size() > 8)
+    return std::nullopt;
+  // Only the requests the batch would run: a TP2 peer plans before the batch
+  // sets aside invalid ones.
+  std::array<MtpBatchController::Row, 8> rows{};
+  std::size_t count = 0;
+  std::uint32_t batch_context = 0;
+  const Session* first = nullptr;
+  for (const auto& r : requests) {
+    if (r.session == nullptr || r.sampler == nullptr || !r.session->valid_ ||
+        r.session->tokens_.empty() || r.max_tokens == 0)
+      continue;
+    if (!r.session->MtpEnabled() || r.sampler->config().uses_random_sampling())
+      return std::nullopt;
+    const auto& exec = *r.session->model_->executor_;
+    const auto cap = std::min<std::size_t>(
+        r.max_tokens, r.session->ContextSize() - r.session->Position());
+    rows[count++] = {&r.session->draft_length_,
+                     static_cast<std::uint32_t>(
+                         std::min<std::size_t>(cap, exec.max_speculative())) -
+                         (cap != 0)};
+    batch_context = std::max(batch_context, r.session->Position());
+    if (first == nullptr)
+      first = r.session;
+  }
+  if (count < 2)
+    return std::nullopt;
+  return first->model_->batch_policy_.Choose(std::span(rows).first(count),
+                                             batch_context);
 }
 
 bool Session::EvaluateBatch(std::span<const AdvanceRequest> requests,
@@ -1042,6 +1077,7 @@ bool Session::EvaluateBatch(std::span<const AdvanceRequest> requests,
 }
 
 bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
+                              const std::optional<std::uint32_t>* plan,
                               std::string* error_msg) {
   if (requests.size() == 1) {
     const auto& r = requests.front();
@@ -1053,24 +1089,12 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
   std::optional<std::uint32_t> batch_drafts;
   std::uint32_t batch_context = 0;
   auto& policy = requests.front().session->model_->batch_policy_;
-  if (std::ranges::all_of(
-          requests, [](const auto& r) { return r.session->MtpEnabled(); }) &&
-      std::ranges::none_of(requests, [](const auto& request) {
-        return request.sampler->config().uses_random_sampling();
-      })) {
-    std::array<MtpBatchController::Row, 8> rows{};
-    for (std::size_t i = 0; i < requests.size(); ++i) {
-      const auto& r = requests[i];
-      const auto cap = std::min<std::size_t>(
-          r.max_tokens, r.session->ContextSize() - r.session->Position());
-      rows[i] = {&r.session->draft_length_,
-                 static_cast<std::uint32_t>(
-                     std::min<std::size_t>(cap, exec.max_speculative())) -
-                     (cap != 0)};
+  // A given plan (a TP2 peer's) replaces the timing-based choice.
+  batch_drafts = plan != nullptr ? *plan : PlanBatch(requests);
+  if (batch_drafts) {
+    for (const auto& r : requests) {
       batch_context = std::max(batch_context, r.session->Position());
     }
-    batch_drafts =
-        policy.Choose(std::span(rows).first(requests.size()), batch_context);
   }
   const auto cycle_start = std::chrono::steady_clock::now();
   std::vector<PendingDecode> pending(requests.size());

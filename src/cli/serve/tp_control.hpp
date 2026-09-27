@@ -82,14 +82,25 @@ enum class TpInstructionOp : std::uint8_t {
   /// restores its own half. Acknowledged; a failure makes both ranks treat the
   /// entry as a miss.
   kRestoreDisk = 14,
+  /// `DecodeBatch` over `batch`: one multi-token cycle for every member, with
+  /// the batch's draft count from `batch_drafts` (the plan rank 0 chose, plus
+  /// one; zero lets each member choose from its own history). Sent with
+  /// sequence 0; each member names its request and carries its budget and
+  /// draw state, like `kDecode`.
+  kDecodeBatch = 15,
 };
 
 /// One member of a batched instruction: a request, the state it leases, and
-/// the token that state advances by.
+/// the arguments of its call.
 struct TpBatchMember {
   std::uint64_t sequence{0};
   std::uint32_t state{0};
+  /// kAdvanceBatch only.
   std::int32_t token{0};
+  /// kDecodeBatch only: the member's token budget and draw state, as kDecode.
+  std::uint32_t count{0};
+  std::uint64_t rng{0};
+  std::int32_t pending{-1};
 
   bool operator==(const TpBatchMember&) const = default;
 };
@@ -109,10 +120,13 @@ struct TpInstruction {
   std::uint64_t rng{0};
   std::int32_t pending{-1};
   std::uint64_t snapshot_id{0};
-  /// kAdvanceBatch only: two to eight members on distinct states.
+  /// kAdvanceBatch and kDecodeBatch only: two to eight members on distinct
+  /// states; a decode batch's members also serve distinct requests.
   std::vector<TpBatchMember> batch;
   /// kPersist and kRestoreDisk only: names the snapshot's file on both ranks.
   std::uint64_t file_key{0};
+  /// kDecodeBatch only: the batch's draft count plus one, or zero for none.
+  std::uint32_t batch_drafts{0};
 
   bool operator==(const TpInstruction&) const = default;
 };

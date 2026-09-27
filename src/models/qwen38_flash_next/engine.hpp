@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -182,8 +183,16 @@ public:
   };
   /// A false return may include completed peers. Inspect each outcome; only
   /// sessions whose persistent state was partly mutated become invalid.
-  [[nodiscard]] static bool DecodeBatch(std::span<const DecodeRequest> requests,
-                                        std::string* error_msg = nullptr);
+  /// `plan`, when given, fixes the batch's draft count (none: each session
+  /// chooses from its own acceptance history) instead of choosing it here.
+  [[nodiscard]] static bool DecodeBatch(
+      std::span<const DecodeRequest> requests, std::string* error_msg = nullptr,
+      const std::optional<std::uint32_t>* plan = nullptr);
+  /// The draft count DecodeBatch would choose for these requests: one for
+  /// the whole batch when every request decodes greedily with MTP, from
+  /// measured cycle costs, else none. A TP2 peer runs the batch with it.
+  [[nodiscard]] static std::optional<std::uint32_t> PlanBatch(
+      std::span<const DecodeRequest> requests);
   struct AdvanceRequest {
     Session* session;
     std::int32_t token;
@@ -254,9 +263,11 @@ private:
   static bool DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
                                 std::string* error_msg);
   template<class Request>
-  static bool RunIsolatedBatch(std::span<const Request> requests,
-                               std::string* error_msg);
+  static bool RunIsolatedBatch(
+      std::span<const Request> requests, std::string* error_msg,
+      const std::optional<std::uint32_t>* plan = nullptr);
   static bool DecodeBatchImpl(std::span<const DecodeRequest> requests,
+                              const std::optional<std::uint32_t>* plan,
                               std::string* error_msg);
   static bool EvaluateBatchImpl(std::span<const AdvanceRequest> requests,
                                 std::string* error_msg);

@@ -284,6 +284,22 @@ int main() {
               {.sequence = command.sequence + 1, .state = 0, .token = 11},
               {.sequence = command.sequence + 2, .state = 7, .token = 0}}}};
   round_trip(batch);
+  // A batched multi-token decode names each member's request, state, budget
+  // and draw state, and carries rank 0's draft plan plus one.
+  const TpControlCommand decode_batch{
+      .sequence = 0,
+      .kind = TpControlCommandKind::kInstruction,
+      .instruction = {
+          .op = TpInstructionOp::kDecodeBatch,
+          .index = 18,
+          .batch = {{.sequence = command.sequence,
+                     .state = 2,
+                     .count = 8,
+                     .rng = 0x0123456789abcdefULL,
+                     .pending = 248068},
+                    {.sequence = command.sequence + 1, .state = 0, .count = 1}},
+          .batch_drafts = 4}};
+  round_trip(decode_batch);
   // A capture carries the request's call count and digest so far.
   round_trip({.sequence = command.sequence,
               .kind = TpControlCommandKind::kInstruction,
@@ -434,6 +450,31 @@ int main() {
           with_batch([&](auto& bad) { bad.sequence = command.sequence; }));
   refuses("a batch carrying a token",
           with_batch([](auto& bad) { bad.instruction.token = 3; }));
+  const auto with_decode_batch = [&](auto change) {
+    TpControlCommand bad = decode_batch;
+    change(bad);
+    return bad;
+  };
+  refuses("a decode batch serving one request twice",
+          with_decode_batch([](auto& bad) {
+            bad.instruction.batch[1].sequence =
+                bad.instruction.batch[0].sequence;
+          }));
+  refuses(
+      "a decode batch member without a budget",
+      with_decode_batch([](auto& bad) { bad.instruction.batch[1].count = 0; }));
+  refuses(
+      "a decode batch member with a token",
+      with_decode_batch([](auto& bad) { bad.instruction.batch[0].token = 5; }));
+  refuses("a decode batch member with an invalid pending draw",
+          with_decode_batch(
+              [](auto& bad) { bad.instruction.batch[0].pending = -2; }));
+  refuses("a batched advance member with a draw state",
+          with_batch([](auto& bad) { bad.instruction.batch[0].rng = 9; }));
+  refuses("a batched advance member with a budget",
+          with_batch([](auto& bad) { bad.instruction.batch[0].count = 2; }));
+  refuses("a draft plan outside a decode batch",
+          with_batch([](auto& bad) { bad.instruction.batch_drafts = 2; }));
   refuses("members on a single advance", with([&](auto& bad) {
             bad.instruction = {.op = TpInstructionOp::kAdvance,
                                .token = 1,
