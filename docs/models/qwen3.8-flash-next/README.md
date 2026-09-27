@@ -5,7 +5,8 @@ Supported target: `unsloth/Qwen3.8-Flash-Next-GGUF`, **UD-Q4_K_XL** (four shards
 Optional shared-Q8 MTP predictor; optional BF16 vision projector.
 Original unquantized-model and GGUF-conversion parity remain unqualified.
 
-[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) ·
+[TP2](TP2.md)
 
 ## Load and run
 
@@ -22,6 +23,7 @@ MTP=/path/to/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
   --mtp-model "$MTP" --sessions 2 --context 32768
 ```
 
+To run across two hosts over InfiniBand, see [TP2](TP2.md).
 The loader discovers the remaining shards. Omit the speculative options for AR;
 AR sessions allocate no predictor state even if a shared model has MTP loaded.
 Adaptive MTP is default, with `--draft-tokens` capping 1–7 proposals. Sampled

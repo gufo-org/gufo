@@ -79,3 +79,25 @@ not unprofiled throughput measurements.
 Next: improve prefill at depth and target/draft batch projection reuse while
 preserving [quality](QUALITY.md). The 1700 tok/s PP and flat d0–d128K
 objectives remain unmet; see [current benchmarks](BENCHMARKS.md).
+
+## TP2
+
+Two-host tensor parallelism over InfiniBand ([TP2.md](TP2.md)). Measured on two
+Strix Halo hosts with ConnectX-3 FDR cards at PCIe Gen3 x4, Q4 unless noted.
+Development measurements, not published cells.
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| Fabric ceiling | Measurement: `ib_write_bw` at 5 MiB gives 3.27 GB/s one way and 2.7 GB/s each way in both directions, so a 5 MiB prefill exchange cannot go below about 1.9 ms. The card's two ports share one Gen3 x4 link. |
+| Header-free RDMA exchange | Retained; replaces a TCP header, a one-sided RDMA read and a TCP acknowledgement. One RDMA write with immediate data carries header and partial into one of three rotating receive windows. One-row exchange 46 → 24 µs; AR +2.5%, MTP +4.3%. |
+| Queued exchanges | Retained. A stage kernel publishes a ready flag, a communicator thread writes and waits, and a one-wave kernel holds the stream until the arrival flag, so the host queues a whole forward. GPU cost per exchange 53 → 21 µs; AR +1.3%, MTP +1.2–1.9%, outputs unchanged. |
+| Bounded completion spin | Rejected: a 5 µs spin on the completion queue raised empty polls from 5,728 to about 663,000 per rank without reducing sleep time. The thread now spins with a pause for 5 ms, then sleeps. |
+| One-host eager control | Measurement: forcing eager execution on one host decoded tg128 at 26.39 against 26.73 tok/s with graphs. Graph capture is worth about 1% on one host; TP2 runs without it. |
+| Intra-expert split | Retained; replaces whole-expert ownership. Each rank holds half (320 of 640 units) of every routed and shared expert's intermediate dimension, on quantization-block boundaries, and computes every selected expert on it. AR +5% (Q4) and +6% (Q8); no load imbalance between the ranks. |
+| Shared expert on both ranks | Retained fix. Full Q8 ranks diverged from the second layer on: running a Q8_0 projection on one rank only re-keyed that rank's activation staging cache, so its later projections read a differently rounded copy. Both ranks now run their half of the shared expert; ranks agree bit for bit on Q4 and Q8. |
+| Dense split | Retained. Every trunk layer's GDN (8 of 16 key heads, the 24 value heads that read them) or attention heads (one KV head, twelve query heads) are split, with a second exchange per layer; per-rank KV cache and recurrent state halve. Split kernels equal the full ones bit for bit. AR 28.2 → 34.0 tok/s, MTP +17–24%, prefill +21–24% at 4K–32K; Q8 MTP +15–17%. |
+| Prefill overlap | Retained. A prefill step of up to 4096 tokens runs as two trunk batches a layer apart, so each batch's exchange crosses the link while the other computes; results equal two steps bit for bit. Q4 +33–46% at 4K–32K, Q8 +21%. |
+| Rank 1 as executor | Retained. Rank 0 runs the ordinary scheduler and sends each state-changing model call to rank 1, including multi-token MTP cycles with the sampler's draw state and cache operations; both ranks digest every call. Sampled MTP 35.5/38.5 tok/s mixed/repetitive against about 24 token by token; a follow-up turn on 5.9K tokens of history reaches its first token in 124–141 ms instead of 4.9 s. |
+| Concurrent requests | Retained. Rank 1 keeps every open request; concurrent single-token decoders advance in one batched instruction, and a request's continuations are reused only after rank 1 agreed with it. Greedy aggregate C1/C2/C4/C8: AR 35.2/57.4/89.7/121.9 tok/s; every concurrent output equals its serial one. Batched multi-token (MTP) decoding is not mirrored yet. |
+| Images | Retained. A request's images (resized pixels, grid, RoPE layout) travel with it to rank 1, each rank runs the replicated vision encoder, and binding a state to a request's images is a mirrored call. Q4, greedy: a striped flag, a disc, two images at once and an image beside a text request give answers byte-identical to one host, AR and MTP alike; the repeat restores all 105 prompt tokens and a follow-up 138 of 160. |
+| TP2 against one host | Measurement. Reduction order differs, so logits are compared with a tolerance: 216 tokens RMSE 0.134, top-1 63/64, mean KL 0.0055; 5,713 tokens RMSE 0.51, KL 0.029. WikiText-2 (8 × 1024 tokens) perplexity 2.1093 on TP2 against 2.1168 on one host, KL 0.019, 97.1% same top token. |
