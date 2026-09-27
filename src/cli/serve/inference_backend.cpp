@@ -543,12 +543,15 @@ public:
     rollback_position_ = position_;
     rollback_tokens_.assign(1, *frontier_);
     rollback_logits_ = std::move(frontier_logits_);
+    // Verification keeps its own EOS handling: the tokenizer stop set already
+    // covers EOS, so a sentinel id here would change nothing. An ignore-EOS
+    // request instead publishes the stop token in AppendSpeculativeSelection
+    // and continues, at the cost of a window clipped on every EOS crossing.
     return {*verifier_,
             sequence_,
             static_cast<std::uint32_t>(position_),
             *frontier_,
-            stop_at_eos() ? model_->GetTokenizer().GetEosTokenId()
-                          : std::numeric_limits<TextRunnerToken>::max(),
+            model_->GetTokenizer().GetEosTokenId(),
             static_cast<std::uint32_t>(std::min<std::size_t>(
                 remaining, std::numeric_limits<std::uint32_t>::max())),
             sampler};
@@ -3499,22 +3502,25 @@ InferenceBackend::start_complete(
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
-  if (state == nullptr)
-    throw std::runtime_error("model is not loaded");
+  if (state == nullptr) {
+    return TextGenerationBackend::start_complete(
+        prompt, max_tokens, sampling_config, is_cancelled, stream_output,
+        ignore_eos, client_id, stop_sequences);
+  }
   auto prompt_tokens = state->scheduler->runner().Tokenize(prompt);
-  auto scheduled_request =
-      state->scheduler->Submit(std::move(prompt_tokens), max_tokens,
-                               sampling_config, is_cancelled, stream_output,
-                               TextRequestMetadata{
-                                   .client_id = std::string(client_id),
-                                   .deadline = std::nullopt,
-                                   .request_start = request_start,
-                                   .prompt_context = {},
-                                   .cache_prompt = true,
-                                   .cache_prefix_tokens = 0,
-                                   .stop_at_eos = !ignore_eos,
-                                   .stop_sequences = stop_sequences,
-                               });
+  auto scheduled_request = state->scheduler->Submit(
+      std::move(prompt_tokens), max_tokens, sampling_config, is_cancelled,
+      stream_output,
+      TextRequestMetadata{
+          .client_id = client_id.empty() ? "anonymous" : std::string(client_id),
+          .deadline = std::nullopt,
+          .request_start = request_start,
+          .prompt_context = {},
+          .cache_prompt = true,
+          .cache_prefix_tokens = 0,
+          .stop_at_eos = !ignore_eos,
+          .stop_sequences = stop_sequences,
+      });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
       state, std::move(scheduled_request));
 #else

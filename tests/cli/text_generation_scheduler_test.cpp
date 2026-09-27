@@ -1570,6 +1570,8 @@ void TestEmptyTokenIsPublished() {
   });
   Expect(result.tokens.size() == 1 && events == 1,
          "one empty decoded token still has one streaming event");
+  Expect(result.max_buffered_output_bytes >= 1,
+         "an empty streamed piece still charges the output budget");
 }
 
 int main() {

@@ -423,10 +423,13 @@ void TestCompatibilityRequests() {
     }
     for (const auto field :
          {"stream", "echo", "store", "background", "tools", "stop", "reasoning",
-          "output_config", "logit_bias"}) {
-      if ((std::string_view(endpoint.path) == "/v1/responses" ||
-           std::string_view(endpoint.path) == "/v1/completions") &&
-          std::string_view(field) == "stream")
+          "output_config", "logit_bias", "ignore_eos"}) {
+      const std::string_view path(endpoint.path);
+      const std::string_view name(field);
+      if ((path == "/v1/responses" || path == "/v1/completions") &&
+          name == "stream")
+        continue;
+      if (path == "/v1/completions" && name == "ignore_eos")
         continue;
       auto invalid = body;
       invalid[field] = true;
@@ -590,6 +593,14 @@ void TestRawCompletionStreaming() {
           R"({"prompt":"hello","ignore_eos":1})",
       })
     ExpectStatus(server.Post("/v1/completions", body), 400);
+
+  // Raw Completions owns the fixed-length contract; every other text endpoint
+  // rejects the field instead of silently generating a shorter run.
+  ExpectStatus(
+      server.Post(
+          "/v1/chat/completions",
+          R"({"model":"test","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"ignore_eos":true})"),
+      400);
 }
 
 void TestInvalidBindSettings() {

@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -127,12 +128,19 @@ void PublishTerminal(const std::shared_ptr<ScheduledRequest>& request,
   request->output_condition.notify_all();
 }
 
+/// Queue cost of one streamed piece. A token whose decoded text is empty still
+/// occupies a queue slot, so it is charged one byte: a zero cost would let an
+/// unbounded number of them accumulate behind a slow consumer.
+[[nodiscard]] std::size_t QueuedPieceCost(std::string_view piece) noexcept {
+  return std::max<std::size_t>(piece.size(), 1);
+}
+
 [[nodiscard]] bool PublishPiece(
     const std::shared_ptr<ScheduledRequest>& request, std::string piece) {
   if (!request->publish_token_pieces) {
     return true;
   }
-  const std::size_t piece_bytes = piece.size();
+  const std::size_t piece_bytes = QueuedPieceCost(piece);
   {
     const std::lock_guard<std::mutex> lock(request->output_mutex);
     if (request->buffered_output_bytes > request->max_buffered_output_bytes ||
@@ -1261,7 +1269,7 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
       if (!impl_->request->output_pieces.empty()) {
         has_piece = true;
         const std::size_t piece_bytes =
-            impl_->request->output_pieces.front().size();
+            QueuedPieceCost(impl_->request->output_pieces.front());
         piece = std::move(impl_->request->output_pieces.front());
         impl_->request->output_pieces.pop_front();
         impl_->request->buffered_output_bytes -= piece_bytes;

@@ -486,8 +486,16 @@ Raw Completions accepts `stream: true` and
 `stream_options: {"include_usage": true}`. The final usage event reports prompt,
 cached and completion token counts before the `[DONE]` sentinel. Local benchmark
 clients can set `ignore_eos: true` to generate exactly `max_tokens`; context
-capacity remains the hard limit. `GET /v1/models` reports that configured limit
-as `context_length` on the loaded text model.
+capacity remains the hard limit. Chat Completions, Responses, Messages and
+`/completion` reject `ignore_eos`: Raw Completions owns the fixed-length
+contract. `GET /v1/models` reports that configured limit as `context_length` on
+the loaded text model.
+
+`ignore_eos` measures decode past the model's stop tokens, which speculative
+backends do not accelerate: verification ends its accepted run at every EOS it
+emits, so each crossing clips the draft window. Expect decode near the
+autoregressive rate in that region, not the rate the same model reaches on an
+ordinary continuation.
 
 ## Chat Completions Adapter
 

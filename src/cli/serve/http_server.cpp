@@ -485,14 +485,23 @@ HttpResponse InvalidCompatibilityRequest(std::string_view message) {
              "invalid_request_error", "invalid_request");
 }
 
+// Per-endpoint allowances for the shared compatibility validator. Every field
+// left false rejects its request field on that endpoint.
+struct CompatibilityAllowances {
+  /// Request field carrying stop sequences, empty when the endpoint has none.
+  std::string_view stop_field;
+  bool stream{false};
+  bool stream_options{false};
+  bool ignore_eos{false};
+};
+
 // Validate the text subset before dispatch so a client never gets an answer
 // to a different request. Responses also supports streamed output.
 std::optional<HttpResponse> ReadCompatibilityOptions(
     const json::Value& body, TextGenerationBackend& backend,
     std::string_view token_field, std::size_t* max_tokens,
-    sampling::SamplingConfig* sampling_config, std::string_view stop_field = {},
-    bool allow_stream = false, bool allow_stream_options = false,
-    bool allow_ignore_eos = false) {
+    sampling::SamplingConfig* sampling_config,
+    const CompatibilityAllowances& allowances = {}) {
   if (!body.is_object())
     return InvalidCompatibilityRequest("request body must be an object");
   if (const auto* model = body.find("model"); model != nullptr) {
@@ -506,7 +515,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     if (const auto* value = body.find(field);
         value != nullptr &&
         (!value->is_bool() ||
-         (value->as_bool() && !(allow_stream && field == "stream")))) {
+         (value->as_bool() && !(allowances.stream && field == "stream")))) {
       return InvalidCompatibilityRequest("'" + field + "' must be false");
     }
   }
@@ -540,9 +549,10 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
                                   "truncation",
                                   "modalities",
                                   "audio"}) {
-    if (field != stop_field &&
-        !(field == "stream_options" && allow_stream_options) &&
-        !(field == "ignore_eos" && allow_ignore_eos) && body.contains(field)) {
+    if (field != allowances.stop_field &&
+        !(field == "stream_options" && allowances.stream_options) &&
+        !(field == "ignore_eos" && allowances.ignore_eos) &&
+        body.contains(field)) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }
@@ -656,8 +666,13 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                            &sampling_config, "stop", true,
-                                            true, true)) {
+                                            &sampling_config,
+                                            {
+                                                .stop_field = "stop",
+                                                .stream = true,
+                                                .stream_options = true,
+                                                .ignore_eos = true,
+                                            })) {
     return std::move(*error);
   }
   const auto* stream_field = body.find("stream");
@@ -837,7 +852,7 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
   sampling::SamplingConfig sampling_config;
   if (auto error =
           ReadCompatibilityOptions(body, b, "max_output_tokens", &max_tokens,
-                                   &sampling_config, {}, true)) {
+                                   &sampling_config, {.stream = true})) {
     return std::move(*error);
   }
 
@@ -885,9 +900,9 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error =
-          ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                   &sampling_config, "stop_sequences")) {
+  if (auto error = ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
+                                            &sampling_config,
+                                            {.stop_field = "stop_sequences"})) {
     return std::move(*error);
   }
 
@@ -964,8 +979,9 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error = ReadCompatibilityOptions(body, b, "n_predict", &max_tokens,
-                                            &sampling_config, "stop")) {
+  if (auto error =
+          ReadCompatibilityOptions(body, b, "n_predict", &max_tokens,
+                                   &sampling_config, {.stop_field = "stop"})) {
     return std::move(*error);
   }
 

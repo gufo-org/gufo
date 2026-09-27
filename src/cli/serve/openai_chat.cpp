@@ -682,6 +682,14 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
       (!choices->is_number() || choices->as_double() != 1.0)) {
     return Error(400, "Bad Request", "only n=1 is supported", "unsupported_n");
   }
+  // Raw Completions owns the fixed-length benchmark contract. Rejecting the
+  // field here keeps a harness from measuring silently shortened runs.
+  if (const auto* value = body.find("ignore_eos");
+      value != nullptr && !value->is_null()) {
+    return Error(400, "Bad Request",
+                 "request field 'ignore_eos' is not supported on this endpoint",
+                 "unsupported_field");
+  }
   for (const std::string_view unsupported :
        {"logprobs", "top_logprobs", "response_format", "modalities", "audio"}) {
     if (const auto* value = body.find(std::string(unsupported));
