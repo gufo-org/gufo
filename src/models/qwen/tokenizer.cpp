@@ -9,8 +9,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -439,12 +441,21 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromVocabulary(
     auto it2 = tokenizer->token_to_id_.find(part2);
     if (it1 != tokenizer->token_to_id_.end() &&
         it2 != tokenizer->token_to_id_.end()) {
-      tokenizer->merge_ranks_[{it1->second, it2->second}] = rank;
+      // The merged token is fixed by the pair, so resolve it once here
+      // instead of rebuilding the string on every merge.
+      const auto merged = tokenizer->token_to_id_.find(part1 + part2);
+      tokenizer->merge_ranks_[{it1->second, it2->second}] = {
+          .rank = rank,
+          .token = merged != tokenizer->token_to_id_.end() ? merged->second
+                                                           : kInvalidTokenId,
+      };
     }
   }
 
   // Register special tokens
+  tokenizer->special_token_list_.reserve(special_tokens.size());
   for (const auto& [name, id] : special_tokens) {
+    tokenizer->special_token_list_.emplace_back(name, id);
     tokenizer->special_token_to_id_[name] = id;
     tokenizer->is_special_token_[id] = true;
     if (id < tokenizer->id_to_token_.size()) {
@@ -532,38 +543,85 @@ std::vector<TokenId> QwenTokenizer::BpeMergeChunk(
     return word_tokens;
   }
 
-  // Iteratively merge the highest-ranked adjacent pairs
-  while (word_tokens.size() >= 2) {
-    std::optional<std::uint32_t> best_rank;
-    std::size_t best_idx = 0;
-
-    for (std::size_t i = 0; i < word_tokens.size() - 1; ++i) {
-      auto it = merge_ranks_.find({word_tokens[i], word_tokens[i + 1]});
-      if (it != merge_ranks_.end()) {
-        if (!best_rank.has_value() || it->second < *best_rank) {
-          best_rank = it->second;
-          best_idx = i;
-        }
-      }
-    }
-
-    if (!best_rank.has_value()) {
-      break;
-    }
-
-    const std::string merged_str = id_to_token_[word_tokens[best_idx]] +
-                                   id_to_token_[word_tokens[best_idx + 1]];
-    auto merged_it = token_to_id_.find(merged_str);
-    if (merged_it == token_to_id_.end()) {
-      break;
-    }
-
-    word_tokens[best_idx] = merged_it->second;
-    word_tokens.erase(word_tokens.begin() +
-                      static_cast<std::ptrdiff_t>(best_idx + 1));
+  // Merge the lowest-ranked adjacent pair repeatedly, leftmost first on a
+  // tie. Rescanning the whole word per merge is quadratic in the piece, and
+  // pre-tokenizer pieces are unbounded (a run of letters or of spaces is one
+  // piece), so hold the symbols in a linked list and the candidate pairs in a
+  // heap. Stale entries are discarded when popped.
+  constexpr std::size_t kNoSymbol = std::numeric_limits<std::size_t>::max();
+  const std::size_t count = word_tokens.size();
+  std::vector<std::size_t> previous(count);
+  std::vector<std::size_t> following(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    previous[i] = i == 0 ? kNoSymbol : i - 1;
+    following[i] = i + 1 < count ? i + 1 : kNoSymbol;
   }
 
-  return word_tokens;
+  struct Candidate {
+    std::uint32_t rank;
+    std::size_t index;  ///< Left symbol; also the left-to-right tie-break.
+    TokenId left;
+    TokenId right;
+  };
+  const auto later = [](const Candidate& a, const Candidate& b) {
+    return a.rank != b.rank ? a.rank > b.rank : a.index > b.index;
+  };
+  std::priority_queue<Candidate, std::vector<Candidate>, decltype(later)>
+      candidates(later);
+
+  const auto offer = [&](std::size_t index, std::size_t right) {
+    const auto merge =
+        merge_ranks_.find({word_tokens[index], word_tokens[right]});
+    if (merge != merge_ranks_.end()) {
+      candidates.push({
+          .rank = merge->second.rank,
+          .index = index,
+          .left = word_tokens[index],
+          .right = word_tokens[right],
+      });
+    }
+  };
+
+  for (std::size_t i = 0; i + 1 < count; ++i) {
+    offer(i, i + 1);
+  }
+
+  while (!candidates.empty()) {
+    const Candidate best = candidates.top();
+    candidates.pop();
+    const std::size_t right = following[best.index];
+    if (word_tokens[best.index] != best.left || right == kNoSymbol ||
+        word_tokens[right] != best.right) {
+      continue;  // A neighbouring merge already replaced this pair.
+    }
+
+    const auto merge = merge_ranks_.find({best.left, best.right});
+    if (merge == merge_ranks_.end() || merge->second.token == kInvalidTokenId) {
+      break;  // Ranked pair with no vocabulary entry: stop merging.
+    }
+
+    word_tokens[best.index] = merge->second.token;
+    const std::size_t after = following[right];
+    following[best.index] = after;
+    if (after != kNoSymbol) {
+      previous[after] = best.index;
+    }
+    word_tokens[right] = kInvalidTokenId;
+
+    if (previous[best.index] != kNoSymbol) {
+      offer(previous[best.index], best.index);
+    }
+    if (after != kNoSymbol) {
+      offer(best.index, after);
+    }
+  }
+
+  std::vector<TokenId> merged;
+  merged.reserve(count);
+  for (std::size_t i = 0; i != kNoSymbol; i = following[i]) {
+    merged.push_back(word_tokens[i]);
+  }
+  return merged;
 }
 
 std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
@@ -619,22 +677,40 @@ std::vector<TokenId> QwenTokenizer::Encode(
     const auto chunk_tokens = BpeEncodeText(text);
     tokens.insert(tokens.end(), chunk_tokens.begin(), chunk_tokens.end());
   } else {
-    // Scan text for special token delimiters
+    // Scan text for special token delimiters. Searching every special from
+    // the cursor on each turn costs a full pass per delimiter, so a long
+    // conversation pays for its own length once per turn. Each special keeps
+    // its next occurrence instead and only re-searches once the cursor has
+    // passed it, which walks the text once overall.
+    std::vector<std::size_t> occurrence(special_token_list_.size());
+    for (std::size_t i = 0; i < special_token_list_.size(); ++i) {
+      occurrence[i] = text.find(special_token_list_[i].first);
+    }
+
     std::size_t pos = 0;
     while (pos < text.size()) {
       std::size_t next_special_pos = std::string_view::npos;
       std::string_view matched_special;
       TokenId matched_id = kInvalidTokenId;
 
-      for (const auto& [special_str, id] : special_token_to_id_) {
-        const auto found = text.find(special_str, pos);
-        if (found != std::string_view::npos) {
-          if (next_special_pos == std::string_view::npos ||
-              found < next_special_pos) {
-            next_special_pos = found;
-            matched_special = special_str;
-            matched_id = id;
-          }
+      for (std::size_t i = 0; i < special_token_list_.size(); ++i) {
+        const auto& [special_str, id] = special_token_list_[i];
+        if (occurrence[i] != std::string_view::npos && occurrence[i] < pos) {
+          occurrence[i] = text.find(special_str, pos);
+        }
+        const auto found = occurrence[i];
+        if (found == std::string_view::npos) {
+          continue;
+        }
+        // Prefer the earliest match, and the longest where two specials
+        // start together.
+        if (next_special_pos == std::string_view::npos ||
+            found < next_special_pos ||
+            (found == next_special_pos &&
+             special_str.size() > matched_special.size())) {
+          next_special_pos = found;
+          matched_special = special_str;
+          matched_id = id;
         }
       }
 

@@ -468,6 +468,7 @@ void PrintServeHelp(std::string_view program_name,
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
+    bool log_progress = false;
 
     gufo::cli::ArgParser parser(
         std::string(program_name) + " serve llm",
@@ -568,6 +569,8 @@ void PrintServeHelp(std::string_view program_name,
                      "RAM limit for queued snapshots and each disk read "
                      "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
                      "Cache", &cache_disk_staging_bytes);
+    parser.AddFlag("", "--log-progress", "Log live prefill and decode progress",
+                   "Logging", &log_progress);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
     parser.PrintHelp();
@@ -918,6 +921,7 @@ int RunServe(std::span<const char* const> args) {
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
+    bool log_progress = false;
 
     gufo::cli::ArgParser llm_parser(
         "gufo serve llm",
@@ -1015,6 +1019,9 @@ int RunServe(std::span<const char* const> args) {
         "RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
+    llm_parser.AddFlag("", "--log-progress",
+                       "Log live prefill and decode progress", "Logging",
+                       &log_progress);
 
     add_server_options(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
@@ -1129,6 +1136,7 @@ int RunServe(std::span<const char* const> args) {
                                std::chrono::milliseconds{
                                    static_cast<std::chrono::milliseconds::rep>(
                                        request_timeout_ms)},
+                           .log_progress = log_progress,
                        },
                        speculative_config,
                        server::TextDiskCacheConfig{

@@ -1,7 +1,6 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -140,13 +139,9 @@ void CheckSamplingStrategies(
 class TemporaryDirectory {
 public:
   TemporaryDirectory() {
-    std::array<char, 96> pattern{};
-    const std::string path =
+    std::string pattern =
         (std::filesystem::temp_directory_path() / "gufo-qwen-disk-cache-XXXXXX")
             .string();
-    Expect(path.size() + 1 <= pattern.size(),
-           "temporary Qwen cache path fits fixed buffer");
-    std::copy(path.begin(), path.end(), pattern.begin());
     const char* created = ::mkdtemp(pattern.data());
     if (created == nullptr) {
       throw std::runtime_error("failed to create Qwen cache directory");

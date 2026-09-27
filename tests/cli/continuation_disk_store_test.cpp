@@ -60,12 +60,9 @@ void Expect(bool condition, std::string_view message) {
 class TemporaryDirectory {
 public:
   TemporaryDirectory() {
-    std::array<char, 64> pattern{};
-    const std::string base = (std::filesystem::temp_directory_path() /
-                              "gufo-continuation-disk-XXXXXX")
-                                 .string();
-    Expect(base.size() + 1 <= pattern.size(), "temporary path fits buffer");
-    std::copy(base.begin(), base.end(), pattern.begin());
+    std::string pattern = (std::filesystem::temp_directory_path() /
+                           "gufo-continuation-disk-XXXXXX")
+                              .string();
     char* created = ::mkdtemp(pattern.data());
     if (created == nullptr) {
       throw std::runtime_error("failed to create temporary directory");

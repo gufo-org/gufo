@@ -554,13 +554,9 @@ private:
 class TemporaryDirectory {
 public:
   TemporaryDirectory() {
-    std::array<char, 96> pattern{};
-    const std::string path = (std::filesystem::temp_directory_path() /
-                              "gufo-runner-disk-cache-XXXXXX")
-                                 .string();
-    Expect(path.size() + 1 <= pattern.size(),
-           "temporary path fits fixed buffer");
-    std::copy(path.begin(), path.end(), pattern.begin());
+    std::string pattern = (std::filesystem::temp_directory_path() /
+                           "gufo-runner-disk-cache-XXXXXX")
+                              .string();
     const char* created = ::mkdtemp(pattern.data());
     if (created == nullptr) {
       throw std::runtime_error("failed to create runner cache directory");
