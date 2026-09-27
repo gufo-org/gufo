@@ -950,6 +950,125 @@ void TestStableChatPrefixSurvivesInterruptedFraming() {
   next.Invalidate();
 }
 
+void TestWarmChatCheckpointsDoNotSplitPrefill() {
+  auto stats = std::make_shared<FakeStats>();
+  TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
+  Expect(pool.capacity() == 1 && stats->states_created == 1,
+         "extra checkpoint entries do not allocate execution sessions");
+  auto root = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  Expect(root.Prefill(64).consumed_tokens == 3,
+         "cold chat retains the stable fallback before assistant framing");
+  Expect(root.Prefill(64).decode_ready, "cold chat completes the suffix");
+  const auto first = root.SelectNext().token;
+  root.Advance();
+  root.Commit();
+
+  auto continuation =
+      pool.Acquire({1, 2, 3, 40, 41, first, 7, 40, 41}, {}, {}, {}, true, 7);
+  Expect(continuation.cached_prompt_tokens() == 6 &&
+             continuation.cache_restore_bytes() == 0,
+         "retained reasoning reuses generated tokens without a restore");
+  const auto step = continuation.Prefill(64);
+  Expect(step.consumed_tokens == 3 && step.decode_ready,
+         "warm prefill processes user and assistant framing in one pass");
+  const auto second = continuation.SelectNext().token;
+  continuation.Advance();
+  continuation.Commit();
+
+  auto repeated =
+      pool.Acquire({1, 2, 3, 40, 41, first, 7, 40, 41}, {}, {}, {}, true, 7);
+  Expect(repeated.cached_prompt_tokens() == 9 && repeated.prefill_complete(),
+         "identical thinking prompt reuses the full prompt checkpoint");
+  Expect(repeated.SelectNext().token == second,
+         "the full checkpoint preserves greedy selection");
+  repeated.Advance();
+  repeated.Commit();
+
+  // Empty reasoning changes 40,41 into 50,51 in the replayed assistant.
+  auto dropped = pool.Acquire({1, 2, 3, 40, 41, first, 7, 50, 51, 8, 40, 41},
+                              {}, {}, {}, true, 10);
+  Expect(dropped.cached_prompt_tokens() == 6,
+         "the exact retry did not replace the earlier branching fallback");
+  Expect(dropped.Prefill(64).decode_ready,
+         "omitted reasoning prefills only the remaining suffix, in one pass");
+  dropped.Cancel();
+}
+
+void TestChatFallbackSurvivesSnapshotBudgetPressure() {
+  auto stats = std::make_shared<FakeStats>();
+  auto runner =
+      std::make_shared<SnapshotRunner>(stats, 64, 256, sizeof(FakeSnapshot));
+  TextRunnerPool pool(runner, 1);
+  auto root = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  Expect(!root.Prefill(64).decode_ready, "cold chat stops at its fallback");
+  Expect(root.Prefill(64).decode_ready, "cold chat completes prefill");
+  root.CapturePromptSnapshot();
+  Expect(stats->snapshot_captures == 1,
+         "a full prompt is not copied when only the fallback fits");
+  const auto committed = root.Commit();
+  Expect(committed.snapshot_bytes == sizeof(FakeSnapshot),
+         "checkpoint retention respects the original one-snapshot budget");
+  auto dropped = pool.Acquire({1, 2, 3, 50, 51, 9}, {}, {}, {}, true, 5);
+  Expect(dropped.cached_prompt_tokens() == 3,
+         "the optional full checkpoint never evicts the required fallback");
+  dropped.Invalidate();
+}
+
+void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
+  TemporaryDirectory directory;
+  const TextRunnerDiskCacheOptions disk_cache{.directory = directory.path(),
+                                              .capacity_bytes = 8192,
+                                              .staging_capacity_bytes = 4096};
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentSnapshotRunner>(stats, "artifact-A");
+  {
+    TextRunnerPool writer(runner, 1, disk_cache);
+    auto prompt = writer.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+    Expect(!prompt.Prefill(64).decode_ready, "writer saves the stable prefix");
+    Expect(prompt.Prefill(64).decode_ready, "writer saves the complete prompt");
+    (void)prompt.SelectNext();
+    prompt.Advance();
+    prompt.Commit();
+  }
+  TextRunnerPool reader(runner, 1, disk_cache);
+  auto exact = reader.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  Expect(exact.cache_disk_hit() && exact.cached_prompt_tokens() == 5 &&
+             exact.prefill_complete(),
+         "disk restores the exact prompt instead of recomputing its suffix");
+  const auto token = exact.SelectNext().token;
+  exact.Advance();
+  exact.Commit();
+  auto repeated = reader.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  Expect(!repeated.cache_disk_hit() && repeated.prefill_complete(),
+         "a disk-restored full prompt is retained for cheap RAM retries");
+  Expect(repeated.SelectNext().token == token,
+         "disk and RAM checkpoints select the same token");
+  repeated.Advance();
+  repeated.Commit();
+  auto changed = reader.Acquire({1, 2, 3, 50, 51, 60}, {}, {}, {}, true, 5);
+  Expect(changed.cache_disk_hit() && changed.cached_prompt_tokens() == 3,
+         "the earlier disk fallback survives exact full-prompt restoration");
+  changed.Invalidate();
+
+  TemporaryDirectory legacy_directory;
+  const TextRunnerDiskCacheOptions legacy_disk{
+      .directory = legacy_directory.path(),
+      .capacity_bytes = 8192,
+      .staging_capacity_bytes = 4096};
+  {
+    TextRunnerPool writer(runner, 1, legacy_disk);
+    auto old = writer.Acquire({1, 2, 3, 40, 41});
+    Expect(old.Prefill(64).decode_ready,
+           "legacy writer saves only the full prompt");
+    old.Commit();
+  }
+  TextRunnerPool migrated(runner, 1, legacy_disk);
+  auto old = migrated.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  Expect(!old.cache_hit(),
+         "a legacy full-prompt file without a fallback still migrates safely");
+  old.Invalidate();
+}
+
 void TestSharedPrefixIsLearnedAndRestoredAcrossConversations() {
   TemporaryDirectory directory;
   const TextRunnerDiskCacheOptions disk_cache{
@@ -1147,6 +1266,9 @@ int main() {
   TestCancellationRetainsOnlyCompletedWork();
   TestPromptReuseCanBeDisabledPerRequest();
   TestStableChatPrefixSurvivesInterruptedFraming();
+  TestWarmChatCheckpointsDoNotSplitPrefill();
+  TestChatFallbackSurvivesSnapshotBudgetPressure();
+  TestFullChatCheckpointRestoresWithoutSuffixPrefill();
   TestDiskOnlyCaptureReservesBudgetBeforeCommit();
   TestDiskPreflightAvoidsUnusableCapture();
   TestBoundedPrefillDecodeAndPrefixReuse();

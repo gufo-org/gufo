@@ -20,6 +20,12 @@
 
 namespace gufo::tokenization {
 
+std::size_t RenderedPromptBoundBytes(std::uint32_t context_tokens) noexcept {
+  constexpr std::size_t kFloor = 1024ULL * 1024ULL;
+  return std::max(kFloor,
+                  std::size_t{context_tokens} * kMaxRenderedBytesPerToken);
+}
+
 ChatTemplateOptions ResolveQwenChatOptions(const ReasoningOptions& reasoning,
                                            bool add_vision_id) {
   ChatTemplateOptions options;

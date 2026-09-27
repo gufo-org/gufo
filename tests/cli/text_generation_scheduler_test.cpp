@@ -174,6 +174,7 @@ struct FakeControl {
   std::vector<std::string> output_pieces;
   std::uint32_t max_context{128};
   std::optional<std::size_t> stop_after;
+  std::optional<std::size_t> eos_after;
   std::function<void()> snapshot_callback;
 };
 
@@ -371,6 +372,9 @@ public:
       throw std::logic_error("scheduler fake has no frontier");
     }
     if (control_->stop_after && fake.decode_count >= *control_->stop_after)
+      return {.stop = true};
+    if (control_->eos_after && fake.decode_count >= *control_->eos_after &&
+        fake.stop_at_eos())
       return {.stop = true};
     if (!control_->output_pieces.empty()) {
       const auto index =
@@ -1669,8 +1673,52 @@ void TestProgressLoggingIsOptInAndBounded() {
          "progress logging reports decode intervals and the final remainder");
 }
 
+void TestIgnoreEosIsRequestScoped() {
+  auto control = std::make_shared<FakeControl>();
+  control->eos_after = 0;
+  auto scheduler = MakeScheduler(control, 1);
+  gufo::sampling::SamplingConfig sampling;
+  const auto normal = scheduler->Submit({1}, 4, sampling).Wait();
+  Expect(normal.tokens.empty() &&
+             normal.finish_reason ==
+                 gufo::server::TextGenerationBackend::FinishReason::kStop,
+         "normal request stops at EOS");
+  TextGenerationScheduler::RequestMetadata metadata;
+  metadata.stop_at_eos = false;
+  const auto ignored =
+      scheduler->Submit({2}, 4, sampling, {}, false, metadata).Wait();
+  Expect(ignored.tokens.size() == 4 &&
+             ignored.finish_reason ==
+                 gufo::server::TextGenerationBackend::FinishReason::kLength,
+         "ignore-EOS request reaches its exact token limit");
+  const auto restored = scheduler->Submit({3}, 4, sampling).Wait();
+  Expect(restored.tokens.empty() &&
+             restored.finish_reason ==
+                 gufo::server::TextGenerationBackend::FinishReason::kStop,
+         "reused runner restores EOS stopping for the next request");
+}
+
+void TestEmptyTokenIsPublished() {
+  auto control = std::make_shared<FakeControl>();
+  control->output_pieces = {""};
+  auto scheduler = MakeScheduler(control, 1);
+  std::size_t events = 0;
+  auto request = scheduler->Submit({1}, 1, 0.0F, {}, true);
+  const auto result = request.Wait([&](std::string_view piece) {
+    Expect(piece.empty(), "empty token has no text bytes");
+    ++events;
+    return true;
+  });
+  Expect(result.tokens.size() == 1 && events == 1,
+         "one empty decoded token still has one streaming event");
+  Expect(result.max_buffered_output_bytes >= 1,
+         "an empty streamed piece still charges the output budget");
+}
+
 int main() {
   TestProgressLoggingIsOptInAndBounded();
+  TestIgnoreEosIsRequestScoped();
+  TestEmptyTokenIsPublished();
   TestStopSequenceChunkBoundaries();
   TestStopSequencesPreserveExecutedState();
   TestStopPrefixFlushAndBatchIsolation();

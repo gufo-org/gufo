@@ -147,11 +147,14 @@ public:
   /// Drains accepted writes. Shutdown also drains automatically.
   void Flush();
 
-  /// Restores the longest exact saved prefix of prompt into state.
+  /// Restores the longest exact saved prefix of prompt into state. When a
+  /// stable boundary is supplied, a later checkpoint requires an earlier
+  /// saved prefix too, so legacy full-prompt files cannot bypass migration.
   [[nodiscard]] RestoreResult RestoreLongestPrefix(
       const TextModelRunner& runner, TextRunnerState& state,
       std::span<const TextRunnerToken> prompt,
-      std::span<const std::uint8_t> input_identity = {});
+      std::span<const std::uint8_t> input_identity = {},
+      std::size_t stable_prefix_tokens = 0);
 
   /// Prefix lengths that prompt shares with stored entries but that no entry
   /// holds exactly.
