@@ -858,10 +858,9 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error =
-          ReadCompatibilityOptions(body, b, "max_output_tokens", &max_tokens,
-                                   &sampling_config,
-                                   {.stream = true, .response_controls = true})) {
+  if (auto error = ReadCompatibilityOptions(
+          body, b, "max_output_tokens", &max_tokens, &sampling_config,
+          {.stream = true, .response_controls = true})) {
     return std::move(*error);
   }
 

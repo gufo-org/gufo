@@ -550,6 +550,12 @@ def check_structured_outputs(client, model, checks, vision=False):
     record("schema_length", truncated)
     stopped = chat_result(client, {**constrained, "stop": "text"}, True)
     assert stopped["finish"] == "stop" and "text" not in stopped["text"], stopped
+    try:
+        json.loads(stopped["text"])
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError("stop inside the required key should leave incomplete JSON")
     record("schema_explicit_stop", stopped)
     arguments = {
         "type": "object", "properties": {
@@ -569,6 +575,15 @@ def check_structured_outputs(client, model, checks, vision=False):
         Draft202012Validator(arguments).validate(json.loads(function["arguments"]))
         assert function["name"] == "score", tool_result
         record(f"schema_tool_{streaming}", tool_result)
+    # A response schema leaves automatic tools enabled; an explicit `none`
+    # must select the final-answer grammar even when the prompt asks for a tool.
+    answer_only = {**tool_request, "tool_choice": "none",
+                   "response_format": constant("ok")}
+    for streaming in (False, True):
+        result = chat_result(client, answer_only, streaming)
+        assert result["finish"] == "stop" and not result["tools"], result
+        assert json.loads(result["text"]) == {"text": "ok"}, result
+        record(f"schema_tool_none_{streaming}", result)
     for invalid in (
         {"response_format": {"type": "json_schema", "json_schema": {
             "name": "bad", "schema": {"type": "object", "properties": {},

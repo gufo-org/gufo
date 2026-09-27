@@ -579,65 +579,41 @@ The official SDK supports typed parsing and streaming through
 `client.chat.completions.parse/stream(response_format=Model)` and
 `client.responses.parse/stream(text_format=Model)`.
 
-Constraints apply before target sampling in AR, DFlash2, MTP and DSpark.
-Thinking follows the model/request default and precedes the constrained answer;
-reasoning stays separate from JSON content. Streaming, image inputs, independent
-concurrent requests and continuation caches use the same decoding path.
-A stop sequence or token limit can interrupt JSON or a tool call; check the
-finish reason before parsing. Changing the schema changes the cached prompt prefix.
-Output token budgets include reasoning: Chat returns `finish_reason: "length"`,
-and Responses returns `status: "incomplete"` with reason `max_output_tokens`.
-Whitespace between JSON elements is bounded to prevent formatting loops; string
-contents are unchanged.
+Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, including
+streaming, images and concurrent requests. Reasoning stays separate from JSON
+and counts toward the output budget. Changing the schema changes the cache prefix.
 
-Supported schema features:
+Parse the returned content: leading whitespace is valid JSON, and stops or token
+limits can leave it incomplete. `finish_reason: "stop"` includes matched stop
+sequences and does not guarantee complete JSON. Token limits return `"length"`
+in Chat or `status: "incomplete"` with reason `max_output_tokens` in Responses.
 
-- Objects, arrays, primitive/nullable types, `enum`/`const` values and `anyOf`.
-- Recursive local `$ref`/`$defs`, including references to the root. Sibling
-  bounds, patterns, types and finite choices are intersected rather than discarded.
-- Numeric bounds, exclusive bounds and exact decimal `multipleOf`.
-- String `pattern`, `minLength`/`maxLength`, and formats `date-time`, `time`,
-  `date`, `duration`, `email`, `hostname`, `ipv4`, `ipv6`, `uuid`.
-- Array `minItems`/`maxItems`; large bounds compile without enumerating elements.
+Supported: objects, arrays, nullable types, `enum`/`const`, `anyOf`, recursive local
+`$ref`/`$defs`, numeric bounds/`multipleOf`, string patterns/lengths/formats and
+array length bounds. Formats include date/time, duration, email, hostname,
+IP addresses and UUID.
 
 The root must resolve to an object. Objects require `additionalProperties:false`;
-strict schemas require every property (use null for optional values). Keys follow
-schema order. Numeric generation uses decimal notation, up to 4,096 bytes per
-number. Unsupported keywords,
-external references and unusable reference cycles return a validation error.
-Schemas allow 5,000 properties, 1,000 enum values and 120,000 characters in
-property/definition names and enum/const strings, with a 2 MiB document limit.
-Regex evaluation and grammar caches have bounded resource budgets.
-Patterns use ECMA-262 Unicode semantics (`\w`/`\d` are ASCII; `$` is strict end)
-and support Unicode properties/code-point escapes, alternation, repetition,
-anchors, word boundaries and lookahead;
-pattern, format and length limits are enforced together. Lookbehind,
-backreferences, inline flags and unbounded repetition
-of assertions return a validation error before generation. String matching uses
-incremental state and reuses token masks when the remaining length permits it.
+strict schemas require every property (use null for optional values).
+Unsupported keywords, external references and unusable cycles are rejected.
+Schemas are limited to 2 MiB, 5,000 properties, 1,000 enum values and 120,000
+characters in names and enum/const strings. Patterns use ECMA-262 Unicode
+semantics; lookbehind, backreferences, inline flags and unbounded repetition
+of assertions are unsupported.
 
-Chat Completions enforces function `strict:true` even without `response_format`.
-`auto` permits ordinary prose or constrained calls; `required` requires a call,
-and a function-valued `tool_choice` selects exactly one call to that function.
-`parallel_tool_calls:false` prevents additional calls, including non-strict tools. `response_format`
-governs the final answer independently. Quoted markup in arguments stays literal;
-incomplete calls are not returned as executable tool calls.
+In Chat Completions, function `strict:true` constrains tool arguments independently
+of `response_format`.
+With `tool_choice: "auto"`, the model may call a tool or give a final answer;
+the response schema constrains the latter. Use `"none"` for JSON answers only,
+`"required"` to require a call, or select a named function.
+`parallel_tool_calls:false` allows at most one call. Interrupted calls are omitted.
 
 References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create),
 [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs),
 [JSON Schema patterns](https://json-schema.org/draft/2020-12/json-schema-validation#name-pattern)
 and [llama.cpp grammar sampling](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/sampling.cpp).
-Gufo applies the grammar before filtering/normalizing the target distribution;
-proposal probabilities remain those actually sampled by each draft backend.
 Verify with `tools/serving/check-openai-sdk.py --suite structured` or
 `--suite structured-limits` (add `--vision` for an image-capable server).
-The independent schema oracle runs with
-`nix develop -c python tests/core/json_schema_oracle.py build/cpu-test/json_constraint_test`.
-Add `--node /path/to/node` to compare regex semantics with V8 independently.
-
-Admission groups text requests by the socket peer's IP address across chat and
-compatibility endpoints. Caller-provided identity headers do not affect quotas;
-clients behind the same proxy or NAT share a peer quota.
 
 ## Model Discovery
 
@@ -707,6 +683,10 @@ The HTTP transport bounds connection count and request-body size. The scheduler
 bounds admission and output buffering and propagates client cancellation to
 model runners. An in-flight GPU operation may finish before its request retires.
 See [CLI.md](CLI.md) for supported configuration flags.
+
+Admission groups text requests by the socket peer's IP address across chat and
+compatibility endpoints. Caller-provided identity headers do not affect quotas;
+clients behind the same proxy or NAT share a peer quota.
 
 Cancellation retains the last successfully executed conversation frontier and
 the immutable prompt snapshot. It does not execute a selected but unfinished

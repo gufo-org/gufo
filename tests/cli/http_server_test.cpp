@@ -605,6 +605,8 @@ void TestRawCompletionStreaming() {
           R"({"prompt":"hello","stream":true,"stream_options":{"include_usage":"true"}})",
           R"({"prompt":"hello","stream":true,"stream_options":{"other":true}})",
           R"({"prompt":"hello","ignore_eos":1})",
+          R"({"prompt":"hello","stream":true,"text":{"format":{"type":"json_object"}}})",
+          R"({"prompt":"hello","stream":true,"reasoning":{"effort":"none"}})",
       })
     ExpectStatus(server.Post("/v1/completions", body), 400);
 
