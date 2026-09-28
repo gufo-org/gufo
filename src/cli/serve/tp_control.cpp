@@ -130,22 +130,6 @@ bool ReadU64(std::span<const std::uint8_t> data, std::size_t* offset,
   return true;
 }
 
-void AppendBytes(std::vector<std::uint8_t>* out,
-                 std::span<const std::uint8_t> bytes) {
-  out->insert(out->end(), bytes.begin(), bytes.end());
-}
-
-bool ReadBytes(std::span<const std::uint8_t> data, std::size_t* offset,
-               std::span<std::uint8_t> bytes, std::string* error) {
-  if (*offset > data.size() || bytes.size() > data.size() - *offset) {
-    SetError(error, "TP control payload is truncated");
-    return false;
-  }
-  std::memcpy(bytes.data(), data.data() + *offset, bytes.size());
-  *offset += bytes.size();
-  return true;
-}
-
 [[nodiscard]] bool IsDefaultSampling(const sampling::SamplingConfig& config) {
   const sampling::SamplingConfig defaults;
   return config.temperature == defaults.temperature &&
