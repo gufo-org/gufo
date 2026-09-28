@@ -815,6 +815,8 @@ The `debug` tier adds:
   are separate on purpose: the banner only appears once the model has loaded and
   the listener is accepting, so a load that fails or hangs leaves
   `event=options` as the sole record of what was asked for;
+- completion logs for the polls that are quiet by default, and `event=received`
+  for GET requests;
 
 Loader phases stay at INFO: the weight-mapping and session-preallocation work is
 HIP-only code, so deeper sub-phases there need a GPU build to verify and are not
@@ -865,7 +867,8 @@ lazily in the worker. Control characters are escaped in log lines.
 
 - `json_test`: number precision, Unicode escapes, malformed input and depth limits.
 - `http_server_test`: transport framing, authentication, compatibility validation,
-  sampling forwarding, request logs and streaming failures without loading a model.
+  sampling forwarding, request logs at the default and debug tiers, and streaming
+  failures without loading a model.
 - `serve_cli_test`: executable help, argument wiring and rejected configurations,
   including that `--log-level` and `-v` change the emitted log rather than only
   parsing.

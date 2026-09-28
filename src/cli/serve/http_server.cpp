@@ -1593,16 +1593,24 @@ void HttpServer::handle_connection(int client_fd) {
       }
     }
 
-    // Successful health/metrics polling and video status polling stay quiet.
+    // Successful health/metrics polling and video status polling stay quiet at
+    // the default level. Under --log-level=debug they become visible, because
+    // "is anything actually arriving?" is the first question an operator asks
+    // when a client reports a hang.
     const bool log_request =
         req.method == "POST" || req.method == "DELETE" ||
         req.path == "/v1/models" || req.path.ends_with("/content") ||
         req.path == "/v1/realtime" || req.path == "/v1/audio/speech/stream";
-    if (ok && log_request) {
-      Logger::Info("http", "request=" + req.request_id +
-                               " event=received method=" + req.method +
-                               " path=" + req.path + " body_bytes=" +
-                               std::to_string(req.body.size()));
+    const LogLevel request_level =
+        log_request ? LogLevel::kInfo : LogLevel::kDebug;
+    // The tier check subsumes the method test: receipt lines are kInfo for
+    // the methods above and kDebug otherwise, so a quiet tier that discards
+    // the line also skips the concatenation that would build it.
+    if (ok && Logger::Enabled(request_level)) {
+      Logger::Log(request_level, "http",
+                  "request=" + req.request_id + " event=received method=" +
+                      req.method + " path=" + req.path +
+                      " body_bytes=" + std::to_string(req.body.size()));
     }
 
     HttpResponse resp;
@@ -1670,9 +1678,10 @@ void HttpServer::handle_connection(int client_fd) {
         // The status remains useful for an endpoint returning a non-JSON error.
       }
     }
-    if (log_request || resp.status >= 400 || !connected) {
+    if (Logger::Enabled(request_level) || resp.status >= 400 || !connected) {
       Logger::LogRequest(req.request_id, req.method, req.path, resp.status,
-                         elapsed_ms(), resp.log_details, outcome);
+                         elapsed_ms(), resp.log_details, outcome,
+                         request_level);
     }
   } catch (const TextGenerationError& exception) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(

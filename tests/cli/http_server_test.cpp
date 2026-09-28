@@ -9,6 +9,7 @@
 #include <cassert>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -23,6 +24,10 @@
 namespace {
 
 using gufo::server::HttpServer;
+using gufo::server::Logger;
+using gufo::server::LogLevel;
+using gufo::server::LogLevelFromName;
+using gufo::server::LogLevelName;
 using gufo::server::TextGenerationBackend;
 
 class FakeBackend final : public TextGenerationBackend {
@@ -281,10 +286,19 @@ void TestAuthorization() {
   assert(secured.backend->calls == 1);
 }
 
-void TestRequestLogging() {
-  std::ostringstream output;
-  auto* previous = std::clog.rdbuf(output.rdbuf());
+struct CapturedLogs {
+  std::string text;
   std::string request_id;
+};
+
+// Drives one pass of traffic at a fixed verbosity. The process-wide filter is
+// shared by every test in this binary, so the previous level is restored.
+CapturedLogs CaptureTraffic(LogLevel level) {
+  const LogLevel previous = Logger::Level();
+  Logger::SetLevel(level);
+  std::ostringstream output;
+  auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+  CapturedLogs captured;
   {
     RunningServer server;
     ExpectStatus(server.Send("GET /health HTTP/1.1\r\n\r\n"), 200);
@@ -295,28 +309,128 @@ void TestRequestLogging() {
     const auto header = response.find("X-Request-ID: ");
     assert(header != std::string::npos);
     const auto begin = header + std::string("X-Request-ID: ").size();
-    request_id = response.substr(begin, response.find("\r\n", begin) - begin);
+    captured.request_id =
+        response.substr(begin, response.find("\r\n", begin) - begin);
 
     const auto failed = server.Post("/stream-error", "");
     ExpectStatus(failed, 200);
     assert(failed.find("first chunk") != std::string::npos);
     assert(failed.find("HTTP/1.1", 1) == std::string::npos);
+
+    ExpectStatus(server.Send("GET /not-a-route HTTP/1.1\r\n\r\n"), 404);
   }
-  gufo::server::Logger::Info("test", "escaped\n\x1b[31m");
-  std::clog.rdbuf(previous);
-  const auto log = output.str();
-  assert(log.find("request=" + request_id + " event=received") !=
+  Logger::Info("test", "escaped\n\x1b[31m");
+  std::clog.rdbuf(previous_sink);
+  Logger::SetLevel(previous);
+  captured.text = output.str();
+  return captured;
+}
+
+void TestRequestLogging() {
+  const CapturedLogs info = CaptureTraffic(LogLevel::kInfo);
+  const std::string& log = info.text;
+  assert(log.find("request=" + info.request_id + " event=received") !=
          std::string::npos);
-  assert(log.find("request=" + request_id + " event=completed") !=
+  assert(log.find("request=" + info.request_id + " event=completed") !=
          std::string::npos);
   assert(log.find("cache=memory") != std::string::npos);
   assert(log.find("acceptance_pct=50.0") != std::string::npos);
   assert(log.find("rss_mib=") != std::string::npos);
   assert(log.find("error_code=server_exception") != std::string::npos);
+  // A successful poll is quiet at the default level, and so is the received
+  // line for a GET that is not on the inference list.
   assert(log.find("path=/health") == std::string::npos);
+  // Statuses never are: 4xx keeps escalating to WARN under any filter.
+  assert(log.find("path=/not-a-route status=404") != std::string::npos);
+  assert(log.find("[WARN]") != std::string::npos);
   assert(log.find("private-query") == std::string::npos);
   assert(log.find("private-prompt") == std::string::npos);
   assert(log.find("escaped\\x0a\\x1b[31m") != std::string::npos);
+  // The startup confirmation is INFO-tier, so the default level reports it.
+  // TestQuietTiersSuppressLifecycle covers the tiers that do not.
+  assert(log.find("event=listening") != std::string::npos);
+
+  const CapturedLogs debug = CaptureTraffic(LogLevel::kDebug);
+  assert(debug.text.find("[DEBUG]") != std::string::npos);
+  assert(debug.text.find("event=received method=GET path=/health") !=
+         std::string::npos);
+  assert(debug.text.find("path=/health status=200") != std::string::npos);
+  // Debug adds lines; it must not downgrade an inference completion to DEBUG,
+  // nor pull a refused 4xx back under the threshold.
+  assert(debug.text.find("[INFO] [http] request=" + debug.request_id +
+                         " event=completed") != std::string::npos);
+  assert(debug.text.find("path=/not-a-route status=404") != std::string::npos);
+  // The higher tier must still hide every byte of the request.
+  assert(debug.text.find("private-query") == std::string::npos);
+  assert(debug.text.find("private-prompt") == std::string::npos);
+  // Options are echoed by `gufo serve`, not by the HTTP layer itself.
+  assert(debug.text.find("event=options") == std::string::npos);
+}
+
+// The threshold covers the lifecycle lines too: `--log-level=warn|error` boots
+// and stops without a word, which docs/SERVER.md states, while an escalation
+// keeps its own tier and a filtered INFO receipt line never reaches the log.
+void TestQuietTiersSuppressLifecycle() {
+  const CapturedLogs warn = CaptureTraffic(LogLevel::kWarn);
+  assert(warn.text.find("event=listening") == std::string::npos);
+  assert(warn.text.find("event=received") == std::string::npos);
+  assert(warn.text.find("path=/not-a-route status=404") != std::string::npos);
+
+  const CapturedLogs error = CaptureTraffic(LogLevel::kError);
+  assert(error.text.find("event=listening") == std::string::npos);
+  assert(error.text.find("event=received") == std::string::npos);
+  assert(error.text.find("path=/not-a-route status=404") == std::string::npos);
+}
+
+void TestLogLevelFilter() {
+  const LogLevel previous = Logger::Level();
+  assert(previous == LogLevel::kInfo);
+
+  std::ostringstream output;
+  auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+  Logger::SetLevel(LogLevel::kError);
+  Logger::Debug("probe", "hidden-debug");
+  Logger::Info("probe", "hidden-info");
+  Logger::Warn("probe", "hidden-warn");
+  Logger::Error("probe", "visible-error");
+  Logger::LogRequest("r-quiet", "GET", "/health", 200, 1.0, "", "completed",
+                     LogLevel::kDebug);
+  Logger::LogRequest("r-404", "GET", "/missing", 404, 1.0);
+  Logger::LogRequest("r-500", "POST", "/boom", 500, 1.0);
+  Logger::SetLevel(LogLevel::kWarn);
+  Logger::Debug("probe", "still-hidden-debug");
+  Logger::Warn("probe", "visible-at-warn");
+  Logger::LogRequest("r-404b", "GET", "/missing", 404, 1.0);
+  std::clog.rdbuf(previous_sink);
+  Logger::SetLevel(previous);
+
+  const std::string log = output.str();
+  assert(log.find("hidden-debug") == std::string::npos);
+  assert(log.find("hidden-info") == std::string::npos);
+  assert(log.find("hidden-warn") == std::string::npos);
+  assert(log.find("still-hidden-debug") == std::string::npos);
+  assert(log.find("visible-error") != std::string::npos);
+  assert(log.find("visible-at-warn") != std::string::npos);
+  assert(log.find("[DEBUG]") == std::string::npos);
+  // A poll that is quiet by default stays filtered, while an escalation keeps
+  // its own tier: `--log-level error` means errors only, not "hide failures".
+  assert(log.find("request=r-quiet event=completed") == std::string::npos);
+  assert(log.find("request=r-404 event=completed") == std::string::npos);
+  assert(log.find("request=r-500 event=completed") != std::string::npos);
+  assert(log.find("request=r-404b event=completed") != std::string::npos);
+  assert(Logger::Level() == LogLevel::kInfo);
+}
+
+void TestLogLevelNames() {
+  assert(LogLevelFromName("debug") == LogLevel::kDebug);
+  assert(LogLevelFromName("info") == LogLevel::kInfo);
+  assert(LogLevelFromName("warn") == LogLevel::kWarn);
+  assert(LogLevelFromName("error") == LogLevel::kError);
+  assert(!LogLevelFromName("trace").has_value());
+  assert(!LogLevelFromName("DEBUG").has_value());
+  assert(!LogLevelFromName("").has_value());
+  assert(LogLevelName(LogLevel::kDebug) == "debug");
+  assert(LogLevelName(LogLevel::kError) == "error");
 }
 
 void TestFramingAndMetrics() {
@@ -932,7 +1046,14 @@ void TestSignalShutdown() {
 }  // namespace
 
 int main() {
+  // The log assertions below match "[LEVEL] [component]" text written to a
+  // redirected stderr sink, so the real stderr's TTY state must not add ANSI
+  // tint around the level tag.
+  ::setenv("NO_COLOR", "1", 1);
   TestRequestLogging();
+  TestQuietTiersSuppressLifecycle();
+  TestLogLevelFilter();
+  TestLogLevelNames();
   TestInvalidBindSettings();
   TestQueryParameters();
   TestAuthorization();
