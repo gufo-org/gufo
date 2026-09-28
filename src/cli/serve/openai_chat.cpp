@@ -1002,10 +1002,7 @@ void ParseQwenCalls(
         // Outer closing tags inside a parameter are data, not structure.
         const auto close = body.find("</parameter>");
         if (close == std::string_view::npos || body.find(start) < close ||
-            name.empty() ||
-            std::ranges::any_of(call.arguments, [&](const auto& arg) {
-              return arg.name == name;
-            })) {
+            name.empty()) {
           valid = false;
           break;
         }
@@ -1030,8 +1027,17 @@ void ParseQwenCalls(
             break;
           }
         }
-        call.arguments.push_back(
-            {.name = name, .value = std::move(raw), .is_string = is_string});
+        // Models sometimes repeat a parameter. An identical copy is harmless;
+        // conflicting copies leave no safe choice.
+        const auto previous = std::ranges::find(
+            call.arguments, name, [](const auto& arg) { return arg.name; });
+        if (previous == call.arguments.end()) {
+          call.arguments.push_back(
+              {.name = name, .value = std::move(raw), .is_string = is_string});
+        } else if (previous->value != raw || previous->is_string != is_string) {
+          valid = false;
+          break;
+        }
         body.remove_prefix(close + std::string_view{"</parameter>"}.size());
       }
       complete = valid && consume("</function>") && consume(end);

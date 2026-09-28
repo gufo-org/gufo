@@ -640,6 +640,20 @@ void TestQwenToolBoundariesAndSchema() {
         Case{"<tool_call><function=f><parameter=flag>Yes</parameter>"
              "</function></tool_call>",
              0, ""},
+        // A repeated parameter with the same value is dropped; a conflicting
+        // repeat still rejects the call.
+        Case{"<tool_call>\n<function=f>\n<parameter=text>\na\n</parameter>\n"
+             "<parameter=count>42</parameter><parameter=flag>True</parameter>"
+             "<parameter=text>a</parameter><parameter=count>\n42\n"
+             "</parameter><parameter=flag>true</parameter>\n</function>\n"
+             "</tool_call>",
+             1, R"({"text":"a","count":42,"flag":true})"},
+        Case{"<tool_call><function=f><parameter=text>a</parameter>"
+             "<parameter=text>b</parameter></function></tool_call>",
+             0, ""},
+        Case{"<tool_call><function=f><parameter=text>a</parameter>"
+             "<parameter=text>a </parameter></function></tool_call>",
+             0, ""},
         Case{"<tool_call>{\"name\":\"f\",\"arguments\":{\"text\":"
              "\"literal </tool_call>\"}}</tool_call>",
              1, R"({"text":"literal </tool_call>"})"}}) {
