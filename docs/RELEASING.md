@@ -84,3 +84,9 @@ Official artifacts build the `release` package from a `vX.Y.Z` tag and report
 `gufo version X.Y.Z (<revision>)`. Both package outputs retain the exact flake
 revision; only the explicitly selected release output reads the semantic version
 from `version.txt`.
+
+After Release Please creates a GitHub Release, the same workflow sends its exact
+`vX.Y.Z` tag to the Toolboxes repository. Toolboxes builds the release package
+from that tag and publishes OCI images tagged `X.Y.Z`, `X.Y` and `latest`.
+Rolling Toolboxes images remain separate: they follow Gufo `main` and use `edge`
+and `sha-<revision>` tags.
