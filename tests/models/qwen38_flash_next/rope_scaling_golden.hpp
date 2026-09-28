@@ -7,14 +7,14 @@
 // the hosted golden-table check (rope_scaling_test.cpp) and the CPU-oracle
 // check (rope_scaling_oracle_test.cpp) so the numbers have one source.
 //
-// Regeneration command (transformers 5.17.0, run 2026-09-26 on crow from
-// ~/video-stack/.venv-comfy): calls the real
+// Regeneration command (transformers==5.17.0, `pip install
+// transformers==5.17.0`): calls the real
 // `transformers.modeling_rope_utils._compute_yarn_parameters` on a config
 // object with head_dim 256, partial_rotary_factor 0.25 (dim 64), rope_theta
 // 1e7, original_max_position_embeddings 262144, rope_type yarn, no
 // attention_factor/mscale/betas (so defaults 32/1, truncate true):
 //
-//   ~/video-stack/.venv-comfy/bin/python - <<'EOF'
+//   python3 - <<'EOF'
 //   from transformers.modeling_rope_utils import _compute_yarn_parameters
 //   class Cfg:
 //       def __init__(self, f):
