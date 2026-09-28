@@ -17,12 +17,14 @@ from typing import Dict, List, Set, Tuple
 
 REQUIRED_DOC_FILES = [
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md",
     "AGENTS.md",
     "docs/CLI.md",
     "docs/DEVELOPMENT.md",
+    "docs/RELEASING.md",
     "docs/models/README.md",
     "docs/SERVER.md",
     "docs/TESTING.md",

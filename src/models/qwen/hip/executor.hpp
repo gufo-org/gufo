@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_
 #define GUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -514,6 +515,10 @@ public:
       const core::ModelConfig& config, std::uint32_t max_context,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
+  void SetCancellationCheck(std::function<bool()> check) {
+    cancellation_check_ = std::move(check);
+    vision_input_.SetCancellationCheck(cancellation_check_);
+  }
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;
   void ConfigureVision(
@@ -541,6 +546,10 @@ public:
   void FinishVerification();
 
 private:
+  void CheckPrefillCancellation() const;
+  void PrefillLayerCheckpoint(std::uint32_t layer);
+  std::function<bool()> cancellation_check_;
+  std::array<hipEvent_t, 2> prefill_events_{};
   void CheckReset() const {
     if (reset_failure_)
       std::rethrow_exception(reset_failure_);

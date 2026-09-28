@@ -2619,7 +2619,9 @@ SnapshotHeader MakeSnapshotHeader(const Config& c, const MixerHeads& heads,
   h.ple_elems = c.ple_layer >= 0 ? c.PleConvHistory() * c.HcDim() : 0;
   h.has_mtp = has_mtp ? 1 : 0;
   h.position = session.position();
-  h.image_count = session.VisionLayout().images.size();
+  h.image_count = std::ranges::count_if(
+      session.VisionLayout().images,
+      [&](const auto& image) { return image.offset < h.position; });
   return h;
 }
 
@@ -2866,7 +2868,8 @@ bool Executor::RestoreSnapshot(Session& session,
     AssignError(error_msg, e.what());
     return false;
   }
-  if (!layout.images.empty() && layout != session.VisionLayout()) {
+  if (!layout.images.empty() &&
+      layout.Prefix(h.position) != session.VisionLayout().Prefix(h.position)) {
     AssignError(error_msg,
                 "image snapshot layout does not match its prompt attachment");
     return false;

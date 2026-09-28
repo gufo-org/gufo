@@ -68,6 +68,15 @@ one transformer block or one denoiser forward. Full video generation and LPIPS
 are release/quality qualification, not routine PR work. `nix flake check` runs
 all declared checks and is deliberately not the hosted CI command.
 
+For Qwen image-prefix changes, build `qwen_vision_serving_test` with `gpu-test`
+and run it with `MODEL DRAFT_OR_DASH IMAGE_DIRECTORY --append-only`.
+The directory needs `red.png` and `blue.png`. This compares complete target
+logits when images are attached early or after a cached prefix, including
+snapshot restoration and sampled Flash-Next MTP replay.
+Qwen27B also checks exact restoration after cancellation between layers.
+Use the [HTTP continuation check](SERVER.md#hip-execution)
+for cancellation, thinking controls and disk restart.
+
 ## Match validation to the change
 
 | Change | Relevant checks |

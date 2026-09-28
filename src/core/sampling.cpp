@@ -160,6 +160,9 @@ void ApplyMinP(std::vector<Candidate>* candidates,
 }  // namespace
 
 void SamplingConfig::Validate() const {
+  if (constraint && (!constraint->grammar || !constraint->vocabulary ||
+                     constraint->vocabulary->size() == 0))
+    throw std::invalid_argument("sampling constraint is incomplete");
   if (!std::isfinite(temperature) || temperature < 0.0F) {
     throw std::invalid_argument(
         "sampling temperature must be finite and nonnegative");
@@ -198,7 +201,7 @@ bool SamplingConfig::uses_random_sampling() const noexcept {
 }
 
 bool SamplingConfig::can_use_unmodified_argmax() const noexcept {
-  return temperature == 0.0F && !penalties_enabled();
+  return !constraint && temperature == 0.0F && !penalties_enabled();
 }
 
 SamplingDistribution::SamplingDistribution(std::vector<Probability> entries)
@@ -366,6 +369,11 @@ SamplingDistribution BuildDistribution(
     std::span<const float> logits, const SamplingConfig& config,
     std::span<const TokenId> prompt_tokens,
     std::span<const TokenId> generated_tokens) {
+  if (config.constraint) {
+    SamplerState sampler(config, prompt_tokens);
+    sampler.Accept(generated_tokens);
+    return sampler.Distribution(logits);
+  }
   std::unordered_map<TokenId, TokenPenalty> counts;
   if (config.frequency_penalty != 0 || config.presence_penalty != 0) {
     for (const auto token : generated_tokens) {
@@ -400,12 +408,15 @@ SamplerState::SamplerState(SamplingConfig config,
       history_(initial_history.begin(), initial_history.end()),
       rng_state_(InitialRngState(config.seed)) {
   config_.Validate();
+  if (config_.constraint)
+    constraint_state_ = config_.constraint->grammar->Start();
   TrimHistory();
   RebuildPenaltyCounts();
 }
 
 SamplerState::SamplerState(const SamplerState& other)
     : config_(other.config_),
+      constraint_state_(other.constraint_state_),
       history_(other.history_),
       penalty_counts_(other.penalty_counts_),
       rng_state_(other.rng_state_),
@@ -416,12 +427,38 @@ SamplerState& SamplerState::operator=(const SamplerState& other) {
     return *this;
   }
   config_ = other.config_;
+  constraint_state_ = other.constraint_state_;
   history_ = other.history_;
   penalty_counts_ = other.penalty_counts_;
   candidate_scratch_.clear();
   rng_state_ = other.rng_state_;
   pending_sample_ = other.pending_sample_;
   return *this;
+}
+
+SamplerState SamplerState::WithoutConstraint() const {
+  auto copy = *this;
+  copy.config_.constraint.reset();
+  copy.constraint_state_.clear();
+  return copy;
+}
+
+std::vector<float> SamplerState::ConstrainedLogits(
+    std::span<const float> logits, std::span<const TokenId> ids) const {
+  const auto mask = config_.constraint->Allowed(constraint_state_);
+  if ((!ids.empty() && ids.size() != logits.size()) ||
+      (ids.empty() && logits.size() != mask->size()))
+    throw std::invalid_argument(
+        "JSON constraint vocabulary differs from logits");
+  std::vector<float> masked(logits.begin(), logits.end());
+  for (std::size_t i = 0; i < masked.size(); ++i) {
+    const auto token = ids.empty() ? i : ids[i];
+    if (token >= mask->size())
+      throw std::invalid_argument("invalid compact token ID");
+    if (!(*mask)[token])
+      masked[i] = -std::numeric_limits<float>::infinity();
+  }
+  return masked;
 }
 
 const SamplingConfig& SamplerState::config() const noexcept {
@@ -451,6 +488,8 @@ void SamplerState::CopyDrawStateFrom(const SamplerState& other) noexcept {
 }
 
 void SamplerState::ResetHistory(std::span<const TokenId> tokens) {
+  if (config_.constraint)
+    constraint_state_ = config_.constraint->grammar->Start();
   pending_sample_.reset();
   penalty_counts_.clear();
   history_.assign(tokens.begin(), tokens.end());
@@ -463,6 +502,13 @@ void SamplerState::Accept(TokenId token) {
 }
 
 void SamplerState::Accept(std::span<const TokenId> tokens) {
+  if (config_.constraint) {
+    auto next = constraint_state_;
+    for (const auto token : tokens)
+      next = config_.constraint->vocabulary->Accept(
+          *config_.constraint->grammar, next, token);
+    constraint_state_ = std::move(next);
+  }
   if (config_.frequency_penalty != 0 || config_.presence_penalty != 0) {
     for (const auto token : tokens) {
       auto found = std::ranges::lower_bound(penalty_counts_, token, {},
@@ -483,6 +529,15 @@ void SamplerState::Accept(std::span<const TokenId> tokens) {
 
 SamplingDistribution SamplerState::Distribution(
     std::span<const float> logits) const {
+  if (config_.constraint) {
+    if (config_.temperature == 0) {
+      config_.Validate();
+      return SamplingDistribution({{SampleConstrainedGreedy(logits), 1.0}},
+                                  1.0);
+    }
+    const auto masked = ConstrainedLogits(logits);
+    return WithoutConstraint().Distribution(masked);
+  }
   config_.Validate();
   if (logits.empty() || logits.size() > std::numeric_limits<TokenId>::max())
     throw std::invalid_argument("invalid sampling vocabulary size");
@@ -506,6 +561,10 @@ SamplingDistribution SamplerState::Distribution(
 
 SamplingDistribution SamplerState::Distribution(
     std::span<const float> logits, std::span<const TokenId> token_ids) const {
+  if (config_.constraint) {
+    const auto masked = ConstrainedLogits(logits, token_ids);
+    return WithoutConstraint().Distribution(masked, token_ids);
+  }
   if (logits.size() != token_ids.size())
     throw std::invalid_argument("compact logits and token IDs differ in size");
   std::vector<TokenPenalty> penalties;
@@ -543,8 +602,16 @@ TokenId SamplerState::Sample(std::span<const float> logits) {
       throw std::invalid_argument("pending sample exceeds vocabulary");
     }
     const auto token = *pending_sample_;
+    if (config_.constraint &&
+        !config_.constraint->Allowed(constraint_state_)->at(token))
+      throw std::runtime_error("pending sample violates JSON constraint");
     pending_sample_.reset();
     return token;
+  }
+  if (config_.constraint) {
+    const auto distribution = Distribution(logits);
+    return config_.temperature == 0 ? distribution.best_token()
+                                    : distribution.Sample(&rng_state_);
   }
   if (config_.temperature == 0.0F) {
     return SampleGreedy(logits);
@@ -644,6 +711,37 @@ TokenId SamplerState::SampleGreedy(std::span<const float> logits) const {
   if (!found) {
     throw std::runtime_error("logit distribution contains no finite values");
   }
+  return best_token;
+}
+
+TokenId SamplerState::SampleConstrainedGreedy(
+    std::span<const float> logits) const {
+  const auto mask = config_.constraint->Allowed(constraint_state_);
+  if (logits.size() != mask->size())
+    throw std::invalid_argument(
+        "JSON constraint vocabulary differs from logits");
+  // Read the mask directly: greedy constraints need neither a copied vocabulary
+  // of masked logits nor a cloned sampler/history. Preserve token-ID tie order.
+  double best_logit = -std::numeric_limits<double>::infinity();
+  TokenId best_token = 0;
+  bool found = false;
+  for (std::size_t index = 0; index < logits.size(); ++index) {
+    if (!(*mask)[index] || !std::isfinite(logits[index]))
+      continue;
+    const double value = penalty_counts_.empty()
+                             ? static_cast<double>(logits[index])
+                             : AdjustedLogit(index, logits[index]);
+    if (!std::isfinite(value))
+      throw std::runtime_error(
+          "sampling penalties produced a non-finite logit");
+    if (value > best_logit) {
+      best_logit = value;
+      best_token = static_cast<TokenId>(index);
+      found = true;
+    }
+  }
+  if (!found)
+    throw std::runtime_error("logit distribution contains no finite values");
   return best_token;
 }
 

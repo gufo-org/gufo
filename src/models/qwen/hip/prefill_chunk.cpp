@@ -171,6 +171,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 
   // 3. Layer stack
   for (std::uint32_t l = 0; l < config.num_layers; ++l) {
+    PrefillLayerCheckpoint(l);
     const auto& layer = weights_.layers[l];
     const auto route_resolution = ResolveQwenLayerRouteWithReasons(
         policy_, QwenExecutionMode::kPrefill, layer.is_full_attention);

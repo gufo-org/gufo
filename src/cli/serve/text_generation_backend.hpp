@@ -95,11 +95,15 @@ struct ChatRequest {
   std::vector<tokenization::ChatTool> tools;
   std::string client_id{"anonymous"};
   ToolChoice tool_choice{ToolChoice::kAuto};
+  bool constrained_tools{false};
+  bool parallel_tool_calls{true};
   ReasoningOptions reasoning;
   bool add_vision_id{false};
   /// Bypass prompt reuse for this request; its completed state may be retained.
   bool cache_prompt{true};
   std::vector<std::string> stop_sequences;
+  std::shared_ptr<const sampling::JsonConstraint> response_format;
+  std::string response_format_description;
 };
 
 /// Model-agnostic text generation boundary used by the HTTP transport.

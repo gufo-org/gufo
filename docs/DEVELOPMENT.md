@@ -74,7 +74,8 @@ tree), `deepseek-gpu` and `qwen-gpu-kernel-oracle`. Definitions live in
 | `GUFO_ENABLE_WARNINGS` | `ON` | Compiler warnings |
 | `GUFO_ENABLE_SANITIZERS` | `OFF` | AddressSanitizer and UndefinedBehaviorSanitizer |
 | `GUFO_ENABLE_TP2_RDMA` | `OFF` | Two-host Qwen3.8 Flash-Next over InfiniBand RDMA; needs libibverbs and HIP ([TP2](models/qwen3.8-flash-next/TP2.md)) |
-| `GUFO_VERSION` | `development` | Reported build revision |
+| `GUFO_RELEASE_VERSION` | `development` | Reported semantic release version |
+| `GUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
 | `GUFO_FFMPEG_EXECUTABLE`, `GUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
 
 C++20 is required; HIP kernels compile from the same tree, and the adapted
@@ -157,13 +158,16 @@ model oracles, so run the GPU checks that cover the change locally; the exact
 hosted selection is described in [testing](TESTING.md).
 
 - Prefer `jj` when available (`jj version`); otherwise use Git.
-- Follow Conventional Commits with a single-line message.
+- Follow Conventional Commits with a single-line message. Pull request titles
+  must follow the types and version effects in the [release policy](RELEASING.md);
+  the squash merge retains the title as the commit on `main`.
 - Use `gh` for GitHub operations after checking `gh auth status`.
 - Preserve unrelated work and stage only task-owned paths before Nix builds.
 
 ## Related documents
 
 [CLI](CLI.md), [server](SERVER.md), [testing](TESTING.md),
+[releasing](RELEASING.md),
 [performance](PERFORMANCE.md), [benchmarking](BENCHMARKS.md) and
 [models](models/README.md).
 

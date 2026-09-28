@@ -13,6 +13,24 @@ namespace gufo::server {
 
 using ContinuationToken = std::uint32_t;
 
+/// Supplemental input identity for prefixes ending at or before token_count.
+/// Ordered boundaries allow a checkpoint before a new image to retain its
+/// original identity. The complete request identity applies after the last one.
+struct ContinuationInputPrefix {
+  std::size_t token_count{0};
+  std::vector<std::uint8_t> identity;
+};
+
+[[nodiscard]] inline std::span<const std::uint8_t> PrefixInputIdentity(
+    std::span<const std::uint8_t> complete,
+    std::span<const ContinuationInputPrefix> prefixes, std::size_t count) {
+  for (const auto& prefix : prefixes) {
+    if (count <= prefix.token_count)
+      return prefix.identity;
+  }
+  return complete;
+}
+
 /// Model-private continuation state retained by the common serving cache.
 ///
 /// Implementations own all attention, recurrent, position, and graph-bound
@@ -187,6 +205,11 @@ public:
     std::size_t prompt_tokens_{0};
     std::size_t stable_prefix_tokens_{0};
     std::vector<std::uint8_t> input_identity_;
+    std::vector<ContinuationInputPrefix> input_prefixes_;
+    [[nodiscard]] std::span<const std::uint8_t> InputIdentity(
+        std::size_t count) const {
+      return PrefixInputIdentity(input_identity_, input_prefixes_, count);
+    }
     ContinuationLookup lookup_;
   };
 
@@ -209,7 +232,8 @@ public:
       const CancellationCheck& is_cancelled = {},
       std::span<const std::uint8_t> input_identity = {},
       const std::function<void(ContinuationState&)>& prepare_state = {},
-      bool reuse_prompt = true, std::size_t stable_prefix_tokens = 0);
+      bool reuse_prompt = true, std::size_t stable_prefix_tokens = 0,
+      std::span<const ContinuationInputPrefix> input_prefixes = {});
 
   /// Drop all reuse state. Requires no outstanding leases or reservations.
   void Clear();
@@ -234,7 +258,8 @@ private:
       std::size_t reservation_bytes, std::vector<ContinuationToken> tokens,
       std::shared_ptr<const ContinuationSnapshot> snapshot,
       std::vector<std::uint8_t> input_identity,
-      std::vector<ContinuationToken> live_tokens, bool release_state = true,
+      std::vector<ContinuationToken> live_tokens,
+      std::vector<std::uint8_t> live_identity, bool release_state = true,
       std::size_t* published_index = nullptr,
       std::size_t stable_prefix_tokens = 0);
   void Invalidate(std::size_t index, std::size_t reservation_bytes) noexcept;

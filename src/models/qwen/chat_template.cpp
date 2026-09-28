@@ -335,7 +335,7 @@ std::optional<std::string> QwenChatTemplate::Render(
 std::optional<std::string> QwenChatTemplate::Render(
     std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
     const ChatTemplateOptions& options, std::string* error_msg,
-    std::vector<std::size_t>* image_offsets) {
+    std::vector<std::size_t>* image_offsets, std::size_t* stable_prefix_bytes) {
   if (image_offsets != nullptr)
     image_offsets->clear();
   if (messages.empty()) {
@@ -438,6 +438,7 @@ std::optional<std::string> QwenChatTemplate::Render(
   }
 
   std::size_t image_count = 0;
+  std::optional<std::size_t> mutable_reasoning;
   for (; message_index < messages.size(); ++message_index) {
     const auto& msg = messages[message_index];
     if (msg.role == ChatRole::kSystem || msg.role == ChatRole::kDeveloper) {
@@ -464,6 +465,12 @@ std::optional<std::string> QwenChatTemplate::Render(
       output.append("<|im_end|>\n");
       continue;
     }
+    // Current tool-cycle assistants retain their reasoning even when older
+    // reasoning is disabled. A new user turn removes it, including empty
+    // <think> framing. Keep a checkpoint before the first affected assistant.
+    if (!options.preserve_thinking && msg.role == ChatRole::kAssistant &&
+        message_index > last_user_index && !mutable_reasoning)
+      mutable_reasoning = output.size();
     const auto role_name = ToString(msg.role);
     output.append("<|im_start|>");
     output.append(role_name);
@@ -525,6 +532,8 @@ std::optional<std::string> QwenChatTemplate::Render(
     }
   }
 
+  if (stable_prefix_bytes != nullptr)
+    *stable_prefix_bytes = mutable_reasoning.value_or(output.size());
   if (options.add_generation_prompt)
     output.append(GenerationPrompt(options.enable_thinking));
 

@@ -2139,8 +2139,8 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
 /// positions: lane j scores key j of the tile, then lane d accumulates
 /// value column d with online softmax rescaling. In the sparse window the
 /// tiles are gathered from the query's selected blocks (compacted through
-/// LDS in windows of 1024 blocks), so the sweep costs the budget rather than
-/// the context.
+/// LDS in windows of 1024 blocks, tiles cut across windows), so the key
+/// work costs the budget rather than the context.
 /// grid.z splits the key tiles round-robin across `gridDim.z` blocks; with
 /// more than one split each block writes (max, sum, unnormalized acc) to
 /// `partials[(t * heads + h) * splits + z]` and AttentionMergeKernel
@@ -2160,7 +2160,12 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
   __shared__ float p[kTile];
   __shared__ float shared[32];
   __shared__ std::uint32_t keys[kTile];
-  __shared__ std::uint32_t list[kWindow];
+  // Room for one carried partial tile at the model's ratio of 4 (under a
+  // tile's worth of blocks). A whole tile of keys would push the kernel past
+  // 16 KiB of LDS and cost a resident block per CU on multi-row calls; below
+  // ratio 4 a partial tile too big to carry is attended in its window.
+  constexpr std::uint32_t kCarry = kTile / 4;
+  __shared__ std::uint32_t list[kWindow + kCarry];
   __shared__ std::uint32_t wave_total[8];
   const std::uint32_t h = blockIdx.x;
   const std::uint32_t t = blockIdx.y;
@@ -2265,9 +2270,19 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
     const std::uint32_t n_complete = tail_start / ratio;
     const std::uint32_t lane = i & 31u;
     const std::uint32_t wave = i >> 5u;
+    // Tiles are cut from the running compacted list, not per window: the
+    // budget's ~512 selected blocks make the same eight full tiles at any
+    // depth, dealt round-robin over the splits. Cut per window, a deep
+    // context scattered them into dozens of mostly empty tiles, and every
+    // window holding fewer than one tile's blocks landed on split 0 alone,
+    // so decode attention grew with the context instead of the budget.
+    const std::uint32_t per_tile = kTile / ratio;
+    std::uint32_t carry = 0;    // compacted blocks not yet cut into a tile
+    std::uint32_t tile_no = 0;  // tiles cut so far (the same in every split)
     for (std::uint32_t w0 = 0; w0 < n_complete; w0 += kWindow) {
       // Thread i owns blocks w0 + 4i .. +3 of the window: flag the selected
-      // ones and compact their indices with a block-wide exclusive scan.
+      // ones and compact their indices with a block-wide exclusive scan,
+      // appending after the carried-over blocks.
       std::uint32_t flags = 0;
       std::uint32_t count = 0;
       for (std::uint32_t k = 0; k < 4; ++k) {
@@ -2293,21 +2308,44 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
       for (std::uint32_t w = 0; w < 8; ++w) {
         total += wave_total[w];
       }
-      std::uint32_t slot = base + incl - count;
+      std::uint32_t slot = carry + base + incl - count;
       for (std::uint32_t k = 0; k < 4; ++k) {
         if ((flags >> k) & 1u) {
           list[slot++] = w0 + (i * 4) + k;
         }
       }
       __syncthreads();
-      for (std::uint32_t t0 = split * (kTile / ratio); t0 < total;
-           t0 += (kTile / ratio) * splits) {
-        const std::uint32_t entry = t0 + (i / ratio);
-        keys[i] = entry < total ? (list[entry] * ratio) + (i % ratio) : n_kv;
+      const std::uint32_t n = carry + total;
+      std::uint32_t t0 = 0;
+      for (; t0 < n; t0 += per_tile, ++tile_no) {
+        const std::uint32_t len = min(per_tile, n - t0);
+        if (len < per_tile && len <= kCarry) {
+          break;  // carried into the next window
+        }
+        if (tile_no % splits != split) {
+          continue;
+        }
+        const std::uint32_t entry = i / ratio;
+        keys[i] = entry < len ? (list[t0 + entry] * ratio) + (i % ratio) : n_kv;
         __syncthreads();
         tile_step();
       }
+      // Move the partial tile's blocks to the front for the next window.
+      carry = t0 < n ? n - t0 : 0;
+      if (t0 > 0) {
+        const std::uint32_t moved = i < carry ? list[t0 + i] : 0u;
+        __syncthreads();
+        if (i < carry) {
+          list[i] = moved;
+        }
+      }
       __syncthreads();
+    }
+    if (carry > 0 && tile_no % splits == split) {
+      const std::uint32_t entry = i / ratio;
+      keys[i] = entry < carry ? (list[entry] * ratio) + (i % ratio) : n_kv;
+      __syncthreads();
+      tile_step();
     }
     // The incomplete tail block is always visible.
     if (tail_start < n_kv && split == 0) {

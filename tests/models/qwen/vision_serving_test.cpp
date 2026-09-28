@@ -189,6 +189,148 @@ void CheckQwenIncrementalOracle(
   Require(std::ranges::equal(expected, cold_logits),
           "Qwen image prefill logits changed with chunk boundaries");
 }
+
+void CheckAppendSnapshotOracle(
+    const std::shared_ptr<const hip::QwenGpuModel>& qwen,
+    const std::shared_ptr<models::qwen38_flash_next::Model>& flash,
+    const std::filesystem::path& images) {
+  auto request = ImageRequest(images / "red.png");
+  request.messages.emplace_back(tokenization::ChatRole::kAssistant, "Red.");
+  request.messages.emplace_back(tokenization::ChatRole::kUser,
+                                "Name only the newest image's color.");
+  request.messages.back().images.push_back(
+      {0, std::make_shared<const std::vector<std::uint8_t>>(
+              core::ReadImageFile(images / "blue.png"))});
+  const auto& tokenizer = flash ? flash->tokenizer() : qwen->GetTokenizer();
+  const auto encoder = flash ? flash->VisionEncoder() : qwen->VisionEncoder();
+  const auto full = std::make_shared<models::qwen::vision::Prompt>(
+      models::qwen::vision::Prepare(
+          tokenizer, request.messages, {},
+          tokenization::ResolveQwenChatOptions(request.reasoning),
+          encoder->identity(), 1024));
+  const auto equal_logits = [](std::span<const float> a,
+                               std::span<const float> b) {
+    Require(!a.empty() && a.size() == b.size(), "missing append oracle logits");
+    float maximum = 0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      Require(std::isfinite(a[i]) && std::isfinite(b[i]),
+              "nonfinite append logits");
+      maximum = std::max(maximum, std::abs(a[i] - b[i]));
+    }
+    std::cout << " append_max_logit_error=" << maximum << '\n';
+    Require(maximum == 0, "attaching a future image changed computed state");
+  };
+  for (std::size_t image = 0; image < full->images.size(); ++image) {
+    const auto count = full->images[image].grid.offset;
+    auto before = std::make_shared<models::qwen::vision::Prompt>(*full);
+    before->images.resize(image);
+    before->rope = full->rope.Prefix(count);
+    const auto identity = full->IdentityForPrefix(count);
+    before->cache_identity.assign(identity.begin(), identity.end());
+    if (flash) {
+      const std::vector<std::int32_t> tokens(full->tokens.begin(),
+                                             full->tokens.end());
+      for (const auto mode : {core::SessionMode::kAutoregressive,
+                              core::SessionMode::kSpeculative}) {
+        if (mode == core::SessionMode::kSpeculative && !flash->HasMtp())
+          continue;
+        std::string error;
+        auto delayed = flash->CreateSession(mode, 1024, &error);
+        auto attached = flash->CreateSession(mode, 1024, &error);
+        auto restored = flash->CreateSession(mode, 1024, &error);
+        Require(delayed && attached && restored, error);
+        delayed->ConfigureVision(before);
+        attached->ConfigureVision(full);
+        Require(delayed->Sync(std::span(tokens).first(count), &error), error);
+        Require(attached->Sync(std::span(tokens).first(count), &error), error);
+        equal_logits(delayed->Logits(), attached->Logits());
+        delayed->ConfigureVision(full);
+        Require(delayed->Position() == count, "image append reset the prefix");
+        auto snapshot = delayed->SaveSnapshot(&error);
+        Require(snapshot != nullptr, error);
+        restored->ConfigureVision(full);
+        Require(restored->RestoreSnapshot(*snapshot, &error), error);
+        restored->ConfigureVision(full);
+        Require(delayed->Sync(tokens, &error) &&
+                    attached->Sync(tokens, &error) &&
+                    restored->Sync(tokens, &error),
+                error);
+        equal_logits(delayed->Logits(), attached->Logits());
+        equal_logits(delayed->Logits(), restored->Logits());
+        sampling::SamplingConfig config;
+        config.temperature = 0.8F;
+        config.top_k = 20;
+        config.seed = 1234;
+        sampling::SamplerState a(config, full->tokens), b(config, full->tokens);
+        models::qwen38_flash_next::Session::DecodeResult left, right;
+        Require(delayed->DecodeStep(4, a, &left, &error) &&
+                    restored->DecodeStep(4, b, &right, &error),
+                error);
+        Require(left.tokens == right.tokens && left.stop == right.stop,
+                "restored appended image changed sampled AR/MTP decoding");
+      }
+    } else {
+      hip::QwenGpuExecutor delayed(qwen, 1024), attached(qwen, 1024),
+          restored(qwen, 1024);
+      const auto tokens = std::span(full->tokens);
+      delayed.ConfigureVision(before, encoder);
+      attached.ConfigureVision(full, encoder);
+      (void)delayed.ForwardPromptBatch(tokens.first(count));
+      (void)attached.ForwardPromptBatch(tokens.first(count));
+      equal_logits(delayed.CopyLastLogits(), attached.CopyLastLogits());
+      delayed.ConfigureVision(full, encoder);
+      auto snapshot = delayed.SaveSnapshot(count);
+      Require(snapshot->PayloadBytes() ==
+                  delayed.SnapshotPayloadBytes(count) +
+                      image * sizeof(models::qwen::vision::ImageGrid),
+              "snapshot accounts only consumed image metadata");
+      restored.ConfigureVision(full, encoder);
+      restored.RestoreSnapshot(*snapshot);
+      restored.ConfigureVision(full, encoder);
+      int cancellation_checks = 0;
+      restored.SetCancellationCheck([&] { return ++cancellation_checks >= 5; });
+      bool vision_cancelled = false;
+      try {
+        (void)restored.ForwardPromptBatch(tokens.subspan(count), count);
+      } catch (const std::runtime_error& error) {
+        vision_cancelled =
+            std::string_view(error.what()) == "vision encoding cancelled";
+      }
+      Require(vision_cancelled && cancellation_checks == 5,
+              "prefill must observe cancellation inside image encoding");
+      restored.SetCancellationCheck({});
+      restored.RestoreSnapshot(*snapshot);
+      restored.ConfigureVision(full, encoder);
+      (void)restored.ForwardPromptBatch(tokens.subspan(count), count);
+      (void)delayed.ForwardPromptBatch(tokens.subspan(count), count);
+      (void)attached.ForwardPromptBatch(tokens.subspan(count), count);
+      equal_logits(delayed.CopyLastLogits(), restored.CopyLastLogits());
+
+      // The completed image embedding is reusable after restoration, so the
+      // next cancellation reaches the text layers rather than the encoder.
+      restored.RestoreSnapshot(*snapshot);
+      restored.ConfigureVision(full, encoder);
+      cancellation_checks = 0;
+      restored.SetCancellationCheck([&] { return ++cancellation_checks >= 5; });
+      bool cancelled = false;
+      try {
+        (void)restored.ForwardPromptBatch(tokens.subspan(count), count);
+      } catch (const std::runtime_error& error) {
+        cancelled = std::string_view(error.what()) == "Qwen prefill cancelled";
+      }
+      Require(cancelled && cancellation_checks == 5,
+              "prefill must observe cancellation within the layer stack");
+      // Exercise bounded submission too, against the uncancellable executor.
+      restored.SetCancellationCheck([] { return false; });
+      restored.RestoreSnapshot(*snapshot);
+      restored.ConfigureVision(full, encoder);
+      (void)restored.ForwardPromptBatch(tokens.subspan(count), count);
+      equal_logits(delayed.CopyLastLogits(), attached.CopyLastLogits());
+      equal_logits(delayed.CopyLastLogits(), restored.CopyLastLogits());
+    }
+  }
+  std::cout << "text/image and image/image snapshot oracle: exact\n";
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -197,9 +339,11 @@ int main(int argc, char** argv) {
   try {
     const bool disk_only =
         argc == 5 && std::string_view(argv[4]) == "--disk-only";
-    Require(argc == 4 || disk_only,
+    const bool append_only =
+        argc == 5 && std::string_view(argv[4]) == "--append-only";
+    Require(argc == 4 || disk_only || append_only,
             "usage: qwen_vision_serving_test MODEL DRAFT_OR_DASH "
-            "IMAGE_DIRECTORY [--disk-only]");
+            "IMAGE_DIRECTORY [--disk-only|--append-only]");
     const std::string model_path(argv[1]);
     const std::string draft = std::string_view(argv[2]) == "-" ? "" : argv[2];
     const std::filesystem::path images(argv[3]);
@@ -230,6 +374,10 @@ int main(int argc, char** argv) {
           hip::QwenGpuModel::CreateFromGguf(reader, &error, std::move(encoder));
       Require(qwen != nullptr, error);
     }
+    if (!disk_only)
+      CheckAppendSnapshotOracle(qwen, qfn, images);
+    if (append_only)
+      return 0;
     const auto load = [&](bool use_spec,
                           const server::TextDiskCacheConfig& cache = {}) {
       auto backend = std::make_unique<Backend>();

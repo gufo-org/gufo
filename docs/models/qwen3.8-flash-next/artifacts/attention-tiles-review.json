@@ -1,0 +1,406 @@
+{
+  "schemaVersion": 1,
+  "scope": "PR #292 sparse attention tile redistribution; focused review of the exact PR head against its parent, not full unquantized-model qualification.",
+  "measuredOn": "2026-09-28",
+  "base": {
+    "revision": "b722a615df87a556a3e87109017cb4d0e9344061",
+    "binarySha256": "b2805a2cd9db3f933e772002f06b471c4272afcb091bdf1e6e1ffa63df75561b"
+  },
+  "candidate": {
+    "revision": "f797b5b05cba21c08e133783ec8e5c9fa85111f7",
+    "binarySha256": "0536e337596a720a5c53e47dc7d66f9f64f68d621ef210a6ff034671c09dda61"
+  },
+  "modelIdentities": "model-identities.json",
+  "operator": {
+    "test": "qwen38_flash_next_attention_ops_test",
+    "result": "pass",
+    "fp64AbsoluteErrorLimit": 1e-06,
+    "fp64MaximumAbsoluteError": 2.8211e-07,
+    "comparisons": 90,
+    "coverage": "Native geometry, dense/sparse masks, window carries, 1/3/8 splits, ratio-1 fallback, graph positions and multiple query rows through 262144 context.",
+    "measuredOn": "2026-09-27"
+  },
+  "attentionDiagnostic": {
+    "scope": "The same quantized model with only narrow-row attention evaluated using FP64 dot products, softmax and value accumulation, single split, then one FP32 output rounding. All other operators and weights are unchanged.",
+    "validation": "The diagnostic GPU attention was separately compared with the existing independent CPU FP64 formula at depths 8191 and 32765, one/three query rows and 512 selected blocks.",
+    "cpuFp64MaximumAbsoluteError": 8.90371e-09,
+    "executableSha256": "a8937f15f954c3c4a284b5409cd5b1f3d98d1de486df4be3d365b4a2c6d3a292",
+    "method": "Tokenize each whole corpus once. Prefill an exact multiple of 2048 using unchanged wide attention, save its state once, restore a fresh session per variant, feed the same next 64 tokens, and compare each output row with the following token. All files were checked for expected sizes and finite logits. New sessions isolate captured graphs between variants.",
+    "corpora": {
+      "code": {
+        "source": "Sorted src/**/*.cpp at the PR head, excluding /vendor/ and /runtime/, concatenated with newlines",
+        "sha256": "8ea4552055a030f782dc6b9e6ec4ba808a59cd746d86e725722ffd4bd4c88967"
+      },
+      "prose": {
+        "source": "https://www.gutenberg.org/cache/epub/1661/pg1661.txt",
+        "sha256": "922e2a12ccb43a4c9544c260b2166c6ad2097aeb5957faeee113f173bb857cd0"
+      }
+    },
+    "cases": {
+      "code-32768": {
+        "metadata": {
+          "vocab": 248320,
+          "depth": 32768,
+          "rows": 64,
+          "snapshot_bytes": 948510808
+        },
+        "sha256": {
+          "targets.bin": "54a845fb1f6d1a677785d9f58d57b3621d4a06a5f0486d1d63cf639a68857d8e",
+          "prefix.bin": "309be6ed39f76149d69d5e0c9f3249c2d8ffb8b05ef418a07d0fb0afe3c18b6f"
+        },
+        "variants": {
+          "base": {
+            "nll": 0.10347460165034313,
+            "perplexity": 1.109017625789929,
+            "teacher_kl_mean": 0.0005999033293035481,
+            "teacher_kl_max": 0.007334640517831119,
+            "teacher_tv_mean": 0.004522328795031667,
+            "teacher_top1_matches": 64
+          },
+          "candidate": {
+            "nll": 0.10320975202673954,
+            "perplexity": 1.108723941781935,
+            "teacher_kl_mean": 0.0006023713519320522,
+            "teacher_kl_max": 0.0092250536710398,
+            "teacher_tv_mean": 0.003680446095242698,
+            "teacher_top1_matches": 64
+          },
+          "fp64": {
+            "nll": 0.10026856103073399,
+            "perplexity": 1.1054677637753527,
+            "teacher_kl_mean": 0.0,
+            "teacher_kl_max": 0.0,
+            "teacher_tv_mean": 0.0,
+            "teacher_top1_matches": 64
+          }
+        },
+        "candidate_vs_base": {
+          "nll_delta": -0.00026484962360357367,
+          "nll_improved_rows": 36,
+          "kl_mean": 0.000662636205494135,
+          "top1_matches": 64
+        }
+      },
+      "prose-32768": {
+        "metadata": {
+          "vocab": 248320,
+          "depth": 32768,
+          "rows": 64,
+          "snapshot_bytes": 948510808
+        },
+        "sha256": {
+          "targets.bin": "ce927528da37a60d8d2487abad5e295422b7d22cc2f07cae5adda8b5b9ff3769",
+          "prefix.bin": "8502f52c731129d265739c15b98d464259d537497dc30d4de38f5c06eabf4a7d"
+        },
+        "variants": {
+          "base": {
+            "nll": 0.0058608962772393304,
+            "perplexity": 1.005878104932781,
+            "teacher_kl_mean": 0.0009634443318850721,
+            "teacher_kl_max": 0.058064177003235476,
+            "teacher_tv_mean": 0.002400792113877258,
+            "teacher_top1_matches": 64
+          },
+          "candidate": {
+            "nll": 0.004261234666585511,
+            "perplexity": 1.0042703266367796,
+            "teacher_kl_mean": 0.000278104788074718,
+            "teacher_kl_max": 0.016508516391512257,
+            "teacher_tv_mean": 0.0011960926046052484,
+            "teacher_top1_matches": 64
+          },
+          "fp64": {
+            "nll": 0.002856958409847401,
+            "perplexity": 1.002861043404819,
+            "teacher_kl_mean": 0.0,
+            "teacher_kl_max": 0.0,
+            "teacher_tv_mean": 0.0,
+            "teacher_top1_matches": 64
+          }
+        },
+        "candidate_vs_base": {
+          "nll_delta": -0.0015996616106538194,
+          "nll_improved_rows": 39,
+          "kl_mean": 0.0002941883946997278,
+          "top1_matches": 64
+        }
+      },
+      "code-131072": {
+        "metadata": {
+          "vocab": 248320,
+          "depth": 131072,
+          "rows": 64,
+          "snapshot_bytes": 3439927384
+        },
+        "sha256": {
+          "targets.bin": "250f49001b1c87218da679f8d6df998656857ffc21ee6af4192687d8524f6abb",
+          "prefix.bin": "56c7e712501b5a24f6fca6afd8a42c89e43b0ff0d110391d390163f8cefd1cb3"
+        },
+        "variants": {
+          "base": {
+            "nll": 0.3596890151881561,
+            "perplexity": 1.4328837401846157,
+            "teacher_kl_mean": 0.000747081608755621,
+            "teacher_kl_max": 0.012302156889692982,
+            "teacher_tv_mean": 0.004905530605553382,
+            "teacher_top1_matches": 63
+          },
+          "candidate": {
+            "nll": 0.3628065275857868,
+            "perplexity": 1.437357743265515,
+            "teacher_kl_mean": 0.0009727356888117507,
+            "teacher_kl_max": 0.02428849487945511,
+            "teacher_tv_mean": 0.0051097254825455095,
+            "teacher_top1_matches": 64
+          },
+          "fp64": {
+            "nll": 0.36466451074207396,
+            "perplexity": 1.440030812231643,
+            "teacher_kl_mean": 0.0,
+            "teacher_kl_max": 0.0,
+            "teacher_tv_mean": 0.0,
+            "teacher_top1_matches": 64
+          }
+        },
+        "candidate_vs_base": {
+          "nll_delta": 0.003117512397630675,
+          "nll_improved_rows": 31,
+          "kl_mean": 0.0006294056547522022,
+          "top1_matches": 63
+        }
+      },
+      "prose-131072": {
+        "metadata": {
+          "vocab": 248320,
+          "depth": 131072,
+          "rows": 64,
+          "snapshot_bytes": 3439927384
+        },
+        "sha256": {
+          "targets.bin": "e82b9a13e49feb754dab80b9e83506acc6a57e58cfac8f530e27dadd1618d104",
+          "prefix.bin": "1d716c04a6615180588e976b52951e45d0372e5fd4f0f9065a0bb88a7c54c4ee"
+        },
+        "variants": {
+          "base": {
+            "nll": 0.039997924248089,
+            "perplexity": 1.040808613729677,
+            "teacher_kl_mean": 0.0038842678636609876,
+            "teacher_kl_max": 0.1708335864828618,
+            "teacher_tv_mean": 0.006178237790053187,
+            "teacher_top1_matches": 63
+          },
+          "candidate": {
+            "nll": 0.056229566001512826,
+            "perplexity": 1.0578405000781979,
+            "teacher_kl_mean": 0.00047323517114641,
+            "teacher_kl_max": 0.010791047703322463,
+            "teacher_tv_mean": 0.001983186205527239,
+            "teacher_top1_matches": 64
+          },
+          "fp64": {
+            "nll": 0.05246634053491878,
+            "perplexity": 1.0538670888790578,
+            "teacher_kl_mean": 0.0,
+            "teacher_kl_max": 0.0,
+            "teacher_tv_mean": 0.0,
+            "teacher_top1_matches": 64
+          }
+        },
+        "candidate_vs_base": {
+          "nll_delta": 0.016231641753423825,
+          "nll_improved_rows": 24,
+          "kl_mean": 0.003265716311702727,
+          "top1_matches": 63
+        }
+      }
+    },
+    "aggregate": {
+      "base": {
+        "teacher_kl_mean": 0.0015486742834013073,
+        "teacher_tv_mean": 0.004501722326128874,
+        "teacher_top1_matches": 254,
+        "nll": 0.1272556093409569
+      },
+      "candidate": {
+        "teacher_kl_mean": 0.0005816117499912327,
+        "teacher_tv_mean": 0.0029923625969801738,
+        "teacher_top1_matches": 256,
+        "nll": 0.13162677007015616
+      }
+    },
+    "interpretation": "No consistent numerical regression: candidate/reference KL is lower on two cases and higher on two; aggregate KL and top-1 agreement improve. Corpus NLL increases by 0.00437 nats/token overall and is not a capability or perplexity qualification. The 256 correlated rows are a focused rounding audit. No original BF16 checkpoint parity claim.",
+    "sourceGeneratorSha256": "8ac8b2ae83eb487951c5d822eddf1b0a485792852abf79e0a57bdf71200aef4f",
+    "analysisSha256": "fbcae7b060555c6328fbd768d3a65ce5dc655b8b34c3308e127dd2fe048d3bb4",
+    "measuredOn": "2026-09-27"
+  },
+  "stateChecks": {
+    "qwen38_flash_next_session_test": "pass: chunked prefill, C2/4/6/8 AR/MTP logits/acceptance/RNG, cancellation isolation, image attachment, greedy and sampled frontier equality, fresh-load replay, 23 serving sampling configurations with/without MTP",
+    "qwen38_flash_next_snapshot_test": "pass: serialized image/text snapshot round trips and exact replay",
+    "gpu_probe_io": "pass: missing/empty input, conflicting probe flags, context overflow, complete logit/ID counts, failed logits/ID writes",
+    "deepReplay": {
+      "measuredOn": "2026-09-28",
+      "depths": [
+        32768,
+        131072
+      ],
+      "greedyTokensPerDepth": 32,
+      "sampledTokensPerDepth": 16,
+      "sampledTemperature": 0.7,
+      "sampledTopP": 0.8,
+      "seed": 73,
+      "result": "Identical initial prefill logits; greedy AR/MTP token IDs and every committed frontier logit are bit-exact. Sampled MTP session frontiers equal an AR session fed those tokens. Restoring the sampled snapshot replays identical tokens, logits and RNG.",
+      "sourceSha256": "6ff96f6600a641808f09bdf565818d393d93915d154973cb95be024234559fe9"
+    }
+  },
+  "performance": {
+    "scope": "One warmed pp2048/tg128 HTTP sample per variant and depth, greedy, thinking off, C1. Identical ordered depth list [0,32768,131072] for each pair. Base and candidate cache_n, prompt_n and predicted_n match. Generated long-context outputs differ after reassociation; speculative acceptance remains workload-dependent.",
+    "note": "Absolute rates differ from the contributor measurements; paired gains reproduce the claim. Published TG tables use the full candidate refresh (retaining the three initial AR controls); their MTP prompts at 32K/128K differ from this focused control because depth calibration is sweep-dependent. No gain is inferred between those different prompts.",
+    "tables": {
+      "single-ar": {
+        "baseMeasuredOn": "2026-09-27",
+        "candidateMeasuredOn": "2026-09-27",
+        "rows": {
+          "0": {
+            "baseTg": 25.9,
+            "candidateTg": 25.87,
+            "gainPct": -0.116,
+            "baseCounts": {
+              "cache_n": 0,
+              "completion_sha256": "b7df29a4a061aef9f0eb72057935f0523ab707463a2ad1f9767d77922f866839",
+              "draft_n": 0,
+              "draft_n_accepted": 0,
+              "predicted_n": 128,
+              "prompt_n": 2040
+            },
+            "candidateCounts": {
+              "cache_n": 0,
+              "completion_sha256": "b7df29a4a061aef9f0eb72057935f0523ab707463a2ad1f9767d77922f866839",
+              "draft_n": 0,
+              "draft_n_accepted": 0,
+              "predicted_n": 128,
+              "prompt_n": 2040
+            }
+          },
+          "32768": {
+            "baseTg": 24.07,
+            "candidateTg": 25.69,
+            "gainPct": 6.73,
+            "baseCounts": {
+              "cache_n": 32764,
+              "completion_sha256": "af7fc55d676421991cc822e0df0b01a8cf9ecf9a84fafa4d1f093d2f92dd7c37",
+              "draft_n": 0,
+              "draft_n_accepted": 0,
+              "predicted_n": 128,
+              "prompt_n": 2060
+            },
+            "candidateCounts": {
+              "cache_n": 32764,
+              "completion_sha256": "f7182b467eb4c49f09882b36ae8545e732e977f0f5fee977cfe10a766b952dc8",
+              "draft_n": 0,
+              "draft_n_accepted": 0,
+              "predicted_n": 128,
+              "prompt_n": 2060
+            }
+          },
+          "131072": {
+            "baseTg": 19.65,
+            "candidateTg": 22.89,
+            "gainPct": 16.489,
+            "baseCounts": {
+              "cache_n": 131123,
+              "completion_sha256": "fbca93bbb8a97a37db0626cac0fae056c8815b1e142d9b077510bf9f33c05c10",
+              "draft_n": 0,
+              "draft_n_accepted": 0,
+              "predicted_n": 128,
+              "prompt_n": 2049
+            },
+            "candidateCounts": {
+              "cache_n": 131123,
+              "completion_sha256": "dd5c230d6d7181482f477589b79adab772beae36d20f538bd2a30a8ecaabf48b",
+              "draft_n": 0,
+              "draft_n_accepted": 0,
+              "predicted_n": 128,
+              "prompt_n": 2049
+            }
+          }
+        }
+      },
+      "single-mtp": {
+        "baseMeasuredOn": "2026-09-27",
+        "candidateMeasuredOn": "2026-09-28",
+        "rows": {
+          "0": {
+            "baseTg": 32.18,
+            "candidateTg": 32.18,
+            "gainPct": 0.0,
+            "baseCounts": {
+              "cache_n": 0,
+              "completion_sha256": "b7df29a4a061aef9f0eb72057935f0523ab707463a2ad1f9767d77922f866839",
+              "draft_n": 85,
+              "draft_n_accepted": 50,
+              "predicted_n": 128,
+              "prompt_n": 2040
+            },
+            "candidateCounts": {
+              "cache_n": 0,
+              "completion_sha256": "b7df29a4a061aef9f0eb72057935f0523ab707463a2ad1f9767d77922f866839",
+              "draft_n": 85,
+              "draft_n_accepted": 50,
+              "predicted_n": 128,
+              "prompt_n": 2040
+            }
+          },
+          "32768": {
+            "baseTg": 32.48,
+            "candidateTg": 34.42,
+            "gainPct": 5.973,
+            "baseCounts": {
+              "cache_n": 32765,
+              "completion_sha256": "e1d160dc16ecf404fd71fab314a245d2961bd98b9bf15208efc99abbca470bc9",
+              "draft_n": 117,
+              "draft_n_accepted": 62,
+              "predicted_n": 128,
+              "prompt_n": 2059
+            },
+            "candidateCounts": {
+              "cache_n": 32765,
+              "completion_sha256": "5a399c05cffc0dc90b17c9da75eb4ac12931f0e7d38023993de3c1121369d5b3",
+              "draft_n": 98,
+              "draft_n_accepted": 60,
+              "predicted_n": 128,
+              "prompt_n": 2059
+            }
+          },
+          "131072": {
+            "baseTg": 31.45,
+            "candidateTg": 32.31,
+            "gainPct": 2.734,
+            "baseCounts": {
+              "cache_n": 131124,
+              "completion_sha256": "24673ac73b591a8c084ab766e4442a11c991d0fe63da4a8fa8bd0baac007fc44",
+              "draft_n": 118,
+              "draft_n_accepted": 69,
+              "predicted_n": 128,
+              "prompt_n": 2048
+            },
+            "candidateCounts": {
+              "cache_n": 131124,
+              "completion_sha256": "77798d2be1f6c34ea733b433b33a411947e48b9822548c3c5aefcf83c5920b57",
+              "draft_n": 91,
+              "draft_n_accepted": 56,
+              "predicted_n": 128,
+              "prompt_n": 2048
+            }
+          }
+        }
+      }
+    }
+  },
+  "reviewFindings": [
+    "No production attention defect found: selected-key membership and carry bounds are preserved; only FP32 grouping changes beyond one selection window.",
+    "Fixed gpu_probe missing-input/output failures and silent context truncation; documented next-token logit alignment.",
+    "Deep HTTP AR/MTP completion hashes cannot establish verification parity when cache frontiers differ. This occurs in the base too. Separate matched-prefill 32K/128K session checks pass.",
+    "Depth-grid calibration changes the generated benchmark prompt; performance controls use an identical grid.",
+    "Later main changes affect cache identity, tokenizer/server features and constraints rather than this attention kernel. Qualification is for the exact PR head identified above."
+  ]
+}

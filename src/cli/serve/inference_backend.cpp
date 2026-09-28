@@ -82,6 +82,90 @@ private:
   std::shared_ptr<models::qwen38_flash_next::rocm::Communicator> communicator_;
 };
 
+std::optional<ChatRequest> ConstrainChatRequest(
+    const ChatRequest& request, const TextModelRunner& runner,
+    sampling::SamplingConfig* sampling) {
+  bool strict_tools = request.constrained_tools;
+  for (const auto& tool : request.tools)
+    if (!tool.definition_json.empty()) {
+      const auto definition = json::parse(tool.definition_json);
+      const auto* function = definition.find("function");
+      strict_tools |= function && function->find("strict") &&
+                      function->find("strict")->as_bool();
+    }
+  if (!request.response_format &&
+      (request.tools.empty() ||
+       request.tool_choice == ChatRequest::ToolChoice::kNone ||
+       (!strict_tools && request.parallel_tool_calls)))
+    return std::nullopt;
+  auto constrained = request;
+  auto instruction = request.response_format ? request.response_format->prompt()
+                                             : std::string();
+  auto grammar = request.response_format;
+  if (!request.tools.empty() &&
+      request.tool_choice != ChatRequest::ToolChoice::kNone) {
+    std::vector<sampling::JsonConstraint::Tool> tools;
+    for (const auto& tool : request.tools) {
+      const auto definition = tool.definition_json.empty()
+                                  ? json::Value()
+                                  : json::parse(tool.definition_json);
+      const auto* function = definition.find("function");
+      const auto* strict = function ? function->find("strict") : nullptr;
+      const bool enforce = strict && strict->as_bool();
+      auto schema = json::parse(tool.parameters_json);
+      if (!enforce) {
+        if (!schema.contains("type"))
+          schema["type"] = "object";
+        if (!schema.contains("properties"))
+          schema["properties"] = json::Value::object();
+        if (!schema.contains("additionalProperties"))
+          schema["additionalProperties"] = false;
+      }
+      std::shared_ptr<const sampling::JsonConstraint> arguments;
+      try {
+        arguments = sampling::JsonConstraint::Compile(schema, enforce);
+      } catch (const std::invalid_argument&) {
+        if (enforce)
+          throw;
+        // Non-strict tool parameters are guidance, unlike response_format.
+        // An unrestricted/unsupported tool schema must not prevent a valid
+        // structured answer. Keep the declared tool name and JSON arguments.
+        arguments = sampling::JsonConstraint::Object();
+      }
+      tools.emplace_back(tool.name, std::move(arguments));
+    }
+    grammar = sampling::JsonConstraint::WithTools(
+        grammar, std::move(tools),
+        request.tool_choice == ChatRequest::ToolChoice::kRequired,
+        !request.response_format && request.parallel_tool_calls);
+    instruction +=
+        "\nIf a tool is needed, respond using the JSON tool-call form "
+        "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
+        "tool_call>. "
+        "Tool arguments must follow the chosen function's schema.";
+    if (request.response_format)
+      instruction += " The JSON response schema applies to the final answer.";
+  }
+  if (!request.response_format_description.empty())
+    instruction.insert(0, request.response_format_description + "\n\n");
+  if (!constrained.messages.empty() &&
+      (constrained.messages.front().role == tokenization::ChatRole::kSystem ||
+       constrained.messages.front().role ==
+           tokenization::ChatRole::kDeveloper)) {
+    constrained.messages.front().content += "\n\n" + instruction;
+  } else {
+    constrained.messages.insert(
+        constrained.messages.begin(),
+        tokenization::ChatMessage{tokenization::ChatRole::kSystem,
+                                  instruction});
+  }
+  if (runner.InitialOutputState(request) ==
+      TextGenerationBackend::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  sampling->constraint = runner.BindConstraint(grammar);
+  return constrained;
+}
+
 struct QwenImageContext final : TextPromptContext {
   std::shared_ptr<const models::qwen::vision::Prompt> prompt;
 };
@@ -96,14 +180,6 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
   options.max_output_bytes =
       tokenization::RenderedPromptBoundBytes(max_context);
   return options;
-}
-
-std::size_t StablePromptPrefix(std::span<const TextRunnerToken> tokens,
-                               std::span<const TextRunnerToken> generation) {
-  if (generation.empty() || tokens.size() <= generation.size() ||
-      !std::ranges::equal(tokens.last(generation.size()), generation))
-    return 0;
-  return tokens.size() - generation.size();
 }
 
 TextPreparedPrompt PrepareQwenPrompt(
@@ -122,16 +198,7 @@ TextPreparedPrompt PrepareQwenPrompt(
           options,
           encoder && has_images ? encoder->identity() : std::string_view{},
           max_context));
-  // Agent clients may discard an interrupted assistant entirely and append
-  // another user turn, with or without thinking/tools. Always preserve a
-  // checkpoint before the mutable assistant-generation suffix.
-  // With thinking enabled the suffix ends in "<think>\n"; a later turn that
-  // renders this assistant with empty reasoning emits "<think>\n\n", which
-  // BPE merges into one token, so the full prompt is no longer a prefix.
-  const auto generation = tokenizer.Encode(
-      tokenization::GenerationPrompt(options.enable_thinking),
-      {.add_bos = false, .add_eos = false, .parse_special_tokens = true});
-  const auto cache_prefix = StablePromptPrefix(prompt->tokens, generation);
+  const auto cache_prefix = prompt->stable_prefix_tokens;
   if (prompt->images.empty())
     return {std::move(prompt->tokens), {}, cache_prefix};
   if (!encoder)
@@ -139,6 +206,11 @@ TextPreparedPrompt PrepareQwenPrompt(
         "image input requires a matching --mmproj BF16 sidecar");
   auto context = std::make_shared<QwenImageContext>();
   context->cache_identity = prompt->cache_identity;
+  for (const auto& image : prompt->images) {
+    const auto identity = prompt->IdentityForPrefix(image.grid.offset);
+    context->cache_prefixes.push_back(
+        {image.grid.offset, {identity.begin(), identity.end()}});
+  }
   context->prompt = prompt;
   return {prompt->tokens, std::move(context), cache_prefix};
 }
@@ -522,6 +594,10 @@ public:
     }
   }
 
+  void SetCancellationCheck(const CancellationCheck& check) override {
+    executor_->SetCancellationCheck(check);
+  }
+
   void Invalidate() noexcept override {
     if (verifier_ != nullptr) {
       verifier_->Reset();
@@ -822,7 +898,10 @@ public:
     }
     checked_add(logits_count * sizeof(float));
     checked_add(resume_tokens_.size() * sizeof(TextRunnerToken));
-    checked_add(executor_->VisionLayout().images.size() *
+    checked_add(std::ranges::count_if(executor_->VisionLayout().images,
+                                      [this](const auto& image) {
+                                        return image.offset < position_;
+                                      }) *
                 sizeof(models::qwen::vision::ImageGrid));
     if (verifier_ != nullptr) {
       checked_add(verifier_->SnapshotPayloadBytes());
@@ -1026,6 +1105,16 @@ public:
       });
     }
     return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->GetTokenizer().GetVocabSize(), [this](std::uint32_t id) {
+          const auto& tokenizer = model_->GetTokenizer();
+          return sampling::ConstraintVocabulary::Piece{
+              tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
+        });
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -1747,6 +1836,16 @@ public:
       });
     }
     return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          return sampling::ConstraintVocabulary::Piece{
+              model_->DecodeToken(static_cast<int>(id)),
+              model_->IsStopToken(static_cast<int>(id))};
+        });
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -2502,6 +2601,16 @@ public:
           {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
     }
     return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->tokenizer().GetVocabSize(), [this](std::uint32_t id) {
+          const auto& tokenizer = model_->tokenizer();
+          return sampling::ConstraintVocabulary::Piece{
+              tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
+        });
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -4071,16 +4180,20 @@ InferenceBackend::Result InferenceBackend::chat(
   if (state == nullptr) {
     return {};
   }
-  auto prompt = state->scheduler->runner().PreparePrompt(request);
+  auto effective_sampling = sampling_config;
+  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
+                                          &effective_sampling);
+  const auto& effective_request = constrained ? *constrained : request;
+  auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return {};
   }
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
-      sampling_config, is_cancelled, on_token, request.client_id,
+      effective_sampling, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
       prompt->cache_prefix_tokens, request.stop_sequences,
-      state->scheduler->runner().InitialOutputState(request));
+      state->scheduler->runner().InitialOutputState(effective_request));
 #else
   (void)request;
   (void)max_tokens;
@@ -4142,7 +4255,11 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
         request, max_tokens, sampling_config, is_cancelled, stream_output);
   }
 
-  auto prompt = state->scheduler->runner().PreparePrompt(request);
+  auto effective_sampling = sampling_config;
+  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
+                                          &effective_sampling);
+  const auto& effective_request = constrained ? *constrained : request;
+  auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return TextGenerationBackend::start_chat(
         request, max_tokens, sampling_config, is_cancelled, stream_output);
@@ -4159,7 +4276,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
         std::move(prompt->context));
   }
   auto scheduled_request = state->scheduler->Submit(
-      std::move(prompt->tokens), max_tokens, sampling_config, is_cancelled,
+      std::move(prompt->tokens), max_tokens, effective_sampling, is_cancelled,
       stream_output,
       TextRequestMetadata{
           .client_id = client_id,
@@ -4172,7 +4289,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
       state, std::move(scheduled_request),
-      state->scheduler->runner().InitialOutputState(request));
+      state->scheduler->runner().InitialOutputState(effective_request));
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);

@@ -334,16 +334,23 @@ void Session::SetCancellationCheck(std::function<bool()> check) {
 
 void Session::ConfigureVision(
     std::shared_ptr<const qwen::vision::Prompt> prompt) {
-  const auto identity =
-      prompt ? prompt->cache_identity : std::vector<std::uint8_t>{};
-  if (!tokens_.empty() && identity != image_identity_)
+  const auto identity = prompt ? prompt->IdentityForPrefix(tokens_.size())
+                               : std::span<const std::uint8_t>{};
+  if (!tokens_.empty() &&
+      !std::ranges::equal(identity, ImageIdentity(tokens_.size())))
     Reset();
   const bool was_valid = valid_;
   valid_ = false;
-  session_->ConfigureVision(std::move(prompt), model_->vision_,
+  session_->ConfigureVision(prompt, model_->vision_,
                             model_->executor_->stream());
-  image_identity_ = identity;
+  image_prompt_ = std::move(prompt);
   valid_ = was_valid;
+}
+
+std::span<const std::uint8_t> Session::ImageIdentity(
+    std::size_t token_count) const {
+  return image_prompt_ ? image_prompt_->IdentityForPrefix(token_count)
+                       : std::span<const std::uint8_t>{};
 }
 
 std::uint32_t Session::KeptHiddenRows() const noexcept {
@@ -356,7 +363,8 @@ std::uint64_t Session::SnapshotBytes() const {
   if (!valid_)
     return 0;
   return SessionSnapshotHostBytes(static_cast<std::uint32_t>(tokens_.size()),
-                                  model_->VocabSize(), image_identity_.size()) +
+                                  model_->VocabSize(),
+                                  ImageIdentity(tokens_.size()).size()) +
          model_->executor_->SnapshotBytes(*session_, KeptHiddenRows());
 }
 
@@ -368,11 +376,12 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
     return nullptr;
   }
   const auto token_count = static_cast<std::uint32_t>(tokens_.size());
+  const auto identity = ImageIdentity(token_count);
   const std::uint32_t hidden_rows = KeptHiddenRows();
   const std::uint64_t executor_bytes =
       model_->executor_->SnapshotBytes(*session_, hidden_rows);
   const std::uint64_t host_bytes = SessionSnapshotHostBytes(
-      token_count, model_->VocabSize(), image_identity_.size());
+      token_count, model_->VocabSize(), identity.size());
   std::unique_ptr<SessionSnapshot> snapshot(
       new SessionSnapshot(host_bytes + executor_bytes));
   std::uint8_t* out = snapshot->data_.get();
@@ -384,15 +393,14 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
       .hidden_rows = hidden_rows,
       .executor_bytes = executor_bytes,
       .draft_policy = draft_length_.State(),
-      .image_identity_bytes =
-          static_cast<std::uint32_t>(image_identity_.size()),
+      .image_identity_bytes = static_cast<std::uint32_t>(identity.size()),
       .policy_concurrency = model_->DecodeConcurrency(),
   };
   std::memcpy(out, &header, sizeof(header));
   out += sizeof(header);
-  if (!image_identity_.empty())
-    std::memcpy(out, image_identity_.data(), image_identity_.size());
-  out += image_identity_.size();
+  if (!identity.empty())
+    std::memcpy(out, identity.data(), identity.size());
+  out += identity.size();
   std::memcpy(out, tokens_.data(), tokens_.size() * sizeof(std::int32_t));
   out += tokens_.size() * sizeof(std::int32_t);
   std::memcpy(out, logits_.data(), logits_.size() * sizeof(float));
@@ -449,7 +457,8 @@ bool Session::RestoreSnapshotPayload(std::span<const std::uint8_t> payload,
   const std::uint8_t* in = payload.data() + sizeof(header);
   std::vector<std::uint8_t> image_identity(in,
                                            in + header.image_identity_bytes);
-  if (!image_identity.empty() && image_identity != image_identity_) {
+  if (!image_identity.empty() &&
+      !std::ranges::equal(image_identity, ImageIdentity(header.token_count))) {
     AssignError(error_msg,
                 "image snapshot requires its matching prompt attachment");
     return false;
@@ -485,7 +494,6 @@ bool Session::RestoreSnapshotPayload(std::span<const std::uint8_t> payload,
     AssignError(error_msg, "session snapshot positions are inconsistent");
     return false;
   }
-  image_identity_ = std::move(image_identity);
   tokens_ = std::move(tokens);
   logits_ = std::move(logits);
   hidden_base_ = info.position - info.hidden_rows;
@@ -750,7 +758,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   // Target verification keeps its own draws after this independent seed.
   pending->draft_rng =
       sampled ? sampling::NextRandom(sampler.mutable_rng_state()) : 0;
-  pending->draft_sampler = sampler;
+  pending->draft_sampler = sampler.WithoutConstraint();
   pending->draft_sampler->Accept(static_cast<sampling::TokenId>(anchor));
   pending->chain = {anchor};
   pending->draft = draft_token_;

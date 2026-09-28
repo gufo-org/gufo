@@ -4,7 +4,8 @@
 21 mixed MTP and 21 repetitive MTP at C1/2/4/6/8. Unsloth UD-Q4_K_XL target,
 shared Q8_0 MTP; [identities](artifacts/model-identities.json).
 These are consistency checks, not original unquantized-model or GGUF-conversion
-qualification. Latest measurements: September 20–23, 2026.
+qualification. HTTP measurements: September 20–23, 2026; attention review:
+September 27–28.
 
 | Check | Result |
 | --- | --- |
@@ -14,6 +15,12 @@ qualification. Latest measurements: September 20–23, 2026.
 | Prefill and cache | Full logits match across tested chunk boundaries, short tails and restored state through 4096 tokens |
 | Scalar versus bulk prefill, 2176 tokens | Same top-1; logit RMSE 0.18, not bit-identical |
 | Serving | Cancellation, three-turn continuation, reasoning/tool history, concurrent image/text isolation and disk restart pass |
+| Sparse attention | Independent FP64 operator error ≤2.83e-7 (limit 1e-6). At 32K/128K, 256 fixed-token code/prose rows: mean KL 5.82e-4 and 256/256 top-1 agreement with an FP64-attention diagnostic. [Evidence](artifacts/attention-tiles-review.json). |
+
+The attention diagnostic retains the quantized weights and other native
+operators. Regrouping FP32 sums can change long-context text across builds;
+matched-prefill AR/MTP logits and sampled snapshot replay are exact at
+32K/128K. Session tests also cover image/text restoration and C2/4/6/8.
 
 Sampled MTP can consume different RNG draws from AR. Seeded replay requires
 the same build, request budget, capacity and sampling configuration; live cost
@@ -49,11 +56,16 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-September 22–23, 2026; one warmed sample per point, greedy, thinking off.
+Gufo single-user TG refreshed September 27, 2026 (`f797b5b`); PP and other
+measurements retain September 22–23 provenance. One warmed sample per point,
+greedy, thinking off.
 Single-user uses pp2048/tg128; MTP pp is the maximum across mixed/repetitive
 workloads. C1/2/4/6/8 use the same d0 prompts; every session prefills before
 measured tg128, with at most four prompt-tail tokens reevaluated. Rates sum
 individual decode rates. Gufo d0/C1 agree within 0.4% with matching drafts/output.
+Depth calibration depends on the ordered sweep. Paired speed controls use
+the same depth list. Deep AR/MTP HTTP cache frontiers differ by one token;
+exact replay is checked separately with identical prefill boundaries.
 AR reference is llama.cpp b11069; MTP uses pinned `6fcaa16f`.
 Loading: cold files, C1/MTP/capacity 262144. Memory: C1/AR/capacity 133121,
 peak global HIP allocation including idle memory. Full commands, counts and

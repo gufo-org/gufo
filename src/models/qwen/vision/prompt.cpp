@@ -131,6 +131,25 @@ std::uint32_t RopeLayout::PrefixLength() const {
   return last.offset + last.height * last.width;
 }
 
+RopeLayout RopeLayout::Prefix(std::uint32_t token_count) const {
+  RopeLayout prefix;
+  for (const auto& image : images) {
+    if (image.offset >= token_count)
+      break;
+    prefix.images.push_back(image);
+  }
+  return prefix;
+}
+
+std::span<const std::uint8_t> Prompt::IdentityForPrefix(
+    std::size_t token_count) const {
+  for (auto image = images.rbegin(); image != images.rend(); ++image) {
+    if (image->grid.offset < token_count)
+      return image->prefix_identity;
+  }
+  return {};
+}
+
 void RopeLayout::Validate(std::uint32_t max_context) const {
   if (images.size() > 256)
     throw std::invalid_argument("too many image grids");
@@ -231,9 +250,10 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
                const tokenization::ChatTemplateOptions& options,
                std::string_view encoder_identity, std::uint32_t max_context) {
   std::vector<std::size_t> offsets;
+  std::size_t stable_prefix_bytes = 0;
   std::string error;
   const auto rendered = tokenization::QwenChatTemplate::Render(
-      messages, tools, options, &error, &offsets);
+      messages, tools, options, &error, &offsets, &stable_prefix_bytes);
   if (!rendered)
     throw std::invalid_argument(error);
   Prompt prompt;
@@ -283,11 +303,19 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
       identity.Update(pixels.pixels);
       prompt.tokens.insert(prompt.tokens.end(), count, kImageToken);
       prompt.rope.images.push_back(grid);
-      prompt.images.push_back({std::move(pixels), grid});
+      prompt.images.push_back({std::move(pixels), grid, identity.Digest()});
       cursor = offsets[index++] + std::string_view("<|image_pad|>").size();
     }
   }
   append(std::string_view(*rendered).substr(cursor));
+  // The boundary starts an assistant special token, after every image.
+  // Encode only the mutable suffix; never decode or resize images twice.
+  const auto suffix = tokenizer.Encode(
+      std::string_view(*rendered).substr(stable_prefix_bytes), tok_options);
+  if (suffix.size() > prompt.tokens.size() ||
+      !std::ranges::equal(suffix, std::span(prompt.tokens).last(suffix.size())))
+    throw std::logic_error("Qwen stable prefix is not a token boundary");
+  prompt.stable_prefix_tokens = prompt.tokens.size() - suffix.size();
   prompt.rope.Validate(max_context);
   if (!prompt.images.empty()) {
     const auto digest = identity.Finish();

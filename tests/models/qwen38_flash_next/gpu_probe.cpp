@@ -12,6 +12,10 @@
 // External reference: --kld-base FILE, a llama.cpp --kl-divergence-base file
 //                     (every TP rank needs the file's tokens)
 //                     [--kld-save OUT] writes Gufo's log-probs in its format
+// Matched-token decode: --prompt-file P --decode-file C --dump rows.bin
+//                       [--decode-ids ids.bin] (prefill P, then feed C's
+//                       tokens one at a time; row i predicts the token
+//                       after ids[i], so score row i against ids[i + 1])
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -20,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -287,6 +292,9 @@ int main(int argc, char** argv) {
   std::string mtp_path;
   std::string kld_base;
   std::string kld_save;
+  std::string decode_text;
+  std::string decode_ids_path;
+  bool decode = false;
   bool mtp_audit = false;
   bool reference = false;
   bool cost_audit = false;
@@ -381,6 +389,23 @@ int main(int argc, char** argv) {
       tp_bootstrap_host = next();
     } else if (arg == "--prompt") {
       prompt = next();
+    } else if (arg == "--prompt-file" || arg == "--decode-file") {
+      const auto path = next();
+      std::ifstream in(path, std::ios::binary);
+      if (!in) {
+        std::fprintf(stderr, "cannot open %s\n", path.c_str());
+        return 2;
+      }
+      std::string text((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+      if (in.bad()) {
+        std::fprintf(stderr, "cannot read %s\n", path.c_str());
+        return 2;
+      }
+      (arg == "--prompt-file" ? prompt : decode_text) = std::move(text);
+      decode |= arg == "--decode-file";
+    } else if (arg == "--decode-ids") {
+      decode_ids_path = next();
     } else if (arg == "--reference") {
       reference = true;
     } else if (arg == "--batch" || arg == "--context") {
@@ -406,6 +431,14 @@ int main(int argc, char** argv) {
   }
   if (model_path.empty()) {
     std::fprintf(stderr, "--model is required\n");
+    return 2;
+  }
+  if ((decode &&
+       (decode_text.empty() || reference || mtp_audit || cost_audit)) ||
+      (!decode && !decode_ids_path.empty())) {
+    std::fprintf(stderr,
+                 "--decode-file requires a nonempty continuation and cannot "
+                 "be combined with other probes; --decode-ids requires it\n");
     return 2;
   }
   if ((mtp_audit || cost_audit) && mtp_path.empty()) {
@@ -615,6 +648,15 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "prompt must contain 1..%u tokens\n", context);
     return 2;
   }
+  std::vector<std::int32_t> continuation;
+  if (decode) {
+    const auto ids = tokenizer->Encode(decode_text);
+    continuation.assign(ids.begin(), ids.end());
+    if (continuation.empty() || continuation.size() > context - tokens.size()) {
+      std::fprintf(stderr, "complete continuation must fit in the context\n");
+      return 2;
+    }
+  }
   std::printf("prompt tokens (%zu)\n", tokens.size());
   std::ofstream dump;
   if (!dump_path.empty()) {
@@ -648,6 +690,46 @@ int main(int argc, char** argv) {
       gpu_logits = std::move(out);
       logit_rows = rows;
     }
+  }
+  if (decode) {
+    // Matched-token decode: feed a fixed continuation one token at a time
+    // through the decode path and dump each step's logits.
+    std::vector<float> row(c.vocab_size);
+    std::size_t steps = 0;
+    for (const auto t : continuation) {
+      if (!executor->Forward(*session, std::span<const std::int32_t>(&t, 1), 1,
+                             row.data(),
+                             q::rocm::Executor::ForwardMode::kDecode, &error)) {
+        std::fprintf(stderr, "decode failed: %s\n", error.c_str());
+        return 1;
+      }
+      if (dump.is_open())
+        dump.write(reinterpret_cast<const char*>(row.data()),
+                   static_cast<std::streamsize>(row.size() * sizeof(float)));
+      ++steps;
+    }
+    if (dump.is_open()) {
+      dump.close();
+      if (!dump) {
+        std::fprintf(stderr, "cannot write logit dump %s\n", dump_path.c_str());
+        return 1;
+      }
+    }
+    if (!decode_ids_path.empty()) {
+      std::ofstream ids(decode_ids_path, std::ios::binary);
+      ids.write(reinterpret_cast<const char*>(continuation.data()),
+                static_cast<std::streamsize>(continuation.size() *
+                                             sizeof(continuation[0])));
+      ids.close();
+      if (!ids) {
+        std::fprintf(stderr, "cannot write token IDs %s\n",
+                     decode_ids_path.c_str());
+        return 1;
+      }
+    }
+    std::printf("decode steps %zu after %zu prompt tokens\n", steps,
+                tokens.size());
+    return 0;
   }
   if (dump.is_open()) {
     dump.write(reinterpret_cast<const char*>(gpu_logits.data()),

@@ -35,5 +35,14 @@
       "binarySha256": "66a42853bde76ef09e0574298819559003ef7fa5a9aa55bdbe3c0e4c085a484f"
     },
     "measurement": "One measured sample per point. Concurrency uses the same synthetic pp2048 prompt generator as single-user d0. Every session completes prompt preparation before timed tg128; measured requests reuse the full prefix, allowing at most four final prompt tokens to be evaluated again. Rates sum individual server decode rates. Gufo outputs match independent fresh AR controls. Inference and weights are unchanged."
+  },
+  "benchmarks-attention-tiles": {
+    "scope": "Gufo single-user TG refresh only; retained PP and other measurements retain their original provenance.",
+    "gufo": {
+      "revision": "f797b5b05cba21c08e133783ec8e5c9fa85111f7",
+      "binarySha256": "0536e337596a720a5c53e47dc7d66f9f64f68d621ef210a6ff034671c09dda61",
+      "build": "nix build, production gfx1151 binary"
+    },
+    "qualification": "attention-tiles-review.json"
   }
 }

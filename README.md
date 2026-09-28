@@ -9,6 +9,9 @@ Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unifie
 
 **Contrinutions are welcome!**
 
+See the [changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/gufo-org/gufo/releases)
+for user-facing changes and release history.
+
 ## Models and benchmarks
 
 All model documentation lives under [docs/models](docs/models/README.md):

@@ -32,8 +32,8 @@
 #define MFD_CLOEXEC 0x0001U
 #endif
 
-#ifndef GUFO_VERSION
-#define GUFO_VERSION "development"
+#ifndef GUFO_REVISION
+#define GUFO_REVISION "unknown"
 #endif
 
 namespace gufo::diagnostics {
@@ -1117,7 +1117,7 @@ AllocationBenchmarkReport RunHipAllocationBenchmark(
     const MachineFingerprint& fingerprint) {
   AllocationBenchmarkReport report;
   report.timestamp = CurrentIso8601Utc();
-  report.engine_revision = GUFO_VERSION;
+  report.engine_revision = GUFO_REVISION;
   report.options = options;
   report.inventory = inventory;
   report.fingerprint = fingerprint;

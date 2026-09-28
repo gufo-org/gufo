@@ -13,10 +13,14 @@
   rocmPackages,
   rdma-core ? null,
   enableTp2Rdma ? false,
-  version,
+  releaseVersion ? null,
+  revision,
 }:
 
 let
+  versionLabel = if releaseVersion == null then "development" else releaseVersion;
+  packageVersion =
+    if releaseVersion == null then "0-unstable-${revision}" else releaseVersion;
   sourceRoot = ../..;
   productionSource = lib.cleanSourceWith {
     src = sourceRoot;
@@ -47,7 +51,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "gufo";
-  inherit version;
+  version = packageVersion;
   src = productionSource;
 
   nativeBuildInputs = [
@@ -76,7 +80,8 @@ stdenv.mkDerivation {
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
     "-DBUILD_TESTING=OFF"
-    "-DGUFO_VERSION=${version}"
+    "-DGUFO_RELEASE_VERSION=${versionLabel}"
+    "-DGUFO_REVISION=${revision}"
     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
     "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
@@ -86,9 +91,9 @@ stdenv.mkDerivation {
   installCheckPhase = ''
     runHook preInstallCheck
 
-    $out/bin/gufo --version
+    test "$($out/bin/gufo --version)" = "gufo version ${versionLabel} (${revision})"
     $out/bin/gufo --help >/dev/null
-    $out/bin/gufo-server --version
+    test "$($out/bin/gufo-server --version)" = "gufo version ${versionLabel} (${revision})"
     $out/bin/gufo-server --help >/dev/null
     test ! -e $out/bin/gufo-kernel-bench
     test -f $out/share/licenses/gufo/LICENSE
@@ -102,7 +107,7 @@ stdenv.mkDerivation {
   '';
 
   passthru = {
-    inherit rocmPackages;
+    inherit releaseVersion revision rocmPackages;
     toolchain = {
       targetPlatform = "x86_64-linux";
       targetGpu = "gfx1151";

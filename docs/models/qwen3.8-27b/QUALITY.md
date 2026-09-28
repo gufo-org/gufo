@@ -50,6 +50,9 @@ generated-history continuation and disk-restart checks. Q8 also requires exact
 cold/live/restored continuation logits. Encoder controls use official
 Transformers operators over the **same converted BF16 GGUF**; they cannot detect
 conversion errors. Flash-Next has a separate [vision limit](../qwen3.8-flash-next/QUALITY.md#vision).
+Q4/Q8 image snapshots restored after cancellation inside the image encoder or
+text prefill match all target logits exactly; token-limit endings and stripped
+tool reasoning retain the compatible conversation prefix.
 
 ## Reproduce
 

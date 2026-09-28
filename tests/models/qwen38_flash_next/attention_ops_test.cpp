@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -25,6 +26,9 @@ constexpr std::uint32_t kDim = 256;
 constexpr std::uint32_t kRatio = 4;
 constexpr std::uint32_t kQWidth = kHeads * kDim;
 constexpr std::uint32_t kKvWidth = kKvHeads * kDim;
+// The per-token kernel accumulates in FP32 over FP16 keys/values; its gated
+// output (order one) stays within this of an FP64 evaluation.
+constexpr double kFp64Limit = 1e-6;
 
 void CheckHip(hipError_t error, const char* operation) {
   if (error != hipSuccess) {
@@ -229,6 +233,66 @@ void CheckPreparation(std::uint32_t n, std::uint32_t start,
             << " rotary=" << rotary << ": exact, including graph positions\n";
 }
 
+/// FP64 gated attention over the keys each row can see: every key below
+/// pos + 1, or with a mask the selected complete blocks plus the incomplete
+/// tail block. An independent formula for the per-token kernel.
+std::vector<double> Fp64Attention(
+    const std::vector<float>& qv, const std::vector<float>& gate,
+    const std::vector<__half>& kh, const std::vector<__half>& vh,
+    const std::uint32_t* mask, std::uint32_t mask_words, std::uint32_t n_tokens,
+    std::uint32_t start_pos, std::uint32_t ratio = kRatio) {
+  std::vector<double> out(static_cast<std::size_t>(n_tokens) * kQWidth);
+  const double scale = 1.0 / std::sqrt(static_cast<double>(kDim));
+  std::vector<std::uint32_t> keys;
+  std::vector<double> scores;
+  for (std::uint32_t t = 0; t < n_tokens; ++t) {
+    const std::uint32_t n_kv = start_pos + t + 1;
+    const std::uint32_t tail_start = n_kv / ratio * ratio;
+    keys.clear();
+    for (std::uint32_t j = 0; j < n_kv; ++j) {
+      const std::uint32_t b = j / ratio;
+      if (mask == nullptr || j >= tail_start ||
+          ((mask[static_cast<std::size_t>(t) * mask_words + b / 32] >>
+            (b % 32)) &
+           1U) != 0) {
+        keys.push_back(j);
+      }
+    }
+    for (std::uint32_t h = 0; h < kHeads; ++h) {
+      const std::size_t row = (static_cast<std::size_t>(t) * kHeads + h) * kDim;
+      const std::size_t kv_head = (h / (kHeads / kKvHeads)) * kDim;
+      scores.assign(keys.size(), 0.0);
+      double maximum = -INFINITY;
+      for (std::size_t k = 0; k < keys.size(); ++k) {
+        const std::size_t base = keys[k] * std::size_t{kKvWidth} + kv_head;
+        double dot = 0.0;
+        for (std::uint32_t d = 0; d < kDim; ++d) {
+          dot += static_cast<double>(qv[row + d]) *
+                 static_cast<double>(__half2float(kh[base + d]));
+        }
+        scores[k] = dot * scale;
+        maximum = std::max(maximum, scores[k]);
+      }
+      double sum = 0.0;
+      for (double& score : scores) {
+        score = std::exp(score - maximum);
+        sum += score;
+      }
+      for (std::uint32_t d = 0; d < kDim; ++d) {
+        double acc = 0.0;
+        for (std::size_t k = 0; k < keys.size(); ++k) {
+          acc += scores[k] *
+                 static_cast<double>(__half2float(
+                     vh[keys[k] * std::size_t{kKvWidth} + kv_head + d]));
+        }
+        const double g = static_cast<double>(gate[row + d]);
+        out[row + d] = acc / sum / (1.0 + std::exp(-g));
+      }
+    }
+  }
+  return out;
+}
+
 /// Runs the per-token reference and the fused WMMA route over the same
 /// cache and reports the worst absolute error of the gated context.
 double Compare(std::uint32_t n_tokens, std::uint32_t start_pos, bool masked,
@@ -317,6 +381,20 @@ double Compare(std::uint32_t n_tokens, std::uint32_t start_pos, bool masked,
       worst = std::max(worst, std::abs(static_cast<double>(a[i] - b[i])));
     }
     std::cout << "  split-key reference worst absolute error " << worst << '\n';
+    const auto exact =
+        Fp64Attention(qv, gate, kh, vh, masked ? mask.data() : nullptr,
+                      mask_words, n_tokens, start_pos);
+    double single_error = 0.0;
+    double split_error = 0.0;
+    for (std::size_t i = 0; i < q_count; ++i) {
+      single_error = std::max(single_error, std::abs(a[i] - exact[i]));
+      split_error = std::max(split_error, std::abs(b[i] - exact[i]));
+    }
+    std::cout << "  FP64 worst absolute error single " << single_error
+              << " split " << split_error << '\n';
+    if (std::max(single_error, split_error) > kFp64Limit) {
+      throw std::runtime_error("per-token attention exceeds its FP64 limit");
+    }
     if (worst > 1e-4) {
       throw std::runtime_error("split-key attention disagrees");
     }
@@ -385,6 +463,98 @@ double Compare(std::uint32_t n_tokens, std::uint32_t start_pos, bool masked,
     }
   }
   return worst;
+}
+
+/// Selected blocks for one query row, given its complete-block count.
+using BlockPattern =
+    std::function<void(std::uint32_t, std::vector<std::uint32_t>*)>;
+
+/// The per-token kernel against FP64 on a structured selection, in its
+/// single-block form and split 1, 3 and 8 ways. The masks are built so the
+/// sparse path's 1024-block compaction windows and 64-block key tiles meet
+/// their edge cases: tiles that straddle windows, a carried partial tile of
+/// every size, a single partial tile, and a ninth tile that wraps a split.
+void CheckStructured(const char* name, std::uint32_t n_tokens,
+                     std::uint32_t start_pos, const BlockPattern& pattern,
+                     std::uint32_t seed, std::uint32_t ratio = kRatio) {
+  const std::uint32_t n_kv = start_pos + n_tokens;
+  const std::uint32_t max_blocks = (n_kv + ratio - 1) / ratio;
+  const std::uint32_t mask_words = (max_blocks + 31) / 32;
+  const std::size_t q_count = static_cast<std::size_t>(n_tokens) * kQWidth;
+  const std::size_t kv_count = static_cast<std::size_t>(n_kv) * kKvWidth;
+  const auto qv = MakeValues(q_count, seed, 4.0F);
+  const auto gate = MakeValues(q_count, seed ^ 0x5555U, 3.0F);
+  std::vector<__half> kh(kv_count);
+  std::vector<__half> vh(kv_count);
+  {
+    const auto kf = MakeValues(kv_count, seed ^ 0xAAAAU, 1.0F);
+    const auto vf = MakeValues(kv_count, seed ^ 0x3333U, 1.0F);
+    for (std::size_t i = 0; i < kv_count; ++i) {
+      kh[i] = __float2half(kf[i]);
+      vh[i] = __float2half(vf[i]);
+    }
+  }
+  std::vector<std::uint32_t> mask(static_cast<std::size_t>(n_tokens) *
+                                  mask_words);
+  std::vector<std::uint32_t> blocks;
+  std::size_t selected = 0;
+  for (std::uint32_t t = 0; t < n_tokens; ++t) {
+    const std::uint32_t complete = (start_pos + t + 1) / ratio;
+    blocks.clear();
+    pattern(complete, &blocks);
+    for (const std::uint32_t b : blocks) {
+      if (b >= complete) {
+        throw std::runtime_error("structured mask selects past the context");
+      }
+      mask[static_cast<std::size_t>(t) * mask_words + b / 32] |= 1U << (b % 32);
+    }
+    selected += blocks.size();
+  }
+  const auto exact = Fp64Attention(qv, gate, kh, vh, mask.data(), mask_words,
+                                   n_tokens, start_pos, ratio);
+
+  HipBuffer<float> d_q(q_count);
+  HipBuffer<float> d_gate(q_count);
+  HipBuffer<__half> d_k(kv_count);
+  HipBuffer<__half> d_v(kv_count);
+  HipBuffer<std::uint32_t> d_mask(mask.size());
+  HipBuffer<std::uint32_t> d_pos(1);
+  HipBuffer<float> d_out(q_count);
+  Upload(&d_q, qv);
+  Upload(&d_gate, gate);
+  Upload(&d_k, kh);
+  Upload(&d_v, vh);
+  Upload(&d_mask, mask);
+  Upload(&d_pos, std::vector<std::uint32_t>{start_pos});
+  std::cout << "structured " << name << " ratio=" << ratio << " n=" << n_tokens
+            << " start=" << start_pos << " blocks/row=" << selected / n_tokens
+            << " FP64 worst absolute error";
+  double worst = 0.0;
+  for (const std::uint32_t splits : {0U, 1U, 3U, 8U}) {
+    HipBuffer<float> d_partials(static_cast<std::size_t>(n_tokens) * kHeads *
+                                std::max(splits, 1U) * (kDim + 2));
+    q::Attention(d_q.get(), d_k.get(), d_v.get(), d_mask.get(), mask_words,
+                 d_out.get(), splits == 0 ? nullptr : d_partials.get(), splits,
+                 n_tokens, d_pos.get(), kHeads, kKvHeads, kDim, ratio, nullptr);
+    q::SigmoidMul(d_out.get(), d_gate.get(), q_count, nullptr);
+    CheckHip(hipDeviceSynchronize(), "structured attention");
+    const auto out = Download(&d_out, q_count);
+    double error = 0.0;
+    for (std::size_t i = 0; i < q_count; ++i) {
+      if (!std::isfinite(out[i])) {
+        throw std::runtime_error("structured attention output is not finite");
+      }
+      error = std::max(error, std::abs(out[i] - exact[i]));
+    }
+    std::cout << (splits == 0 ? " single "
+                              : " split" + std::to_string(splits) + " ")
+              << error;
+    worst = std::max(worst, error);
+  }
+  std::cout << '\n';
+  if (worst > kFp64Limit) {
+    throw std::runtime_error("structured attention exceeds its FP64 limit");
+  }
 }
 
 /// A TP rank holds one KV head and its twelve query heads. From the rank's
@@ -536,6 +706,81 @@ int main() {
     CheckPreparation(8, 4096, 64);
     CheckPreparation(65, 131069, 64);
     CheckPreparation(7, 131069, 256);
+    // Structured selections against the sparse path's 1024-block compaction
+    // windows and 64-block key tiles. At 131069 the last 512 blocks sit in
+    // the final window; 262141 spans all 64 windows of the native context,
+    // so 63 blocks per window carry every partial-tile size once.
+    constexpr std::uint32_t kWindow = 1024;
+    const auto spread = [](std::uint32_t count) {
+      return [count](std::uint32_t complete, std::vector<std::uint32_t>* out) {
+        for (std::uint32_t j = 0; j < count && j < complete; ++j) {
+          out->push_back(static_cast<std::uint32_t>(
+              static_cast<std::uint64_t>(j) * complete / count));
+        }
+      };
+    };
+    const auto per_window = [](std::uint32_t count) {
+      return [count](std::uint32_t complete, std::vector<std::uint32_t>* out) {
+        for (std::uint32_t w0 = 0; w0 < complete; w0 += kWindow) {
+          for (std::uint32_t j = 0; j < count; ++j) {
+            const std::uint32_t b = w0 + j * 16 + (w0 / kWindow) % 16;
+            if (b < complete) {
+              out->push_back(b);
+            }
+          }
+        }
+      };
+    };
+    const BlockPattern last_budget = [](std::uint32_t complete,
+                                        std::vector<std::uint32_t>* out) {
+      for (std::uint32_t b = complete - std::min(512U, complete); b < complete;
+           ++b) {
+        out->push_back(b);
+      }
+    };
+    const BlockPattern one_window = [](std::uint32_t complete,
+                                       std::vector<std::uint32_t>* out) {
+      for (std::uint32_t j = 0; j < 64 && 7 * kWindow + j * 16 < complete;
+           ++j) {
+        out->push_back(7 * kWindow + j * 16);
+      }
+    };
+    struct Structured {
+      const char* name;
+      std::uint32_t start_pos;
+      BlockPattern pattern;
+    };
+    const Structured structured[] = {
+        {"last-512", 131069, last_budget},
+        {"63-per-window", 262141, per_window(63)},
+        {"1-per-window", 262141, per_window(1)},
+        {"40-total", 131069, spread(40)},
+        {"64-in-one-window", 131069, one_window},
+        {"513-total", 131069, spread(513)},
+        {"576-total", 131069, spread(576)},
+    };
+    std::uint32_t structured_seed = 0x5EED0000U;
+    for (const Structured& c : structured) {
+      for (const std::uint32_t n : {1U, 3U}) {
+        CheckStructured(c.name, n, c.start_pos, c.pattern, structured_seed++);
+      }
+    }
+    // At ratio 1 a tile is 256 blocks, so partial tiles reach 231 blocks,
+    // more than the room kept for a ratio-4 carry. Alternating 999 and 100
+    // selected blocks per window attends some partial tiles in their window
+    // and carries others.
+    const BlockPattern alternating = [](std::uint32_t complete,
+                                        std::vector<std::uint32_t>* out) {
+      for (std::uint32_t b = 0; b < complete; ++b) {
+        if (b % kWindow < ((b / kWindow) % 2 == 0 ? 999U : 100U)) {
+          out->push_back(b);
+        }
+      }
+    };
+    for (const std::uint32_t n : {1U, 3U}) {
+      CheckStructured("ratio-1-alternating", n, 8189, alternating,
+                      structured_seed++, 1);
+    }
     struct Case {
       std::uint32_t n_tokens;
       std::uint32_t start_pos;
