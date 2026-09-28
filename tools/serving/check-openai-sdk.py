@@ -319,6 +319,16 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             "max_output_tokens": 8, "store": False,
             "extra_body": {"cache_prompt": False},
         }
+        if vision:
+            response_request["input"] = [{"role": "user", "content": [
+                *[{"type": "input_image",
+                   "image_url": image_content(color)["image_url"]["url"]}
+                  for color in ("red", "blue")],
+                {"type": "input_text", "text":
+                 "Reply with exactly two English color names in image order, separated by a comma."},
+            ]}]
+            # Allow a complete visual answer; reasoning remains deliberately bounded.
+            response_request["max_output_tokens"] = 8 if thinking else 32
         if "seed" not in overrides:
             response_request["extra_body"]["seed"] = 73
         explicit_response = {
@@ -342,8 +352,21 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             events = list(stream)
         check_events(events, thinking)
         supplied = events[-1].response
+        assert omitted.usage.input_tokens_details.cached_tokens == 0, omitted
+        assert supplied.usage.input_tokens_details.cached_tokens == 0, supplied
         assert response_signature(omitted) == response_signature(supplied), (omitted, supplied)
         record(f"responses_preset_thinking{thinking}", check_response(omitted, thinking))
+        cached_response = client.responses.create(**{
+            **response_request,
+            "extra_body": {**response_request["extra_body"], "cache_prompt": True},
+        })
+        assert cached_response.usage.input_tokens_details.cached_tokens > 0, cached_response
+        assert response_signature(cached_response) == response_signature(omitted), (
+            cached_response, omitted)
+        if vision and not thinking:
+            assert "red" in omitted.output_text.lower() and "blue" in omitted.output_text.lower(), omitted
+        record(f"responses_cached_preset_thinking{thinking}",
+               check_response(cached_response, thinking))
 
         # Exercise grammar+default resolution without requiring a long answer.
         schema = {"type": "object", "properties": {"ok": {"type": "boolean"}},

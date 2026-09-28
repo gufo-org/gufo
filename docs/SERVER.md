@@ -173,10 +173,10 @@ Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 
 Prompt reuse is enabled by default. `cache_prompt: false` on
-`/v1/chat/completions` bypasses both memory and disk lookup for that request;
-the result can still populate the cache. DeepSeek and Qwen tool requests retain
-a checkpoint before the assistant-generation suffix, including when a client
-drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
+`/v1/chat/completions` or `/v1/responses` bypasses memory and disk lookup for
+that request; the result can still populate the cache. DeepSeek and Qwen tool
+requests retain a checkpoint before the assistant-generation suffix, including
+when a client drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
 also accounts for tokenization changes where adjacent user/tool turns join.
 Qwen requests retain this checkpoint with thinking enabled or disabled.
 Warm continuations checkpoint the reused frontier and prefill the new suffix

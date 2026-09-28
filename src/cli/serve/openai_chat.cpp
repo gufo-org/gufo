@@ -2146,6 +2146,12 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
 
 std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
                                                         ChatRequest* chat) {
+  if (const auto* cache = body.find("cache_prompt")) {
+    if (!cache->is_bool())
+      return Error(400, "Bad Request", "'cache_prompt' must be a boolean",
+                   "invalid_cache_prompt");
+    chat->cache_prompt = cache->as_bool();
+  }
   if (const auto* reasoning = body.find("reasoning");
       reasoning && !reasoning->is_null()) {
     if (!reasoning->is_object())

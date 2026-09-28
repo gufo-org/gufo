@@ -847,6 +847,24 @@ void TestResponseSamplingDefaults() {
       }
     }
   }
+  // Responses must preserve the same request-owned cache control as Chat.
+  auto body = gufo::json::parse(R"({"input":"hello","max_output_tokens":1})");
+  ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+  assert(server.backend->LastCall().chat.cache_prompt);
+  for (const bool stream : {false, true}) {
+    body["stream"] = stream;
+    for (const bool cache : {false, true}) {
+      body["cache_prompt"] = cache;
+      ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+      assert(server.backend->LastCall().chat.cache_prompt == cache);
+    }
+  }
+  for (const char* invalid : {"null", "0", "\"false\""}) {
+    body["cache_prompt"] = gufo::json::parse(invalid);
+    const int calls = server.backend->calls;
+    ExpectStatus(server.Post("/v1/responses", body.dump()), 400);
+    assert(server.backend->calls == calls);
+  }
 }
 
 void TestStreamingFraming() {
