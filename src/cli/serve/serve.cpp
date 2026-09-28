@@ -1,10 +1,13 @@
 #include "src/cli/serve/serve.hpp"
 
 #include <arpa/inet.h>
+#include <unistd.h>
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -29,6 +32,7 @@
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/core/diagnostics/gpu_queues.h"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
@@ -84,6 +88,81 @@ private:
   std::chrono::steady_clock::time_point start_;
   bool completed_{false};
 };
+
+// Reports a fatal signal on the way out. A driver or runtime failure during a
+// load can abort the process outright, which runs no destructor and no
+// terminate handler, leaving a log that stops at event=load_started. Only
+// async-signal-safe calls are allowed here, so the line is assembled by hand
+// and written straight to the descriptor.
+extern "C" void ReportFatalSignal(int number) {
+  static constexpr char kPrefix[] =
+      "[ERROR] [server] event=fatal_signal signal=";
+  char digits[8];
+  std::size_t length = 0;
+  int value = number;
+  if (value <= 0) {
+    digits[length++] = '0';
+  } else {
+    char reversed[8];
+    std::size_t count = 0;
+    while (value > 0 && count < sizeof(reversed)) {
+      reversed[count++] = static_cast<char>('0' + (value % 10));
+      value /= 10;
+    }
+    while (count > 0) {
+      digits[length++] = reversed[--count];
+    }
+  }
+  (void)::write(STDERR_FILENO, kPrefix, sizeof(kPrefix) - 1);
+  (void)::write(STDERR_FILENO, digits, length);
+  (void)::write(STDERR_FILENO, "\n", 1);
+  // Restore the default action and re-raise, so the exit status and any core
+  // dump still describe the original fault.
+  struct sigaction restore{};
+  restore.sa_handler = SIG_DFL;
+  (void)::sigemptyset(&restore.sa_mask);
+  (void)::sigaction(number, &restore, nullptr);
+  (void)::raise(number);
+}
+
+void InstallFatalSignalReporter() {
+  struct sigaction action{};
+  action.sa_handler = ReportFatalSignal;
+  (void)::sigemptyset(&action.sa_mask);
+  action.sa_flags = SA_RESETHAND;
+  for (const int number : {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE}) {
+    (void)::sigaction(number, &action, nullptr);
+  }
+}
+
+// Installs a terminate handler that names the reason before the process dies.
+// A HIP or driver failure during a load throws, and an exception that reaches
+// the top of main terminates without unwinding the stack, so ModelLoadLog's
+// destructor never runs and the log ends at event=load_started.
+void ReportTerminationReason() {
+  static std::terminate_handler previous = nullptr;
+  previous = std::set_terminate([] {
+    std::string reason = "unknown";
+    if (std::current_exception() != nullptr) {
+      try {
+        std::rethrow_exception(std::current_exception());
+      } catch (const std::exception& error) {
+        reason = error.what();
+      } catch (...) {
+        reason = "non-standard exception";
+      }
+    }
+    try {
+      server::Logger::Error("server", "event=terminated reason=" + reason);
+    } catch (...) {
+      // The handler must not throw on its way out.
+    }
+    if (previous != nullptr) {
+      previous();
+    }
+    std::abort();
+  });
+}
 
 std::optional<ReasoningEffort> ParseReasoningEffort(std::string_view value) {
   if (value == "minimal") {
@@ -614,6 +693,12 @@ int RunServe(std::span<const char* const> args) {
   (void)std::setvbuf(stderr, nullptr, _IONBF, 0);
   std::cout.setf(std::ios::unitbuf);
   std::cerr.setf(std::ios::unitbuf);
+  // An exception that escapes a load path terminates without unwinding, so no
+  // destructor reports it and the process exits with an empty log. Naming the
+  // reason here is the difference between a diagnosable failure and a server
+  // that simply vanished after event=load_started.
+  ReportTerminationReason();
+  InstallFatalSignalReporter();
 
   std::string host = "127.0.0.1";
   if (const char* env_host = std::getenv("HOST");
@@ -692,6 +777,31 @@ int RunServe(std::span<const char* const> args) {
     }
     break;
   }
+  // Hardware queues are claimed on the first HIP dispatch and held for the
+  // lifetime of the process, so the budget is decided here, once, before any
+  // model loads. Help output loads nothing and is left alone.
+  const auto wants_help = [&] {
+    return std::any_of(sub_args.begin(), sub_args.end(), [](const char* arg) {
+      const std::string_view value(arg);
+      return value == "--help" || value == "-h" || value == "help";
+    });
+  };
+  if (!wants_help()) {
+    const auto profile = subcommand == "llm" ? diagnostics::QueueProfile::kText
+                         : (subcommand == "tts" || subcommand == "asr")
+                             ? diagnostics::QueueProfile::kAudio
+                             : diagnostics::QueueProfile::kUnmeasured;
+    const auto plan =
+        diagnostics::PlanQueues(profile, diagnostics::QueryQueueCensus(),
+                                std::getenv("GPU_MAX_HW_QUEUES"));
+    diagnostics::ApplyQueuePlan(plan);
+    server::Logger::Info("gpu",
+                         diagnostics::DescribeQueuePlan(subcommand, plan));
+    if (plan.may_exceed_budget) {
+      server::Logger::Warn("gpu", diagnostics::DescribeQueuePressure(plan));
+    }
+  }
+
   const auto valid_server_options = [&] {
     in_addr address{};
     if (::inet_pton(AF_INET, host.c_str(), &address) != 1) {
@@ -855,15 +965,20 @@ int RunServe(std::span<const char* const> args) {
         std::cerr << "Error: " << parse_err << '\n';
         return 2;
       }
-      tts = std::make_shared<server::TtsService>(server::TtsServiceOptions{
-          .model_root = options.model,
-          .native_context_tokens = options.context,
-          .validate_model = true,
-          .model_id = options.served_model_name,
-          .voices = {},
-          .voice_presets = std::move(voice_presets),
-          .runner = {},
-      });
+      try {
+        tts = std::make_shared<server::TtsService>(server::TtsServiceOptions{
+            .model_root = options.model,
+            .native_context_tokens = options.context,
+            .validate_model = true,
+            .model_id = options.served_model_name,
+            .voices = {},
+            .voice_presets = std::move(voice_presets),
+            .runner = {},
+        });
+      } catch (const std::exception& error) {
+        std::cerr << "Error loading Qwen3-TTS: " << error.what() << '\n';
+        return 1;
+      }
       if (!tts->ready()) {
         std::cerr << "Error enabling Qwen3-TTS service: "
                   << tts->initialization_error() << '\n';
@@ -873,13 +988,18 @@ int RunServe(std::span<const char* const> args) {
           "model=" + tts->model_id() +
           " sessions=1 context_tokens=" + std::to_string(options.context));
     } else {
-      asr = std::make_shared<server::AsrService>(server::AsrServiceOptions{
-          .model_root = options.model,
-          .native_context_tokens = options.context,
-          .validate_model = true,
-          .model_id = options.served_model_name,
-          .runner = {},
-      });
+      try {
+        asr = std::make_shared<server::AsrService>(server::AsrServiceOptions{
+            .model_root = options.model,
+            .native_context_tokens = options.context,
+            .validate_model = true,
+            .model_id = options.served_model_name,
+            .runner = {},
+        });
+      } catch (const std::exception& error) {
+        std::cerr << "Error loading Qwen3-ASR: " << error.what() << '\n';
+        return 1;
+      }
       if (!asr->ready()) {
         std::cerr << "Error enabling Qwen3-ASR service: "
                   << asr->initialization_error() << '\n';

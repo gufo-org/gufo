@@ -207,6 +207,43 @@ reports equality to a fresh full prefill, whose different matrix shapes and
 prefill/decode history can change rounding; that comparison is not silently
 counted as an exact cache replay.
 
+### Hardware compute queues
+
+The gfx1151 command processor keeps eight compute queues mapped at once,
+counted across every process on the device. Past that total the firmware
+scheduler time-slices them even when all of them are empty: the GPU then
+reports a busy engine at its top shader clock and draws about 26 W above idle
+for as long as the processes live. Queues are claimed on a process's first HIP
+dispatch and never released — neither `hipStreamDestroy` nor `hipDeviceReset`
+gives one back — so the count is fixed at startup, and the first dispatch costs
+two queues whatever the configuration. Four HIP processes is therefore the
+ceiling on one device, gufo or otherwise.
+
+Each server reads the queues already in use from
+`/sys/class/kfd/kfd/proc/*/queues/*/type`, which is world-readable and so
+includes processes gufo does not own, then exports `GPU_MAX_HW_QUEUES` before
+loading a model and logs a `queue_budget` event:
+
+| Server | `GPU_MAX_HW_QUEUES` | Resident compute queues |
+| --- | ---: | ---: |
+| `serve llm` | 2 | 3 |
+| `serve tts` | 1 | 2 |
+| `serve asr` | 1 | 2 |
+| `serve image`, `serve video` | runtime default | up to 5 |
+
+Text and audio caps are measured to cost no throughput: `serve llm` is flat from
+the runtime default down to a single queue at one and at four concurrent
+requests, and both audio servers are flat within run-to-run noise. Image and
+video are unmeasured, so they keep the runtime default unless the device is too
+busy to hold it.
+
+The cap is only ever lowered to fit the free slots, never raised to fill them,
+so a server's throughput does not depend on the order the servers started. A
+`GPU_MAX_HW_QUEUES` set by the operator is always left alone, but it is still
+checked: a cap of N resolves to at most N + 1 resident queues, so a value that
+will not fit is reported even though it is honoured. When a server cannot fit,
+it logs a `queue_budget_exceeded` warning and starts anyway.
+
 ### Reasoning controls
 
 `--think auto` uses the model's default. Qwen27B and Flash-Next match the

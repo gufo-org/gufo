@@ -81,6 +81,7 @@ if (GUFO_ENABLE_SANITIZERS)
 endif()
 
 add_library(gufo_diagnostics STATIC
+  src/core/diagnostics/gpu_queues.cpp
   src/core/diagnostics/linux_sysfs.cpp
   src/core/diagnostics/system_inventory.cpp
   src/core/diagnostics/compatibility.cpp
@@ -536,6 +537,11 @@ if (BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/prof_test.py)
   set_tests_properties(prof_test PROPERTIES
     LABELS "cpu;tools;profiling")
+
+  add_executable(gpu_queues_test tests/diagnostics/gpu_queues_test.cpp)
+  target_link_libraries(gpu_queues_test PRIVATE gufo_diagnostics)
+  add_test(NAME gpu_queues_test COMMAND gpu_queues_test)
+  set_tests_properties(gpu_queues_test PROPERTIES LABELS "cpu;diagnostics;serving")
 
   add_executable(bandwidth_test tests/diagnostics/bandwidth_test.cpp)
   target_compile_definitions(bandwidth_test PRIVATE TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diagnostics")
