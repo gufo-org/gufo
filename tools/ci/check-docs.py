@@ -23,6 +23,7 @@ REQUIRED_DOC_FILES = [
     "AGENTS.md",
     "docs/CLI.md",
     "docs/DEVELOPMENT.md",
+    "docs/RELEASING.md",
     "docs/models/README.md",
     "docs/SERVER.md",
     "docs/TESTING.md",

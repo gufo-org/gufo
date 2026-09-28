@@ -155,13 +155,16 @@ model oracles, so run the GPU checks that cover the change locally; the exact
 hosted selection is described in [testing](TESTING.md).
 
 - Prefer `jj` when available (`jj version`); otherwise use Git.
-- Follow Conventional Commits with a single-line message.
+- Follow Conventional Commits with a single-line message. Pull request titles
+  must follow the types and version effects in the [release policy](RELEASING.md);
+  the squash merge retains the title as the commit on `main`.
 - Use `gh` for GitHub operations after checking `gh auth status`.
 - Preserve unrelated work and stage only task-owned paths before Nix builds.
 
 ## Related documents
 
 [CLI](CLI.md), [server](SERVER.md), [testing](TESTING.md),
+[releasing](RELEASING.md),
 [performance](PERFORMANCE.md), [benchmarking](BENCHMARKS.md) and
 [models](models/README.md).
 

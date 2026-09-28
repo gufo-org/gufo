@@ -62,6 +62,9 @@ quality; successful optimizations become the default, without extra switches.
 - Keep model code, tests, tools and numerical contracts with their model.
 - Use one canonical long option and backend name per behavior; avoid aliases.
 - Use `gh` for GitHub operations after checking `gh auth status`.
-- Follow Conventional Commits with a single-line message.
+- Follow Conventional Commits with a single-line message. Title pull requests
+  according to [the release policy](docs/RELEASING.md); squash merging retains
+  that title on `main`. Mark breaking changes with `!` in the title, and leave
+  version and changelog updates to the release workflow.
 - Prefer `jj` when available (`jj version`); otherwise use Git.
 - Follow the user's remote workflow and preserve unrelated work.
