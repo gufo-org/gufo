@@ -947,6 +947,11 @@ int RunQwen38FlashNextBenchmark(
     return 1;
   }
   PrintModelLoadTime(model_load_start);
+  if (rope_scaling) {
+    std::cout << "[YaRN]: factor=" << rope_scaling->factor
+              << " original_context=" << qwen4exp_native_context
+              << " context=" << required_context << '\n';
+  }
 
   // Repeat a fixed token pattern for reproducible timing. It uses far fewer
   // distinct PLE rows than varied requests.

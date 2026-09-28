@@ -3087,13 +3087,6 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     // below the artifact's native context leaves it off.
     const auto rope_scaling = models::qwen38_flash_next::RopeScalingForContext(
         max_context, qwen4exp_native_context);
-    if (rope_scaling) {
-      Logger::Info(
-          "loader",
-          "event=yarn factor=" + std::to_string(rope_scaling->factor) +
-              " original_context=" + std::to_string(qwen4exp_native_context) +
-              " context=" + std::to_string(max_context));
-    }
     // The model owns prefill geometry for both bulk and scheduled requests.
     auto model = models::qwen38_flash_next::Model::Load(
         model_path,
@@ -3114,6 +3107,13 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error,
                "Failed to create Qwen3.8-Flash-Next model: " + load_error);
       return false;
+    }
+    if (rope_scaling) {
+      Logger::Info(
+          "loader",
+          "event=yarn factor=" + std::to_string(rope_scaling->factor) +
+              " original_context=" + std::to_string(qwen4exp_native_context) +
+              " context=" + std::to_string(max_context));
     }
     if (DiskCacheEnabled(resolved_disk_cache_config) &&
         resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
