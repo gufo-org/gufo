@@ -16,13 +16,21 @@
     let
       # Strix Halo is a Linux x86-64-only target (see README non-goals).
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" ];
-      version = self.shortRev or self.dirtyShortRev or "dirty";
+      releaseVersion =
+        let
+          value = builtins.replaceStrings [ "\n" "\r" ] [ "" "" ] (
+            builtins.readFile ./version.txt
+          );
+        in
+        assert builtins.match "[0-9]+\\.[0-9]+\\.[0-9]+" value != null;
+        value;
+      revision = self.shortRev or self.dirtyShortRev or "dirty";
 
       pkgs = forAllSystems (system: import nixpkgs { inherit system; });
 
       gufoPackages = forAllSystems (
         system:
-        pkgs.${system}.callPackage ./.devops/nix/scope.nix { inherit version; }
+        pkgs.${system}.callPackage ./.devops/nix/scope.nix { inherit revision; }
       );
 
       llamaReferences = forAllSystems (
@@ -84,6 +92,7 @@
     in
     {
       lib = {
+        inherit releaseVersion revision;
         mkGufoServe =
           {
             pkgs ? null,
@@ -116,6 +125,9 @@
         in
         {
           default = base;
+          # Official artifacts select this output from a tagged source. The
+          # default package remains visibly developmental on moving branches.
+          release = base.override { inherit releaseVersion; };
           # Optional benchmark packages: excluded from Gufo, the default
           # development shell and hosted checks.
           ds4-reference = pkgs.${system}.callPackage ./.devops/nix/ds4-reference.nix { };

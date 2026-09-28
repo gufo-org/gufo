@@ -77,3 +77,10 @@ Merging the release pull request declares the version ready. The next scheduled
 or manually dispatched release workflow creates the immutable tag and GitHub
 Release. Do not edit the version, changelog or release manifest in an ordinary
 feature or fix pull request.
+
+Nix keeps release identity and source identity separate. The default package is
+a development build and reports `gufo version development (<revision>)`.
+Official artifacts build the `release` package from a `vX.Y.Z` tag and report
+`gufo version X.Y.Z (<revision>)`. Both package outputs retain the exact flake
+revision; only the explicitly selected release output reads the semantic version
+from `version.txt`.

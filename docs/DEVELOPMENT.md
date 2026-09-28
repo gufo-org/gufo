@@ -72,7 +72,8 @@ tree), `deepseek-gpu` and `qwen-gpu-kernel-oracle`. Definitions live in
 | `GUFO_BUILD_TOOLS` | `OFF` | Build kernel benchmarks and tuning executables |
 | `GUFO_ENABLE_WARNINGS` | `ON` | Compiler warnings |
 | `GUFO_ENABLE_SANITIZERS` | `OFF` | AddressSanitizer and UndefinedBehaviorSanitizer |
-| `GUFO_VERSION` | `development` | Reported build revision |
+| `GUFO_RELEASE_VERSION` | `development` | Reported semantic release version |
+| `GUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
 | `GUFO_FFMPEG_EXECUTABLE`, `GUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
 
 C++20 is required; HIP kernels compile from the same tree, and the adapted

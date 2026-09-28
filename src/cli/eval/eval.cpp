@@ -25,8 +25,8 @@
 #include "src/eval/extract.hpp"
 #include "src/eval/http_client.hpp"
 
-#ifndef GUFO_VERSION
-#define GUFO_VERSION "development"
+#ifndef GUFO_REVISION
+#define GUFO_REVISION "unknown"
 #endif
 #ifndef GUFO_EVAL_SOURCE_DATA
 #define GUFO_EVAL_SOURCE_DATA \
@@ -391,11 +391,11 @@ Value OptionalIdentity(std::string value, std::string_view base_url,
 }
 
 std::string EvaluatorState() {
-  const std::string version = GUFO_VERSION;
-  if (version == "development") {
+  const std::string revision = GUFO_REVISION;
+  if (revision == "unknown") {
     return "unknown";
   }
-  return version.find("dirty") == std::string::npos ? "clean" : "dirty";
+  return revision.find("dirty") == std::string::npos ? "clean" : "dirty";
 }
 
 int Execute(const EvalOptions& options) {
@@ -451,7 +451,7 @@ int Execute(const EvalOptions& options) {
   report["benchmark_source"] = std::move(source);
 
   Value run = Value::object();
-  run["evaluator_commit"] = GUFO_VERSION;
+  run["evaluator_commit"] = GUFO_REVISION;
   run["evaluator_worktree"] = EvaluatorState();
   run["command"] = SanitizedCommand(options);
   run["questions"] = options.questions;
