@@ -212,7 +212,7 @@ def image_content(color):
     }
 
 
-def check_sampling_defaults(client, model, checks, preset):
+def check_sampling_defaults(client, model, checks, preset, overrides, vision=False):
     """Omission and explicit presets must replay within each execution mode."""
     def signature(value):
         return value["text"].strip(), value["reasoning"].strip(), value["finish"]
@@ -222,6 +222,25 @@ def check_sampling_defaults(client, model, checks, preset):
         print(f"CHECK {name}", file=sys.stderr, flush=True)
         return result
 
+    if not overrides:
+        # A default server must use the model's recommended thinking mode,
+        # including the same effort instructions as an explicit request.
+        effort = "high" if preset == "deepseek4" else "xhigh"
+        request = {
+            "model": model, "seed": 73, "max_completion_tokens": 8,
+            "messages": [{"role": "user", "content": "What is two plus two?"}],
+            "extra_body": {"cache_prompt": False},
+        }
+        default = chat_result(client, request)
+        explicit = chat_result(client, {**request, "reasoning_effort": effort}, True)
+        assert default["reasoning"], default
+        assert signature(default) == signature(explicit), (default, explicit)
+        record("default_thinking_effort", default)
+        if preset == "deepseek4":
+            xhigh = chat_result(client, {**request, "reasoning_effort": "xhigh"})
+            assert signature(xhigh) == signature(explicit), (xhigh, explicit)
+            record("deepseek_xhigh_maps_high", xhigh)
+
     for thinking in (False, True):
         qwen_off = preset == "qwen38" and not thinking
         expected = {
@@ -229,9 +248,14 @@ def check_sampling_defaults(client, model, checks, preset):
             "top_p": .8 if qwen_off else .95,
             "presence_penalty": 1.5 if qwen_off else 0.,
             "frequency_penalty": 0.,
+            "seed": 73,
         }
         native = {"top_k": 20 if preset == "qwen38" else 0,
-                  "min_p": 0., "repeat_penalty": 1.}
+                  "min_p": 0., "min_keep": 0, "repeat_penalty": 1.,
+                  "repeat_last_n": 64}
+        assert overrides.keys() <= (expected.keys() | native.keys()), overrides
+        expected.update({key: value for key, value in overrides.items() if key in expected})
+        native.update({key: value for key, value in overrides.items() if key in native})
         request = {
             "model": model, "seed": 73, "max_completion_tokens": 8,
             "messages": [{"role": "user", "content":
@@ -239,13 +263,17 @@ def check_sampling_defaults(client, model, checks, preset):
             "extra_body": {"cache_prompt": False, "chat_template_kwargs": {
                 "enable_thinking": thinking}},
         }
+        if "seed" in overrides:
+            del request["seed"]
         explicit = {**request, **expected,
                     "extra_body": {**request["extra_body"], **native}}
         inherited = chat_result(client, request)
         supplied = chat_result(client, explicit, True)
         assert signature(inherited) == signature(supplied), (inherited, supplied)
         nullable = chat_result(client, {**request, "temperature": None,
-                                       "top_p": None, "presence_penalty": None})
+                                       "top_p": None, "presence_penalty": None,
+                                       "frequency_penalty": None,
+                                       **({"seed": None} if "seed" in overrides else {})})
         assert signature(nullable) == signature(inherited), (nullable, inherited)
         record(f"sampling_preset_thinking{thinking}", inherited)
 
@@ -257,12 +285,23 @@ def check_sampling_defaults(client, model, checks, preset):
             ("min_p", {"temperature": 1.3, "top_p": 1.}, {"top_k": 0, "min_p": .1}),
             ("penalties", {"frequency_penalty": .3, "presence_penalty": .4},
              {"repeat_penalty": 1.1, "repeat_last_n": 16}),
+            ("greedy_penalties", {"temperature": 0, "frequency_penalty": .3,
+                                  "presence_penalty": .4},
+             {"repeat_penalty": 1.1, "repeat_last_n": 16}),
         ):
             body = {**request, **override, "extra_body": {**request["extra_body"], **extra}}
             full = {**explicit, **override, "extra_body": {**explicit["extra_body"], **extra}}
             actual, reference = chat_result(client, body), chat_result(client, full, True)
             assert signature(actual) == signature(reference), (label, actual, reference)
             record(f"sampling_{label}_thinking{thinking}", actual)
+
+        # Reusing model state must not restore the preceding request's sampler.
+        cached = chat_result(client, {
+            **request, "extra_body": {**request["extra_body"], "cache_prompt": True}}, True)
+        assert signature(cached) == signature(inherited), (cached, inherited)
+        assert cached["usage"]["cached_tokens"] > 0, cached
+        assert cached["usage"]["gufo"]["prefill_tokens"] == 0, cached
+        record(f"sampling_cached_preset_thinking{thinking}", cached)
 
         # Distinct request-owned samplers must replay when admitted together.
         peers = [request, {**request, "seed": 91, "temperature": .4}]
@@ -272,6 +311,60 @@ def check_sampling_defaults(client, model, checks, preset):
         first, second = batch(), batch()
         assert list(map(signature, first)) == list(map(signature, second)), (first, second)
         record(f"sampling_concurrent_thinking{thinking}", first)
+
+        # Responses must select its preset after applying reasoning.effort.
+        response_request = {
+            "model": model, "input": request["messages"][0]["content"],
+            "reasoning": {"effort": "low" if thinking else "none"},
+            "max_output_tokens": 8, "store": False,
+            "extra_body": {"cache_prompt": False},
+        }
+        if "seed" not in overrides:
+            response_request["extra_body"]["seed"] = 73
+        explicit_response = {
+            **response_request,
+            "temperature": expected["temperature"], "top_p": expected["top_p"],
+            "extra_body": {
+                **response_request["extra_body"], **native,
+                **{key: expected[key] for key in ("seed", "presence_penalty", "frequency_penalty")},
+            },
+        }
+
+        def response_signature(response):
+            check_response(response, thinking)
+            return response.status, [
+                item.model_dump(exclude={"id", "status"}, exclude_none=True)
+                for item in response.output
+            ]
+
+        omitted = client.responses.create(**response_request)
+        with client.responses.stream(**explicit_response) as stream:
+            events = list(stream)
+        check_events(events, thinking)
+        supplied = events[-1].response
+        assert response_signature(omitted) == response_signature(supplied), (omitted, supplied)
+        record(f"responses_preset_thinking{thinking}", check_response(omitted, thinking))
+
+        # Exercise grammar+default resolution without requiring a long answer.
+        schema = {"type": "object", "properties": {"ok": {"type": "boolean"}},
+                  "required": ["ok"], "additionalProperties": False}
+        constrained = {
+            **request, "max_completion_tokens": 32 if not thinking else 2,
+            "messages": [{"role": "user", "content": "Return a JSON object with ok true."}],
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "sampling_defaults", "strict": True, "schema": schema}},
+        }
+        if vision:
+            constrained["messages"][0]["content"] = [
+                image_content("red"), {"type": "text", "text": "Return a JSON object with ok true."}]
+        actual = chat_result(client, constrained, True)
+        if thinking:
+            assert actual["finish"] == "length" and actual["usage"]["completion_tokens"] == 2, actual
+        else:
+            from jsonschema import Draft202012Validator
+            assert actual["finish"] == "stop", actual
+            Draft202012Validator(schema).validate(json.loads(actual["text"]))
+        record(f"sampling_schema_thinking{thinking}", actual)
 
 
 def check_conversations(client, model, checks, vision=False):
@@ -975,10 +1068,14 @@ def main():
                         help="Add image checks; the server needs its matching --mmproj")
     parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"),
                         help="Expected text defaults; required for sampling-defaults suite")
+    parser.add_argument("--sampling-overrides", type=json.loads, default={},
+                        help="JSON object of explicit server sampling CLI values")
     args = parser.parse_args()
     if args.suite == "sampling-defaults" and not args.sampling_preset:
         parser.error("--sampling-preset is required for sampling-defaults")
-    if args.vision and args.suite not in ("all", "conversation", "structured", "structured-limits"):
+    if not isinstance(args.sampling_overrides, dict):
+        parser.error("--sampling-overrides must be a JSON object")
+    if args.vision and args.suite not in ("all", "conversation", "structured", "structured-limits", "sampling-defaults"):
         parser.error("--vision requires a conversation or structured-output suite")
     url = urlsplit(args.base_url)
     if (url.scheme != "http" or url.hostname not in ("127.0.0.1", "::1")
@@ -1016,7 +1113,8 @@ def main():
             print(json.dumps(report, indent=2))
             return
         if args.suite == "sampling-defaults":
-            check_sampling_defaults(client, args.model, checks, args.sampling_preset)
+            check_sampling_defaults(client, args.model, checks, args.sampling_preset,
+                                    args.sampling_overrides, args.vision)
             print(json.dumps(report, indent=2))
             return
         if args.suite in ("all", "stops"):

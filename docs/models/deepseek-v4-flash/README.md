@@ -30,6 +30,11 @@ It verifies proposals against the target, commits only accepted prefixes and
 keeps sampling/controller state private to each request. Speed depends on
 acceptance and context; the support model is optional.
 
+Thinking defaults to enabled with `high` effort, matching the
+[DeepSeek API](https://api-docs.deepseek.com/guides/thinking_mode).
+Use `--think off` for non-thinking chat or `--reasoning-effort low` for
+lighter reasoning.
+
 The server exposes OpenAI-compatible chat, streaming, tools, reasoning controls,
 and RAM/disk continuation caches. See [server configuration](../../SERVER.md)
 and [CLI options](../../CLI.md). Images are unsupported.

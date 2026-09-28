@@ -972,6 +972,15 @@ void TestModelSamplingDefaults() {
   FakeBackend backend;
   backend.defaults.model = TextModelPreset::kQwen38;
   backend.defaults.supplied = {};
+  auto constraint = std::make_shared<gufo::sampling::TokenConstraint>();
+  constraint->grammar = gufo::sampling::JsonConstraint::Object();
+  constraint->vocabulary =
+      std::make_shared<gufo::sampling::ConstraintVocabulary>(
+          2, [](std::uint32_t id) {
+            return gufo::sampling::ConstraintVocabulary::Piece{
+                .text = id == 0 ? "{}" : "", .stop = id == 1};
+          });
+  backend.defaults.sampling.constraint = constraint;
   auto send = [&](std::string fields) {
     const auto response = gufo::server::HandleOpenAiChat(
         Request("{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\","
@@ -979,6 +988,9 @@ void TestModelSamplingDefaults() {
                 fields + "}"),
         backend);
     Expect(response.status == 200, "Model default request accepted");
+    Expect(backend.last_sampling.constraint ==
+               backend.defaults.sampling.constraint,
+           "Model presets preserve output constraints");
     return backend.last_sampling;
   };
   auto config = send("");
@@ -1020,6 +1032,10 @@ void TestModelSamplingDefaults() {
                config.repeat_penalty == 1.0F,
            "DeepSeek agentic defaults do not depend on reasoning");
   }
+  backend.defaults.supplied = gufo::sampling::SamplingOverrides::All();
+  config = send("");
+  Expect(config.constraint == backend.defaults.sampling.constraint,
+         "Explicit public-API configuration preserves its output constraint");
 }
 
 void TestCompleteToolDefinitionsReachTemplate() {

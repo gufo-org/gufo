@@ -357,6 +357,31 @@ def request_with(fake, **overrides):
         serving_bench.urllib.request.urlopen = original_urlopen
 
 
+def neutral_benchmark(request, timeout):
+    body = json.loads(request.data)
+    check(body["temperature"] == 0 and body["top_p"] == 1
+          and body["frequency_penalty"] == 0 and body["presence_penalty"] == 0
+          and body["repeat_penalty"] == 1 and body["top_k"] == 0
+          and body["min_p"] == 0,
+          "greedy benchmarks do not inherit model or thinking sampling defaults")
+    return fake_urlopen(request, timeout)
+
+
+request_with(neutral_benchmark)
+
+
+def overridden_benchmark(request, timeout):
+    body = json.loads(request.data)
+    check(body["temperature"] == .7 and body["presence_penalty"] == .5
+          and body["top_k"] == 7 and body["repeat_penalty"] == 1,
+          "explicit benchmark sampling overrides remain authoritative")
+    return fake_urlopen(request, timeout)
+
+
+request_with(overridden_benchmark,
+             extra_body={"temperature": .7, "presence_penalty": .5, "top_k": 7})
+
+
 for api_key in ("", "benchmark-test-secret"):
     with patch.dict(os.environ, {"OPENAI_API_KEY": api_key}):
         expected = f"Bearer {api_key}" if api_key else None

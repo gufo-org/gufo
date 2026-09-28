@@ -1762,20 +1762,15 @@ public:
         });
       }
     }
-    auto tokens = DeepSeekRunnerTokens(model_->EncodeChat(
-        messages, tools,
-        models::deepseek_v4_flash::ChatTemplateOptions{
-            .enable_thinking = request.reasoning.enabled.value_or(false),
-            .reasoning_effort =
-                request.reasoning.effort.value_or(ReasoningEffort::kLow),
-            .preserve_thinking =
-                request.reasoning.preserve_thinking.value_or(false),
-            .tools_present =
-                !request.tools.empty() &&
-                request.tool_choice != ChatRequest::ToolChoice::kNone,
-            .require_tool_call =
-                request.tool_choice == ChatRequest::ToolChoice::kRequired,
-        }));
+    auto options = models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
+        request.reasoning);
+    options.tools_present =
+        !request.tools.empty() &&
+        request.tool_choice != ChatRequest::ToolChoice::kNone;
+    options.require_tool_call =
+        request.tool_choice == ChatRequest::ToolChoice::kRequired;
+    auto tokens =
+        DeepSeekRunnerTokens(model_->EncodeChat(messages, tools, options));
     if (tokens.empty()) {
       return std::nullopt;
     }
@@ -1784,7 +1779,9 @@ public:
 
   [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
       const ChatRequest& request) const override {
-    return request.reasoning.enabled.value_or(false)
+    return models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
+               request.reasoning)
+                   .enable_thinking
                ? TextGenerationBackend::InitialOutputState::kReasoning
                : TextGenerationBackend::InitialOutputState::kContent;
   }

@@ -506,7 +506,7 @@ struct CompatibilityAllowances {
 std::optional<HttpResponse> ReadCompatibilityOptions(
     const json::Value& body, TextGenerationBackend& backend,
     std::string_view token_field, std::size_t* max_tokens,
-    sampling::SamplingConfig* sampling_config,
+    sampling::SamplingConfig* sampling_config, std::optional<bool> thinking,
     const CompatibilityAllowances& allowances = {}) {
   if (!body.is_object())
     return InvalidCompatibilityRequest("request body must be an object");
@@ -579,9 +579,8 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
           std::size_t{std::numeric_limits<std::uint32_t>::max()}, max_tokens)) {
     return InvalidCompatibilityRequest(error->message);
   }
-  if (const auto error = ParseSamplingConfig(
-          body, defaults.Resolve(backend.reasoning_defaults().enabled),
-          sampling_config)) {
+  if (const auto error = ParseSamplingConfig(body, defaults.Resolve(thinking),
+                                             sampling_config)) {
     return Err(400, "Bad Request", error->message.c_str(),
                "invalid_request_error", error->code.c_str());
   }
@@ -676,6 +675,7 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
                                             &sampling_config,
+                                            b.reasoning_defaults().enabled,
                                             {
                                                 .stop_field = "stop",
                                                 .stream = true,
@@ -857,10 +857,15 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
                "parse_error");
   }
 
+  ChatRequest chat;
+  chat.reasoning = b.reasoning_defaults();
+  if (auto error = ParseOpenAiResponseControls(body, &chat))
+    return std::move(*error);
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(
           body, b, "max_output_tokens", &max_tokens, &sampling_config,
+          chat.reasoning.enabled,
           {.stream = true, .response_controls = true})) {
     return std::move(*error);
   }
@@ -883,11 +888,8 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
         "use /v1/chat/completions for tools");
   }
 
-  ChatRequest chat{std::move(messages)};
+  chat.messages = std::move(messages);
   chat.client_id = req.client_id;
-  chat.reasoning = b.reasoning_defaults();
-  if (auto error = ParseOpenAiResponseControls(body, &chat))
-    return std::move(*error);
   return CreateOpenAiResponse(
       req, b, chat, max_tokens, sampling_config,
       body.find("stream") != nullptr && body.find("stream")->as_bool());
@@ -911,9 +913,9 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error = ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                            &sampling_config,
-                                            {.stop_field = "stop_sequences"})) {
+  if (auto error = ReadCompatibilityOptions(
+          body, b, "max_tokens", &max_tokens, &sampling_config,
+          b.reasoning_defaults().enabled, {.stop_field = "stop_sequences"})) {
     return std::move(*error);
   }
 
@@ -990,9 +992,9 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error =
-          ReadCompatibilityOptions(body, b, "n_predict", &max_tokens,
-                                   &sampling_config, {.stop_field = "stop"})) {
+  if (auto error = ReadCompatibilityOptions(
+          body, b, "n_predict", &max_tokens, &sampling_config,
+          b.reasoning_defaults().enabled, {.stop_field = "stop"})) {
     return std::move(*error);
   }
 

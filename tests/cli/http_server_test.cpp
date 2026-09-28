@@ -798,6 +798,57 @@ void TestCompatibilityThinkingDefaults() {
   }
 }
 
+void TestResponseSamplingDefaults() {
+  RunningServer server;
+  using gufo::sampling::TextModelPreset;
+  for (const auto model :
+       {TextModelPreset::kQwen38, TextModelPreset::kDeepSeekV4Flash}) {
+    server.backend->defaults.model = model;
+    for (const bool server_thinking : {false, true}) {
+      server.backend->reasoning.enabled = server_thinking;
+      for (const char* effort :
+           {"null", "\"none\"", "\"minimal\"", "\"low\"", "\"medium\"",
+            "\"high\"", "\"xhigh\"", "\"max\""}) {
+        auto body = gufo::json::parse(
+            R"({"input":"hello","max_output_tokens":1,"temperature":null,"top_p":null,"presence_penalty":null,"reasoning":{},"text":{"format":{"type":"json_object"}}})");
+        body["reasoning"]["effort"] = gufo::json::parse(effort);
+        const bool thinking = std::string_view(effort) == "null"
+                                  ? server_thinking
+                                  : std::string_view(effort) != "\"none\"";
+        const bool qwen_off = model == TextModelPreset::kQwen38 && !thinking;
+        server.backend->defaults.supplied = {};
+        ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+        auto call = server.backend->LastCall();
+        assert(call.chat.reasoning.enabled == thinking);
+        assert(call.chat.response_format);
+        assert(call.sampling.temperature == (qwen_off ? 0.7F : 1.0F));
+        assert(call.sampling.top_p == (qwen_off ? 0.8F : 0.95F));
+        assert(call.sampling.presence_penalty == (qwen_off ? 1.5F : 0.0F));
+        assert(call.sampling.top_k ==
+               (model == TextModelPreset::kQwen38 ? 20 : 0));
+        // Explicit CLI values survive reasoning changes and SDK nulls.
+        server.backend->defaults.sampling.temperature = 0.25F;
+        server.backend->defaults.sampling.top_k = 0;
+        server.backend->defaults.supplied = {.temperature = true,
+                                             .top_k = true};
+        ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+        call = server.backend->LastCall();
+        assert(call.sampling.temperature == 0.25F && call.sampling.top_k == 0);
+        assert(call.sampling.top_p == (qwen_off ? 0.8F : 0.95F));
+        // Per-request zero overrides both CLI and model values, also streamed.
+        body["temperature"] = 0;
+        body["presence_penalty"] = 0;
+        body["top_k"] = 3;
+        body["stream"] = true;
+        ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+        call = server.backend->LastCall();
+        assert(call.sampling.temperature == 0 && call.sampling.top_k == 3);
+        assert(call.sampling.presence_penalty == 0);
+      }
+    }
+  }
+}
+
 void TestStreamingFraming() {
   RunningServer server;
   const std::string chunks = std::string("3\r\na\0b\r\n", 8) + "3\r\nend\r\n";
@@ -872,6 +923,7 @@ int main() {
   TestRawCompletionStreaming();
   TestCompatibilityStopSequences();
   TestCompatibilityThinkingDefaults();
+  TestResponseSamplingDefaults();
   TestCompatibilityUtf8();
   TestPeerDisconnect();
   TestStreamingFraming();

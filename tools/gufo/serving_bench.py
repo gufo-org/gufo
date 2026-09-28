@@ -309,6 +309,16 @@ def _http_error(exception: urllib.error.HTTPError) -> RuntimeError:
     )
 
 
+def benchmark_sampling(temperature: float, endpoint_profile: str) -> dict[str, Any]:
+    """Keep measured workloads independent of a server's conversational preset."""
+    config = {"temperature": temperature, "top_p": 1.0,
+              "frequency_penalty": 0.0, "presence_penalty": 0.0}
+    if endpoint_profile == "gufo":
+        config.update(top_k=0, min_p=0.0, min_keep=0,
+                      repeat_penalty=1.0, repeat_last_n=64)
+    return config
+
+
 def run_request(
     *,
     base_url: str,
@@ -337,7 +347,7 @@ def run_request(
         # `messages` overrides the single-turn prompt for cached-prefix workloads.
         "messages": messages or [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": temperature,
+        **benchmark_sampling(temperature, endpoint_profile),
         "stream": True,
         "stream_options": {"include_usage": True},
     }
