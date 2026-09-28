@@ -46,9 +46,10 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
-  /// Internal YaRN override applied to the artifact configuration before
-  /// upload. Empty keeps the artifact's own setting, which is always off:
-  /// no GGUF metadata key sets it today.
+  /// Static YaRN scaling, derived by the caller (serve, bench) from the
+  /// requested context via `RopeScalingForContext`. Empty leaves the
+  /// artifact's own setting, which is always off: no GGUF metadata key sets
+  /// it today.
   std::optional<RopeScaling> rope_scaling{};
 };
 

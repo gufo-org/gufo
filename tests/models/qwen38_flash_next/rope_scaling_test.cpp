@@ -145,6 +145,60 @@ void CheckPositionPolicy() {
   std::cout << "position policy strings pinned\n";
 }
 
+// Serve and bench derive YaRN from the requested --context (Qwen's own
+// advice: factor = typical context / 262,144); no GGUF key sets it.
+void CheckContextDerivation() {
+  Require(!qfn::RopeScalingForContext(262144, 262144).has_value(),
+          "native context must not enable YaRN");
+  Require(!qfn::RopeScalingForContext(32768, 262144).has_value(), "short");
+  const auto s = qfn::RopeScalingForContext(409600, 262144);
+  Require(s && s->factor == 1.5625F && s->original_context == 262144,
+          "409600 must derive factor 1.5625");
+  const auto exact = qfn::RopeScalingForContext(655360, 262144);
+  Require(exact && exact->factor == 2.5F && exact->original_context == 262144,
+          "655360 must derive the exact factor 2.5");
+  // Not an exact multiple of the native context: the float ratio can round
+  // down and floor ScaledContextLength below the request, which the
+  // nextafter bump in RopeScalingForContext must correct. For the shipped
+  // power-of-two native context (2^18) requested/native is always exactly
+  // representable in float below kMaxRopePositions, so this case alone does
+  // NOT prove the bump fires (see the non-power-of-two case below for that).
+  const auto rounded = qfn::RopeScalingForContext(300001, 262144);
+  Require(rounded.has_value(), "300001 over native must derive a scaling");
+  Require(qfn::ScaledContextLength(*rounded, 262144) >= 300001,
+          "a non-exact request must round its factor up, not down");
+  // A non-power-of-two native context: the initial float ratio is provably
+  // not exact, so the nextafter bump must actually run at least once. This
+  // is the case that exercises the bump the 262,144-native cases above
+  // cannot.
+  const float naive_factor = static_cast<float>(static_cast<double>(300007) /
+                                                static_cast<double>(100003));
+  const auto bumped = qfn::RopeScalingForContext(300007, 100003);
+  Require(bumped.has_value(), "non-power-of-two native must derive a scaling");
+  Require(qfn::ScaledContextLength(*bumped, 100003) >= 300007,
+          "a non-power-of-two request must round its factor up to cover it");
+  Require(bumped->factor > naive_factor,
+          "the bump must have actually raised the factor past the naive "
+          "ratio, not just returned it unchanged");
+  // A request past kMaxRopePositions (2^24): the loop must terminate rather
+  // than hang, and ScaledContextLength is hard-clamped at kMaxRopePositions
+  // so it can never reach `requested` here -- the derivation returns
+  // anyway, leaving Model::Load's own context check to reject the request.
+  const auto past_max = qfn::RopeScalingForContext((1U << 24) + 1, 262144);
+  Require(past_max.has_value(),
+          "a request past kMaxRopePositions must still return");
+  Require(qfn::ScaledContextLength(*past_max, 262144) < (1U << 24) + 1,
+          "ScaledContextLength must stay clamped below a request past "
+          "kMaxRopePositions, proving the loop terminated instead of "
+          "spinning toward it");
+  // native == 0 (no native context could be read) must not divide by zero
+  // and must not hang; it leaves YaRN off for the caller's own check.
+  Require(!qfn::RopeScalingForContext(300000, 0).has_value(),
+          "native == 0 must return nullopt, not attempt to derive a factor");
+  std::cout << "context-derived YaRN scaling covers exact, rounded, "
+               "non-power-of-two, out-of-range and native == 0 requests\n";
+}
+
 }  // namespace
 
 int main() {
@@ -154,6 +208,7 @@ int main() {
     CheckInvertedCorrectionRange();
     CheckNormalizedRopeScaling();
     CheckPositionPolicy();
+    CheckContextDerivation();
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';
     return 1;

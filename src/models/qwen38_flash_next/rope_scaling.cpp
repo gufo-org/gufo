@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <locale>
 #include <numbers>
+#include <optional>
 #include <sstream>
 
 namespace gufo::models::qwen38_flash_next {
@@ -41,6 +43,46 @@ std::uint32_t ScaledContextLength(const RopeScaling& scaling,
   const auto bounded = static_cast<std::uint32_t>(
       std::min(scaled, static_cast<double>(kMaxRopePositions)));
   return std::max(native_context, bounded);
+}
+
+std::optional<RopeScaling> RopeScalingForContext(
+    std::uint32_t requested, std::uint32_t native) noexcept {
+  // native == 0 means the caller could not read a native context (e.g. a
+  // GGUF missing qwen4exp.context_length); dividing by it would be +-inf.
+  // Leave YaRN off and let the caller's existing "context exceeds the
+  // model's N tokens" check in Model::Load reject the request instead.
+  if (native == 0 || requested <= native)
+    return std::nullopt;
+  RopeScaling scaling{
+      .factor = static_cast<float>(static_cast<double>(requested) /
+                                   static_cast<double>(native)),
+      .original_context = native,
+  };
+  // The float ratio can round down from the exact double value, which would
+  // floor `ScaledContextLength` one token below `requested`. Nudge the
+  // factor up by the smallest float steps until the scaled ceiling covers
+  // the request. This cannot fire for the shipped 262,144 (2^18) native
+  // context within the valid request range: requested / 262144 is exactly
+  // representable in float for every requested < 2^24 (kMaxRopePositions),
+  // so the loop runs zero iterations there (e.g. 409600/262144 -> exactly
+  // 1.5625F, 655360/262144 -> exactly 2.5F). It exists for non-power-of-two
+  // native contexts, where the ratio is not exact and the loop does fire.
+  //
+  // Bounded so a pathological input (requested past kMaxRopePositions, or a
+  // native that makes the ratio's float rounding land exactly on an
+  // integer boundary) can never spin forever: `ScaledContextLength` itself
+  // hard-clamps at kMaxRopePositions, so once the scaled ceiling reaches
+  // that clamp, more factor is not going to move it and the loop must stop.
+  // Whatever scaling comes out the other end (possibly still short of
+  // `requested`, possibly rejected by ValidateRopeScaling for exceeding
+  // kMaxRopePositions) is left for the caller's own validation to reject.
+  while (std::isfinite(scaling.factor) &&
+         ScaledContextLength(scaling, native) < requested &&
+         ScaledContextLength(scaling, native) < kMaxRopePositions) {
+    scaling.factor =
+        std::nextafter(scaling.factor, std::numeric_limits<float>::infinity());
+  }
+  return scaling;
 }
 
 YarnRope MakeYarnRope(const RopeScaling& scaling, std::uint32_t rotary_dim,
