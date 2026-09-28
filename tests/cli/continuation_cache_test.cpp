@@ -1,11 +1,15 @@
 #include "src/cli/serve/continuation_cache.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string_view>
 #include <vector>
+
+#include "src/cli/serve/logging.hpp"
 
 namespace {
 
@@ -469,6 +473,92 @@ void TestEntryReplacementLogsRemovedSnapshot() {
          "entry replacement keeps exact aggregate accounting");
 }
 
+// The summarised cache lines stay at INFO/WARN; which candidate was rejected,
+// and by which guard, is only worth the bytes when the operator asked for it.
+void TestCacheCandidateDetailIsDebugTierOnly() {
+  const auto run = [](gufo::server::LogLevel level) {
+    std::vector<std::size_t> invalidations(1);
+    std::size_t next_id = 0;
+    const auto previous_level = gufo::server::Logger::Level();
+    gufo::server::Logger::SetLevel(level);
+    std::ostringstream output;
+    auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+    {
+      gufo::server::ContinuationCache cache(1, [&] {
+        return std::make_unique<FakeState>(next_id++, &invalidations);
+      });
+      const std::vector<gufo::server::ContinuationToken> retained{1, 2, 3};
+      const std::vector<gufo::server::ContinuationToken> diverged{9, 8, 7};
+      {
+        auto lease = cache.Acquire(retained);
+        lease.Commit(retained);
+      }
+      auto other = cache.Acquire(diverged);
+      Expect(!other.cache_hit(), "a different prompt cannot reuse the slot");
+    }
+    std::clog.rdbuf(previous_sink);
+    gufo::server::Logger::SetLevel(previous_level);
+    return output.str();
+  };
+
+  const auto quiet = run(gufo::server::LogLevel::kInfo);
+  Expect(quiet.find("event=candidate_skip") == std::string::npos,
+         "candidate detail is silent at the default level");
+  Expect(quiet.find("event=capture_evicts") == std::string::npos,
+         "eviction detail is silent at the default level");
+
+  const auto verbose = run(gufo::server::LogLevel::kDebug);
+  Expect(verbose.find("event=candidate_skip index=0 tokens=3 prompt_tokens=3 "
+                      "reason=token_prefix") != std::string::npos,
+         "debug tier names the rejected candidate and its failing guard");
+  Expect(verbose.find("event=capture_evicts index=0 tokens=3") !=
+             std::string::npos,
+         "debug tier names the checkpoint a capture overwrites");
+}
+
+// A waiter that finds every slot busy still reports why each candidate was
+// rejected: contention is exactly when that question gets asked, and the
+// records used to die with the poll iteration that collected them.
+void TestWaitingAcquireReportsCandidateSkips() {
+  std::vector<std::size_t> invalidations(1);
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); });
+  {
+    auto seed =
+        cache.Acquire(std::vector<gufo::server::ContinuationToken>{1, 2, 3});
+    seed.Commit({1, 2, 3});
+  }
+  auto busy =
+      cache.Acquire(std::vector<gufo::server::ContinuationToken>{1, 2, 3, 4});
+  Expect(busy.cache_hit(), "the sole slot is leased to a matching prompt");
+  // The lease clears the saved tokens in the live (non-snapshot) mode, so the
+  // waiter records the busy slot with zero checkpoint tokens.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds{200};
+  const auto previous_level = gufo::server::Logger::Level();
+  gufo::server::Logger::SetLevel(gufo::server::LogLevel::kDebug);
+  std::ostringstream output;
+  auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+  {
+    auto waiter = cache.Acquire(
+        std::vector<gufo::server::ContinuationToken>{9, 8, 7},
+        [&] { return std::chrono::steady_clock::now() >= deadline; });
+    Expect(!waiter, "the cancelled waiter never acquires the busy slot");
+  }
+  std::clog.rdbuf(previous_sink);
+  gufo::server::Logger::SetLevel(previous_level);
+  const std::string log = output.str();
+  Expect(log.find("event=candidate_skip index=0 tokens=0 prompt_tokens=3 "
+                  "reason=unavailable") != std::string::npos,
+         "a waiter names the guard that rejected the busy candidate");
+  std::size_t bursts = 0;
+  for (std::size_t at = log.find("event=candidate_skip");
+       at != std::string::npos; at = log.find("event=candidate_skip", at + 1)) {
+    ++bursts;
+  }
+  Expect(bursts == 1, "a long wait reports its first record set once");
+}
+
 }  // namespace
 
 void TestImageIdentityIsolation() {
@@ -611,6 +701,8 @@ int main() {
   TestAbandonedReservationIsReleased();
   TestReservationMismatchSkipsRetentionWithoutFailingCommit();
   TestEntryReplacementLogsRemovedSnapshot();
+  TestCacheCandidateDetailIsDebugTierOnly();
+  TestWaitingAcquireReportsCandidateSkips();
   std::cout << "All continuation cache tests passed\n";
   return 0;
 }

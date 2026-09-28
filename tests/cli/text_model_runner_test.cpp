@@ -1310,6 +1310,9 @@ void TestSnapshotCaptureFailureReleasesReservationAndKeepsRequestSuccessful() {
 }  // namespace
 
 int main() {
+  // The cache warning assertion in this binary matches the plain "[WARN]
+  // [cache]" text captured from a redirected sink; a TTY stderr tints it.
+  ::setenv("NO_COLOR", "1", 1);
   TestNewImageGetsAStableCheckpoint();
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();

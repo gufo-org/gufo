@@ -396,7 +396,7 @@ if (BUILD_TESTING)
   add_executable(continuation_cache_test
     tests/cli/continuation_cache_test.cpp
     src/cli/serve/continuation_cache.cpp)
-  target_link_libraries(continuation_cache_test PRIVATE gufo_core)
+  target_link_libraries(continuation_cache_test PRIVATE gufo_core gufo_logging)
   add_test(NAME continuation_cache_test COMMAND continuation_cache_test)
   set_tests_properties(continuation_cache_test PROPERTIES
     LABELS "cpu;server;cache;state;lifecycle")

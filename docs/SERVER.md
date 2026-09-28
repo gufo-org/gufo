@@ -822,6 +822,12 @@ The `debug` tier adds:
   that rejected it and the client, and `event=backpressure` once per stream
   naming which output budget refused a token (`request_buffer` or
   `total_buffer`) with the byte counts;
+- cache candidate detail behind the summarised lines: `event=candidate_skip`
+  gives the entry index, its token length and the first guard that failed
+  (`unavailable`, `input_identity`, `stable_prefix_boundary` or
+  `token_prefix`), and `event=capture_evicts` names the checkpoint a capture is
+  about to overwrite. A request that finds every slot busy emits its skip
+  records once, so a long wait does not repeat them on every 10ms poll.
 
 Loader phases stay at INFO: the weight-mapping and session-preallocation work is
 HIP-only code, so deeper sub-phases there need a GPU build to verify and are not

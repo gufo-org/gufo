@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/logging.hpp"
+
 namespace gufo::server {
 
 namespace {
@@ -305,6 +307,37 @@ ContinuationCache::Lease ContinuationCache::Acquire(
     return std::ranges::equal(
         identity, PrefixInputIdentity(input_identity, input_prefixes, count));
   };
+  // Sampled once per Acquire: re-reading the atomic on every candidate would
+  // cost more than the scan itself when the debug tier is off.
+  const bool debug_cache = Logger::Enabled(LogLevel::kDebug);
+  // Debug records are collected while the mutex is held and emitted after it
+  // is released: the timestamp and stderr write in Logger::Debug must not
+  // serialize every other Acquire() behind this one. The buffer is hoisted so
+  // a wait does not repeat the allocation under the mutex on every poll.
+  struct CandidateSkip {
+    std::size_t index;
+    std::size_t tokens;
+    std::string_view reason;
+  };
+  std::vector<CandidateSkip> skipped;
+  if (debug_cache) {
+    // `entries` is fixed once the cache is constructed, so the capacity can be
+    // reserved without the mutex.
+    skipped.reserve(impl_->entries.size());
+  }
+  // A wait reports its first non-empty record set once: the set is stable
+  // while every slot stays busy, and a long wait must not repeat it on every
+  // 10ms poll.
+  bool wait_reported = false;
+  const auto emit_candidate_skips = [&](const auto& records) {
+    for (const auto& skip : records) {
+      Logger::Debug("cache",
+                    "event=candidate_skip index=" + std::to_string(skip.index) +
+                        " tokens=" + std::to_string(skip.tokens) +
+                        " prompt_tokens=" + std::to_string(prompt.size()) +
+                        " reason=" + std::string(skip.reason));
+    }
+  };
   while (true) {
     std::unique_lock<std::mutex> lock(impl_->mutex);
 
@@ -328,12 +361,25 @@ ContinuationCache::Lease ContinuationCache::Acquire(
     };
     std::size_t source = no_entry;
     std::size_t cached_tokens = 0;
+    skipped.clear();
     for (std::size_t index = 0; reuse_prompt && index < impl_->entries.size();
          ++index) {
       const auto& entry = *impl_->entries[index];
-      if ((!impl_->snapshot_mode() && !entry.available) || !entry.valid ||
-          !matches_input(entry.input_identity, entry.tokens.size()) ||
-          !can_reuse(entry.tokens.size()) || !IsPrefix(entry.tokens, prompt)) {
+      // Evaluated in the original order so the first failing guard is also the
+      // reason reported under --log-level=debug.
+      std::string_view skip_reason;
+      if ((!impl_->snapshot_mode() && !entry.available) || !entry.valid)
+        skip_reason = "unavailable";
+      else if (!matches_input(entry.input_identity, entry.tokens.size()))
+        skip_reason = "input_identity";
+      else if (!can_reuse(entry.tokens.size()))
+        skip_reason = "stable_prefix_boundary";
+      else if (!IsPrefix(entry.tokens, prompt))
+        skip_reason = "token_prefix";
+      if (!skip_reason.empty()) {
+        if (debug_cache) {
+          skipped.push_back({index, entry.tokens.size(), skip_reason});
+        }
         continue;
       }
       if (source == no_entry || entry.tokens.size() > cached_tokens) {
@@ -387,6 +433,10 @@ ContinuationCache::Lease ContinuationCache::Acquire(
       }
     }
     std::size_t selected = live_hit ? live_source : source;
+    bool evicting = false;
+    std::size_t evict_index = 0;
+    std::size_t evict_tokens = 0;
+    std::size_t evict_stable_prefix_tokens = 0;
     if ((impl_->snapshot_mode() && !live_hit) || !cache_hit) {
       selected = no_entry;
       std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
@@ -396,6 +446,14 @@ ContinuationCache::Lease ContinuationCache::Acquire(
           selected = index;
           oldest = entry.state_last_used;
         }
+      }
+      if (debug_cache && selected != no_entry &&
+          impl_->entries[selected]->valid) {
+        const auto& slot = *impl_->entries[selected];
+        evicting = true;
+        evict_index = selected;
+        evict_tokens = slot.tokens.size();
+        evict_stable_prefix_tokens = slot.stable_prefix_tokens;
       }
     }
 
@@ -424,6 +482,22 @@ ContinuationCache::Lease ContinuationCache::Acquire(
       std::size_t restored_snapshot_bytes = 0;
       double restore_ms = 0.0;
       try {
+        // Still outside the mutex, but inside the guard: these lines allocate,
+        // and a failure here must restore `entry.available` rather than leak
+        // the slot every other request waits on.
+        if (debug_cache) {
+          emit_candidate_skips(skipped);
+          if (evicting) {
+            Logger::Debug(
+                "cache",
+                "event=capture_evicts index=" + std::to_string(evict_index) +
+                    " tokens=" + std::to_string(evict_tokens) +
+                    " stable_prefix_tokens=" +
+                    std::to_string(evict_stable_prefix_tokens) +
+                    " prompt_tokens=" + std::to_string(prompt.size()));
+          }
+        }
+
         if (needs_invalidation)
           entry.state->Invalidate();
         if (prepare_state)
@@ -470,6 +544,15 @@ ContinuationCache::Lease ContinuationCache::Acquire(
     lock.unlock();
     if (is_cancelled && is_cancelled()) {
       return {};
+    }
+    // No slot could be captured, so this scan's records are the only answer
+    // to "why was my checkpoint not reused?" — exactly the question contention
+    // raises. Emit them here instead of dropping them for the next poll;
+    // nothing is reserved yet, so a failure while formatting simply unwinds
+    // out of Acquire.
+    if (debug_cache && !wait_reported && !skipped.empty()) {
+      emit_candidate_skips(skipped);
+      wait_reported = true;
     }
     lock.lock();
     impl_->condition.wait_for(lock, kCancellationPollInterval);
