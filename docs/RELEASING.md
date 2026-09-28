@@ -64,3 +64,16 @@ and changelog updates.
 Git tags use `vX.Y.Z`. A released version is immutable. Development builds keep
 their exact Git revision so diagnostics can identify the source independently
 of the release version.
+
+## Release flow
+
+`version.txt` is the canonical release version. A daily GitHub workflow reads
+the Conventional Commit history after the latest release and opens or updates
+one release pull request. That pull request updates `version.txt`,
+`CHANGELOG.md` and the release manifest. It receives the same review and CI as
+any other change.
+
+Merging the release pull request declares the version ready. The next scheduled
+or manually dispatched release workflow creates the immutable tag and GitHub
+Release. Do not edit the version, changelog or release manifest in an ordinary
+feature or fix pull request.

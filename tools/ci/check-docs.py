@@ -17,6 +17,7 @@ from typing import Dict, List, Set, Tuple
 
 REQUIRED_DOC_FILES = [
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md",
