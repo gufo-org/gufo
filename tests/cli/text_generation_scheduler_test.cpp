@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 
 namespace {
@@ -1562,6 +1563,56 @@ void TestProgressLoggingIsOptInAndBounded() {
          "progress logging reports decode intervals and the final remainder");
 }
 
+void TestAdmissionLoggingIsDebugTierOnly() {
+  const auto run = [](gufo::server::LogLevel level) {
+    auto control = std::make_shared<FakeControl>();
+    control->block_advance_label = 1;
+    const auto previous_level = gufo::server::Logger::Level();
+    gufo::server::Logger::SetLevel(level);
+    std::ostringstream output;
+    auto* previous = std::clog.rdbuf(output.rdbuf());
+    bool rejected = false;
+    {
+      auto scheduler = MakeScheduler(control, 1, {},
+                                     TextSchedulerPolicy{
+                                         .max_pending_requests = 1,
+                                         .max_pending_requests_per_client = 1,
+                                     });
+      auto active = scheduler->Submit({1}, 4, 0.0F, {}, false,
+                                      ClientMetadata("active-client"));
+      control->WaitForAdvance(1);
+      auto queued = scheduler->Submit({2}, 1, 0.0F, {}, false,
+                                      ClientMetadata("queued-client"));
+      try {
+        (void)scheduler->Submit({3}, 1, 0.0F, {}, false,
+                                ClientMetadata("third-client"));
+      } catch (const TextGenerationError& error) {
+        rejected = error.code() == TextGenerationErrorCode::kQueueFull;
+      }
+      control->ReleaseAdvance();
+      (void)active.Wait();
+      (void)queued.Wait();
+    }
+    std::clog.rdbuf(previous);
+    gufo::server::Logger::SetLevel(previous_level);
+    Expect(rejected, "admission logging still rejects a full pending queue");
+    return output.str();
+  };
+
+  Expect(run(gufo::server::LogLevel::kInfo).find("event=admission") ==
+             std::string::npos,
+         "admission detail is silent at the default level");
+
+  const auto output = run(gufo::server::LogLevel::kDebug);
+  Expect(output.find("[DEBUG] [scheduler] event=admitted") != std::string::npos,
+         "debug tier records the admission decision");
+  Expect(output.find(" client_id=queued-client queued=1") != std::string::npos,
+         "admission detail reports the queue depth the request joined");
+  Expect(output.find("event=admission_refused reason=queue_full queued=1 "
+                     "limit=1 client_id=third-client") != std::string::npos,
+         "a refusal names the limit and the rejected client");
+}
+
 void TestIgnoreEosIsRequestScoped() {
   auto control = std::make_shared<FakeControl>();
   control->eos_after = 0;
@@ -1605,7 +1656,11 @@ void TestEmptyTokenIsPublished() {
 }
 
 int main() {
+  // Log assertions in this binary match the plain "[LEVEL] [component]" text
+  // captured from a redirected sink; a TTY stderr would tint the level tag.
+  ::setenv("NO_COLOR", "1", 1);
   TestProgressLoggingIsOptInAndBounded();
+  TestAdmissionLoggingIsDebugTierOnly();
   TestIgnoreEosIsRequestScoped();
   TestEmptyTokenIsPublished();
   TestStopSequenceChunkBoundaries();

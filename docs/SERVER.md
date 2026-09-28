@@ -817,15 +817,29 @@ The `debug` tier adds:
   `event=options` as the sole record of what was asked for;
 - completion logs for the polls that are quiet by default, and `event=received`
   for GET requests;
+- scheduler decisions: `event=admitted` with the pending queue depth and the
+  per-client depth the request joined, `event=admission_refused` naming the limit
+  that rejected it and the client, and `event=backpressure` once per stream
+  naming which output budget refused a token (`request_buffer` or
+  `total_buffer`) with the byte counts;
 
 Loader phases stay at INFO: the weight-mapping and session-preallocation work is
 HIP-only code, so deeper sub-phases there need a GPU build to verify and are not
 part of this tier.
 
+Prompt text, message bodies and API keys stay unlogged at every level, and debug
+lines use the same escaping and redaction as the rest of the log. Client
+identity is the exception: scheduler admission lines name a client by the peer
+address of its socket (`client_id=127.0.0.1` on the default loopback bind), so a
+public `--host` writes client IP addresses into the debug tier.
+
 Pass `--log-progress` to `gufo serve llm` to log each prefill chunk, each
 50-token decode boundary, and the final decode remainder. Each line includes the
 request ID, completed and total tokens, percentage, current speed and average
-speed. Speculative requests also include accepted and proposed drafts.
+speed. Speculative requests also include accepted and proposed drafts. Progress
+lines are INFO-tier: `--log-level=warn` or `--log-level=error` would discard
+them, so the server rejects that combination at startup instead of ignoring the
+flag.
 
 Text completion logs include stop/length/cancellation, queue and first-token
 latency, prefill/decode speed, execution width, memory/disk cache hits and reused
