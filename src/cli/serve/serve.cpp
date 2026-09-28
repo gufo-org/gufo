@@ -1327,7 +1327,8 @@ int RunServe(std::span<const char* const> args) {
     if (tp_world_size == 2 && tp_rank == 1) {
       std::string worker_error;
       if (!backend->run_worker(&worker_error)) {
-        std::cerr << "TP worker failed: " << worker_error << '\n';
+        server::Logger::Error("server",
+                              "event=tp_worker_failed reason=" + worker_error);
         return 1;
       }
       return 0;

@@ -623,12 +623,11 @@ public:
       return false;
     }
     if (poisoned_) {
-      SetError(error, "verbs communicator is poisoned");
+      PoisonedError(error);
       return false;
     }
     if (bound_scope_.has_value()) {
-      poisoned_ = true;
-      SetError(error, "another verbs operation scope is already bound");
+      Poison(error, "another verbs operation scope is already bound");
       return false;
     }
     bound_scope_ = scope_id;
@@ -639,7 +638,7 @@ public:
                                   std::string* error) override {
     std::lock_guard lock(mutex_);
     if (poisoned_) {
-      SetError(error, "verbs communicator is poisoned");
+      PoisonedError(error);
       return false;
     }
     if (!bound_scope_.has_value()) {
@@ -647,15 +646,13 @@ public:
       return false;
     }
     if (*bound_scope_ != scope_id) {
-      poisoned_ = true;
-      SetError(error, "verbs operation scope end mismatch: bound=" +
+      Poison(error, "verbs operation scope end mismatch: bound=" +
                           std::to_string(*bound_scope_) +
                           " requested=" + std::to_string(scope_id));
       return false;
     }
     if (started_ != 0 || queued_ != 0) {
-      poisoned_ = true;
-      SetError(error, "verbs operation scope ended with exchanges in flight");
+      Poison(error, "verbs operation scope ended with exchanges in flight");
       return false;
     }
     bound_scope_.reset();
@@ -671,8 +668,7 @@ public:
       return nullptr;
     }
     if (started_ != 0 || queued_ != 0) {
-      poisoned_ = true;
-      SetError(error, "verbs exchange started with overlapped ones in flight");
+      Poison(error, "verbs exchange started with overlapped ones in flight");
       return nullptr;
     }
     // Synchronizing retires this rank's adds of earlier exchanges, whose
@@ -681,13 +677,14 @@ public:
         (hipStreamSynchronize(stream) != hipSuccess ||
          hipMemcpy(SendWindow(next_operation_) + kDataOffset, data, bytes,
                    hipMemcpyDeviceToHost) != hipSuccess)) {
-      poisoned_ = true;
-      SetError(error, "HIP device-to-host all-reduce staging failed");
+      Poison(error, "HIP device-to-host all-reduce staging failed");
       return nullptr;
     }
-    const float* peer = Transfer(*bound_scope_, next_operation_, bytes, error);
+    std::string transfer_error;
+    const float* peer =
+        Transfer(*bound_scope_, next_operation_, bytes, &transfer_error);
     if (peer == nullptr) {
-      poisoned_ = true;
+      Poison(error, std::move(transfer_error));
       return nullptr;
     }
     ++next_operation_;
@@ -702,12 +699,11 @@ public:
       return false;
     }
     if (started_ == kStartedExchanges) {
-      poisoned_ = true;
-      SetError(error, "too many overlapped verbs exchanges in flight");
+      Poison(error, "too many overlapped verbs exchanges in flight");
       return false;
     }
-    if (!StartWorker(error)) {
-      poisoned_ = true;
+    if (std::string worker_error; !StartWorker(&worker_error)) {
+      Poison(error, std::move(worker_error));
       return false;
     }
     // At most kStartedExchanges are in flight, so the exchange that last used
@@ -715,8 +711,7 @@ public:
     const std::uint64_t operation_id = next_operation_;
     hipEvent_t ready = ready_events_[operation_id % kStartedExchanges];
     if (hipEventRecord(ready, stream) != hipSuccess) {
-      poisoned_ = true;
-      SetError(error, "overlapped exchange event record failed");
+      Poison(error, "overlapped exchange event record failed");
       return false;
     }
     {
@@ -738,8 +733,7 @@ public:
     {
       std::lock_guard lock(mutex_);
       if (started_ == 0) {
-        poisoned_ = true;
-        SetError(error, "no overlapped verbs exchange is in flight");
+        Poison(error, "no overlapped verbs exchange is in flight");
         return nullptr;
       }
     }
@@ -757,8 +751,7 @@ public:
       finished.error = "overlapped verbs exchange size mismatch";
     }
     if (finished.peer == nullptr) {
-      poisoned_ = true;
-      SetError(error, finished.error);
+      Poison(error, finished.error);
     }
     return finished.peer;
   }
@@ -770,12 +763,11 @@ public:
       return false;
     }
     if (started_ != 0 || queued_ == kQueuedExchanges) {
-      poisoned_ = true;
-      SetError(error, "verbs exchange queued with too many in flight");
+      Poison(error, "verbs exchange queued with too many in flight");
       return false;
     }
-    if (!StartWorker(error)) {
-      poisoned_ = true;
+    if (std::string worker_error; !StartWorker(&worker_error)) {
+      Poison(error, std::move(worker_error));
       return false;
     }
     const std::uint64_t operation_id = next_operation_;
@@ -819,8 +811,7 @@ public:
       }
     }
     if (poisoned_) {
-      SetError(error, first_error_.empty() ? "verbs communicator is poisoned"
-                                           : first_error_);
+      PoisonedError(error);
       return false;
     }
     return true;
@@ -842,6 +833,23 @@ private:
     std::string error;
   };
 
+  /// Poisons the communicator under `mutex_`, keeping the first failure so
+  /// later calls report why the sequence cannot continue.
+  void Poison(std::string* error, std::string message) {
+    poisoned_ = true;
+    if (first_error_.empty()) {
+      first_error_ = message;
+    }
+    SetError(error, std::move(message));
+  }
+
+  /// Reports a call on the poisoned communicator, under `mutex_`.
+  void PoisonedError(std::string* error) const {
+    SetError(error, first_error_.empty()
+                        ? "verbs communicator is poisoned"
+                        : "verbs communicator is poisoned: " + first_error_);
+  }
+
   /// Validates an exchange of `bytes` at `data` under `mutex_`, poisoning the
   /// communicator when the sequence cannot continue.
   [[nodiscard]] bool CheckExchange(const float* data, std::size_t bytes,
@@ -855,27 +863,23 @@ private:
       return false;
     }
     if (poisoned_) {
-      SetError(error, "verbs communicator is poisoned");
+      PoisonedError(error);
       return false;
     }
     if (!bound_scope_.has_value()) {
-      poisoned_ = true;
-      SetError(error, "verbs collective has no bound operation scope");
+      Poison(error, "verbs collective has no bound operation scope");
       return false;
     }
     if (bytes % sizeof(float) != 0 || (bytes != 0 && data == nullptr)) {
-      poisoned_ = true;
-      SetError(error, "all-reduce buffer is invalid");
+      Poison(error, "all-reduce buffer is invalid");
       return false;
     }
     if (next_operation_ == std::numeric_limits<std::uint64_t>::max()) {
-      poisoned_ = true;
-      SetError(error, "verbs collective operation sequence exhausted");
+      Poison(error, "verbs collective operation sequence exhausted");
       return false;
     }
     if (bytes > kWindowBytes - kDataOffset) {
-      poisoned_ = true;
-      SetError(error, "all-reduce payload exceeds the receive window");
+      Poison(error, "all-reduce payload exceeds the receive window");
       return false;
     }
     return true;
@@ -1032,13 +1036,15 @@ private:
         jobs_.pop_front();
       }
       Finished finished{.bytes = job.bytes};
-      bool poisoned = false;
+      std::string poisoned;
       {
         std::lock_guard lock(mutex_);
-        poisoned = poisoned_;
+        if (poisoned_) {
+          PoisonedError(&poisoned);
+        }
       }
-      if (poisoned) {
-        finished.error = "verbs communicator is poisoned";
+      if (!poisoned.empty()) {
+        finished.error = std::move(poisoned);
       } else if (job.queued) {
         if (WaitReady(job.operation_id + 1, &finished.error)) {
           finished.peer = Transfer(job.scope_id, job.operation_id, job.bytes,
@@ -1347,7 +1353,7 @@ private:
   // waiting for its own write of the current one.
   bool early_receive_{false};
   bool poisoned_{false};
-  // The first failure of a background exchange, for CheckQueued.
+  // The first failure that poisoned the communicator.
   std::string first_error_;
   // Started exchanges not yet finished, and queued exchanges not yet
   // complete.

@@ -1616,6 +1616,9 @@ bool TpExecutor::ExecuteCall(std::uint64_t sequence, Request& request,
     }
   }
   if (forward && !EndScope(instruction.index, error)) {
+    if (!call_error.empty() && error != nullptr) {
+      *error = call_error + "; " + *error;
+    }
     return false;
   }
   if (TpCacheAcknowledged(instruction.op)) {
