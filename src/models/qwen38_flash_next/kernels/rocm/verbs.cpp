@@ -647,8 +647,8 @@ public:
     }
     if (*bound_scope_ != scope_id) {
       Poison(error, "verbs operation scope end mismatch: bound=" +
-                          std::to_string(*bound_scope_) +
-                          " requested=" + std::to_string(scope_id));
+                        std::to_string(*bound_scope_) +
+                        " requested=" + std::to_string(scope_id));
       return false;
     }
     if (started_ != 0 || queued_ != 0) {
