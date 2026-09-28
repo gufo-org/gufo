@@ -1146,6 +1146,7 @@ void ParseDsmlCalls(std::string_view text, std::vector<ParsedToolCall>* calls) {
         text.substr(invoke_start, tag_end - invoke_start + 1), "name");
     call.name = name.value_or("");
 
+    bool valid = true;
     std::size_t parameter_cursor = tag_end + 1;
     while (parameter_cursor < invoke_end) {
       const std::size_t parameter_start =
@@ -1167,16 +1168,28 @@ void ParseDsmlCalls(std::string_view text, std::vector<ParsedToolCall>* calls) {
       const auto parameter_name = Attribute(tag, "name");
       const auto string_value = Attribute(tag, "string");
       if (parameter_name.has_value()) {
-        call.arguments.push_back({
+        tokenization::ChatMessage::ToolArgument argument{
             .name = *parameter_name,
             .value = std::string(Trim(text.substr(
                 parameter_tag_end + 1, parameter_end - parameter_tag_end - 1))),
             .is_string = string_value.value_or("true") != "false",
-        });
+        };
+        // As for Qwen calls: drop an identical repeat and reject a
+        // conflicting one instead of letting the last value win.
+        const auto previous =
+            std::ranges::find(call.arguments, argument.name,
+                              [](const auto& arg) { return arg.name; });
+        if (previous == call.arguments.end()) {
+          call.arguments.push_back(std::move(argument));
+        } else if (previous->value != argument.value ||
+                   previous->is_string != argument.is_string) {
+          valid = false;
+          break;
+        }
       }
       parameter_cursor = parameter_end + kParameterEnds[syntax].size();
     }
-    if (!call.name.empty()) {
+    if (valid && !call.name.empty()) {
       calls->push_back(std::move(call));
     }
     cursor = invoke_end + kInvokeEnds[syntax].size();
