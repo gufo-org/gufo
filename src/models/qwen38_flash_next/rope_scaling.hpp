@@ -50,25 +50,13 @@ struct YarnRope {
 [[nodiscard]] std::uint32_t ScaledContextLength(
     const RopeScaling& scaling, std::uint32_t native_context) noexcept;
 
-/// Derives a static YaRN scaling from a requested serving context, per
-/// Qwen's own advice (factor = typical context / 262,144). Returns nullopt
-/// when `native == 0` (no native context could be read; leave YaRN off and
-/// let the caller's own context check reject the request) or when
-/// `requested <= native` (native context already covers the request, so
-/// YaRN stays off). Otherwise the factor is the exact ratio
-/// `requested / native` when that ratio is exactly representable in float
-/// (e.g. 409600 / 262144 -> 1.5625F -- true for every request against the
-/// shipped 262,144 native context, since requested / 262144 is exact in
-/// float below kMaxRopePositions), and is nudged up with `std::nextafter`
-/// just far enough that `ScaledContextLength` of the result is not below
-/// `requested` (a float ratio can otherwise round down and make
-/// `Model::Load` reject the caller's own `--context`) -- this only fires
-/// for a non-power-of-two native context, where the ratio is not exact.
-/// The nudge is bounded by `ScaledContextLength`'s own kMaxRopePositions
-/// clamp, so it always terminates: a `requested` past kMaxRopePositions, or
-/// a native for which no float factor reaches `requested` exactly, still
-/// returns (a scaling whose `ScaledContextLength` stays below `requested`,
-/// or one `ValidateRopeScaling`/`Model::Load` rejects), never hangs.
+/// Derives a static YaRN scaling from a requested serving context (factor =
+/// requested / native, Qwen's own advice). Returns nullopt when `native ==
+/// 0` or `requested <= native` (YaRN stays off). Otherwise nudges the float
+/// factor up with `std::nextafter` when needed so `ScaledContextLength` of
+/// the result does not round below `requested`; only needed for a
+/// non-power-of-two native context. Bounded by `ScaledContextLength`'s own
+/// kMaxRopePositions clamp, so it always terminates.
 [[nodiscard]] std::optional<RopeScaling> RopeScalingForContext(
     std::uint32_t requested, std::uint32_t native) noexcept;
 

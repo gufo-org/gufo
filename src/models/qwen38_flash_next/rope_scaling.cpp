@@ -58,24 +58,13 @@ std::optional<RopeScaling> RopeScalingForContext(
                                    static_cast<double>(native)),
       .original_context = native,
   };
-  // The float ratio can round down from the exact double value, which would
-  // floor `ScaledContextLength` one token below `requested`. Nudge the
-  // factor up by the smallest float steps until the scaled ceiling covers
-  // the request. This cannot fire for the shipped 262,144 (2^18) native
-  // context within the valid request range: requested / 262144 is exactly
-  // representable in float for every requested < 2^24 (kMaxRopePositions),
-  // so the loop runs zero iterations there (e.g. 409600/262144 -> exactly
-  // 1.5625F, 655360/262144 -> exactly 2.5F). It exists for non-power-of-two
-  // native contexts, where the ratio is not exact and the loop does fire.
-  //
-  // Bounded so a pathological input (requested past kMaxRopePositions, or a
-  // native that makes the ratio's float rounding land exactly on an
-  // integer boundary) can never spin forever: `ScaledContextLength` itself
-  // hard-clamps at kMaxRopePositions, so once the scaled ceiling reaches
-  // that clamp, more factor is not going to move it and the loop must stop.
-  // Whatever scaling comes out the other end (possibly still short of
-  // `requested`, possibly rejected by ValidateRopeScaling for exceeding
-  // kMaxRopePositions) is left for the caller's own validation to reject.
+  // The float ratio can round down from the exact double value and floor
+  // `ScaledContextLength` one token below `requested`; nudge the factor up
+  // by the smallest float steps until the scaled ceiling covers it. Only
+  // fires for a non-power-of-two native context (the shipped 262,144 is
+  // exact for every valid `requested`, so the loop is a zero-iteration
+  // no-op there). Bounded by `ScaledContextLength`'s own kMaxRopePositions
+  // clamp, so a pathological input still terminates.
   while (std::isfinite(scaling.factor) &&
          ScaledContextLength(scaling, native) < requested &&
          ScaledContextLength(scaling, native) < kMaxRopePositions) {

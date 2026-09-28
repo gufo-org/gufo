@@ -15,7 +15,6 @@
 #include <charconv>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <memory>

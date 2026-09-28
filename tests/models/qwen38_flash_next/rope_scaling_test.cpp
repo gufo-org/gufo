@@ -178,8 +178,7 @@ void CheckContextDerivation() {
   Require(qfn::ScaledContextLength(*bumped, 100003) >= 300007,
           "a non-power-of-two request must round its factor up to cover it");
   Require(bumped->factor > naive_factor,
-          "the bump must have actually raised the factor past the naive "
-          "ratio, not just returned it unchanged");
+          "the bump must raise the factor past the naive ratio");
   // A request past kMaxRopePositions (2^24): the loop must terminate rather
   // than hang, and ScaledContextLength is hard-clamped at kMaxRopePositions
   // so it can never reach `requested` here -- the derivation returns
@@ -189,8 +188,7 @@ void CheckContextDerivation() {
           "a request past kMaxRopePositions must still return");
   Require(qfn::ScaledContextLength(*past_max, 262144) < (1U << 24) + 1,
           "ScaledContextLength must stay clamped below a request past "
-          "kMaxRopePositions, proving the loop terminated instead of "
-          "spinning toward it");
+          "kMaxRopePositions");
   // native == 0 (no native context could be read) must not divide by zero
   // and must not hang; it leaves YaRN off for the caller's own check.
   Require(!qfn::RopeScalingForContext(300000, 0).has_value(),
