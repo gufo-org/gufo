@@ -580,6 +580,98 @@ void TestInvalidToolsFailBeforeGeneration() {
   }
 }
 
+void TestToolNameCharacters() {
+  const auto declare = [](const std::string& name) {
+    auto body = gufo::json::parse(R"({
+      "model":"test-model","messages":[{"role":"user","content":"use it"}],
+      "tools":[]
+    })");
+    auto tool = gufo::json::parse(
+        R"({"type":"function","function":{"name":"PLACEHOLDER",
+            "parameters":{"type":"object","properties":{}}}})");
+    tool["function"]["name"] = name;
+    body["tools"].push_back(std::move(tool));
+    return body.dump();
+  };
+  const auto replay = [](const std::string& name) {
+    auto body = gufo::json::parse(R"({
+      "model":"test-model","messages":[{"role":"user","content":"use it"}]
+    })");
+    auto assistant =
+        gufo::json::parse(R"({"role":"assistant","tool_calls":[]})");
+    auto call = gufo::json::parse(
+        R"({"id":"call_1","type":"function","function":{"name":"PLACEHOLDER",
+            "arguments":"{\"path\":\"a.txt\"}"}})");
+    call["function"]["name"] = name;
+    assistant["tool_calls"].push_back(std::move(call));
+    body["messages"].push_back(std::move(assistant));
+    body["messages"].push_back(gufo::json::parse(
+        R"({"role":"tool","tool_call_id":"call_1","content":"done"})"));
+    return body.dump();
+  };
+
+  // Agent harnesses name bridged tools after their server. Nothing between
+  // the request and either renderer treats these characters as structure.
+  const std::vector<std::string> renderable{
+      "read_file",   "read-file", "readFile",
+      "server:tool", "fs/read",   "github.create_issue",
+      "tool@v1",     "a.b.c~d+e", std::string(64, 'n')};
+  for (const std::string& name : renderable) {
+    FakeBackend declared;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(declare(name)), declared);
+    Expect(response.status == 200 && declared.last_request.tools.size() == 1 &&
+               declared.last_request.tools.front().name == name,
+           "A renderable tool name reaches the backend unchanged");
+
+    FakeBackend replayed;
+    Expect(gufo::server::HandleOpenAiChat(Request(replay(name)), replayed)
+                       .status == 200 &&
+               replayed.chat_calls == 1,
+           "The same name is accepted when a message replays a call");
+  }
+
+  // The Qwen and DeepSeek renderers append a name verbatim, so a name that
+  // frames a call is refused at both entry points rather than corrupting one.
+  // Non-ASCII is refused with them: a confusable name reaches the prompt and
+  // the operator's logs, where it can only mislead.
+  const std::vector<std::string> unrenderable{"bad>name",
+                                              "bad<name",
+                                              "bad\"name",
+                                              "bad\\name",
+                                              "bad name",
+                                              "bad\nname",
+                                              "bad\x7F"
+                                              "name",
+                                              "outil_traçage",
+                                              "reаd",
+                                              "​read",
+                                              "",
+                                              std::string(65, 'n')};
+  for (const std::string& name : unrenderable) {
+    FakeBackend declared;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(declare(name)), declared);
+    Expect(response.status == 400 &&
+               response.body.find("invalid_tools") != std::string::npos &&
+               declared.chat_calls == 0,
+           "An unrenderable declared name fails with invalid_tools");
+
+    if (name.empty())
+      continue;  // An empty replayed name has its own error message.
+    // Messages parse before tools, so a replayed name reports the message
+    // code. Both routes refuse the name; only the code differs.
+    FakeBackend replayed;
+    const auto replay_response =
+        gufo::server::HandleOpenAiChat(Request(replay(name)), replayed);
+    Expect(replay_response.status == 400 &&
+               replay_response.body.find("invalid_messages") !=
+                   std::string::npos &&
+               replayed.chat_calls == 0,
+           "An unrenderable replayed name fails with invalid_messages");
+  }
+}
+
 void TestQwenToolBoundariesAndSchema() {
   using gufo::json::Value;
   const auto schema = gufo::json::parse(R"({
@@ -1945,6 +2037,7 @@ int main() {
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
   TestInvalidToolsFailBeforeGeneration();
+  TestToolNameCharacters();
   TestQwenToolBoundariesAndSchema();
   TestDeepSeekToolCallsAreStructured();
   TestDeepSeekRepeatedToolParameters();

@@ -532,8 +532,16 @@ ordinary continuation.
   Chat Completions shape and the flat Responses-style `{type,name,parameters}`
   shape. Missing or null `parameters` become `{}`. `parametersJsonSchema` is
   accepted as an alias for `parameters`. Flat definitions retain all function
-  fields, including `strict`. Unsupported tool types, malformed entries and
-  non-object parameters return 400 `invalid_tools` before generation.
+  fields, including `strict`. A function name holds 1-64 printable ASCII
+  characters and may use any of them except a space, `<`, `>`, `"` and `\`,
+  which frame a rendered call; dotted and namespaced names such as
+  `github.create_issue` are accepted. OpenAI itself documents a narrower set
+  for this field, so a name outside `[A-Za-z0-9_-]` is portable to gufo but not
+  to every OpenAI-compatible service. The same name rule applies to an
+  assistant `tool_calls` entry that replays a call. Unsupported tool types,
+  malformed entries, unrenderable declared names and non-object parameters
+  return 400 `invalid_tools` before generation; because messages parse first,
+  an unrenderable name in a replayed call returns 400 `invalid_messages`.
 - shared top-k, min-p, repeat, frequency and presence sampling controls
 
 Streaming objects use `chat.completion.chunk` and end with the compatibility
