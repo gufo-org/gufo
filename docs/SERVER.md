@@ -790,7 +790,35 @@ and automatic recovery after device reset or suspend/resume.
 Server lifecycle and request logs go to stderr. Each request gets an
 `X-Request-ID` response header matching its `request=rN` log entries. Inference
 requests log receipt and completion; streaming completion is logged after the
-stream ends. Successful health/metrics and video-status polls are quiet.
+stream ends. Successful health/metrics and video-status polls are quiet at the
+default level.
+
+Set verbosity with `--log-level <error|warn|info|debug>` (default `info`);
+`-v`/`--verbose` is shorthand for `--log-level=debug` and cannot combine with
+the canonical spelling — passing both is a usage error rather than a precedence
+to guess at. Each tier is a threshold, not only an addition:
+`--log-level error` shows ERROR lines alone, so a 5xx response or stream
+failure still logs while a 4xx refusal, which logs at WARN (a 429 admission
+refusal included), is filtered out.
+
+The threshold also covers the lifecycle lines. `event=listening` (the bound
+address, auth mode and connection limits) and `event=shutdown_requested` (the
+signal that asked for a stop) are INFO-tier, so `--log-level=warn` and
+`--log-level=error` start and stop with no output at all. Keep the default
+`info` for systemd units and CI that read the startup banner, or confirm boot
+with `GET /health` or `GET /ready`.
+
+The `debug` tier adds:
+
+- the resolved server options as `event=options` before the model opens, with
+  `api_key=set` rather than the key. This line and the `event=listening` banner
+  are separate on purpose: the banner only appears once the model has loaded and
+  the listener is accepting, so a load that fails or hangs leaves
+  `event=options` as the sole record of what was asked for;
+
+Loader phases stay at INFO: the weight-mapping and session-preallocation work is
+HIP-only code, so deeper sub-phases there need a GPU build to verify and are not
+part of this tier.
 
 Pass `--log-progress` to `gufo serve llm` to log each prefill chunk, each
 50-token decode boundary, and the final decode remainder. Each line includes the
@@ -838,8 +866,10 @@ lazily in the worker. Control characters are escaped in log lines.
 - `json_test`: number precision, Unicode escapes, malformed input and depth limits.
 - `http_server_test`: transport framing, authentication, compatibility validation,
   sampling forwarding, request logs and streaming failures without loading a model.
+- `serve_cli_test`: executable help, argument wiring and rejected configurations,
+  including that `--log-level` and `-v` change the emitted log rather than only
+  parsing.
 - `openai_chat_test`: chat parsing, streaming, images, tools and sampling controls.
-- `serve_cli_test`: executable help, argument wiring and rejected configurations.
 - Per-model serving tests: greedy/sampled decoding, batching, cache reuse and
   cancellation. Use the affected model's benchmark README for commands and limits.
 

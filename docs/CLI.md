@@ -181,7 +181,16 @@ These apply to every modality, before or after the subcommand:
   32 MiB).
 - `apiKey` — if set, requests require `Authorization: Bearer <key>`, including
   health checks. Browser CORS preflight (`OPTIONS`) remains unauthenticated.
-- `verbose` — chattier logs.
+- `logLevel` (`--log-level <error|warn|info|debug>`, default `info`) — how much
+  the server logs. In practice: `debug` is the level that explains a stalled
+  client, because it also shows health polls, admission refusals with the limit
+  that rejected them, and cache candidate decisions. `verbose` (`-v`) is
+  shorthand for `--log-level=debug`; passing both is a usage error. The tier is
+  a threshold all the way down, and the `event=listening` startup confirmation
+  is INFO-tier, so `warn` and `error` boot and stop silently. Prompt text,
+  message bodies and the API key are never logged at any level; debug admission
+  lines do name the client by the peer IP address of its connection. See
+  [server logs](SERVER.md#troubleshooting-logs).
 
 ## Commands
 
