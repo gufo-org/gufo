@@ -1,10 +1,9 @@
 # Qwen3.6 35B-A3B benchmarks
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory (126976 MiB reported). Gufo
-`560fcd0` (branch `feat/qwen35moe-35b-a3b`). Built on the host,
-run inside the ROCm 7.2.3 container (the host's ROCm 7.1 cannot run Gufo).
-Measured September 26, 2026, with the production inference services and the
-OOM cron stopped so the benchmark owned the GPU.
+`560fcd0` (branch `feat/qwen35moe-35b-a3b`), run in the ROCm 7.2.3
+`gufo-runtime` container. Measured September 26, 2026, with no other GPU
+workload resident.
 
 Prefill, generation and MTP decode are 3 repetitions; the 27B regression
 check is 2.
@@ -44,8 +43,8 @@ is affected the same way. Treat pp512 gains as indicative only.
 
 Cold mapped-weight load of the 36.65 GiB artifact to readiness is roughly
 5–11 s depending on page-cache warmth. The single-shot `hipHostRegister`
-(no 4 GiB chunking) loads the model cleanly with the production services
-stopped; see [Experiments](EXPERIMENTS.md).
+(no 4 GiB chunking) loads the model cleanly when nothing else is resident;
+see [Experiments](EXPERIMENTS.md).
 
 ## Qwen3.6 35B-A3B, UD-Q6_K_XL
 
@@ -88,6 +87,69 @@ prompt. The draft step costs about the same on both quants; an earlier
 UD-Q8_K_XL run favoured n=1, so treat the n=1/n=2 gap on that quant as
 run-dependent.
 
+## llama.cpp Vulkan comparison
+
+The ROCm fork above is not llama.cpp's fastest backend on this chip. Against
+upstream llama.cpp `b81c99b47` on Vulkan (RADV, Mesa 26.1.7, `-fa 1`, no mmap;
+prefill is the better of the default ubatch and `-ub 2048 -b 2048`), measured
+September 27, 2026 with the same GGUFs, 3 repetitions:
+
+| Test | UD-Q6_K_XL gufo | llama.cpp | gain | UD-Q8_K_XL gufo | llama.cpp | gain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pp512 | 1789.6 | 1074.2 | +66.6% | 1483.6 | 1114.1 | +33.2% |
+| pp2048 | 2579.7 | 1230.6 | +109.6% | 2325.7 | 1256.7 | +85.1% |
+| pp4096 | 2702.1 | 1202.0 | +124.8% | 2383.6 | 1225.4 | +94.5% |
+| pp16384 | 2409.2 | 1057.1 | +127.9% | 2175.1 | 1072.3 | +102.8% |
+| tg128 | 54.5 | 56.4 | −3.3% | 50.8 | 46.2 | +9.9% |
+| tg128 @ d16384 | 47.6 | 50.8 | −6.3% | 45.5 | 43.2 | +5.3% |
+| tg128 @ d32768 | 42.3 | 46.6 | −9.4% | 40.5 | 39.7 | +2.0% |
+
+Plain UD-Q6_K_XL decode trails Vulkan llama.cpp by 3-9%.
+
+## Serving with DFlash2
+
+`gufo serve` with the concurrent draft cap and BF16 context injection
+(`46ac1d5`, `7659c0c`; measured before the rebase onto `8a46cd9`), 4 sessions,
+context 262144, DFlash2 Q8_0 draft,
+`--draft-tokens 7 --draft-policy adaptive`), UD-Q6_K_XL, over HTTP with a
+synchronized client, thinking off. Measured September 27, 2026.
+
+Single-request prefill (fresh random prompt per request, one output token),
+before and after moving the draft's context injection to the BF16 WMMA GEMM:
+
+| Prompt (tokens) | no draft | DFlash2 before | DFlash2 after |
+| ---: | ---: | ---: | ---: |
+| 520 | 1882 | 1451 | 1752 |
+| 1630 | 2672 | 1871 | 2357 |
+| 6420 | 2706 | 2104 | 2521 |
+| 16000 | 2495 | 2076 | 2386 |
+
+Concurrent decode, 512 sampled tokens (temperature 0.6, top-p 0.95, top-k 20)
+from four mixed prompts (story, TCP explanation, Python module, Markdown
+table), rotated so each level sees the same mix. Rates are the sum of
+individual request decode rates per concurrent group, averaged over groups;
+the concurrent draft cap shortens drafts to 3 / 2 / 1 tokens at 2 / 3 / 4
+active requests:
+
+| Concurrent requests | DFlash2 (t/s) | no draft (t/s) |
+| ---: | ---: | ---: |
+| 1 | 62.7 | 53.9 |
+| 2 | 94.1 | TODO |
+| 3 | 98.8 | TODO |
+| 4 | 109.4 | 108.4 |
+
+Without the cap (7-token drafts), 4 concurrent requests reached 88.7 t/s in
+whole-request throughput, against 106.1 with it.
+
+Prefill while other sessions decode is bounded by `--prefill-chunk`. A
+6.5K-token prompt arriving while one session streams:
+
+| `--prefill-chunk` | new prompt TTFT (s) | its prefill (t/s) | longest decode stall (s) |
+| ---: | ---: | ---: | ---: |
+| 512 (default) | 4.20 | 1862 | 0.37 |
+| 1024 | 3.37 | 2190 | 0.52 |
+| 2048 | 3.09 | 2330 | 0.89 |
+
 ## Qwen3.8 27B regression (UD-Q8_K_XL)
 
 Confirms the shared attention/GDN path is unchanged by the MoE work.
@@ -99,25 +161,28 @@ Confirms the shared attention/GDN path is unchanged by the MoE work.
 
 ## Reproduce
 
+With no other GPU workload resident, and `MODELS` pointing at the
+directory holding the GGUFs:
+
 ```sh
 cmake --build --preset release --parallel 8
-# stop the production services + OOM cron first (see the handoff)
 for QUANT in Q8_K_XL Q6_K_XL; do
-  /home/sami/gufo/run-in-container.sh bench \
-    --model /home/sami/models-mtp/Qwen3.6-35B-A3B-MTP-UD-$QUANT.gguf \
+  MODEL="$MODELS/Qwen3.6-35B-A3B-MTP-UD-$QUANT.gguf"
+  ./build/release/gufo bench --model "$MODEL" \
     --n-prompt 512,1024,2048,4096,8192,16384 --n-gen 128 --repetitions 3
   for N in 1 2; do
-    /home/sami/gufo/run-in-container.sh bench \
-      --model /home/sami/models-mtp/Qwen3.6-35B-A3B-MTP-UD-$QUANT.gguf \
-      --speculative mtp \
-      --mtp-model /home/sami/models-mtp/Qwen3.6-35B-A3B-MTP-UD-$QUANT.gguf \
+    ./build/release/gufo bench --model "$MODEL" \
+      --speculative mtp --mtp-model "$MODEL" \
       --draft-tokens $N --min-draft-tokens $N \
       --n-prompt 512 --n-gen 128 --repetitions 3
   done
 done
-/home/sami/gufo/run-in-container.sh bench \
-  --model /home/sami/models-gufo/qwen38-27b/Qwen3.8-27B-UD-Q8_K_XL.gguf \
+./build/release/gufo bench --model "$MODELS/Qwen3.8-27B-UD-Q8_K_XL.gguf" \
   --n-prompt 2048,8192 --n-gen 0 --repetitions 2
 ```
+
+The verification-step and prefill-chunk timing tools are
+`qwen35ba3b_verify_bench` and `qwen35ba3b_prefill_chunk_bench` (`gpu-test`
+preset, `GUFO_QWEN35BA3B_MODEL`).
 
 Greedy, thinking off. [Quality and measurement scope](QUALITY.md).

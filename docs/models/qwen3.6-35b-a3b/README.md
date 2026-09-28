@@ -33,7 +33,7 @@ reports an MoE architecture.
 | --- | --- | --- |
 | AR | No speculative option | Target-only generation. |
 | MTP | `--speculative mtp --mtp-model PATH` (`gufo prompt`, `gufo bench`) | Drafts with the GGUF's own MTP head; pass the same file as the target. `--draft-tokens N --min-draft-tokens N` fixes the draft length. Not available through `gufo serve` yet. |
-| DFlash2 | `--speculative dflash2 --dflash-model PATH` (`gufo prompt`, `gufo bench`) | Block-diffusion draft converted to GGUF (below); it taps 8 target layers. `--draft-tokens N` caps proposals, `--draft-policy fixed` fixes them. `gufo serve` is untested for this model. |
+| DFlash2 | `--speculative dflash2 --dflash-model PATH` (`gufo prompt`, `gufo bench`, `gufo serve`) | Block-diffusion draft converted to GGUF (below); it taps 8 target layers. `--draft-tokens N` caps proposals, `--draft-policy fixed` fixes them. |
 
 ### Speculative decoding (MTP)
 
@@ -79,6 +79,26 @@ agree with each other, but verifying a batch of tokens takes a different
 MoE numeric route than single-token decode, so near-tied tokens can flip late
 in a long answer. The Qwen3.8 27B keeps that contract; this model does not yet.
 
+### Serving with DFlash2
+
+```sh
+./result/bin/gufo serve --sessions 4 llm --model "$MODEL" --context 262144 \
+  --speculative dflash2 --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf \
+  --draft-tokens 7 --draft-policy adaptive --prefill-chunk 1024
+```
+
+Concurrent requests share one batched verification step. Each extra row reads
+mostly different experts, so a step costs close to one decode step per
+stacked row; the server therefore shortens drafts as more requests are active
+(3 draft tokens at 2 requests, 2 at 3, 1 at 4 or more) and a lone request
+keeps the full draft. Prefill is not batched across sessions: requests take
+turns, and while other sessions decode, a prompt is prefilled in
+`--prefill-chunk` token slices. 1024 cut a 6.5K-token prompt's time to first
+token by ~20% against the 512 default, at the cost of a ~0.5 s pause for the
+streaming sessions. Each session holds its own KV/SSM state: at context
+262144, one session used 38.7 GiB of device memory in total and four 59.7 GiB.
+See [Benchmarks](BENCHMARKS.md#serving-with-dflash2).
+
 Thinking/template controls and HTTP sampling defaults are described in
 [the server guide](../../SERVER.md#reasoning-controls).
 
@@ -87,8 +107,8 @@ Thinking/template controls and HTTP sampling defaults are described in
 - Quantized MoE expert GEMM (Q8_0 / Q6_K) and the fused gate/up/down expert
   path; dense attention and GDN layers are shared with the other Qwen runners.
 - No vision, no audio. Speculative decoding is MTP or a converted DFlash2
-  draft, from `gufo prompt` and `gufo bench`; the HTTP server rejects MTP for
-  this architecture (it wires MTP for Flash-Next only).
+  draft. `gufo serve` runs DFlash2; it rejects MTP for this architecture (it
+  wires MTP for Flash-Next only), so MTP is `gufo prompt` / `gufo bench` only.
 - The prefill attention kernel is compiled only for head shapes listed in
   `detail/attention_policy.hpp`; unsupported shapes fall back to the baseline
   path (see [Experiments](EXPERIMENTS.md)).
