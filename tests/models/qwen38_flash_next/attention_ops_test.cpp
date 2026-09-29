@@ -819,6 +819,9 @@ int main() {
         {"64-in-one-window", 131069, one_window},
         {"513-total", 131069, spread(513)},
         {"576-total", 131069, spread(576)},
+        // A YaRN-scaled capacity (409600 at factor 1.5625, 3200 mask words):
+        // chunks past the native 262144 tokens take this same kernel.
+        {"63-per-window-past-native", 409597, per_window(63)},
     };
     std::uint32_t structured_seed = 0x5EED0000U;
     for (const Structured& c : structured) {
