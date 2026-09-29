@@ -208,6 +208,7 @@ target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts guf
 
 add_executable(gufo
   src/cli/main.cpp
+  src/cli/banner.cpp
   src/cli/eval/eval.cpp
   src/cli/transcribe/transcribe.cpp
   src/cli/video/video.cpp
