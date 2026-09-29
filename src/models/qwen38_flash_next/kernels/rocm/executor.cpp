@@ -234,6 +234,7 @@ void Session::Reset() {
   spec_tokens_ = 0;
   ngram_.Reset();
   mtp_.position = 0;
+  mtp_.residual_valid = false;
   mtp_.blocks = 0;
   const Config& c = owner_->config();
   for (auto& l : linear_) {
@@ -1436,7 +1437,9 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // Raw keys survive only until pooling. The ring holds the initial
   // pre-budget backlog and a batch, independently for trunk and predictor.
   if (s.index_k != nullptr) {
-    if (!Dense(l.indexer_k, x, s_.ik, n_tokens, error_msg)) {
+    if (!(projections_ready
+              ? DenseBatch(l.indexer_k, x, s_.ik, n_tokens, error_msg)
+              : Dense(l.indexer_k, x, s_.ik, n_tokens, error_msg))) {
       return false;
     }
     StoreRows(s_.ik, s.index_k, n_tokens, c.indexer_head_dim, pos,
@@ -1909,7 +1912,8 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     // the trunk residual is still in shared scratch. MtpBody reads that
     // residual into xn before reusing res for the predictor output.
     PrefillPhase draft_phase(false);
-    if (!MtpForward(session, tokens.subspan(1), 0, {}, error_msg, s_.res))
+    if (!MtpForward(session, tokens.subspan(1), 0, {.kv_only = true}, error_msg,
+                    s_.res))
       return false;
   }
   return true;
@@ -2084,7 +2088,7 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
 }
 
 constexpr std::array<char, 8> kSnapshotMagic{'Q', 'F', 'N', 'S',
-                                             'N', 'A', 'P', '4'};
+                                             'N', 'A', 'P', '5'};
 
 /// Fixed header ahead of the section bytes. It carries every geometry
 /// value the section sizes derive from, so a payload of another artifact
@@ -2105,6 +2109,7 @@ struct SnapshotHeader {
   std::uint32_t blocks;
   std::uint32_t mtp_position;
   std::uint32_t mtp_blocks;
+  std::uint32_t mtp_residual_valid;
   std::uint32_t hidden_rows;
   std::uint32_t image_count;
   std::array<std::int32_t, Config::kMaxPleNgram - 1> ngram_prev;
@@ -2244,8 +2249,10 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
                 "draft K cache") ||
         !region(mtp != nullptr ? mtp->v_cache : nullptr, mtp_kv_bytes,
                 "draft V cache") ||
-        !region(mtp != nullptr ? mtp->h : nullptr,
-                std::uint64_t{h.hc_dim} * sizeof(float), "draft residual") ||
+        !region(
+            mtp != nullptr ? mtp->h : nullptr,
+            h.mtp_residual_valid ? std::uint64_t{h.hc_dim} * sizeof(float) : 0,
+            "draft residual") ||
         !region(mtp != nullptr ? mtp->target_hidden : nullptr,
                 std::uint64_t{h.hidden_rows} * h.hc_dim * sizeof(float),
                 "kept trunk rows")) {
@@ -2263,6 +2270,7 @@ std::uint64_t Executor::SnapshotBytes(const Session& session,
   h.blocks = session.blocks_;
   h.mtp_blocks = session.mtp_.blocks;
   h.mtp_position = session.mtp_.position;
+  h.mtp_residual_valid = session.mtp_.residual_valid;
   h.hidden_rows = hidden_rows;
   return WalkSnapshot(
       h, nullptr,
@@ -2291,6 +2299,7 @@ bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
   h.blocks = session.blocks_;
   h.mtp_blocks = session.mtp_.blocks;
   h.mtp_position = session.mtp_.position;
+  h.mtp_residual_valid = session.mtp_.residual_valid;
   h.hidden_rows = hidden_rows;
   h.ngram_prev = session.ngram_.prev;
   h.payload_bytes = SnapshotBytes(session, hidden_rows);
@@ -2345,7 +2354,10 @@ bool Executor::RestoreSnapshot(Session& session,
       h.mtp_position - h.mtp_blocks * h.compress_ratio >
           session.index_capacity_ ||
       h.hidden_rows > h.position || h.hidden_rows > options_.max_speculative ||
-      (h.has_mtp == 0 && (h.mtp_position != 0 || h.hidden_rows != 0))) {
+      h.mtp_residual_valid > 1 ||
+      (h.mtp_residual_valid != 0 && h.mtp_position == 0) ||
+      (h.has_mtp == 0 && (h.mtp_position != 0 || h.hidden_rows != 0 ||
+                          h.mtp_residual_valid != 0))) {
     AssignError(error_msg, "snapshot positions do not fit this session");
     return false;
   }
@@ -2409,6 +2421,7 @@ bool Executor::RestoreSnapshot(Session& session,
   session.blocks_ = h.blocks;
   session.mtp_.position = h.mtp_position;
   session.mtp_.blocks = h.mtp_blocks;
+  session.mtp_.residual_valid = h.mtp_residual_valid != 0;
   session.spec_base_ = h.position;
   session.spec_tokens_ = 0;
   session.ngram_.prev = h.ngram_prev;
@@ -2494,12 +2507,20 @@ bool Executor::MtpForward(Session& session,
     AssignError(error_msg, "invalid MTP trace destinations");
     return false;
   }
+  if ((hidden_row < 0 && !session.mtp_.residual_valid) ||
+      (output.kv_only &&
+       (hidden_row < 0 || output.token != nullptr ||
+        output.candidates != nullptr || output.trace != nullptr))) {
+    AssignError(error_msg, "MTP residual requires a full known-hidden forward");
+    return false;
+  }
   const std::uint32_t pos = session.mtp_.position;
   if (pos + n > session.max_context_) {
     AssignError(error_msg, "MTP context is full");
     return false;
   }
   ++session.mutation_epoch_;
+  session.mtp_.residual_valid = false;
   std::copy(tokens.begin(), tokens.end(), tokens_host_);
   control_host_->position = session.position_;
   control_host_->blocks = session.blocks_;
@@ -2520,11 +2541,12 @@ bool Executor::MtpForward(Session& session,
       (std::uint64_t{1} << 40) |
       (std::uint64_t{output.token != nullptr} << 41) |
       (std::uint64_t{output.candidates != nullptr} << 43) |
-      (std::uint64_t{sparse} << 44);
+      (std::uint64_t{sparse} << 44) | (std::uint64_t{output.kv_only} << 45);
   const auto body = [&] {
     return MtpBody(session, n, pos, output.token != nullptr,
                    output.candidates != nullptr, error_msg,
-                   graph ? graph_pool : pool, hidden_source, output.trace);
+                   graph ? graph_pool : pool, hidden_source, output.trace,
+                   output.kv_only);
   };
   if (!Run(session, key, graph, body, error_msg)) {
     return false;
@@ -2536,6 +2558,7 @@ bool Executor::MtpForward(Session& session,
     *output.candidates = *mtp_candidates_host_;
   }
   session.mtp_.position = pos + n;
+  session.mtp_.residual_valid = !output.kv_only;
   if (sparse)
     session.mtp_.blocks = complete;
   return true;
@@ -2544,7 +2567,7 @@ bool Executor::MtpForward(Session& session,
 bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
                        bool token, bool candidates, std::string* error_msg,
                        std::uint32_t pool_grid, const float* hidden_source,
-                       MtpTrace* trace) const {
+                       MtpTrace* trace, bool kv_only) const {
   const Config& c = config();
   const DeviceLayer& l = model_->mtp();
   const std::uint32_t hc_dim = c.HcDim();
@@ -2582,9 +2605,13 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
               stream_);
   if (trace && !copy_trace(s_.mtp_h + final_row, trace->normalized_hidden))
     return false;
-  if (!Dense(l.nextn_fc_embedding, s_.mtp_embd, s_.mtp_eproj, n, error_msg) ||
-      !Dense(l.nextn_fc_hidden, s_.mtp_h, s_.mtp_res, n * c.hc_count,
-             error_msg)) {
+  // These projections determine persistent draft KV. Use the same row-wise
+  // activation quantization and reduction for prompt chunks and decode;
+  // changing between F16 GEMM and Q8 GEMV changes sampled replay after reuse.
+  if (!DenseBatch(l.nextn_fc_embedding, s_.mtp_embd, s_.mtp_eproj, n,
+                  error_msg) ||
+      !DenseBatch(l.nextn_fc_hidden, s_.mtp_h, s_.mtp_res, n * c.hc_count,
+                  error_msg)) {
     return false;
   }
   MtpAddEmbedding(s_.mtp_eproj, s_.mtp_res, n, c.hidden_size, c.hc_count,
@@ -2606,12 +2633,63 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
   // Keep the final 128-column tile (and its predecessor for short tails).
   // At least 96 rows retain the wide mixer/projection arithmetic. Attention
   // still writes every KV/indexer row before the scratch view is narrowed.
-  const auto skipped = last_only && n >= 224 ? (n - 96) / 128 * 128 : 0U;
-  if (!HcMix(l.hc_attn, s_.mtp_res, false, s_.mixed, s_.inject, n, error_msg) ||
-      !Attention(l, attn, s_.mixed, s_.block_out, n,
+  // Short catch-up also carries only its final row. Keep two rows so the
+  // router and projections retain their multi-row arithmetic; the single
+  // row route has a different floating-point reduction.
+  const auto skipped =
+      control_host_->hidden_row >= 0 && n > 2 && n <= kVecBatch
+          ? n - 2
+          : (last_only && n >= 224 ? (n - 96) / 128 * 128 : 0U);
+  const bool cache_only = kv_only && !l.attn_qkv.empty();
+  if (!HcMixBatch(l.hc_attn, s_.mtp_res, false, s_.mixed,
+                  cache_only ? nullptr : s_.inject, n, error_msg)) {
+    return false;
+  }
+  if (cache_only) {
+    // Known trunk rows replace the predictor residual on the next forward.
+    // Only K/V and pooled indexer keys survive this catch-up. Slice the
+    // packed Q/gate/K/V weight without copying or changing its arithmetic.
+    auto kv = l.attn_qkv;
+    const TensorRef layout{.type = kv.type, .cols = kv.cols};
+    kv.data = static_cast<std::uint8_t*>(kv.data) +
+              std::size_t{2} * c.AttentionQDim() * layout.RowBytes();
+    kv.rows = 2 * c.AttentionKvDim();
+    if (!DenseBatch(kv, s_.mixed, s_.qg, n, error_msg) ||
+        !PrepareAttention(s_.qg, kv.rows, nullptr, l.attn_k_norm.f32(), nullptr,
+                          nullptr, attn.k_cache, attn.v_cache, n, 0,
+                          c.num_kv_heads, c.head_dim, c.rotary_dim,
+                          &session.control_->mtp_position, c.rope_theta,
+                          c.rms_eps, stream_, attn.rope)) {
+      AssignError(error_msg, "MTP cache projection failed");
+      return false;
+    }
+    const auto capacity =
+        IndexerCapacity(c, options_.max_batch, session.max_context_);
+    if (!DenseBatch(l.indexer_k, s_.mixed, s_.ik, n, error_msg))
+      return false;
+    StoreRows(s_.ik, attn.index_k, n, c.indexer_head_dim,
+              &session.control_->mtp_position, capacity, stream_);
+    if (pos + n > c.indexer_top_k) {
+      PoolIndexerBlocks(attn.index_k, l.indexer_k_norm.f32(), attn.block_k,
+                        &session.control_->mtp_blocks,
+                        &session.control_->mtp_position, n, pool_grid,
+                        c.compress_ratio, c.indexer_head_dim, c.rotary_dim,
+                        c.rope_theta, c.rms_eps, capacity, stream_, attn.rope);
+    }
+    return true;
+  }
+  if (!l.attn_qkv.empty()) {
+    if (!DenseBatch(l.attn_qkv, s_.mixed, s_.qg, n, error_msg))
+      return false;
+  } else if (!DenseBatch(l.attn_q, s_.mixed, s_.qg, n, error_msg) ||
+             !DenseBatch(l.attn_k, s_.mixed, s_.k, n, error_msg) ||
+             !DenseBatch(l.attn_v, s_.mixed, s_.v, n, error_msg)) {
+    return false;
+  }
+  if (!Attention(l, attn, s_.mixed, s_.block_out, n,
                  &session.control_->mtp_position, &session.control_->mtp_blocks,
                  pos, pool_grid, session.max_context_,
-                 pos + n > c.indexer_top_k, error_msg, last_only, false,
+                 pos + n > c.indexer_top_k, error_msg, last_only, true,
                  skipped == 0)) {
     return false;
   }
@@ -2645,8 +2723,19 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
              error_msg) ||
       (trace && !copy_trace(s_.mixed + static_cast<std::size_t>(tail_rows - 1) *
                                            c.hidden_size,
-                            trace->ffn_input)) ||
-      !Moe(l, s_.mixed, s_.block_out, tail_rows, error_msg, last_only)) {
+                            trace->ffn_input))) {
+    return false;
+  }
+  if (skipped != 0 && tail_rows == 2 &&
+      !Check(hipMemcpyAsync(s_.mixed, s_.mixed + c.hidden_size,
+                            c.hidden_size * sizeof(float),
+                            hipMemcpyDeviceToDevice, stream_),
+             "MTP tail padding", error_msg)) {
+    return false;
+  }
+  // The discarded padding row shares the final row's routed experts, so
+  // preserving multi-row arithmetic does not reread another expert set.
+  if (!Moe(l, s_.mixed, s_.block_out, tail_rows, error_msg, last_only)) {
     return false;
   }
   Combine(s_.mtp_res, nullptr, tail_rows);

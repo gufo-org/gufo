@@ -264,6 +264,66 @@ void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
   }
   Require(vision->ResidentBytes() == 0,
           "MTP encoded pixels instead of embedding shifted text IDs");
+  // Identical known trunk rows must build identical predictor KV regardless
+  // of prefill segmentation. Supply the final row separately so obsolete
+  // residuals from cache-only catch-up cannot mask a KV discrepancy.
+  constexpr unsigned replay_rows = 33;
+  std::vector<float> replay_hidden((replay_rows + 1) * c.HcDim());
+  for (unsigned row = 0; row <= replay_rows; ++row) {
+    for (std::size_t h = 0; h < c.HcDim(); ++h)
+      replay_hidden[row * c.HcDim() + h] =
+          initial[h] + 0.01F * std::sin(float(h + row) * 0.17F);
+  }
+  auto* replay_input = arena.Make<float>(replay_hidden.size());
+  Hip(hipMemcpyAsync(replay_input, replay_hidden.data(),
+                     replay_hidden.size() * sizeof(float),
+                     hipMemcpyHostToDevice, stream));
+  std::array<std::int32_t, replay_rows + 1> replay_tokens;
+  std::iota(replay_tokens.begin(), replay_tokens.end(), 42);
+  q::MtpCandidateLogits replay_reference;
+  for (const bool kv_only : {false, true}) {
+    for (const auto chunk : {1U, 8U, 9U, 32U, 33U}) {
+      auto replay_session =
+          exec.CreateSession(gufo::core::SessionMode::kSpeculative, 64, &error);
+      Require(replay_session != nullptr, error);
+      for (unsigned offset = 0; offset < replay_rows; offset += chunk) {
+        const auto count = std::min(chunk, replay_rows - offset);
+        Require(exec.MtpForward(*replay_session,
+                                std::span(replay_tokens).subspan(offset, count),
+                                0, {.kv_only = kv_only}, &error,
+                                replay_input + offset * c.HcDim()),
+                error);
+      }
+      if (kv_only) {
+        q::MtpCandidateLogits unused;
+        q::rocm::Executor::MtpHeadItem head{replay_session.get(),
+                                            {.candidates = &unused}};
+        Require(!exec.MtpHeads(std::span(&head, 1), &error),
+                "head accepted an omitted predictor residual");
+        Require(
+            !exec.MtpForward(*replay_session, std::span(replay_tokens).last(1),
+                             -1, {}, &error),
+            "recursive proposal accepted an omitted predictor residual");
+        q::rocm::Executor::MtpBatchItem body{
+            replay_session.get(), std::span(replay_tokens).last(1), -1};
+        Require(!exec.MtpForwardBatch(std::span(&body, 1), &error),
+                "batched proposal accepted an omitted predictor residual");
+      }
+      q::MtpCandidateLogits actual;
+      Require(exec.MtpForward(*replay_session, std::span(replay_tokens).last(1),
+                              0, {.candidates = &actual}, &error,
+                              replay_input + replay_rows * c.HcDim()),
+              error);
+      if (!kv_only && chunk == 1)
+        replay_reference = actual;
+      else
+        Require(actual.ids == replay_reference.ids &&
+                    actual.logits == replay_reference.logits,
+                "prefill segmentation changed MTP candidate probabilities");
+      std::printf("MTP cache replay chunk=%u kv_only=%d candidates_exact=1\n",
+                  chunk, kv_only);
+    }
+  }
   // Short catch-up compacts only the final FFN rows. Compare it against
   // full independent predictor execution, including the one-row arithmetic
   // tail that must retain its original shape.

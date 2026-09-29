@@ -1,0 +1,191 @@
+{
+  "base_commit": "eb915840ffb62a8ec4b5c1adb41b04b5c1c75892",
+  "source_sha256": {
+    "src/models/qwen38_flash_next/engine.hpp": "00e5b6f26ea22b1077653057f9027de86e7729880072ce22001c8b1b9579f3b2",
+    "src/models/qwen38_flash_next/kernels/rocm/batch.cpp": "feb515247990bae0b7ace703638698d2b3c70ba9f352ea605835649f213a6b2e",
+    "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": "4642aa43cec57ba8a0c1458af8a2ca10cf31197447ac81624b75105ef4a4f246",
+    "src/models/qwen38_flash_next/kernels/rocm/executor.hpp": "97780ee50936a2912e865b0ccaa9429a4217e3177033fa629084a8818ae2e94b",
+    "src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp": "2b1a36fefff2ad04fab9f495fe30da33133ac36be1589beb5195a1d76382eadd",
+    "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp": "2126bc0f2eaba56361cd72720e10304f7ea28cca4a964f9b14c64045faf79b28",
+    "src/models/qwen38_flash_next/kernels/rocm/mmq/mmvq.hip.cpp": "2f4da08926be31014ec8d6d367a1f0bfe9540b92996c3891d797758308b0254a",
+    "src/models/qwen38_flash_next/mtp_costs.hpp": "a4615a7d84cb4fddc8aabf64a07a4cb684e2ff83ba85ced81708a5357c324b9d"
+  },
+  "model": "Unsloth Flash-Next UD-Q4_K_XL; shared Q8_0 MTP",
+  "weights_revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+  "snapshot_version": 16,
+  "http": {
+    "context": 32768,
+    "sessions": 2,
+    "draft_limit": 7,
+    "thinking": false,
+    "sampled": {
+      "temperature": 0.8,
+      "top_k": 20,
+      "top_p": 0.95,
+      "min_p": 0,
+      "repeat_penalty": 1,
+      "frequency_penalty": 0,
+      "presence_penalty": 0
+    },
+    "prompt_tokens": 355,
+    "new_prefix_splits": [
+      [
+        320,
+        35
+      ],
+      [
+        348,
+        7
+      ]
+    ],
+    "output_budget": 200,
+    "content_sha256_prefixes": [
+      {
+        "seed": 0,
+        "incremental": "41900f5d3b",
+        "again": "41900f5d3b",
+        "cold": "41900f5d3b",
+        "after_cold": "41900f5d3b"
+      },
+      {
+        "seed": 1,
+        "incremental": "5319822f83",
+        "again": "5319822f83",
+        "cold": "5319822f83",
+        "after_cold": "5319822f83"
+      },
+      {
+        "seed": 2,
+        "incremental": "842dbe92d3",
+        "again": "842dbe92d3",
+        "cold": "842dbe92d3",
+        "after_cold": "842dbe92d3"
+      }
+    ],
+    "cache_replays_prefill_tokens": 0
+  },
+  "gpu_checks": {
+    "independent_mtp_oracle": "pass; full norm, split projections, attention, recursive carry, full Q8 head and image IDs",
+    "exact_candidate_chunk_rows": [
+      1,
+      8,
+      9,
+      32,
+      33
+    ],
+    "prefill_lengths": [
+      136,
+      2048,
+      4096
+    ],
+    "prefill_comparison": "exact target logits and sampled MTP replay",
+    "concurrency": [
+      2,
+      4,
+      6,
+      8
+    ],
+    "batch_comparison": "exact target logits, tokens, acceptance, history, RNG and residual correction",
+    "cancellation": "pass; direct recovery, peer isolation and reused rollback",
+    "snapshot": "pass; 4095 tokens, persistent bytes, mid-generation, deferred residual, ring wrap and version rejection",
+    "kv_only_prefill": "exact full-head candidates versus full predictor at 1/8/9/32/33 rows; heads and recursive proposals reject omitted residuals",
+    "short_catchup": "exact full-head candidates and recursive stages versus independent batched execution, with discarded feed-forward rows omitted"
+  },
+  "image_http_checks": {
+    "image-reasoning": {
+      "case": "reasoning_content-preserve1-sampled1",
+      "cached": 681,
+      "prefill": 32,
+      "disk": false,
+      "exact": true
+    },
+    "image-discard": {
+      "case": "content-preserve0-sampled0",
+      "cached": 403,
+      "prefill": 13,
+      "disk": false,
+      "exact": true
+    },
+    "image-reasoning-disk": {
+      "case": "reasoning_content-preserve1-sampled1",
+      "cached": 713,
+      "prefill": 0,
+      "disk": true,
+      "exact": true
+    },
+    "image-discard-disk": {
+      "case": "content-preserve0-sampled0",
+      "cached": 416,
+      "prefill": 0,
+      "disk": true,
+      "exact": true
+    }
+  },
+  "performance": {
+    "method": "Production Nix CLI builds; one measurement per ordered depth 0,4096, C1 MTP, greedy, pp2048/tg128. Prefill is warmed; generation starts from 16 tokens at d0 and 4096 at d4K and includes graph warm-up. No profiling, builds or other GPU work overlapped these controls. These do not replace the HTTP benchmark tables.",
+    "command": "gufo bench --model MODEL --mtp-model MTP --speculative mtp -p 2048 -n 128 -d 0,4096 -r 1 -v",
+    "unit": "tok/s",
+    "previous_fix": {
+      "pp2048": 1616.98,
+      "tg128": 43.17,
+      "pp2048 @ d4096": 1552.39,
+      "tg128 @ d4096": 45.91
+    },
+    "main": {
+      "pp2048": 1654.38,
+      "tg128": 44.57,
+      "pp2048 @ d4096": 1588.16,
+      "tg128 @ d4096": 46.03
+    },
+    "candidate": {
+      "pp2048": 1650.68,
+      "tg128": 44.1,
+      "pp2048 @ d4096": 1583.63,
+      "tg128 @ d4096": 46.23
+    },
+    "main_cycles": [
+      {
+        "depth": 0,
+        "cycles": 45,
+        "drafted": 120,
+        "accepted": 83,
+        "output_sha256": "6d5ef35567bb68a092e36b8afb323a76c82de1be845e85f4b65919cb8d2af104"
+      },
+      {
+        "depth": 4096,
+        "cycles": 40,
+        "drafted": 117,
+        "accepted": 88,
+        "output_sha256": "a55b41fe193345c538a74a0ff05c7933075809d18915193a30cb3423122bad24"
+      }
+    ],
+    "candidate_cycles": [
+      {
+        "depth": 0,
+        "cycles": 47,
+        "drafted": 114,
+        "accepted": 81,
+        "output_sha256": "6d5ef35567bb68a092e36b8afb323a76c82de1be845e85f4b65919cb8d2af104"
+      },
+      {
+        "depth": 4096,
+        "cycles": 40,
+        "drafted": 117,
+        "accepted": 88,
+        "output_sha256": "a55b41fe193345c538a74a0ff05c7933075809d18915193a30cb3423122bad24"
+      }
+    ],
+    "production_candidate": "/nix/store/7fh25r65x60lmis75q9yh4j75s1d8350-gufo-0-unstable-eb91584-dirty",
+    "retained": [
+      "K/V-only known-prompt catch-up; skipped residuals are explicitly invalid and omitted from snapshots",
+      "32-row invariant Q8 projection tiles for FC, K/V and HC",
+      "short catch-up keeps two rows for unchanged router arithmetic, sharing the retained row's expert weights",
+      "C1/d0 cost curve remeasured for all eight widths; sampling uses fixed costs"
+    ],
+    "rejected": [
+      "four vocabulary rows per GPU block: no measurable end-to-end gain",
+      "headless decode shortcut: single/batched snapshot byte mismatch; removed"
+    ]
+  },
+  "repository_checks": "35/35 canonical Nix checks; formatting, dependencies, docs and CLI contracts pass"
+}

@@ -195,7 +195,7 @@ public:
   }
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 14;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 16;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   /// Captures the whole context (tokens, device caches and recurrent

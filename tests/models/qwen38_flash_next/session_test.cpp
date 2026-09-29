@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "src/cli/serve/inference_backend.hpp"
+#include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "tests/models/qwen27b/sampling_cases.hpp"
 
@@ -202,6 +203,7 @@ void CheckImageSnapshotAttachment(const std::shared_ptr<qfn::Model>& model) {
     for (std::size_t i = blue ? 2 : 0; i < pixels.pixels.size(); i += 3)
       pixels.pixels[i] = 255;
     prompt->images.push_back({std::move(pixels), grid});
+    prompt->images.back().prefix_identity.fill(blue ? 2 : 1);
     prompt->cache_identity.assign(32, blue ? 2 : 1);
     return prompt;
   };
@@ -278,6 +280,7 @@ void CheckPrefillChunks(const std::shared_ptr<qfn::Model>& model) {
                 split->Sync(std::span(tokens).first(boundary), &error) &&
                 split->Sync(tokens, &error),
             error);
+    std::vector<sampling::TokenId> history(tokens.begin(), tokens.end());
     for (unsigned step = 0; step < 4; ++step) {
       const auto logits = bulk->Logits();
       RequireExact(
@@ -289,10 +292,106 @@ void CheckPrefillChunks(const std::shared_ptr<qfn::Model>& model) {
           std::max_element(logits.begin(), logits.end()) - logits.begin());
       Require(bulk->Evaluate(token, &error) && split->Evaluate(token, &error),
               error);
+      history.push_back(token);
+    }
+    if (model->HasMtp()) {
+      const sampling::SamplingConfig config{
+          .temperature = 0.8F, .top_k = 20, .top_p = 0.95F, .seed = 73};
+      sampling::SamplerState a(config, history), b(config, history);
+      for (unsigned generated = 0; generated < 16;) {
+        qfn::Session::DecodeResult first, second;
+        Require(
+            bulk->DecodeStep(16 - generated, a, &first, &error, false) &&
+                split->DecodeStep(16 - generated, b, &second, &error, false),
+            error);
+        Require(!first.tokens.empty() && first.tokens == second.tokens &&
+                    a.rng_state() == b.rng_state(),
+                "prefill chunking changed sampled MTP replay: length=" +
+                    std::to_string(length) +
+                    " boundary=" + std::to_string(boundary));
+        RequireExact(bulk->Logits(), split->Logits(),
+                     "prefill chunking changed MTP target logits");
+        generated += first.tokens.size();
+      }
     }
     std::cout << "prefill chunks: length=" << length << " boundary=" << boundary
-              << " four logit rows exact\n"
+              << " four logit rows and sampled MTP replay exact\n"
               << std::flush;
+  }
+}
+
+void CheckMtpCacheReplay(const std::shared_ptr<qfn::Model>& model) {
+  namespace qt = gufo::tokenization;
+  std::string error;
+  for (const auto seed : {1U, 2U}) {
+    std::string system = "Case " + std::to_string(seed) + ". ";
+    for (unsigned i = 0; i < 32; ++i)
+      system += "Follow the user instruction carefully and answer accurately. ";
+    const std::array messages{
+        qt::ChatMessage{qt::ChatRole::kSystem, system},
+        qt::ChatMessage{qt::ChatRole::kUser,
+                        "Name three rivers in Europe and one fact about each."},
+        qt::ChatMessage{qt::ChatRole::kAssistant,
+                        "The Danube, the Rhine and the Loire."},
+        qt::ChatMessage{qt::ChatRole::kUser,
+                        "Now write a short story about one of them."}};
+    const auto encoded = qt::QwenChatTemplate::RenderAndTokenize(
+        model->tokenizer(), messages, {.enable_thinking = false}, &error);
+    Require(encoded.has_value(), error);
+    const std::vector<std::int32_t> prompt(encoded->begin(), encoded->end());
+    Require(prompt.size() == 355, "MTP cache replay fixture changed");
+    const sampling::SamplingConfig config{
+        .temperature = 0.8F, .top_k = 20, .top_p = 0.95F, .seed = seed};
+    const std::vector<sampling::TokenId> history(prompt.begin(), prompt.end());
+    std::vector<std::int32_t> expected;
+    std::vector<std::size_t> expected_widths;
+    std::uint64_t expected_rng = 0;
+    // The server's immutable frontier excludes the seven-token generation
+    // suffix. Rebuilding the same prompt must not depend on whether a
+    // previous turn already supplied its first 320 tokens.
+    for (const auto boundary : {320U, 348U}) {
+      auto session = model->CreateSession(gufo::core::SessionMode::kSpeculative,
+                                          6145, &error);
+      Require(session &&
+                  session->Sync(std::span(prompt).first(boundary), &error) &&
+                  session->Sync(prompt, &error),
+              error);
+      const auto snapshot = session->SaveSnapshot(&error);
+      Require(snapshot != nullptr, error);
+      for (unsigned restore = 0; restore < 2; ++restore) {
+        if (restore)
+          Require(session->RestoreSnapshot(*snapshot, &error), error);
+        session->ResetDraftPolicy();
+        sampling::SamplerState sampler(config, history);
+        std::vector<std::int32_t> tokens;
+        std::vector<std::size_t> widths;
+        while (tokens.size() < 200) {
+          qfn::Session::DecodeResult step;
+          Require(session->DecodeStep(200 - tokens.size(), sampler, &step,
+                                      &error, false),
+                  error);
+          Require(!step.tokens.empty(), "MTP replay made no progress");
+          tokens.insert(tokens.end(), step.tokens.begin(), step.tokens.end());
+          widths.push_back(step.tokens.size());
+        }
+        if (expected.empty()) {
+          expected = tokens;
+          expected_widths = widths;
+          expected_rng = sampler.rng_state();
+        } else {
+          Require(tokens == expected && widths == expected_widths &&
+                      sampler.rng_state() == expected_rng,
+                  "MTP cache replay changed tokens, acceptance or RNG: seed=" +
+                      std::to_string(seed) +
+                      " boundary=" + std::to_string(boundary) +
+                      " restore=" + std::to_string(restore));
+        }
+        std::cout << "MTP cache replay seed=" << seed
+                  << " boundary=" << boundary << " restore=" << restore
+                  << " tokens=200 exact=1\n"
+                  << std::flush;
+      }
+    }
   }
 }
 
@@ -723,11 +822,15 @@ int main(int argc, char** argv) {
       argc == 6 && std::string_view(argv[5]) == "--prefill-only";
   const bool sampling_only =
       argc == 6 && std::string_view(argv[5]) == "--sampling-only";
-  if ((argc != 5 && !batch_only && !prefill_only && !sampling_only) ||
+  const bool cache_only =
+      argc == 6 && std::string_view(argv[5]) == "--cache-only";
+  if ((argc != 5 && !batch_only && !prefill_only && !sampling_only &&
+       !cache_only) ||
       std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
-    std::cerr << "Usage: session_test --model FIRST.gguf --mtp-model MTP.gguf "
-                 "[--batch-only | --prefill-only | --sampling-only]\n";
+    std::cerr
+        << "Usage: session_test --model FIRST.gguf --mtp-model MTP.gguf "
+           "[--batch-only | --prefill-only | --sampling-only | --cache-only]\n";
     return 77;
   }
   try {
@@ -737,6 +840,10 @@ int main(int argc, char** argv) {
         {.max_context = 6145, .mtp_model_path = argv[4], .max_draft_tokens = 7},
         &error);
     Require(model != nullptr, error);
+    if (cache_only) {
+      CheckMtpCacheReplay(model);
+      return 0;
+    }
     CheckSnapshotDuringGraphCapture(model);
     CheckExecutionModes(model);
     if (sampling_only) {
@@ -747,6 +854,8 @@ int main(int argc, char** argv) {
       CheckPrefillChunks(model);
     if (prefill_only)
       return 0;
+    if (!batch_only)
+      CheckMtpCacheReplay(model);
     CheckFailureRecovery(model);
     CheckRollbackReuse(model);
     CheckImageSnapshotAttachment(model);

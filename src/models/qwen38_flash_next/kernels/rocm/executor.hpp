@@ -98,6 +98,7 @@ private:
     float* h{nullptr};  ///< [hc_dim] wide residual handed to the next draft
     float* target_hidden{nullptr};  ///< last max_speculative trunk rows
     std::uint32_t position{0};
+    bool residual_valid{false};
   };
 
   mutable bool cancelled_{false};
@@ -212,6 +213,9 @@ public:
     std::int32_t* token{nullptr};
     MtpCandidateLogits* candidates{nullptr};
     MtpTrace* trace{nullptr};  ///< final-row diagnostic; disables graph capture
+    /// Prefill needs only persistent KV. A subsequent full forward with
+    /// known trunk hidden rows is required before heads/recursive proposals.
+    bool kv_only{false};
   };
   struct MtpHeadItem {
     Session* session;
@@ -268,6 +272,8 @@ public:
 
   /// Rewinds the draft block's own context.
   void MtpRewind(Session& session, std::uint32_t position) const noexcept {
+    if (session.mtp_.position != position)
+      session.mtp_.residual_valid = false;
     session.mtp_.position = position;
     session.mtp_.blocks =
         std::min(session.mtp_.blocks, position / config().compress_ratio);
@@ -392,7 +398,7 @@ private:
                    std::string* error_msg) const;
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
-               const float* hidden_source, MtpTrace* trace) const;
+               const float* hidden_source, MtpTrace* trace, bool kv_only) const;
   /// Runs `body` eagerly, or as the session's captured graph for `key`
   /// when `graph` is set. A prefix may leave its work queued so the host
   /// can wait for disk reads while the GPU computes it.

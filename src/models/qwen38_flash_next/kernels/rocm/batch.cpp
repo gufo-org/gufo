@@ -149,8 +149,8 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                             m.inject.type == core::GgmlType::kF32;
   q8t_src_ = nullptr;
   half_src_ = nullptr;
-  // Every request contains at most eight decode rows. Keep its scalar
-  // epilogue/reduction even when the concatenated batch exceeds eight.
+  // Keep each row's scalar epilogue/reduction independently of the total
+  // row count, including prompt replay and concatenated decode batches.
   HcMixEpilogue(s_.xn, s_.hc_gate, fused_inject ? m.inject.f32() : nullptr,
                 mixed, inject, rows, c.hidden_size, c.hc_count, stream_);
   inject_parts_ = fused_inject ? HcInjectParts(c.hidden_size) : 1;
@@ -182,7 +182,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     const auto n = item.tokens.size();
     if (item.session == nullptr || item.session->owner_ != this ||
         !item.session->mtp_enabled_ || n == 0 || n > kDecodeRows ||
-        (item.hidden_row < 0 && n != 1) ||
+        (item.hidden_row < 0 &&
+         (n != 1 || !item.session->mtp_.residual_valid)) ||
         (item.hidden_row >= 0 &&
          static_cast<std::uint32_t>(item.hidden_row) + n >
              options_.max_speculative) ||
@@ -254,36 +255,16 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     }
     RmsNormRows(base.mtp_h, l.nextn_hnorm.f32(), base.mtp_h, rows, c.HcDim(), 1,
                 c.rms_eps, stream_);
-    // Keep each session's vector/matrix arithmetic while sharing weight
-    // reads among adjacent vector-sized inputs. Project the embedding once.
-    for (std::size_t i = 0; i < items.size();) {
-      const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
-      auto end = i + 1;
-      if (n * c.hc_count <= kDecodeRows) {
-        while (end < items.size() &&
-               items[end].tokens.size() * c.hc_count <= kDecodeRows)
-          ++end;
-      }
-      const auto end_row = end == items.size() ? rows : offsets[end];
-      const auto count = end_row - offsets[i];
-      UseScratch(RowScratch(base, offsets[i]));
-      if (n * c.hc_count <= kDecodeRows) {
-        if (!DenseBatch(l.nextn_fc_embedding, s_.mtp_embd, s_.mtp_eproj, count,
-                        error) ||
-            !DenseBatch(l.nextn_fc_hidden, s_.mtp_h, s_.mtp_res,
-                        count * c.hc_count, error))
-          return false;
-      } else if (!Dense(l.nextn_fc_embedding, s_.mtp_embd, s_.mtp_eproj, n,
-                        error) ||
-                 !Dense(l.nextn_fc_hidden, s_.mtp_h, s_.mtp_res, n * c.hc_count,
-                        error)) {
-        return false;
-      }
-      MtpAddEmbedding(s_.mtp_eproj, s_.mtp_res, count, c.hidden_size,
-                      c.hc_count, stream_);
-      i = end;
-    }
     UseScratch(base);
+    // Persistent draft KV uses the same projections for every prompt split,
+    // catch-up length and number of independent sessions.
+    if (!DenseBatch(l.nextn_fc_embedding, base.mtp_embd, base.mtp_eproj, rows,
+                    error) ||
+        !DenseBatch(l.nextn_fc_hidden, base.mtp_h, base.mtp_res,
+                    rows * c.hc_count, error))
+      return false;
+    MtpAddEmbedding(base.mtp_eproj, base.mtp_res, rows, c.hidden_size,
+                    c.hc_count, stream_);
     if (!HcMixBatch(l.hc_attn, base.mtp_res, false, base.mixed, base.inject,
                     rows, error))
       return false;
@@ -312,6 +293,7 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
         continue;
       }
       ++session.mutation_epoch_;
+      session.mtp_.residual_valid = false;
       Session::AttentionState attention;
       attention.rope = session.vision_input_.rope();
       attention.k_cache = session.mtp_.k_cache;
@@ -394,6 +376,7 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     if (item.session->Cancelled())
       continue;
     item.session->mtp_.position += item.tokens.size();
+    item.session->mtp_.residual_valid = true;
     if (item.session->mtp_.position > c.indexer_top_k)
       item.session->mtp_.blocks =
           item.session->mtp_.position / c.compress_ratio;
@@ -412,6 +395,7 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
     const auto& item = items[i];
     if (item.session == nullptr || item.session->owner_ != this ||
         !item.session->mtp_enabled_ || item.session->mtp_.position == 0 ||
+        !item.session->mtp_.residual_valid || item.output.kv_only ||
         item.output.trace != nullptr ||
         (item.output.token == nullptr && item.output.candidates == nullptr)) {
       return Fail(error, "invalid MTP head request");
@@ -568,9 +552,11 @@ bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
   }
   // Three matrix tiles help 33–48 rows; four tiles cost more than two
   // 32-row launches. Small outputs with long K sweeps stay at eight.
-  const auto chunk = w.cols == 2560 && w.rows >= 8192
-                         ? (rows > 32 && rows <= 48 ? 48U : 32U)
-                         : kDecodeRows;
+  const auto chunk =
+      ((w.cols == 2560 && w.rows >= 1024) || (w.cols == 320 && w.rows == 10240))
+          ? (w.cols == 2560 && w.rows >= 8192 && rows > 32 && rows <= 48 ? 48U
+                                                                         : 32U)
+          : kDecodeRows;
   for (std::uint32_t r = 0; r < rows; r += chunk) {
     if (!project(r, std::min(chunk, rows - r)))
       return false;

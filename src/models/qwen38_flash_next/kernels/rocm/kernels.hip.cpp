@@ -5678,7 +5678,7 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
                       float theta, float eps, hipStream_t stream,
                       const qwen::vision::DeviceRope* rope, bool prefill) {
   if (d == 0 || d > 256 || rotary_dim == 0 || rotary_dim > d ||
-      rotary_dim % 2 != 0 || heads == 0 || kv_heads == 0 ||
+      rotary_dim % 2 != 0 || kv_heads == 0 ||
       stride < static_cast<std::size_t>(2) * (heads + kv_heads) * d) {
     return false;
   }

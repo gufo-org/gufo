@@ -2,6 +2,9 @@
 
 | Experiment | Decision / evidence |
 | --- | --- |
+| Prefix-independent MTP cache projections | Retained: exact seeded replay across prompt splits and checkpoint replacement, using shared Q8 row arithmetic. [Checks and timings](artifacts/mtp-cache-replay.json). |
+| Skip discarded MTP outputs | Retained: K/V-only prefill, compact catch-up and wider projection tiles; C1 costs remeasured. Prefill is within 0.3% of main; d0 TG remains 1.1% slower, d4K TG is 0.4% faster. |
+| Group vocabulary rows per block | Rejected: no measurable end-to-end gain. |
 | Full-width MTP RMSNorm and split projection | Retained after independent CPU stage audit; one 10240-wide normalization, embedding projection shared across HC branches. |
 | Full Q8 vocabulary head | Retained; private Q4 shortlist removed. Sampled top-64 proposals use exact target verification. |
 | Batched MTP transformer and heads | Retained; independent body/head comparisons, private KV/recurrent/rollback/RNG state. |

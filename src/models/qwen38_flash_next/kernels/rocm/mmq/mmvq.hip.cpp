@@ -524,7 +524,9 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                              const block_q8_1* input, float* output, int k,
                              int rows, int tokens, int input_stride,
                              hipStream_t stream) {
-  if (!gate && k == 2560 && rows >= 2560 && tokens >= 9 && tokens <= 48) {
+  const bool matrix_shape =
+      (k == 2560 && rows >= 1024) || (k == 320 && rows == 10240);
+  if (!gate && matrix_shape && tokens >= 9 && tokens <= 48) {
     if (tokens <= 16)
       launch_q8_matrix<1>(weights, input, output, k, rows, tokens, input_stride,
                            stream);

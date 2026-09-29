@@ -14,10 +14,11 @@ namespace gufo::models::qwen38_flash_next {
 // Reproduce with qwen38_flash_next_gpu_probe --cost-audit 0. Allocation and C1
 // graph capture are warmed outside the measurement; each row is the median
 // of three complete cycles. Use --depth N to audit one depth. See benchmarks.
+// C1/d0 was remeasured with invariant MTP cache projections for issue #300.
 inline constexpr float kMtpCycleMilliseconds[3][5][8] = {
     {
         // Context 0
-        {38.4F, 47.2F, 56.7F, 67.2F, 78.4F, 85.8F, 94.5F, 102.6F},        // C1
+        {38.5F, 47.3F, 56.1F, 65.7F, 74.1F, 82.2F, 89.7F, 96.8F},         // C1
         {46.1F, 59.6F, 74.0F, 90.5F, 109.0F, 121.2F, 135.9F, 145.8F},     // C2
         {57.6F, 80.6F, 108.6F, 131.4F, 161.9F, 183.5F, 213.5F, 234.3F},   // C4
         {68.4F, 104.7F, 140.2F, 175.5F, 211.6F, 254.2F, 293.7F, 325.8F},  // C6

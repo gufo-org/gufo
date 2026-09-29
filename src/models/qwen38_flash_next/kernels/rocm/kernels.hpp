@@ -339,6 +339,7 @@ void UnpackQGate(const float* qg, std::uint32_t qg_stride, float* q,
 
 /// Unpacks a stacked Q/gate/K/V projection, normalizes and rotates Q/K,
 /// and writes the F16 caches. Returns false for heads wider than 256.
+/// With zero query heads, packed contains only K/V and q/gate may be null.
 bool PrepareAttention(const float* packed, std::uint32_t stride,
                       const float* q_gamma, const float* k_gamma, float* q,
                       float* gate, __half* k_cache, __half* v_cache,

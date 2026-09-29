@@ -838,6 +838,8 @@ int main() {
     CheckSmallProjection(q::WeightType::kF16, 7, 131);
     CheckDecodeGrouping(64, 2560);
     CheckDecodeGrouping(320, 10240);
+    CheckDecodeGrouping(1024, 2560);
+    CheckDecodeGrouping(10240, 320);
     CheckDecodeGrouping(2561, 2560);
     CheckDecodeGrouping(12289, 2560);
     CheckDecodeGrouping(65537, 2560);
