@@ -170,8 +170,8 @@ void SamplingConfig::Validate() const {
   if (top_k < 0) {
     throw std::invalid_argument("sampling top-k must be nonnegative");
   }
-  if (!std::isfinite(top_p) || top_p <= 0.0F || top_p > 1.0F) {
-    throw std::invalid_argument("sampling top-p must be in (0, 1]");
+  if (!std::isfinite(top_p) || top_p < 0.0F || top_p > 1.0F) {
+    throw std::invalid_argument("sampling top-p must be in [0, 1]");
   }
   if (!std::isfinite(min_p) || min_p < 0.0F || min_p > 1.0F) {
     throw std::invalid_argument("sampling min-p must be in [0, 1]");
@@ -204,9 +204,10 @@ bool SamplingConfig::can_use_unmodified_argmax() const noexcept {
   return !constraint && temperature == 0.0F && !penalties_enabled();
 }
 
-bool SamplerState::CanSelectArgmax(TokenId token) const {
+bool SamplerState::CanSelectArgmax(TokenId token,
+                                 bool penalties_applied) const {
   if (pending_sample_ || config_.temperature != 0.0F ||
-      config_.penalties_enabled())
+      (!penalties_applied && config_.penalties_enabled()))
     return false;
   if (!config_.constraint)
     return true;
@@ -727,12 +728,19 @@ TokenId SamplerState::SampleGreedy(std::span<const float> logits) const {
   double best_logit = -std::numeric_limits<double>::infinity();
   TokenId best_token = 0;
   bool found = false;
+  auto penalty = penalty_counts_.begin();
   for (std::size_t index = 0; index < logits.size(); ++index) {
     if (!std::isfinite(logits[index])) {
       continue;
     }
+    // Both vocab IDs and sparse penalties are sorted. Walk them together
+    // instead of binary-searching the history for every vocabulary entry.
+    while (penalty != penalty_counts_.end() && penalty->token < index)
+      ++penalty;
     const double adjusted =
-        AdjustedLogit(static_cast<TokenId>(index), logits[index]);
+        penalty != penalty_counts_.end() && penalty->token == index
+            ? Penalize(logits[index], config_, *penalty)
+            : static_cast<double>(logits[index]);
     if (!std::isfinite(adjusted)) {
       throw std::runtime_error(
           "sampling penalties produced a non-finite logit");

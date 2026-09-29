@@ -262,6 +262,7 @@ Executor::~Executor() {
     (void)ngram_->WaitRead();
   }
   (void)hipFree(batch_logits_);
+  (void)hipFree(verification_penalties_);
   (void)hipHostFree(batch_gdn_host_);
   (void)hipHostFree(batch_controls_);
   (void)hipHostFree(batch_candidates_host_);
@@ -467,7 +468,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     s.mtp_res = s.res;
     s.mtp_argmax = Alloc<ArgmaxCandidate>(a, kArgmaxParts, error_msg);
     s.mtp_token = Alloc<std::int32_t>(a, 1, error_msg);
-    const auto candidate_ids = MtpCandidateWorkspaceSize(c.vocab_size);
+    const auto candidate_ids = std::max<std::size_t>(
+        MtpCandidateWorkspaceSize(c.vocab_size),
+        e->options_.max_speculative * kArgmaxParts *
+            sizeof(PenaltyArgmaxCandidate) / sizeof(std::uint32_t));
     s.mtp_ids = Alloc<std::uint32_t>(a, candidate_ids, error_msg);
     s.mtp_scratch_ids = Alloc<std::uint32_t>(a, candidate_ids, error_msg);
     // Final selection consumes intermediate IDs before writing its scores.
@@ -2450,29 +2454,73 @@ bool Executor::ReadVerificationRows(std::uint32_t row, std::span<float> logits,
 }
 
 bool Executor::GreedyMtpPredictions(std::span<ArgmaxCandidate> predictions,
+                                    const sampling::SamplerState& sampler,
+                                    std::span<const std::int32_t> drafts,
                                     std::string* error_msg) const {
   const auto rows = predictions.size();
-  if (rows == 0 || rows > options_.max_logit_rows || rows > kArgmaxParts ||
-      s_.mtp_ids == nullptr) {
+  if (rows == 0 || rows > options_.max_logit_rows || rows > 7 ||
+      drafts.size() != rows || s_.mtp_ids == nullptr) {
     AssignError(error_msg, "invalid greedy MTP verification request");
     return false;
   }
   // Proposal selection has finished. Its two ID buffers and argmax scratch
   // can be reused until the next draft head overwrites them.
   const auto vocab = config().vocab_size;
-  gufo::hip::LaunchBatchedGPUArgmax(
-      VerificationLogits(), s_.mtp_ids, rows, vocab,
-      {reinterpret_cast<float*>(s_.mtp_scratch_ids),
-       MtpCandidateWorkspaceSize(vocab)},
-      stream_);
-  GatherArgmaxCandidates(VerificationLogits(), s_.mtp_ids, s_.mtp_argmax,
-                         static_cast<std::uint32_t>(rows), vocab, stream_);
-  return Check(hipMemcpyAsync(predictions.data(), s_.mtp_argmax,
-                              predictions.size_bytes(), hipMemcpyDeviceToHost,
-                              stream_),
-               "greedy MTP predictions download", error_msg) &&
-         Check(hipStreamSynchronize(stream_), "greedy MTP verification",
-               error_msg);
+  // Keep the host upload alive until the final stream synchronization. This
+  // workspace is shared, never part of a session or its persistent snapshot.
+  std::vector<sampling::TokenPenalty> penalties;
+  if (sampler.config().penalties_enabled()) {
+    penalties.reserve(rows * (sampler.penalties().size() + rows));
+    auto tentative = sampler;
+    GreedyPenaltyRows batch{};
+    for (std::size_t row = 0; row < rows; ++row) {
+      const auto counts = tentative.penalties();
+      penalties.insert(penalties.end(), counts.begin(), counts.end());
+      batch.offsets[row + 1] = static_cast<std::uint32_t>(penalties.size());
+      if (row + 1 < rows)
+        tentative.Accept(static_cast<sampling::TokenId>(drafts[row]));
+    }
+    if (penalties.size() > verification_penalty_capacity_) {
+      const auto capacity =
+          std::max(penalties.size(), 2 * verification_penalty_capacity_);
+      sampling::TokenPenalty* allocated = nullptr;
+      if (!Check(hipMalloc(&allocated, capacity * sizeof(*allocated)),
+                 "verification penalty allocation", error_msg))
+        return false;
+      (void)hipFree(verification_penalties_);
+      verification_penalties_ = allocated;
+      verification_penalty_capacity_ = capacity;
+    }
+    batch.penalties = verification_penalties_;
+    if (!penalties.empty() &&
+        !Check(hipMemcpyAsync(verification_penalties_, penalties.data(),
+                              penalties.size() * sizeof(penalties.front()),
+                              hipMemcpyHostToDevice, stream_),
+               "verification penalty upload", error_msg))
+      return false;
+    const auto& config = sampler.config();
+    PenalizedArgmax(
+        VerificationLogits(), batch, config.repeat_penalty,
+        config.frequency_penalty, config.presence_penalty,
+        reinterpret_cast<PenaltyArgmaxCandidate*>(s_.mtp_scratch_ids),
+        s_.mtp_argmax, rows, vocab, stream_);
+  } else {
+    gufo::hip::LaunchBatchedGPUArgmax(
+        VerificationLogits(), s_.mtp_ids, rows, vocab,
+        {reinterpret_cast<float*>(s_.mtp_scratch_ids),
+         MtpCandidateWorkspaceSize(vocab)},
+        stream_);
+    GatherArgmaxCandidates(VerificationLogits(), s_.mtp_ids, s_.mtp_argmax,
+                           static_cast<std::uint32_t>(rows), vocab, stream_);
+  }
+  const bool copied = Check(
+      hipMemcpyAsync(predictions.data(), s_.mtp_argmax,
+                     predictions.size_bytes(), hipMemcpyDeviceToHost, stream_),
+      "greedy MTP predictions download", error_msg);
+  // Drain even after a failed download before releasing the upload source.
+  const bool completed = Check(hipStreamSynchronize(stream_),
+                               "greedy MTP verification", error_msg);
+  return copied && completed;
 }
 
 bool Executor::MtpForward(Session& session,

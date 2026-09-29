@@ -44,6 +44,20 @@ void TestDefaultConfigPreservesGreedyDecoding() {
          "default sampler does not consume RNG state");
 }
 
+void TestExternalArgmaxRequiresAppliedPenalties() {
+  using gufo::sampling::SamplerState;
+  const std::array<float, 2> logits{1.0F, 0.75F};
+  SamplerState sampler({.presence_penalty = 1.5F});
+  sampler.Accept(0);
+  Expect(sampler.Sample(logits) == 1, "penalty changes the greedy winner");
+  Expect(!sampler.CanSelectArgmax(0), "raw argmax cannot bypass penalties");
+  Expect(sampler.CanSelectArgmax(1, /*penalties_applied=*/true),
+         "an exactly penalized argmax avoids downloading verification logits");
+  SamplerState sampled({.temperature = .7F, .presence_penalty = 1.5F});
+  Expect(!sampled.CanSelectArgmax(1, /*penalties_applied=*/true),
+         "applied penalties never bypass random sampling");
+}
+
 void TestTemperatureSamplingIsDeterministicAndNonGreedy() {
   const std::array<float, 3> logits = {0.0F, 0.0F, 0.0F};
   bool saw_first = false;
@@ -92,6 +106,14 @@ void TestTopPFiltersByCumulativeProbability() {
          "top-p retains the smallest cumulative-probability prefix");
   Expect(distribution.probability(2) == 0.0,
          "top-p removes the low-probability tail");
+  config.top_p = 0.0F;
+  for (const auto floor : {0U, 1U, 2U}) {
+    config.min_keep = floor;
+    const auto zero = gufo::sampling::BuildDistribution(logits, config);
+    Expect(zero.entries().size() == std::max(floor, 1U),
+           "top-p zero preserves the minimum token count");
+    Expect(zero.best_token() == 0, "top-p zero keeps the highest probability");
+  }
 }
 
 void TestMinPFiltersRelativeToTheBestToken() {
@@ -298,6 +320,38 @@ void TestDistributionIsNormalized() {
          "post-filter probabilities are normalized");
 }
 
+void TestGreedySparsePenaltyWalk() {
+  using namespace gufo::sampling;
+  std::vector<float> logits(16385);
+  for (std::size_t i = 0; i < logits.size(); ++i)
+    logits[i] = float(int((i * 7919) % 65521) - 32768) / 32768;
+  logits[0] = logits[128] = std::numeric_limits<float>::quiet_NaN();
+  logits[777] = std::numeric_limits<float>::infinity();
+  for (const float repeat : {.7F, 1.F, 1.3F}) {
+    for (const float penalty : {-1.5F, 1.5F}) {
+      SamplingConfig config{.seed = 73,
+                            .repeat_penalty = repeat,
+                            .repeat_last_n = 3,
+                            .frequency_penalty = penalty / 3,
+                            .presence_penalty = penalty};
+      const std::vector<TokenId> history{0, 128, 777, 16384, UINT32_MAX};
+      SamplerState sampler(config, history);
+      std::vector<TokenId> generated;
+      for (unsigned step = 0; step < 16; ++step) {
+        const auto expected =
+            BuildDistribution(logits, config, history, generated);
+        Expect(
+            sampler.Sample(logits) == expected.best_token(),
+            "sparse greedy walk matches independent distribution construction");
+        const TokenId token =
+            step % 3 == 0 ? 128 : (step * 977) % logits.size();
+        generated.push_back(token);
+        sampler.Accept(token);
+      }
+    }
+  }
+}
+
 void TestSamplingFailsClosedOnInvalidInputs() {
   bool empty_rejected = false;
   try {
@@ -332,7 +386,7 @@ void TestSamplingFailsClosedOnInvalidInputs() {
   bool invalid_config_rejected = false;
   try {
     gufo::sampling::SamplingConfig config;
-    config.top_p = 0.0F;
+    config.top_p = -0.01F;
     config.Validate();
   } catch (const std::invalid_argument&) {
     invalid_config_rejected = true;
@@ -544,6 +598,7 @@ int main() {
   TestResponsePenaltyScope();
   TestGreedySelectsFiniteArgmaxWithoutAdvancingRng();
   TestDefaultConfigPreservesGreedyDecoding();
+  TestExternalArgmaxRequiresAppliedPenalties();
   TestTemperatureSamplingIsDeterministicAndNonGreedy();
   TestTopKFiltersTheCandidateSet();
   TestTopPFiltersByCumulativeProbability();
@@ -558,6 +613,7 @@ int main() {
   TestFastMinPSamplingNeverEscapesRelativeThreshold();
   TestSeedAndStateAreRequestLocal();
   TestDistributionIsNormalized();
+  TestGreedySparsePenaltyWalk();
   TestSamplingFailsClosedOnInvalidInputs();
   TestZeroDrawAndNonFiniteCandidates();
   TestStrategyReplayAgainstReference();

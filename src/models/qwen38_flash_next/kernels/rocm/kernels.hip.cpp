@@ -2633,6 +2633,91 @@ __global__ void ArgmaxFinishKernel(const float* logits,
   }
 }
 
+__device__ __forceinline__ PenaltyArgmaxCandidate
+BetterPenaltyCandidate(PenaltyArgmaxCandidate a, PenaltyArgmaxCandidate b) {
+  return b.value > a.value || (b.value == a.value && b.index < a.index) ? b : a;
+}
+
+__device__ PenaltyArgmaxCandidate PenaltyArgmaxBlock(
+    PenaltyArgmaxCandidate best, PenaltyArgmaxCandidate* shared) {
+  const unsigned lane = threadIdx.x & 31u;
+  const unsigned wave = threadIdx.x >> 5u;
+  for (int offset = 16; offset > 0; offset >>= 1)
+    best = BetterPenaltyCandidate(
+        best, {__shfl_xor(best.value, offset), __shfl_xor(best.index, offset)});
+  if (lane == 0)
+    shared[wave] = best;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (unsigned w = 1; w < kThreads / 32; ++w)
+      best = BetterPenaltyCandidate(best, shared[w]);
+  }
+  return best;
+}
+
+__global__ void PenaltyArgmaxPartialKernel(const float* logits,
+                                           GreedyPenaltyRows penalties,
+                                           float repeat, float frequency,
+                                           float presence,
+                                           PenaltyArgmaxCandidate* partial,
+                                           std::uint32_t vocab) {
+  __shared__ PenaltyArgmaxCandidate shared[kThreads / 32];
+  const unsigned row = blockIdx.y;
+  const auto* src = logits + std::size_t(row) * vocab;
+  PenaltyArgmaxCandidate best{-INFINITY, INT32_MAX};
+  for (unsigned token = blockIdx.x * kThreads + threadIdx.x; token < vocab;
+       token += kArgmaxParts * kThreads) {
+    if (!isfinite(src[token]))
+      continue;
+    auto begin = penalties.offsets[row];
+    auto end = penalties.offsets[row + 1];
+    while (begin < end) {
+      const auto mid = begin + (end - begin) / 2;
+      if (penalties.penalties[mid].token < token)
+        begin = mid + 1;
+      else
+        end = mid;
+    }
+    double value = src[token];
+    if (begin < penalties.offsets[row + 1] &&
+        penalties.penalties[begin].token == token) {
+      const auto penalty = penalties.penalties[begin];
+      // Preserve the CPU's FP64 operations. In particular, do not narrow
+      // the adjusted logit before comparing close candidates.
+      if (penalty.repeated && repeat != 1.0F)
+        value = value <= 0 ? __dmul_rn(value, double(repeat))
+                           : __ddiv_rn(value, double(repeat));
+      value = __dadd_rn(value, -__dmul_rn(double(frequency),
+                                          double(penalty.generated_count)));
+      if (penalty.generated_count != 0)
+        value = __dadd_rn(value, -double(presence));
+    }
+    best =
+        BetterPenaltyCandidate(best, {value, static_cast<std::int32_t>(token)});
+  }
+  best = PenaltyArgmaxBlock(best, shared);
+  if (threadIdx.x == 0)
+    partial[row * kArgmaxParts + blockIdx.x] = best;
+}
+
+__global__ void PenaltyArgmaxFinishKernel(const float* logits,
+                                          const PenaltyArgmaxCandidate* partial,
+                                          ArgmaxCandidate* out,
+                                          std::uint32_t vocab) {
+  __shared__ PenaltyArgmaxCandidate shared[kThreads / 32];
+  const auto row = blockIdx.x;
+  PenaltyArgmaxCandidate best{-INFINITY, INT32_MAX};
+  if (threadIdx.x < kArgmaxParts)
+    best = partial[row * kArgmaxParts + threadIdx.x];
+  best = PenaltyArgmaxBlock(best, shared);
+  if (threadIdx.x == 0)
+    out[row] =
+        best.index < vocab
+            ? ArgmaxCandidate{logits[std::size_t(row) * vocab + best.index],
+                              best.index}
+            : ArgmaxCandidate{NAN, -1};
+}
+
 constexpr unsigned kMtpCandidateTile = 1024;
 
 __global__ void GatherArgmaxCandidatesKernel(const float* logits,
@@ -5910,6 +5995,19 @@ void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
                      dim3(kThreads), 0, stream, logits, scratch, vocab);
   hipLaunchKernelGGL(ArgmaxFinishKernel, dim3(n_tokens), dim3(kThreads), 0,
                      stream, logits, scratch, out, vocab);
+}
+
+void PenalizedArgmax(const float* logits, GreedyPenaltyRows penalties,
+                     float repeat, float frequency, float presence,
+                     PenaltyArgmaxCandidate* partial, ArgmaxCandidate* out,
+                     std::uint32_t rows, std::uint32_t vocab,
+                     hipStream_t stream) {
+  if (rows == 0 || rows > 7 || vocab == 0)
+    throw std::invalid_argument("invalid penalty argmax shape");
+  PenaltyArgmaxPartialKernel<<<dim3(kArgmaxParts, rows), kThreads, 0, stream>>>(
+      logits, penalties, repeat, frequency, presence, partial, vocab);
+  PenaltyArgmaxFinishKernel<<<rows, kThreads, 0, stream>>>(logits, partial, out,
+                                                           vocab);
 }
 
 void GatherArgmaxCandidates(const float* logits, const std::uint32_t* ids,

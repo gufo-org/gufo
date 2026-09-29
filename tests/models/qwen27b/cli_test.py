@@ -40,6 +40,7 @@ SAMPLING_CASES = [
     {"temperature": 1, "seed": 0},
     {"temperature": 0.8, "top_k": 3, "seed": 73},
     {"temperature": 0.8, "top_p": 0.7, "seed": 73},
+    {"temperature": 0.8, "top_p": 0, "seed": 73},
     {"temperature": 0.8, "min_p": 0.3, "seed": 73},
     {"temperature": 0.8, "repeat_penalty": 1.5, "seed": 73},
     {"temperature": 0.8, "repeat_penalty": 0.7, "seed": 73},
@@ -78,7 +79,7 @@ def check_options(binary):
             if result.returncode != 2:
                 raise AssertionError(f"invalid DFlash2 config not rejected: {command} {flag}")
     invalid_sampling = (
-        ("--temperature", "-0.1"), ("--top-k", "-1"), ("--top-p", "0"),
+        ("--temperature", "-0.1"), ("--top-k", "-1"), ("--top-p", "-0.01"),
         ("--min-p", "1.1"), ("--min-keep", "-1"), ("--seed", "-2"),
         ("--repeat-penalty", "0"), ("--repeat-last-n", "-1"),
         ("--frequency-penalty", "inf"), ("--presence-penalty", "nan"),
@@ -274,7 +275,7 @@ def check_http(binary, model, draft, policies, selection="both"):
                     ("/infill", {"input_prefix": prompt}),
                 ):
                     for field, value in (
-                            ("draft_temperature", 0.8), ("top_p", 0),
+                            ("draft_temperature", 0.8), ("top_p", -0.01),
                             ("temperature", -1), ("seed", 1.5),
                             ("samplers", ["top_k", "temperature"]),
                             ("typical_p", 0.9), ("tfs_z", 0.9),

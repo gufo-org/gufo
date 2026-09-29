@@ -624,6 +624,11 @@ and may include prompt tokens. Setting that window to zero disables only the
 repetition penalty. Speculative rejection discards tentative counts; seeded
 sampling replay retains independent request histories.
 
+API ranges: temperature `[0, 2]`, top-p/min-p `[0, 1]`, frequency/presence
+penalties `[-2, 2]`. Top-p zero keeps the highest-probability token (or
+`min_keep` tokens). Setting temperature to zero retains configured penalties;
+omitted controls keep their model/CLI defaults.
+
 Tool calls are emitted only for declared functions when `tool_choice` allows
 calling tools. With `auto`, ordinary text and reasoning remain allowed; once a
 call starts, decoding constrains its name and argument format. Non-strict tools

@@ -97,9 +97,11 @@ public:
   /// Draft q may remain unconstrained; target p always uses this request's
   /// grammar.
   [[nodiscard]] SamplerState WithoutConstraint() const;
-  /// An already validated finite, unmodified argmax can be selected without
-  /// downloading logits when it also satisfies the request grammar.
-  [[nodiscard]] bool CanSelectArgmax(TokenId token) const;
+  /// A finite argmax can bypass downloading logits if it satisfies the grammar.
+  /// Set penalties_applied only for a winner computed with this state's exact
+  /// penalty arithmetic and history; raw model argmaxes leave it false.
+  [[nodiscard]] bool CanSelectArgmax(TokenId token,
+                                      bool penalties_applied = false) const;
   /// A lazy tool grammar can admit the entire vocabulary before a call.
   /// Retain ordinary CPU/GPU sampling while its mask makes no restriction.
   [[nodiscard]] bool NeedsConstraintMask() const;

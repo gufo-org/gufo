@@ -61,6 +61,7 @@
 | Side-stream inject/shared-expert overlap | Rejected: exact output and real kernel overlap in the trace, but the co-running kernels slowed each other and interleaved wall-clock runs were 0.5–0.9% slower. |
 | Sparse attention tiles cut across selection windows | Retained; distribute tiles across splits using a 64-block carry, keeping four resident blocks/CU. Independent review: AR +6.7% at 32K and +16.5% at 128K, d0 unchanged. Same keys, reassociated FP32 sums; FP64 operator and model-level rounding checks pass. [Evidence](artifacts/attention-tiles-review.json). |
 | Whole-tile carry across windows | Rejected: same output, but 16.5 KiB of LDS cost a resident block per CU and slowed d2K eight-row verification 8.5%. |
+| GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
 
 Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
 to dense projections and 12.6% to attention/indexing. Final-tile catch-up

@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include "src/core/json.hpp"
@@ -158,6 +159,27 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
   if (auto error = detail::ReadSamplingFloat(body, "presence_penalty",
                                              &output->presence_penalty, true)) {
     return error;
+  }
+
+  // Check the original JSON number, not the narrowed float: 1.00000001 must
+  // not round into the permitted top-p range. Native sampler controls may
+  // be broader; these bounds implement the public API contract.
+  for (const auto& [field, minimum, maximum] :
+       {std::tuple{"temperature", 0.0, 2.0},
+        {"top_p", 0.0, 1.0},
+        {"min_p", 0.0, 1.0},
+        {"frequency_penalty", -2.0, 2.0},
+        {"presence_penalty", -2.0, 2.0}}) {
+    const auto* value = body.find(field);
+    if (value && value->is_number() &&
+        (value->as_double() < minimum || value->as_double() > maximum)) {
+      return SamplingRequestError{
+          .message = "'" + std::string(field) + "' must be between " +
+                     std::to_string(minimum) + " and " +
+                     std::to_string(maximum),
+          .code = detail::SamplingErrorCode(field),
+      };
+    }
   }
 
   try {

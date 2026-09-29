@@ -514,10 +514,12 @@ def check_sampling_ranges(client, model, checks):
     invalid = (
         ("temperature", -1), ("temperature", 2.01),
         ("temperature", "hot"), ("temperature", True),
-        ("top_p", 0), ("top_p", -0.1), ("top_p", 1.01), ("top_p", "0.9"),
+        ("top_p", -0.1), ("top_p", 1.01), ("top_p", "0.9"),
+        ("top_p", 1.00000001), ("temperature", 2.00000001),
         ("top_k", -1), ("top_k", 1.5), ("min_p", -0.1), ("min_p", 1.1),
         ("repeat_penalty", 0), ("repeat_last_n", -1), ("seed", -2),
         ("presence_penalty", 2.1), ("frequency_penalty", -2.1),
+        ("presence_penalty", 2.00000001), ("frequency_penalty", -2.00000001),
         ("draft_temperature", .7), ("typical_p", .9),
     )
     for endpoint, (create, body) in endpoints.items():
@@ -534,9 +536,11 @@ def check_sampling_ranges(client, model, checks):
                         response.close()
                     raise AssertionError(f"{endpoint} accepted invalid {name}={value!r}")
         # Boundaries are valid; use greedy selection to avoid probabilistic assertions.
-        for top_p in (.0001, 1.):
+        for top_p in (0., .0001, 1.):
             response = create(**body, temperature=0, top_p=top_p)
             checks[f"range_{endpoint}_valid_{top_p}"] = response.to_dict()
+        response = create(**body, temperature=.7, top_p=0, seed=42)
+        checks[f"range_{endpoint}_sampled_zero"] = response.to_dict()
 
 
 def check_batches(client, model, checks, width, vision=False, speculative="off"):
@@ -663,7 +667,7 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
         if index:
             return cross_endpoint(index)
         try:
-            client.chat.completions.create(**{**cases[0], "top_p": 0}, stream=True)
+            client.chat.completions.create(**{**cases[0], "top_p": -0.1}, stream=True)
         except openai.BadRequestError:
             return None
         raise AssertionError("invalid peer entered generation")

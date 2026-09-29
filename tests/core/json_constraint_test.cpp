@@ -781,6 +781,9 @@ void TestAutomaticTools() {
         SamplerState sampler(config);
         auto plain = sampler.WithoutConstraint();
         assert(!sampler.NeedsConstraintMask());
+        assert(!sampler.CanSelectArgmax('a'));
+        assert(sampler.CanSelectArgmax('a', /*penalties_applied=*/true) ==
+               (temperature == 0.0F));
         std::vector<float> logits(259, -INFINITY);
         logits['a'] = 1;
         logits['b'] = .8F;
@@ -808,6 +811,8 @@ void TestAutomaticTools() {
         auto before_call = sampler;
         sampler.Accept(258);
         assert(sampler.NeedsConstraintMask());
+        assert(!sampler.CanSelectArgmax('!', /*penalties_applied=*/true));
+        assert(!sampler.CanSelectArgmax(256, /*penalties_applied=*/true));
         accept(call);
         assert(!sampler.NeedsConstraintMask());
         sampler.Accept(257);  // Empty pieces preserve the ordinary path.

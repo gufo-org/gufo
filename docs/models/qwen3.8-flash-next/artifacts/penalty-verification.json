@@ -1,0 +1,121 @@
+{
+  "date": "2026-09-29",
+  "base_commit": "8eedee6fd904b8e6812f740f777fe84940f341c5",
+  "model": "Unsloth Qwen3.8 Flash-Next UD-Q4_K_XL with shared Q8_0 MTP",
+  "production_binary": "/nix/store/bl5hdp8plk40i746xlimd3hqbq51yf6m-gufo-0-unstable-8eedee6-dirty/bin/gufo",
+  "source_diff_sha256": "a986630c4b417890c82e3ac2f297d1768d43843f851586cfe817eed0b485b647",
+  "method": "One warmed HTTP measurement per configuration, GPU_MAX_HW_QUEUES=4. Concurrency rates sum individual decode rates; prompts are cached before timing. These short-prompt controls do not replace the pp2048 benchmark tables.",
+  "reported_request": {
+    "request": {
+      "model": "issue325",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write a detailed 350-word explanation of how a heat pump works, in plain English."
+        }
+      ],
+      "max_tokens": 400,
+      "temperature": 0,
+      "chat_template_kwargs": {
+        "enable_thinking": false
+      }
+    },
+    "sessions": 4,
+    "context": 65536,
+    "baseline_tok_s": 32.116,
+    "optimized_tok_s": 33.797,
+    "gain_percent": 5.24,
+    "same_output": true,
+    "output_sha256_prefix": "d9bc937331d8",
+    "tokens": 400,
+    "drafts_equal": true,
+    "acceptances_equal": true
+  },
+  "no_penalty_control": {
+    "baseline_tok_s": 35.45,
+    "optimized_tok_s": 35.556,
+    "gain_percent": 0.3,
+    "same_output": true,
+    "output_sha256_prefix": "4f1609f5333b",
+    "tokens": 400,
+    "drafts_equal": true,
+    "acceptances_equal": true,
+    "note": "Repeated only this control after an isolated 599 ms inter-token stall. The clean repeat peaked at 77 ms; the anomalous sample was 33.838 tok/s."
+  },
+  "concurrency": {
+    "context": 8192,
+    "sessions": 8,
+    "output_tokens": 128,
+    "prompt": "Reader {row}. Write a detailed explanation of how a heat pump works, in plain English.",
+    "sampling": {
+      "temperature": 0,
+      "presence_penalty": 1.5,
+      "top_k": 20,
+      "top_p": 0.95,
+      "seed": 73
+    },
+    "rows": [
+      {
+        "C": 1,
+        "baseline_tok_s": 29.348,
+        "optimized_tok_s": 30.199,
+        "gain_percent": 2.9,
+        "all_outputs_equal": true
+      },
+      {
+        "C": 2,
+        "baseline_tok_s": 54.452,
+        "optimized_tok_s": 58.615,
+        "gain_percent": 7.64,
+        "all_outputs_equal": true
+      },
+      {
+        "C": 4,
+        "baseline_tok_s": 75.147,
+        "optimized_tok_s": 81.521,
+        "gain_percent": 8.48,
+        "all_outputs_equal": true
+      },
+      {
+        "C": 6,
+        "baseline_tok_s": 81.574,
+        "optimized_tok_s": 94.874,
+        "gain_percent": 16.3,
+        "all_outputs_equal": true
+      },
+      {
+        "C": 8,
+        "baseline_tok_s": 97.978,
+        "optimized_tok_s": 111.87,
+        "gain_percent": 14.18,
+        "all_outputs_equal": true
+      }
+    ]
+  },
+  "qualification": {
+    "gpu_operator": "FP64 penalty selection equals CPU for 1..7 rows, vocabularies 257 and 248320; ties below FP32 resolution, rewards, repeat-window eviction, extreme negative/nonfinite logits and unchanged frontier bytes.",
+    "model": "C2/C4/C6/C8: logits, tokens, RNG, history and full session state equal isolated execution; 25 AR/MTP sampling strategies, C2 interleaving and budgets 1..3 pass.",
+    "http": "Six image/tool continuation checks: sampled and greedy reasoning, discarded visible output, appended image, third turns and disk restart. Restored requests have zero prefill.",
+    "sdk": "OpenAI Python 2.41.1: image conversation suite, reasoning effort, cancellation/replay, inclusive sampling boundaries, top_p=0 replay/greedy agreement, Responses and constrained greedy pass.",
+    "repository": "Canonical Nix PR checks: 35 tests plus formatting, docs and dependency gates pass."
+  },
+  "profile": {
+    "baseline": {},
+    "final": {
+      "partial": {
+        "calls": 15,
+        "total_ns": 701240,
+        "verification_rows": 59,
+        "mean_us": 46.74933333333333
+      },
+      "finish": {
+        "calls": 15,
+        "total_ns": 33062,
+        "verification_rows": 0,
+        "mean_us": 2.204133333333333
+      }
+    },
+    "derived_reduction_in_logit_download_bytes": 58603048,
+    "scope": "Diagnostic CLI pp32/tg64 with presence_penalty=1.5. Kernel timings only; not throughput qualification."
+  }
+}

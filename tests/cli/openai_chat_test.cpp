@@ -1215,6 +1215,30 @@ void TestUnsupportedSamplingControlsAreRejected() {
   }
 }
 
+void TestSamplingRanges() {
+  FakeBackend backend;
+  backend.pieces = {"ok"};
+  for (const auto* field : {"temperature", "top_p", "min_p",
+                            "frequency_penalty", "presence_penalty"}) {
+    const bool penalty = std::string_view(field).ends_with("penalty");
+    const double minimum = penalty ? -2 : 0;
+    const double maximum =
+        penalty || std::string_view(field) == "temperature" ? 2 : 1;
+    for (const auto value :
+         {minimum - 1e-8, minimum, maximum, maximum + 1e-8}) {
+      auto request = Request(
+          R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
+      auto body = gufo::json::parse(request.body);
+      body[field] = value;
+      request.body = body.dump();
+      const auto response = gufo::server::HandleOpenAiChat(request, backend);
+      Expect(
+          response.status == (value < minimum || value > maximum ? 400 : 200),
+          "sampling range is inclusive and checked before float rounding");
+    }
+  }
+}
+
 void TestAssistantReasoningContentReachesBackend() {
   FakeBackend backend;
   backend.pieces = {"Blue"};
@@ -2409,6 +2433,7 @@ int main() {
   TestFlatToolFieldsReachTemplate();
   TestAllSamplingControlsReachBackend();
   TestUnsupportedSamplingControlsAreRejected();
+  TestSamplingRanges();
   TestAssistantReasoningContentReachesBackend();
   TestPiReasoningControlsAndOutputFraming();
   TestPiNativeDeepSeekThinkingObject();

@@ -86,8 +86,11 @@ void TestInvalidFlags() {
                                             "--min-draft-tokens", "4"};
   assert(!gufo::cli::ParsePromptOptions(args5, &err).has_value());
 
-  const std::array<const char*, 2> args6 = {"--top-p", "0"};
+  const std::array<const char*, 2> args6 = {"--top-p", "-0.01"};
   assert(!gufo::cli::ParsePromptOptions(args6, &err).has_value());
+  const auto zero_top_p =
+      gufo::cli::ParsePromptOptions(std::array{"--top-p", "0"}, &err);
+  assert(zero_top_p && zero_top_p->sampling.top_p == 0.0F);
 
   const std::array<const char*, 6> unsupported_floor = {
       "--speculative",      "dflash2", "--dflash-model", "draft.gguf",

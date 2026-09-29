@@ -24,6 +24,8 @@ inline std::vector<SamplingCase> QwenSamplingCases() {
       {"top-k-one", {.temperature = 0.8F, .top_k = 1}},
       {"top-k", {.temperature = 0.8F, .top_k = 3}},
       {"top-p", {.temperature = 0.8F, .top_p = 0.7F}},
+      {"top-p-zero", {.temperature = 0.8F, .top_p = 0.0F}},
+      {"top-p-zero-floor", {.temperature = 0.8F, .top_p = 0.0F, .min_keep = 3}},
       {"min-p", {.temperature = 0.8F, .min_p = 0.3F}},
       {"min-p-one", {.temperature = 0.8F, .min_p = 1.0F}},
       {"top-k-floor", {.temperature = 0.8F, .top_k = 1, .min_keep = 3}},

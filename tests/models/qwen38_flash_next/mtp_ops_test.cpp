@@ -4,6 +4,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -36,6 +37,100 @@ auto Allocate(std::size_t count) {
   T* pointer = nullptr;
   CheckHip(hipMalloc(&pointer, count * sizeof(T)), "allocate");
   return std::unique_ptr<T, DeviceDelete>(pointer);
+}
+
+void CheckPenaltyArgmax(std::uint32_t vocab) {
+  namespace sampling = gufo::sampling;
+  // Ragged vocabularies end at the allocation boundary, with every MTP width.
+  for (unsigned rows = 1; rows <= 7; ++rows) {
+    for (unsigned mode = 0; mode < 5; ++mode) {
+      sampling::SamplingConfig config{
+          .seed = 73,
+          .repeat_penalty = mode == 1 ? 0.7F : 1.3F,
+          .repeat_last_n = mode == 2 ? 0U : 3U,
+          .frequency_penalty = mode == 1 ? -0.4F : 0.2F,
+          .presence_penalty = mode == 1 ? -1.5F : 1.5F};
+      if (mode >= 3) {
+        config.repeat_penalty = 1;
+        config.frequency_penalty = 0;
+        config.presence_penalty = 1.0e-8F;
+      }
+      sampling::SamplerState sampler(config,
+                                     std::vector<sampling::TokenId>{0, 1, 0});
+      sampler.Accept(0);
+      sampler.Accept(vocab - 1);
+      std::vector<float> logits(std::size_t(rows) * vocab);
+      std::vector<sampling::TokenPenalty> counts;
+      q::GreedyPenaltyRows batch{};
+      std::vector<int> expected(rows, -1);
+      for (unsigned row = 0; row < rows; ++row) {
+        auto values =
+            std::span(logits).subspan(std::size_t(row) * vocab, vocab);
+        for (unsigned i = 0; i < vocab; ++i)
+          values[i] =
+              float(int((i * 7919U + row * 31U) % 65521U) - 32768) / 32768;
+        values[0] = values[vocab - 1] = mode == 2 ? -1.e35F : 1.0F;
+        if (mode == 2)
+          std::fill(values.begin(), values.end(), -1.e35F);
+        if (mode >= 3) {
+          std::fill(values.begin(), values.end(), -100.0F);
+          // FP32 penalty arithmetic incorrectly picks token zero here.
+          values[0] = values[1] = 1.0F;
+          values[vocab - 1] = std::numeric_limits<float>::infinity();
+        }
+        if (mode == 4)
+          std::fill(values.begin(), values.end(),
+                    std::numeric_limits<float>::quiet_NaN());
+        const auto penalties = sampler.penalties();
+        counts.insert(counts.end(), penalties.begin(), penalties.end());
+        batch.offsets[row + 1] = counts.size();
+        try {
+          expected[row] = sampler.Sample(values);
+        } catch (const std::runtime_error&) {
+          if (mode != 4)
+            throw;
+        }
+        sampler.Accept((row + 2) % vocab);
+      }
+      auto device_logits = Allocate<float>(logits.size());
+      auto device_counts = Allocate<sampling::TokenPenalty>(counts.size());
+      auto partial =
+          Allocate<q::PenaltyArgmaxCandidate>(rows * q::kArgmaxParts);
+      auto output = Allocate<q::ArgmaxCandidate>(rows);
+      CheckHip(hipMemcpy(device_logits.get(), logits.data(),
+                         logits.size() * sizeof(float), hipMemcpyHostToDevice),
+               "penalty logits");
+      CheckHip(
+          hipMemcpy(device_counts.get(), counts.data(),
+                    counts.size() * sizeof(counts[0]), hipMemcpyHostToDevice),
+          "penalty histories");
+      batch.penalties = device_counts.get();
+      q::PenalizedArgmax(device_logits.get(), batch, config.repeat_penalty,
+                         config.frequency_penalty, config.presence_penalty,
+                         partial.get(), output.get(), rows, vocab, nullptr);
+      std::vector<q::ArgmaxCandidate> actual(rows);
+      CheckHip(hipMemcpy(actual.data(), output.get(), rows * sizeof(actual[0]),
+                         hipMemcpyDeviceToHost),
+               "penalty predictions");
+      for (unsigned row = 0; row < rows; ++row) {
+        if (actual[row].index != expected[row] ||
+            (expected[row] < 0 && std::isfinite(actual[row].value)))
+          throw std::runtime_error("penalty argmax differs from CPU: vocab=" +
+                                   std::to_string(vocab) +
+                                   " row=" + std::to_string(row) +
+                                   " mode=" + std::to_string(mode));
+      }
+      std::vector<float> retained(logits.size());
+      CheckHip(
+          hipMemcpy(retained.data(), device_logits.get(),
+                    retained.size() * sizeof(float), hipMemcpyDeviceToHost),
+          "retained logits");
+      if (std::memcmp(retained.data(), logits.data(),
+                      logits.size() * sizeof(float)))
+        throw std::runtime_error("penalty selection modified frontier logits");
+    }
+  }
+  std::cout << "penalty argmax CPU exact: vocab=" << vocab << " widths=1..7\n";
 }
 
 void CheckArgmax(std::uint32_t vocab) {
@@ -282,6 +377,8 @@ void CheckCandidates(std::uint32_t vocab) {
 
 int main() {
   try {
+    CheckPenaltyArgmax(257);
+    CheckPenaltyArgmax(248320);
     CheckArgmax(1);
     CheckArgmax(257);
     CheckArgmax(248320);

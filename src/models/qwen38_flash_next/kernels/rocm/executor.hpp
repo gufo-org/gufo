@@ -243,9 +243,11 @@ public:
                                      std::span<float> hidden,
                                      std::string* error_msg) const;
 
-  /// Plain greedy verification keeps full logit rows on the GPU.
+  /// Greedy verification keeps full logit rows on the GPU, including penalties.
   [[nodiscard]] bool GreedyMtpPredictions(
-      std::span<ArgmaxCandidate> predictions, std::string* error_msg) const;
+      std::span<ArgmaxCandidate> predictions,
+      const sampling::SamplerState& sampler,
+      std::span<const std::int32_t> drafts, std::string* error_msg) const;
 
   /// A session's complete context as one host byte payload: recurrent and
   /// PLE state, KV and indexer caches up to the position, and the draft
@@ -506,6 +508,9 @@ private:
   bool QuantizeBatch(const float* x, std::uint32_t rows, std::uint32_t cols,
                      std::string* error) const;
   bool AllocateBatch(std::string* error_msg) const;
+  /// Shared transient storage, grown only for penalty-aware verification.
+  mutable sampling::TokenPenalty* verification_penalties_{nullptr};
+  mutable std::size_t verification_penalty_capacity_{0};
   /// Allocated only when concurrent decoding is first requested.
   mutable float* batch_logits_{nullptr};
   mutable Session::Control* batch_controls_{nullptr};
