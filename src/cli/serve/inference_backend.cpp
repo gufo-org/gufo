@@ -4085,7 +4085,8 @@ InferenceBackend::InitialOutputState InferenceBackend::initial_output_state(
     const ChatRequest& request) const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
-  return state != nullptr
+  // A TP2 rank 1 has no scheduler: it only executes rank 0's calls.
+  return state != nullptr && state->scheduler != nullptr
              ? state->scheduler->runner().InitialOutputState(request)
              : InitialOutputState::kAuto;
 #else
