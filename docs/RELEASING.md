@@ -70,13 +70,16 @@ of the release version.
 `version.txt` is the canonical release version. A daily GitHub workflow reads
 the Conventional Commit history after the latest release and opens or updates
 one release pull request. That pull request updates `version.txt`,
-`CHANGELOG.md` and the release manifest. It receives the same review and CI as
-any other change.
+`CHANGELOG.md` and the release manifest. It receives the same CI as any other
+change. The workflow waits for the pull request title and repository checks,
+and leaves the pull request open without publishing a release if either check
+fails.
 
-Merging the release pull request declares the version ready. The next scheduled
-or manually dispatched release workflow creates the immutable tag and GitHub
-Release. Do not edit the version, changelog or release manifest in an ordinary
-feature or fix pull request.
+After the checks pass, the workflow squash-merges the release pull request and
+immediately creates the immutable tag and GitHub Release. A manually dispatched
+run follows the same process and is available for recovery. Do not edit the
+version, changelog or release manifest in an ordinary feature or fix pull
+request.
 
 Nix keeps release identity and source identity separate. The default package is
 a development build and reports `gufo version development (<revision>)`.

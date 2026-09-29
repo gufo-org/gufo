@@ -9,11 +9,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
 jobs:
   release:
-    name: Maintain release pull request
+    name: Create daily release
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
       - name: Create release app token
         id: app-token
@@ -38,11 +42,106 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      - name: Request stable Toolboxes images
+      - name: Request stable Toolboxes images for an existing merged release
         if: ${{ steps.release-please.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_TAG: ${{ steps.release-please.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n --arg tag "$RELEASE_TAG" \
+            '{event_type: "gufo-release", client_payload: {tag: $tag}}' \
+            | gh api --method POST repos/gufo-org/toolboxes/dispatches --input -
+
+      - name: Wait for release pull request checks and merge
+        if: >-
+          ${{ steps.release-please.outputs.prs_created == 'true' &&
+              steps.release-please.outputs.release_created != 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PRS: ${{ steps.release-please.outputs.prs }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t pr_numbers < <(jq -er '.[].number' <<<"$RELEASE_PRS")
+          if (( ${#pr_numbers[@]} == 0 )); then
+            echo "Release Please reported a pull request without returning its number." >&2
+            exit 1
+          fi
+
+          required_checks=(
+            "Conventional Commit title"
+            "CPU contracts & repository checks"
+          )
+
+          for pr_number in "${pr_numbers[@]}"; do
+            for attempt in {1..180}; do
+              checks_rc=0
+              checks=$(gh pr checks "$pr_number" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json name,bucket 2>/dev/null) || checks_rc=$?
+              if (( checks_rc != 0 && checks_rc != 8 )); then
+                checks='[]'
+              fi
+              all_passed=true
+
+              for check_name in "${required_checks[@]}"; do
+                bucket=$(jq -r --arg name "$check_name" '
+                  if any(.[]; .name == $name and .bucket == "pass") then "pass"
+                  elif any(.[]; .name == $name and
+                    (.bucket == "fail" or .bucket == "cancel" or
+                     .bucket == "skipping")) then "fail"
+                  else "pending"
+                  end
+                ' <<<"$checks")
+
+                if [[ "$bucket" == "fail" ]]; then
+                  echo "Required check failed for PR #${pr_number}: ${check_name}" >&2
+                  exit 1
+                fi
+                if [[ "$bucket" != "pass" ]]; then
+                  all_passed=false
+                fi
+              done
+
+              if [[ "$all_passed" == true ]]; then
+                break
+              fi
+              if (( attempt == 180 )); then
+                echo "Timed out waiting for required checks on PR #${pr_number}." >&2
+                exit 1
+              fi
+              sleep 10
+            done
+
+            pr_title=$(gh pr view "$pr_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json title \
+              --jq .title)
+            gh pr merge "$pr_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --squash \
+              --subject "$pr_title" \
+              --body ""
+          done
+
+      - name: Publish automatically merged release
+        if: >-
+          ${{ steps.release-please.outputs.prs_created == 'true' &&
+              steps.release-please.outputs.release_created != 'true' }}
+        id: publish-release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Request stable Toolboxes images for the daily release
+        if: ${{ steps.publish-release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.publish-release.outputs.tag_name }}
         shell: bash
         run: |
           set -euo pipefail
