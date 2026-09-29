@@ -56,8 +56,8 @@ NativeEffort MapEffort(ReasoningEffort effort) noexcept {
       return NativeEffort::kLow;
     case ReasoningEffort::kMedium:
     case ReasoningEffort::kHigh:
-      return NativeEffort::kHigh;
     case ReasoningEffort::kXHigh:
+      return NativeEffort::kHigh;
     case ReasoningEffort::kMax:
       return NativeEffort::kMax;
   }
@@ -240,6 +240,15 @@ void AppendToolCalls(std::string& output,
 }
 
 }  // namespace
+
+ChatTemplateOptions ResolveDeepSeekChatOptions(
+    const ReasoningOptions& reasoning) {
+  return {
+      .enable_thinking = reasoning.enabled.value_or(true),
+      .reasoning_effort = reasoning.effort.value_or(ReasoningEffort::kHigh),
+      .preserve_thinking = reasoning.preserve_thinking.value_or(false),
+  };
+}
 
 std::string_view DeepSeekReasoningEffortName(ReasoningEffort effort) noexcept {
   switch (MapEffort(effort)) {

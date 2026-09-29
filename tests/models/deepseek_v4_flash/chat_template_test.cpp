@@ -104,6 +104,23 @@ void TestChatAndThinkingPrefixes() {
       "High effort uses the pinned DeepSeek instruction");
   Expect(thinking.ends_with("<｜Assistant｜><think>"),
          "Thinking mode starts inside a reasoning block");
+
+  using gufo::models::deepseek_v4_flash::ResolveDeepSeekChatOptions;
+  const auto defaults = ResolveDeepSeekChatOptions({});
+  Expect(defaults.enable_thinking &&
+             defaults.reasoning_effort == ReasoningEffort::kHigh,
+         "User-facing DeepSeek defaults match the API's thinking/high");
+  Expect(gufo::models::deepseek_v4_flash::RenderChat(messages, defaults) ==
+             thinking,
+         "Default serving prompt matches the official high-effort encoding");
+  Expect(gufo::models::deepseek_v4_flash::RenderChat(
+             messages, ResolveDeepSeekChatOptions({.enabled = false})) == chat,
+         "Explicit thinking off overrides the serving default");
+  const auto low = ResolveDeepSeekChatOptions(
+      {.effort = ReasoningEffort::kLow, .preserve_thinking = true});
+  Expect(low.enable_thinking && low.reasoning_effort == ReasoningEffort::kLow &&
+             low.preserve_thinking,
+         "Explicit effort and history policy override serving defaults");
 }
 
 void TestHistoricalThinkingPolicy() {
@@ -159,8 +176,10 @@ void TestEffortMappingAndToolResults() {
          "minimal maps to DeepSeek low");
   Expect(DeepSeekReasoningEffortName(ReasoningEffort::kMedium) == "high",
          "medium maps to DeepSeek high");
-  Expect(DeepSeekReasoningEffortName(ReasoningEffort::kXHigh) == "max",
-         "xhigh maps to DeepSeek max");
+  Expect(DeepSeekReasoningEffortName(ReasoningEffort::kXHigh) == "high",
+         "xhigh maps to DeepSeek high like the API");
+  Expect(DeepSeekReasoningEffortName(ReasoningEffort::kMax) == "max",
+         "max selects DeepSeek's highest effort");
 
   const std::vector<ChatMessage> messages = {
       {.role = "tool", .content = "one", .reasoning_content = {}},

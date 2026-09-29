@@ -67,11 +67,12 @@ The supported modalities are LLM, image, video, and audio (TTS, ASR).
 
 - `think` (`"on"` / `"off"` / `"auto"`) — whether the model produces its
   visible thinking before answering. In practice: off for quick chats, on
-  for hard problems, auto lets the model decide per request.
+  for hard problems. Auto uses the model default: enabled for Qwen3.8 and
+  DeepSeek V4 Flash.
 - `reasoningEffort` (`"auto"`, `"minimal"`, `"low"`, `"medium"`, `"high"`,
-  `"xhigh"`, `"max"`) — how long the model is allowed to reason before
-  answering. More effort usually means better answers on hard tasks, at the
-  cost of slower responses and more generated tokens.
+  `"xhigh"`, `"max"`) — model instructions controlling reasoning depth,
+  not a token limit. Auto selects Qwen `xhigh` or DeepSeek `high`; more effort
+  can increase response time and generated tokens.
 - `preserveThinking` (`"on"` / `"off"` / `"auto"`) — whether earlier turns'
   thinking is kept in the conversation history. In practice: keeping it can
   help follow-up questions that build on the previous reasoning, at the cost

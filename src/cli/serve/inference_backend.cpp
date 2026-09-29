@@ -1900,20 +1900,15 @@ public:
         });
       }
     }
-    auto tokens = DeepSeekRunnerTokens(model_->EncodeChat(
-        messages, tools,
-        models::deepseek_v4_flash::ChatTemplateOptions{
-            .enable_thinking = request.reasoning.enabled.value_or(false),
-            .reasoning_effort =
-                request.reasoning.effort.value_or(ReasoningEffort::kLow),
-            .preserve_thinking =
-                request.reasoning.preserve_thinking.value_or(false),
-            .tools_present =
-                !request.tools.empty() &&
-                request.tool_choice != ChatRequest::ToolChoice::kNone,
-            .require_tool_call =
-                request.tool_choice == ChatRequest::ToolChoice::kRequired,
-        }));
+    auto options = models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
+        request.reasoning);
+    options.tools_present =
+        !request.tools.empty() &&
+        request.tool_choice != ChatRequest::ToolChoice::kNone;
+    options.require_tool_call =
+        request.tool_choice == ChatRequest::ToolChoice::kRequired;
+    auto tokens =
+        DeepSeekRunnerTokens(model_->EncodeChat(messages, tools, options));
     if (tokens.empty()) {
       return std::nullopt;
     }
@@ -1922,7 +1917,9 @@ public:
 
   [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
       const ChatRequest& request) const override {
-    return request.reasoning.enabled.value_or(false)
+    return models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
+               request.reasoning)
+                   .enable_thinking
                ? TextGenerationBackend::InitialOutputState::kReasoning
                : TextGenerationBackend::InitialOutputState::kContent;
   }
@@ -3699,6 +3696,9 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     }
 
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextPreset(model->GetConfig());
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<QwenTextRunner>(
         std::move(model), max_context, std::move(dflash_model),
         speculative_options, disk_cache_config.model_artifact_fingerprint,
@@ -3782,6 +3782,9 @@ bool InferenceBackend::load(
 
   try {
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextModelPreset::kDeepSeekV4Flash;
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<DeepSeekTextRunner>(
         std::move(model), max_context, use_dspark,
         speculative_config.max_draft_tokens,
@@ -3878,6 +3881,8 @@ bool InferenceBackend::load(
   const bool has_vision = model->VisionEncoder() != nullptr;
   try {
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<QwenFlashNextTextRunner>(
         std::move(model), max_context,
         speculative_config.backend == TextSpeculativeBackend::kMtp,
@@ -4107,7 +4112,8 @@ void InferenceBackend::set_model_id(const std::string& model_id) {
 }
 
 void InferenceBackend::set_sampling_defaults(
-    std::size_t max_tokens, const sampling::SamplingConfig& sampling_config) {
+    std::size_t max_tokens, const sampling::SamplingConfig& sampling_config,
+    sampling::SamplingOverrides supplied) {
 #if defined(ENGINE_ENABLE_HIP)
   sampling_config.Validate();
   const std::lock_guard<std::mutex> lock(impl_->state_mutex);
@@ -4115,14 +4121,14 @@ void InferenceBackend::set_sampling_defaults(
     return;
   }
   auto updated = std::make_shared<Impl::State>(*impl_->state);
-  updated->sampling_defaults = {
-      .max_tokens = max_tokens,
-      .sampling = sampling_config,
-  };
+  updated->sampling_defaults.max_tokens = max_tokens;
+  updated->sampling_defaults.sampling = sampling_config;
+  updated->sampling_defaults.supplied = supplied;
   impl_->state = std::move(updated);
 #else
   (void)max_tokens;
   (void)sampling_config;
+  (void)supplied;
 #endif
 }
 

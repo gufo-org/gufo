@@ -608,12 +608,13 @@ void PrintServeHelp(std::string_view program_name,
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
         "Sampling Defaults", &max_tokens);
-    RegisterSamplingOptions(parser, &sampling_config, "Sampling Defaults");
+    RegisterSamplingOptions(parser, &sampling_config, "Sampling Defaults", true,
+                            true);
 
     // Reasoning Defaults
     parser.AddOption(
         "", "--think", "MODE",
-        "Default reasoning mode: on, off, or auto (default: model template)",
+        "Default reasoning mode: on, off, or auto (default: model)",
         "Reasoning Defaults", &reasoning_mode);
     parser.AddOption(
         "", "--reasoning-effort", "LEVEL",
@@ -1129,10 +1130,11 @@ int RunServe(std::span<const char* const> args) {
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
         "Sampling Defaults", &max_tokens);
-    RegisterSamplingOptions(llm_parser, &sampling_config, "Sampling Defaults");
+    RegisterSamplingOptions(llm_parser, &sampling_config, "Sampling Defaults",
+                            true, true);
     llm_parser.AddOption(
         "", "--think", "MODE",
-        "Default reasoning mode: on, off, or auto (default: model template)",
+        "Default reasoning mode: on, off, or auto (default: model)",
         "Reasoning Defaults", &reasoning_mode);
     llm_parser.AddOption(
         "", "--reasoning-effort", "LEVEL",
@@ -1426,8 +1428,34 @@ int RunServe(std::span<const char* const> args) {
     backend->set_model_id(served_model_name);
     backend->set_sampling_defaults(
         max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
-        sampling_config);
+        sampling_config, SamplingOptionsSupplied(llm_parser));
     backend->set_reasoning_defaults(*reasoning_defaults);
+    const auto effective_sampling =
+        backend->sampling_defaults().Resolve(reasoning_defaults->enabled);
+    server::ChatRequest default_request;
+    default_request.reasoning = *reasoning_defaults;
+    const auto initial_output = backend->initial_output_state(default_request);
+    std::ostringstream sampling_log;
+    sampling_log
+        << "event=defaults thinking="
+        << (initial_output == server::TextGenerationBackend::
+                                  InitialOutputState::kReasoning
+                ? "on"
+            : initial_output ==
+                    server::TextGenerationBackend::InitialOutputState::kContent
+                ? "off"
+                : "auto")
+        << " temperature=" << effective_sampling.temperature
+        << " top_k=" << effective_sampling.top_k
+        << " top_p=" << effective_sampling.top_p
+        << " min_p=" << effective_sampling.min_p
+        << " min_keep=" << effective_sampling.min_keep
+        << " seed=" << effective_sampling.seed
+        << " repeat_penalty=" << effective_sampling.repeat_penalty
+        << " repeat_last_n=" << effective_sampling.repeat_last_n
+        << " frequency_penalty=" << effective_sampling.frequency_penalty
+        << " presence_penalty=" << effective_sampling.presence_penalty;
+    server::Logger::Info("sampling", sampling_log.str());
     const char* speculation =
         speculative_config.backend == server::TextSpeculativeBackend::kDFlash
             ? "dflash2"

@@ -24,6 +24,7 @@ namespace {
 
 using Model = gufo::models::deepseek_v4_flash::Model;
 using ModelOptions = gufo::models::deepseek_v4_flash::ModelOptions;
+using gufo::models::deepseek_v4_flash::ResolveDeepSeekChatOptions;
 
 void Expect(bool condition, std::string_view message) {
   if (!condition) {
@@ -339,7 +340,8 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
              .content = "Continue the pattern with twenty terms: red, blue, "
                         "blue, red, blue, blue,"},
         };
-    const auto direct_prompt = model->EncodeChat(direct_messages);
+    const auto direct_prompt =
+        model->EncodeChat(direct_messages, ResolveDeepSeekChatOptions({}));
     InferenceBackend backend;
     Expect(backend.load(model, &error, 4096, 1, {}, {}, speculative), error);
     const auto greedy = backend.chat(prompt, 32, 0.0F);
@@ -558,8 +560,10 @@ int main(int argc, char** argv) {
               {.role = "system", .content = "Answer with one short sentence."},
               {.role = "user", .content = "Name one primary color."},
           };
-      const auto direct_chat =
-          GenerateDirect(model, model->EncodeChat(direct_messages), 2);
+      const auto direct_chat = GenerateDirect(
+          model,
+          model->EncodeChat(direct_messages, ResolveDeepSeekChatOptions({})),
+          2);
       const auto http_chat = backend.chat(messages, 2, {});
       Expect(http_chat.tokens == direct_chat, "chat direct/HTTP token parity");
       Expect(!http_chat.cache_hit, "first chat request is a cache miss");
@@ -594,10 +598,16 @@ int main(int argc, char** argv) {
           {.role = "assistant", .content = http_chat.text});
       forked_direct_messages.push_back(
           {.role = "user", .content = "Name one warm primary color."});
-      const auto direct_continuation = GenerateDirect(
-          model, model->EncodeChat(continued_direct_messages), 2);
+      const auto direct_continuation =
+          GenerateDirect(model,
+                         model->EncodeChat(continued_direct_messages,
+                                           ResolveDeepSeekChatOptions({})),
+                         2);
       const auto direct_fork =
-          GenerateDirect(model, model->EncodeChat(forked_direct_messages), 2);
+          GenerateDirect(model,
+                         model->EncodeChat(forked_direct_messages,
+                                           ResolveDeepSeekChatOptions({})),
+                         2);
 
       gufo::server::ChatRequest continuation_request(continued_messages);
       continuation_request.client_id = "deepseek-snapshot-branch-a";
@@ -661,10 +671,14 @@ int main(int argc, char** argv) {
                    "Continue this sequence with four short items: red, green, "
                    "blue,"},
           };
-      const auto direct_a =
-          GenerateDirect(model, model->EncodeChat(direct_a_messages), 4);
-      const auto direct_b =
-          GenerateDirect(model, model->EncodeChat(direct_b_messages), 4);
+      const auto direct_a = GenerateDirect(
+          model,
+          model->EncodeChat(direct_a_messages, ResolveDeepSeekChatOptions({})),
+          4);
+      const auto direct_b = GenerateDirect(
+          model,
+          model->EncodeChat(direct_b_messages, ResolveDeepSeekChatOptions({})),
+          4);
 
       auto pending_a = backend.start_chat(concurrent_a, 4, 0.0F, {}, true);
       auto pending_b = backend.start_chat(concurrent_b, 4, 0.0F, {}, true);

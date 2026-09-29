@@ -40,12 +40,19 @@ struct ChatTool {
 };
 
 struct ChatTemplateOptions {
+  // Literal encoder options; user-facing defaults are resolved below.
   bool enable_thinking{false};
   ReasoningEffort reasoning_effort{ReasoningEffort::kLow};
   bool preserve_thinking{false};
   bool tools_present{false};
   bool require_tool_call{false};
 };
+
+/// User-facing defaults follow DeepSeek's API: thinking enabled, high effort.
+/// Explicit options override them; the checkpoint encoder itself has no
+/// default thinking mode.
+[[nodiscard]] ChatTemplateOptions ResolveDeepSeekChatOptions(
+    const ReasoningOptions& reasoning);
 
 [[nodiscard]] std::string_view GenerationPrompt(bool enable_thinking);
 

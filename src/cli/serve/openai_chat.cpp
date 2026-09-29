@@ -774,8 +774,10 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   }
 
   sampling::SamplingConfig parsed_sampling;
-  if (const auto sampling_error =
-          ParseSamplingConfig(body, output->sampling, &parsed_sampling)) {
+  if (const auto sampling_error = ParseSamplingConfig(
+          body,
+          backend.sampling_defaults().Resolve(output->chat.reasoning.enabled),
+          &parsed_sampling)) {
     return Error(400, "Bad Request", sampling_error->message,
                  sampling_error->code.c_str());
   }
@@ -2144,6 +2146,12 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
 
 std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
                                                         ChatRequest* chat) {
+  if (const auto* cache = body.find("cache_prompt")) {
+    if (!cache->is_bool())
+      return Error(400, "Bad Request", "'cache_prompt' must be a boolean",
+                   "invalid_cache_prompt");
+    chat->cache_prompt = cache->as_bool();
+  }
   if (const auto* reasoning = body.find("reasoning");
       reasoning && !reasoning->is_null()) {
     if (!reasoning->is_object())

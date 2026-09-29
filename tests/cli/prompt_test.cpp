@@ -13,6 +13,7 @@ void TestDefaultOptions() {
   assert(opt->prompt_text == "Hello world");
   assert(opt->max_tokens == 128);
   assert(opt->sampling.temperature == 0.0F);
+  assert(!opt->sampling_supplied.temperature && !opt->sampling_supplied.top_k);
   assert(opt->use_chat_template);
   assert(opt->system_prompt.empty());
   assert(opt->reasoning_mode == "auto");
@@ -33,9 +34,20 @@ void TestExplicitFlags() {
   assert(opt->max_tokens == 256);
   assert(opt->sampling.temperature > 0.69F &&
          opt->sampling.temperature < 0.71F);
+  assert(opt->sampling_supplied.temperature && !opt->sampling_supplied.top_p);
   assert(!opt->use_chat_template);
   assert(opt->verbose);
   assert(opt->prompt_text == "Test prompt");
+  const char* neutral[] = {"--temperature=0", "--top-k=0",
+                           "--presence-penalty=0", "-s=0", "Hello"};
+  const auto zero = gufo::cli::ParsePromptOptions(neutral);
+  assert(zero);
+  const auto sampling = gufo::sampling::ResolveTextSampling(
+      gufo::sampling::TextModelPreset::kQwen38, false, zero->sampling,
+      zero->sampling_supplied);
+  assert(sampling.temperature == 0 && sampling.top_k == 0 &&
+         sampling.presence_penalty == 0 && sampling.seed == 0);
+  assert(sampling.top_p == 0.8F);
 }
 
 void TestFlashMtpFlags() {
@@ -159,6 +171,19 @@ void TestSamplingAndReasoningFlags() {
          opt->sampling.frequency_penalty < 0.26F);
   assert(opt->sampling.presence_penalty > 0.49F &&
          opt->sampling.presence_penalty < 0.51F);
+  const auto resolved = gufo::sampling::ResolveTextSampling(
+      gufo::sampling::TextModelPreset::kQwen38, false, opt->sampling,
+      opt->sampling_supplied);
+  assert(resolved.temperature == 0.7F);
+  assert(resolved.top_p == opt->sampling.top_p &&
+         resolved.top_k == opt->sampling.top_k &&
+         resolved.min_p == opt->sampling.min_p &&
+         resolved.min_keep == opt->sampling.min_keep &&
+         resolved.seed == opt->sampling.seed &&
+         resolved.repeat_penalty == opt->sampling.repeat_penalty &&
+         resolved.repeat_last_n == opt->sampling.repeat_last_n &&
+         resolved.frequency_penalty == opt->sampling.frequency_penalty &&
+         resolved.presence_penalty == opt->sampling.presence_penalty);
   assert(opt->reasoning_mode == "on");
   assert(opt->reasoning_effort == "high");
   assert(opt->preserve_thinking == "off");

@@ -23,6 +23,7 @@ from typing import Any
 from gufo.serving_bench import (
     PromptCase,
     RequestObservation,
+    benchmark_sampling,
     load_fingerprint,
     load_prompt_suite,
     load_reference_report,
@@ -515,7 +516,8 @@ class Session:
                   extra_body: dict[str, Any] | None = None) -> str:
         """Non-streaming completion text, used to build a reusable conversation prefix."""
         payload = {"model": self.request_model, "messages": messages, "max_tokens": max_tokens,
-                   "temperature": float(self.config.data["sampling"]["temperature"]), "stream": False}
+                   **benchmark_sampling(float(self.config.data["sampling"]["temperature"]), self.profile),
+                   "stream": False}
         if self.target == "reference" and self.reference_kind == "ds4":
             payload["thinking"] = {"type": "disabled"}
         if self.cache_prompt is not None:

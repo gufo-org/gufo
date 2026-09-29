@@ -74,7 +74,7 @@ Text serving defaults match llama.cpp for context and generation length:
 | `--context` | `0`: native context from model metadata, per session |
 | `--max-tokens` | `-1`: until EOS or remaining context is exhausted |
 | `--sessions` | `1` |
-| Thinking / reasoning effort | Model template defaults |
+| Thinking / reasoning effort | Enabled; Qwen `xhigh`, DeepSeek `high` |
 
 Qwen chat prompts are bounded by the session context, not a fixed size: the
 rendered template may use up to 128 bytes per context token (at least 1 MiB).
@@ -86,11 +86,36 @@ context; exhaustion reports `length` or `incomplete`, without discarding earlier
 conversation tokens. Reduce `--context` or `--sessions` if their state exceeds
 available memory.
 
-Gufo retains greedy sampling by default. llama.cpp instead defaults to temperature
-0.8, top-k 40, top-p 0.95 and min-p 0.05; set these explicitly to match its sampler.
-Both leave repetition, frequency and presence penalties disabled.
-Reference: [llama.cpp parameters](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/common.h)
-and [server options](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/tools/server/README.md).
+Text sampling follows each model's recommended defaults in `serve`, `prompt`
+and `chat`. Explicit request values override explicit server options, which
+otherwise inherit the effective thinking preset. Null request values inherit
+where supported; explicit zero values are preserved (`top_p` must remain positive).
+The startup sampling log reports server defaults; requests can override each
+setting independently, including when changing thinking mode.
+
+| Model / mode | Temperature | Top-p | Top-k | Presence penalty |
+| --- | --- | --- | --- | --- |
+| DeepSeek V4 Flash 0731 (agentic) | 1.0 | 0.95 | 0 | 0 |
+| Qwen3.8 27B / Flash-Next, thinking | 1.0 | 0.95 | 20 | 0 |
+| Qwen3.8 27B / Flash-Next, thinking off | 0.7 | 0.8 | 20 | 1.5 |
+
+Min-p and frequency penalty default to zero; repetition penalty is 1.0.
+AR and DFlash2/MTP/DSpark use the same target defaults.
+Use `--temperature 0` or request `"temperature": 0` for greedy
+output; `bench` remains greedy by default. Audio and image generation retain
+their own settings.
+Use `--think off` or request `"reasoning_effort": "none"` to disable thinking.
+DeepSeek maps `minimal`/`low` to `low`, `medium`/`high`/`xhigh` to `high`,
+and `max` to `max`.
+The SDK check `--suite sampling-defaults --sampling-preset qwen38` (or
+`deepseek4`) compares omitted and explicit settings, including C2 replay.
+
+Sources: [Qwen27B](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
+[Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices),
+[DeepSeek 0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/7872f01b1d1fe23eabc4c98b48bffcef5a386062/README.md),
+[DeepSeek thinking defaults](https://api-docs.deepseek.com/guides/thinking_mode).
+DeepSeek's 0.95 top-p is its agentic recommendation; neutral penalties and
+disabled unspecified filters are Gufo defaults.
 
 ```sh
 nix build
@@ -148,10 +173,10 @@ Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 
 Prompt reuse is enabled by default. `cache_prompt: false` on
-`/v1/chat/completions` bypasses both memory and disk lookup for that request;
-the result can still populate the cache. DeepSeek and Qwen tool requests retain
-a checkpoint before the assistant-generation suffix, including when a client
-drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
+`/v1/chat/completions` or `/v1/responses` bypasses memory and disk lookup for
+that request; the result can still populate the cache. DeepSeek and Qwen tool
+requests retain a checkpoint before the assistant-generation suffix, including
+when a client drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
 also accounts for tokenization changes where adjacent user/tool turns join.
 Qwen requests retain this checkpoint with thinking enabled or disabled.
 Warm continuations checkpoint the reused frontier and prefill the new suffix
@@ -249,10 +274,10 @@ it logs a `queue_budget_exceeded` warning and starts anyway.
 `--think auto` uses the model's default. Qwen27B and Flash-Next match the
 official Jinja: thinking enabled, `xhigh` effort, prior reasoning preserved.
 Use `--think off` or `chat_template_kwargs.enable_thinking=false` for direct
-answers. DeepSeek retains its chat-mode default. Quality comparisons must use
-the same reasoning mode and effort.
+answers. DeepSeek defaults to thinking with `high` effort. Quality comparisons
+must use the same reasoning mode and effort.
 
-`POST /v1/chat/completions` accepts top-level `reasoning_effort` (`off`,
+`POST /v1/chat/completions` accepts top-level `reasoning_effort` (`none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`) and Pi/llama.cpp-style
 `chat_template_kwargs`:
 
