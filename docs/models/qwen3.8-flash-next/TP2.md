@@ -51,6 +51,9 @@ Limits:
   failed requests a second to report. Run both ranks under a supervisor that
   restarts them (for example systemd `Restart=always`): each waits about 30 s
   for the other before loading the model, so restarted ranks pair up again.
+  A peer that exits is noticed at once and a host that vanishes after about
+  25 s; a living peer that falls behind, for example while its n-gram reads
+  wait on a throttled SSD, is waited for up to 3 minutes.
 - Each session holds a full-context state on each rank. Full Q8 (six `Q8_0`
   shards, which do not fit one host) at 262,144 tokens uses 87 GB of each
   host's 127 GB GPU memory with four sessions and 103 GB with eight.

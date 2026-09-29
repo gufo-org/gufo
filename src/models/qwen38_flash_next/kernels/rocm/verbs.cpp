@@ -62,7 +62,7 @@ constexpr std::size_t kStartedExchanges = 4;
 // Queued exchanges not yet complete; a forward queues one per layer.
 constexpr std::size_t kQueuedExchanges = 4096;
 // A GPU wait gives up well after the exchange thread's own timeout.
-constexpr std::uint64_t kWaitSeconds = 120;
+constexpr std::uint64_t kWaitSeconds = 240;
 // Flag words, a cache line apart: written by the GPU, by the host, and by a
 // GPU wait that timed out.
 constexpr std::size_t kReadyOffset = 0;
@@ -71,6 +71,13 @@ constexpr std::size_t kTimedOutOffset = 128;
 constexpr std::size_t kFlagBytes = 4096;
 constexpr std::uint32_t kPort = 1;
 constexpr auto kCollectiveTimeout = std::chrono::seconds(30);
+// A living peer may fall far behind, e.g. while its n-gram reads wait on a
+// throttled SSD; a dead one closes the bootstrap socket, and a vanished host
+// fails its TCP keepalive, both long before this.
+constexpr auto kExchangeTimeout = std::chrono::seconds(180);
+constexpr int kKeepaliveIdleSeconds = 10;
+constexpr int kKeepaliveIntervalSeconds = 5;
+constexpr int kKeepaliveProbes = 3;
 constexpr auto kReceiveSpinWindow = std::chrono::microseconds(500);
 // An exchange waits for a layer of GPU work, or a peer that is a layer behind:
 // spinning that long keeps the wake-up latency off every decode exchange.
@@ -340,6 +347,19 @@ private:
     const int no_delay = 1;
     (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &no_delay,
                        sizeof(no_delay));
+    // After setup the socket only reports a dead peer; keepalive also
+    // reports a host that vanished without closing it.
+    const int on = 1;
+    (void)::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+#if defined(TCP_KEEPIDLE) && defined(TCP_KEEPINTVL) && defined(TCP_KEEPCNT)
+    (void)::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &kKeepaliveIdleSeconds,
+                       sizeof(kKeepaliveIdleSeconds));
+    (void)::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL,
+                       &kKeepaliveIntervalSeconds,
+                       sizeof(kKeepaliveIntervalSeconds));
+    (void)::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &kKeepaliveProbes,
+                       sizeof(kKeepaliveProbes));
+#endif
   }
 
   int fd_{-1};
@@ -901,7 +921,7 @@ private:
   [[nodiscard]] bool WaitReady(std::uint64_t value, std::string* error) {
     const auto start = std::chrono::steady_clock::now();
     const auto spin_deadline = start + kExchangeSpinWindow;
-    const auto deadline = start + kCollectiveTimeout;
+    const auto deadline = start + kExchangeTimeout;
     while (Flag<std::uint64_t>(kReadyOffset).load(std::memory_order_acquire) <
            value) {
       if (stopping_.load(std::memory_order_relaxed)) {
@@ -1180,7 +1200,7 @@ private:
     bool received = std::exchange(early_receive_, false);
     const auto start = std::chrono::steady_clock::now();
     const auto spin_deadline = start + kExchangeSpinWindow;
-    const auto deadline = start + kCollectiveTimeout;
+    const auto deadline = start + kExchangeTimeout;
     std::array<ibv_wc, 4> completions{};
     const auto drain = [&]() -> int {
       const int n = ibv_poll_cq(cq_, static_cast<int>(completions.size()),
