@@ -64,10 +64,16 @@ std::optional<ChatRequest> ConstrainChatRequest(
       strict_tools |= function && function->find("strict") &&
                       function->find("strict")->as_bool();
     }
+  // gufo #315: a required choice is forced decoding, not a post-hoc check, so
+  // it carries the tool grammar whatever `parallel_tool_calls` and tool
+  // strictness say. The declared names and argument schemas then bound what
+  // the model can write, and the requirement cannot go unmet.
+  const bool required_tools =
+      request.tool_choice == ChatRequest::ToolChoice::kRequired;
   if (!request.response_format &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone ||
-       (!strict_tools && request.parallel_tool_calls)))
+       (!strict_tools && !required_tools && request.parallel_tool_calls)))
     return std::nullopt;
   auto constrained = request;
   auto instruction = request.response_format ? request.response_format->prompt()

@@ -877,6 +877,22 @@ def check_strict_tools(client, model, checks):
                   "tools": [{"type": "function", "function": {
                       **tool["function"], "strict": False}}]}
     signature(record("non_strict_single_call", chat_result(client, non_strict, True)))
+    # gufo #315: a required choice constrains decoding on the default path too,
+    # so prose pressure cannot leave the requirement unmet.
+    forced = {**common, "tool_choice": "required", "parallel_tool_calls": True,
+              "max_completion_tokens": 192,
+              "tools": [{"type": "function", "function": {
+                  **tool["function"], "strict": False}}],
+              "messages": [
+                  {"role": "user", "content": "Just chat with me, no tools."},
+                  {"role": "assistant", "content": "Sure, happy to chat in prose."},
+                  {"role": "user", "content": "Tell me a one-line joke."}]}
+    forced_result = record("required_forced_decoding",
+                           chat_result(client, forced, True))
+    assert forced_result["finish"] == "tool_calls" and forced_result["tools"], forced_result
+    assert all(call["function"]["name"] == "record"
+               and isinstance(json.loads(call["function"]["arguments"]), dict)
+               for call in forced_result["tools"]), forced_result
     for streaming in (False, True):
         try:
             client.chat.completions.create(**{

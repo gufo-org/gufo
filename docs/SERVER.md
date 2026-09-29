@@ -619,9 +619,11 @@ repetition penalty. Speculative rejection discards tentative counts; seeded
 sampling replay retains independent request histories.
 
 Tool calls are emitted only for declared functions when `tool_choice` allows
-calling tools. An unmet `required` choice returns `tool_choice_unsatisfied`
-(HTTP 502, or an SSE error after streaming starts), unless a requested stop
-sequence interrupted generation first.
+calling tools. `tool_choice: "required"` constrains decoding to a declared call,
+so the requirement is forced rather than checked afterwards. Where the backend
+cannot constrain sampling, an unmet `required` choice still returns
+`tool_choice_unsatisfied` (HTTP 502, or an SSE error after streaming starts);
+a requested stop sequence that interrupted generation first wins over both.
 
 Stop sequences match accepted output bytes, including reasoning and tool
 markup, before streaming or response parsing. Partial prefixes are buffered;
@@ -675,8 +677,10 @@ In Chat Completions, function `strict:true` constrains tool arguments independen
 of `response_format`.
 With `tool_choice: "auto"`, the model may call a tool or give a final answer;
 the response schema constrains the latter. Use `"none"` for JSON answers only,
-`"required"` to require a call, or select a named function.
-`parallel_tool_calls:false` allows at most one call. Interrupted calls are omitted.
+`"required"` to force a call, or select a named function.
+`"required"` and a named function constrain decoding regardless of tool
+strictness; `parallel_tool_calls:false` allows at most one call and constrains
+it likewise. Interrupted calls are omitted.
 
 References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create),
 [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs),
