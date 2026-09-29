@@ -867,6 +867,21 @@ void TestPersistentSnapshotRestoresAcrossPools() {
          "restarted request prefills only its unmatched suffix");
   extension.Invalidate();
 
+  {
+    auto cold = restarted.Acquire({1, 2, 3}, {}, {}, {}, false);
+    Expect(!cold.cache_hit() && cold.Prefill(3).decode_ready,
+           "cold request bypasses the existing disk checkpoint");
+    (void)cold.SelectNext();
+    cold.Advance();
+    Expect(cold.Commit().snapshot_bytes == 0 &&
+               reader_stats->snapshot_captures == 0,
+           "cold request does not replace the disk capture in memory");
+  }
+  auto preserved = restarted.Acquire({1, 2, 3});
+  Expect(preserved.cache_hit() && preserved.cache_disk_hit(),
+         "later replay still restores the first disk capture");
+  preserved.Invalidate();
+
   auto incompatible_stats = std::make_shared<FakeStats>();
   auto incompatible = std::make_shared<PersistentSnapshotRunner>(
       incompatible_stats, "artifact-B");
@@ -899,6 +914,39 @@ void TestPromptReuseCanBeDisabledPerRequest() {
   Expect(retained.cached_prompt_tokens() == 4,
          "a no-reuse request can populate the cache for later requests");
   retained.Invalidate();
+}
+
+void TestColdRequestPreservesExistingPromptSnapshot() {
+  auto stats = std::make_shared<FakeStats>();
+  TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
+  {
+    auto first = pool.Acquire({1, 2});
+    Expect(first.Prefill(2).decode_ready, "first prefix is ready");
+    first.Commit();
+  }
+  {
+    auto extension = pool.Acquire({1, 2, 3});
+    Expect(extension.cached_prompt_tokens() == 2,
+           "extension restores the first prefix");
+    Expect(extension.Prefill(1).decode_ready, "extension reaches its prompt");
+    extension.Commit();
+  }
+  const auto captures = stats->snapshot_captures;
+  {
+    auto cold = pool.Acquire({1, 2, 3}, {}, {}, {}, false);
+    Expect(!cold.cache_hit() && cold.Prefill(3).decode_ready,
+           "cold request bypasses lookup and prefills the whole prompt");
+    (void)cold.SelectNext();
+    cold.Advance();
+    Expect(cold.Commit().snapshot_bytes == 0 &&
+               stats->snapshot_captures == captures,
+           "cold request keeps the existing prompt snapshot");
+  }
+  auto repeated = pool.Acquire({1, 2, 3});
+  Expect(repeated.cache_hit() && repeated.cached_prompt_tokens() == 3 &&
+             repeated.cache_restore_bytes() > 0,
+         "repeat restores the original full-prompt snapshot");
+  repeated.Invalidate();
 }
 
 void TestStableChatPrefixSurvivesInterruptedFraming() {
@@ -1315,6 +1363,7 @@ int main() {
   TestGeneratedFrontierPersistsForForks();
   TestCancellationRetainsOnlyCompletedWork();
   TestPromptReuseCanBeDisabledPerRequest();
+  TestColdRequestPreservesExistingPromptSnapshot();
   TestStableChatPrefixSurvivesInterruptedFraming();
   TestWarmChatCheckpointsDoNotSplitPrefill();
   TestChatFallbackSurvivesSnapshotBudgetPressure();

@@ -151,9 +151,11 @@ public:
     /// Reserves aggregate retained-snapshot capacity before model allocation.
     ///
     /// Byte-pressure evictions happen synchronously before this returns true.
-    [[nodiscard]] bool TryReserveSnapshot(std::size_t snapshot_bytes,
-                                          std::size_t token_count,
-                                          bool preserve_source = false);
+    /// Passing tokens preserves an existing reusable snapshot for that prefix.
+    [[nodiscard]] bool TryReserveSnapshot(
+        std::size_t snapshot_bytes, std::size_t token_count,
+        bool preserve_source = false,
+        std::span<const ContinuationToken> tokens = {});
 
     /// Releases an admitted reservation and records a sanitized skip reason.
     void SkipSnapshot(SnapshotEventReason reason, std::size_t snapshot_bytes,
@@ -236,10 +238,11 @@ private:
   struct Entry;
 
   [[nodiscard]] ContinuationState& StateAt(std::size_t index);
-  [[nodiscard]] bool ReserveSnapshot(std::size_t source_index,
-                                     std::size_t snapshot_bytes,
-                                     std::size_t token_count,
-                                     bool preserve_source);
+  [[nodiscard]] bool ReserveSnapshot(
+      std::size_t source_index, std::size_t snapshot_bytes,
+      std::size_t token_count, bool preserve_source,
+      std::span<const ContinuationToken> tokens,
+      std::span<const std::uint8_t> input_identity);
   void SkipSnapshot(std::size_t reservation_bytes, SnapshotEventReason reason,
                     std::size_t snapshot_bytes,
                     std::size_t token_count) noexcept;

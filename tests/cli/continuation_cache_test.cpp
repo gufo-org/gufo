@@ -312,6 +312,77 @@ void TestConcurrentReservationsCannotOvercommitBudget() {
          "completed requests leave no leaked reservation");
 }
 
+void TestConcurrentExactCapturesKeepFirstSnapshot() {
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {
+          .restore =
+              [](gufo::server::ContinuationState& state,
+                 const gufo::server::ContinuationSnapshot& snapshot) {
+                dynamic_cast<FakeState&>(state).value =
+                    dynamic_cast<const FakeSnapshot&>(snapshot).value;
+              },
+          .capacity_bytes = [] { return 32; },
+          .on_event = {},
+      });
+
+  const std::vector<gufo::server::ContinuationToken> prompt{1, 2, 3};
+  auto first = cache.Acquire(prompt);
+  auto second = cache.Acquire(prompt, {}, {}, {}, false);
+  Expect(first.TryReserveSnapshot(8, prompt.size()) &&
+             second.TryReserveSnapshot(8, prompt.size()),
+         "both in-flight captures reserve snapshot space");
+  Expect(first.Commit(prompt, std::make_unique<FakeSnapshot>(7, 8)) == 8,
+         "first capture is retained");
+  Expect(second.Commit(prompt, std::make_unique<FakeSnapshot>(9, 8)) == 0,
+         "later capture cannot replace the same prefix");
+  Expect(cache.retained_snapshot_bytes() == 8 &&
+             cache.reserved_snapshot_bytes() == 0,
+         "skipped capture releases its reservation");
+
+  auto restored = cache.Acquire(prompt);
+  Expect(restored.cache_hit() &&
+             dynamic_cast<FakeState&>(restored.state()).value == 7,
+         "later request restores the first capture");
+  restored.Invalidate();
+}
+
+void TestLateReservationDoesNotEvictExactSnapshot() {
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {
+          .restore =
+              [](gufo::server::ContinuationState& state,
+                 const gufo::server::ContinuationSnapshot& snapshot) {
+                dynamic_cast<FakeState&>(state).value =
+                    dynamic_cast<const FakeSnapshot&>(snapshot).value;
+              },
+          .capacity_bytes = [] { return 8; },
+          .on_event = {},
+      });
+
+  const std::vector<gufo::server::ContinuationToken> prompt{1, 2, 3};
+  auto first = cache.Acquire(prompt);
+  auto second = cache.Acquire(prompt, {}, {}, {}, false);
+  Expect(first.TryReserveSnapshot(8, prompt.size(), false, prompt),
+         "first capture reserves all snapshot space");
+  Expect(first.Commit(prompt, std::make_unique<FakeSnapshot>(7, 8)) == 8,
+         "first capture fills the cache");
+  Expect(!second.TryReserveSnapshot(8, prompt.size(), false, prompt),
+         "late exact reservation does not evict the first capture");
+  second.Commit(prompt);
+
+  auto restored = cache.Acquire(prompt);
+  Expect(restored.cache_hit() &&
+             dynamic_cast<FakeState&>(restored.state()).value == 7,
+         "first capture remains reusable after the late reservation");
+  restored.Invalidate();
+}
+
 void TestImpossibleReservationPreservesRetainedEntries() {
   using gufo::server::SnapshotEventAction;
   using gufo::server::SnapshotEventReason;
@@ -607,6 +678,8 @@ int main() {
   TestSnapshotCanBranchIntoTwoIndependentStateSlots();
   TestByteCapacityEvictsBeforeSnapshotAllocation();
   TestConcurrentReservationsCannotOvercommitBudget();
+  TestConcurrentExactCapturesKeepFirstSnapshot();
+  TestLateReservationDoesNotEvictExactSnapshot();
   TestImpossibleReservationPreservesRetainedEntries();
   TestAbandonedReservationIsReleased();
   TestReservationMismatchSkipsRetentionWithoutFailingCommit();

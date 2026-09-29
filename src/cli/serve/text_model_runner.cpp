@@ -625,9 +625,18 @@ struct TextRunnerPool::Request::Impl {
         !capabilities.fork) {
       return;
     }
-    if (lease.cache_hit() && !lease.restored_from_disk() &&
-        lease.cached_tokens() == snapshot_tokens.size() &&
-        lease.HasSnapshotFor(snapshot_tokens)) {
+    // A forced cold request may reach the same prompt through different
+    // prefill chunks. Keep the first reusable checkpoint for that exact
+    // prefix, including when this request bypassed cache lookup.
+    if (lease.HasSnapshotFor(snapshot_tokens)) {
+      return;
+    }
+    // Disk checkpoints already keep their first capture. A cold request may
+    // bypass that lookup, but must not put a different version of the same
+    // prefix into memory.
+    if (disk_store && !lease.restored_from_disk() &&
+        disk_store->Touch(*runner, snapshot_tokens,
+                          InputIdentity(snapshot_tokens.size()))) {
       return;
     }
 
@@ -653,8 +662,9 @@ struct TextRunnerPool::Request::Impl {
 
     retain_snapshot = false;
     try {
-      retain_snapshot = lease.TryReserveSnapshot(
-          snapshot_bytes, snapshot_tokens.size(), retain_fallback);
+      retain_snapshot =
+          lease.TryReserveSnapshot(snapshot_bytes, snapshot_tokens.size(),
+                                   retain_fallback, snapshot_tokens);
     } catch (...) {
       return;
     }
@@ -1437,7 +1447,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
         if (runner.CheckpointPosition(state) != prefix.size())
           throw std::logic_error("live checkpoint position mismatch");
         bytes = runner.SnapshotPayloadBytes(state);
-        if (lease.TryReserveSnapshot(bytes, prefix.size(), true)) {
+        if (lease.TryReserveSnapshot(bytes, prefix.size(), true, prefix)) {
           snapshot = runner.Snapshot(state);
           if (snapshot == nullptr)
             throw std::runtime_error("live checkpoint capture failed");

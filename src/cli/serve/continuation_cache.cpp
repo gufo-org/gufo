@@ -156,9 +156,9 @@ void ContinuationCache::Lease::AdoptRestoredPrefix(std::size_t cached_tokens,
   lookup_ = {};
 }
 
-bool ContinuationCache::Lease::TryReserveSnapshot(std::size_t snapshot_bytes,
-                                                  std::size_t token_count,
-                                                  bool preserve_source) {
+bool ContinuationCache::Lease::TryReserveSnapshot(
+    std::size_t snapshot_bytes, std::size_t token_count, bool preserve_source,
+    std::span<const ContinuationToken> tokens) {
   if (cache_ == nullptr) {
     throw std::logic_error("continuation cache lease is empty");
   }
@@ -167,7 +167,8 @@ bool ContinuationCache::Lease::TryReserveSnapshot(std::size_t snapshot_bytes,
         "continuation cache lease already has a snapshot reservation");
   }
   if (!cache_->ReserveSnapshot(source_index_, snapshot_bytes, token_count,
-                               preserve_source)) {
+                               preserve_source, tokens,
+                               InputIdentity(tokens.size()))) {
     return false;
   }
   reserved_snapshot_bytes_ = snapshot_bytes;
@@ -499,10 +500,11 @@ ContinuationState& ContinuationCache::StateAt(std::size_t index) {
   return *impl_->entries.at(index)->state;
 }
 
-bool ContinuationCache::ReserveSnapshot(std::size_t source_index,
-                                        std::size_t snapshot_bytes,
-                                        std::size_t token_count,
-                                        bool preserve_source) {
+bool ContinuationCache::ReserveSnapshot(
+    std::size_t source_index, std::size_t snapshot_bytes,
+    std::size_t token_count, bool preserve_source,
+    std::span<const ContinuationToken> tokens,
+    std::span<const std::uint8_t> input_identity) {
   std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
   std::vector<SnapshotEvent> events;
   bool admitted = false;
@@ -521,63 +523,74 @@ bool ContinuationCache::ReserveSnapshot(std::size_t source_index,
           .capacity_bytes = impl_->snapshot_capacity_bytes,
       };
     };
-    const auto fits = [&] {
-      const std::size_t used =
-          impl_->retained_snapshot_bytes + impl_->reserved_snapshot_bytes;
-      return snapshot_bytes != 0 && used <= impl_->snapshot_capacity_bytes &&
-             snapshot_bytes <= impl_->snapshot_capacity_bytes - used;
-    };
-    const auto oldest_snapshot = [&](bool allow_source) {
-      std::size_t selected = impl_->entries.size();
-      std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
-      for (std::size_t candidate = 0; candidate < impl_->entries.size();
-           ++candidate) {
-        const auto& entry = *impl_->entries[candidate];
-        if (!entry.valid || entry.snapshot == nullptr ||
-            (!allow_source && candidate == source_index)) {
-          continue;
-        }
-        if (entry.snapshot_last_used < oldest) {
-          selected = candidate;
-          oldest = entry.snapshot_last_used;
-        }
-      }
-      return selected;
-    };
-
-    const bool can_fit_after_eviction =
-        snapshot_bytes != 0 &&
-        impl_->reserved_snapshot_bytes <= impl_->snapshot_capacity_bytes &&
-        snapshot_bytes <=
-            impl_->snapshot_capacity_bytes - impl_->reserved_snapshot_bytes;
-    while (can_fit_after_eviction && !fits()) {
-      std::size_t target = oldest_snapshot(false);
-      if (target == impl_->entries.size() && !preserve_source) {
-        target = oldest_snapshot(true);
-      }
-      if (target == impl_->entries.size()) {
-        break;
-      }
-      auto& entry = *impl_->entries[target];
-      const std::size_t removed_bytes = entry.snapshot_bytes;
-      const std::size_t removed_tokens = entry.tokens.size();
-      removed_snapshots.push_back(std::move(entry.snapshot));
-      entry.tokens.clear();
-      entry.snapshot_bytes = 0;
-      entry.valid = false;
-      impl_->retained_snapshot_bytes -= removed_bytes;
-      events.push_back(make_event(SnapshotEventAction::kRemoved,
-                                  SnapshotEventReason::kByteCapacity,
-                                  removed_bytes, removed_tokens));
-    }
-
-    if (fits()) {
-      impl_->reserved_snapshot_bytes += snapshot_bytes;
-      admitted = true;
-    } else {
+    if (!tokens.empty() &&
+        std::ranges::any_of(impl_->entries, [&](const auto& source) {
+          return source->valid && std::ranges::equal(source->tokens, tokens) &&
+                 std::ranges::equal(source->input_identity, input_identity) &&
+                 source->snapshot != nullptr;
+        })) {
       events.push_back(make_event(SnapshotEventAction::kSkipped,
-                                  SnapshotEventReason::kByteCapacity,
+                                  SnapshotEventReason::kExactReplacement,
                                   snapshot_bytes, token_count));
+    } else {
+      const auto fits = [&] {
+        const std::size_t used =
+            impl_->retained_snapshot_bytes + impl_->reserved_snapshot_bytes;
+        return snapshot_bytes != 0 && used <= impl_->snapshot_capacity_bytes &&
+               snapshot_bytes <= impl_->snapshot_capacity_bytes - used;
+      };
+      const auto oldest_snapshot = [&](bool allow_source) {
+        std::size_t selected = impl_->entries.size();
+        std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
+        for (std::size_t candidate = 0; candidate < impl_->entries.size();
+             ++candidate) {
+          const auto& entry = *impl_->entries[candidate];
+          if (!entry.valid || entry.snapshot == nullptr ||
+              (!allow_source && candidate == source_index)) {
+            continue;
+          }
+          if (entry.snapshot_last_used < oldest) {
+            selected = candidate;
+            oldest = entry.snapshot_last_used;
+          }
+        }
+        return selected;
+      };
+
+      const bool can_fit_after_eviction =
+          snapshot_bytes != 0 &&
+          impl_->reserved_snapshot_bytes <= impl_->snapshot_capacity_bytes &&
+          snapshot_bytes <=
+              impl_->snapshot_capacity_bytes - impl_->reserved_snapshot_bytes;
+      while (can_fit_after_eviction && !fits()) {
+        std::size_t target = oldest_snapshot(false);
+        if (target == impl_->entries.size() && !preserve_source) {
+          target = oldest_snapshot(true);
+        }
+        if (target == impl_->entries.size()) {
+          break;
+        }
+        auto& entry = *impl_->entries[target];
+        const std::size_t removed_bytes = entry.snapshot_bytes;
+        const std::size_t removed_tokens = entry.tokens.size();
+        removed_snapshots.push_back(std::move(entry.snapshot));
+        entry.tokens.clear();
+        entry.snapshot_bytes = 0;
+        entry.valid = false;
+        impl_->retained_snapshot_bytes -= removed_bytes;
+        events.push_back(make_event(SnapshotEventAction::kRemoved,
+                                    SnapshotEventReason::kByteCapacity,
+                                    removed_bytes, removed_tokens));
+      }
+
+      if (fits()) {
+        impl_->reserved_snapshot_bytes += snapshot_bytes;
+        admitted = true;
+      } else {
+        events.push_back(make_event(SnapshotEventAction::kSkipped,
+                                    SnapshotEventReason::kByteCapacity,
+                                    snapshot_bytes, token_count));
+      }
     }
   }
   removed_snapshots.clear();
@@ -685,71 +698,85 @@ std::size_t ContinuationCache::Commit(
             break;
           }
         }
-        if (target == no_entry) {
-          for (std::size_t candidate = 0; candidate < impl_->entries.size();
-               ++candidate) {
-            if (!impl_->entries[candidate]->valid) {
-              target = candidate;
-              break;
-            }
-          }
-        }
-        if (target == no_entry) {
-          std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
-          for (std::size_t candidate = 0; candidate < impl_->entries.size();
-               ++candidate) {
-            if (impl_->entries.size() > 1 && candidate == source_index) {
-              continue;
-            }
-            const auto& entry = *impl_->entries[candidate];
-            if (entry.snapshot_last_used < oldest) {
-              target = candidate;
-              oldest = entry.snapshot_last_used;
-            }
-          }
-        }
-        if (target == no_entry) {
-          target = source_index < impl_->entries.size() ? source_index : index;
-        }
-
-        auto& snapshot_entry = *impl_->entries[target];
-        if (snapshot_entry.snapshot != nullptr) {
-          const std::size_t removed_bytes = snapshot_entry.snapshot_bytes;
-          const std::size_t removed_tokens = snapshot_entry.tokens.size();
-          removed_snapshots.push_back(std::move(snapshot_entry.snapshot));
-          impl_->retained_snapshot_bytes -= removed_bytes;
-          snapshot_entry.tokens.clear();
-          snapshot_entry.snapshot_bytes = 0;
-          snapshot_entry.valid = false;
-          events.push_back(make_event(
-              SnapshotEventAction::kRemoved,
-              exact_replacement ? SnapshotEventReason::kExactReplacement
-                                : SnapshotEventReason::kEntryCapacity,
-              removed_bytes, removed_tokens));
-        }
-        const std::size_t used =
-            impl_->retained_snapshot_bytes + impl_->reserved_snapshot_bytes;
-        if (used > impl_->snapshot_capacity_bytes ||
-            snapshot_bytes > impl_->snapshot_capacity_bytes - used) {
+        if (exact_replacement && impl_->entries[target]->snapshot != nullptr) {
+          // An in-flight capture may have passed the earlier lookup before
+          // this checkpoint was published. Preserve the first valid state.
           retain_snapshot = false;
-          skip_reason = SnapshotEventReason::kReservationMismatch;
-        } else {
-          snapshot_entry.tokens = std::move(tokens);
-          snapshot_entry.input_identity = std::move(input_identity);
-          snapshot_entry.snapshot = std::move(retained_snapshot);
-          snapshot_entry.snapshot_bytes = snapshot_bytes;
-          snapshot_entry.stable_prefix_tokens = stable_prefix_tokens;
-          snapshot_entry.valid = !snapshot_entry.tokens.empty();
-          snapshot_entry.snapshot_last_used = ++impl_->clock;
-          impl_->retained_snapshot_bytes += snapshot_bytes;
-          retained_bytes = snapshot_bytes;
+          skip_reason = SnapshotEventReason::kExactReplacement;
           if (published_index)
             *published_index = target;
-        }
-        if (!retain_snapshot) {
           events.push_back(make_event(SnapshotEventAction::kSkipped,
                                       skip_reason, snapshot_bytes,
                                       token_count));
+        }
+        if (retain_snapshot) {
+          if (target == no_entry) {
+            for (std::size_t candidate = 0; candidate < impl_->entries.size();
+                 ++candidate) {
+              if (!impl_->entries[candidate]->valid) {
+                target = candidate;
+                break;
+              }
+            }
+          }
+          if (target == no_entry) {
+            std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
+            for (std::size_t candidate = 0; candidate < impl_->entries.size();
+                 ++candidate) {
+              if (impl_->entries.size() > 1 && candidate == source_index) {
+                continue;
+              }
+              const auto& entry = *impl_->entries[candidate];
+              if (entry.snapshot_last_used < oldest) {
+                target = candidate;
+                oldest = entry.snapshot_last_used;
+              }
+            }
+          }
+          if (target == no_entry) {
+            target =
+                source_index < impl_->entries.size() ? source_index : index;
+          }
+
+          auto& snapshot_entry = *impl_->entries[target];
+          if (snapshot_entry.snapshot != nullptr) {
+            const std::size_t removed_bytes = snapshot_entry.snapshot_bytes;
+            const std::size_t removed_tokens = snapshot_entry.tokens.size();
+            removed_snapshots.push_back(std::move(snapshot_entry.snapshot));
+            impl_->retained_snapshot_bytes -= removed_bytes;
+            snapshot_entry.tokens.clear();
+            snapshot_entry.snapshot_bytes = 0;
+            snapshot_entry.valid = false;
+            events.push_back(make_event(
+                SnapshotEventAction::kRemoved,
+                exact_replacement ? SnapshotEventReason::kExactReplacement
+                                  : SnapshotEventReason::kEntryCapacity,
+                removed_bytes, removed_tokens));
+          }
+          const std::size_t used =
+              impl_->retained_snapshot_bytes + impl_->reserved_snapshot_bytes;
+          if (used > impl_->snapshot_capacity_bytes ||
+              snapshot_bytes > impl_->snapshot_capacity_bytes - used) {
+            retain_snapshot = false;
+            skip_reason = SnapshotEventReason::kReservationMismatch;
+          } else {
+            snapshot_entry.tokens = std::move(tokens);
+            snapshot_entry.input_identity = std::move(input_identity);
+            snapshot_entry.snapshot = std::move(retained_snapshot);
+            snapshot_entry.snapshot_bytes = snapshot_bytes;
+            snapshot_entry.stable_prefix_tokens = stable_prefix_tokens;
+            snapshot_entry.valid = !snapshot_entry.tokens.empty();
+            snapshot_entry.snapshot_last_used = ++impl_->clock;
+            impl_->retained_snapshot_bytes += snapshot_bytes;
+            retained_bytes = snapshot_bytes;
+            if (published_index)
+              *published_index = target;
+          }
+          if (!retain_snapshot) {
+            events.push_back(make_event(SnapshotEventAction::kSkipped,
+                                        skip_reason, snapshot_bytes,
+                                        token_count));
+          }
         }
       } else if (snapshot != nullptr || reservation_bytes != 0) {
         events.push_back(make_event(SnapshotEventAction::kSkipped, skip_reason,
