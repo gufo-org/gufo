@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 import openai
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
 from openai.types import Completion, CompletionChoice
-from metrics import Recorder
+from metrics import CaseComplete, Recorder
 
 
 class CompletionStreamChoice(CompletionChoice):
@@ -1913,6 +1913,8 @@ def main():
     parser.add_argument("--server-thinking", choices=("on", "off"),
                         help="Explicit --think setting on the server, if any")
     parser.add_argument("--output", type=Path, help="Write a partial report after every case")
+    parser.add_argument("--through-case",
+                        help="Replay the suite prefix and stop before the next request")
     parser.add_argument("--concurrency", type=int, default=4,
                         help="Requests in the batch suite; must fit server --sessions")
     parser.add_argument("--context", type=int, default=8192,
@@ -1945,8 +1947,9 @@ def main():
               "vision": args.vision, "speculative": args.speculative,
               "sampling_preset": args.sampling_preset,
               "sampling_overrides": args.sampling_overrides, "suites": {},
-              "status": "running"}
-    recorder = Recorder(args.output.with_suffix(".requests.json") if args.output else None)
+              "through_case": args.through_case, "status": "running"}
+    recorder = Recorder(args.output.with_suffix(".requests.json") if args.output else None,
+                        args.through_case)
     checks = CheckResults(report, args.output, recorder)
     report["checks"] = checks
     checks.save()
@@ -1979,6 +1982,8 @@ def main():
             try:
                 suites[name]()
                 report["suites"][name] = {"status": "passed"}
+            except CaseComplete:
+                report["suites"][name] = {"status": "passed", "through_case": args.through_case}
             except Exception as error:
                 report["suites"][name] = {"status": "failed", "error": str(error),
                                           "traceback": traceback.format_exc()}
@@ -1989,6 +1994,11 @@ def main():
                 raise
             report["suites"][name]["seconds"] = round(time.monotonic() - started, 3)
             checks.save()
+            if args.through_case and args.through_case in checks:
+                break
+    if args.through_case and args.through_case not in checks:
+        report["suites"]["requested-case"] = {
+            "status": "failed", "error": f"case not reached: {args.through_case}"}
     report["status"] = ("passed" if all(row["status"] == "passed"
                          for row in report["suites"].values()) else "failed")
     checks.save()

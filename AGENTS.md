@@ -49,17 +49,16 @@ is not a quality pass. Broaden checks when shared behavior changes or failures
 expose risk.
 
 Text API functional/regression tests live in [tests/functional/](tests/functional/README.md).
-Use its runner with focused suites for sampling, tools, stops, thinking, images,
-concurrency and cache changes. Include `long-context` and `cache` when changing
-conversation state, cancellation or restore. Compare each request's prefill,
-decode, queue, restore and end-to-end timings with `--baseline`; investigate
-flagged regressions in addition to the standard speed benchmark. Each request
-and phase must pass independently; never qualify a change from an overall
-average. Retain output and schema gates plus affected numerical sampler/model
-tests: HTTP success and seed replay alone do not establish model quality.
-Keep these tests here, not in
-`tools/`, and keep model runs outside hosted CI. Use focused model/mode coverage
-during iteration; expand it for shared behavior without repeating full sweeps.
+Compare clean main with the rebased PR using identical production toolchains,
+settings and cache history. Include `long-context` and `cache` for continuation
+changes. Correctness and expected prefill/cache work are strict; timings are
+mandatory per request/phase at 5% and 3 ms, never averaged across requests.
+Run once, investigate flags, then alternate main/PR only for affected histories;
+use unchanged-main controls when needed and retain every result. Fix confirmed
+regressions before publishing. Noisy evidence stays visibly inconclusive and
+unqualified; do not widen margins or stop at reporting failures.
+Retain numerical quality tests and the standard speed benchmark. Keep these
+tests in `tests/functional/`, outside hosted model CI; avoid full sweeps.
 
 ## Profiling and kernels
 

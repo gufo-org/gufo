@@ -17,7 +17,7 @@ spec = importlib.util.spec_from_file_location(
     "functional", ROOT / "tests/functional/run.py")
 functional = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(functional)
-from metrics import Recorder, canonical, compare, join_server_timings, summarize
+from metrics import CaseComplete, Recorder, canonical, compare, join_server_timings, qualify, summarize
 
 
 class FunctionalRunnerTest(unittest.TestCase):
@@ -79,16 +79,16 @@ class FunctionalRunnerTest(unittest.TestCase):
         baseline = {"startup_ms": 100, "restart_ms": 100}
         result = {"status": "passed", "measurements": []}
         functional.compare_lifecycle(result, baseline,
-                                     {"startup_ms": 125, "restart_ms": 75}, .05, 3)
-        self.assertEqual(result["status"], "failed")
+                                     {"startup_ms": 125, "restart_ms": 75})
+        self.assertEqual(result["status"], "inconclusive")
         for candidate in ({}, {"startup_ms": 100}, {"startup_ms": float("nan")},
                           {"startup_ms": 100, "restart_ms": 0}):
             with self.assertRaisesRegex(ValueError, "server"):
-                functional.compare_lifecycle(result, baseline, candidate, .05, 3)
+                functional.compare_lifecycle(result, baseline, candidate)
         with self.assertRaisesRegex(ValueError, "restart_ms"):
             functional.compare_lifecycle(result,
                 {"startup_ms": 100, "suites": {"text-cancel-disk": {}}},
-                {"startup_ms": 100, "suites": {"text-cancel-disk": {}}}, .05, 3)
+                {"startup_ms": 100, "suites": {"text-cancel-disk": {}}})
 
     def test_fragmented_stream_metrics_and_output_identity(self):
         usage = {"prompt_tokens": 10, "completion_tokens": 2,
@@ -150,8 +150,8 @@ class FunctionalRunnerTest(unittest.TestCase):
             payload["requests"].append(faster)
             (b / "tools.requests.json").write_text(json.dumps(payload))
             result = compare(a, b)
-            self.assertEqual(result["status"], "failed")
-            self.assertTrue(any(row["metric"] == "decode_ms" and row["regression"]
+            self.assertEqual(result["status"], "inconclusive")
+            self.assertTrue(any(row["metric"] == "decode_ms" and row["exceeds_margin"]
                                 for row in result["measurements"]))
             self.assertFalse(result["quality_or_coverage_changes"])
             (a / "tools.requests.json").write_text(original)
@@ -168,6 +168,126 @@ class FunctionalRunnerTest(unittest.TestCase):
         self.assertNotEqual(canonical({"arguments": '{"id":"a"}'}),
                             canonical({"arguments": '{"id":"b"}'}))
 
+    def test_timing_evidence_does_not_hide_outliers_or_average_requests(self):
+        def pair(old, new):
+            result = {"status": "passed", "measurements": [],
+                      "quality_or_coverage_changes": [], "slowdown_tolerance": .05, "noise_ms": 3}
+            functional.compare_lifecycle(result, {"startup_ms": old}, {"startup_ms": new})
+            return result
+
+        self.assertEqual(qualify([pair(100, 105)])["status"], "passed")
+        self.assertEqual(qualify([pair(1, 4)])["status"], "passed")
+        self.assertEqual(qualify([pair(100, 106)])["status"], "inconclusive")
+        self.assertEqual(qualify([pair(100, 120), pair(101, 119)])["status"], "failed")
+        noisy = qualify([pair(100, 700), pair(700, 100)])
+        self.assertEqual(noisy["status"], "inconclusive")
+        self.assertEqual(len(noisy["measurements"][0]["samples"]), 2)
+        # A lucky repetition cannot erase the original slower observation.
+        self.assertEqual(qualify([pair(100, 700), pair(100, 99)])["status"], "inconclusive")
+        # Main itself reproduced the stall: neither failure nor qualification.
+        control = qualify([pair(100, 120), pair(101, 119)], [pair(100, 800)])
+        self.assertEqual(control["status"], "inconclusive")
+        self.assertEqual(control["measurements"][0]["control_flags"], 1)
+        bad = pair(100, 100)
+        bad["quality_or_coverage_changes"] = ["unexpected full prefill"]
+        self.assertEqual(qualify([bad, pair(100, 90)])["status"], "failed")
+        changed_margin = pair(100, 100)
+        changed_margin["noise_ms"] = 50
+        with self.assertRaisesRegex(ValueError, "margins"):
+            qualify([changed_margin])
+        faster_peer = pair(100, 50)["measurements"][0]
+        faster_peer.update(request_key=["other-request"], case="other")
+        slow = pair(100, 120)
+        slow["measurements"].append(faster_peer)
+        repeated = pair(100, 120)
+        repeated["measurements"].append(faster_peer)
+        result = qualify([slow, repeated])
+        self.assertEqual([row["status"] for row in result["measurements"]], ["failed", "passed"])
+
+    def test_comparison_preserves_history_but_allows_parallel_submission_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            a, b = Path(directory) / "a", Path(directory) / "b"
+            a.mkdir()
+            b.mkdir()
+            rows = [{"index": index, "case": case, "request_sha256": str(index),
+                     "status": "complete", "wall_ms": 1, "metrics": {}}
+                    for index, case in enumerate(("warmup", "batch", "batch", "retry"))]
+
+            def write(path, items):
+                (path / "batch.requests.json").write_text(json.dumps(
+                    {"version": 1, "requests": items}))
+
+            write(a, rows)
+            write(b, [rows[0], rows[2], rows[1], rows[3]])
+            self.assertEqual(compare(a, b)["status"], "passed")
+            write(b, [rows[3], *rows[:3]])
+            self.assertEqual(compare(a, b)["status"], "failed")
+            write(a, [rows[0], rows[3]])
+            write(b, [rows[0], rows[3]])
+            followup = compare(a, b)
+            write(a, rows)
+            write(b, rows)
+            with self.assertRaisesRegex(ValueError, "history"):
+                qualify([compare(a, b), followup])
+            for path in (a, b):
+                (path / "report.json").write_text(json.dumps(
+                    {"suites": {"warmup": {}, "batch": {}}}))
+                (path / "warmup.requests.json").write_text(json.dumps(
+                    {"version": 1, "requests": rows[:2]}))
+            original = compare(a, b)
+            for path in (a, b):
+                (path / "warmup.requests.json").write_text(json.dumps(
+                    {"version": 1, "requests": rows[:1]}))
+            with self.assertRaisesRegex(ValueError, "history"):
+                qualify([original, compare(a, b)])
+
+    def test_evidence_requires_independent_runs_and_identical_builds(self):
+        from compare import evidence
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def record(name, binary, elapsed):
+                path = root / name
+                path.mkdir()
+                (path / "report.json").write_text(json.dumps({
+                    "status": "passed", "binary": binary, "startup_ms": elapsed,
+                    "suites": {"tools": {"status": "passed"}},
+                    "comparison_command": ["serve", "llm", "--sessions", "4"]}))
+                (path / "tools.requests.json").write_text(json.dumps({
+                    "version": 1, "requests": [{"index": 0, "case": "literal",
+                        "request_sha256": "prompt", "status": "complete", "wall_ms": elapsed}]}))
+                return path
+
+            a, b = record("a", "main", 100), record("b", "pr", 125)
+            c, d = record("c", "main", 101), record("d", "pr", 124)
+            result = evidence([(a, b), (c, d)])
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(len(result["evidence"]), 2)
+            with self.assertRaisesRegex(ValueError, "reused"):
+                evidence([(a, b), (a, d)])
+            with self.assertRaisesRegex(ValueError, "itself"):
+                evidence([(a, a)])
+            wrong = record("wrong", "different-build", 125)
+            with self.assertRaisesRegex(ValueError, "builds"):
+                evidence([(a, b), (c, wrong)])
+            stalled = record("stalled", "main", 700)
+            self.assertEqual(evidence([(a, b), (c, d)], [(a, stalled)])["status"], "inconclusive")
+
+    def test_focused_replay_finishes_case_before_stopping_the_next_request(self):
+        recorder = Recorder(None, "retry")
+        for case in ("warmup", "retry"):
+            request = recorder.begin("/v1/models", {})
+            request.row["http_status"] = 200
+            request.feed(b'{"data":[],"object":"list"}')
+            request.ended = True
+            request.finish()
+            recorder.mark(case)
+            # Marking a case must not interrupt the assertions that follow it.
+            self.assertEqual(request.row["case"], case)
+        with self.assertRaises(CaseComplete):
+            recorder.begin("/v1/models", {})
+        self.assertEqual(len(recorder.rows), 2)
+
     def test_explicit_zero_and_neutral_overrides_are_not_dropped(self):
         self.assertEqual(functional.sampling_overrides([
             "--temperature", "0", "--top-k=0", "--top-p", "1",
@@ -176,6 +296,42 @@ class FunctionalRunnerTest(unittest.TestCase):
              "presence_penalty": 0, "seed": 123})
         with self.assertRaises(ValueError):
             functional.sampling_overrides(["--temperature", "0", "--temperature=1"])
+
+    def test_runner_inconclusive_is_nonzero_and_correctness_still_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def run(name, elapsed, output_hash="same", baseline=None):
+                child = f'''import json,sys
+from pathlib import Path
+p = Path(sys.argv[sys.argv.index("--output") + 1])
+p.write_text(json.dumps({{"status": "passed"}}))
+p.with_suffix(".requests.json").write_text(json.dumps({{
+    "version": 1, "requests": [{{"index": 0, "case": "reply", "status": "complete",
+    "endpoint": "/v1/chat/completions", "wall_ms": {elapsed},
+    "request_sha256": "same", "output_sha256": "{output_hash}"}}]}}))
+'''
+                (root / "openai_sdk.py").write_text(child)
+                args = ["run.py", "--output", str(root / name), "--sampling-preset", "qwen38",
+                        "--suite", "responses"]
+                args += ["--baseline", str(baseline)] if baseline else ["--record-baseline"]
+                args += ["--", sys.executable, "serve", "llm", "--model", "fixture.gguf"]
+                with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
+                     patch.object(functional, "server", return_value=contextlib.nullcontext()), \
+                     patch.object(functional, "provenance", return_value={}), \
+                     patch.object(functional, "join_server_timings"), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    code = functional.main()
+                return code, json.loads((root / name / "report.json").read_text())
+
+            self.assertEqual(run("main", 100)[0], 0)
+            code, report = run("pr", 150, baseline=root / "main")
+            self.assertEqual(code, 2)
+            self.assertEqual(report["status"], "inconclusive")
+            self.assertEqual(report["functional_status"], "passed")
+            code, report = run("wrong", 150, "different", root / "main")
+            self.assertEqual(code, 1)
+            self.assertEqual(report["status"], "failed")
 
     def test_failed_or_incomplete_child_is_not_reported_as_a_pass(self):
         for child, expected in (
@@ -206,6 +362,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                         sys.executable, "serve", "llm", "--model", "fixture.gguf"]
                 with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
                      patch.object(functional, "server", return_value=contextlib.nullcontext()), \
+                     patch.object(functional, "provenance", return_value={}), \
                      patch.object(functional, "join_server_timings"), \
                      contextlib.redirect_stdout(io.StringIO()):
                     status = functional.main()

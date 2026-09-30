@@ -14,7 +14,8 @@ nix develop -c python3 tests/functional/run.py \
 Then use the candidate binary, a new output directory and
 `--baseline /tmp/api-baseline` instead of `--record-baseline`. Keep the model,
 server options and suite order identical, with no competing GPU/build work.
-The first run records a reference; the second qualifies the change.
+Use clean main and the rebased PR with the same production toolchain. The first
+run records a reference; the second checks the change.
 
 Use `deepseek4` for DeepSeek. Pass the model's normal speculative options for
 DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
@@ -41,10 +42,29 @@ Model runs stay outside hosted CI; CI checks the runner and measurement logic.
 Every request checks its applicable response format, expected output and timings.
 Missing measurements fail. `comparison.json` reports per-request prefill, decode,
 queue, restore and wall times, plus server startup/restart. Missing cases,
-changed output/token counts, or slowdowns exceeding **both 5% and 3 ms** fail
-qualification (`--max-slowdown`, `--noise-ms`). Investigate flagged steps; repeat
-only when needed to separate a regression from timing noise. **Each step must
-pass independently; faster steps never compensate for slower ones.**
+changed output/token counts or unexpected prefill/cache work fail immediately.
+Timing margins remain **both 5% and 3 ms**. One overrun is **inconclusive**, not
+proof of regression. Exit codes: **0 pass, 1 fail, 2 inconclusive/unqualified**.
+
+Investigate flags; rerun only affected histories, alternating main and PR.
+`--through-case long-context:long_cancel_replay` replays preceding selected
+suites/cases and stops before the next request. Keep the original suite arguments
+and server/cache settings. Disk-restore investigations use the `cache` suite.
+Combine the original pair and focused follow-ups without discarding results:
+
+```sh
+python3 tests/functional/compare.py \
+  --pair /tmp/main /tmp/pr --pair /tmp/main-repeat /tmp/pr-repeat \
+  --output /tmp/timing-evidence.json
+```
+
+Add `--control /tmp/main-repeat /tmp/main-control` for a fresh unchanged-main
+control with the same focused history.
+Every request/phase is judged separately: all observed candidate times within
+margin pass; repeated separation from stable main fails; overlapping or variable
+timings stay inconclusive. Sample values and flag counts remain visible for
+stall investigation. Faster requests never offset slower ones. Fix regressions;
+inconclusive timings remain unqualified. Never widen margins to pass.
 
 Reports and logs survive failures. These checks complement the standard speed
 benchmark and numerical quality tests; they do not establish upstream model

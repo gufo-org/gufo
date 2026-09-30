@@ -8,6 +8,13 @@ import re
 import threading
 import time
 
+SLOWDOWN = .05
+NOISE_MS = 3
+
+
+class CaseComplete(BaseException):
+    """Control flow, not an SDK connection error; stop before the next request."""
+
 
 def canonical(value):
     """Ignore generated identifiers, never tool arguments or message text."""
@@ -252,8 +259,10 @@ def summarize(parts, streaming, ended, contract=None):
 
 
 class Recorder:
-    def __init__(self, path):
+    def __init__(self, path, through_case=None):
         self.path = path
+        self.through_case = through_case
+        self.reached_case = False
         self.rows = []
         self.lock = threading.RLock()
 
@@ -265,6 +274,8 @@ class Recorder:
 
     def begin(self, path, body):
         with self.lock:
+            if self.reached_case:
+                raise CaseComplete()
             row = {"index": len(self.rows), "endpoint": path,
                    "request_sha256": digest({"endpoint": path, "body": body}),
                    "stream": bool(body.get("stream")), "status": "running"}
@@ -277,6 +288,8 @@ class Recorder:
                 if row["status"] != "running":
                     row.setdefault("case", case)
             self.save()
+            if case == self.through_case:
+                self.reached_case = True
 
     def request_hook(self, request):
         body = json.loads(request.content) if request.content else {}
@@ -367,16 +380,55 @@ class Measurement:
                 self.recorder.save()
 
 
-def compare(baseline, candidate, slowdown=.05, noise_ms=3):
-    """Flag every slowdown; fail significant ones and any workload/output mismatch."""
+def timing_measurement(case, metric, old, new, count=1, request_key=None):
+    floor = NOISE_MS / max(1, count) if metric.endswith("_per_token") else NOISE_MS
+    exceeded = new - old > max(floor, old * SLOWDOWN)
+    return {"case": case, "request_key": request_key or ["server"], "metric": metric,
+            "baseline": old, "candidate": new, "noise_floor": floor,
+            "change_percent": 100 * (new / old - 1) if old else None,
+            "exceeds_margin": exceeded,
+            "status": "inconclusive" if exceeded else "passed"}
+
+
+def comparison_status(rows, issues):
+    if issues or any(row["status"] == "failed" for row in rows):
+        return "failed"
+    return "inconclusive" if any(row["status"] == "inconclusive" for row in rows) else "passed"
+
+
+def compare(baseline, candidate):
+    """One matched observation flags timings; deterministic differences fail immediately."""
     def index(directory):
-        result = {}
-        for path in sorted(Path(directory).glob("*.requests.json")):
+        result, history = {}, []
+        root = Path(directory)
+        paths = sorted(root.glob("*.requests.json"))
+        if (root / "report.json").is_file():
+            report = json.loads((root / "report.json").read_text())
+            expected = [root / (suite + ".requests.json") for suite in report["suites"]]
+            if set(paths) != set(expected):
+                raise ValueError("missing or unexpected suite measurements")
+            paths = expected
+        for path in paths:
             payload = json.loads(path.read_text())
             if not isinstance(payload, dict) or payload.get("version") != 1 \
                     or not isinstance(payload.get("requests"), list):
                 raise ValueError(f"unsupported metrics: {path}")
             occurrences = {}
+            history.append([path.name])
+            # A concurrent case can submit its requests in a different order.
+            # Preserve case order and group membership, without ordering peers.
+            groups = []
+            for row in payload["requests"]:
+                label = row.get("case", row.get("index")) if isinstance(row, dict) else None
+                if not groups or groups[-1][0] != label:
+                    groups.append((label, []))
+                groups[-1][1].append(row)
+            histories = {}
+            for label, group in groups:
+                history.append([label, sorted(row.get("request_sha256", "") for row in group
+                                             if isinstance(row, dict))])
+                for row in group:
+                    histories[id(row)] = digest(history)
             for row in payload["requests"]:
                 if not isinstance(row, dict) or row.get("status") not in ("complete", "disconnected"):
                     raise ValueError(f"unfinished/invalid request in {path}")
@@ -389,7 +441,8 @@ def compare(baseline, candidate, slowdown=.05, noise_ms=3):
                 fingerprint = row["request_sha256"]
                 occurrence = occurrences.get(fingerprint, 0)
                 occurrences[fingerprint] = occurrence + 1
-                result[(path.name, fingerprint, occurrence)] = row
+                result[(path.name, fingerprint, occurrence)] = {
+                    **row, "history_sha256": histories[id(row)]}
         return result
 
     before, after = index(baseline), index(candidate)
@@ -399,7 +452,7 @@ def compare(baseline, candidate, slowdown=.05, noise_ms=3):
     for key in sorted(before.keys() & after.keys()):
         a, b = before[key], after[key]
         label = f"{key[0]}:{b.get('case', b['index'])}:{key[2]}"
-        for field in ("http_status", "status", "output_sha256"):
+        for field in ("http_status", "status", "output_sha256", "case", "history_sha256"):
             if a.get(field) != b.get(field) or b.get("status") in ("running", "invalid"):
                 issues.append(f"{label}: {field} changed")
         am, bm = a.get("metrics", {}), b.get("metrics", {})
@@ -413,16 +466,75 @@ def compare(baseline, candidate, slowdown=.05, noise_ms=3):
                 continue
             old = a["wall_ms"] if field == "wall_ms" else am[field]
             new = b["wall_ms"] if field == "wall_ms" else bm[field]
-            # Translate the absolute timing noise allowance into per-token units.
             count = bm.get("prefill_tokens" if field.startswith("prefill") else "completion_tokens", 1)
-            floor = noise_ms / max(1, count) if field.endswith("_per_token") else noise_ms
-            regression = new - old > max(floor, old * slowdown)
-            rows.append({"case": label, "metric": field, "baseline": old, "candidate": new,
-                         "change_percent": 100 * (new / old - 1) if old else None,
-                         "regression": regression})
-    return {"status": "failed" if issues or any(row["regression"] for row in rows) else "passed",
-            "slowdown_tolerance": slowdown, "noise_ms": noise_ms,
+            measurement = timing_measurement(label, field, old, new, count, list(key))
+            measurement["history_sha256"] = b["history_sha256"]
+            rows.append(measurement)
+    return {"status": comparison_status(rows, issues),
+            "slowdown_tolerance": SLOWDOWN, "noise_ms": NOISE_MS,
             "quality_or_coverage_changes": issues, "measurements": rows}
+
+
+def qualify(comparisons, controls=()):
+    """Retain every observation; overlapping timing ranges stay unqualified.
+
+    Deliberately conservative, not a confidence interval: confirm a slowdown only
+    when two independent candidate observations exceed every stable main/control
+    observation. Sparse or overlapping stall evidence needs more investigation.
+    """
+    if not comparisons:
+        raise ValueError("at least one matched main/PR comparison is required")
+    rows, issues = {}, []
+    for index, comparison in enumerate([*comparisons, *controls]):
+        control = index >= len(comparisons)
+        if comparison.get("slowdown_tolerance") != SLOWDOWN \
+                or comparison.get("noise_ms") != NOISE_MS:
+            raise ValueError("timing margins must remain 5% and 3 ms")
+        issues.extend(comparison["quality_or_coverage_changes"])
+        seen = set()
+        for item in comparison["measurements"]:
+            key = (*item["request_key"], item["metric"])
+            if key in seen:
+                raise ValueError("duplicate request/phase measurement")
+            seen.add(key)
+            if index and key not in rows:
+                raise ValueError("follow-up contains a scenario absent from the initial run")
+            row = rows.setdefault(key, {
+                "case": item["case"], "request_key": item["request_key"], "metric": item["metric"],
+                "history_sha256": item.get("history_sha256"), "noise_floor": item["noise_floor"],
+                "samples": [], "controls": [],
+            })
+            if row["history_sha256"] != item.get("history_sha256") \
+                    or row["noise_floor"] != item["noise_floor"]:
+                raise ValueError(f"unmatched history or token count: {item['case']}")
+            row["controls" if control else "samples"].append({
+                "comparison": index, "baseline": item["baseline"], "candidate": item["candidate"],
+                "exceeds_margin": item["exceeds_margin"]})
+    for row in rows.values():
+        baseline = [sample["baseline"] for sample in row["samples"]]
+        baseline += [value for sample in row["controls"]
+                     for value in (sample["baseline"], sample["candidate"])]
+        candidate = [sample["candidate"] for sample in row["samples"]]
+        row["baseline_range"] = [min(baseline), max(baseline)]
+        row["candidate_range"] = [min(candidate), max(candidate)]
+        row["flagged_pairs"] = sum(sample["exceeds_margin"] for sample in row["samples"])
+        row["control_flags"] = sum(sample["exceeds_margin"] for sample in row["controls"])
+        row["baseline_variable"] = max(baseline) - min(baseline) > max(
+            row["noise_floor"], min(baseline) * SLOWDOWN)
+        if max(candidate) - min(baseline) <= max(row["noise_floor"], min(baseline) * SLOWDOWN):
+            row.update(status="passed", reason="all observations within margin")
+        elif len(candidate) >= 2 and not row["baseline_variable"] \
+                and min(candidate) - max(baseline) > max(
+                row["noise_floor"], max(baseline) * SLOWDOWN):
+            row.update(status="failed", reason="reproduced slowdown across observed ranges")
+        else:
+            row.update(status="inconclusive", reason=(
+                "confirmation required" if len(candidate) == 1 and not row["controls"]
+                else "variable or overlapping observations; inspect stalls"))
+    measurements = list(rows.values())
+    return {"status": comparison_status(measurements, issues),
+            "slowdown_tolerance": SLOWDOWN, "noise_ms": NOISE_MS,
+            "quality_or_coverage_changes": issues, "measurements": measurements}
 
 
 def join_server_timings(directory):

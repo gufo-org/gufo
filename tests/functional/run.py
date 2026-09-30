@@ -9,9 +9,12 @@ No weights are downloaded. Model checks are manual, not hosted CI workloads.
 import argparse
 import contextlib
 import http.client
+import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import platform
 import signal
 import socket
 import struct
@@ -20,7 +23,7 @@ import sys
 import time
 import traceback
 import zlib
-from metrics import compare, join_server_timings
+from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
 SUITES = ("responses", "stops", "conversation", "structured", "structured-limits",
@@ -35,6 +38,26 @@ SAMPLING = {
     "--repeat-penalty": ("repeat_penalty", float),
     "--repeat-last-n": ("repeat_last_n", int),
 }
+COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides",
+                     "vision", "environment", "harness_sha256", "build_inputs_sha256")
+
+
+def provenance():
+    source = hashlib.sha256()
+    for name in ("run.py", "metrics.py", "openai_sdk.py", "continuation.py"):
+        source.update((TESTS / name).read_bytes())
+    lock = TESTS.parents[1] / "flake.lock"
+    kernel_command = Path("/proc/cmdline")
+    return {
+        "harness_sha256": source.hexdigest(),
+        "build_inputs_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+        "environment": {"host": platform.node(), "kernel": platform.release(),
+                        "kernel_command_line": (kernel_command.read_text().strip()
+                                                if kernel_command.is_file() else None), **{
+            key: os.environ.get(key) for key in (
+                "GPU_MAX_HW_QUEUES", "HSA_ENABLE_SDMA", "HSA_ENABLE_INTERRUPT",
+                "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "LD_PRELOAD")}},
+    }
 
 
 def option(command, name, default=None):
@@ -63,7 +86,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def compare_lifecycle(comparison, baseline, candidate, slowdown, noise_ms):
+def compare_lifecycle(comparison, baseline, candidate):
     for key in ("startup_ms", "restart_ms"):
         if key == "restart_ms" and key not in baseline and key not in candidate \
                 and not any(label.endswith("-disk") for report in (baseline, candidate)
@@ -73,12 +96,26 @@ def compare_lifecycle(comparison, baseline, candidate, slowdown, noise_ms):
         if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
                for value in (old, new)):
             raise ValueError(f"missing/invalid server {key}")
-        regression = new - old > max(noise_ms, old * slowdown)
-        comparison["measurements"].append({
-            "case": "server", "metric": key, "baseline": old, "candidate": new,
-            "change_percent": 100 * (new / old - 1), "regression": regression})
-        if regression:
-            comparison["status"] = "failed"
+        comparison["measurements"].append(timing_measurement("server", key, old, new))
+    comparison["status"] = comparison_status(
+        comparison["measurements"], comparison.get("quality_or_coverage_changes", []))
+
+
+def compare_runs(baseline_dir, candidate_dir):
+    baseline = json.loads((baseline_dir / "report.json").read_text())
+    candidate = json.loads((candidate_dir / "report.json").read_text())
+    for report in (baseline, candidate):
+        if report.get("functional_status", report["status"]) != "passed":
+            raise ValueError("functional checks did not pass")
+    for key in (*COMPARISON_FIELDS, "through_case"):
+        if baseline.get(key) != candidate.get(key):
+            raise ValueError(f"unmatched baseline {key}")
+    if list(baseline["suites"]) != list(candidate["suites"]):
+        raise ValueError("unmatched baseline suites")
+    comparison = compare(baseline_dir, candidate_dir)
+    compare_lifecycle(comparison, baseline, candidate)
+    comparison["runs"] = [str(baseline_dir.resolve()), str(candidate_dir.resolve())]
+    return comparison
 
 
 @contextlib.contextmanager
@@ -147,10 +184,8 @@ def main():
                                help="Matched previous run directory; compare every HTTP request")
     qualification.add_argument("--record-baseline", action="store_true",
                                help="Explicitly capture the reference; no regression claim yet")
-    parser.add_argument("--max-slowdown", type=float, default=.05,
-                        help="Fractional per-step timing tolerance (default: 0.05)")
-    parser.add_argument("--noise-ms", type=float, default=3,
-                        help="Absolute per-step timing noise floor (default: 3 ms)")
+    parser.add_argument("--through-case", metavar="SUITE:CASE",
+                        help="Replay preceding suites/cases, then stop; focused investigation only")
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- ./result/bin/gufo serve llm --model PATH [server options]")
     args = parser.parse_args()
@@ -169,6 +204,7 @@ def main():
             parser.error("all cannot be combined with other suites")
         selected = [suite for suite in SUITES if suite != "auto-tools"]
     selected = list(dict.fromkeys(selected))
+    disk_enabled = "cache" in selected
     try:
         overrides = sampling_overrides(command)
         sessions = int(option(command, "--sessions", "4"))
@@ -176,8 +212,13 @@ def main():
             raise ValueError("use --sessions 1 through 8 for functional checks")
         if args.startup_timeout <= 0 or args.suite_timeout <= 0:
             raise ValueError("timeouts must be positive")
-        if not 0 <= args.max_slowdown < 1 or not 0 <= args.noise_ms < 1000:
-            raise ValueError("use 0 <= max-slowdown < 1 and 0 <= noise-ms < 1000")
+        through_suite, through_case = (args.through_case.split(":", 1)
+                                      if args.through_case else (None, None))
+        if args.through_case:
+            if through_suite not in selected or through_suite == "cache" or not through_case:
+                raise ValueError("--through-case requires a selected SDK suite and case name")
+            selected = selected[:selected.index(through_suite) + 1]
+            selected = [suite for suite in selected if suite != "cache"]
         if args.baseline and not (args.baseline / "report.json").is_file():
             raise ValueError("--baseline must contain report.json")
         args.output.mkdir(parents=True, exist_ok=False)
@@ -194,7 +235,7 @@ def main():
                           ("--max-pending-per-client", str(max(4, sessions)))):
         if option(command, flag) is None:
             command += [flag, default]
-    if "cache" in selected:
+    if disk_enabled:
         command += ["--cache-disk", str(output / "disk"),
                     "--cache-disk-bytes", str(8 * 1024**3),
                     "--cache-disk-staging-bytes", str(1024**3)]
@@ -207,11 +248,12 @@ def main():
     for flag in ("--port", "--cache-disk"):
         if flag in comparison_command:
             comparison_command[comparison_command.index(flag) + 1] = "<runner-owned>"
-    report = {"command": command, "comparison_command": comparison_command,
+    report = {**provenance(), "command": command, "comparison_command": comparison_command,
               "binary": str(Path(command[0]).resolve()),
               "mode": "baseline" if args.record_baseline else "qualification",
               "sampling_preset": args.sampling_preset, "sampling_overrides": overrides,
-              "vision": vision, "suites": {}, "status": "running"}
+              "vision": vision, "suites": {}, "through_case": args.through_case,
+              "started_ns": time.time_ns(), "status": "running"}
     report_path = output / "report.json"
     write_json(report_path, report)
 
@@ -283,6 +325,8 @@ def main():
                     sdk_args += ["--vision"]
                 if option(command, "--think") is not None:
                     sdk_args += ["--server-thinking", option(command, "--think")]
+                if suite == through_suite:
+                    sdk_args += ["--through-case", through_case]
                 run(suite, "openai_sdk.py", sdk_args)
             if "cache" in selected:
                 for label, extra in cache_cases:
@@ -313,27 +357,20 @@ def main():
         join_server_timings(output)
     except (ValueError, OSError) as error:
         report.update(status="failed", measurements_error=str(error))
+    report["functional_status"] = report["status"]
+    report["completed_ns"] = time.time_ns()
+    write_json(report_path, report)
     if args.baseline:
         try:
-            baseline = json.loads((args.baseline / "report.json").read_text())
-            if baseline["status"] != "passed":
-                raise ValueError("baseline functional checks did not pass")
-            for key in ("comparison_command", "sampling_preset", "sampling_overrides", "vision"):
-                if baseline.get(key) != report.get(key):
-                    raise ValueError(f"unmatched baseline {key}")
-            if list(baseline["suites"]) != list(report["suites"]):
-                raise ValueError("unmatched baseline suites")
-            comparison = compare(args.baseline, output, args.max_slowdown, args.noise_ms)
-            compare_lifecycle(comparison, baseline, report, args.max_slowdown, args.noise_ms)
+            comparison = compare_runs(args.baseline, output)
             write_json(output / "comparison.json", comparison)
             report["comparison"] = comparison["status"]
-            if comparison["status"] != "passed":
-                report["status"] = "failed"
+            report["status"] = comparison["status"]
         except (ValueError, KeyError, OSError) as error:
             report.update(status="failed", comparison_error=str(error))
     write_json(report_path, report)
     print(f"{report['mode']} {report['status']}: {report_path}", flush=True)
-    return 0 if report["status"] == "passed" else 1
+    return {"passed": 0, "failed": 1, "inconclusive": 2}[report["status"]]
 
 
 if __name__ == "__main__":
