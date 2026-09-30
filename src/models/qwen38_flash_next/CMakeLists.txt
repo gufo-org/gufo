@@ -34,8 +34,11 @@ if (ENGINE_ENABLE_HIP)
 
   add_library(gufo_qwen38_flash_next_mmq STATIC ${QFN_MMQ_SOURCES})
   set_source_files_properties(${QFN_MMQ_SOURCES} PROPERTIES LANGUAGE HIP)
+  # -mwavefrontsize64 is gfx11-only; gfx12 (RDNA4) is wave32-only.
+  if (CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1151")
   set_source_files_properties(${QFN_MMQ_DIR}/moe_wave64.hip.cpp
     PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
+  endif()
   set_target_properties(gufo_qwen38_flash_next_mmq PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
@@ -57,8 +60,11 @@ if (ENGINE_ENABLE_HIP)
     engine.cpp)
   target_sources(gufo_qwen38_flash_next PRIVATE ${QFN_HIP_SOURCES})
   set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
+  # -mwavefrontsize64 is gfx11-only; gfx12 (RDNA4) is wave32-only.
+  if (CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1151")
   set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
     PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
+  endif()
   target_compile_definitions(gufo_qwen38_flash_next PRIVATE QFN_ROCM_BUILD=1)
   target_compile_options(gufo_qwen38_flash_next PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O2>

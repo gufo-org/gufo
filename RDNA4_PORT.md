@@ -54,6 +54,15 @@ A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
 - [x] wave64 三檔中立化：TryLaunch* 在 gfx12 回 false（wave32 fallback
       接手），-mwavefrontsize64 限 gfx1151。Qwen 全數通過，build 推進到
       minimax。
+- [x] 非文字模型 trap-stub（用户決議：先關掉）：minimax attention/dense、
+      asr conv、image attn/conv/dense 共 11 個 WMMA kernel 本體換成
+      fail-stop trap，C++/CMake/CLI 全不動。誤觸即炸，不靜默錯。
+- [x] qfn part1：W8A8GemmWave64 調用點＋本體中立化（wave32 tiles 接手），
+      moe/w8a8 的 wave64 flags 限 gfx1151。
+- [ ] qfn part2：kernels.hip.cpp（5 站點：attention S/O、quant GEMM、
+      a_lo/a_hi 兩處）＋mmvq.hip.cpp（iu8，K8-part 需上下半拆零）。
+- [ ] ds4_rocm_q8.hip.hpp（8× f16，同 attention 模式）。
+- [ ] tts/moE_wave64 等 build 浮現的殘敵。
 - [ ] minimax_h3/attention.hip、dense.hip：bf16，同構（acc 2i+half 套路），
       bf16 佈局已驗與 f16/iu8 一致。進行中。
 - [ ] prefill_quant_gemm.hpp/.hip：iu8，結構已摸清（a0/a1 雙 call 累加同 c，

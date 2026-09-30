@@ -4540,10 +4540,13 @@ bool W8A8Gemm(const void* w, const void* x_tiled, float* out, std::size_t batch,
   }
   // Qwen's wave64 matrix kernel with four row groups improves the model's
   // large output projections while preserving every K32 accumulator update.
+  // No wave64 on gfx12 (RDNA4 is wave32-only): use the tiles below.
+#if !defined(__GFX12__)
   if (batch >= 1024 && m == 2560 && k == 6144) {
     W8A8GemmWave64(w, x_tiled, out, batch, m, k, stream);
     return true;
   }
+#endif
   // A 128-token macro tile is the throughput configuration; short chunks
   // would leave most of it idle and take the 64-token variant. A narrow
   // projection (the 320-row mixer down over K = 10240) gets 64-row tiles so
