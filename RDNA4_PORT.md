@@ -46,6 +46,16 @@ A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
 - [x] attention_wmma.hip：S/O 兩階段改 half-fragment 餵法＋列映射
       `(2i+half)→(i+half*8)`，LDS 邏輯佈局不變，下游免動。
       單 TU 在 gfx1201 編譯通過（commit f0c3f1e）。
+- [x] prefill_quant_gemm.hpp＋.hip：iu8，舊 acc 佈局經 epilogue 反推為
+      row=sub、col=2l+half；改 acc 新佈局＋epilogue 寫入式＋dw/off
+      scale 經 QuantSlot12 轉碼。兩 TU 編譯通過。
+- [x] prefill_fp16.hip：f16，paired/direct/scratch 三寫回路徑同改。
+      編譯通過。
+- [x] wave64 三檔中立化：TryLaunch* 在 gfx12 回 false（wave32 fallback
+      接手），-mwavefrontsize64 限 gfx1151。Qwen 全數通過，build 推進到
+      minimax。
+- [ ] minimax_h3/attention.hip、dense.hip：bf16，同構（acc 2i+half 套路），
+      bf16 佈局已驗與 f16/iu8 一致。進行中。
 - [ ] prefill_quant_gemm.hpp/.hip：iu8，結構已摸清（a0/a1 雙 call 累加同 c，
       acc=8 與 gfx12 一致，只需拆 K-half），待下輪動手。
       ※ 深入後發現：舊 acc 佈局是 row=sub、col=2l+half（epilogue
