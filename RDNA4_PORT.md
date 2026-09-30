@@ -40,6 +40,14 @@ ROCm：7.2.4，`__GFX12__` 宏確認可用。VRAM 16GB discrete（非 Strix Halo
       與 Q feed 細節。
 - diagnose PASS；serve 可跑但輸出錯（attention 或 fp16 未驗之故；
       quant 已排除）。
+- [x] serve 點火成功（2026-09-30）：Qwen3.8-27B-Q3_K_M，c4096，
+      12*12=144 答對，英文故事連貫。tail 16-key 修復後 attention
+      五組全過（context rel~1e-4，FP64 oracle rel~2e-4，replay 與
+      chunk-boundary byte-identical）。batch=2048 case 中止於上游
+      tiled 參考核拒收該形狀（與本移植無關）。
+- [ ] decode 僅 1.9 tok/s（prefill ~55 tok/s），GPU 滿載 3.1GHz——
+      結構性慢，待查 decode 路徑（小 batch GEMV/attention decode 核
+      或 hipblaslt 無 gfx1201 調校）。
 
 `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12`（f16）與
 `__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12`（iu8）行为一致：
