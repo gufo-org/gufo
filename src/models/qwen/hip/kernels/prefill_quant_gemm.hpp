@@ -131,6 +131,27 @@ __device__ __forceinline__ WmmaQuantAccumulator<WaveSize> WmmaQuant(
                                                       true);
   }
 }
+
+#if defined(__GFX12__)
+// RDNA4 int8 WMMA: 8 int8 per lane (int32x2), acc layout acc[l] of
+// lane(sub,half) = out(tok sub, row l+half*8). Lane partition verified
+// on-device (RX 9070): same row/col/K-half split as the f16 form.
+using int32x2_t = __attribute__((__vector_size__(2 * sizeof(int)))) int;
+__device__ __forceinline__ int32x8_t WmmaQuant12(int32x2_t a, int32x2_t b,
+                                                int32x8_t c) {
+  return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(true, a, true, b, c,
+                                                         true);
+}
+// K-half of a staged 16-int8 fragment for this lane's half-wave.
+__device__ __forceinline__ int32x2_t QuantHalf(const int32x4_t& v, int half) {
+  return reinterpret_cast<const int32x2_t*>(&v)[half];
+}
+// Inverse of commit_stage's slot packing (slot = rl/2 + 8*(rl%2)):
+// scale index for gfx12 acc row r (rows contiguous per half-wave).
+__device__ __forceinline__ int QuantSlot12(int r) {
+  return (r / 2) + 8 * (r % 2);
+}
+#endif
 // Both wave sizes preserve every K32 accumulator update, including the affine
 // minimum correction and the separate Q6/Q3 half-block scales. Activation
 // staging uses 32-thread groups; the native WMMA wave determines C ownership.
@@ -398,6 +419,10 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
         const int rs = (wave_row * kWaveRowTiles) + i;
         a0[i] = weight_stage(kb)[rs][sub_lane];
         a1[i] = weight_stage(kb)[rs][16 + sub_lane];
+#if defined(__GFX12__)
+        for (int l = 0; l < 8; ++l)
+          dw0[i][l] = s_dw[kb][0][rs][QuantSlot12(l + half_id * 8)];
+#else
         const float4 lo = *reinterpret_cast<const float4*>(
             &s_dw[kb][0][rs][half_id * kAccumulatorElements]);
         dw0[i][0] = lo.x;
@@ -412,7 +437,12 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
           dw0[i][6] = up.z;
           dw0[i][7] = up.w;
         }
+#endif
         if constexpr (PerHalfScale) {
+#if defined(__GFX12__)
+          for (int l = 0; l < 8; ++l)
+            dw1[i][l] = s_dw[kb][1][rs][QuantSlot12(l + half_id * 8)];
+#else
           const float4 hlo = *reinterpret_cast<const float4*>(
               &s_dw[kb][1][rs][half_id * kAccumulatorElements]);
           dw1[i][0] = hlo.x;
@@ -427,8 +457,13 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
             dw1[i][6] = hup.z;
             dw1[i][7] = hup.w;
           }
+#endif
         }
         if constexpr (HasOffset) {
+#if defined(__GFX12__)
+          for (int l = 0; l < 8; ++l)
+            off[i][l] = s_off[kb][rs][QuantSlot12(l + half_id * 8)];
+#else
           const float4 olo = *reinterpret_cast<const float4*>(
               &s_off[kb][rs][half_id * kAccumulatorElements]);
           off[i][0] = olo.x;
@@ -443,6 +478,7 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
             off[i][6] = oup.z;
             off[i][7] = oup.w;
           }
+#endif
         }
       }
 #pragma unroll
@@ -461,8 +497,15 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
           if constexpr (PerHalfScale) {
             Accumulator c0{};
             Accumulator c1{};
+#if defined(__GFX12__)
+            c0 = WmmaQuant12(QuantHalf(a0[i], half_id),
+                             QuantHalf(b0, half_id), c0);
+            c1 = WmmaQuant12(QuantHalf(a1[i], half_id),
+                             QuantHalf(b1, half_id), c1);
+#else
             c0 = WmmaQuant<WaveSize>(a0[i], b0, c0);
             c1 = WmmaQuant<WaveSize>(a1[i], b1, c1);
+#endif
 #pragma unroll
             for (int l = 0; l < kAccumulatorElements; ++l) {
               acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c0[l]) +
@@ -470,8 +513,15 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
             }
           } else {
             Accumulator c{};
+#if defined(__GFX12__)
+            c = WmmaQuant12(QuantHalf(a0[i], half_id),
+                            QuantHalf(b0, half_id), c);
+            c = WmmaQuant12(QuantHalf(a1[i], half_id),
+                            QuantHalf(b1, half_id), c);
+#else
             c = WmmaQuant<WaveSize>(a0[i], b0, c);
             c = WmmaQuant<WaveSize>(a1[i], b1, c);
+#endif
 #pragma unroll
             for (int l = 0; l < kAccumulatorElements; ++l) {
               acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c[l]);
@@ -516,8 +566,12 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
       for (int j = 0; j < kWaveTokTiles; ++j) {
 #pragma unroll
         for (int l = 0; l < kAccumulatorElements; ++l) {
+#if defined(__GFX12__)
+          tile_scratch[((l + half_id * 8) * 16) + sub_lane] = acc[i][j][l];
+#else
           tile_scratch[(sub_lane * 16) + ((WaveSize / 16) * l) + half_id] =
               acc[i][j][l];
+#endif
         }
         __builtin_amdgcn_wave_barrier();
         const std::size_t r0 =

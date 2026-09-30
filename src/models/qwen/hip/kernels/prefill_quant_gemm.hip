@@ -384,6 +384,7 @@ __device__ __forceinline__ void BlockedSwiGluQuantEpilogue(
   }
 }
 
+#if !defined(__GFX12__)
 template<bool SubOpsel>
 __device__ __forceinline__ int32x8_t Wmma_16x16x16_iu8(int32x4_t a, int32x4_t b,
                                                        int32x8_t c) {
@@ -395,6 +396,7 @@ __device__ __forceinline__ int32x8_t Wmma_16x16x16_iu8(int32x4_t a, int32x4_t b,
   return c;
 #endif
 }
+#endif
 
 // Two-dimensionally blocked W8A8 WMMA GEMM (opt-c163-blocked-w8a8).
 //
@@ -568,6 +570,10 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
         const int rs = (wave_row * kWaveRowTiles) + i;
         a0[i] = s_a[kb][rs][sub_lane];
         a1[i] = s_a[kb][rs][16 + sub_lane];
+#if defined(__GFX12__)
+        for (int l = 0; l < 8; ++l)
+          dw[i][l] = s_dw[kb][rs][QuantSlot12(l + half_id * 8)];
+#else
         const float4 lo =
             *reinterpret_cast<const float4*>(&s_dw[kb][rs][half_id * 8]);
         const float4 up =
@@ -580,6 +586,7 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
         dw[i][5] = up.y;
         dw[i][6] = up.z;
         dw[i][7] = up.w;
+#endif
       }
       // The token-tile operands are read one tile at a time, inside the j loop,
       // rather than all kWaveTokTiles of them up front. Hoisting them held
@@ -595,8 +602,15 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
 #pragma unroll
         for (int i = 0; i < kWaveRowTiles; ++i) {
           int32x8_t c = {0, 0, 0, 0, 0, 0, 0, 0};
+#if defined(__GFX12__)
+          c = WmmaQuant12(QuantHalf(a0[i], half_id),
+                          QuantHalf(b0, half_id), c);
+          c = WmmaQuant12(QuantHalf(a1[i], half_id),
+                          QuantHalf(b1, half_id), c);
+#else
           c = Wmma_16x16x16_iu8<true>(a0[i], b0, c);
           c = Wmma_16x16x16_iu8<true>(a1[i], b1, c);
+#endif
 #pragma unroll
           for (int l = 0; l < 8; ++l) {
             acc[i][j][l] += (dw[i][l] * dx) * static_cast<float>(c[l]);
@@ -640,7 +654,11 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
     for (int j = 0; j < kWaveTokTiles; ++j) {
 #pragma unroll
       for (int l = 0; l < 8; ++l) {
+#if defined(__GFX12__)
+        tile_scratch[((l + half_id * 8) * 16) + sub_lane] = acc[i][j][l];
+#else
         tile_scratch[(sub_lane * 16) + (2 * l) + half_id] = acc[i][j][l];
+#endif
       }
       __builtin_amdgcn_wave_barrier();
       const std::size_t r0 =
