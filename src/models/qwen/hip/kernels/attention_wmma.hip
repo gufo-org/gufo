@@ -6,6 +6,10 @@
 // reference: A holds row L%16 and 16 contiguous k, B holds column L%16 and 16
 // contiguous k (so B is fed a transposed tile), and C element i is row
 // 2i + L/16, column L%16.
+// RDNA4 (__GFX12__): same logical tiles, half-width fragments -- A/B hold
+// 8 k (K-half selected by L<16), C element i is row i + 8*(L/16).
+// Verified on-device (RX 9070, Sep 2026): all-ones -> 16.0, one-hot -> 2.0,
+// lane-tagged patterns match this exact partition (see RDNA4_PORT.md).
 //
 // Three things set the shape of this kernel, each found by ablation:
 //
@@ -99,9 +103,30 @@ constexpr std::uint32_t kKvWidth = kKvHeads * kHeadDim;
 using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
 using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
+#if defined(__GFX12__)
+// RDNA4 WMMA fragments: 8 halves per lane (see file header note).
+using h8 = _Float16 __attribute__((__vector_size__(8 * sizeof(_Float16))));
+using FragF16 = h8;
+// New acc-slot -> row: slot i holds row i + 8*(lane/16).
+#define GUFO_WMMA_ROW(i) ((i) + half_id * 8)
+__device__ __forceinline__ v8f Wmma(h8 a, h8 b, v8f c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, c);
+}
+__device__ __forceinline__ h8 LoadFrag8(const __half* p) {
+  union {
+    h8 f;
+    uint4 u;
+  } cvt;
+  cvt.u = *reinterpret_cast<const uint4*>(p);
+  return cvt.f;
+}
+#else
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
 }
+using FragF16 = v16h;
+#define GUFO_WMMA_ROW(i) ((2 * (i)) + half_id)
+#endif
 
 // A fragment is 16 contiguous halves = 32 bytes. Reading it element by element
 // costs 16 ds_read_u16 plus 16 __half -> _Float16 conversions; the two formats
@@ -206,7 +231,7 @@ __launch_bounds__(256, 2) __global__
   const std::uint32_t s_rb = s_tile % kRowBlocks;
   const std::uint32_t s_kb = s_tile / kRowBlocks;
 
-  v16h q_frag[kKStepsPerWave];
+  FragF16 q_frag[kKStepsPerWave];
   {
     const std::uint32_t local_query =
         query_start + row_block_offset(s_rb) + sub;
@@ -219,6 +244,17 @@ __launch_bounds__(256, 2) __global__
       const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
       const auto* qp = reinterpret_cast<const float4*>(q_row + d0);
 #pragma unroll
+#if defined(__GFX12__)
+      // This lane's K-half of the 16-wide block.
+      for (std::uint32_t v = 0; v < 2; ++v) {
+        const float4 f = live ? qp[half_id * 2 + v]
+                              : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+        q_frag[ks][(v * 4) + 0] = static_cast<_Float16>(f.x * attention_scale);
+        q_frag[ks][(v * 4) + 1] = static_cast<_Float16>(f.y * attention_scale);
+        q_frag[ks][(v * 4) + 2] = static_cast<_Float16>(f.z * attention_scale);
+        q_frag[ks][(v * 4) + 3] = static_cast<_Float16>(f.w * attention_scale);
+      }
+#else
       for (std::uint32_t v = 0; v < 4; ++v) {
         const float4 f = live ? qp[v] : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
         q_frag[ks][(v * 4) + 0] = static_cast<_Float16>(f.x * attention_scale);
@@ -226,6 +262,7 @@ __launch_bounds__(256, 2) __global__
         q_frag[ks][(v * 4) + 2] = static_cast<_Float16>(f.z * attention_scale);
         q_frag[ks][(v * 4) + 3] = static_cast<_Float16>(f.w * attention_scale);
       }
+#endif
     }
   }
 
@@ -336,15 +373,20 @@ __launch_bounds__(256, 2) __global__
 #pragma unroll
       for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
         const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
-        const v16h k_frag =
+#if defined(__GFX12__)
+        const FragF16 k_frag = LoadFrag8(
+            &kv_lds[(((s_kb * 16) + sub) * kWmmaKStride) + d0 + half_id * 8]);
+#else
+        const FragF16 k_frag =
             LoadFrag(&kv_lds[(((s_kb * 16) + sub) * kWmmaKStride) + d0]);
+#endif
         s_acc = Wmma(q_frag[ks], k_frag, s_acc);
       }
       // Each half writes its own slot, so the reader sums them instead of a
       // read-modify-write that would need a barrier between the halves.
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
-        s_lds[s_kh][s_tile][(2 * i) + half_id][sub] = s_acc[i];
+        s_lds[s_kh][s_tile][GUFO_WMMA_ROW(i)][sub] = s_acc[i];
       }
     }
     __syncthreads();
@@ -409,7 +451,7 @@ __launch_bounds__(256, 2) __global__
         float scale[8];
 #pragma unroll
         for (std::uint32_t i = 0; i < 8; ++i) {
-          scale[i] = row_scale[(rb * 16) + (2 * i) + half_id];
+          scale[i] = row_scale[(rb * 16) + GUFO_WMMA_ROW(i)];
         }
 #pragma unroll
         for (std::uint32_t t = 0; t < 2; ++t) {
@@ -456,7 +498,7 @@ __launch_bounds__(256, 2) __global__
       if constexpr (kHeadMajor) {
 #pragma unroll
         for (std::uint32_t i = 0; i < 8; ++i)
-          scale[i] = row_scale[outer * 16 + 2 * i + half_id];
+          scale[i] = row_scale[outer * 16 + GUFO_WMMA_ROW(i)];
       }
 #pragma unroll
       for (std::uint32_t inner = 0; inner < (kHeadMajor ? 2 : kRowBlocks);
@@ -464,14 +506,27 @@ __launch_bounds__(256, 2) __global__
         const std::uint32_t rb = kHeadMajor ? outer : inner;
         const std::uint32_t t = kHeadMajor ? inner : outer;
         const std::uint32_t dim_tile = wave + t * 8;
-        v16h v_frag[kKeyBlocks];
+        FragF16 v_frag[kKeyBlocks];
 #pragma unroll
         for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
+#if defined(__GFX12__)
+          if constexpr (kHeadMajor) {
+            // v_cur[t] holds 16 keys; take this lane's K-half.
+            for (std::uint32_t s = 0; s < 8; ++s)
+              v_frag[kb][s] = v_cur[t][half_id * 8 + s];
+          } else {
+            // V is staged [dim][key]: this lane's K-half of its dim column.
+            for (std::uint32_t s = 0; s < 8; ++s)
+              v_frag[kb][s] = kv_lds[(dim_tile * 16 + sub) * kVtStride +
+                                     kb * 16 + half_id * 8 + s];
+          }
+#else
           if constexpr (kHeadMajor)
             v_frag[kb] = v_cur[t];
           else
             v_frag[kb] =
                 LoadFrag(&kv_lds[(dim_tile * 16 + sub) * kVtStride + kb * 16]);
+#endif
         }
         if constexpr (kHeadMajor) {
 #pragma unroll
@@ -480,7 +535,12 @@ __launch_bounds__(256, 2) __global__
         }
 #pragma unroll
         for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
-          const v16h p_frag = LoadFrag(&p_lds[(rb * 16) + sub][kb * 16]);
+#if defined(__GFX12__)
+          const FragF16 p_frag =
+              LoadFrag8(&p_lds[(rb * 16) + sub][kb * 16 + half_id * 8]);
+#else
+          const FragF16 p_frag = LoadFrag(&p_lds[(rb * 16) + sub][kb * 16]);
+#endif
           v8f next = Wmma(p_frag, v_frag[kb], o_acc[rb][t]);
           const auto first_key = key_start + kb * 16;
           // Like Flash-Next, sum a query's final partial tile over visible
@@ -490,10 +550,34 @@ __launch_bounds__(256, 2) __global__
           if (first_key + 15 > start_pos + query_start) {
             v8f tail = o_acc[rb][t];
             // Keep the position difference uniform across the wave; only the
-            // even/odd row owner varies between its two half-waves.
+            // row owner varies between its two half-waves (even/odd rows on
+            // pre-RDNA4, contiguous 8-row halves on gfx12).
             const int relative_key = static_cast<int>(first_key) -
                                      static_cast<int>(start_pos + query_start +
                                                       row_block_offset(rb));
+#if defined(__GFX12__)
+#pragma unroll
+            for (std::uint32_t key = 0; key < 8; ++key) {
+              const float value = static_cast<float>(v_frag[kb][key]);
+              const int kk = static_cast<int>(half_id * 8 + key);
+#pragma unroll
+              for (std::uint32_t i = 0; i < 8; ++i) {
+                const int row = static_cast<int>(i) + static_cast<int>(half_id) * 8;
+                if (row < relative_key + 15 && row >= relative_key + kk) {
+                  tail[i] = fmaf(
+                      __half2float(
+                          p_lds[rb * 16 + row][kb * 16 + kk]),
+                      value, tail[i]);
+                }
+              }
+            }
+#pragma unroll
+            for (std::uint32_t i = 0; i < 8; ++i) {
+              const int row = static_cast<int>(i) + static_cast<int>(half_id) * 8;
+              if (row < relative_key + 15)
+                next[i] = tail[i];
+            }
+#else
 #pragma unroll
             for (std::uint32_t key = 0; key < 16; ++key) {
               const float value = static_cast<float>(v_frag[kb][key]);
@@ -516,6 +600,7 @@ __launch_bounds__(256, 2) __global__
               if (static_cast<int>(half_id) <
                   relative_key + 15 - static_cast<int>(2 * i))
                 next[i] = tail[i];
+#endif
           }
           o_acc[rb][t] = next;
         }
@@ -554,7 +639,7 @@ __launch_bounds__(256, 2) __global__
       const std::uint32_t dim_tile = wave + (t * 8);
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
-        const std::uint32_t row = (2 * i) + half_id;
+        const std::uint32_t row = GUFO_WMMA_ROW(i);
         const std::uint32_t local_query = query_start + row_offset + row;
         if (local_query >= batch_size) {
           continue;
@@ -724,5 +809,6 @@ bool LaunchQwenWmmaAttention(
   return true;
 }
 
+#undef GUFO_WMMA_ROW
 }  // namespace gufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)
