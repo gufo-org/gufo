@@ -48,6 +48,16 @@ ROCm：7.2.4，`__GFX12__` 宏確認可用。VRAM 16GB discrete（非 Strix Halo
 - [ ] decode 僅 1.9 tok/s（prefill ~55 tok/s），GPU 滿載 3.1GHz——
       結構性慢，待查 decode 路徑（小 batch GEMV/attention decode 核
       或 hipblaslt 無 gfx1201 調校）。
+- [x] decode 慢根因＝權重住 host（2026-09-30 深夜破案）：Qwen loader 用
+      mmap＋hipHostRegister 零拷貝（Strix Halo 統一記憶體假設），離散卡
+      上每個 decode step 把 13GB 權重从 PCIe 拖一遍（~20GB/s → 1.9t/s；
+      prefill 靠 batch reuse 蓋住）。
+      修法：`!prop.integrated` 時 hipMalloc＋memcpy 常駐 VRAM（VRAM 不夠
+      自動 fallback；teardown 對應 hipFree，`device_owned` 旗標）。
+      成果：prefill 54→252 t/s，decode 1.9→21.8 t/s（11 倍），144 照對。
+      代價：16GB 卡上 Q3_K_M（13.2GB）+sessions 只剩 c2048 能載（c4096
+      state claim 超標；bench 無 --context 會用 native ctx OOM——已知限制）。
+      有效頻寬 ~280GB/s（memcpy 屋頂 521GB/s），K-quant GEMV 微調另案。
 
 `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12`（f16）與
 `__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12`（iu8）行为一致：
