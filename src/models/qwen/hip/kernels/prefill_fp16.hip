@@ -16,10 +16,30 @@ RoundActivation(float value) {  // Keep the FP32 rounding boundary before the
 }
 using v16bf = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
 using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
+#if !defined(__GFX12__)
+using FragF16 = v16bf;
+#endif
 
+#if !defined(__GFX12__)
 __device__ __forceinline__ v8f WmmaHalf(v16bf a, v16bf b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
 }
+#else
+// RDNA4: 8-half fragments, acc[l] of lane(sl,hi) = (row l+hi*8, tok sl).
+using h8 = _Float16 __attribute__((__vector_size__(8 * sizeof(_Float16))));
+using FragF16 = h8;
+__device__ __forceinline__ v8f WmmaHalf(h8 a, h8 b, v8f c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, c);
+}
+__device__ __forceinline__ h8 LoadSwizzled8(const short* p) {
+  union {
+    h8 f;
+    uint4 u;
+  } cvt;
+  cvt.u = *reinterpret_cast<const uint4*>(p);
+  return cvt.f;
+}
+#endif
 
 // Permute 16-byte halves and the LDS row to avoid repeated bank conflicts.
 __device__ __forceinline__ v16bf LoadSwizzled(const short* p) {
@@ -509,15 +529,25 @@ __launch_bounds__(WM * WN * 32) __global__
       fetch(ks0 + BK);
 #pragma unroll
     for (int ks = 0; ks < BK; ++ks) {
-      v16bf a[WRS];
+      FragF16 a[WRS];
 #pragma unroll
       for (int i = 0; i < WRS; ++i) {
+#if defined(__GFX12__)
+        a[i] = LoadSwizzled8(
+            &s_a[ks][(wr * WRS) + i][sl ^ (ks & 3)][(lane >> 4) * 8]);
+#else
         a[i] = LoadSwizzled(&s_a[ks][(wr * WRS) + i][sl ^ (ks & 3)][0]);
+#endif
       }
 #pragma unroll
       for (int j = 0; j < WTS; ++j) {
-        const v16bf b =
+#if defined(__GFX12__)
+        const FragF16 b = LoadSwizzled8(
+            &s_b[ks][(wt * WTS) + j][sl ^ (ks & 3)][(lane >> 4) * 8]);
+#else
+        const FragF16 b =
             LoadSwizzled(&s_b[ks][(wt * WTS) + j][sl ^ (ks & 3)][0]);
+#endif
 #pragma unroll
         for (int i = 0; i < WRS; ++i) {
           if constexpr (Type == gufo::core::GgmlType::kIQ3_S)
@@ -564,15 +594,25 @@ __launch_bounds__(WM * WN * 32) __global__
     for (int i = 0; i < WRS; i += 2) {
 #pragma unroll
       for (int j = 0; j < WTS; ++j) {
+#if defined(__GFX12__)
+        const int row = r_block + (wr * (WRS / 2) + i / 2) * 16 + sl;
+        const int t0 = t_block + (wt * WTS + j) * 16;
+#pragma unroll
+        for (int l = 0; l < 8; ++l) {
+          const int token = t0 + sl;
+          const int grow = row + (l + hi * 8) - sl;
+#else
         const int row = r_block + (wr * (WRS / 2) + i / 2) * 16 + sl;
         const int t0 = t_block + (wt * WTS + j) * 16;
 #pragma unroll
         for (int l = 0; l < 8; ++l) {
           const int token = t0 + 2 * l + hi;
-          if (Complete || (row < m && token < batch)) {
+          const int grow = row;
+#endif
+          if (Complete || (grow < m && token < batch)) {
             const float g = acc[i][j][l], u = acc[i + 1][j][l];
             const float sig = 1.0F / (1.0F + expf(-g));
-            reinterpret_cast<__half*>(y)[std::size_t(token) * m + row] =
+            reinterpret_cast<__half*>(y)[std::size_t(token) * m + grow] =
                 RoundActivation(__fmul_rn(g * sig, u));
           }
         }
@@ -583,6 +623,16 @@ __launch_bounds__(WM * WN * 32) __global__
     for (int i = 0; i < WRS; ++i) {
 #pragma unroll
       for (int j = 0; j < WTS; ++j) {
+#if defined(__GFX12__)
+        const int row = r_block + ((wr * WRS + i) * 16) + sl;
+        const int t0 = t_block + ((wt * WTS + j) * 16);
+#pragma unroll
+        for (int l = 0; l < 8; ++l) {
+          const int token = t0 + sl;
+          const int grow = row + (l + hi * 8) - sl;
+          if (Complete || (grow < m && token < batch))
+            store(std::size_t(token) * m + grow, acc[i][j][l]);
+#else
         const int row = r_block + ((wr * WRS + i) * 16) + sl;
         const int t0 = t_block + ((wt * WTS + j) * 16);
 #pragma unroll
@@ -590,6 +640,7 @@ __launch_bounds__(WM * WN * 32) __global__
           const int token = t0 + 2 * l + hi;
           if (Complete || (row < m && token < batch))
             store(std::size_t(token) * m + row, acc[i][j][l]);
+#endif
         }
       }
     }
@@ -609,7 +660,11 @@ __launch_bounds__(WM * WN * 32) __global__
       for (int j = 0; j < WTS; ++j) {
 #pragma unroll
         for (int l = 0; l < 256 / WaveSize; ++l) {
+#if defined(__GFX12__)
+          scratch[((l + hi * 8) * 16) + sl] = acc[i][j][l];
+#else
           scratch[(sl * 16) + ((WaveSize / 16) * l) + hi] = acc[i][j][l];
+#endif
         }
         __builtin_amdgcn_wave_barrier();
         const int r0 = r_block + (((wr * WRS) + i) * 16);
