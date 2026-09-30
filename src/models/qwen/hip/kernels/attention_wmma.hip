@@ -557,9 +557,15 @@ __launch_bounds__(256, 2) __global__
                                                       row_block_offset(rb));
 #if defined(__GFX12__)
 #pragma unroll
-            for (std::uint32_t key = 0; key < 8; ++key) {
-              const float value = static_cast<float>(v_frag[kb][key]);
-              const int kk = static_cast<int>(half_id * 8 + key);
+            for (int kk = 0; kk < 16; ++kk) {
+              // Own K-half from the fragment; the other half is 8 more LDS
+              // halves away (same [dim][key] layout as the V feed above).
+              const int hk = kk - static_cast<int>(half_id) * 8;
+              const float value =
+                  (hk >= 0 && hk < 8)
+                      ? static_cast<float>(v_frag[kb][hk])
+                      : __half2float(kv_lds[((dim_tile * 16) + sub) *
+                                           kVtStride + kb * 16 + kk]);
 #pragma unroll
               for (std::uint32_t i = 0; i < 8; ++i) {
                 const int row = static_cast<int>(i) + static_cast<int>(half_id) * 8;
