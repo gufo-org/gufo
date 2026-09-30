@@ -5,6 +5,15 @@
 #include "src/models/qwen/hip/kernels/small_batch_quant16_wave64.hpp"
 
 namespace gufo::hip::detail {
+#if defined(__GFX12__)
+// No wave64 on RDNA4: uncalled (dispatchers above return false).
+void LaunchKQuantSixteenWave64(core::GgmlType, const void*, const float*,
+                               float*, std::size_t, std::size_t, hipStream_t,
+                               std::size_t) {}
+void LaunchPackedSwiGLUSixteenWave64(core::GgmlType, const void*,
+                                     const float*, float*, std::size_t,
+                                     hipStream_t) {}
+#else
 namespace {
 
 template<core::GgmlType Type, std::size_t Groups, bool FusedSwiGLU = false>
@@ -75,5 +84,6 @@ void LaunchPackedSwiGLUSixteenWave64(core::GgmlType type, const void* w,
                                               groups);
 }
 
+#endif
 }  // namespace gufo::hip::detail
 #endif

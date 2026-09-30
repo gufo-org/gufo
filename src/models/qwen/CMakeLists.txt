@@ -84,6 +84,8 @@ if (ENGINE_ENABLE_HIP)
 
   # HIP helpers must share the kernel's wave size, so compile this unit
   # separately while the other Qwen kernels retain wave32.
+  # -mwavefrontsize64 is gfx11-only; gfx12 (RDNA4) is wave32-only.
+  if (CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1151")
   set_source_files_properties(
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
@@ -97,4 +99,5 @@ if (ENGINE_ENABLE_HIP)
     TARGET_DIRECTORY gufo_core
     PROPERTIES COMPILE_OPTIONS
     "-mwavefrontsize64;-gline-tables-only;-Xarch_device;-mllvm=-amdgpu-sched-strategy=iterative-ilp")
+  endif()
 endif()

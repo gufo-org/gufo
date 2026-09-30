@@ -5,6 +5,25 @@
 #include "src/models/qwen/hip/ops/swiglu.hpp"
 
 namespace gufo::hip::detail {
+#if defined(__GFX12__)
+// No wave64 on RDNA4: wave32 small-batch kernels cover all shapes.
+bool TryLaunchQ8SmallBatchWave64(const void*, const float*, float*,
+                                 std::size_t, std::size_t, std::size_t,
+                                 hipStream_t, std::size_t) {
+  return false;
+}
+bool TryLaunchBf16SmallBatchWave64(const void*, const float*, float*,
+                                   std::size_t, std::size_t, std::size_t,
+                                   hipStream_t, std::size_t) {
+  return false;
+}
+bool TryLaunchKQuantSmallBatchWave64(core::GgmlType, const void*,
+                                     const float*, float*, std::size_t,
+                                     std::size_t, std::size_t, hipStream_t,
+                                     std::size_t) {
+  return false;
+}
+#else
 namespace {
 
 template<core::GgmlType Type>
@@ -571,10 +590,18 @@ bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
   }
 }
 
+#endif
 }  // namespace gufo::hip::detail
 
 namespace gufo::hip {
-
+#if defined(__GFX12__)
+// No wave64 on RDNA4 (see above).
+bool TryLaunchPackedQuantSwiGLUFp32(core::GgmlType, const void*,
+                                    const float*, float*, std::size_t,
+                                    std::size_t, std::size_t, hipStream_t) {
+  return false;
+}
+#else
 bool TryLaunchPackedQuantSwiGLUFp32(core::GgmlType type, const void* gate_up,
                                     const float* input, float* output,
                                     std::size_t batch_size,
@@ -629,5 +656,6 @@ bool TryLaunchPackedQuantSwiGLUFp32(core::GgmlType type, const void* gate_up,
   return true;
 }
 
+#endif
 }  // namespace gufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)
