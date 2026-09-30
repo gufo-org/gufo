@@ -480,6 +480,11 @@ std::size_t ContinuationCache::capacity() const noexcept {
   return impl_->state_count;
 }
 
+std::size_t ContinuationCache::entry_capacity() const noexcept {
+  const std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->entries.size();
+}
+
 std::size_t ContinuationCache::snapshot_capacity_bytes() const noexcept {
   const std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->snapshot_capacity_bytes;
