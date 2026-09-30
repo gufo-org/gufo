@@ -78,6 +78,15 @@ struct block_iq4_xs {
   std::uint8_t qs[128];
 };
 
+// IQ2_XS: super-block of 256. Each group of 8 elements indexes the 512-entry
+// iq2xs grid (9 low bits of qs) with 7 sign bits (qs >> 9, 8th sign recovered
+// from bit parity); scales holds one 4-bit scale per 16 values (two per byte).
+struct block_iq2_xs {
+  std::uint16_t d;
+  std::uint16_t qs[32];
+  std::uint8_t scales[8];
+};
+
 // IQ3_S: super-block of 256. Each group of 8 elements indexes the 512-entry
 // kIq3sGrid table (8 low bits in qs, 1 high bit in qh) and carries a per-group
 // sign byte; scales holds two 4-bit sub-block scales per byte.
@@ -119,6 +128,7 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
       return 32;
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:
+    case core::GgmlType::kIQ2_XS:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ3_S:
     case core::GgmlType::kQ3_K:
@@ -184,6 +194,9 @@ void DequantizeIQ4_XS(const void* src, float* dst, std::size_t k);
 
 // Dequantize row of IQ3_S to float
 void DequantizeIQ3_S(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of IQ2_XS to float
+void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k);
 
 // Compute dot product of IQ4_NL quantized row with FP32 vector
 float DotProductIQ4_NL(const void* row_data, std::span<const float> vec,

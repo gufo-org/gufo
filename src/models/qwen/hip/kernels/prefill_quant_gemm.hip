@@ -1516,6 +1516,10 @@ void LaunchKQuantWmmaGEMM(core::GgmlType type, const void* w,
       LaunchKQuantWmmaGEMMTyped<core::GgmlType::kIQ3_S>(w, q8_1_x, y, batch, m,
                                                         k, stream);
       return;
+    case core::GgmlType::kIQ2_XS:
+      LaunchKQuantWmmaGEMMTyped<core::GgmlType::kIQ2_XS>(w, q8_1_x, y, batch, m,
+                                                        k, stream);
+      return;
     default:
       return;
   }

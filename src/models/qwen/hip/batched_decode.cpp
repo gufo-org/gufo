@@ -56,6 +56,7 @@ void LaunchFfnActivation(const models::QwenLayerWeights& layer,
                              gate.type == core::GgmlType::kQ5_K ||
                              gate.type == core::GgmlType::kQ6_K ||
                              gate.type == core::GgmlType::kIQ4_XS ||
+                             gate.type == core::GgmlType::kIQ2_XS ||
                              gate.type == core::GgmlType::kQ8_0;
   if (batch_size >= 2 && intermediate_size == 17408 && hidden_size == 5120 &&
       packed_format && gate.type == up.type &&
