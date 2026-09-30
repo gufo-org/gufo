@@ -1028,8 +1028,12 @@ int Run(std::span<const char* const> args) {
   hipDeviceProp_t properties{};
   HIP_CHECK(hipGetDeviceProperties(&properties, device));
   if (std::string_view(properties.gcnArchName).find("gfx1151") ==
-      std::string_view::npos) {
-    throw std::runtime_error("gufo-kernel-bench requires gfx1151");
+          std::string_view::npos &&
+      std::string_view(properties.gcnArchName).find("gfx1201") ==
+          std::string_view::npos &&
+      std::string_view(properties.gcnArchName).find("gfx12") ==
+          std::string_view::npos) {
+    throw std::runtime_error("gufo-kernel-bench requires gfx1151 or gfx1201");
   }
 
   const auto inventory = gufo::diagnostics::CollectSystemInventory();

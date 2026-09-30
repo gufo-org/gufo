@@ -163,9 +163,11 @@ diagnostics::DiagnosticReport CollectDiagnostics(
     check.details["pciId"] = inventory.gpu.pci_id;
     check.details["powerMode"] = inventory.gpu.power_mode;
 
-    if (inventory.gpu.architecture == "gfx1151") {
+    if (inventory.gpu.architecture == "gfx1151" ||
+        inventory.gpu.architecture == "gfx1201") {
       check.status = diagnostics::DiagnosticStatus::kPass;
-      check.message = "Detected AMD Strix Halo GPU (gfx1151)";
+      check.message =
+          "Detected AMD GPU (" + inventory.gpu.architecture + ")";
     } else {
       check.status = diagnostics::DiagnosticStatus::kFail;
       check.message =

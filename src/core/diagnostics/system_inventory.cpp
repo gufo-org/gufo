@@ -78,6 +78,9 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
         pci_view.find("1002:1588") != std::string_view::npos) {
       inv.gpu.architecture = "gfx1151";
       inv.gpu.availability = "available";
+    } else if (pci_view.find("1002:7550") != std::string_view::npos) {
+      inv.gpu.architecture = "gfx1201";
+      inv.gpu.availability = "available (rdna4-port)";
     } else {
       inv.gpu.architecture = primary_gpu.pci_id;
       inv.gpu.availability = "unsupported GPU (" + primary_gpu.pci_id + ")";
@@ -101,6 +104,10 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
       if (raw_view.find("gfx1151") != std::string_view::npos) {
         inv.gpu.architecture = "gfx1151";
         inv.gpu.availability = "available";
+      } else if (raw_view.find("gfx1201") != std::string_view::npos ||
+                 raw_view.find("gfx12") != std::string_view::npos) {
+        inv.gpu.architecture = "gfx1201";
+        inv.gpu.availability = "available (rdna4-port)";
       } else {
         inv.gpu.architecture = prop.gcnArchName;
         inv.gpu.availability = "unsupported architecture";

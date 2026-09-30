@@ -31,9 +31,9 @@ set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
 
 # CPU-only builds exist for host checks; production targets gfx1151 only.
 option(ENGINE_ENABLE_HIP "Build the gfx1151 HIP backend" ON)
-set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING "HIP architecture")
-if (ENGINE_ENABLE_HIP AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1151")
-  message(FATAL_ERROR "Gufo kernels require CMAKE_HIP_ARCHITECTURES=gfx1151")
+set(CMAKE_HIP_ARCHITECTURES gfx1201 CACHE STRING "HIP architecture (rdna4 port; upstream gfx1151)")
+if (ENGINE_ENABLE_HIP AND NOT CMAKE_HIP_ARCHITECTURES MATCHES "^(gfx1151|gfx1201)$")
+  message(FATAL_ERROR "Gufo kernels require CMAKE_HIP_ARCHITECTURES=gfx1151 (or gfx1201 on rdna4-port branch)")
 endif()
 # Standard ROCm installations; custom prefixes use CMAKE_PREFIX_PATH.
 if (EXISTS /opt/rocm)

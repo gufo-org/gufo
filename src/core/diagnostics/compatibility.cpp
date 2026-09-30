@@ -66,7 +66,8 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
     gpu_item.detected_value = inventory.gpu.architecture;
     gpu_item.required_value = "gfx1151";
     gpu_item.evidence = inventory.gpu.source;
-    if (inventory.gpu.architecture == "gfx1151") {
+    if (inventory.gpu.architecture == "gfx1151" ||
+        inventory.gpu.architecture == "gfx1201") {
       gpu_item.verdict = CompatibilityVerdict::kSupported;
       gpu_item.remediation_hint = "None";
     } else {
