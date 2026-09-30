@@ -10,6 +10,10 @@
 #include <type_traits>
 
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
+#if defined(__GFX12__)
+#include <cstdio>
+#endif
+// GUFO_RDNA4_STUBBED: unported WMMA kernels trap on gfx12
 
 // HIP kernels follow the layouts and operator formulas in reference.cpp.
 
@@ -1863,10 +1867,18 @@ __global__ void PoolBlocksKernel(const float* raw, const float* gamma,
 using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
 using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
-#if !defined(__GFX12__)
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
+#if defined(__GFX12__)
+  // Unreachable on gfx12 (callers ported to h8 or trap-stubbed); kept for
+  // frontend overload resolution. Backend deletes it as unreachable.
+  (void)a;
+  (void)b;
+  return c;
+#else
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
+#endif
 }
+#if !defined(__GFX12__)
 using FragF16 = v16h;
 #else
 // RDNA4: 8-half fragments, acc[l] of lane(sl,half) = (row l+half*8, col sl).
@@ -3347,7 +3359,14 @@ using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
 
 __device__ __forceinline__ int32x8_t WmmaI8(int32x4_t a, int32x4_t b,
                                             int32x8_t c) {
+#if defined(__GFX12__)
+  // Unreachable on gfx12 (all callers trap-stubbed); frontend only.
+  (void)a;
+  (void)b;
+  return c;
+#else
   return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
+#endif
 }
 
 /// Four elements per lane, eight lanes per 32-wide K block, four blocks per
@@ -3448,6 +3467,11 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
     const void* __restrict__ w, const void* __restrict__ x_blocks,
     std::conditional_t<kHcDown, __half, float>* __restrict__ y,
     std::size_t batch, std::size_t m, std::size_t k) {
+#if defined(__GFX12__)
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+  return;
+#endif
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
   static_assert(BN / 16 <= 8,
@@ -3815,6 +3839,11 @@ __launch_bounds__(256) __global__
                              float* __restrict__ out,
                              __half* __restrict__ out_half, std::size_t m,
                              std::size_t k, const void* __restrict__ w_up) {
+#if defined(__GFX12__)
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+  return;
+#endif
   static_assert(BM == 128 || BM == 256, "eight waves, 16-row tiles");
   static_assert(!kPair || BM == 128);
   static_assert(BN % 16 == 0 && BN / 16 <= 8);
@@ -4845,6 +4874,11 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const __half* xn = nullptr, __half* mixed_half = nullptr,
     void* mixed_q8 = nullptr, const float* conv_w = nullptr,
     float* conv_out = nullptr, AttentionProjectionOutput attention = {}) {
+#if defined(__GFX12__)
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+  return;
+#endif
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
   constexpr int kRowTiles = BM / 16;

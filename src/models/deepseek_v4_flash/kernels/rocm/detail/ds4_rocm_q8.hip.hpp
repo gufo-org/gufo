@@ -8,6 +8,10 @@
 #endif
 
 #include "ds4_rocm_q8_decode.hip.hpp"
+#if defined(__GFX12__)
+#include <cstdio>
+#endif
+// GUFO_RDNA4_STUBBED: unported WMMA kernels trap on gfx12
 
 __device__ static float q8_0_scale_scalar(const unsigned char *blk) {
     const uint16_t bits = (uint16_t)blk[0] | ((uint16_t)blk[1] << 8);
@@ -131,7 +135,14 @@ __global__ static void matmul_q8_0_f32_batch_wmma_4w_kernel(
         uint32_t n_tokens,
         uint32_t in_dim,
         uint32_t out_dim,
-        uint64_t row_bytes) {
+        uint64_t row_bytes) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
     constexpr uint32_t M_TILE = 64u;
     constexpr uint32_t N_TILE = 64u;
     constexpr uint32_t K_TILE = 32u;
@@ -224,6 +235,7 @@ __global__ static void matmul_q8_0_f32_batch_wmma_4w_kernel(
         }
     }
 }
+#endif
 
 #endif
 

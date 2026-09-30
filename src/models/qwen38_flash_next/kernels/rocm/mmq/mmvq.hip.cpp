@@ -3,6 +3,10 @@ namespace qfn_mmq {
 #include "mmvq.hpp"
 #include "unary.hpp"
 #include "vecdotq.hpp"
+#if defined(__GFX12__)
+#include <cstdio>
+#endif
+// GUFO_RDNA4_STUBBED: unported WMMA kernels trap on gfx12
 
 // Each wave handles up to eight dense inputs for one weight row on gfx1151.
 template<int ncols_dst, bool has_gate, int token_waves = 1, bool ragged = false>
@@ -62,7 +66,14 @@ template<int token_tiles, bool ragged>
 __launch_bounds__(256) static __global__ void mul_mat_q8_decode_batch(
     const block_q8_0* __restrict__ weights,
     const block_q8_1* __restrict__ input, float* __restrict__ output,
-    int k, int rows, int input_stride, int tokens) {
+    int k, int rows, int input_stride, int tokens) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   using Int4 = __attribute__((ext_vector_type(4))) int;
   using Int8 = __attribute__((ext_vector_type(8))) int;
   __shared__ float partial[16 * 16 * 32];
@@ -140,6 +151,7 @@ __launch_bounds__(256) static __global__ void mul_mat_q8_decode_batch(
     __syncthreads();
   }
 }
+#endif
 
 typedef float (*vec_dot_q_hip_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
 
