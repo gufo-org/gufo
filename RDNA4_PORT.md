@@ -59,6 +59,13 @@ A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
       fail-stop trap，C++/CMake/CLI 全不動。誤觸即炸，不靜默錯。
 - [x] qfn part1：W8A8GemmWave64 調用點＋本體中立化（wave32 tiles 接手），
       moe/w8a8 的 wave64 flags 限 gfx1151。
+- [x] qfn attention（WmmaCausalAttentionKernel）：S/O＋rescale＋tail＋
+      epilogue 同 Qwen 模式移植（tail/epilogue 為邏輯讀，只換 row）。
+- [ ] qfn W8A8（WmmaI8，3563）：同 Qwen quant 模式（a0/a1 雙 call＋
+      dw＋scratch[tok][row] 雙 tile 寫回）。
+- [ ] qfn fused-dequant GEMM ×2（4122/5006，a_lo/a_hi）：K32 雙 call 結構，
+      取 half-8 餵新指令；acc 映射待讀 epilogue。
+- [ ] qfn mmvq.hip.cpp（iu8，K8-part 需上下半拆零；末參 false 需參數化）。
 - [ ] qfn part2：kernels.hip.cpp（5 站點：attention S/O、quant GEMM、
       a_lo/a_hi 兩處）＋mmvq.hip.cpp（iu8，K8-part 需上下半拆零）。
 - [ ] ds4_rocm_q8.hip.hpp（8× f16，同 attention 模式）。

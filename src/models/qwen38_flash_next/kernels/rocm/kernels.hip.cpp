@@ -1863,9 +1863,28 @@ __global__ void PoolBlocksKernel(const float* raw, const float* gamma,
 using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
 using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
+#if !defined(__GFX12__)
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
 }
+using FragF16 = v16h;
+#else
+// RDNA4: 8-half fragments, acc[l] of lane(sl,half) = (row l+half*8, col sl).
+// Lane partition verified on RX 9070 (see RDNA4_PORT.md).
+using h8 = _Float16 __attribute__((__vector_size__(8 * sizeof(_Float16))));
+using FragF16 = h8;
+__device__ __forceinline__ v8f Wmma(h8 a, h8 b, v8f c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, c);
+}
+__device__ __forceinline__ h8 LoadFrag8(const __half* p) {
+  union {
+    h8 f;
+    uint4 u;
+  } cvt;
+  cvt.u = *reinterpret_cast<const uint4*>(p);
+  return cvt.f;
+}
+#endif
 
 // Keep indexer queries in F32: narrowing them before ranking can swap blocks
 // at the selection boundary. A thread scores one key, reusing it across all
@@ -2818,7 +2837,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   const std::uint32_t s_rb = s_tile % kRowBlocks;
   const std::uint32_t s_kb = s_tile / kRowBlocks;
 
-  v16h q_frag[kKStepsPerWave];
+  FragF16 q_frag[kKStepsPerWave];
   if (wave < 2 * kSTiles) {
     const std::uint32_t local_query = row_query(s_rb, sub);
     const bool live = row_live(s_rb, sub);
@@ -2831,8 +2850,14 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
       const auto* qp = reinterpret_cast<const float4*>(q_row + d0);
 #pragma unroll
+#if defined(__GFX12__)
+      for (std::uint32_t v = 0; v < 2; ++v) {
+        const float4 f = live ? qp[half_id * 2 + v]
+                              : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+#else
       for (std::uint32_t v = 0; v < 4; ++v) {
         const float4 f = live ? qp[v] : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+#endif
         q_frag[ks][(v * 4) + 0] = static_cast<_Float16>(f.x * attention_scale);
         q_frag[ks][(v * 4) + 1] = static_cast<_Float16>(f.y * attention_scale);
         q_frag[ks][(v * 4) + 2] = static_cast<_Float16>(f.z * attention_scale);
@@ -3065,14 +3090,23 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 #pragma unroll
       for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
         const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
-        const v16h k_frag =
+#if defined(__GFX12__)
+        const FragF16 k_frag = LoadFrag8(
+            &kv_lds[(((s_kb * 16) + sub) * kWmmaKStride) + d0 + half_id * 8]);
+#else
+        const FragF16 k_frag =
             LoadFrag(&kv_lds[(((s_kb * 16) + sub) * kWmmaKStride) + d0]);
+#endif
         s_acc = Wmma(q_frag[ks], k_frag, s_acc);
       }
       // Each half writes its own slot; the reader sums them.
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
+#if defined(__GFX12__)
+        s_lds[s_kh][s_tile][i + half_id * 8][sub] = s_acc[i];
+#else
         s_lds[s_kh][s_tile][(2 * i) + half_id][sub] = s_acc[i];
+#endif
       }
     }
     __syncthreads();
@@ -3165,7 +3199,11 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       float scale[8];
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
+#if defined(__GFX12__)
+        scale[i] = row_scale[(rb * 16) + i + half_id * 8];
+#else
         scale[i] = row_scale[(rb * 16) + (2 * i) + half_id];
+#endif
       }
 #pragma unroll
       for (std::uint32_t t = 0; t < 2; ++t) {
@@ -3180,17 +3218,28 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 #pragma unroll
     for (std::uint32_t t = 0; t < 2; ++t) {
       const std::uint32_t dim_tile = wave + (t * 8);
-      v16h v_frag[kKeyBlocks];
+      FragF16 v_frag[kKeyBlocks];
 #pragma unroll
       for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
+#if defined(__GFX12__)
+        for (std::uint32_t s = 0; s < 8; ++s)
+          v_frag[kb][s] = kv_lds[(((dim_tile * 16) + sub) * kVtStride) +
+                                 (kb * 16) + half_id * 8 + s];
+#else
         v_frag[kb] = LoadFrag(
             &kv_lds[(((dim_tile * 16) + sub) * kVtStride) + (kb * 16)]);
+#endif
       }
 #pragma unroll
       for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
 #pragma unroll
         for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
-          const v16h p_frag = LoadFrag(&p_lds[(rb * 16) + sub][kb * 16]);
+#if defined(__GFX12__)
+          const FragF16 p_frag =
+              LoadFrag8(&p_lds[(rb * 16) + sub][kb * 16 + half_id * 8]);
+#else
+          const FragF16 p_frag = LoadFrag(&p_lds[(rb * 16) + sub][kb * 16]);
+#endif
           v8f next = Wmma(p_frag, v_frag[kb], o_acc[rb][t]);
           if constexpr (!kPackHeads) {
             const std::uint32_t first_key = cur.block[0] * ratio;
@@ -3202,7 +3251,11 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
             if (first_key + kKeys - 1 > start_pos + query_start) {
 #pragma unroll
               for (std::uint32_t i = 0; i < 8; ++i) {
+#if defined(__GFX12__)
+                const std::uint32_t row = i + half_id * 8;
+#else
                 const std::uint32_t row = (2 * i) + half_id;
+#endif
                 const std::uint32_t absolute_query =
                     start_pos + row_query(rb, row);
                 if (absolute_query < first_key + kKeys - 1) {
@@ -3248,7 +3301,11 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       const std::uint32_t dim_tile = wave + (t * 8);
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
+#if defined(__GFX12__)
+        const std::uint32_t row = i + half_id * 8;
+#else
         const std::uint32_t row = (2 * i) + half_id;
+#endif
         if (!row_live(rb, row)) {
           continue;
         }
