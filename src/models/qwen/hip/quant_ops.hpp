@@ -140,16 +140,17 @@ struct IQ3SBlock {
 };
 static_assert(sizeof(IQ3SBlock) == 110, "block_iq3_s must be 110 bytes");
 
-// block_q2_K layout ({half d; half dmin; uint8 scales[16]; uint8 qs[64];},
+// block_q2_K layout ({uint8 scales[16]; uint8 qs[64]; half d; half dmin;},
 // 84 bytes, QK_K=256). Sixteen groups of sixteen 2-bit quants; each scale
-// byte packs a 4-bit scale (low) and 4-bit min (high).
+// byte packs a 4-bit scale (low) and 4-bit min (high). NOTE: scales come
+// FIRST, unlike the other K-quants (verified against ggml-common.h).
 constexpr std::size_t kQ2KBlockSize = 256;
 
 struct Q2KBlock {
-  __half d;
-  __half dmin;
   std::uint8_t scales[16];
   std::uint8_t qs[64];
+  __half d;
+  __half dmin;
 };
 static_assert(sizeof(Q2KBlock) == 84, "block_q2_K must be 84 bytes");
 
