@@ -44,7 +44,8 @@ embedding bytes but do not resolve this gap. [Evidence](artifacts/vision-parity.
 
 **With YaRN off, the extension is a no-op: full-model logits and served
 continuations are byte-identical to the pre-change build.** Unsloth
-UD-Q4_K_XL target, shared Q8_0 MTP; September 26–27, 2026.
+UD-Q4_K_XL target, shared Q8_0 MTP; September 26–29, 2026. YaRN-off identity
+and the `--context` path were rechecked on the final build on September 29.
 
 | Check | Result |
 | --- | --- |
