@@ -6,7 +6,7 @@ namespace gufo::models::qwen38_flash_next::rocm {
 void W8A8GemmWave64(const void* w, const void* x_tiled, float* out,
                     std::size_t batch, std::size_t m, std::size_t k,
                     hipStream_t stream) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
   // No wave64 on RDNA4: W8A8Gemm() uses the wave32 tiles instead.
   (void)w; (void)x_tiled; (void)out;
   (void)batch; (void)m; (void)k; (void)stream;

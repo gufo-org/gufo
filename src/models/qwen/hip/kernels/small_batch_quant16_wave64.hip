@@ -5,7 +5,7 @@
 #include "src/models/qwen/hip/kernels/small_batch_quant16_wave64.hpp"
 
 namespace gufo::hip::detail {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
 // No wave64 on RDNA4: uncalled (dispatchers above return false).
 void LaunchKQuantSixteenWave64(core::GgmlType, const void*, const float*,
                                float*, std::size_t, std::size_t, hipStream_t,

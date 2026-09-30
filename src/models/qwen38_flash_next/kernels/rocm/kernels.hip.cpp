@@ -10,7 +10,7 @@
 #include <type_traits>
 
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
 #include <cstdio>
 #endif
 // GUFO_RDNA4_STUBBED: unported WMMA kernels trap on gfx12
@@ -1868,7 +1868,7 @@ using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
 using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
   // Unreachable on gfx12 (callers ported to h8 or trap-stubbed); kept for
   // frontend overload resolution. Backend deletes it as unreachable.
   (void)a;
@@ -1878,7 +1878,7 @@ __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
 #endif
 }
-#if !defined(__GFX12__)
+#if !defined(GUFO_RDNA4_PORT)
 using FragF16 = v16h;
 #else
 // RDNA4: 8-half fragments, acc[l] of lane(sl,half) = (row l+half*8, col sl).
@@ -2862,7 +2862,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
       const auto* qp = reinterpret_cast<const float4*>(q_row + d0);
 #pragma unroll
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
       for (std::uint32_t v = 0; v < 2; ++v) {
         const float4 f = live ? qp[half_id * 2 + v]
                               : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
@@ -3102,7 +3102,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 #pragma unroll
       for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
         const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
         const FragF16 k_frag = LoadFrag8(
             &kv_lds[(((s_kb * 16) + sub) * kWmmaKStride) + d0 + half_id * 8]);
 #else
@@ -3114,7 +3114,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       // Each half writes its own slot; the reader sums them.
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
         s_lds[s_kh][s_tile][i + half_id * 8][sub] = s_acc[i];
 #else
         s_lds[s_kh][s_tile][(2 * i) + half_id][sub] = s_acc[i];
@@ -3211,7 +3211,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       float scale[8];
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
         scale[i] = row_scale[(rb * 16) + i + half_id * 8];
 #else
         scale[i] = row_scale[(rb * 16) + (2 * i) + half_id];
@@ -3233,7 +3233,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       FragF16 v_frag[kKeyBlocks];
 #pragma unroll
       for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
         for (std::uint32_t s = 0; s < 8; ++s)
           v_frag[kb][s] = kv_lds[(((dim_tile * 16) + sub) * kVtStride) +
                                  (kb * 16) + half_id * 8 + s];
@@ -3246,7 +3246,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
 #pragma unroll
         for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
           const FragF16 p_frag =
               LoadFrag8(&p_lds[(rb * 16) + sub][kb * 16 + half_id * 8]);
 #else
@@ -3263,7 +3263,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
             if (first_key + kKeys - 1 > start_pos + query_start) {
 #pragma unroll
               for (std::uint32_t i = 0; i < 8; ++i) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
                 const std::uint32_t row = i + half_id * 8;
 #else
                 const std::uint32_t row = (2 * i) + half_id;
@@ -3313,7 +3313,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       const std::uint32_t dim_tile = wave + (t * 8);
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
         const std::uint32_t row = i + half_id * 8;
 #else
         const std::uint32_t row = (2 * i) + half_id;
@@ -3359,7 +3359,7 @@ using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
 
 __device__ __forceinline__ int32x8_t WmmaI8(int32x4_t a, int32x4_t b,
                                             int32x8_t c) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
   // Unreachable on gfx12 (all callers trap-stubbed); frontend only.
   (void)a;
   (void)b;
@@ -3467,7 +3467,7 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
     const void* __restrict__ w, const void* __restrict__ x_blocks,
     std::conditional_t<kHcDown, __half, float>* __restrict__ y,
     std::size_t batch, std::size_t m, std::size_t k) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
   printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
   __builtin_trap();
   return;
@@ -3839,7 +3839,7 @@ __launch_bounds__(256) __global__
                              float* __restrict__ out,
                              __half* __restrict__ out_half, std::size_t m,
                              std::size_t k, const void* __restrict__ w_up) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
   printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
   __builtin_trap();
   return;
@@ -4627,7 +4627,7 @@ bool W8A8Gemm(const void* w, const void* x_tiled, float* out, std::size_t batch,
   // Qwen's wave64 matrix kernel with four row groups improves the model's
   // large output projections while preserving every K32 accumulator update.
   // No wave64 on gfx12 (RDNA4 is wave32-only): use the tiles below.
-#if !defined(__GFX12__)
+#if !defined(GUFO_RDNA4_PORT)
   if (batch >= 1024 && m == 2560 && k == 6144) {
     W8A8GemmWave64(w, x_tiled, out, batch, m, k, stream);
     return true;
@@ -4874,7 +4874,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const __half* xn = nullptr, __half* mixed_half = nullptr,
     void* mixed_q8 = nullptr, const float* conv_w = nullptr,
     float* conv_out = nullptr, AttentionProjectionOutput attention = {}) {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
   printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
   __builtin_trap();
   return;

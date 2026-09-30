@@ -2,7 +2,7 @@
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 
 namespace gufo::hip::detail {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
 // No wave64 on RDNA4: the ported wave32 prefill path handles all shapes.
 bool TryLaunchQuantPrefillWave64(core::GgmlType, const void*, const void*,
                                  float*, std::size_t, std::size_t, std::size_t,

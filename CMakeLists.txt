@@ -50,6 +50,11 @@ if (ENGINE_ENABLE_HIP)
   find_path(ROCPRIM_INCLUDE_DIR rocprim/rocprim.hpp REQUIRED)
   find_path(ROCWMMA_INCLUDE_DIR rocwmma/rocwmma.hpp REQUIRED)
   message(STATUS "gufo: HIP target ${CMAKE_HIP_ARCHITECTURES}")
+  # Visible in BOTH host and device passes (unlike __GFX12__): launch
+  # control must agree or the host launches kernels with no image.
+  if (CMAKE_HIP_ARCHITECTURES MATCHES "gfx12")
+    add_compile_definitions(GUFO_RDNA4_PORT=1)
+  endif()
 endif()
 
 if (ENGINE_ENABLE_HIP)

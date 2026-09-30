@@ -5,7 +5,7 @@
 #include "src/models/qwen/hip/ops/swiglu.hpp"
 
 namespace gufo::hip::detail {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
 // No wave64 on RDNA4: wave32 small-batch kernels cover all shapes.
 bool TryLaunchQ8SmallBatchWave64(const void*, const float*, float*,
                                  std::size_t, std::size_t, std::size_t,
@@ -594,7 +594,7 @@ bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
 }  // namespace gufo::hip::detail
 
 namespace gufo::hip {
-#if defined(__GFX12__)
+#if defined(GUFO_RDNA4_PORT)
 // No wave64 on RDNA4 (see above).
 bool TryLaunchPackedQuantSwiGLUFp32(core::GgmlType, const void*,
                                     const float*, float*, std::size_t,
