@@ -4,8 +4,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <stdexcept>
+#include <string>
 
+#include "src/core/json_constraint.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/runtime/dspark_policy.h"
 #include "src/models/deepseek_v4_flash/runtime/native_internal.h"
@@ -238,17 +241,45 @@ int main() {
   SamplerState greedy({.temperature = 0, .repeat_penalty = 1.1F});
   DsparkSamplerBridge greedy_bridge(greedy);
   Expect(greedy_bridge.hook()->propose == nullptr &&
-             greedy_bridge.hook()->verify == nullptr,
+             greedy_bridge.hook()->verify == nullptr &&
+             greedy_bridge.hook()->try_accept_argmax == nullptr,
          "greedy retains point-mass behavior");
   SamplerState unfiltered({.temperature = 0.7F, .seed = 12});
   DsparkSamplerBridge delta(unfiltered);
-  Expect(delta.hook()->propose == nullptr && delta.hook()->verify == nullptr,
+  Expect(delta.hook()->propose == nullptr && delta.hook()->verify == nullptr &&
+             delta.hook()->try_accept_argmax == nullptr,
          "expensive full-vocabulary p retains the point-mass fallback");
   const auto expected = unfiltered.Sample(logits);
   Expect(delta.hook()->sample(delta.hook()->ctx, logits.data(),
                               logits.size()) == static_cast<int>(expected) &&
              delta.rng_state() == unfiltered.rng_state(),
          "point-mass fallback preserves the sampled AR seed trace");
+  const std::array<std::string, 3> pieces{"{", "\"x\":1", "}"};
+  auto constraint = std::make_shared<gufo::sampling::TokenConstraint>();
+  constraint->grammar = gufo::sampling::JsonConstraint::Object();
+  constraint->vocabulary =
+      std::make_shared<gufo::sampling::ConstraintVocabulary>(
+          pieces.size(), [&](std::uint32_t i) {
+            return gufo::sampling::ConstraintVocabulary::Piece{pieces[i],
+                                                               false};
+          });
+  SamplerState constrained({.seed = 19, .constraint = constraint});
+  DsparkSamplerBridge fast(constrained);
+  const auto* hook = fast.hook();
+  Expect(hook->try_accept_argmax != nullptr,
+         "greedy constraints can use exact target argmaxes");
+  ExpectThrows([&] { hook->try_accept_argmax(hook->ctx, 3); });
+  Expect(!hook->try_accept_argmax(hook->ctx, -1) &&
+             !hook->try_accept_argmax(hook->ctx, 2),
+         "invalid and forbidden argmaxes leave the grammar unchanged");
+  Expect(hook->try_accept_argmax(hook->ctx, 0) &&
+             !hook->try_accept_argmax(hook->ctx, 0) &&
+             hook->try_accept_argmax(hook->ctx, 1) &&
+             hook->try_accept_argmax(hook->ctx, 2) &&
+             !hook->try_accept_argmax(hook->ctx, 1),
+         "accepted argmaxes advance the grammar exactly once");
+  Expect(fast.rng_state() == constrained.rng_state(),
+         "greedy constraint acceptance consumes no random draws");
   std::puts(
       "DSpark sampling: distribution, residual, replay and malformed rows "
       "pass");

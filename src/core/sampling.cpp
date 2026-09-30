@@ -204,6 +204,14 @@ bool SamplingConfig::can_use_unmodified_argmax() const noexcept {
   return !constraint && temperature == 0.0F && !penalties_enabled();
 }
 
+bool SamplerState::CanSelectArgmax(TokenId token) const {
+  return !pending_sample_ && config_.temperature == 0.0F &&
+         !config_.penalties_enabled() &&
+         (!config_.constraint ||
+          config_.constraint->vocabulary->Allows(*config_.constraint->grammar,
+                                                 constraint_state_, token));
+}
+
 SamplingDistribution::SamplingDistribution(std::vector<Probability> entries)
     : entries_(std::move(entries)) {
   if (entries_.empty()) {

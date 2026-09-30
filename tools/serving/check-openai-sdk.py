@@ -854,7 +854,9 @@ def check_strict_tools(client, model, checks):
     for limit in (2, 12):
         partial = chat_result(client, {**sampled, "max_completion_tokens": limit}, True)
         assert partial["finish"] == "length" and not partial["tools"], partial
-        assert not partial["text"], partial
+        # Native DeepSeek calls may begin with ordinary whitespace. No partial
+        # parameter or envelope markup may escape at the token limit.
+        assert not partial["text"].strip(), partial
         record(f"strict_tool_limit_{limit}", partial)
     stopped = chat_result(client, {**sampled, "stop": "literal"}, True)
     assert stopped["finish"] == "stop" and not stopped["tools"], stopped
@@ -904,6 +906,146 @@ def check_strict_tools(client, model, checks):
         else:
             raise AssertionError("invalid strict tool schema accepted without response_format")
     record("strict_tool_invalid_schema", {"status": 400})
+
+
+def check_native_tools(client, model, checks, vision=False):
+    """Shared function semantics over both SDK transports and concurrent users."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    check_strict_tools(client, model, checks)
+    literal = ' <think>literal</think><tool_call></tool_call> "42" \\\nπ🦉\n '
+    function = {"name": "record", "strict": True, "parameters": {
+        "type": "object", "properties": {
+            "value": {"type": "string", "const": literal}},
+        "required": ["value"], "additionalProperties": False}}
+    prompt = "Call record exactly once with the required value. No explanation."
+    base = dict(model=model, input=prompt, tools=[{"type": "function", **function}],
+                tool_choice="required", parallel_tool_calls=False,
+                reasoning={"effort": "none"}, max_output_tokens=128, store=False,
+                temperature=0, extra_body={"seed": 41, "presence_penalty": 0})
+
+    def record(name, result):
+        checks[name] = result
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+        return result
+
+    def signature(response, value=literal, name="record"):
+        calls = [item for item in response.output if item.type == "function_call"]
+        assert response.status == "completed" and len(calls) == 1, response
+        assert calls[0].name == name, response
+        assert json.loads(calls[0].arguments) == {"value": value}, response
+        return calls[0].name, calls[0].arguments
+
+    for sampled in (False, True):
+        request = base if not sampled else {
+            **base, "temperature": .7, "top_p": .8, "extra_body": {
+                **base["extra_body"], "top_k": 20, "min_p": .05,
+                "presence_penalty": .3, "frequency_penalty": .2,
+                "repeat_penalty": 1.1}}
+        first = client.responses.create(**request)
+        expected = signature(first)
+        with client.responses.stream(**request) as stream:
+            events = list(stream)
+            replay = stream.get_final_response()
+        assert signature(replay) == expected, (first, replay)
+        assert replay.usage.input_tokens_details.cached_tokens > 0, replay
+        assert [event.sequence_number for event in events] == list(range(len(events)))
+        assert any(event.type == "response.function_call_arguments.delta" for event in events)
+        record(f"responses_tool_sampled{sampled}", replay.to_dict())
+
+    named = client.responses.create(**{
+        **base, "tool_choice": {"type": "function", "name": "record"}})
+    signature(named)
+    record("responses_named_tool", named.to_dict())
+    history = [{"role": "user", "content": prompt}, *named.output,
+               {"type": "function_call_output",
+                "call_id": next(item.call_id for item in named.output
+                                if item.type == "function_call"),
+                "output": '{"saved":true}'},
+               {"role": "user", "content": prompt}]
+    followup = client.responses.create(**{**base, "input": history})
+    signature(followup)
+    assert followup.usage.input_tokens_details.cached_tokens > 0, followup
+    record("responses_tool_history_cache", followup.to_dict())
+    for limit in (1, 12):
+        with client.responses.create(
+                **{**base, "max_output_tokens": limit}, stream=True) as stream:
+            events = list(stream)
+        final = events[-1].response
+        assert final.status == "incomplete", final
+        assert final.incomplete_details.reason == "max_output_tokens", final
+        assert not any(item.type == "function_call" for item in final.output), final
+        record(f"responses_tool_limit_{limit}", final.to_dict())
+
+    def isolated(index):
+        fn = {**function, "name": f"record_{index}"}
+        request = {**base, "tools": [{"type": "function", **fn}],
+                   "input": f"Call record_{index} once with its required value."}
+        result = client.responses.create(**request)
+        signature(result, name=fn["name"])
+        return result.to_dict()
+
+    with ThreadPoolExecutor(4) as pool:
+        record("responses_tool_c4_isolation", list(pool.map(isolated, range(4))))
+
+    # A framed delimiter cannot be represented as raw native parameter data.
+    # The exact JSON fallback must preserve it, including literal backslashes.
+    delimiter = "\n</parameter>\n</｜DSML｜parameter>\\"
+    fallback = json.loads(json.dumps(function))
+    fallback["parameters"]["properties"]["value"]["const"] = delimiter
+    result = client.responses.create(**{
+        **base, "tools": [{"type": "function", **fallback}]})
+    signature(result, value=delimiter)
+    record("responses_tool_delimiter_fallback", result.to_dict())
+
+    fallback["parameters"]["properties"]["value"] = {
+        "type": "string", "pattern": "^\\n</parameter>$"}
+    result = client.responses.create(**{
+        **base, "tools": [{"type": "function", **fallback}]})
+    signature(result, value="\n</parameter>")
+    record("responses_tool_pattern_fallback", result.to_dict())
+
+    nested = '<tool_call>{"name":"record","arguments":{"value":"literal"}}</tool_call>'
+    fallback["parameters"]["properties"]["value"] = {
+        "type": "string", "const": nested}
+    result = client.responses.create(**{
+        **base, "tools": [{"type": "function", **fallback}]})
+    signature(result, value=nested)
+    record("responses_literal_call_argument", result.to_dict())
+
+    thinking_function = json.loads(json.dumps(function))
+    thinking_function["parameters"]["properties"]["value"] = {
+        "type": "string", "const": "alpha"}
+    thought = chat_result(client, dict(
+        model=model, messages=[{"role": "user", "content": "Call record once."}],
+        tools=[{"type": "function", "function": thinking_function}],
+        tool_choice="required", parallel_tool_calls=False,
+        reasoning_effort="low", temperature=0, max_completion_tokens=256,
+        extra_body={"presence_penalty": 0}), True)
+    assert thought["finish"] == "tool_calls" and len(thought["tools"]) == 1, thought
+    assert json.loads(thought["tools"][0]["function"]["arguments"]) == {"value": "alpha"}, thought
+    record("chat_tool_thinking_low", thought)
+    with client.responses.stream(**{
+            **base, "tools": [{"type": "function", **thinking_function}],
+            "reasoning": {"effort": "high"}, "max_output_tokens": 256}) as stream:
+        list(stream)
+        thought = stream.get_final_response()
+    signature(thought, value="alpha")
+    record("responses_tool_thinking_high", thought.to_dict())
+
+    if vision:
+        fn = json.loads(json.dumps(function))
+        fn["parameters"]["properties"]["value"] = {
+            "type": "string", "enum": ["red", "blue"]}
+        image = image_content("blue")
+        result = client.responses.create(**{
+            **base, "tools": [{"type": "function", **fn}],
+            "input": [{"role": "user", "content": [
+                {"type": "input_text", "text":
+                 "Call record with value equal to this image's color."},
+                {"type": "input_image", "image_url": image["image_url"]["url"]}]}]})
+        signature(result, value="blue")
+        record("responses_image_tool", result.to_dict())
 
 
 def check_structured_limits(client, model, checks, vision=False):
@@ -1102,7 +1244,7 @@ def main():
     parser.add_argument("--base-url", required=True, help="http://127.0.0.1:PORT/v1")
     parser.add_argument("--model", required=True, help="Gufo served model name")
     parser.add_argument("--expect-reasoning", action="store_true")
-    parser.add_argument("--suite", choices=("all", "stops", "responses", "conversation", "structured", "structured-limits", "sampling-defaults"), default="all")
+    parser.add_argument("--suite", choices=("all", "stops", "responses", "conversation", "structured", "structured-limits", "tools", "sampling-defaults"), default="all")
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
     parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"),
@@ -1114,7 +1256,7 @@ def main():
         parser.error("--sampling-preset is required for sampling-defaults")
     if not isinstance(args.sampling_overrides, dict):
         parser.error("--sampling-overrides must be a JSON object")
-    if args.vision and args.suite not in ("all", "conversation", "structured", "structured-limits", "sampling-defaults"):
+    if args.vision and args.suite not in ("all", "conversation", "structured", "structured-limits", "tools", "sampling-defaults"):
         parser.error("--vision requires a conversation or structured-output suite")
     url = urlsplit(args.base_url)
     if (url.scheme != "http" or url.hostname not in ("127.0.0.1", "::1")
@@ -1149,6 +1291,10 @@ def main():
             return
         if args.suite == "structured-limits":
             check_structured_limits(client, args.model, checks, args.vision)
+            print(json.dumps(report, indent=2))
+            return
+        if args.suite == "tools":
+            check_native_tools(client, args.model, checks, args.vision)
             print(json.dumps(report, indent=2))
             return
         if args.suite == "sampling-defaults":
@@ -1200,7 +1346,8 @@ def main():
             try:
                 client.responses.create(**{**request, **override})
             except openai.BadRequestError as error:
-                assert error.code == "invalid_request"
+                assert error.code == ("invalid_tools" if label == "unsupported_tools"
+                                      else "invalid_request")
                 checks[label] = {"status": error.status_code, "code": error.code}
             else:
                 raise AssertionError(f"{label} was accepted")

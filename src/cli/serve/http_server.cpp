@@ -438,6 +438,23 @@ bool ReadTextMessages(const json::Value* input,
   if (input == nullptr || !input->is_array() || input->empty())
     return false;
   for (const auto& item : input->items()) {
+    if (responses && (item.member_str("type") == "function_call" ||
+                      item.member_str("type") == "function_call_output")) {
+      tokenization::ChatMessage message;
+      std::string error;
+      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error))
+        return false;
+      if (message.role == tokenization::ChatRole::kAssistant &&
+          !messages->empty() &&
+          messages->back().role == tokenization::ChatRole::kAssistant) {
+        auto& calls = messages->back().tool_calls;
+        calls.insert(calls.end(), message.tool_calls.begin(),
+                     message.tool_calls.end());
+      } else {
+        messages->push_back(std::move(message));
+      }
+      continue;
+    }
     if (responses && item.member_str("type") == "reasoning") {
       const auto* summary = item.find("summary");
       const auto* encrypted = item.find("encrypted_content");
@@ -560,7 +577,8 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
         !(field == "ignore_eos" && allowances.ignore_eos) &&
         body.contains(field) &&
         !(allowances.response_controls &&
-          (field == "text" || field == "reasoning"))) {
+          (field == "text" || field == "reasoning" || field == "tools" ||
+           field == "tool_choice" || field == "parallel_tool_calls"))) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }
@@ -883,9 +901,8 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
     messages.push_back({tokenization::ChatRole::kUser, input->str(), "", ""});
   } else if (!ReadTextMessages(input, &messages, true)) {
     return InvalidCompatibilityRequest(
-        "'input' must contain text, message items with text/images, or Gufo "
-        "reasoning items; "
-        "use /v1/chat/completions for tools");
+        "'input' must contain text, message items with text/images, reasoning "
+        "items, function calls or function outputs");
   }
 
   chat.messages = std::move(messages);

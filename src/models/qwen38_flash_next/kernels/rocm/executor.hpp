@@ -190,6 +190,9 @@ public:
   [[nodiscard]] bool SelectBatchLogits(std::uint32_t offset, std::uint32_t rows,
                                        float* logits,
                                        std::string* error_msg) const;
+  [[nodiscard]] bool ReadVerificationRows(std::uint32_t row,
+                                          std::span<float> logits,
+                                          std::string* error_msg) const;
 
   /// Keeps the first `keep` (1..n) tokens of the last speculative batch and
   /// discards the rest. If `logits` is supplied, copies the kept frontier

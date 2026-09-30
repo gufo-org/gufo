@@ -484,7 +484,7 @@ void SpeculativeVerifier::PrepareTargetOnlyStep(PreparedStep& prepared,
     return;
   }
   auto next = AdvanceCommittedToken(request.current_token, request.position);
-  if (prepared.sampled)
+  if (prepared.sampled && !working_sampler.CanSelectArgmax(next))
     next = target_executor_->SampleLastLogits(working_sampler);
   std::vector<float> logits;
   if (options_.retain_frontier_logits) {
@@ -627,6 +627,21 @@ SpeculativeVerifier::ProcessVerificationChunk(
     throw std::runtime_error(
         "target executor returned incomplete verification hidden states");
   }
+  const auto select_row = [&](std::size_t row) {
+    // The target already computed these unmodified argmaxes. A legal greedy
+    // candidate is also the exact masked argmax; only forbidden candidates,
+    // penalties or random sampling need the full distribution.
+    if (row < verification.predictions.size() &&
+        working_sampler.CanSelectArgmax(verification.predictions[row]))
+      return verification.predictions[row];
+    return device_resident_sampling
+               ? target_executor_->SampleVerificationLogits(row,
+                                                            working_sampler)
+               : working_sampler.Sample(
+                     std::span<const float>(verification.logits)
+                         .subspan(row * verification.vocab_size,
+                                  verification.vocab_size));
+  };
   if (prepared.target_only) {
     target_executor_->FinishVerification();
     const auto prediction = verification.predictions.front();
@@ -640,13 +655,8 @@ SpeculativeVerifier::ProcessVerificationChunk(
       throw std::runtime_error("draft failed to append committed target token");
     }
     auto next = prediction;
-    if (prepared.sampled) {
-      next =
-          device_resident_sampling
-              ? target_executor_->SampleVerificationLogits(0, working_sampler)
-              : working_sampler.Sample(std::span(verification.logits)
-                                           .first(verification.vocab_size));
-    }
+    if (prepared.sampled)
+      next = select_row(0);
     std::vector<float> logits;
     if (options_.retain_frontier_logits) {
       const auto row = prepared.capture_logits
@@ -679,14 +689,7 @@ SpeculativeVerifier::ProcessVerificationChunk(
       // Penalties change the target argmax after each committed token. Draft
       // proposals remain useful: verify against that same evolving AR history,
       // without drawing random numbers or constructing a proposal distribution.
-      const auto target_token =
-          device_resident_sampling
-              ? target_executor_->SampleVerificationLogits(local_row,
-                                                           working_sampler)
-              : working_sampler.Sample(std::span<const float>(
-                    verification.logits.data() +
-                        local_row * verification.vocab_size,
-                    verification.vocab_size));
+      const auto target_token = select_row(local_row);
       if (target_token != proposal.tokens[accepted_count] ||
           IsStopToken(target_token, eos_id)) {
         correction_token = target_token;
@@ -753,15 +756,8 @@ SpeculativeVerifier::ProcessVerificationChunk(
   if (accepted_count == num_draft) {
     if (!prepared.sampled) {
       correction_token = verification.predictions[correction_row_index];
-    } else if (device_resident_sampling) {
-      correction_token = target_executor_->SampleVerificationLogits(
-          correction_row_index, working_sampler);
     } else {
-      const auto bonus_row = std::span<const float>(
-          verification.logits.data() +
-              (correction_row_index * verification.vocab_size),
-          verification.vocab_size);
-      correction_token = working_sampler.Sample(bonus_row);
+      correction_token = select_row(correction_row_index);
     }
   }
 

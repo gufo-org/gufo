@@ -22,6 +22,7 @@ namespace gufo::sampling {
 // verification.
 class JsonConstraint {
 public:
+  enum class ToolFormat { kJson, kQwen, kDeepSeek };
   struct Stack {
     std::vector<std::uint32_t> symbols;
     std::string lexeme;
@@ -34,12 +35,17 @@ public:
   static std::shared_ptr<const JsonConstraint> Compile(
       const json::Value& schema, bool strict);
   static std::shared_ptr<const JsonConstraint> Object();
+  // Returns null when a schema cannot be represented unambiguously by native
+  // parameter tags. The caller retains the exact JSON schema in that case.
+  static std::shared_ptr<const JsonConstraint> ToolParameters(
+      const json::Value& schema, bool strict, ToolFormat format);
   static std::shared_ptr<const JsonConstraint> WithReasoning(
       std::shared_ptr<const JsonConstraint> answer);
   using Tool = std::pair<std::string, std::shared_ptr<const JsonConstraint>>;
   static std::shared_ptr<const JsonConstraint> WithTools(
       std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
-      bool required, bool parallel = false);
+      bool required, bool parallel = false,
+      ToolFormat format = ToolFormat::kJson);
 
   [[nodiscard]] State Start() const;
   [[nodiscard]] State Advance(const State& state, unsigned char byte) const;
@@ -75,20 +81,22 @@ public:
   [[nodiscard]] JsonConstraint::State Accept(const JsonConstraint& grammar,
                                              const JsonConstraint::State& state,
                                              std::uint32_t token) const;
+  [[nodiscard]] bool Allows(const JsonConstraint& grammar,
+                            const JsonConstraint::State& state,
+                            std::uint32_t token) const;
   [[nodiscard]] std::size_t size() const { return pieces_.size(); }
 
 private:
   friend struct TokenConstraint;
-  struct Edge {
-    std::uint32_t child;
-    unsigned char byte;
-  };
   struct Node {
-    std::vector<Edge> edges;
-    std::vector<std::uint32_t> tokens;
+    std::uint32_t child{UINT32_MAX};
+    std::uint32_t sibling{UINT32_MAX};
+    std::uint32_t token{UINT32_MAX};
+    unsigned char byte{0};
   };
   std::vector<Node> trie_{1};
   std::vector<Piece> pieces_;
+  std::vector<std::uint32_t> next_token_;
   std::size_t max_token_bytes_{0};
 };
 

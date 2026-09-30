@@ -682,7 +682,8 @@ bool Session::PrepareDecode(const DecodeRequest& request,
 
   const std::uint32_t base = static_cast<std::uint32_t>(tokens_.size());
   const bool sampled = sampler.config().uses_random_sampling();
-  const bool gpu_greedy = sampler.config().can_use_unmodified_argmax();
+  const bool gpu_greedy = sampler.config().temperature == 0.0F &&
+                          !sampler.config().penalties_enabled();
   const bool gpu_verification = gpu_greedy;
   if (!defer_head && !DraftCatchUp(anchor, true, error_msg,
                                    sampled ? &pending->candidates : nullptr)) {
@@ -702,7 +703,8 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   pending->sampled = sampled;
   pending->gpu_greedy = gpu_greedy;
   pending->gpu_verification = gpu_verification;
-  if (!gpu_verification && verify_logits_.empty()) {
+  if (!gpu_verification &&
+      verify_logits_.size() < exec.max_speculative() * model_->VocabSize()) {
     verify_logits_.resize(exec.max_speculative() * model_->VocabSize());
   }
   if (!defer_head) {
@@ -755,12 +757,26 @@ bool Session::FinishDecode(const DecodeRequest& request,
   }
   std::uint32_t keep = 1;
   std::optional<std::int32_t> correction;
+  bool cpu_rows = false;
   while (keep < k) {
-    if (gpu_greedy) {
+    if (gpu_greedy && !cpu_rows) {
       const auto& prediction = greedy[keep - 1];
       if (!std::isfinite(prediction.value)) {
         AssignError(error_msg, "logit distribution contains no finite values");
         return false;
+      }
+      if (!sampler.CanSelectArgmax(prediction.index)) {
+        // Most native tool tokens already obey the grammar. On the first
+        // forbidden argmax, download the remaining rows once and use exact
+        // masked selection. Avoid one synchronization per rejected candidate.
+        // SelectBatchLogits has already installed this session's row offset.
+        verify_logits_.resize(exec.max_speculative() * vocab);
+        auto rows = std::span(verify_logits_)
+                        .subspan((keep - 1) * vocab, (k - keep + 1) * vocab);
+        if (!exec.ReadVerificationRows(keep - 1, rows, error_msg))
+          return false;
+        cpu_rows = true;
+        continue;
       }
       if (is_stop(prediction.index)) {
         result->stop = true;
@@ -801,11 +817,12 @@ bool Session::FinishDecode(const DecodeRequest& request,
     }
     ++keep;
   }
-  if (!exec.Rollback(*session_, keep, error_msg,
-                     gpu_verification ? logits_.data() : nullptr)) {
+  if (!exec.Rollback(
+          *session_, keep, error_msg,
+          gpu_verification && !cpu_rows ? logits_.data() : nullptr)) {
     return false;
   }
-  if (!gpu_verification) {
+  if (!gpu_verification || cpu_rows) {
     std::copy_n(verify_logits_.data() + (keep - 1) * vocab, vocab,
                 logits_.begin());
   }

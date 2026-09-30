@@ -30,7 +30,11 @@ public:
               .sample = &Sample,
               .accept = &Accept,
               .propose = UseStochastic(sampler.config()) ? &Propose : nullptr,
-              .verify = UseStochastic(sampler.config()) ? &Verify : nullptr} {}
+              .verify = UseStochastic(sampler.config()) ? &Verify : nullptr,
+              .try_accept_argmax = sampler.config().temperature == 0.F &&
+                                           !sampler.config().penalties_enabled()
+                                       ? &TryAcceptArgmax
+                                       : nullptr} {}
 
   DsparkSamplerBridge(const DsparkSamplerBridge&) = delete;
   DsparkSamplerBridge& operator=(const DsparkSamplerBridge&) = delete;
@@ -160,6 +164,15 @@ private:
   static void Accept(void* ctx, int token) {
     static_cast<DsparkSamplerBridge*>(ctx)->working_.Accept(
         static_cast<sampling::TokenId>(token));
+  }
+
+  static bool TryAcceptArgmax(void* ctx, int token) {
+    auto& working = static_cast<DsparkSamplerBridge*>(ctx)->working_;
+    if (token < 0 ||
+        !working.CanSelectArgmax(static_cast<sampling::TokenId>(token)))
+      return false;
+    working.Accept(static_cast<sampling::TokenId>(token));
+    return true;
   }
 
   sampling::SamplerState working_;

@@ -715,21 +715,30 @@ static uint32_t session_dspark_accept_prefix(
     return accepted;
   }
   while (accepted < drafted) {
-    const float* row = nullptr;
-    if (row_logits != nullptr) {
-      row = row_logits + (size_t)(accepted - 1u) * (size_t)vocabulary_size;
-    } else if (ds4_rocm_graph_read_spec_logits_row(
-                   session->graph, accepted - 1u, session->logits.get())) {
-      row = session->logits.get();
-      *frontier_read = true;
+    int drawn = row_tops[accepted - 1u];
+    if (drawn >= 0 && drawn < vocabulary_size &&
+        sampler->try_accept_argmax != nullptr &&
+        sampler->try_accept_argmax(sampler->ctx, drawn)) {
+      // A legal greedy argmax needs no vocabulary download or full mask.
+      // A rejection below must still fetch this row as its reusable frontier.
+      *frontier_read = false;
     } else {
-      return 0;
+      const float* row = nullptr;
+      if (row_logits != nullptr) {
+        row = row_logits + (size_t)(accepted - 1u) * (size_t)vocabulary_size;
+      } else if (ds4_rocm_graph_read_spec_logits_row(
+                     session->graph, accepted - 1u, session->logits.get())) {
+        row = session->logits.get();
+        *frontier_read = true;
+      } else {
+        return 0;
+      }
+      drawn =
+          sampler->verify != nullptr
+              ? sampler->verify(sampler->ctx, accepted - 1u, row,
+                                (uint32_t)vocabulary_size, drafts[accepted])
+              : sampler->sample(sampler->ctx, row, (uint32_t)vocabulary_size);
     }
-    const int drawn =
-        sampler->verify != nullptr
-            ? sampler->verify(sampler->ctx, accepted - 1u, row,
-                              (uint32_t)vocabulary_size, drafts[accepted])
-            : sampler->sample(sampler->ctx, row, (uint32_t)vocabulary_size);
     if (drawn != drafts[accepted] ||
         (stop_at_eos && ds4_token_is_stop(session->engine, drawn))) {
       // EOS is a completed draw, but must not enter the reusable checkpoint.

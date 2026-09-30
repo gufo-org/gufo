@@ -744,11 +744,84 @@ private:
   std::shared_ptr<const JsonSchemaRegex> regex_;
 };
 
+// Native tool arguments use raw UTF-8, not a JSON string literal. Reuse the
+// exact Unicode/pattern/length matcher and its bounded canonical state, feeding
+// escaped bytes only at this adapter boundary. Quotes and backslashes remain
+// literal data. The enclosing grammar supplies the parameter delimiter.
+class RawStringLexeme final : public JsonSchemaLexeme {
+public:
+  RawStringLexeme(const json::Value& schema, std::string delimiter)
+      : string_(JsonSchemaLexeme::String(schema)),
+        delimiter_(std::move(delimiter)) {}
+  bool CacheTransitions() const override { return true; }
+  void CanonicalMaskState(std::string& state,
+                          std::size_t token_bytes) const override {
+    if (state.empty())
+      return;
+    auto inner = state.substr(1);
+    string_->CanonicalMaskState(inner, token_bytes);
+    state.replace(1, std::string::npos, inner);
+  }
+  Match Check(std::string_view bytes) const override {
+    std::string state;
+    Match result{true, string_->Check("\"\"").complete};
+    for (const unsigned char byte : bytes) {
+      result = Advance(state, byte);
+      if (!result.prefix)
+        break;
+    }
+    return result;
+  }
+  Match Advance(std::string& encoded, unsigned char byte) const override {
+    auto state = encoded.empty() ? std::string() : encoded.substr(1);
+    std::string suffix(delimiter_.substr(
+        0, encoded.empty() ? 0 : static_cast<unsigned char>(encoded.front())));
+    suffix += static_cast<char>(byte);
+    auto matched = std::min(suffix.size(), delimiter_.size());
+    while (matched && !suffix.ends_with(delimiter_.substr(0, matched)))
+      --matched;
+    if (matched == delimiter_.size())
+      return {};
+    if (state.empty())
+      string_->Advance(state, '"');
+    Match result;
+    if (byte == '"' || byte == '\\') {
+      result = string_->Advance(state, '\\');
+      if (result.prefix)
+        result = string_->Advance(state, byte);
+    } else if (byte < 0x20) {
+      constexpr char hex[] = "0123456789abcdef";
+      for (const unsigned char part :
+           std::string{'\\', 'u', '0', '0', hex[byte >> 4], hex[byte & 15]}) {
+        result = string_->Advance(state, part);
+        if (!result.prefix)
+          return {};
+      }
+    } else {
+      result = string_->Advance(state, byte);
+    }
+    if (!result.prefix)
+      return {};
+    auto closing = state;
+    encoded.assign(1, static_cast<char>(matched));
+    encoded += state;
+    return {true, string_->Advance(closing, '"').complete};
+  }
+
+private:
+  std::shared_ptr<const JsonSchemaLexeme> string_;
+  std::string delimiter_;
+};
+
 }  // namespace
 
 std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::String(
     const json::Value& schema) {
   return std::make_shared<StringLexeme>(schema);
+}
+std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::RawString(
+    const json::Value& schema, std::string delimiter) {
+  return std::make_shared<RawStringLexeme>(schema, std::move(delimiter));
 }
 std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Whitespace() {
   static const auto whitespace = std::make_shared<WhitespaceLexeme>();

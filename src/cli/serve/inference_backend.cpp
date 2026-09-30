@@ -64,10 +64,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
       strict_tools |= function && function->find("strict") &&
                       function->find("strict")->as_bool();
     }
-  // gufo #315: a required choice is forced decoding, not a post-hoc check, so
-  // it carries the tool grammar whatever `parallel_tool_calls` and tool
-  // strictness say. The declared names and argument schemas then bound what
-  // the model can write, and the requirement cannot go unmet.
+  // Required choices constrain decoding even for non-strict parallel tools.
   const bool required_tools =
       request.tool_choice == ChatRequest::ToolChoice::kRequired;
   if (!request.response_format &&
@@ -82,6 +79,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
   if (!request.tools.empty() &&
       request.tool_choice != ChatRequest::ToolChoice::kNone) {
     std::vector<sampling::JsonConstraint::Tool> tools;
+    std::vector<sampling::JsonConstraint::Tool> native_tools;
+    auto format = runner.ToolFormat();
     for (const auto& tool : request.tools) {
       const auto definition = tool.definition_json.empty()
                                   ? json::Value()
@@ -99,8 +98,11 @@ std::optional<ChatRequest> ConstrainChatRequest(
           schema["additionalProperties"] = false;
       }
       std::shared_ptr<const sampling::JsonConstraint> arguments;
+      std::shared_ptr<const sampling::JsonConstraint> native;
       try {
         arguments = sampling::JsonConstraint::Compile(schema, enforce);
+        native =
+            sampling::JsonConstraint::ToolParameters(schema, enforce, format);
       } catch (const std::invalid_argument&) {
         if (enforce)
           throw;
@@ -110,25 +112,37 @@ std::optional<ChatRequest> ConstrainChatRequest(
         arguments = sampling::JsonConstraint::Object();
       }
       tools.emplace_back(tool.name, std::move(arguments));
+      native_tools.emplace_back(tool.name, std::move(native));
     }
+    if (std::ranges::all_of(native_tools, [](const auto& tool) {
+          return tool.second != nullptr;
+        }))
+      tools = std::move(native_tools);
+    else
+      format = sampling::JsonConstraint::ToolFormat::kJson;
     grammar = sampling::JsonConstraint::WithTools(
         grammar, std::move(tools),
         request.tool_choice == ChatRequest::ToolChoice::kRequired,
-        !request.response_format && request.parallel_tool_calls);
-    instruction +=
-        "\nIf a tool is needed, respond using the JSON tool-call form "
-        "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
-        "tool_call>. "
-        "Tool arguments must follow the chosen function's schema.";
+        !request.response_format && request.parallel_tool_calls, format);
+    if (format == sampling::JsonConstraint::ToolFormat::kJson)
+      instruction +=
+          "\nIf a tool is needed, respond using the JSON tool-call form "
+          "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
+          "tool_call>. "
+          "Tool arguments must follow the chosen function's schema.";
     if (request.response_format)
       instruction += " The JSON response schema applies to the final answer.";
   }
   if (!request.response_format_description.empty())
     instruction.insert(0, request.response_format_description + "\n\n");
-  if (!constrained.messages.empty() &&
-      (constrained.messages.front().role == tokenization::ChatRole::kSystem ||
-       constrained.messages.front().role ==
-           tokenization::ChatRole::kDeveloper)) {
+  if (instruction.empty()) {
+    // Native constraints follow the model's existing template. In particular
+    // they do not change prompt tokens or invalidate continuation checkpoints.
+  } else if (!constrained.messages.empty() &&
+             (constrained.messages.front().role ==
+                  tokenization::ChatRole::kSystem ||
+              constrained.messages.front().role ==
+                  tokenization::ChatRole::kDeveloper)) {
     constrained.messages.front().content += "\n\n" + instruction;
   } else {
     constrained.messages.insert(
@@ -594,7 +608,8 @@ public:
     if (!frontier_.has_value()) {
       throw std::logic_error("Qwen state has no next-token frontier");
     }
-    if (sampler.config().can_use_unmodified_argmax()) {
+    if (sampler.config().can_use_unmodified_argmax() ||
+        (verifier_ == nullptr && sampler.CanSelectArgmax(*frontier_))) {
       return *frontier_;
     }
     if (frontier_logits_.empty()) {
@@ -882,6 +897,9 @@ const QwenTextRunnerState& RequireQwenState(const TextRunnerState& state) {
 
 class QwenTextRunner final : public TextModelRunner {
 public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kQwen;
+  }
   QwenTextRunner(
       std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t max_context,
       std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model = nullptr,
@@ -1627,6 +1645,9 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
 
 class DeepSeekTextRunner final : public TextModelRunner {
 public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kDeepSeek;
+  }
   DeepSeekTextRunner(std::shared_ptr<models::deepseek_v4_flash::Model> model,
                      std::uint32_t max_context, bool use_dspark,
                      std::uint32_t max_draft_tokens,
@@ -2380,6 +2401,9 @@ const QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
 
 class QwenFlashNextTextRunner final : public TextModelRunner {
 public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kQwen;
+  }
   QwenFlashNextTextRunner(std::shared_ptr<QwenFlashNextModel> model,
                           std::uint32_t max_context, bool use_mtp,
                           std::uint32_t max_draft_tokens,

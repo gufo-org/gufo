@@ -2419,6 +2419,23 @@ bool Executor::RestoreSnapshot(Session& session,
   return true;
 }
 
+bool Executor::ReadVerificationRows(std::uint32_t row, std::span<float> logits,
+                                    std::string* error_msg) const {
+  const auto vocab = config().vocab_size;
+  if (row >= options_.max_speculative || logits.empty() ||
+      logits.size() % vocab != 0 ||
+      logits.size() / vocab > options_.max_speculative - row) {
+    AssignError(error_msg, "invalid verification row");
+    return false;
+  }
+  return Check(hipMemcpyAsync(logits.data(), VerificationLogits() + row * vocab,
+                              logits.size_bytes(), hipMemcpyDeviceToHost,
+                              stream_),
+               "constrained verification row download", error_msg) &&
+         Check(hipStreamSynchronize(stream_), "constrained verification",
+               error_msg);
+}
+
 bool Executor::GreedyMtpPredictions(std::span<ArgmaxCandidate> predictions,
                                     std::string* error_msg) const {
   const auto rows = predictions.size();

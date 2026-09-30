@@ -226,6 +226,10 @@ public:
   BuildConstraintVocabulary() const {
     throw std::invalid_argument("model does not support structured output");
   }
+  [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
+      const {
+    return sampling::JsonConstraint::ToolFormat::kJson;
+  }
   [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
       std::shared_ptr<const sampling::JsonConstraint> grammar) const;
 

@@ -40,6 +40,8 @@ public:
   }
   static std::shared_ptr<const JsonSchemaLexeme> String(
       const json::Value& schema);
+  static std::shared_ptr<const JsonSchemaLexeme> RawString(
+      const json::Value& schema, std::string delimiter);
   static std::shared_ptr<const JsonSchemaLexeme> Number(
       const json::Value& schema, bool integer);
   static std::shared_ptr<const JsonSchemaLexeme> Whitespace();

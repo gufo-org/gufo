@@ -97,6 +97,9 @@ public:
   /// Draft q may remain unconstrained; target p always uses this request's
   /// grammar.
   [[nodiscard]] SamplerState WithoutConstraint() const;
+  /// An already validated finite, unmodified argmax can be selected without
+  /// downloading logits when it also satisfies the request grammar.
+  [[nodiscard]] bool CanSelectArgmax(TokenId token) const;
   [[nodiscard]] std::span<const TokenId> history() const noexcept;
   [[nodiscard]] std::span<const TokenPenalty> penalties() const noexcept {
     return penalty_counts_;

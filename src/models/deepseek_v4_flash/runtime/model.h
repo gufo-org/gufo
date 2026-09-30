@@ -63,6 +63,9 @@ struct ds4_dspark_sampler {
                  const ds4_dspark_candidates* candidates) = nullptr;
   int (*verify)(void* ctx, uint32_t row, const float* logits,
                 uint32_t vocabulary_size, int draft) = nullptr;
+  // Accept an already-computed target argmax only when it is also the exact
+  // request selection. A false result must leave sampler state unchanged.
+  bool (*try_accept_argmax)(void* ctx, int token) = nullptr;
 };
 
 struct ds4_session_dspark_batch_item {
