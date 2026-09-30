@@ -854,7 +854,8 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       const std::uint8_t scale_byte = blk.scales[c >> 1];
       const unsigned ls =
           ((c & 1U) == 0U) ? (scale_byte & 15U) : (scale_byte >> 4U);
-      out.scale = __half2float(blk.d) * static_cast<float>(ls) * 0.25F;
+      out.scale =
+          __half2float(blk.d) * (0.5F + static_cast<float>(ls)) * 0.25F;
       return;
     }
     case core::GgmlType::kQ2_K: {
@@ -863,12 +864,17 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       const std::uint8_t sc = blk.scales[g];
       const unsigned scale = sc & 15U;
       const unsigned mins = sc >> 4U;
-      // Fold the 4-bit group scale into the int8 codes; the affine min rides
-      // the shared offset term (HasOffset covers Q2_K in the WMMA kernel).
+      // Q2_K quants are bit-plane-interleaved across groups: the four pairs
+      // of byte ((g>>3)*32 + (g&1)*16 + j) belong to groups g, g+2, g+4, g+6
+      // at pair ((g>>1)&3). Fold the 4-bit group scale into the int8 codes;
+      // the affine min rides the shared offset term (HasOffset covers Q2_K
+      // in the WMMA kernel).
+      const unsigned pair = ((g >> 1) & 3U);
+      const std::size_t qbase = ((g >> 3) * 32) + ((g & 1) * 16);
 #pragma unroll
       for (int j = 0; j < 16; ++j) {
         const unsigned q =
-            (blk.qs[4 * g + (j >> 2)] >> (2 * (j & 3))) & 3U;
+            (blk.qs[qbase + j] >> (2 * pair)) & 3U;
         out.q[j] = static_cast<std::int8_t>(scale * q);
       }
       out.scale = __half2float(blk.d);

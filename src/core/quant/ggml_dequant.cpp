@@ -795,6 +795,37 @@ void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k) {
   }
 }
 
+void DequantizeQ2_K(const void* src, float* dst, std::size_t k) {
+  struct Block {
+    std::uint8_t scales[16];
+    std::uint8_t qs[64];
+    std::uint16_t d;
+    std::uint16_t dmin;
+  };
+  static_assert(sizeof(Block) == 84);
+  const auto* blocks = static_cast<const Block*>(src);
+  const std::size_t nb = k / 256;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    const float dmin = Fp16ToFloat(blocks[b].dmin);
+    for (std::size_t g = 0; g < 16; ++g) {
+      const std::uint8_t sc = blocks[b].scales[g];
+      const float scale = d * static_cast<float>(sc & 15U);
+      const float mins = dmin * static_cast<float>(sc >> 4U);
+      // Bit-plane-interleaved quants (see device decoder): pair ((g>>1)&3)
+      // of bytes ((g>>3)*32 + (g&1)*16 + j).
+      const unsigned pair = ((g >> 1) & 3U);
+      const std::size_t qbase = ((g >> 3) * 32) + ((g & 1) * 16);
+      for (int j = 0; j < 16; ++j) {
+        const unsigned q =
+            (blocks[b].qs[qbase + j] >> (2 * pair)) & 3U;
+        dst[(b * 256) + (g * 16) + j] = scale * q - mins;
+      }
+    }
+  }
+}
+
+
 
 float DotProductIQ4_NL(const void* row_data, std::span<const float> vec,
                        std::size_t k) {
