@@ -626,24 +626,9 @@ std::optional<HttpResponse> ParseToolControls(const json::Value& body,
       choice && choice->is_object())
     output->chat.parallel_tool_calls =
         false;  // Forced functions execute exactly once.
-  try {
-    for (const auto& tool : output->chat.tools) {
-      const auto definition = json::parse(tool.definition_json);
-      const auto* function = definition.find("function");
-      const auto* strict = function ? function->find("strict") : nullptr;
-      if (strict && strict->as_bool()) {
-        output->chat.constrained_tools =
-            output->chat.tool_choice != ChatRequest::ToolChoice::kNone;
-      }
-    }
-  } catch (const std::exception& error) {
-    return Error(400, "Bad Request", error.what(), "invalid_tools");
-  }
-  output->chat.constrained_tools |=
+  output->chat.constrained_tools =
       !output->chat.tools.empty() &&
-      output->chat.tool_choice != ChatRequest::ToolChoice::kNone &&
-      (!output->chat.parallel_tool_calls ||
-       output->chat.tool_choice == ChatRequest::ToolChoice::kRequired);
+      output->chat.tool_choice != ChatRequest::ToolChoice::kNone;
 
   return {};
 }
@@ -832,10 +817,6 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
           &parsed_sampling)) {
     return Error(400, "Bad Request", sampling_error->message,
                  sampling_error->code.c_str());
-  }
-  if (parsed_sampling.temperature > 2.0F) {
-    return Error(400, "Bad Request", "'temperature' must be between 0 and 2",
-                 "invalid_temperature");
   }
   output->sampling = parsed_sampling;
 

@@ -527,6 +527,11 @@ if (BUILD_TESTING)
   set_tests_properties(serving_bench_test PROPERTIES
     LABELS "cpu;tools;server;benchmarks;statistics;json")
 
+  add_test(NAME functional_runner_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/test_runner.py)
+  set_tests_properties(functional_runner_test PROPERTIES LABELS "cpu;server;functional")
+
   add_test(NAME speculative_corpus_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/speculative_corpus_test.py)

@@ -48,6 +48,19 @@ video generation or duplicate suites for routine edits. A missing-model skip
 is not a quality pass. Broaden checks when shared behavior changes or failures
 expose risk.
 
+Text API functional/regression tests live in [tests/functional/](tests/functional/README.md).
+Use its runner with focused suites for sampling, tools, stops, thinking, images,
+concurrency and cache changes. Include `long-context` and `cache` when changing
+conversation state, cancellation or restore. Compare each request's prefill,
+decode, queue, restore and end-to-end timings with `--baseline`; investigate
+flagged regressions in addition to the standard speed benchmark. Each request
+and phase must pass independently; never qualify a change from an overall
+average. Retain output and schema gates plus affected numerical sampler/model
+tests: HTTP success and seed replay alone do not establish model quality.
+Keep these tests here, not in
+`tools/`, and keep model runs outside hosted CI. Use focused model/mode coverage
+during iteration; expand it for shared behavior without repeating full sweeps.
+
 ## Profiling and kernels
 
 Apply [.agents/skills/optimize-kernel/SKILL.md](.agents/skills/optimize-kernel/SKILL.md).

@@ -107,7 +107,8 @@ their own settings.
 Use `--think off` or request `"reasoning_effort": "none"` to disable thinking.
 DeepSeek maps `minimal`/`low` to `low`, `medium`/`high`/`xhigh` to `high`,
 and `max` to `max`.
-The SDK check `--suite sampling-defaults --sampling-preset qwen38` (or
+The [functional suite](../tests/functional/README.md) with
+`--suite sampling-defaults --sampling-preset qwen38` (or
 `deepseek4`) compares omitted and explicit settings, including C2 replay.
 
 Sources: [Qwen27B](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
@@ -214,7 +215,7 @@ Qwen27B at full context needs larger staging and `--cache-disk-bytes` limits;
 use the required size reported in the skip log.
 
 For a focused cancellation check, run
-`python3 tools/serving/check-continuation.py --output /tmp/cache-check.json`
+`python3 tests/functional/continuation.py --output /tmp/cache-check.json`
 against a private server named `cache-test` on port 5815.
 It checks interruption during reasoning and visible output, with and without
 reasoning replay, greedy/seeded sampling, and explicit cache bypass. Use
@@ -622,7 +623,11 @@ repetition penalty. Speculative rejection discards tentative counts; seeded
 sampling replay retains independent request histories.
 
 Tool calls are emitted only for declared functions when `tool_choice` allows
-calling tools. `tool_choice: "required"` constrains decoding to a declared call,
+calling tools. With `auto`, ordinary text and reasoning remain allowed; once a
+call starts, decoding constrains its name and argument format. Non-strict tools
+keep optional arguments optional. Untyped arguments retain native best-effort
+semantics; schemas that cannot use native tags fall back to JSON.
+`tool_choice: "required"` constrains decoding to a declared call,
 so the requirement is forced rather than checked afterwards. Where the backend
 cannot constrain sampling, an unmet `required` choice still returns
 `tool_choice_unsatisfied` (HTTP 502, or an SSE error after streaming starts).
@@ -692,7 +697,7 @@ References: [OpenAI Chat Completions](https://developers.openai.com/api/referenc
 [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs),
 [JSON Schema patterns](https://json-schema.org/draft/2020-12/json-schema-validation#name-pattern)
 and [llama.cpp grammar sampling](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/sampling.cpp).
-Verify with `tools/serving/check-openai-sdk.py --suite tools`,
+Verify with `tests/functional/openai_sdk.py --suite tools`,
 `--suite structured` or `--suite structured-limits`
 (add `--vision` for an image-capable server).
 

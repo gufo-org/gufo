@@ -435,6 +435,13 @@ void TestCompatibilityRequests() {
              "length");
     }
     const int calls = server.backend->calls;
+    for (const auto& [field, value] :
+         {std::pair{"temperature", 2.01}, std::pair{"presence_penalty", 2.01},
+          std::pair{"frequency_penalty", -2.01}}) {
+      auto invalid = body;
+      invalid[field] = value;
+      ExpectStatus(server.Post(endpoint.path, invalid.dump()), 400);
+    }
     for (const auto value : {"0", "-1", "1.5", "1e100", "\"1\"", "null"}) {
       auto invalid = body;
       invalid[endpoint.limit] = parse(value);
@@ -599,6 +606,12 @@ void TestRawCompletionStreaming() {
   assert(terminal.find("choices")->items()[0].member_str("finish_reason") ==
          "stop");
   assert(terminal.find("usage") == nullptr);
+  const auto* timings = terminal.find("timings");
+  assert(timings != nullptr);
+  assert(timings->member_size("prompt_n") == 2);
+  assert(timings->member_double("prompt_ms") == 4);
+  assert(timings->member_size("predicted_n") == 1);
+  assert(timings->member_size("cache_n") == 8);
   const auto& usage = events[2];
   assert(usage.find("choices")->items().empty());
   assert(usage.find("usage")->member_size("completion_tokens") == 1);
@@ -606,6 +619,12 @@ void TestRawCompletionStreaming() {
   assert(response.find("data: [DONE]\n\n") != std::string::npos);
   assert(server.backend->last_ignore_eos);
   assert(server.backend->LastCall().max_tokens == 256);
+
+  const auto without_usage =
+      server.Post("/v1/completions", R"({"prompt":"hello","stream":true})");
+  ExpectStatus(without_usage, 200);
+  assert(without_usage.find("\"timings\":") != std::string::npos);
+  assert(without_usage.find("\"usage\":") == std::string::npos);
 
   server.backend->failure = 1;
   const auto failed = server.Post(

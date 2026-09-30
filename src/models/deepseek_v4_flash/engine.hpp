@@ -60,11 +60,14 @@ public:
   [[nodiscard]] std::unique_ptr<Session> CreateSession(
       core::SessionMode mode, std::uint32_t max_context,
       std::string* error_msg = nullptr);
+  // On cancellation, interrupted is true and no session has been mutated.
+  // Callers may retry the remaining sessions independently.
   [[nodiscard]] bool EvaluateBatch(std::span<const SessionBatchItem> items,
-                                   std::string* error_msg = nullptr) const;
+                                   std::string* error_msg = nullptr,
+                                   bool* interrupted = nullptr) const;
   [[nodiscard]] bool DsparkStepBatch(
       std::span<const SessionDsparkBatchItem> items,
-      std::string* error_msg = nullptr) const;
+      std::string* error_msg = nullptr, bool* interrupted = nullptr) const;
   [[nodiscard]] std::vector<int> Tokenize(
       std::string_view text, bool parse_special_tokens = false) const;
   [[nodiscard]] std::vector<int> EncodeChat(std::string_view system_prompt,

@@ -175,6 +175,9 @@ public:
     const auto* properties = root->find("properties");
     if (!properties)
       return {};
+    if (const auto* extra = root->find("additionalProperties");
+        extra && (!extra->is_bool() || extra->as_bool()))
+      return {};
     std::set<std::string> required;
     if (const auto* fields = root->find("required"))
       for (const auto& field : fields->items())
@@ -260,6 +263,31 @@ public:
       body = Seq(std::move(ordered));
     }
     grammar_->root_ = body;
+    (void)grammar_->Start();
+    return std::move(grammar_);
+  }
+
+  std::shared_ptr<const JsonConstraint> OpenToolParameters(
+      JsonConstraint::ToolFormat format) {
+    using Format = JsonConstraint::ToolFormat;
+    const bool qwen = format == Format::kQwen;
+    // Dynamic names must survive the native parser's trimming and cannot
+    // contain tag/attribute delimiters. Values retain literal UTF-8 text.
+    const auto name_schema = json::parse(
+        R"({"type":"string","pattern":"^[^<>\"=\\s](?:[^<>\"=\\r\\n]*[^<>\"=\\s])?$"})");
+    const auto name =
+        Lexeme(JsonSchemaLexeme::RawString(name_schema, qwen ? ">" : "\""));
+    const std::string close = qwen ? "\n</parameter>" : "</｜DSML｜parameter>";
+    const auto raw = Optional(
+        Lexeme(JsonSchemaLexeme::RawString(json::Value::object(), close)));
+    const auto value = qwen ? Seq({Literal(">\n"), raw})
+                            : Alt({Seq({Literal("\" string=\"true\">"), raw}),
+                                   Seq({Literal("\" string=\"false\">"),
+                                        GenericValue(kMaxDepth)})});
+    const auto parameter =
+        Seq({Literal(qwen ? "<parameter=" : "<｜DSML｜parameter name=\""), name,
+             value, Literal(close + "\n")});
+    grammar_->root_ = Repeat(parameter);
     (void)grammar_->Start();
     return std::move(grammar_);
   }
@@ -1235,6 +1263,23 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
   return cache.emplace(key, std::move(grammar)).first->second;
 }
 
+std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
+    ToolFormat format) {
+  if (format == ToolFormat::kJson)
+    return Object();
+  static const auto qwen = [] {
+    const auto schema = json::Value::object();
+    return JsonConstraintCompiler(schema, false)
+        .OpenToolParameters(ToolFormat::kQwen);
+  }();
+  static const auto deepseek = [] {
+    const auto schema = json::Value::object();
+    return JsonConstraintCompiler(schema, false)
+        .OpenToolParameters(ToolFormat::kDeepSeek);
+  }();
+  return format == ToolFormat::kQwen ? qwen : deepseek;
+}
+
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
     std::shared_ptr<const JsonConstraint> answer) {
   // Cache separately from schema compilation. No mutable phase belongs to the
@@ -1254,6 +1299,10 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
   const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
   grammar->rules_.resize(base + end.size());
   for (std::size_t prefix = 0; prefix < end.size(); ++prefix) {
+    // Automatic calls must not turn a natural reasoning-only stop into a
+    // mandatory call. The request's output cap also remains independent.
+    if (grammar->automatic_tools_)
+      grammar->rules_[base + prefix].push_back({});
     std::array<std::bitset<256>, end.size() + 1> transitions;
     for (unsigned byte = 0; byte < 256; ++byte) {
       std::string candidate(end.substr(0, prefix));
@@ -1302,6 +1351,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   auto grammar = std::shared_ptr<JsonConstraint>(
       new JsonConstraint(answer ? *answer : *Object()));
   grammar->stop_only_when_complete_ = !plain_answer && !parallel;
+  grammar->automatic_tools_ = plain_answer && !required;
   Rule alternatives;
   if (!required && answer)
     alternatives.push_back({answer->root_});
@@ -1598,7 +1648,8 @@ std::vector<std::uint8_t> ConstraintVocabulary::Allowed(
   std::vector<std::uint8_t> mask(pieces_.size());
   if (grammar.Complete(state)) {
     for (std::size_t i = 0; i < pieces_.size(); ++i)
-      mask[i] = pieces_[i].stop;
+      mask[i] = pieces_[i].stop ||
+                (grammar.automatic_tools_ && pieces_[i].text.empty());
     if (grammar.stop_only_when_complete_)
       return mask;
   }
@@ -1681,7 +1732,8 @@ JsonConstraint::State ConstraintVocabulary::Accept(
     const JsonConstraint& grammar, const JsonConstraint::State& state,
     std::uint32_t token) const {
   const auto& piece = pieces_.at(token);
-  if (piece.stop && grammar.Complete(state))
+  if ((piece.stop || (grammar.automatic_tools_ && piece.text.empty())) &&
+      grammar.Complete(state))
     return state;
   if (piece.stop || piece.text.empty())
     throw std::runtime_error("invalid token accepted by JSON constraint");
@@ -1702,7 +1754,7 @@ bool ConstraintVocabulary::Allows(const JsonConstraint& grammar,
   if (piece.stop)
     return grammar.Complete(state);
   if (piece.text.empty())
-    return false;
+    return grammar.automatic_tools_ && grammar.Complete(state);
   auto next = state;
   for (const unsigned char byte : piece.text) {
     next = grammar.Advance(next, byte);

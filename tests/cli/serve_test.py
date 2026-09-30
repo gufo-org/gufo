@@ -74,6 +74,10 @@ def main():
     for limit in ("0", "-2", "4294967296"):
         check(["serve", "llm", "--max-tokens", limit], 2,
               "sampling and scheduling limits are invalid")
+    for flag, value in (("--temperature", "2.01"), ("--presence-penalty", "2.01"),
+                        ("--frequency-penalty", "-2.01")):
+        check(["serve", "llm", flag, value], 2,
+              "sampling and scheduling limits are invalid")
     for staging in (None, "0", "8589934592"):
         args = ["serve", "llm", "--model", "missing.gguf",
                 "--cache-disk", "/unused-cache"]

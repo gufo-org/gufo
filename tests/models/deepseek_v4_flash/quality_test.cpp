@@ -533,8 +533,11 @@ void CheckSessionBatch(
   const int token0 = batched[0]->SelectNext(0.0F, nullptr);
   const int token1 = batched[1]->SelectNext(0.0F, nullptr);
   const auto expect_preflight_rejection =
-      [&](std::span<const SessionBatchItem> items, const char* message) {
-        Expect(!model->EvaluateBatch(items, &error), message);
+      [&](std::span<const SessionBatchItem> items, const char* message,
+          bool cancelled = false) {
+        bool interrupted = !cancelled;
+        Expect(!model->EvaluateBatch(items, &error, &interrupted), message);
+        Expect(interrupted == cancelled, "batch cancellation classification");
         Expect(batched[0]->Position() == position0 &&
                    batched[1]->Position() == position1,
                "session batch preflight preserves positions");
@@ -560,7 +563,7 @@ void CheckSessionBatch(
       {.session = batched[1].get(), .token = token1},
   }};
   expect_preflight_rejection(cancelled_items,
-                             "session batch rejects cancelled sessions");
+                             "session batch rejects cancelled sessions", true);
   batched[1]->SetCancellationCheck({});
 
   int comparisons = 0;

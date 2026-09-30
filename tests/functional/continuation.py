@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Short HTTP cancellation/replay checks; restart the same server for --restore.
+"""Functional HTTP cancellation/replay checks; restart the same server for --restore.
 
 Use a private server with --served-model-name cache-test. Add --cache-disk
 only when checking restart persistence; in-memory reuse needs no disk cache.
@@ -17,6 +17,9 @@ from pathlib import Path
 import socket
 import time
 from urllib.parse import urlsplit
+from metrics import Recorder
+
+TRACE = Recorder(None)
 
 CASES = tuple(f"{field}-preserve{preserve}-sampled{sampled}"
               for sampled in (0, 1)
@@ -29,18 +32,31 @@ def call(url, body, stop_field=None):
     cls = http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
     connection = cls(target.hostname, target.port, timeout=180)
     started = time.monotonic()
+    measurement = TRACE.begin("/v1/chat/completions", body)
     connection.request("POST", target.path.rstrip("/") + "/v1/chat/completions",
                        json.dumps(body), {"Content-Type": "application/json"})
     response = connection.getresponse()
+    measurement.row["http_status"] = response.status
+    measurement.row["request_id"] = response.getheader("X-Request-ID")
     if response.status != 200:
-        raise RuntimeError(f"HTTP {response.status}: {response.read().decode()}")
+        data = response.read()
+        measurement.feed(data)
+        measurement.ended = True
+        measurement.finish()
+        connection.close()
+        raise RuntimeError(f"HTTP {response.status}: {data.decode()}")
     if stop_field is None:
-        result = json.loads(response.read())
+        data = response.read()
+        measurement.feed(data)
+        measurement.ended = True
+        measurement.finish()
+        result = json.loads(data)
         connection.close()
         return result
     message = {"role": "assistant", "content": "", "reasoning_content": ""}
     pieces = 0
     for line in response:
+        measurement.feed(line)
         if not line.startswith(b"data: "):
             continue
         raw = line[6:].strip()
@@ -57,8 +73,11 @@ def call(url, body, stop_field=None):
                 connection.sock.shutdown(socket.SHUT_RDWR)
             response.close()
             connection.close()
+            measurement.finish()
             return message, time.monotonic() - started
     connection.close()
+    measurement.ended = True
+    measurement.finish()
     raise RuntimeError(f"fixture never reached eight {stop_field} deltas")
 
 
@@ -98,6 +117,7 @@ def main():
     parser.add_argument("--case", action="append", choices=CASES,
                         help="Run only this case (repeatable for focused checks)")
     args = parser.parse_args()
+    TRACE.path = args.output.with_suffix(".requests.json")
     if args.append_image and not args.image:
         parser.error("--append-image requires --image")
     reports = []

@@ -756,31 +756,34 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
             [generation = std::move(generation), id, created, model,
              include_usage,
              stream_log](const HttpResponse::BodyWriter& writer) {
-              const auto write_chunk = [&](std::string_view piece,
-                                           std::string_view finish_reason,
-                                           const json::Value* usage = nullptr) {
-                json::Value chunk = json::Value::object();
-                chunk["id"] = id;
-                chunk["object"] = "text_completion";
-                chunk["created"] = created;
-                chunk["model"] = model;
-                json::Value choices = json::Value::array();
-                if (usage == nullptr) {
-                  json::Value choice = json::Value::object();
-                  choice["text"] = std::string(piece);
-                  choice["index"] = 0;
-                  choice["logprobs"] = json::Value();
-                  choice["finish_reason"] =
-                      finish_reason.empty()
-                          ? json::Value()
-                          : json::Value(std::string(finish_reason));
-                  choices.push_back(std::move(choice));
-                }
-                chunk["choices"] = std::move(choices);
-                if (usage != nullptr)
-                  chunk["usage"] = *usage;
-                return writer("data: " + chunk.dump() + "\n\n");
-              };
+              const auto write_chunk =
+                  [&](std::string_view piece, std::string_view finish_reason,
+                      const json::Value* usage = nullptr,
+                      const json::Value* timings = nullptr) {
+                    json::Value chunk = json::Value::object();
+                    chunk["id"] = id;
+                    chunk["object"] = "text_completion";
+                    chunk["created"] = created;
+                    chunk["model"] = model;
+                    json::Value choices = json::Value::array();
+                    if (usage == nullptr) {
+                      json::Value choice = json::Value::object();
+                      choice["text"] = std::string(piece);
+                      choice["index"] = 0;
+                      choice["logprobs"] = json::Value();
+                      choice["finish_reason"] =
+                          finish_reason.empty()
+                              ? json::Value()
+                              : json::Value(std::string(finish_reason));
+                      choices.push_back(std::move(choice));
+                    }
+                    chunk["choices"] = std::move(choices);
+                    if (usage != nullptr)
+                      chunk["usage"] = *usage;
+                    if (timings != nullptr)
+                      chunk["timings"] = *timings;
+                    return writer("data: " + chunk.dump() + "\n\n");
+                  };
               core::Utf8Decoder decoder;
               bool connected = true;
               try {
@@ -795,12 +798,14 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                 if (!connected || result.cancelled)
                   return;
                 const auto trailing = decoder.Push({}, true);
+                const auto timings = GenerationTimings(result);
                 if (!write_chunk(
                         trailing,
                         result.finish_reason ==
                                 TextGenerationBackend::FinishReason::kLength
                             ? "length"
-                            : "stop"))
+                            : "stop",
+                        nullptr, &timings))
                   return;
                 if (include_usage) {
                   const auto usage = UsageJson(result);

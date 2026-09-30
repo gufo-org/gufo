@@ -93,7 +93,9 @@ std::unique_ptr<Session> Model::CreateSession(core::SessionMode mode,
 }
 
 bool Model::EvaluateBatch(std::span<const SessionBatchItem> items,
-                          std::string* error_msg) const {
+                          std::string* error_msg, bool* interrupted) const {
+  if (interrupted)
+    *interrupted = false;
   if (items.size() < 2 || items.size() > 8) {
     AssignError(error_msg,
                 "DeepSeek batch decode requires two to eight sessions");
@@ -115,8 +117,11 @@ bool Model::EvaluateBatch(std::span<const SessionBatchItem> items,
   }
 
   std::array<char, kErrorCapacity> error{};
-  if (ds4_sessions_eval_batch(native_items.data(), item_count, error.data(),
-                              error.size()) != 0) {
+  const int status = ds4_sessions_eval_batch(native_items.data(), item_count,
+                                             error.data(), error.size());
+  if (status != 0) {
+    if (interrupted)
+      *interrupted = status == DS4_SESSION_SYNC_INTERRUPTED;
     AssignError(error_msg, error[0] != '\0' ? error.data()
                                             : "DeepSeek batch decode failed");
     return false;
@@ -125,7 +130,9 @@ bool Model::EvaluateBatch(std::span<const SessionBatchItem> items,
 }
 
 bool Model::DsparkStepBatch(std::span<const SessionDsparkBatchItem> items,
-                            std::string* error_msg) const {
+                            std::string* error_msg, bool* interrupted) const {
+  if (interrupted)
+    *interrupted = false;
   if (items.empty() || items.size() > 8) {
     AssignError(error_msg,
                 "DeepSeek DSpark batch requires one to eight sessions");
@@ -161,8 +168,11 @@ bool Model::DsparkStepBatch(std::span<const SessionDsparkBatchItem> items,
   }
 
   std::array<char, kErrorCapacity> error{};
-  if (ds4_sessions_dspark_step_batch(native_items.data(), items.size(),
-                                     error.data(), error.size()) != 0) {
+  const int status = ds4_sessions_dspark_step_batch(
+      native_items.data(), items.size(), error.data(), error.size());
+  if (status != 0) {
+    if (interrupted)
+      *interrupted = status == DS4_SESSION_SYNC_INTERRUPTED;
     AssignError(error_msg,
                 error[0] != '\0'
                     ? error.data()

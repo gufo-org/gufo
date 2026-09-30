@@ -77,6 +77,14 @@ Qwen27B also checks exact restoration after cancellation between layers.
 Use the [HTTP continuation check](SERVER.md#hip-execution)
 for cancellation, thinking controls and disk restart.
 
+## Text API functional tests
+
+Use [tests/functional/](../tests/functional/README.md) for live API regression
+checks. Its single runner starts a private server and covers SDK transports,
+sampling defaults/overrides, tools, thinking, images, concurrent isolation,
+cancellation and RAM/disk replay. Select focused suites and the affected
+AR/speculative model modes; full model runs stay outside hosted CI.
+
 ## Match validation to the change
 
 | Change | Relevant checks |

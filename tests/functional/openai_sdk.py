@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Gufo's text APIs with the official OpenAI Python SDK.
+"""Functional text API checks with the official OpenAI Python SDK.
 
 Run with nix develop -c python3. Start a Gufo text server first; all requests
 go to the explicitly supplied loopback endpoint.
@@ -10,13 +10,53 @@ import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
+from pathlib import Path
 import struct
 import sys
+import threading
+import time
+import traceback
+from typing import Literal
 import zlib
 from urllib.parse import urlsplit
 
 import openai
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
+from openai.types import Completion, CompletionChoice
+from metrics import Recorder
+
+
+class CompletionStreamChoice(CompletionChoice):
+    # openai-python shares its completed-choice type with legacy stream chunks,
+    # although in-progress chunks legitimately carry finish_reason:null.
+    finish_reason: Literal["stop", "length", "content_filter"] | None
+
+
+class CompletionStreamFrame(Completion):
+    choices: list[CompletionStreamChoice]
+
+
+class CheckResults(dict):
+    """Persist completed cases even if a later request fails or is interrupted."""
+
+    def __init__(self, report, output, recorder):
+        super().__init__()
+        self.report, self.output = report, output
+        self.recorder = recorder
+
+    def save(self):
+        if self.output:
+            self.output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.output.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.report, indent=2) + "\n")
+            temporary.replace(self.output)
+
+    def __setitem__(self, name, value):
+        if name in self:
+            raise AssertionError(f"duplicate functional check: {name}")
+        super().__setitem__(name, value)
+        self.recorder.mark(name)
+        self.save()
 
 
 def chat_result(client, request, streaming=False):
@@ -212,7 +252,8 @@ def image_content(color):
     }
 
 
-def check_sampling_defaults(client, model, checks, preset, overrides, vision=False):
+def check_sampling_defaults(client, model, checks, preset, overrides, vision=False,
+                            server_thinking=None):
     """Omission and explicit presets must replay within each execution mode."""
     def signature(value):
         return value["text"].strip(), value["reasoning"].strip(), value["finish"]
@@ -225,7 +266,8 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
     if not overrides:
         # A default server must use the model's recommended thinking mode,
         # including the same effort instructions as an explicit request.
-        effort = "high" if preset == "deepseek4" else "xhigh"
+        thinking = server_thinking != "off"
+        effort = ("high" if preset == "deepseek4" else "xhigh") if thinking else "none"
         request = {
             "model": model, "seed": 73, "max_completion_tokens": 8,
             "messages": [{"role": "user", "content": "What is two plus two?"}],
@@ -233,10 +275,10 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         }
         default = chat_result(client, request)
         explicit = chat_result(client, {**request, "reasoning_effort": effort}, True)
-        assert default["reasoning"], default
+        assert bool(default["reasoning"]) == thinking, default
         assert signature(default) == signature(explicit), (default, explicit)
         record("default_thinking_effort", default)
-        if preset == "deepseek4":
+        if preset == "deepseek4" and thinking:
             xhigh = chat_result(client, {**request, "reasoning_effort": "xhigh"})
             assert signature(xhigh) == signature(explicit), (xhigh, explicit)
             record("deepseek_xhigh_maps_high", xhigh)
@@ -256,6 +298,11 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         assert overrides.keys() <= (expected.keys() | native.keys()), overrides
         expected.update({key: value for key, value in overrides.items() if key in expected})
         native.update({key: value for key, value in overrides.items() if key in native})
+        # A server seeded from entropy has no replay contract until a request
+        # supplies a seed. Still test that explicit request seed overrides -1.
+        inherited_seed = "seed" in overrides and overrides["seed"] >= 0
+        if expected["seed"] < 0:
+            expected["seed"] = 73
         request = {
             "model": model, "seed": 73, "max_completion_tokens": 8,
             "messages": [{"role": "user", "content":
@@ -263,7 +310,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             "extra_body": {"cache_prompt": False, "chat_template_kwargs": {
                 "enable_thinking": thinking}},
         }
-        if "seed" in overrides:
+        if inherited_seed:
             del request["seed"]
         explicit = {**request, **expected,
                     "extra_body": {**request["extra_body"], **native}}
@@ -273,13 +320,18 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         nullable = chat_result(client, {**request, "temperature": None,
                                        "top_p": None, "presence_penalty": None,
                                        "frequency_penalty": None,
-                                       **({"seed": None} if "seed" in overrides else {})})
+                                       **({"seed": None} if inherited_seed else {})})
         assert signature(nullable) == signature(inherited), (nullable, inherited)
         record(f"sampling_preset_thinking{thinking}", inherited)
 
         # Each change targets one independent control, with and without all
         # other defaults written out; this also checks explicit neutral values.
         for label, override, extra in (
+            ("temperature_only", {"temperature": .4}, {}),
+            ("top_p_only", {"top_p": .6}, {}),
+            ("top_k_only", {}, {"top_k": 0}),
+            ("presence_only", {"presence_penalty": 0}, {}),
+            ("frequency_only", {"frequency_penalty": .2}, {}),
             ("greedy", {"temperature": 0, "presence_penalty": 0}, {"top_k": 0}),
             ("nucleus", {"temperature": .5, "top_p": .7}, {}),
             ("min_p", {"temperature": 1.3, "top_p": 1.}, {"top_k": 0, "min_p": .1}),
@@ -329,7 +381,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             ]}]
             # Allow a complete visual answer; reasoning remains deliberately bounded.
             response_request["max_output_tokens"] = 8 if thinking else 32
-        if "seed" not in overrides:
+        if not inherited_seed:
             response_request["extra_body"]["seed"] = 73
         explicit_response = {
             **response_request,
@@ -356,6 +408,25 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         assert supplied.usage.input_tokens_details.cached_tokens == 0, supplied
         assert response_signature(omitted) == response_signature(supplied), (omitted, supplied)
         record(f"responses_preset_thinking{thinking}", check_response(omitted, thinking))
+        for label, override, extra in (
+            ("temperature_only", {"temperature": 0}, {}),
+            ("top_p_only", {"top_p": .6}, {}),
+            ("top_k_only", {}, {"top_k": 0}),
+            ("presence_only", {}, {"presence_penalty": 0}),
+            ("frequency_only", {}, {"frequency_penalty": .2}),
+            ("min_p_only", {}, {"min_p": .1}),
+        ):
+            partial = {**response_request, **override, "extra_body": {
+                **response_request["extra_body"], **extra}}
+            full = {**explicit_response, **override, "extra_body": {
+                **explicit_response["extra_body"], **extra}}
+            first = client.responses.create(**partial)
+            with client.responses.create(**full, stream=True) as stream:
+                events = list(stream)
+            check_events(events, thinking)
+            assert response_signature(first) == response_signature(events[-1].response), (
+                label, first, events[-1].response)
+            record(f"responses_{label}_thinking{thinking}", check_response(first, thinking))
         cached_response = client.responses.create(**{
             **response_request,
             "extra_body": {**response_request["extra_body"], "cache_prompt": True},
@@ -388,6 +459,219 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             assert actual["finish"] == "stop", actual
             Draft202012Validator(schema).validate(json.loads(actual["text"]))
         record(f"sampling_schema_thinking{thinking}", actual)
+
+        # Raw Completions has no chat template control; its preset follows the
+        # server's configured thinking mode rather than this Chat request.
+        if thinking == (server_thinking != "off"):
+            raw = dict(model=model, prompt="One, two, three,",
+                       max_tokens=8, seed=73, extra_body={})
+            if inherited_seed:
+                del raw["seed"]
+            full = {**raw, **expected, "extra_body": {**raw["extra_body"], **native}}
+            for label, change in (("defaults", {}), ("temperature_only", {"temperature": 0}),
+                                  ("top_p_only", {"top_p": .6})):
+                first = completion_result(client, {**raw, **change})
+                second = completion_result(client, {**full, **change}, True)
+                assert first["text"] == second["text"] and first["finish"] == second["finish"], (
+                    first, second)
+                record("completions_" + label, first)
+
+
+def completion_result(client, request, streaming=False):
+    # Use the SDK's ordinary legacy stream path, then validate the wire shape
+    # with only its in-progress finish_reason made nullable. Keep the original
+    # shared client immutable; other threads still use strict Chat/Responses.
+    stream_client = client.copy(_extra_kwargs={"_strict_response_validation": False})
+    result = (stream_client if streaming else client).completions.create(**request, stream=streaming,
+        **({"stream_options": {"include_usage": True}} if streaming else {}))
+    if not streaming:
+        return {"text": result.choices[0].text, "finish": result.choices[0].finish_reason,
+                "usage": result.usage.to_dict()}
+    text, finish, usage = "", None, None
+    with result:
+        for chunk in result:
+            CompletionStreamFrame.model_validate(chunk.to_dict())
+            if chunk.usage:
+                usage = chunk.usage.to_dict()
+            for choice in chunk.choices:
+                text += choice.text
+                finish = choice.finish_reason or finish
+    assert finish is not None and usage is not None, (finish, usage)
+    return {"text": text, "finish": finish, "usage": usage}
+
+
+def check_sampling_ranges(client, model, checks):
+    """Malformed inputs fail before SSE starts, consistently across transports."""
+    endpoints = {
+        "chat": (client.chat.completions.create, {
+            "model": model, "messages": [{"role": "user", "content": "Hello"}],
+            "max_completion_tokens": 1}),
+        "responses": (client.responses.create, {
+            "model": model, "input": "Hello", "max_output_tokens": 1, "store": False}),
+        "completions": (client.completions.create, {
+            "model": model, "prompt": "Hello", "max_tokens": 1}),
+    }
+    invalid = (
+        ("temperature", -1), ("temperature", 2.01),
+        ("temperature", "hot"), ("temperature", True),
+        ("top_p", 0), ("top_p", -0.1), ("top_p", 1.01), ("top_p", "0.9"),
+        ("top_k", -1), ("top_k", 1.5), ("min_p", -0.1), ("min_p", 1.1),
+        ("repeat_penalty", 0), ("repeat_last_n", -1), ("seed", -2),
+        ("presence_penalty", 2.1), ("frequency_penalty", -2.1),
+        ("draft_temperature", .7), ("typical_p", .9),
+    )
+    for endpoint, (create, body) in endpoints.items():
+        for streaming in (False, True):
+            for index, (name, value) in enumerate(invalid):
+                try:
+                    response = create(**body, stream=streaming, extra_body={name: value})
+                except openai.BadRequestError as error:
+                    assert error.status_code == 400 and error.code, error
+                    checks[f"range_{endpoint}_{streaming}_{index}_{name}"] = {
+                        "status": 400, "code": error.code, "value": value}
+                else:
+                    if streaming:
+                        response.close()
+                    raise AssertionError(f"{endpoint} accepted invalid {name}={value!r}")
+        # Boundaries are valid; use greedy selection to avoid probabilistic assertions.
+        for top_p in (.0001, 1.):
+            response = create(**body, temperature=0, top_p=top_p)
+            checks[f"range_{endpoint}_valid_{top_p}"] = response.to_dict()
+
+
+def check_batches(client, model, checks, width, vision=False, speculative="off"):
+    """Different endpoints/samplers/grammars share a physical batch without state leakage."""
+    cases = []
+    values = []
+    for index in range(width):
+        name = f"row_{index}"
+        value = name + ": " + " ".join(f"item{n}" for n in range(16))
+        values.append(value)
+        body = dict(model=model, temperature=0 if index % 2 == 0 else .7, seed=101 + index,
+                    top_p=.85, presence_penalty=.2, frequency_penalty=.1,
+                    max_completion_tokens=48,
+                    messages=[{"role": "user", "content": "Count from one to twenty."}],
+                    extra_body={"cache_prompt": True, "top_k": 20,
+                                "chat_template_kwargs": {"enable_thinking": False}})
+        if index % 3 == 1:
+            body.update(tools=[{"type": "function", "function": {
+                "name": name, "parameters": {"type": "object", "properties": {
+                    "value": {"type": "string", "const": value}},
+                    "required": ["value"], "additionalProperties": False}}}],
+                tool_choice="auto", parallel_tool_calls=False, max_completion_tokens=128,
+                messages=[{"role": "user", "content": f"Call {name} once with its required value."}])
+        elif index % 3 == 2:
+            body.update(response_format={"type": "json_schema", "json_schema": {
+                "name": name, "strict": True, "schema": {"type": "object",
+                "properties": {"value": {"type": "string", "const": value}},
+                "required": ["value"], "additionalProperties": False}}},
+                max_completion_tokens=96,
+                messages=[{"role": "user", "content": "Return JSON with the required value."}])
+        if vision and index == width - 1:
+            content = body["messages"][0]["content"]
+            body["messages"][0]["content"] = [
+                image_content("red"), {"type": "text", "text": content}]
+        # Cache all prompts before measuring concurrency, so short prefills cannot
+        # turn the intended physical batch into sequential requests.
+        chat_result(client, {**body, "max_completion_tokens": 1})
+        cases.append(body)
+    # Each row must outlive admission of its peers. A seven-token schema can
+    # finish in one speculative cycle and cannot qualify the requested width.
+    start = threading.Barrier(width)
+    def simultaneous(body):
+        start.wait(timeout=30)
+        return chat_result(client, body, True)
+    with ThreadPoolExecutor(width) as pool:
+        first = list(pool.map(simultaneous, cases))
+    assert max(row["usage"]["gufo"]["physical_execution_width"] for row in first) == width, first
+    for index, (body, row) in enumerate(zip(cases, first)):
+        replay = chat_result(client, body)
+        def signature(result):
+            return result["text"], result["reasoning"], result["finish"], [
+                call["function"] for call in result["tools"]]
+        if speculative == "dspark" and body["temperature"] > 0:
+            # Filtered DSpark C>1 uses p/q proposals, while C1 uses a point
+            # mass. Both preserve p, but their same-seed traces can differ.
+            # Test exact cache replay with the same C1 execution configuration.
+            repeated = chat_result(client, body, True)
+            assert signature(replay) == signature(repeated), (replay, repeated)
+        else:
+            assert signature(row) == signature(replay), (row, replay)
+        assert replay["usage"]["cached_tokens"] > 0, replay
+        if index % 3 == 1:
+            assert row["tools"] and all(
+                call["function"]["name"] == f"row_{index}"
+                and json.loads(call["function"]["arguments"]) == {"value": values[index]}
+                for call in row["tools"]), row
+        elif index % 3 == 2:
+            assert json.loads(row["text"]) == {"value": values[index]}, row
+    checks[f"batch_c{width}_independent_samplers_and_grammars"] = first
+
+    def cross_endpoint(index):
+        # Each endpoint must retain its own seeded output when mixed with the
+        # other transports. Their prompt templates need not be byte-identical.
+        if index % 3 == 0:
+            value = chat_result(client, cases[0], True)
+            return (value["text"], value["reasoning"], value["finish"])
+        if index % 3 == 1:
+            request = dict(model=model, input="Count from one to twenty.", temperature=.7,
+                           top_p=1 if speculative == "dspark" else .85,
+                           max_output_tokens=24, store=False,
+                           reasoning={"effort": "none"}, extra_body={
+                               "seed": 101 + index,
+                               **({"top_k": 0} if speculative == "dspark" else {})})
+            with client.responses.create(**request, stream=True) as stream:
+                events = list(stream)
+            check_events(events, False)
+            response = events[-1].response
+            return response.output_text, response.status
+        result = completion_result(client, dict(
+            model=model, prompt="One, two, three,", temperature=.7,
+            top_p=1 if speculative == "dspark" else .85, seed=101 + index,
+            max_tokens=24, extra_body=(
+                {"top_k": 0} if speculative == "dspark" else {})), True)
+        return result["text"], result["finish"]
+    indices = range(max(3, width))
+    expected = [cross_endpoint(index) for index in indices]
+    with ThreadPoolExecutor(width) as pool:
+        actual = list(pool.map(cross_endpoint, indices))
+    assert actual == expected, (actual, expected)
+    checks[f"batch_c{width}_chat_responses_completions_replay"] = actual
+    if width == 1:
+        return
+
+    def cancel_peer(index):
+        if index:
+            return cross_endpoint(index)
+        pieces = 0
+        with client.chat.completions.create(**cases[0], stream=True) as stream:
+            for chunk in stream:
+                pieces += sum(bool(choice.delta.content) for choice in chunk.choices)
+                if pieces >= 3:
+                    break
+            else:
+                raise AssertionError("batch cancellation never reached visible output")
+        return None
+
+    with ThreadPoolExecutor(width) as pool:
+        cancelled = list(pool.map(cancel_peer, indices))
+    assert cancelled[1:] == expected[1:], (cancelled, expected)
+    assert cross_endpoint(0) == expected[0], "cancelled row failed to replay from cache"
+    checks[f"batch_c{width}_cancelled_peer_isolation"] = cancelled
+
+    def invalid_peer(index):
+        if index:
+            return cross_endpoint(index)
+        try:
+            client.chat.completions.create(**{**cases[0], "top_p": 0}, stream=True)
+        except openai.BadRequestError:
+            return None
+        raise AssertionError("invalid peer entered generation")
+
+    with ThreadPoolExecutor(width) as pool:
+        rejected = list(pool.map(invalid_peer, indices))
+    assert rejected[1:] == expected[1:], (rejected, expected)
+    checks[f"batch_c{width}_rejected_peer_isolation"] = rejected
 
 
 def check_conversations(client, model, checks, vision=False):
@@ -563,6 +847,135 @@ def check_conversations(client, model, checks, vision=False):
             r["text"] == expected["text"].split(marker)[0] and r["finish"] == "stop"
         ), r
 
+        # Close after SSE headers, before consuming output from a longer image
+        # prefill. Reuse may keep only completed checkpoints, never partial state.
+        request = body([
+            image_content("blue"),
+            {"type": "text", "text": "Name this image's dominant color in one sentence."},
+        ], max_completion_tokens=16, presence_penalty=0)
+        request["messages"].insert(0, {
+            "role": "system", "content": "Follow the final instruction carefully. " * 256})
+        with client.chat.completions.create(**request, stream=True):
+            time.sleep(.05)
+        request["extra_body"]["cache_prompt"] = True
+        resumed = chat("vision_prefill_cancel_resume", request, True)
+        warm = chat("vision_prefill_cancel_warm", request)
+        cold = chat("vision_prefill_cancel_cold", {
+            **request, "extra_body": {**request["extra_body"], "cache_prompt": False}})
+        assert signature(resumed) == signature(warm) == signature(cold), (resumed, warm, cold)
+        assert warm["usage"]["cached_tokens"] > 0, warm
+
+
+def check_long_context(client, model, checks, context, vision=False):
+    """A bounded, multi-turn agent history; actual depth is retained in usage."""
+    if context < 8192:
+        raise ValueError("long-context requires a server context of at least 8192")
+    archive = ("Archive entry: this ordinary record has no new instructions.\n"
+               * (context // 32))
+    messages = [
+        {"role": "system", "content": "Remember the secret keyword LANTERN.\n" + archive},
+        {"role": "user", "content": "Return the secret keyword in the requested JSON format."},
+    ]
+    if vision:
+        messages[-1]["content"] = [
+            image_content("red"),
+            {"type": "text", "text": "Return the secret keyword in the requested JSON format."},
+        ]
+    schema = {"type": "object", "properties": {"keyword": {"type": "string"}},
+              "required": ["keyword"], "additionalProperties": False}
+    extra = {"cache_prompt": True,
+             "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": True},
+             "top_k": 20, "min_p": 0}
+    request = dict(model=model, messages=messages, temperature=0, top_p=.95,
+                   presence_penalty=0, frequency_penalty=0, seed=42,
+                   max_completion_tokens=32, extra_body=extra,
+                   response_format={"type": "json_schema", "json_schema": {
+                       "name": "remembered_keyword", "strict": True, "schema": schema}})
+
+    def chat(label, body, stream=False):
+        result = chat_result(client, body, stream)
+        checks[label] = result
+        return result
+
+    def signature(result):
+        return result["text"], result["reasoning"].strip(), result["finish"], result["tools"]
+
+    first = chat("long_schema_cold", request)
+    assert json.loads(first["text"]) == {"keyword": "LANTERN"}, first
+    depth = first["usage"]["prompt_tokens"]
+    assert context // 4 <= depth < context - 512, depth
+    replay = chat("long_schema_cached", request, True)
+    assert signature(replay) == signature(first), replay
+    assert replay["usage"]["gufo"]["prefill_tokens"] == 0, replay
+
+    # Reuse the same multimodal history through the Responses SDK, with sampled
+    # output and a new turn. JSON validity alone would not catch lost memory.
+    history = []
+    for message in messages:
+        content = message["content"]
+        if isinstance(content, list):
+            content = [{"type": "input_image", "image_url": item["image_url"]["url"]}
+                       if item["type"] == "image_url" else
+                       {"type": "input_text", "text": item["text"]} for item in content]
+        history.append({**message, "content": content})
+    history += [{"role": "assistant", "content": first["text"]},
+                {"role": "user", "content": "Give the same keyword again as JSON."}]
+    responses = dict(model=model, input=history, temperature=.7, top_p=.9,
+                     presence_penalty=0, seed=42, max_output_tokens=32, store=False,
+                     reasoning={"effort": "none"}, extra_body={"top_k": 20},
+                     text={"format": {"type": "json_schema", "name": "remembered_keyword",
+                                      "strict": True, "schema": schema}})
+    # seed/presence are Gufo extensions on Responses, not SDK keyword arguments.
+    responses["extra_body"].update(seed=responses.pop("seed"),
+                                    presence_penalty=responses.pop("presence_penalty"))
+    response = client.responses.create(**responses)
+    checks["long_responses_sampled"] = response.to_dict()
+    assert response.status == "completed" and json.loads(response.output_text) == {
+        "keyword": "LANTERN"}, response
+    assert response.usage.input_tokens_details.cached_tokens >= depth - 128, response
+    with client.responses.create(**responses, stream=True) as stream:
+        events = list(stream)
+    check_events(events, False)
+    repeated = events[-1].response
+    assert repeated.output_text == response.output_text, repeated
+    checks["long_responses_sampled_replay"] = repeated.to_dict()
+
+    messages += [{"role": "assistant", "content": first["text"]},
+                 {"role": "user", "content": "Give the same keyword again as JSON."},
+                 {"role": "assistant", "content": response.output_text},
+                 {"role": "user", "content": "Explain how to calculate 123 times 456."}]
+    thinking = {**request, "messages": messages, "max_completion_tokens": 8,
+                "reasoning_effort": "high", "extra_body": {
+                    **extra, "chat_template_kwargs": {
+                        "enable_thinking": True, "preserve_thinking": True}}}
+    limited = chat("long_thinking_token_limit", thinking, True)
+    assert limited["finish"] == "length" and limited["reasoning"], limited
+    # Switching thinking changes the template's leading instructions; that
+    # frontier may legitimately miss. Subsequent same-mode continuation must hit.
+    count = 0
+    with client.chat.completions.create(
+            **{**thinking, "max_completion_tokens": 128}, stream=True) as stream:
+        for chunk in stream:
+            count += sum(bool(getattr(c.delta, "reasoning_content", "")) for c in chunk.choices)
+            if count >= 3:
+                break
+        else:
+            raise AssertionError("long thinking stream never reached cancellation point")
+    checks["long_thinking_cancel"] = {"reasoning_deltas": count}
+    # Discard the interrupted assistant, as Pi does, then continue immediately.
+    continued = {**thinking, "max_completion_tokens": 192,
+                 "messages": [*messages, {"role": "user", "content":
+                 "Return only the secret keyword as JSON; do not explain the arithmetic."}]}
+    resumed = chat("long_cancel_resume", continued, True)
+    assert json.loads(resumed["text"]) == {"keyword": "LANTERN"}, resumed
+    assert resumed["usage"]["cached_tokens"] >= depth - 128, resumed
+    assert resumed["usage"]["gufo"]["prefill_tokens"] < 128, resumed
+    repeated = chat("long_cancel_replay", continued)
+    assert signature(resumed) == signature(repeated), (resumed, repeated)
+    stopped = chat("long_json_stop", {**request, "stop": "TERN"}, True)
+    assert stopped["finish"] == "stop" and "TERN" not in stopped["text"], stopped
+    assert stopped["text"] == first["text"].split("TERN")[0], stopped
+
 
 def check_structured_outputs(client, model, checks, vision=False):
     from typing import Literal
@@ -575,8 +988,6 @@ def check_structured_outputs(client, model, checks, vision=False):
     class Reply(BaseModel):
         items: list[Item] = Field(min_length=1, max_length=2)
         note: str | None
-
-    check_strict_tools(client, model, checks)
 
     def record(name, value):
         checks[name] = value
@@ -679,12 +1090,12 @@ def check_structured_outputs(client, model, checks, vision=False):
         record(f"schema_literal_{streaming}", result)
 
     # A new grammar starts at its root even when prompt/model state is reused.
-    for text in ("alpha", "beta", "alpha"):
+    for index, text in enumerate(("alpha", "beta", "alpha")):
         body = {**common, "response_format": constant(text)}
         result = chat_result(client, body, True)
         assert json.loads(result["text"]) == {"text": text}, result
-        record("schema_cache_" + text, result)
-    assert checks["schema_cache_alpha"]["usage"]["cached_tokens"] > 0
+        record(f"schema_cache_{index}_{text}", result)
+    assert checks["schema_cache_2_alpha"]["usage"]["cached_tokens"] > 0
 
     peers = [{**common, "response_format": constant(text), "temperature": .8, "seed": seed}
              for text, seed in (("peer-a", 11), ("peer-b", 19))]
@@ -1048,6 +1459,158 @@ def check_native_tools(client, model, checks, vision=False):
         record("responses_image_tool", result.to_dict())
 
 
+def check_auto_tools(client, model, checks, vision=False):
+    """Automatic calls retain prose, loose schemas, replay and both transports."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    function = {"name": "record", "strict": False, "parameters": {
+        "type": "object", "properties": {
+            "value": {"type": "string"}, "optional": {"type": "integer"}},
+        "required": ["value"], "additionalProperties": False}}
+    prompt = "Call record exactly once with value alpha. Omit optional. No explanation."
+    common = dict(model=model, tools=[{"type": "function", "function": function}],
+                  tool_choice="auto", parallel_tool_calls=True, temperature=0,
+                  seed=61, max_completion_tokens=160,
+                  messages=[{"role": "user", "content": prompt}],
+                  extra_body={"presence_penalty": 0,
+                              "chat_template_kwargs": {"enable_thinking": False}})
+
+    def record(name, value):
+        checks[name] = value
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+        return value
+
+    def signature(result):
+        assert result["finish"] == "tool_calls" and result["tools"], result
+        calls = [item["function"] for item in result["tools"]]
+        assert all(call["name"] == "record"
+                   and json.loads(call["arguments"]) == {"value": "alpha"}
+                   for call in calls), result
+        return result["text"], result["reasoning"], calls
+
+    for sampled in (False, True):
+        request = {**common, "temperature": .7 if sampled else 0}
+        if sampled:
+            request = {**request, "top_p": .85, "presence_penalty": .3,
+                       "frequency_penalty": .2, "extra_body": {
+                           **common["extra_body"], "top_k": 20, "min_p": .05,
+                           "repeat_penalty": 1.1}}
+        first = chat_result(client, request)
+        replay = chat_result(client, request, True)
+        assert signature(first) == signature(replay), (first, replay)
+        assert replay["usage"]["cached_tokens"] > 0, replay
+        record(f"auto_chat_sampled{sampled}_cache_replay", replay)
+    prose = {**common, "messages": [{"role": "user", "content":
+             "Do not call any tools. Reply with the single word Hello."}]}
+    for thinking in (False, True):
+        request = {**prose, "max_completion_tokens": 96, "extra_body": {
+            "presence_penalty": 0,
+            "chat_template_kwargs": {"enable_thinking": thinking}}}
+        if thinking:
+            request["reasoning_effort"] = "low"
+        result = chat_result(client, request, True)
+        assert not result["tools"] and "Hello" in result["text"], result
+        record(f"auto_prose_thinking{thinking}", result)
+    thought = chat_result(client, {
+        **common, "reasoning_effort": "high", "max_completion_tokens": 256,
+        "extra_body": {"presence_penalty": 0}}, True)
+    signature(thought)
+    record("auto_chat_thinking_high", thought)
+    for limit in (2, 12):
+        result = chat_result(client, {**common, "max_completion_tokens": limit}, True)
+        assert result["finish"] == "length" and not result["tools"], result
+        record(f"auto_chat_limit{limit}", result)
+    stopped = chat_result(client, {**common, "stop": "alpha"}, True)
+    assert stopped["finish"] == "stop" and not stopped["tools"], stopped
+    signature(chat_result(client, common, True))
+    record("auto_argument_stop_retry", stopped)
+
+    response_request = dict(
+        model=model, input=prompt, tools=[{"type": "function", **function}],
+        tool_choice="auto", parallel_tool_calls=True, max_output_tokens=160,
+        temperature=.7, top_p=.85, reasoning={"effort": "none"}, store=False,
+        extra_body={"seed": 61, "top_k": 20, "presence_penalty": 0})
+
+    def response_signature(result, value="alpha"):
+        calls = [item for item in result.output if item.type == "function_call"]
+        # Parallel auto permits more than one call; cardinality is enforced
+        # separately by the nonparallel suite, not by prompt obedience.
+        assert result.status == "completed" and calls, result
+        assert all(call.name == "record" and json.loads(call.arguments) == {"value": value}
+                   for call in calls), result
+        return [(call.name, call.arguments) for call in calls]
+
+    result = client.responses.create(**response_request)
+    with client.responses.stream(**response_request) as stream:
+        list(stream)
+        replay = stream.get_final_response()
+    assert response_signature(result) == response_signature(replay)
+    record("auto_responses_sampled_replay", replay.to_dict())
+    for name, schema in (
+            ("open_object", {"type": "object", "additionalProperties": True}),
+            ("unsupported_schema", {"type": "object", "unevaluatedProperties": True})):
+        loose = {**function, "parameters": schema}
+        result = client.responses.create(**{
+            **response_request, "temperature": 0,
+            "parallel_tool_calls": True,
+            "tools": [{"type": "function", **loose}],
+            "input": "Call record exactly once with the JSON object {\"value\":\"alpha\"}, then stop."})
+        response_signature(result)
+        # This prompt produces one call on the unconstrained baseline. A
+        # previous JSON-envelope fallback instead looped until the token cap.
+        assert len([item for item in result.output if item.type == "function_call"]) == 1, result
+        record("auto_" + name, result.to_dict())
+
+    def independent(index):
+        name = f"record_{index}"
+        request = {**common, "seed": 70 + index,
+                   "tools": [{"type": "function", "function": {**function, "name": name}}],
+                   "messages": [{"role": "user", "content":
+                                 f"Call {name} exactly once with value alpha. Omit optional."}]}
+        result = chat_result(client, request, True)
+        assert result["tools"] and all(
+            call["function"]["name"] == name
+            and json.loads(call["function"]["arguments"]) == {"value": "alpha"}
+            for call in result["tools"]), result
+        return result
+
+    with ThreadPoolExecutor(4) as pool:
+        record("auto_c4_independent_schemas", list(pool.map(independent, range(4))))
+    many_tools = [{"type": "function", "name": f"record_{index}", "strict": False,
+                   "parameters": {"type": "object", "properties": {
+                       "value": {"type": "integer"}}, "required": ["value"],
+                       "additionalProperties": False}} for index in range(32)]
+    result = client.responses.create(**{
+        **response_request, "temperature": 0, "tools": many_tools,
+        "parallel_tool_calls": False,
+        "input": "Call record_31 exactly once with value 7."})
+    calls = [item for item in result.output if item.type == "function_call"]
+    assert len(calls) == 1 and calls[0].name == "record_31", result
+    assert json.loads(calls[0].arguments) == {"value": 7}, result
+    record("auto_many_declared_tools", result.to_dict())
+    if vision:
+        result = client.responses.create(**{
+            **response_request, "temperature": 0,
+            "input": [{"role": "user", "content": [
+                {"type": "input_text", "text":
+                 "Call record with value equal to the image color. Omit optional."},
+                {"type": "input_image", "image_url":
+                 image_content("blue")["image_url"]["url"]}]}]})
+        response_signature(result, value="blue")
+        record("auto_image_tool", result.to_dict())
+        image_request = {**common, "messages": [{"role": "user", "content": [
+            image_content("blue"), {"type": "text", "text":
+            "Call record with value equal to the image color. Omit optional."}]}]}
+        stopped = chat_result(client, {**image_request, "stop": "blue"}, True)
+        assert stopped["finish"] == "stop" and not stopped["tools"], stopped
+        retry = chat_result(client, image_request, True)
+        assert retry["usage"]["cached_tokens"] > 0 and retry["tools"], retry
+        assert all(call["function"]["name"] == "record"
+                   and json.loads(call["function"]["arguments"]) == {"value": "blue"}
+                   for call in retry["tools"]), retry
+        record("auto_image_argument_stop_retry", {"stopped": stopped, "retry": retry})
+
+
 def check_structured_limits(client, model, checks, vision=False):
     """Short boundary checks; valid prefixes may be incomplete at a limit."""
     schema = {"type": "object", "properties": {
@@ -1232,11 +1795,107 @@ def check_events(events, reasoning):
     assert [e.type for e in events[:2]] == [
         "response.created", "response.in_progress"
     ]
-    assert events[-1].type in ("response.completed", "response.incomplete")
+    assert events[-1].type in ("response.completed", "response.incomplete"), [
+        event.to_dict() for event in events[-3:]]
     final = events[-1].response
     text = "".join(e.delta for e in events if e.type == "response.output_text.delta")
     assert text == final.output_text
     return check_response(final, reasoning)
+
+
+def check_responses(client, model, checks, options, async_local_only, expect_reasoning):
+    models = client.models.list()
+    assert model in {item.id for item in models.data}, models
+    checks["model_discovery"] = {"models": [item.id for item in models.data]}
+    prompt = "What is two plus two? Reply briefly."
+    request = dict(model=model, input=prompt, temperature=0, max_output_tokens=256,
+                   reasoning={"effort": "low" if expect_reasoning else "none"}, store=False)
+    first = client.responses.create(**request)
+    assert first.status == "completed", first
+    checks["create"] = check_response(first, expect_reasoning)
+    with client.responses.stream(**request) as stream:
+        events = list(stream)
+        final = stream.get_final_response()
+    checks["stream_helper"] = check_events(events, expect_reasoning)
+    assert final.output_text == first.output_text
+    assert final.usage.input_tokens_details.cached_tokens > 0
+
+    history = [
+        {"role": "user", "content": prompt},
+        *first.output,
+        {"role": "user", "content": "And two plus three? Reply briefly."},
+    ]
+    replay = client.responses.create(**{**request, "input": history})
+    checks["conversation_replay"] = check_response(replay, expect_reasoning)
+    assert replay.usage.input_tokens > first.usage.input_tokens
+
+    # The SDK accumulation helper requires response.completed; consume
+    # typed events directly when testing a deliberately truncated response.
+    with client.responses.create(**{**request, "max_output_tokens": 1},
+                                 stream=True) as stream:
+        events = list(stream)
+    checks["incomplete"] = check_events(events, expect_reasoning)
+    assert events[-1].response.usage.output_tokens == 1
+    if expect_reasoning:
+        assert events[-1].response.usage.output_tokens_details.reasoning_tokens == 1
+
+    for label, override in [
+        ("invalid_limit", {"max_output_tokens": 0}),
+        ("unsupported_store", {"store": True}),
+        ("unsupported_tools", {"tools": [{"type": "web_search"}]}),
+    ]:
+        try:
+            client.responses.create(**{**request, **override})
+        except openai.BadRequestError as error:
+            assert error.code == ("invalid_tools" if label == "unsupported_tools"
+                                  else "invalid_request")
+            checks[label] = {"status": error.status_code, "code": error.code}
+        else:
+            raise AssertionError(f"{label} was accepted")
+
+    with client.responses.create(
+        **{**request, "input": "Count from one to one thousand."}, stream=True
+    ) as stream:
+        for event in stream:
+            if event.type.endswith(".delta"):
+                break
+        else:
+            raise AssertionError("No generation to cancel")
+    # A fresh request must still run after closing the unfinished stream.
+    after = client.responses.create(**{**request, "max_output_tokens": 1})
+    checks["after_disconnect"] = check_response(after, expect_reasoning)
+    chat_request = dict(
+        model=model, messages=[{"role": "user", "content": prompt}],
+        temperature=0, max_completion_tokens=16,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    chat = client.chat.completions.create(**chat_request)
+    assert chat.choices[0].message.content
+    checks["chat_completions"] = {"finish_reason": chat.choices[0].finish_reason}
+
+    async def concurrent():
+        async with AsyncOpenAI(**options, http_client=DefaultAsyncHttpxClient(
+            trust_env=False, event_hooks={
+                "request": [async_local_only, checks.recorder.async_request_hook],
+                "response": [checks.recorder.async_response_hook]}
+        )) as client:
+            async def generate(index):
+                body = {**request, "input": f"Count from {index + 1} to one hundred.",
+                        "max_output_tokens": 8}
+                if index == 0:
+                    return check_response(await client.responses.create(**body),
+                                          expect_reasoning)
+                async with await client.responses.create(**body, stream=True) as stream:
+                    events = [event async for event in stream]
+                return check_events(events, expect_reasoning)
+            return await asyncio.gather(generate(0), generate(1))
+
+    checks["async_concurrent"] = asyncio.run(concurrent())
+
+
+SDK_SUITES = ("responses", "stops", "conversation", "structured", "structured-limits",
+              "tools", "auto-tools", "sampling-defaults", "sampling-ranges", "batch",
+              "long-context")
 
 
 def main():
@@ -1244,20 +1903,29 @@ def main():
     parser.add_argument("--base-url", required=True, help="http://127.0.0.1:PORT/v1")
     parser.add_argument("--model", required=True, help="Gufo served model name")
     parser.add_argument("--expect-reasoning", action="store_true")
-    parser.add_argument("--suite", choices=("all", "stops", "responses", "conversation", "structured", "structured-limits", "tools", "sampling-defaults"), default="all")
+    parser.add_argument("--suite", choices=("all", *SDK_SUITES), default="all")
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
     parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"),
-                        help="Expected text defaults; required for sampling-defaults suite")
+                        help="Expected text defaults; required for all/sampling-defaults")
     parser.add_argument("--sampling-overrides", type=json.loads, default={},
                         help="JSON object of explicit server sampling CLI values")
+    parser.add_argument("--server-thinking", choices=("on", "off"),
+                        help="Explicit --think setting on the server, if any")
+    parser.add_argument("--output", type=Path, help="Write a partial report after every case")
+    parser.add_argument("--concurrency", type=int, default=4,
+                        help="Requests in the batch suite; must fit server --sessions")
+    parser.add_argument("--context", type=int, default=8192,
+                        help="Server capacity; long-context fills roughly half, measured in usage")
+    parser.add_argument("--speculative", choices=("off", "mtp", "dflash2", "dspark"),
+                        default="off", help="Server mode; determines sampled replay guarantees")
     args = parser.parse_args()
-    if args.suite == "sampling-defaults" and not args.sampling_preset:
-        parser.error("--sampling-preset is required for sampling-defaults")
+    if args.suite in ("all", "sampling-defaults") and not args.sampling_preset:
+        parser.error("--sampling-preset is required for all/sampling-defaults")
     if not isinstance(args.sampling_overrides, dict):
         parser.error("--sampling-overrides must be a JSON object")
-    if args.vision and args.suite not in ("all", "conversation", "structured", "structured-limits", "tools", "sampling-defaults"):
-        parser.error("--vision requires a conversation or structured-output suite")
+    if not 1 <= args.concurrency <= 8:
+        parser.error("--concurrency must be between 1 and 8")
     url = urlsplit(args.base_url)
     if (url.scheme != "http" or url.hostname not in ("127.0.0.1", "::1")
             or url.path.rstrip("/") != "/v1" or url.username or url.password
@@ -1271,125 +1939,62 @@ def main():
     async def async_local_only(request):
         local_only(request)
 
-    options = dict(
-        api_key="local-test", base_url=args.base_url, max_retries=0, timeout=120,
-        _strict_response_validation=True,
-    )
-    prompt = "What is two plus two? Reply briefly."
-    request = dict(
-        model=args.model, input=prompt, temperature=0, max_output_tokens=256,
-        store=False,
-    )
-    report = {"sdk": openai.__version__, "model": args.model, "checks": {}}
-    checks = report["checks"]
+    options = dict(api_key="local-test", base_url=args.base_url, max_retries=0,
+                   timeout=120, _strict_response_validation=True)
+    report = {"sdk": openai.__version__, "model": args.model, "suite": args.suite,
+              "vision": args.vision, "speculative": args.speculative,
+              "sampling_preset": args.sampling_preset,
+              "sampling_overrides": args.sampling_overrides, "suites": {},
+              "status": "running"}
+    recorder = Recorder(args.output.with_suffix(".requests.json") if args.output else None)
+    checks = CheckResults(report, args.output, recorder)
+    report["checks"] = checks
+    checks.save()
     with OpenAI(**options, http_client=DefaultHttpxClient(
-        trust_env=False, event_hooks={"request": [local_only]}
+        trust_env=False, event_hooks={"request": [local_only, recorder.request_hook],
+                                     "response": [recorder.response_hook]}
     )) as client:
-        if args.suite == "structured":
-            check_structured_outputs(client, args.model, checks, args.vision)
-            print(json.dumps(report, indent=2))
-            return
-        if args.suite == "structured-limits":
-            check_structured_limits(client, args.model, checks, args.vision)
-            print(json.dumps(report, indent=2))
-            return
-        if args.suite == "tools":
-            check_native_tools(client, args.model, checks, args.vision)
-            print(json.dumps(report, indent=2))
-            return
-        if args.suite == "sampling-defaults":
-            check_sampling_defaults(client, args.model, checks, args.sampling_preset,
-                                    args.sampling_overrides, args.vision)
-            print(json.dumps(report, indent=2))
-            return
-        if args.suite in ("all", "stops"):
-            check_stops(client, args.model, checks)
-        if args.suite in ("all", "conversation"):
-            check_conversations(client, args.model, checks, args.vision)
-        if args.suite in ("stops", "conversation"):
-            print(json.dumps(report, indent=2))
-            return
-        first = client.responses.create(**request)
-        assert first.status == "completed", first
-        checks["create"] = check_response(first, args.expect_reasoning)
-        with client.responses.stream(**request) as stream:
-            events = list(stream)
-            final = stream.get_final_response()
-        checks["stream_helper"] = check_events(events, args.expect_reasoning)
-        assert final.output_text == first.output_text
-        assert final.usage.input_tokens_details.cached_tokens > 0
-
-        history = [
-            {"role": "user", "content": prompt},
-            *first.output,
-            {"role": "user", "content": "And two plus three? Reply briefly."},
-        ]
-        replay = client.responses.create(**{**request, "input": history})
-        checks["conversation_replay"] = check_response(replay, args.expect_reasoning)
-        assert replay.usage.input_tokens > first.usage.input_tokens
-
-        # The SDK accumulation helper requires response.completed; consume
-        # typed events directly when testing a deliberately truncated response.
-        with client.responses.create(**{**request, "max_output_tokens": 1},
-                                     stream=True) as stream:
-            events = list(stream)
-        checks["incomplete"] = check_events(events, args.expect_reasoning)
-        assert events[-1].response.usage.output_tokens == 1
-        if args.expect_reasoning:
-            assert events[-1].response.usage.output_tokens_details.reasoning_tokens == 1
-
-        for label, override in [
-            ("invalid_limit", {"max_output_tokens": 0}),
-            ("unsupported_store", {"store": True}),
-            ("unsupported_tools", {"tools": [{"type": "web_search"}]}),
-        ]:
+        suites = {
+            "responses": lambda: check_responses(client, args.model, checks, options,
+                                                   async_local_only, args.expect_reasoning),
+            "stops": lambda: check_stops(client, args.model, checks),
+            "conversation": lambda: check_conversations(client, args.model, checks, args.vision),
+            "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
+            "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
+            "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
+            "auto-tools": lambda: check_auto_tools(client, args.model, checks, args.vision),
+            "sampling-defaults": lambda: check_sampling_defaults(
+                client, args.model, checks, args.sampling_preset, args.sampling_overrides,
+                args.vision, args.server_thinking),
+            "sampling-ranges": lambda: check_sampling_ranges(client, args.model, checks),
+            "batch": lambda: check_batches(
+                client, args.model, checks, args.concurrency, args.vision, args.speculative),
+            "long-context": lambda: check_long_context(
+                client, args.model, checks, args.context, args.vision),
+        }
+        selected = (list(suites) if args.suite == "all" else
+                    ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
+        for name in selected:
+            started = time.monotonic()
             try:
-                client.responses.create(**{**request, **override})
-            except openai.BadRequestError as error:
-                assert error.code == ("invalid_tools" if label == "unsupported_tools"
-                                      else "invalid_request")
-                checks[label] = {"status": error.status_code, "code": error.code}
-            else:
-                raise AssertionError(f"{label} was accepted")
-
-        with client.responses.create(
-            **{**request, "input": "Count from one to one thousand."}, stream=True
-        ) as stream:
-            for event in stream:
-                if event.type.endswith(".delta"):
-                    break
-            else:
-                raise AssertionError("No generation to cancel")
-        # A fresh request must still run after closing the unfinished stream.
-        after = client.responses.create(**{**request, "max_output_tokens": 1})
-        checks["after_disconnect"] = check_response(after, args.expect_reasoning)
-        chat_request = dict(
-            model=args.model, messages=[{"role": "user", "content": prompt}],
-            temperature=0, max_completion_tokens=16,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
-        chat = client.chat.completions.create(**chat_request)
-        assert chat.choices[0].message.content
-        checks["chat_completions"] = {"finish_reason": chat.choices[0].finish_reason}
-
-    async def concurrent():
-        async with AsyncOpenAI(**options, http_client=DefaultAsyncHttpxClient(
-            trust_env=False, event_hooks={"request": [async_local_only]}
-        )) as client:
-            async def generate(index):
-                body = {**request, "input": f"Count from {index + 1} to one hundred.",
-                        "max_output_tokens": 8}
-                if index == 0:
-                    return check_response(await client.responses.create(**body),
-                                          args.expect_reasoning)
-                async with await client.responses.create(**body, stream=True) as stream:
-                    events = [event async for event in stream]
-                return check_events(events, args.expect_reasoning)
-            return await asyncio.gather(generate(0), generate(1))
-
-    checks["async_concurrent"] = asyncio.run(concurrent())
+                suites[name]()
+                report["suites"][name] = {"status": "passed"}
+            except Exception as error:
+                report["suites"][name] = {"status": "failed", "error": str(error),
+                                          "traceback": traceback.format_exc()}
+                print(f"FAIL {name}: {error}", file=sys.stderr, flush=True)
+            except KeyboardInterrupt:
+                report["status"] = "interrupted"
+                checks.save()
+                raise
+            report["suites"][name]["seconds"] = round(time.monotonic() - started, 3)
+            checks.save()
+    report["status"] = ("passed" if all(row["status"] == "passed"
+                         for row in report["suites"].values()) else "failed")
+    checks.save()
     print(json.dumps(report, indent=2))
+    return 0 if report["status"] == "passed" else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

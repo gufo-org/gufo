@@ -32,6 +32,7 @@
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/sampling_request.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -1158,12 +1159,9 @@ int RunServe(std::span<const char* const> args) {
     if (!valid_server_options()) {
       return 2;
     }
-    bool sampling_valid = true;
-    try {
-      sampling_config.Validate();
-    } catch (const std::invalid_argument&) {
-      sampling_valid = false;
-    }
+    sampling::SamplingConfig validated_sampling;
+    const bool sampling_valid = !server::ParseSamplingConfig(
+        json::Value::object(), sampling_config, &validated_sampling);
     if (max_tokens < -1 || max_tokens == 0 ||
         max_tokens > std::numeric_limits<std::uint32_t>::max() ||
         prefill_chunk_tokens == 0 || max_pending_requests == 0 ||
@@ -1174,7 +1172,7 @@ int RunServe(std::span<const char* const> args) {
         (!cache_disk_directory.empty() && cache_disk_bytes == 0) ||
         request_timeout_ms > static_cast<std::uint64_t>(
                                  std::chrono::milliseconds::max().count()) ||
-        !sampling_valid || sampling_config.temperature > 2.0F) {
+        !sampling_valid) {
       std::cerr << "Error: sampling and scheduling limits are invalid\n";
       return 2;
     }

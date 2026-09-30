@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "src/core/json.hpp"
 #include "src/core/sampling.hpp"
@@ -166,6 +167,22 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
         .message = exception.what(),
         .code = "invalid_sampling",
     };
+  }
+  if (output->temperature > 2.0F) {
+    return SamplingRequestError{
+        .message = "'temperature' must be between 0 and 2",
+        .code = "invalid_temperature",
+    };
+  }
+  for (const auto& [field, value] :
+       {std::pair{"frequency_penalty", output->frequency_penalty},
+        std::pair{"presence_penalty", output->presence_penalty}}) {
+    if (value < -2.0F || value > 2.0F) {
+      return SamplingRequestError{
+          .message = "'" + std::string(field) + "' must be between -2 and 2",
+          .code = detail::SamplingErrorCode(field),
+      };
+    }
   }
   return std::nullopt;
 }

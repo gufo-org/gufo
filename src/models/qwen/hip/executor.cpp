@@ -270,7 +270,7 @@ std::span<const float> QwenGpuExecutor::CopyLastLogits() {
 tokenization::TokenId QwenGpuExecutor::SampleLastLogits(
     sampling::SamplerState& sampler) {
   CheckReset();
-  if (sampler.config().constraint)
+  if (sampler.NeedsConstraintMask())
     return sampler.Sample(CopyLastLogits());
   auto parameters = PrepareGpuSamplingParameters(sampler);
   if (sampler.config().uses_random_sampling()) {
@@ -297,7 +297,7 @@ tokenization::TokenId QwenGpuExecutor::SampleCachedLogits(
   if (logits.size() != weights_.config.vocab_size)
     throw std::invalid_argument(
         "cached Qwen frontier has the wrong vocabulary");
-  if (sampler.config().constraint)
+  if (sampler.NeedsConstraintMask())
     return sampler.Sample(logits);
   auto scratch = arena_.GetScratchView();
   HIP_CHECK(hipMemcpyAsync(scratch.decode.logits.data(), logits.data(),
@@ -328,7 +328,7 @@ tokenization::TokenId QwenGpuExecutor::SampleVerificationLogits(
   if (row >= last_verification_rows_ || d_verification_logits_ == nullptr) {
     throw std::out_of_range("Qwen verification logit row is unavailable");
   }
-  if (sampler.config().constraint)
+  if (sampler.NeedsConstraintMask())
     return sampler.Sample(CopyVerificationLogits(row));
   auto parameters = PrepareGpuSamplingParameters(sampler);
   if (sampler.config().uses_random_sampling()) {
@@ -365,7 +365,7 @@ QwenSampledVerificationResult QwenGpuExecutor::VerifySampledToken(
         "Qwen sampled verification proposal is malformed");
   }
 
-  if (sampler.config().constraint) {
+  if (sampler.NeedsConstraintMask()) {
     const auto target = sampler.Distribution(CopyVerificationLogits(row));
     if (sampler.Uniform() * draft_token_probability <
         target.probability(draft_token)) {

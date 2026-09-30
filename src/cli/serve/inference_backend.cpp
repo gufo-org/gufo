@@ -56,21 +56,9 @@ void SetError(std::string* error, std::string message) {
 std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling) {
-  bool strict_tools = request.constrained_tools;
-  for (const auto& tool : request.tools)
-    if (!tool.definition_json.empty()) {
-      const auto definition = json::parse(tool.definition_json);
-      const auto* function = definition.find("function");
-      strict_tools |= function && function->find("strict") &&
-                      function->find("strict")->as_bool();
-    }
-  // Required choices constrain decoding even for non-strict parallel tools.
-  const bool required_tools =
-      request.tool_choice == ChatRequest::ToolChoice::kRequired;
   if (!request.response_format &&
       (request.tools.empty() ||
-       request.tool_choice == ChatRequest::ToolChoice::kNone ||
-       (!strict_tools && !required_tools && request.parallel_tool_calls)))
+       request.tool_choice == ChatRequest::ToolChoice::kNone))
     return std::nullopt;
   auto constrained = request;
   auto instruction = request.response_format ? request.response_format->prompt()
@@ -89,6 +77,10 @@ std::optional<ChatRequest> ConstrainChatRequest(
       const auto* strict = function ? function->find("strict") : nullptr;
       const bool enforce = strict && strict->as_bool();
       auto schema = json::parse(tool.parameters_json);
+      const auto* properties = schema.find("properties");
+      const auto* additional = schema.find("additionalProperties");
+      const bool untyped = !enforce && (!properties || properties->empty()) &&
+                           (!additional || additional->is_bool());
       if (!enforce) {
         if (!schema.contains("type"))
           schema["type"] = "object";
@@ -110,6 +102,11 @@ std::optional<ChatRequest> ConstrainChatRequest(
         // An unrestricted/unsupported tool schema must not prevent a valid
         // structured answer. Keep the declared tool name and JSON arguments.
         arguments = sampling::JsonConstraint::Object();
+        // An untyped non-strict tool already uses best-effort native values.
+        // Preserve that template: injecting a competing JSON envelope changes
+        // the prompt, cache identity and even whether the model ends its turn.
+        if (untyped)
+          native = sampling::JsonConstraint::OpenToolParameters(format);
       }
       tools.emplace_back(tool.name, std::move(arguments));
       native_tools.emplace_back(tool.name, std::move(native));
@@ -2063,10 +2060,16 @@ public:
     }
 
     std::string error;
+    bool interrupted = false;
     if (!model_->DsparkStepBatch(
             std::span<const models::deepseek_v4_flash::SessionDsparkBatchItem>(
                 items.data(), decodes.size()),
-            &error)) {
+            &error, &interrupted)) {
+      // Cancellation is rejected before sampling or device-state mutation.
+      // Isolate the cancelled row rather than failing every client in its
+      // batch. Ordinary cycles retain the shared physical batch.
+      if (interrupted)
+        return TextModelRunner::DecodeBatch(decodes);
       throw std::runtime_error("DeepSeek DSpark batch decode failed: " + error);
     }
 
@@ -2130,10 +2133,15 @@ public:
     }
 
     std::string error;
+    bool interrupted = false;
     if (!model_->EvaluateBatch(
             std::span<const models::deepseek_v4_flash::SessionBatchItem>(
                 items.data(), item_count),
-            &error)) {
+            &error, &interrupted)) {
+      if (interrupted) {
+        TextModelRunner::AdvanceBatch(advances);
+        return;
+      }
       throw std::runtime_error("DeepSeek batch decode failed: " + error);
     }
     for (std::size_t index = 0; index < item_count; ++index) {

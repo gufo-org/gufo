@@ -10,7 +10,7 @@ benchmark/tuning executables; Python tools run from this source tree.
 | --- | --- |
 | `bench/` | Kernel microbenchmarks, hipBLASLt tuning, and direct speculative-corpus checks; `model-bench.py` drives per-model BENCHMARKS.md tables against each model's reference |
 | `prof/` | rocprofv3 capture, stage summaries, and ISA inspection |
-| `serving/` | HTTP benchmarks, interrupted-chat/disk replay and official OpenAI SDK checks |
+| `serving/` | HTTP serving benchmarks |
 | `ds4/` | DeepSeek-specific validation and experiments |
 | `qwen27b/` | Qwen27B/DFlash2 kernels, reference checks, and vision validation |
 | `qwen-flash/` | Flash-Next projection and MoE microbenchmarks |
@@ -27,26 +27,9 @@ See [performance commands](../docs/PERFORMANCE.md),
 [benchmark methodology](../docs/BENCHMARKS.md), and
 [MiniMax validation](../docs/models/minimax-h3/QUALITY.md).
 
-## OpenAI client check
-
-With a local Gufo text server running, use its API model name from `/v1/models`
-(`qwen` here), rather than its weights path:
-
-```sh
-nix develop -c python3 tools/serving/check-openai-sdk.py \
-  --base-url http://127.0.0.1:8080/v1 --model qwen
-```
-
-Add `--expect-reasoning` when the server defaults to thinking. This uses the
-official OpenAI SDK with strict schema validation: buffered/streamed output,
-reasoning, conversation replay, async concurrency, limits and disconnects.
-Chat stop checks cover Unicode, sampled output, reasoning, tool arguments,
-concurrent isolation and cached continuation. Use `--suite stops` or
-`--suite responses` to check only the affected API behavior.
-`--suite conversation` checks every exposed reasoning effort and cache reuse
-after disconnecting during thinking or visible output. Add `--vision` when
-the server has its matching `--mmproj`; this also checks image identity,
-concurrent red/blue requests and image-prompt replay.
+Functional and regression tests live in [tests/functional/](../tests/functional/README.md),
+including the OpenAI SDK suites and interrupted-chat/disk replay. Use its runner
+for API changes.
 
 ## Qwen27B
 

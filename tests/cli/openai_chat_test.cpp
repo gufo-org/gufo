@@ -1165,6 +1165,23 @@ void TestAllSamplingControlsReachBackend() {
 
 void TestUnsupportedSamplingControlsAreRejected() {
   FakeBackend backend;
+  for (const auto& [field, value] :
+       {std::pair{"temperature", 2.01}, std::pair{"presence_penalty", 2.01},
+        std::pair{"frequency_penalty", -2.01}}) {
+    for (const bool stream : {false, true}) {
+      auto request = Request(
+          R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
+      auto body = gufo::json::parse(request.body);
+      body[field] = value;
+      body["stream"] = stream;
+      request.body = body.dump();
+      const auto response = gufo::server::HandleOpenAiChat(request, backend);
+      Expect(response.status == 400 &&
+                 response.body.find(std::string("invalid_") + field) !=
+                     std::string::npos,
+             "out-of-range OpenAI sampling fails before streaming");
+    }
+  }
   for (const double choices : {0.0, 1.4, 2.0, 1e100}) {
     auto request = Request(
         R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
@@ -2078,6 +2095,9 @@ void TestNativeToolTransports() {
               }
               Expect(call_count == 1 && arguments == args.dump(),
                      "native and JSON arguments survive both API transports");
+              Expect(
+                  backend.last_request.constrained_tools,
+                  "automatic non-strict tools also bind decoding constraints");
               Expect(reasoning.find("literal") == std::string::npos,
                      "argument tags never enter reasoning");
             }

@@ -39,6 +39,10 @@ public:
   // parameter tags. The caller retains the exact JSON schema in that case.
   static std::shared_ptr<const JsonConstraint> ToolParameters(
       const json::Value& schema, bool strict, ToolFormat format);
+  // Best-effort native framing for non-strict tools with no declared argument
+  // types. It preserves the model's native string/DSML typed-value semantics.
+  static std::shared_ptr<const JsonConstraint> OpenToolParameters(
+      ToolFormat format);
   static std::shared_ptr<const JsonConstraint> WithReasoning(
       std::shared_ptr<const JsonConstraint> answer);
   using Tool = std::pair<std::string, std::shared_ptr<const JsonConstraint>>;
@@ -65,6 +69,7 @@ private:
   std::uint32_t root_{0};
   std::string prompt_;
   bool stop_only_when_complete_{true};
+  bool automatic_tools_{false};
 };
 
 class ConstraintVocabulary {
