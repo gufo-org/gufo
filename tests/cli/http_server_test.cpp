@@ -177,6 +177,18 @@ public:
           .stream_log = log,
       };
     });
+    server.add("POST", "/sse-idle", [](const auto&, auto&) {
+      return gufo::server::HttpResponse{
+          .headers = {{"Content-Type", "text/event-stream"}},
+          .streaming_body =
+              [](const auto& write) {
+                (void)write("data: first\n\n");
+                std::this_thread::sleep_for(std::chrono::milliseconds(90));
+                (void)write("data: last\n\n");
+                (void)write("data: [DONE]\n\n");
+              },
+      };
+    });
     std::string error;
     assert(server.start(&error));
     worker = std::jthread([this, handle_signals] {
@@ -887,6 +899,23 @@ void TestStreamingFraming() {
          std::string("a\0bend", 6));
 }
 
+void TestSseHeartbeat() {
+  RunningServer server(
+      {.sse_heartbeat_interval = std::chrono::milliseconds(20)});
+  const auto response = server.Post("/sse-idle", "");
+  ExpectStatus(response, 200);
+  const auto first = response.find("data: first\n\n");
+  const auto ping = response.find(": ping\n\n", first);
+  const auto second_ping = response.find(": ping\n\n", ping + 1);
+  const auto last = response.find("data: last\n\n", second_ping);
+  assert(first != std::string::npos);
+  assert(ping != std::string::npos);
+  assert(second_ping != std::string::npos);
+  assert(last != std::string::npos);
+  assert(response.find("data: [DONE]\n\n", last) != std::string::npos);
+  assert(response.ends_with("0\r\n\r\n"));
+}
+
 void TestSignalShutdown() {
   // Process signals must never terminate the test runner itself. Prove that
   // both idle listeners and active generation return through normal cleanup.
@@ -945,6 +974,7 @@ int main() {
   TestCompatibilityUtf8();
   TestPeerDisconnect();
   TestStreamingFraming();
+  TestSseHeartbeat();
   TestSignalShutdown();
   std::cout << "HTTP transport checks passed.\n";
 }

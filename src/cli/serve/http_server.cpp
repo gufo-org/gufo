@@ -12,6 +12,8 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +26,7 @@
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -62,7 +65,7 @@ class ShutdownSignals {
 public:
   ShutdownSignals() {
     shutdown_signal.store(0, std::memory_order_relaxed);
-    struct sigaction action{};
+    struct sigaction action {};
     action.sa_handler = RequestShutdown;
     ::sigemptyset(&action.sa_mask);
     if (::sigaction(SIGINT, &action, &previous_interrupt_) != 0)
@@ -83,8 +86,8 @@ public:
   ShutdownSignals& operator=(const ShutdownSignals&) = delete;
 
 private:
-  struct sigaction previous_interrupt_{};
-  struct sigaction previous_terminate_{};
+  struct sigaction previous_interrupt_ {};
+  struct sigaction previous_terminate_ {};
 };
 
 // ---------------------------------------------------------------------------
@@ -278,6 +281,13 @@ bool HasHeader(const HttpResponse& response, std::string_view name) {
   const std::string lowered = ToLower(name);
   return std::ranges::any_of(response.headers, [&](const auto& header) {
     return ToLower(header.first) == lowered;
+  });
+}
+
+bool IsEventStream(const HttpResponse& response) {
+  return std::ranges::any_of(response.headers, [](const auto& header) {
+    return ToLower(header.first) == "content-type" &&
+           ToLower(header.second).starts_with("text/event-stream");
   });
 }
 
@@ -1473,7 +1483,9 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
 }
 
 void HttpServer::handle_connection(int client_fd) {
-  const struct timeval tv{120, 0};
+  const struct timeval tv {
+    120, 0
+  };
   ::setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   ::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -1636,11 +1648,48 @@ void HttpServer::handle_connection(int client_fd) {
       response_started = true;
       connected = SendAll(client_fd, head);
       if (connected) {
-        resp.streaming_body([&](std::string_view chunk) {
-          connected = connected && (chunked ? SendChunk(client_fd, chunk)
-                                            : SendAll(client_fd, chunk));
+        std::mutex write_mutex;
+        std::condition_variable write_cv;
+        auto last_write = std::chrono::steady_clock::now();
+        const auto send_body = [&](std::string_view chunk) {
+          const std::lock_guard lock(write_mutex);
+          if (!connected)
+            return false;
+          connected =
+              chunked ? SendChunk(client_fd, chunk) : SendAll(client_fd, chunk);
+          if (connected && !chunk.empty()) {
+            last_write = std::chrono::steady_clock::now();
+            write_cv.notify_all();
+          }
           return connected;
-        });
+        };
+        std::jthread heartbeat;
+        if (IsEventStream(resp) &&
+            options_.sse_heartbeat_interval.count() > 0) {
+          heartbeat = std::jthread([&](std::stop_token stop) {
+            std::stop_callback wake_on_stop(stop,
+                                            [&] { write_cv.notify_all(); });
+            std::unique_lock lock(write_mutex);
+            while (!stop.stop_requested() && connected) {
+              const auto deadline =
+                  last_write + options_.sse_heartbeat_interval;
+              if (write_cv.wait_until(lock, deadline) ==
+                      std::cv_status::timeout &&
+                  !stop.stop_requested() && connected &&
+                  std::chrono::steady_clock::now() >= deadline) {
+                // SSE comments carry bytes without changing the API event
+                // stream.
+                connected = chunked ? SendChunk(client_fd, ": ping\n\n")
+                                    : SendAll(client_fd, ": ping\n\n");
+                last_write = std::chrono::steady_clock::now();
+              }
+            }
+          });
+        }
+        resp.streaming_body(send_body);
+        heartbeat.request_stop();
+        if (heartbeat.joinable())
+          heartbeat.join();
         // An SSE error is a complete protocol response. A failed raw PCM
         // stream must remain incomplete, or it looks like valid shorter audio.
         if (connected && chunked &&

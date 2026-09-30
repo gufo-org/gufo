@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -86,6 +87,7 @@ struct HttpServerOptions {
   std::size_t max_request_body_bytes{static_cast<std::size_t>(8) * 1024 * 1024};
   std::size_t max_connections{16};
   std::string api_key;
+  std::chrono::milliseconds sse_heartbeat_interval{std::chrono::seconds(15)};
 };
 
 /// Minimal bounded HTTP/1.1 server for trusted-LAN model serving.
