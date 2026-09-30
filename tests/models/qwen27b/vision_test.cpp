@@ -74,11 +74,16 @@ void TestPreprocessing() {
   input = {256, 256, std::vector<std::uint8_t>(256 * 256 * 3, 42)};
   assert(ResizeImage(input).pixels == input.pixels);
   const std::vector<std::uint8_t> payload{0xff, 0xd8, 0, 1, 2};
-  assert(gufo::core::ReadImageUrl("data:image/jpeg;base64,/9gAAQI=") ==
-         payload);
+  for (const auto* accepted :
+       {"data:image/jpeg;base64,/9gAAQI=", "data:image/jpg;base64,/9gAAQI=",
+        "data:IMAGE/JPEG;BASE64,/9gAAQI=",
+        "data:image/jpeg;name=photo.jpg;base64,/9gAAQI="})
+    assert(gufo::core::ReadImageUrl(accepted) == payload);
   for (const auto* invalid :
        {"data:image/png;base64,A===", "data:image/png;base64,AB==",
-        "data:image/png;base64,AAAA=", "file:///tmp/image.png"}) {
+        "data:image/png;base64,AAAA=", "file:///tmp/image.png",
+        "data:image/webp;base64,/9gAAQI=", "data:image/png,/9gAAQI=",
+        "data:image/png;base64"}) {
     bool rejected = false;
     try {
       (void)gufo::core::ReadImageUrl(invalid);

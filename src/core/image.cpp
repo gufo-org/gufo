@@ -435,11 +435,21 @@ std::vector<std::uint8_t> ReadImageUrl(std::string_view url,
   --budget.remaining_images;
   if (url.starts_with("data:")) {
     const auto comma = url.find(',');
-    if (comma == std::string_view::npos ||
-        !(url.substr(0, comma) == "data:image/png;base64" ||
-          url.substr(0, comma) == "data:image/jpeg;base64")) {
-      throw std::invalid_argument("image data URL must use base64 PNG or JPEG");
-    }
+    if (comma == std::string_view::npos || comma > 256)
+      throw std::invalid_argument("image data URL has no data");
+    // A media type, parameters and ";base64", case-insensitive (RFC 2397).
+    // Clients differ in case, "image/jpg" and parameters such as a file
+    // name; the decoder tells PNG from JPEG by the bytes anyway.
+    std::string header(url.substr(5, comma - 5));
+    std::ranges::transform(header, header.begin(), [](unsigned char c) {
+      return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    });
+    if (!header.ends_with(";base64"))
+      throw std::invalid_argument("image data URL must be base64-encoded");
+    const std::string media = header.substr(0, header.find(';'));
+    if (media != "image/png" && media != "image/jpeg" && media != "image/jpg")
+      throw std::invalid_argument("image data URL type \"" + media +
+                                  "\" is not supported; use PNG or JPEG");
     const auto encoded = url.substr(comma + 1);
     // Check the decoded size before allocating, including base64 padding.
     const auto padding = encoded.ends_with("==")  ? 2U
