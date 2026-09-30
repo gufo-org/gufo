@@ -833,6 +833,13 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
     }
     case core::GgmlType::kIQ2_XS: {
       const auto& blk = static_cast<const IQ2XSBlock*>(row)[sub16 / 16];
+      const float blk_d = __half2float(blk.d);
+      if (!isfinite(blk_d)) {
+        // Pruned/empty blocks carry a non-finite scale; decode as zeros.
+        for (int j = 0; j < 16; ++j) out.q[j] = 0;
+        out.scale = 0.0F;
+        return;
+      }
       const std::size_t c = sub16 % 16;
       // Two grid groups of eight values; one 4-bit scale per sixteen values.
       const std::uint16_t q0 = blk.qs[2 * c];
@@ -854,8 +861,7 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       const std::uint8_t scale_byte = blk.scales[c >> 1];
       const unsigned ls =
           ((c & 1U) == 0U) ? (scale_byte & 15U) : (scale_byte >> 4U);
-      out.scale =
-          __half2float(blk.d) * (0.5F + static_cast<float>(ls)) * 0.25F;
+      out.scale = blk_d * (0.5F + static_cast<float>(ls)) * 0.25F;
       return;
     }
     case core::GgmlType::kQ2_K: {

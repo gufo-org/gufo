@@ -96,8 +96,30 @@ A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
       實測成立）。
 - [x] Qwen3.8-27B-Q3_K_M 下載完成（~/models，13.23GiB；Flash-Next/DS4
       太大不考慮；Q2 走 sdot4 而 gfx1201 無 dot1-insts，故選 Q3）。
-- [ ] qfn mmvq（stub 完，MoE  Variant 日後再說）。
+- [x] IQ2_XS enablement（用户決議硬上）：llama.cpp 規格從 ds4 vendored
+      vec_dot 反推（grid 9bit＋sign 7bit parity＋nibble scale/4），Sub16
+      解碼器＋CPU 參考＋dispatch 接線（route/weights/wmma-gemm/batched-
+      decode；fp16/small-batch/wave64 刻意不接：前者會 throw，後者已中立化）。
+      grid distinct bytes {8,25,43}，max 0x2b（int8 安全，已斷言）。
+      待：編譯＋std 交叉驗證＋serve 實測。
 - [ ] ds4_q8（stub 完，日後再說）。
+- [x] IQ2_XS enablement（硬上成功，2026-10-01）：解碼器地面真相來自
+      gguf-py（非推測）：grid 9bit＋sign parity＋scale nibble，
+      db = d*(0.5+ls)/4；Q2_K bit-plane-interleaved qs（每 byte 橫跨
+      4 groups）＋scales-first layout（跟其他 K-quant 反過來！）。
+      驗證：IQ2_XS r=0.94、Q2_K r=0.96（vs 受信 Q3_K/Q5_K CPU）。
+      教訓：vec-dot 的 SIMD shuffling 不能直接讀成 plain layout；
+      同 tensor 跨格式相關性是王道驗證法。
+- [x] IQ2_XS serve 點火（c8192，VRAM ~13GB）：144 ✓，Hello world ✓，
+      ~19 t/s。關鍵：(1) VRAM 常駐（沿用）；(2) prefill 走
+      dequant-to-BF16＋hipBLAS（為 IQ2_XS/Q2_K 補 Sub16 dequant
+      kernel——原先是 no-op 靜默零權重！）；(3) decode 避開 fused
+      kernels（packed_format 限舊格式；fused 核對新格式未驗證，
+      先走 proven unfused GEMV，效能債另案）。
+- [ ] fused SwiGLU/QKV kernels 的 IQ2_XS/Q2_K 審計＋啟用（效能）。
+- [ ] WKQuant-PreQuantized 路徑對非 native 格式的正確性（abstest 顯示
+      Q4_K/IQ2_XS 經此路輸出偏小；serve 不走此路故不擋上線；可能是
+      harness 誤用，需查明）。
 - [ ] 全量 build → diagnose → Q3 serve 點火。
 - [ ] qfn W8A8（WmmaI8，3563）：同 Qwen quant 模式（a0/a1 雙 call＋
       dw＋scratch[tok][row] 雙 tile 寫回）。

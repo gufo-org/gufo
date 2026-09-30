@@ -770,6 +770,10 @@ void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k) {
   const std::size_t nb = k / 256;
   for (std::size_t b = 0; b < nb; ++b) {
     const float d = Fp16ToFloat(blocks[b].d);
+    if (!std::isfinite(d)) {
+      for (int j = 0; j < 256; ++j) dst[(b * 256) + j] = 0.0F;
+      continue;
+    }
     for (std::size_t c = 0; c < 16; ++c) {
       const std::uint16_t q0 = blocks[b].qs[2 * c];
       const std::uint16_t q1 = blocks[b].qs[2 * c + 1];
@@ -782,7 +786,7 @@ void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k) {
       const std::uint8_t scale_byte = blocks[b].scales[c >> 1];
       const unsigned ls =
           ((c & 1U) == 0U) ? (scale_byte & 15U) : (scale_byte >> 4U);
-      const float db = d * static_cast<float>(ls) * 0.25F;
+      const float db = d * (0.5F + static_cast<float>(ls)) * 0.25F;
       for (int j = 0; j < 8; ++j) {
         const int mag0 = static_cast<int>((g0 >> (8 * j)) & 0xFFU);
         const int mag1 = static_cast<int>((g1 >> (8 * j)) & 0xFFU);
