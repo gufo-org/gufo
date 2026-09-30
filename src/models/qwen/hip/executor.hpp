@@ -61,6 +61,9 @@ struct QwenGpuWeightRegion {
   void* device_data{nullptr};
   void* host_copy{nullptr};
   std::size_t size{0};
+  // Discrete GPUs copy weights into VRAM (unified-memory zero-copy would
+  // page every decode step over PCIe). True => hipFree device_data on teardown.
+  bool device_owned{false};
 };
 
 struct QwenGpuMemoryUsage {

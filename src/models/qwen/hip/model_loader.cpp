@@ -21,7 +21,9 @@ namespace {
 
 void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
   for (auto& region : regions) {
-    if (region.host_copy != nullptr) {
+    if (region.device_owned) {
+      (void)hipFree(region.device_data);
+    } else if (region.host_copy != nullptr) {
       (void)hipHostUnregister(region.host_copy);
       (void)munmap(region.host_copy, region.size);
     }
@@ -76,6 +78,31 @@ void CopyMappedWeights(const core::GgufMappedRegion& source, void* copy) {
   std::unique_ptr<void, decltype(unmap)> owned_copy(host_copy, unmap);
   (void)madvise(host_copy, source.size, MADV_HUGEPAGE);
   CopyMappedWeights(source, host_copy);
+  // Discrete GPU (no unified memory): keep weights VRAM-resident. Decode is
+  // memory-bound with no batch reuse, so PCIe zero-copy caps it at ~2 tok/s.
+  // Falls back to the zero-copy path if VRAM is short.
+  {
+    hipDeviceProp_t weight_prop{};
+    if (hipGetDeviceProperties(&weight_prop, 0) == hipSuccess &&
+        weight_prop.integrated == 0) {
+      void* device_copy = nullptr;
+      if (hipMalloc(&device_copy, source.size) == hipSuccess &&
+          hipMemcpy(device_copy, host_copy, source.size,
+                    hipMemcpyHostToDevice) == hipSuccess) {
+        (void)munmap(host_copy, source.size);
+        owned_copy.release();
+        destination = {.host_data = source.data,
+                       .device_data = device_copy,
+                       .host_copy = nullptr,
+                       .size = source.size,
+                       .device_owned = true};
+        return hipSuccess;
+      }
+      if (device_copy != nullptr) {
+        (void)hipFree(device_copy);
+      }
+    }
+  }
   const auto register_error = hipHostRegister(
       host_copy, source.size, hipHostRegisterMapped | hipHostRegisterReadOnly);
   if (register_error != hipSuccess)
