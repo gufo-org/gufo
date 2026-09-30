@@ -166,7 +166,8 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
   constexpr bool PerHalfScale =
       WType == core::GgmlType::kQ6_K || WType == core::GgmlType::kQ3_K;
   constexpr bool HasOffset =
-      WType == core::GgmlType::kQ4_K || WType == core::GgmlType::kQ5_K;
+      WType == core::GgmlType::kQ4_K || WType == core::GgmlType::kQ5_K ||
+      WType == core::GgmlType::kQ2_K;
 
   static_assert(WaveSize == 32 || WaveSize == 64);
   static_assert((WaveSize == 32 && WM * WN == 8) ||

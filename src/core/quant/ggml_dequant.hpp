@@ -198,6 +198,9 @@ void DequantizeIQ3_S(const void* src, float* dst, std::size_t k);
 // Dequantize row of IQ2_XS to float
 void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k);
 
+// Dequantize row of Q2_K to float
+void DequantizeQ2_K(const void* src, float* dst, std::size_t k);
+
 // Compute dot product of IQ4_NL quantized row with FP32 vector
 float DotProductIQ4_NL(const void* row_data, std::span<const float> vec,
                        std::size_t k);
