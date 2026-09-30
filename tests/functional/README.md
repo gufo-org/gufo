@@ -28,6 +28,7 @@ DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
 | `conversation` | Thinking/efforts, images, cancellation and RAM reuse |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
+| `tool-edges` | Referenced argument types, literal CR, unusual keys and named Responses metadata |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |
 | `batch` | Independent requests across Chat, Responses and Completions; sessions 1–8 |

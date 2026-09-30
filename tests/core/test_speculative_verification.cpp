@@ -1114,57 +1114,65 @@ void TestConcurrentTargetOnlySteps() {
 void TestConstrainedGreedyVerification() {
   using namespace gufo::speculative;
   using namespace gufo::sampling;
-  const std::vector<std::string> pieces{"{", "\"v\":1", "}"};
-  auto constraint = std::make_shared<TokenConstraint>();
-  constraint->grammar = JsonConstraint::Compile(
-      gufo::json::parse(
-          R"({"type":"object","properties":{"v":{"type":"integer","const":1}},
+  for (const bool tool : {false, true}) {
+    const std::vector<std::string> pieces{
+        tool ? "<tool_call>{\"name\":\"f\",\"arguments\":{" : "{", "\"v\":1",
+        tool ? "}}</tool_call>" : "}"};
+    auto constraint = std::make_shared<TokenConstraint>();
+    constraint->grammar = JsonConstraint::Compile(
+        gufo::json::parse(
+            R"({"type":"object","properties":{"v":{"type":"integer","const":1}},
                            "required":["v"],"additionalProperties":false})"),
-      false);
-  constraint->vocabulary = std::make_shared<ConstraintVocabulary>(
-      pieces.size(), [&](std::uint32_t i) {
-        return ConstraintVocabulary::Piece{pieces[i], false};
-      });
-  for (const auto width : {1U, 4U}) {
-    for (const auto budget : {1U, 2U}) {
-      for (const bool closing : {false, true}) {
-        std::vector<std::unique_ptr<SampledTargetExecutor>> targets;
-        std::vector<std::unique_ptr<SpeculativeVerifier>> verifiers;
-        std::vector<SamplerState> samplers;
-        std::vector<SpeculativeVerifier::StepRequest> requests;
-        samplers.reserve(width);
-        const std::vector<TokenId> prompt{0};
-        const std::vector<TokenId> sequence{0, closing ? 1U : 0U};
-        for (unsigned row = 0; row < width; ++row) {
-          targets.push_back(std::make_unique<SampledTargetExecutor>(
-              std::vector<float>{-20, 5, 1}, true));
-          SpeculativeOptions options;
-          options.use_batched_verification = true;
-          verifiers.push_back(std::make_unique<SpeculativeVerifier>(
-              *targets.back(),
-              std::make_unique<BinarySampledDraftBackend>(0.9F, 0.1F),
-              options));
-          (void)verifiers.back()->Prime(prompt);
-          samplers.emplace_back(SamplingConfig{.constraint = constraint});
-          samplers.back().Accept(0);
-          if (closing)
-            samplers.back().Accept(1);
-          requests.push_back({*verifiers.back(), sequence, 1, sequence.back(),
-                              99, budget, samplers.back()});
-        }
-        const auto results = SpeculativeVerifier::VerifyBatch(requests);
-        for (unsigned row = 0; row < width; ++row) {
-          const auto expected = closing       ? std::vector<TokenId>{2}
-                                : budget == 1 ? std::vector<TokenId>{1}
-                                              : std::vector<TokenId>{1, 2};
-          Expect(results[row].emitted_tokens == expected,
-                 "constrained verification checks both draft and bonus rows");
-          Expect(results[row].accepted_count ==
-                     (!closing && budget == 2 ? 1U : 0U),
-                 "forbidden raw argmax must reject the draft");
-          if (width == 1 && budget == 1 && !closing)
-            Expect(targets[row]->SampleCalls() == 0,
-                   "legal greedy target-only argmax needs no logit sampling");
+        false);
+    if (tool)
+      constraint->grammar = JsonConstraint::WithTools(
+          nullptr, {{"f", constraint->grammar}}, true, false);
+    constraint->vocabulary = std::make_shared<ConstraintVocabulary>(
+        pieces.size(), [&](std::uint32_t i) {
+          return ConstraintVocabulary::Piece{pieces[i], false};
+        });
+    for (const auto width : {1U, 4U}) {
+      for (const auto budget : {1U, 2U}) {
+        for (const bool closing : {false, true}) {
+          std::vector<std::unique_ptr<SampledTargetExecutor>> targets;
+          std::vector<std::unique_ptr<SpeculativeVerifier>> verifiers;
+          std::vector<SamplerState> samplers;
+          std::vector<SpeculativeVerifier::StepRequest> requests;
+          samplers.reserve(width);
+          const std::vector<TokenId> prompt{0};
+          const std::vector<TokenId> sequence{0, closing ? 1U : 0U};
+          for (unsigned row = 0; row < width; ++row) {
+            targets.push_back(std::make_unique<SampledTargetExecutor>(
+                std::vector<float>{-20, 5, 1}, true));
+            SpeculativeOptions options;
+            options.use_batched_verification = true;
+            verifiers.push_back(std::make_unique<SpeculativeVerifier>(
+                *targets.back(),
+                std::make_unique<BinarySampledDraftBackend>(0.9F, 0.1F),
+                options));
+            (void)verifiers.back()->Prime(prompt);
+            samplers.emplace_back(SamplingConfig{.constraint = constraint});
+            samplers.back().Accept(0);
+            if (closing)
+              samplers.back().Accept(1);
+            requests.push_back({*verifiers.back(), sequence, 1, sequence.back(),
+                                99, budget, samplers.back()});
+          }
+          const auto results = SpeculativeVerifier::VerifyBatch(requests);
+          for (unsigned row = 0; row < width; ++row) {
+            const auto expected = closing       ? std::vector<TokenId>{2}
+                                  : budget == 1 ? std::vector<TokenId>{1}
+                                                : std::vector<TokenId>{1, 2};
+            Expect(results[row].emitted_tokens == expected,
+                   "constrained verification checks both draft and bonus rows");
+            Expect(results[row].accepted_count ==
+                       (!closing && budget == 2 ? 1U : 0U),
+                   "forbidden raw argmax must reject the draft");
+            if (width == 1 && budget == 1 && !closing)
+              Expect(tool ? targets[row]->SampleCalls() == 0
+                          : targets[row]->SampleCalls() > 0,
+                     "tools reuse legal argmaxes; closed JSON keeps its mask");
+          }
         }
       }
     }

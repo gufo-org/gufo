@@ -205,11 +205,18 @@ bool SamplingConfig::can_use_unmodified_argmax() const noexcept {
 }
 
 bool SamplerState::CanSelectArgmax(TokenId token) const {
-  return !pending_sample_ && config_.temperature == 0.0F &&
-         !config_.penalties_enabled() &&
-         (!config_.constraint ||
-          config_.constraint->vocabulary->Allows(*config_.constraint->grammar,
-                                                 constraint_state_, token));
+  if (pending_sample_ || config_.temperature != 0.0F ||
+      config_.penalties_enabled())
+    return false;
+  if (!config_.constraint)
+    return true;
+  if (token >= config_.constraint->vocabulary->size())
+    throw std::out_of_range("target argmax exceeds the constraint vocabulary");
+  // Keep full masks for closed JSON outputs: subsequent sampled requests
+  // reuse them. Tool/prose grammars can reuse an already legal target argmax.
+  return !config_.constraint->grammar->stop_only_when_complete_ &&
+         config_.constraint->vocabulary->Allows(*config_.constraint->grammar,
+                                                constraint_state_, token);
 }
 
 SamplingDistribution::SamplingDistribution(std::vector<Probability> entries)

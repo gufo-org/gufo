@@ -428,6 +428,7 @@ bool ParseToolChoice(const json::Value* value, ParsedChatRequest* request,
   }
   if (value->is_string()) {
     const std::string choice = value->get_str();
+    request->chat.forced_tool_name.clear();
     if (choice == "auto") {
       request->chat.tool_choice = ChatRequest::ToolChoice::kAuto;
       return true;
@@ -452,6 +453,7 @@ bool ParseToolChoice(const json::Value* value, ParsedChatRequest* request,
       auto tool = *found;
       tools = {std::move(tool)};
       request->chat.tool_choice = ChatRequest::ToolChoice::kRequired;
+      request->chat.forced_tool_name = name;
       return true;
     }
     *error = "'tool_choice' must name a declared function";
@@ -604,7 +606,8 @@ bool ParseReasoningOptions(const json::Value& body, ReasoningOptions* options,
 }
 
 std::optional<HttpResponse> ParseToolControls(const json::Value& body,
-                                              ParsedChatRequest* output) {
+                                              ParsedChatRequest* output,
+                                              bool nullable_parallel = false) {
   std::string parse_error;
   if (!ParseTools(body.find("tools"), &output->chat.tools, &parse_error) ||
       !ParseToolChoice(body.find("tool_choice"), output, &parse_error)) {
@@ -616,7 +619,8 @@ std::optional<HttpResponse> ParseToolControls(const json::Value& body,
                  "'tool_choice' cannot be required without tools",
                  "invalid_tool_choice");
   }
-  if (const auto* parallel = body.find("parallel_tool_calls")) {
+  if (const auto* parallel = body.find("parallel_tool_calls");
+      parallel && !(nullable_parallel && parallel->is_null())) {
     if (!parallel->is_bool())
       return Error(400, "Bad Request",
                    "'parallel_tool_calls' must be a boolean", "invalid_tools");
@@ -868,14 +872,13 @@ std::string_view Trim(std::string_view value) {
 // newline on each side is framing, everything else (a file's final newline,
 // indentation, blank lines) belongs to the value.
 std::string_view StripFramingNewlines(std::string_view value) {
-  if (value.starts_with("\r\n"))
-    value.remove_prefix(2);
-  else if (value.starts_with('\n'))
-    value.remove_prefix(1);
-  if (value.ends_with("\r\n"))
-    value.remove_suffix(2);
-  else if (value.ends_with('\n'))
-    value.remove_suffix(1);
+  // Match the opening frame: a literal final CR before an LF frame is data.
+  const std::string_view frame = value.starts_with("\r\n") ? "\r\n" : "\n";
+  if (value.starts_with(frame)) {
+    value.remove_prefix(frame.size());
+    if (value.ends_with(frame))
+      value.remove_suffix(frame.size());
+  }
   return value;
 }
 
@@ -982,7 +985,29 @@ std::string ArgumentsJson(
 
 // Qwen's XML-like arguments carry no type marker. The advertised schema is
 // needed to distinguish a string such as 42 from the JSON number 42.
-bool SchemaAccepts(const json::Value& schema, const json::Value& value) {
+const json::Value* ResolveToolSchema(const json::Value& root,
+                                     const json::Value& schema) {
+  const auto* target = &schema;
+  std::vector<const json::Value*> seen;
+  while (const auto* reference = target->find("$ref")) {
+    if (std::ranges::find(seen, target) != seen.end())
+      return nullptr;
+    seen.push_back(target);
+    try {
+      target = sampling::JsonConstraint::ResolveReference(root, *reference);
+    } catch (const std::invalid_argument&) {
+      return nullptr;  // Non-strict schemas may not be compilable.
+    }
+  }
+  return target;
+}
+
+bool SchemaAccepts(const json::Value& root, const json::Value& original,
+                   const json::Value& value, std::size_t depth = 0) {
+  const auto* resolved = ResolveToolSchema(root, original);
+  if (!resolved || depth > 16)
+    return true;  // Retain text for unknown non-strict argument types.
+  const auto& schema = *resolved;
   const auto matches = [&](std::string_view type) {
     return (type == "string" && value.is_string()) ||
            (type == "number" && value.is_number()) ||
@@ -1005,7 +1030,7 @@ bool SchemaAccepts(const json::Value& schema, const json::Value& value) {
   for (const auto* name : {"anyOf", "oneOf"}) {
     if (const auto* choices = schema.find(name); choices && choices->is_array())
       return std::ranges::any_of(choices->items(), [&](const auto& item) {
-        return SchemaAccepts(item, value);
+        return SchemaAccepts(root, item, value, depth + 1);
       });
   }
   return true;
@@ -1048,6 +1073,9 @@ void ParseQwenCalls(
       }
       if (call.name.empty())
         continue;
+      const auto* object =
+          schema ? ResolveToolSchema(*schema, *schema) : nullptr;
+      const auto* properties = object ? object->find("properties") : nullptr;
       bool valid = true;
       while (consume("<parameter=")) {
         const auto name_end = body.find('>');
@@ -1083,22 +1111,21 @@ void ParseQwenCalls(
           break;
         }
         const auto value = StripFramingNewlines(body.substr(0, close));
-        const auto* properties = schema ? schema->find("properties") : nullptr;
         const auto* property = properties ? properties->find(name) : nullptr;
         const bool string_allowed =
             !property ||
-            SchemaAccepts(*property, json::Value(std::string(value)));
+            SchemaAccepts(*schema, *property, json::Value(std::string(value)));
         // Prefer text if the schema permits it; parsing ambiguous scalars
         // as JSON would silently change a caller's declared string type.
         const bool is_string = string_allowed;
         std::string raw(is_string ? value : Trim(value));
         if (!is_string) {
           auto parsed = TryParseJson(raw);
-          if (!parsed || !SchemaAccepts(*property, *parsed)) {
+          if (!parsed || !SchemaAccepts(*schema, *property, *parsed)) {
             raw = PythonLiteralsToJson(raw);
             parsed = TryParseJson(raw);
           }
-          if (!parsed || !SchemaAccepts(*property, *parsed)) {
+          if (!parsed || !SchemaAccepts(*schema, *property, *parsed)) {
             valid = false;
             break;
           }
@@ -1847,6 +1874,11 @@ public:
             ? "none"
         : chat.tool_choice == ChatRequest::ToolChoice::kRequired ? "required"
                                                                  : "auto";
+    if (!chat.forced_tool_name.empty()) {
+      response_["tool_choice"] = json::Value::object();
+      response_["tool_choice"]["type"] = "function";
+      response_["tool_choice"]["name"] = chat.forced_tool_name;
+    }
     response_["tools"] = json::Value::array();
     for (const auto& tool : chat.tools) {
       const auto definition = json::parse(tool.definition_json);
@@ -2327,7 +2359,7 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
                                                         ChatRequest* chat) {
   ParsedChatRequest parsed;
   parsed.chat = *chat;
-  if (auto error = ParseToolControls(body, &parsed))
+  if (auto error = ParseToolControls(body, &parsed, true))
     return error;
   // Responses attempts strict normalization when strict is omitted; Chat
   // Completions keeps its best-effort default. Explicit true/false wins.

@@ -96,6 +96,7 @@ struct ChatRequest {
   std::vector<tokenization::ChatTool> tools;
   std::string client_id{"anonymous"};
   ToolChoice tool_choice{ToolChoice::kAuto};
+  std::string forced_tool_name;
   bool constrained_tools{false};
   bool parallel_tool_calls{true};
   ReasoningOptions reasoning;

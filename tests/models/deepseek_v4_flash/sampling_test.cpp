@@ -254,32 +254,52 @@ int main() {
                               logits.size()) == static_cast<int>(expected) &&
              delta.rng_state() == unfiltered.rng_state(),
          "point-mass fallback preserves the sampled AR seed trace");
-  const std::array<std::string, 3> pieces{"{", "\"x\":1", "}"};
-  auto constraint = std::make_shared<gufo::sampling::TokenConstraint>();
-  constraint->grammar = gufo::sampling::JsonConstraint::Object();
-  constraint->vocabulary =
-      std::make_shared<gufo::sampling::ConstraintVocabulary>(
-          pieces.size(), [&](std::uint32_t i) {
-            return gufo::sampling::ConstraintVocabulary::Piece{pieces[i],
-                                                               false};
-          });
-  SamplerState constrained({.seed = 19, .constraint = constraint});
-  DsparkSamplerBridge fast(constrained);
-  const auto* hook = fast.hook();
-  Expect(hook->try_accept_argmax != nullptr,
-         "greedy constraints can use exact target argmaxes");
-  ExpectThrows([&] { hook->try_accept_argmax(hook->ctx, 3); });
-  Expect(!hook->try_accept_argmax(hook->ctx, -1) &&
-             !hook->try_accept_argmax(hook->ctx, 2),
-         "invalid and forbidden argmaxes leave the grammar unchanged");
-  Expect(hook->try_accept_argmax(hook->ctx, 0) &&
-             !hook->try_accept_argmax(hook->ctx, 0) &&
-             hook->try_accept_argmax(hook->ctx, 1) &&
-             hook->try_accept_argmax(hook->ctx, 2) &&
-             !hook->try_accept_argmax(hook->ctx, 1),
-         "accepted argmaxes advance the grammar exactly once");
-  Expect(fast.rng_state() == constrained.rng_state(),
-         "greedy constraint acceptance consumes no random draws");
+  for (const bool tool : {false, true}) {
+    const std::array<std::string, 3> pieces{
+        tool ? "<tool_call>{\"name\":\"f\",\"arguments\":{" : "{", "\"x\":1",
+        tool ? "}}</tool_call>" : "}"};
+    auto constraint = std::make_shared<gufo::sampling::TokenConstraint>();
+    constraint->grammar = gufo::sampling::JsonConstraint::Object();
+    if (tool)
+      constraint->grammar = gufo::sampling::JsonConstraint::WithTools(
+          nullptr, {{"f", constraint->grammar}}, true, false);
+    constraint->vocabulary =
+        std::make_shared<gufo::sampling::ConstraintVocabulary>(
+            pieces.size(), [&](std::uint32_t i) {
+              return gufo::sampling::ConstraintVocabulary::Piece{pieces[i],
+                                                                 false};
+            });
+    SamplerState constrained({.seed = 19, .constraint = constraint});
+    DsparkSamplerBridge fast(constrained);
+    const auto* hook = fast.hook();
+    Expect(hook->try_accept_argmax != nullptr,
+           "greedy constraints can use exact target argmaxes");
+    ExpectThrows([&] { hook->try_accept_argmax(hook->ctx, 3); });
+    Expect(!hook->try_accept_argmax(hook->ctx, -1) &&
+               !hook->try_accept_argmax(hook->ctx, 2),
+           "invalid and forbidden argmaxes leave the grammar unchanged");
+    if (!tool) {
+      for (int token = 0; token < 3; ++token) {
+        Expect(!hook->try_accept_argmax(hook->ctx, token),
+               "closed JSON defers selection without advancing the grammar");
+        std::array<float, 3> row{-INFINITY, -INFINITY, -INFINITY};
+        row[token] = 1;
+        Expect(hook->sample(hook->ctx, row.data(), row.size()) == token,
+               "closed JSON masks retain the exact target choice");
+      }
+    } else {
+      Expect(hook->try_accept_argmax(hook->ctx, 0) &&
+                 !hook->try_accept_argmax(hook->ctx, 0) &&
+                 hook->try_accept_argmax(hook->ctx, 1) &&
+                 hook->try_accept_argmax(hook->ctx, 2) &&
+                 !hook->try_accept_argmax(hook->ctx, 0),
+             "accepted argmaxes advance the grammar exactly once");
+      Expect(hook->try_accept_argmax(hook->ctx, 1),
+             "ordinary text remains legal after the one permitted tool call");
+    }
+    Expect(fast.rng_state() == constrained.rng_state(),
+           "greedy constraint acceptance consumes no random draws");
+  }
   std::puts(
       "DSpark sampling: distribution, residual, replay and malformed rows "
       "pass");

@@ -1459,6 +1459,69 @@ def check_native_tools(client, model, checks, vision=False):
         record("responses_image_tool", result.to_dict())
 
 
+def check_tool_edges(client, model, checks):
+    """Exercise schema-to-native-to-JSON conversion through the real model."""
+    expected = {"n": 42, "b": True, "a": [1], "o": {"x": 2}, "s": "42", "z": None}
+    definitions = {
+        "number/type~": {"type": "integer", "enum": [42]},
+        "b": {"type": "boolean", "enum": [True]},
+        "a": {"type": "array", "items": {"type": "integer"}, "enum": [[1]]},
+        "o": {"type": "object", "properties": {"x": {"type": "integer", "enum": [2]}},
+              "required": ["x"], "additionalProperties": False},
+        "s": {"type": "string", "enum": ["42"]}, "z": {"type": "null"},
+    }
+    definitions["Arguments"] = {
+        "type": "object", "properties": {
+            key: {"$ref": "#/$defs/" + ("number~1type~0" if key == "n" else key)}
+            for key in expected},
+        "required": list(expected), "additionalProperties": False}
+    function = {"name": "record", "strict": True, "parameters": {
+        "$ref": "#/$defs/Arguments", "$defs": definitions}}
+    prompt = "Call record once using its required values. Do not explain."
+    common = dict(model=model, temperature=0,
+                  extra_body={"seed": 41, "presence_penalty": 0})
+    chat = dict(**common, messages=[{"role": "user", "content": prompt}],
+                tools=[{"type": "function", "function": function}],
+                tool_choice="required", parallel_tool_calls=False,
+                reasoning_effort="none", max_completion_tokens=160)
+    for stream in (False, True):
+        result = chat_result(client, chat, stream)
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        arguments = json.loads(result["tools"][0]["function"]["arguments"])
+        assert arguments == expected and type(arguments["b"]) is bool, arguments
+        checks[f"chat_referenced_types_stream{stream}"] = result
+
+    responses = dict(**common, input=prompt, tools=[{"type": "function", **function}],
+                     tool_choice={"type": "function", "name": "record"},
+                     parallel_tool_calls=None, reasoning={"effort": "none"},
+                     max_output_tokens=160, store=False)
+    for stream in (False, True):
+        if stream:
+            with client.responses.stream(**responses) as events:
+                list(events)
+                result = events.get_final_response()
+        else:
+            result = client.responses.create(**responses)
+        calls = [item for item in result.output if item.type == "function_call"]
+        assert result.status == "completed" and len(calls) == 1, result
+        assert json.loads(calls[0].arguments) == expected, result
+        assert result.tool_choice.type == "function" and result.tool_choice.name == "record"
+        assert result.parallel_tool_calls is False
+        checks[f"responses_referenced_types_stream{stream}"] = result.to_dict()
+
+    for key in ("value", " value "):
+        literal = "literal\r"
+        fn = {"name": "record", "strict": True, "parameters": {
+            "type": "object", "properties": {key: {"type": "string", "const": literal}},
+            "required": [key], "additionalProperties": False}}
+        result = client.responses.create(**{
+            **responses, "tools": [{"type": "function", **fn}]})
+        calls = [item for item in result.output if item.type == "function_call"]
+        assert result.status == "completed" and len(calls) == 1, result
+        assert json.loads(calls[0].arguments) == {key: literal}, result
+        checks[f"responses_literal_cr_key{key!r}"] = result.to_dict()
+
+
 def check_auto_tools(client, model, checks, vision=False):
     """Automatic calls retain prose, loose schemas, replay and both transports."""
     from concurrent.futures import ThreadPoolExecutor
@@ -1894,7 +1957,7 @@ def check_responses(client, model, checks, options, async_local_only, expect_rea
 
 
 SDK_SUITES = ("responses", "stops", "conversation", "structured", "structured-limits",
-              "tools", "auto-tools", "sampling-defaults", "sampling-ranges", "batch",
+              "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context")
 
 
@@ -1966,6 +2029,7 @@ def main():
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
             "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
             "auto-tools": lambda: check_auto_tools(client, args.model, checks, args.vision),
+            "tool-edges": lambda: check_tool_edges(client, args.model, checks),
             "sampling-defaults": lambda: check_sampling_defaults(
                 client, args.model, checks, args.sampling_preset, args.sampling_overrides,
                 args.vision, args.server_thinking),

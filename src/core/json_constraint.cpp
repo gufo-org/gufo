@@ -30,6 +30,47 @@ constexpr std::size_t kMaxWork = 2000000;
 }
 }  // namespace
 
+const json::Value* JsonConstraint::ResolveReference(
+    const json::Value& root, const json::Value& reference) {
+  if (!reference.is_string() ||
+      (reference.str() != "#" && !reference.str().starts_with("#/")))
+    Invalid("only local JSON pointer references are supported");
+  const auto* target = &root;
+  std::string_view pointer(reference.str());
+  pointer.remove_prefix(1);
+  while (!pointer.empty()) {
+    pointer.remove_prefix(1);
+    const auto slash = pointer.find('/');
+    const auto segment = pointer.substr(0, slash);
+    std::string decoded;
+    for (std::size_t i = 0; i < segment.size(); ++i) {
+      if (segment[i] == '~') {
+        if (++i == segment.size() || (segment[i] != '0' && segment[i] != '1'))
+          Invalid("invalid JSON pointer escape");
+        decoded += segment[i] == '0' ? '~' : '/';
+      } else
+        decoded += segment[i];
+    }
+    if (target->is_array()) {
+      std::size_t index = 0;
+      const auto result = std::from_chars(
+          decoded.data(), decoded.data() + decoded.size(), index);
+      target = result.ec == std::errc{} &&
+                       result.ptr == decoded.data() + decoded.size() &&
+                       index < target->size()
+                   ? &target->items()[index]
+                   : nullptr;
+    } else
+      target = target->find(decoded);
+    if (!target)
+      Invalid("local reference does not exist");
+    if (slash == std::string_view::npos)
+      break;
+    pointer.remove_prefix(slash);
+  }
+  return target;
+}
+
 class JsonConstraintCompiler {
 public:
   using Sequence = JsonConstraint::Sequence;
@@ -185,6 +226,13 @@ public:
     std::vector<std::pair<std::string, std::uint32_t>> members;
     for (const auto& [name, original] : properties->members()) {
       if (name.empty() || name.find_first_of("<>\"=\r\n") != std::string::npos)
+        return {};
+      // Qwen's native parser trims tag names. JSON preserves these keys.
+      if (format == Format::kQwen &&
+          (std::string_view(" \t\f\v").find(name.front()) !=
+               std::string_view::npos ||
+           std::string_view(" \t\f\v").find(name.back()) !=
+               std::string_view::npos))
         return {};
       const auto* schema = &original;
       while (const auto* ref = schema->find("$ref")) {
@@ -1080,43 +1128,7 @@ private:
     return Alt(alternatives);
   }
   const json::Value* Reference(const json::Value& reference) const {
-    if (!reference.is_string() ||
-        (reference.str() != "#" && !reference.str().starts_with("#/")))
-      Invalid("only local JSON pointer references are supported");
-    const auto* target = &schema_;
-    std::string_view pointer(reference.str());
-    pointer.remove_prefix(1);
-    while (!pointer.empty()) {
-      pointer.remove_prefix(1);
-      const auto slash = pointer.find('/');
-      const auto segment = pointer.substr(0, slash);
-      std::string decoded;
-      for (std::size_t i = 0; i < segment.size(); ++i) {
-        if (segment[i] == '~') {
-          if (++i == segment.size() || (segment[i] != '0' && segment[i] != '1'))
-            Invalid("invalid JSON pointer escape");
-          decoded += segment[i] == '0' ? '~' : '/';
-        } else
-          decoded += segment[i];
-      }
-      if (target->is_array()) {
-        std::size_t index = 0;
-        const auto result = std::from_chars(
-            decoded.data(), decoded.data() + decoded.size(), index);
-        target = result.ec == std::errc{} &&
-                         result.ptr == decoded.data() + decoded.size() &&
-                         index < target->size()
-                     ? &target->items()[index]
-                     : nullptr;
-      } else
-        target = target->find(decoded);
-      if (!target)
-        Invalid("local reference does not exist");
-      if (slash == std::string_view::npos)
-        break;
-      pointer.remove_prefix(slash);
-    }
-    return target;
+    return JsonConstraint::ResolveReference(schema_, reference);
   }
   std::uint32_t Object(const json::Value& schema, std::size_t depth) {
     static const auto empty_properties = json::Value::object();

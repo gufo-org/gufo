@@ -918,6 +918,19 @@ void TestNativeTools() {
                  R"({"text":"\n</parameter>"})"));
   assert(
       !JsonConstraint::ToolParameters(delimiter_pattern, true, Format::kQwen));
+  for (const std::string name : {" text", "text ", "\ttext", "text\f"}) {
+    auto unusual = gufo::json::Value::object();
+    unusual["type"] = "object";
+    unusual["properties"][name]["type"] = "string";
+    unusual["required"] = gufo::json::Value::array();
+    unusual["required"].push_back(name);
+    unusual["additionalProperties"] = false;
+    auto value = gufo::json::Value::object();
+    value[name] = "literal";
+    assert(Accepts(*JsonConstraint::Compile(unusual, true), value.dump()));
+    assert(!JsonConstraint::ToolParameters(unusual, true, Format::kQwen));
+    assert(JsonConstraint::ToolParameters(unusual, true, Format::kDeepSeek));
+  }
 }
 
 void TestOpenNativeTools() {

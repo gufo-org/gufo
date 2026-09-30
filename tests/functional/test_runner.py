@@ -90,6 +90,23 @@ class FunctionalRunnerTest(unittest.TestCase):
                 {"startup_ms": 100, "suites": {"text-cancel-disk": {}}},
                 {"startup_ms": 100, "suites": {"text-cancel-disk": {}}})
 
+    def test_nullable_parallel_responses_keeps_default(self):
+        response = {"status": "completed", "output": [
+            {"type": "function_call", "name": "f", "call_id": f"call_{i}",
+             "arguments": "{}"} for i in range(2)],
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3,
+                      "input_tokens_details": {"cached_tokens": 0}},
+            "timings": {"prompt_n": 1, "prompt_ms": 2, "predicted_ms": 3,
+                        "cache_restore_ms": 0, "cache_snapshot_ms": 0,
+                        "cache_disk_enqueue_ms": 0}}
+        body = {"tools": [{"type": "function", "name": "f", "parameters": {}}],
+                "parallel_tool_calls": None}
+        data = [(1, json.dumps(response).encode())]
+        summarize(data, False, True, ("/v1/responses", body, 200))
+        body["parallel_tool_calls"] = False
+        with self.assertRaisesRegex(ValueError, "parallel_tool_calls"):
+            summarize(data, False, True, ("/v1/responses", body, 200))
+
     def test_fragmented_stream_metrics_and_output_identity(self):
         usage = {"prompt_tokens": 10, "completion_tokens": 2,
                  "gufo": {"prefill_tokens": 10, "prefill_ms": 20, "decode_ms": 8}}

@@ -646,11 +646,28 @@ std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
   }
 
   std::vector<TokenId> tokens;
+  // Repeated words have identical BPE merges within this normalized span.
+  // Keep a small request-local memo: no cross-request state or lock, and no
+  // retained copies of long/unbounded pieces.
+  std::unordered_map<std::string_view, std::vector<TokenId>> pieces;
+  if (text.size() >= 1024)
+    pieces.reserve(128);
   std::size_t offset = 0;
   while (offset < text.size()) {
     const std::size_t end = Qwen35PieceEnd(text, offset);
-    const auto piece_tokens = BpeMergeChunk(text.substr(offset, end - offset));
+    const auto piece = text.substr(offset, end - offset);
+    if (text.size() >= 1024 && piece.size() > 1 && piece.size() <= 64) {
+      if (const auto found = pieces.find(piece); found != pieces.end()) {
+        tokens.insert(tokens.end(), found->second.begin(), found->second.end());
+        offset = end;
+        continue;
+      }
+    }
+    auto piece_tokens = BpeMergeChunk(piece);
     tokens.insert(tokens.end(), piece_tokens.begin(), piece_tokens.end());
+    if (text.size() >= 1024 && piece.size() > 1 && piece.size() <= 64 &&
+        pieces.size() < 128)
+      pieces.emplace(piece, std::move(piece_tokens));
     offset = end;
   }
   return tokens;

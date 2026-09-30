@@ -27,7 +27,7 @@ from metrics import compare, comparison_status, join_server_timings, timing_meas
 
 TESTS = Path(__file__).resolve().parent
 SUITES = ("responses", "stops", "conversation", "structured", "structured-limits",
-          "tools", "auto-tools", "sampling-defaults", "sampling-ranges", "batch",
+          "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "cache")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),

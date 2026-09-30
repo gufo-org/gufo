@@ -211,6 +211,27 @@ void TestGgufTokenizerLoading() {
   Expect(encoded.size() == 3 && encoded.front() == tool_response_start &&
              encoded.back() == tool_response_end,
          "Qwen tool-response markers are parsed as special tokens");
+
+  // Independent short encodes provide exact token IDs at known regex
+  // boundaries. Exercise repetition, memo saturation and unbounded pieces.
+  std::string paragraph;
+  std::vector<gufo::tokenization::TokenId> expected;
+  for (std::size_t i = 0; i < 768; ++i) {
+    const auto line =
+        (i % 3 == 0 ? std::string("the the e\u0301")
+         : i % 3 == 1
+             ? std::string(i % 150 + 2, 't')
+             : "the " + std::string{static_cast<char>('a' + i % 26),
+                                    static_cast<char>('a' + i / 26 % 26)}) +
+        "\n";
+    paragraph += line;
+    const auto part = tok->Encode(line);
+    expected.insert(expected.end(), part.begin(), part.end());
+  }
+  Expect(tok->Encode(paragraph) == expected,
+         "long normalized spans preserve exact per-piece BPE tokens");
+  Expect(tok->Encode(paragraph) == expected,
+         "BPE memo does not retain request state");
 }
 
 void TestStopTokensFollowVocabulary() {

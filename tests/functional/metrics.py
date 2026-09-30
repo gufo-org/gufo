@@ -126,7 +126,7 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         calls = [item for item in output["output"] if item.get("type") == "function_call"]
     choice = body.get("tool_choice", "auto" if definitions else "none")
     require(not calls or (definitions and choice != "none"), "tool calls violate tool_choice")
-    require(body.get("parallel_tool_calls", True) or len(calls) <= 1,
+    require(body.get("parallel_tool_calls") is not False or len(calls) <= 1,
             "parallel_tool_calls:false returned multiple calls")
     naturally_finished = (output["status"] == "completed" if output is not None else
                           any(item.get("finish") in ("stop", "tool_calls")

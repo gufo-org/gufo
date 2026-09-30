@@ -35,6 +35,10 @@ public:
   static std::shared_ptr<const JsonConstraint> Compile(
       const json::Value& schema, bool strict);
   static std::shared_ptr<const JsonConstraint> Object();
+  // Resolve a local JSON pointer using the same rules as schema compilation.
+  // Throws invalid_argument for malformed or missing references.
+  static const json::Value* ResolveReference(const json::Value& root,
+                                             const json::Value& reference);
   // Returns null when a schema cannot be represented unambiguously by native
   // parameter tags. The caller retains the exact JSON schema in that case.
   static std::shared_ptr<const JsonConstraint> ToolParameters(
@@ -60,6 +64,7 @@ private:
   JsonConstraint() = default;
   friend class JsonConstraintCompiler;
   friend class ConstraintVocabulary;
+  friend class SamplerState;
   friend struct TokenConstraint;
   State CanonicalMaskState(const State& state, std::size_t token_bytes) const;
   State Expand(State state) const;
