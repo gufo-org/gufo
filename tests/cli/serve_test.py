@@ -80,6 +80,18 @@ def main():
     for level in ("info", "warn", "error"):
         assert "event=options" not in run(
             load + ["--log-level", level]).stderr, level
+    # The queue-budget diagnostic is the first startup line, and it now runs
+    # after `--log-level` arms the threshold, so an absolute level drops it
+    # with the rest of the boot sequence. It is INFO tier; match the trailing
+    # " kind=" so the separate WARN `queue_budget_exceeded` line is not
+    # mistaken for it.
+    assert "event=queue_budget kind=llm" in run(load).stderr
+    for level in ("info", "debug"):
+        assert "event=queue_budget kind=llm" in run(
+            load + ["--log-level", level]).stderr, level
+    for level in ("warn", "error"):
+        assert "event=queue_budget kind=" not in run(
+            load + ["--log-level", level]).stderr, level
     # -v is shorthand for --log-level=debug, so combining the two is a
     # conflict to report in either order, not a precedence to resolve silently.
     for both in (["--log-level", "info", "-v"], ["-v", "--log-level", "warn"],

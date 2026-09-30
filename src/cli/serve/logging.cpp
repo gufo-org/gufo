@@ -2,9 +2,12 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -137,6 +140,26 @@ void Logger::Log(LogLevel level, std::string_view component,
          << '\n';
   const std::lock_guard lock(LogMutex());
   std::clog << output.str() << std::flush;
+}
+
+void Logger::LogFormatted(LogLevel level, std::string_view component,
+                          const char* format, ...) {
+  if (!Enabled(level)) {
+    return;
+  }
+  // A fixed buffer is enough for these process-authored lines and avoids an
+  // allocation that a filtered call site would otherwise pay for. vsnprintf
+  // reports the untruncated length, so clamp it to what was written.
+  char buffer[1024];
+  va_list args;
+  va_start(args, format);
+  const int written = std::vsnprintf(buffer, sizeof(buffer), format, args);
+  va_end(args);
+  const std::size_t length =
+      written < 0 ? 0
+                  : std::min<std::size_t>(static_cast<std::size_t>(written),
+                                          sizeof(buffer) - 1);
+  Log(level, component, std::string_view(buffer, length));
 }
 
 std::string Logger::MemoryStatus() {

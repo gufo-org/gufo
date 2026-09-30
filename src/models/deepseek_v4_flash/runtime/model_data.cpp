@@ -25,24 +25,13 @@
 #include <stdexcept>
 #include <vector>
 
+#include "src/cli/serve/logging.hpp"
 #include "src/core/mapped_prefetch.hpp"
 #include "../kernels/rocm/resident_api.h"
 #include "dspark_internal.h"
 #include "model.h"
 #include "model_data_internal.h"
 #include "native_internal.h"
-
-enum class ds4_log_type : uint8_t {
-    default_log,
-    prefill,
-    generation,
-    kv_cache,
-    tool,
-    warning,
-    timing,
-    ok,
-    error,
-};
 
 static uint32_t g_ds4_compress_ratios[DS4_N_LAYER] = {0};
 
@@ -163,48 +152,6 @@ double ds4_now_seconds(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
-}
-
-static const char *ds4_log_color_code(ds4_log_type type) {
-    switch (type) {
-    case ds4_log_type::prefill:
-    case ds4_log_type::timing:
-        return "\x1b[36m";
-    case ds4_log_type::generation:
-    case ds4_log_type::ok:
-        return "\x1b[32m";
-    case ds4_log_type::kv_cache:
-        return "\x1b[33m";
-    case ds4_log_type::tool:
-        return "\x1b[90m";
-    case ds4_log_type::warning:
-        return "\x1b[38;5;208m";
-    case ds4_log_type::error:
-        return "\x1b[31m";
-    case ds4_log_type::default_log:
-        return "";
-    }
-    return "";
-}
-
-bool ds4_log_is_tty(FILE *fp) {
-    int fd = fileno(fp);
-    return fd >= 0 && isatty(fd) != 0;
-}
-
-static void ds4_vlog(FILE *fp, ds4_log_type type, const char *fmt, va_list ap) {
-    const bool colorize =
-        type != ds4_log_type::default_log && ds4_log_is_tty(fp);
-    if (colorize) fputs(ds4_log_color_code(type), fp);
-    vfprintf(fp, fmt, ap);
-    if (colorize) fputs("\x1b[0m", fp);
-}
-
-void ds4_log(FILE *fp, ds4_log_type type, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    ds4_vlog(fp, type, fmt, ap);
-    va_end(ap);
 }
 
 static void cursor_error(ds4_cursor *c, const char *msg) {
@@ -597,9 +544,9 @@ static void parse_tensors(ds4_model *m, ds4_cursor *c) {
         if (!cursor_u64(c, &t->rel_offset)) ds4_die(c->error);
 
         if (!tensor_nbytes(t->type, t->elements, &t->bytes)) {
-            ds4_log(stderr,
-                ds4_log_type::warning,
-                "ds4: warning: tensor %.*s has unsupported GGUF type %u\n",
+            gufo::server::Logger::LogFormatted(
+                gufo::server::LogLevel::kWarn, "ds4",
+                "warning: tensor %.*s has unsupported GGUF type %u",
                 (int)t->name.len, t->name.ptr, t->type);
         }
     }
@@ -738,11 +685,11 @@ static bool accelerator_cache_model_tensors(const ds4_model *m) {
     if (!cache_ok || !upload_ok) return false;
     if (cached != 0) {
         const double t1 = ds4_now_seconds();
-        if (ds4_log_is_tty(stderr)) fputc('\n', stderr);
-        fprintf(stderr,
-                "ds4: ROCm startup model cache prepared %.2f GiB of tensor spans in %.3fs\n",
-                (double)cached / 1073741824.0,
-                t1 - t0);
+        gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kInfo, "ds4",
+            "ROCm startup model cache prepared %.2f GiB of tensor spans in "
+            "%.3fs",
+            (double)cached / 1073741824.0, t1 - t0);
     }
     return true;
 }

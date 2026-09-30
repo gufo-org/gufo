@@ -393,6 +393,11 @@ void TestLogLevelFilter() {
   Logger::Info("probe", "hidden-info");
   Logger::Warn("probe", "hidden-warn");
   Logger::Error("probe", "visible-error");
+  // The printf-style entry point the imported DeepSeek runtime uses has to
+  // filter before it formats: an INFO loader line stays silent at an absolute
+  // threshold while an ERROR line survives.
+  Logger::LogFormatted(LogLevel::kInfo, "ds4", "hidden-ds4-info %d", 1);
+  Logger::LogFormatted(LogLevel::kError, "ds4", "visible-ds4-error %d", 2);
   Logger::LogRequest("r-quiet", "GET", "/health", 200, 1.0, "", "completed",
                      LogLevel::kDebug);
   Logger::LogRequest("r-404", "GET", "/missing", 404, 1.0);
@@ -400,6 +405,8 @@ void TestLogLevelFilter() {
   Logger::SetLevel(LogLevel::kWarn);
   Logger::Debug("probe", "still-hidden-debug");
   Logger::Warn("probe", "visible-at-warn");
+  Logger::LogFormatted(LogLevel::kInfo, "ds4", "still-hidden-ds4-info");
+  Logger::LogFormatted(LogLevel::kWarn, "ds4", "visible-ds4-warn");
   Logger::LogRequest("r-404b", "GET", "/missing", 404, 1.0);
   std::clog.rdbuf(previous_sink);
   Logger::SetLevel(previous);
@@ -409,8 +416,12 @@ void TestLogLevelFilter() {
   assert(log.find("hidden-info") == std::string::npos);
   assert(log.find("hidden-warn") == std::string::npos);
   assert(log.find("still-hidden-debug") == std::string::npos);
+  assert(log.find("hidden-ds4-info") == std::string::npos);
+  assert(log.find("still-hidden-ds4-info") == std::string::npos);
   assert(log.find("visible-error") != std::string::npos);
   assert(log.find("visible-at-warn") != std::string::npos);
+  assert(log.find("visible-ds4-error 2") != std::string::npos);
+  assert(log.find("visible-ds4-warn") != std::string::npos);
   assert(log.find("[DEBUG]") == std::string::npos);
   // A poll that is quiet by default stays filtered, while an escalation keeps
   // its own tier: `--log-level error` means errors only, not "hide failures".

@@ -190,6 +190,13 @@ add_library(gufo_logging STATIC src/cli/serve/logging.cpp)
 target_include_directories(gufo_logging PUBLIC ${PROJECT_SOURCE_DIR})
 target_compile_features(gufo_logging PUBLIC cxx_std_20)
 
+# The imported DeepSeek V4 Flash runtime routes its informational messages
+# through the shared logger instead of writing to stderr directly, so it needs
+# the threshold that `--log-level` arms.
+if (ENGINE_ENABLE_HIP)
+  target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_logging)
+endif()
+
 add_library(gufo_http STATIC
   src/cli/serve/image_api.cpp
   src/cli/serve/audio_asr_api.cpp

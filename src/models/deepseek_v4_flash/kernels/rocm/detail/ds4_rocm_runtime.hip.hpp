@@ -348,17 +348,19 @@ static void hip_q8_f16_cache_budget_notice(
     if (g_q8_f16_budget_notice_printed) return;
     g_q8_f16_budget_notice_printed = 1;
     if (limit_bytes != UINT64_MAX && free_bytes == 0 && total_bytes == 0 && reserve_bytes == 0) {
-        fprintf(stderr,
-                DS4_GPU_LOG_PREFIX "q8 fp16 cache %s; using q8 kernels "
-                "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB)\n",
+        gufo::server::Logger::LogFormatted(
+                gufo::server::LogLevel::kWarn, "ds4",
+                "q8 fp16 cache %s; using q8 kernels "
+                "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB)",
                 reason,
                 (double)request_bytes / 1048576.0,
                 (double)g_q8_f16_bytes / 1073741824.0,
                 (double)limit_bytes / 1073741824.0);
     } else if (limit_bytes == UINT64_MAX) {
-        fprintf(stderr,
-                DS4_GPU_LOG_PREFIX "q8 fp16 cache %s; using q8 kernels "
-                "(request=%.2f MiB cached=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)\n",
+        gufo::server::Logger::LogFormatted(
+                gufo::server::LogLevel::kWarn, "ds4",
+                "q8 fp16 cache %s; using q8 kernels "
+                "(request=%.2f MiB cached=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)",
                 reason,
                 (double)request_bytes / 1048576.0,
                 (double)g_q8_f16_bytes / 1073741824.0,
@@ -366,9 +368,10 @@ static void hip_q8_f16_cache_budget_notice(
                 (double)reserve_bytes / 1073741824.0,
                 (double)total_bytes / 1073741824.0);
     } else {
-        fprintf(stderr,
-                DS4_GPU_LOG_PREFIX "q8 fp16 cache %s; using q8 kernels "
-                "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)\n",
+        gufo::server::Logger::LogFormatted(
+                gufo::server::LogLevel::kWarn, "ds4",
+                "q8 fp16 cache %s; using q8 kernels "
+                "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)",
                 reason,
                 (double)request_bytes / 1048576.0,
                 (double)g_q8_f16_bytes / 1073741824.0,
@@ -392,7 +395,9 @@ static int hip_q8_f16_cache_has_budget(uint64_t request_bytes, const char *label
     size_t total_b = 0;
     hipError_t err = hipMemGetInfo(&free_b, &total_b);
     if (err != hipSuccess) {
-        fprintf(stderr, DS4_GPU_LOG_PREFIX "q8 fp16 cache memory query failed: %s; using q8 kernels\n",
+        gufo::server::Logger::LogFormatted(
+                gufo::server::LogLevel::kWarn, "ds4",
+                "q8 fp16 cache memory query failed: %s; using q8 kernels",
                 hipGetErrorString(err));
         (void)hipGetLastError();
         return 0;
@@ -413,9 +418,10 @@ static int hip_q8_f16_cache_has_budget(uint64_t request_bytes, const char *label
 
 static void hip_q8_f16_cache_disable_after_failure(const char *what, uint64_t request_bytes) {
     if (!g_q8_f16_disabled_after_oom) {
-        fprintf(stderr,
-                DS4_GPU_LOG_PREFIX "q8 fp16 cache disabled after %s "
-                "(request=%.2f MiB cached=%.2f GiB); using q8 kernels\n",
+        gufo::server::Logger::LogFormatted(
+                gufo::server::LogLevel::kWarn, "ds4",
+                "q8 fp16 cache disabled after %s "
+                "(request=%.2f MiB cached=%.2f GiB); using q8 kernels",
                 what ? what : "allocation failure",
                 (double)request_bytes / 1048576.0,
                 (double)g_q8_f16_bytes / 1073741824.0);
@@ -495,7 +501,9 @@ static const __half *hip_q8_f16_ptr(
     __half *dev = NULL;
     hipError_t err = hipMalloc(&dev, (size_t)out_bytes);
     if (err != hipSuccess) {
-        fprintf(stderr, DS4_GPU_LOG_PREFIX "q8 fp16 cache alloc failed (%.2f MiB): %s\n",
+        gufo::server::Logger::LogFormatted(
+                gufo::server::LogLevel::kWarn, "ds4",
+                "q8 fp16 cache alloc failed (%.2f MiB): %s",
                 (double)out_bytes / 1048576.0, hipGetErrorString(err));
         hip_q8_f16_cache_disable_after_failure("allocation failure", out_bytes);
         return NULL;
@@ -550,7 +558,9 @@ static const __half *hip_q8_f16_transpose_ptr(
     __half *dev = NULL;
     hipError_t err = hipMalloc(&dev, (size_t)out_bytes);
     if (err != hipSuccess) {
-        fprintf(stderr, DS4_GPU_LOG_PREFIX "q8 fp16 transpose cache alloc failed (%.2f MiB): %s\n",
+        gufo::server::Logger::LogFormatted(
+                gufo::server::LogLevel::kWarn, "ds4",
+                "q8 fp16 transpose cache alloc failed (%.2f MiB): %s",
                 (double)out_bytes / 1048576.0, hipGetErrorString(err));
         hip_q8_f16_cache_disable_after_failure("transpose allocation failure", out_bytes);
         return NULL;
@@ -579,7 +589,9 @@ static const __half *hip_q8_f16_transpose_ptr(
 
 static int hip_ok(hipError_t err, const char *what) {
     if (err == hipSuccess) return 1;
-    fprintf(stderr, DS4_GPU_LOG_PREFIX "%s failed: %s\n", what, hipGetErrorString(err));
+    gufo::server::Logger::LogFormatted(
+        gufo::server::LogLevel::kError, "ds4", "%s failed: %s", what,
+        hipGetErrorString(err));
     return 0;
 }
 
@@ -610,11 +622,9 @@ static void hip_model_load_progress_note(uint64_t cached_bytes) {
         g_model_load_progress_next = (g_model_load_progress_tty ? 2ull : 16ull) *
                                      1024ull * 1024ull * 1024ull;
         g_model_load_progress_last = now;
-        if (g_model_load_progress_tty) {
-            fprintf(stderr, DS4_GPU_LOG_PREFIX "loading model tensors into device cache: 0.00 GiB");
-        } else {
-            fprintf(stderr, DS4_GPU_LOG_PREFIX "loading model tensors into device cache\n");
-        }
+        gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kInfo, "ds4",
+            "loading model tensors into device cache");
     }
 
     if (cached_bytes < g_model_load_progress_next &&
@@ -622,14 +632,12 @@ static void hip_model_load_progress_note(uint64_t cached_bytes) {
         return;
     }
 
-    if (g_model_load_progress_tty) {
-        fprintf(stderr, "\r" DS4_GPU_LOG_PREFIX "loading model tensors into device cache: %.2f GiB",
-                (double)cached_bytes / 1073741824.0);
-    } else {
-        fprintf(stderr, DS4_GPU_LOG_PREFIX "loading model tensors %.2f GiB cached\n",
-                (double)cached_bytes / 1073741824.0);
-    }
-    fflush(stderr);
+    // One milestone line per step instead of an in-place carriage return: the
+    // shared logger owns the line format and applies the level threshold.
+    gufo::server::Logger::LogFormatted(
+        gufo::server::LogLevel::kInfo, "ds4",
+        "loading model tensors %.2f GiB cached",
+        (double)cached_bytes / 1073741824.0);
     g_model_load_progress_last = now;
     const uint64_t step = (g_model_load_progress_tty ? 2ull : 16ull) *
                           1024ull * 1024ull * 1024ull;
@@ -732,8 +740,10 @@ extern "C" int ds4_gpu_init(void) {
     hipDeviceProp_t prop;
     if (hipGetDeviceProperties(&prop, dev) == hipSuccess) {
         g_rocm_gfx1151 = prop.major == 11 && prop.minor == 5;
-        fprintf(stderr, DS4_GPU_LOG_PREFIX "backend initialized on %s (sm_%d%d)\n",
-                prop.name, prop.major, prop.minor);
+        gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kInfo, "ds4",
+            "backend initialized on %s (sm_%d%d)", prop.name, prop.major,
+            prop.minor);
     }
     if (!g_hipblas_ready) {
         if (!hipblas_ok(hipblasCreate(&g_hipblas), "create handle")) return 0;
@@ -752,8 +762,9 @@ extern "C" int ds4_gpu_init(void) {
      * and short resumed batches keep the kernels the pinned trajectory was
      * recorded against. */
     g_rocm_mmq_ready = g_rocm_gfx1151 && ds4_mmq_init(dev) == 0;
-    fprintf(stderr, DS4_GPU_LOG_PREFIX "native MMQ %s\n",
-            g_rocm_mmq_ready ? "enabled" : "unavailable");
+    gufo::server::Logger::LogFormatted(
+        gufo::server::LogLevel::kInfo, "ds4", "native MMQ %s",
+        g_rocm_mmq_ready ? "enabled" : "unavailable");
     return 1;
 }
 

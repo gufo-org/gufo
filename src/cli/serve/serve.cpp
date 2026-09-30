@@ -811,29 +811,11 @@ int RunServe(std::span<const char* const> args) {
     break;
   }
   // Hardware queues are claimed on the first HIP dispatch and held for the
-  // lifetime of the process, so the budget is decided here, once, before any
-  // model loads. Help output loads nothing and is left alone.
-  const auto wants_help = [&] {
-    return std::any_of(sub_args.begin(), sub_args.end(), [](const char* arg) {
-      const std::string_view value(arg);
-      return value == "--help" || value == "-h" || value == "help";
-    });
-  };
-  if (!wants_help()) {
-    const auto profile = subcommand == "llm" ? diagnostics::QueueProfile::kText
-                         : (subcommand == "tts" || subcommand == "asr")
-                             ? diagnostics::QueueProfile::kAudio
-                             : diagnostics::QueueProfile::kUnmeasured;
-    const auto plan =
-        diagnostics::PlanQueues(profile, diagnostics::QueryQueueCensus(),
-                                std::getenv("GPU_MAX_HW_QUEUES"));
-    diagnostics::ApplyQueuePlan(plan);
-    server::Logger::Info("gpu",
-                         diagnostics::DescribeQueuePlan(subcommand, plan));
-    if (plan.may_exceed_budget) {
-      server::Logger::Warn("gpu", diagnostics::DescribeQueuePressure(plan));
-    }
-  }
+  // lifetime of the process, so the budget is decided once per invocation,
+  // after the modality parser has armed the log threshold and before any
+  // model loads. It lives in `prepare_server_options` so the emitted
+  // `queue_budget` line already obeys `--log-level`. Help output loads nothing
+  // and returns before that point.
 
   const auto prepare_server_options = [&] {
     in_addr address{};
@@ -865,6 +847,23 @@ int RunServe(std::span<const char* const> args) {
             ? server::LogLevel::kDebug
             : log_options.level.value_or(server::LogLevel::kInfo);
     server::Logger::SetLevel(resolved);
+    // The queue plan is applied only after a valid invocation is established,
+    // and the `queue_budget` line is emitted now so an absolute threshold
+    // (`--log-level=error`) suppresses this INFO startup diagnostic with the
+    // rest of the boot sequence instead of leaking it before SetLevel ran.
+    const auto profile = subcommand == "llm" ? diagnostics::QueueProfile::kText
+                         : (subcommand == "tts" || subcommand == "asr")
+                             ? diagnostics::QueueProfile::kAudio
+                             : diagnostics::QueueProfile::kUnmeasured;
+    const auto plan =
+        diagnostics::PlanQueues(profile, diagnostics::QueryQueueCensus(),
+                                std::getenv("GPU_MAX_HW_QUEUES"));
+    diagnostics::ApplyQueuePlan(plan);
+    server::Logger::Info("gpu",
+                         diagnostics::DescribeQueuePlan(subcommand, plan));
+    if (plan.may_exceed_budget) {
+      server::Logger::Warn("gpu", diagnostics::DescribeQueuePressure(plan));
+    }
     // Deliberately emitted before the model opens: a load that fails or hangs
     // never reaches the INFO `event=listening` banner in HttpServer::run, so
     // this is the only record of the resolved options and the armed threshold.

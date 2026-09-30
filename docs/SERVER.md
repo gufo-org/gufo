@@ -247,7 +247,9 @@ ceiling on one device, gufo or otherwise.
 Each server reads the queues already in use from
 `/sys/class/kfd/kfd/proc/*/queues/*/type`, which is world-readable and so
 includes processes gufo does not own, then exports `GPU_MAX_HW_QUEUES` before
-loading a model and logs a `queue_budget` event:
+loading a model and logs a `queue_budget` event. That event is INFO-tier and
+follows `--log-level` like the rest of the startup diagnostics; the
+`queue_budget_exceeded` warning below is WARN-tier:
 
 | Server | `GPU_MAX_HW_QUEUES` | Resident compute queues |
 | --- | ---: | ---: |
@@ -831,7 +833,10 @@ The `debug` tier adds:
 
 Loader phases stay at INFO: the weight-mapping and session-preallocation work is
 HIP-only code, so deeper sub-phases there need a GPU build to verify and are not
-part of this tier.
+part of this tier. The imported DeepSeek V4 Flash runtime logs through the same
+threshold rather than writing to stderr directly, so its informational startup
+lines (the ROCm model-cache and managed-KV lines, DSpark attachment, the shared
+batch workspace) are suppressed by `--log-level=warn`/`error` too.
 
 Prompt text, message bodies and API keys stay unlogged at every level, and debug
 lines use the same escaping and redaction as the rest of the log. Client

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../kernels/rocm/resident_api.h"
+#include "src/cli/serve/logging.hpp"
 #include "dspark_internal.h"
 #include "dspark_policy.h"
 #include "model_data_internal.h"
@@ -750,13 +751,14 @@ static bool rocm_graph_alloc_raw_cap(
          * are present. Managed memory preserves a demand-paged fallback for this
          * long-lived cache class.
          */
-        fprintf(stderr,
-                "ds4: ROCm using managed KV cache for ctx=%u "
-                "(maximum KV %.2f GiB, context estimate %.2f GiB); "
-                "this may degrade performance but is needed for very large "
-                "contexts\n",
-                ctx_size, (double)kv_cache_bytes / 1073741824.0,
-                (double)context_bytes / 1073741824.0);
+        gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kInfo, "ds4",
+            "ROCm using managed KV cache for ctx=%u "
+            "(maximum KV %.2f GiB, context estimate %.2f GiB); "
+            "this may degrade performance but is needed for very large "
+            "contexts",
+            ctx_size, (double)kv_cache_bytes / 1073741824.0,
+            (double)context_bytes / 1073741824.0);
     }
 
     g->cur_hc = ds4_gpu_tensor_alloc(hc_dim * sizeof(float));
@@ -4746,15 +4748,16 @@ static bool rocm_graph_dspark_attach(ds4_gpu_graph *g,
         rocm_graph_dspark_free(g);
         return false;
     }
-    fprintf(stderr,
-            "ds4: DSpark drafting attached stages=%u block=%u ring=%u rows "
-            "features=%.1f MiB\n",
-            dspark->n_stages,
-            dspark->block_size,
-            g->dspark_cache_cap,
-            (double)((uint64_t)g->dspark_capture_rows_cap * feature_width *
-                     sizeof(float)) /
-                1048576.0);
+    gufo::server::Logger::LogFormatted(
+        gufo::server::LogLevel::kInfo, "ds4",
+        "DSpark drafting attached stages=%u block=%u ring=%u rows "
+        "features=%.1f MiB",
+        dspark->n_stages,
+        dspark->block_size,
+        g->dspark_cache_cap,
+        (double)((uint64_t)g->dspark_capture_rows_cap * feature_width *
+                 sizeof(float)) /
+            1048576.0);
     return true;
 }
 
@@ -6968,8 +6971,9 @@ ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,
       workspace->next_batch_workspace = engine->batch_workspace;
       engine->batch_workspace = workspace;
       batch_workspace = workspace;
-      fprintf(stderr, "ds4: sessions share one %u-row batch workspace\n",
-              graph->prefill_cap);
+      gufo::server::Logger::LogFormatted(
+          gufo::server::LogLevel::kInfo, "ds4",
+          "sessions share one %u-row batch workspace", graph->prefill_cap);
     }
     graph->batch_workspace_owner = batch_workspace;
     ++batch_workspace->batch_workspace_borrowers;

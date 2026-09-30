@@ -1,6 +1,10 @@
 #include "backend.h"
 #include <hipblaslt/hipblaslt.h>
 
+/* The process-wide logger lets the loading lines below honor --log-level
+ * instead of writing straight to stderr. */
+#include "src/cli/serve/logging.hpp"
+
 /* Vendored llama.cpp quantized-matmul tier. It owns the routed IQ2 gate/up and
  * dense Q8 prefill kernels; see mmq/VENDOR.md. */
 #include "mmq/ds4_mmq.h"

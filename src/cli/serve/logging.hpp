@@ -47,6 +47,17 @@ public:
   static void Log(LogLevel level, std::string_view component,
                   std::string_view message);
 
+  /// Logs a printf-formatted message through `Log()`, dropping it before any
+  /// formatting when the threshold filters the level. The imported C-style
+  /// runtimes (DeepSeek V4 Flash) use this instead of writing to stderr
+  /// directly, so their informational lines obey the same process-wide level.
+  static void LogFormatted(LogLevel level, std::string_view component,
+                           const char* format, ...)
+#if defined(__GNUC__) || defined(__clang__)
+      __attribute__((format(printf, 3, 4)))
+#endif
+      ;
+
   /// Logs completion after the response body, including streamed generation.
   /// `success_level` is used when the status and outcome are unremarkable, so
   /// endpoints that are quiet by default can appear only under `-v` while
