@@ -48,6 +48,11 @@ A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
       單 TU 在 gfx1201 編譯通過（commit f0c3f1e）。
 - [ ] prefill_quant_gemm.hpp/.hip：iu8，結構已摸清（a0/a1 雙 call 累加同 c，
       acc=8 與 gfx12 一致，只需拆 K-half），待下輪動手。
+      ※ 深入後發現：舊 acc 佈局是 row=sub、col=2l+half（epilogue
+      `scratch[sub*16+2l+half]` 反推），跟 gfx12 新佈局（row=i+half*8）
+      不同列——不能只換 primitive，必須連 acc→epilogue→dw/off/sx
+      scale 索引一起改。epilogue 本體與 scale 形狀是 arch 無關的，
+      改寫範圍：WmmaQuant＋a/b 取 half＋acc 佈局＋epilogue 寫入式。
 - [ ] prefill_fp16.hip：f16，同 attention 模式。
 
 | 檔案 | 用法 | 狀態 |
