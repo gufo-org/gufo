@@ -567,7 +567,7 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
 #pragma unroll
         for (int l = 0; l < kAccumulatorElements; ++l) {
 #if defined(__GFX12__)
-          tile_scratch[((l + half_id * 8) * 16) + sub_lane] = acc[i][j][l];
+          tile_scratch[(sub_lane * 16) + l + half_id * 8] = acc[i][j][l];
 #else
           tile_scratch[(sub_lane * 16) + ((WaveSize / 16) * l) + half_id] =
               acc[i][j][l];

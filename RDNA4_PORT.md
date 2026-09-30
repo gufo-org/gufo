@@ -28,7 +28,18 @@ ROCm：7.2.4，`__GFX12__` 宏確認可用。VRAM 16GB discrete（非 Strix Halo
 - 因此 `LoadSwizzled`/`LoadFrag`/tile 數學都要跟著改，不是換函數名就能動。
 - `__GFX12__` 宏可用 → `vendors/hip.h` 的 `RDNA4` 分支會自動啟用。
 
-## gfx12 WMMA lane-mapping（實機驗證，RX 9070，2026-09-30）
+## 驗證狀態（實機，2026-09-30）
+
+- [x] WMMA 指令映射（f16/iu8/bf16）：CPU-oracle 微型 GEMM 誤差 0，
+      partition 定案。
+- [x] quant GEMM（Qwen hpp＋hip）：CPU-oracle EXACT 過（含 fused SwiGLU）。
+      抓到一隻真 bug：scratch 寫回 tok/row 順序反了，連帶修了 fp16
+      scratch path 和 fused epilogue。
+- [ ] attention：測試仍 rel=0.567。S/O 結構已逐項核對，映射經微型
+      GEMM 證明正確；下輪重點查 V staging（v_slice/v_key 語義未驗）
+      與 Q feed 細節。
+- diagnose PASS；serve 可跑但輸出錯（attention 或 fp16 未驗之故；
+      quant 已排除）。
 
 `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12`（f16）與
 `__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12`（iu8）行为一致：

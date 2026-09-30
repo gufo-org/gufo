@@ -661,7 +661,7 @@ __launch_bounds__(WM * WN * 32) __global__
 #pragma unroll
         for (int l = 0; l < 256 / WaveSize; ++l) {
 #if defined(__GFX12__)
-          scratch[((l + hi * 8) * 16) + sl] = acc[i][j][l];
+          scratch[(sl * 16) + l + hi * 8] = acc[i][j][l];
 #else
           scratch[(sl * 16) + ((WaveSize / 16) * l) + hi] = acc[i][j][l];
 #endif

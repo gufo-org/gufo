@@ -307,8 +307,13 @@ __device__ __forceinline__ void BlockedSwiGluQuantEpilogue(
   for (int j = 0; j < TokTiles; ++j) {
 #pragma unroll
     for (int l = 0; l < 8; ++l) {
+#if defined(__GFX12__)
+      scratch_lo[(sub_lane * 16) + l + half_id * 8] = acc_lo[j][l];
+      scratch_hi[(sub_lane * 16) + l + half_id * 8] = acc_hi[j][l];
+#else
       scratch_lo[(sub_lane * 16) + (2 * l) + half_id] = acc_lo[j][l];
       scratch_hi[(sub_lane * 16) + (2 * l) + half_id] = acc_hi[j][l];
+#endif
     }
     __builtin_amdgcn_wave_barrier();
     const std::size_t t0 = t_base + static_cast<std::size_t>(j * 16);
@@ -655,7 +660,7 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
 #pragma unroll
       for (int l = 0; l < 8; ++l) {
 #if defined(__GFX12__)
-        tile_scratch[((l + half_id * 8) * 16) + sub_lane] = acc[i][j][l];
+        tile_scratch[(sub_lane * 16) + l + half_id * 8] = acc[i][j][l];
 #else
         tile_scratch[(sub_lane * 16) + (2 * l) + half_id] = acc[i][j][l];
 #endif
