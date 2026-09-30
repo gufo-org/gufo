@@ -28,7 +28,27 @@ ROCm：7.2.4，`__GFX12__` 宏確認可用。VRAM 16GB discrete（非 Strix Halo
 - 因此 `LoadSwizzled`/`LoadFrag`/tile 數學都要跟著改，不是換函數名就能動。
 - `__GFX12__` 宏可用 → `vendors/hip.h` 的 `RDNA4` 分支會自動啟用。
 
-## 15 檔清單（grep `__builtin_amdgcn_wmma`）
+## gfx12 WMMA lane-mapping（實機驗證，RX 9070，2026-09-30）
+
+`__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12`（f16）與
+`__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12`（iu8）行为一致：
+
+- lane j 持 A row (j%16)，K-half (j<16 ? K[0:8] : K[8:16])，8 個元素
+- lane j 持 B col (j%16)，同 K-half，8 個元素
+- lane l acc slot i = D(row = i + (l>=16 ? 8 : 0), col = l%16)，8×f32/i32
+
+驗證：全1→全16.0；one-hot→全2.0（每 slot 覆蓋 2K）；
+A=lane/B=1→128+16i（下半）/256+16i（上半）；
+A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
+
+## 移植實績
+
+- [x] attention_wmma.hip：S/O 兩階段改 half-fragment 餵法＋列映射
+      `(2i+half)→(i+half*8)`，LDS 邏輯佈局不變，下游免動。
+      單 TU 在 gfx1201 編譯通過（commit f0c3f1e）。
+- [ ] prefill_quant_gemm.hpp/.hip：iu8，結構已摸清（a0/a1 雙 call 累加同 c，
+      acc=8 與 gfx12 一致，只需拆 K-half），待下輪動手。
+- [ ] prefill_fp16.hip：f16，同 attention 模式。
 
 | 檔案 | 用法 | 狀態 |
 |---|---|---|
