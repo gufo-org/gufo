@@ -539,6 +539,7 @@ struct ContinuationDiskStore::Impl {
     std::shared_ptr<const TextRunnerSnapshot> snapshot;
     std::vector<std::uint8_t> identity;
     std::size_t retained_bytes;
+    bool shared_prefix{false};
   };
 
   Impl(ContinuationDiskStoreOptions store_options, EventSink sink,
@@ -584,7 +585,8 @@ struct ContinuationDiskStore::Impl {
         pending.pop_front();
       }
       try {
-        (void)Save(*job.runner, job.tokens, *job.snapshot, job.identity);
+        (void)Save(*job.runner, job.tokens, *job.snapshot, job.identity,
+                   job.shared_prefix);
       } catch (...) {
         Emit(ContinuationDiskEventAction::kSkipped,
              ContinuationDiskEventReason::kIoFailure, 0, 0, job.tokens.size());
@@ -1092,7 +1094,8 @@ struct ContinuationDiskStore::Impl {
       const TextModelRunner& runner,
       std::span<const TextRunnerToken> checkpoint_tokens,
       const TextRunnerSnapshot& snapshot,
-      std::span<const std::uint8_t> input_identity) {
+      std::span<const std::uint8_t> input_identity,
+      bool shared_prefix = false) {
     // Serialize writers, but keep existing entries readable during payload
     // serialization, hashing and filesystem durability operations.
     const std::lock_guard write_lock(write_mutex);
@@ -1123,6 +1126,28 @@ struct ContinuationDiskStore::Impl {
            ContinuationDiskEventReason::kExactReplacement, existing->file_bytes,
            existing->payload_bytes, checkpoint_tokens.size());
       return {};
+    }
+
+    // A continuation advances by a few hundred tokens per turn, so persisting
+    // every turn rewrites a largely identical snapshot. Skipping writes that
+    // barely move past a stored prefix trades that write for re-prefilling the
+    // short gap, which the caller does anyway when no checkpoint matches.
+    //
+    // Shared prefixes are exempt: they exist to give a new conversation a place
+    // to start from, and they sit only a few tokens past a deeper entry by
+    // construction.
+    if (options.min_checkpoint_step_tokens != 0 && !shared_prefix) {
+      const auto base = FindLongestInputCandidate(
+          runner, checkpoint_tokens, input_identity, {});
+      if (base != entries.end() &&
+          base->tokens.size() < checkpoint_tokens.size() &&
+          checkpoint_tokens.size() - base->tokens.size() <
+              options.min_checkpoint_step_tokens) {
+        Emit(ContinuationDiskEventAction::kSkipped,
+             ContinuationDiskEventReason::kMinStep, 0, 0,
+             checkpoint_tokens.size());
+        return {};
+      }
     }
 
     std::size_t payload_bytes = 0;
@@ -1465,7 +1490,7 @@ std::size_t ContinuationDiskStore::SaveAsync(
     std::vector<TextRunnerToken> checkpoint_tokens,
     std::shared_ptr<const TextRunnerSnapshot> snapshot,
     std::vector<std::uint8_t> input_identity,
-    std::unique_ptr<CaptureReservation> reservation) {
+    std::unique_ptr<CaptureReservation> reservation, bool shared_prefix) {
   if (!runner || !snapshot || checkpoint_tokens.empty())
     return 0;
   const auto descriptor = DescriptorForInput(*runner, input_identity);
@@ -1492,7 +1517,7 @@ std::size_t ContinuationDiskStore::SaveAsync(
       return 0;
     impl_->pending.push_back({std::move(runner), std::move(checkpoint_tokens),
                               std::move(snapshot), std::move(input_identity),
-                              charge});
+                              charge, shared_prefix});
     impl_->queued_bytes += charge;
   }
   impl_->queue_changed.notify_one();

@@ -32,6 +32,8 @@ enum class ContinuationDiskEventReason : std::uint8_t {
   kStagingCapacity,
   kLru,
   kExactReplacement,
+  /// A stored prefix already covers this checkpoint within the minimum step.
+  kMinStep,
   kCorrupt,
   kChecksumMismatch,
   kUnsafeFile,
@@ -61,6 +63,9 @@ struct ContinuationDiskStoreOptions {
   std::size_t capacity_bytes{TextRunnerDiskCacheOptions::kDefaultCapacityBytes};
   /// Zero resolves to the host snapshot budget, capped by capacity_bytes.
   std::size_t staging_capacity_bytes{0};
+  /// Minimum token advance over the longest stored prefix that is still a
+  /// prefix of the checkpoint before writing it. Zero disables the gate.
+  std::size_t min_checkpoint_step_tokens{0};
 };
 
 /// Restart-safe, provider-neutral exact-prefix snapshot store.
@@ -142,7 +147,8 @@ public:
       std::vector<TextRunnerToken> checkpoint_tokens,
       std::shared_ptr<const TextRunnerSnapshot> snapshot,
       std::vector<std::uint8_t> input_identity = {},
-      std::unique_ptr<CaptureReservation> reservation = {});
+      std::unique_ptr<CaptureReservation> reservation = {},
+      bool shared_prefix = false);
 
   /// Drains accepted writes. Shutdown also drains automatically.
   void Flush();

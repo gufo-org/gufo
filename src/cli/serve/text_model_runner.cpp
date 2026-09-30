@@ -277,6 +277,8 @@ std::string_view DiskEventReasonName(
       return "staging_capacity";
     case ContinuationDiskEventReason::kLru:
       return "lru";
+    case ContinuationDiskEventReason::kMinStep:
+      return "min_step";
     case ContinuationDiskEventReason::kExactReplacement:
       return "exact_replacement";
     case ContinuationDiskEventReason::kCorrupt:
@@ -496,6 +498,8 @@ struct TextRunnerPool::Impl {
               .capacity_bytes = disk_cache_options->capacity_bytes,
               .staging_capacity_bytes =
                   disk_cache_options->staging_capacity_bytes,
+              .min_checkpoint_step_tokens =
+                  disk_cache_options->min_checkpoint_step_tokens,
           },
           EmitDiskEvent);
       Logger::Info("cache",
@@ -890,7 +894,8 @@ struct TextRunnerPool::Request::Impl {
       if (snapshot && persistence) {
         const auto saved = disk_store->SaveAsync(
             runner, {prefix.begin(), prefix.end()}, std::move(snapshot),
-            {identity.begin(), identity.end()}, std::move(persistence));
+            {identity.begin(), identity.end()}, std::move(persistence),
+            /*shared_prefix=*/true);
         if (saved != 0) {
           ++snapshot_metrics.shared_prefix_snapshots;
           snapshot_metrics.shared_prefix_bytes += saved;

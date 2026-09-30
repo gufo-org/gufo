@@ -64,6 +64,13 @@ struct TextRunnerDiskCacheOptions {
   std::size_t shared_prefix_min_tokens{128};
   /// Bound on shared-prefix snapshots written while prefilling one request.
   std::size_t shared_prefix_max_boundaries{4};
+  /// Minimum token advance before a checkpoint is worth persisting.
+  ///
+  /// Continuations advance by a few hundred tokens per turn, so persisting
+  /// every turn rewrites a largely identical snapshot. The tokens between two
+  /// checkpoints are cheaper to re-prefill than that write. Zero disables the
+  /// gate.
+  std::size_t min_checkpoint_step_tokens{2048};
 };
 
 /// Host snapshot budget after accounting for cgroup limits and headroom.
