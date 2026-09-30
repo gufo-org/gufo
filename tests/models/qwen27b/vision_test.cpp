@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <webp/encode.h>
 
 #include <algorithm>
 #include <array>
@@ -79,10 +80,12 @@ void TestPreprocessing() {
         "data:IMAGE/JPEG;BASE64,/9gAAQI=",
         "data:image/jpeg;name=photo.jpg;base64,/9gAAQI="})
     assert(gufo::core::ReadImageUrl(accepted) == payload);
+  assert(gufo::core::ReadImageUrl("data:image/webp;base64,/9gAAQI=") ==
+         payload);
   for (const auto* invalid :
        {"data:image/png;base64,A===", "data:image/png;base64,AB==",
         "data:image/png;base64,AAAA=", "file:///tmp/image.png",
-        "data:image/webp;base64,/9gAAQI=", "data:image/png,/9gAAQI=",
+        "data:image/gif;base64,/9gAAQI=", "data:image/png,/9gAAQI=",
         "data:image/png;base64"}) {
     bool rejected = false;
     try {
@@ -92,6 +95,19 @@ void TestPreprocessing() {
     }
     assert(rejected);
   }
+}
+
+// Clients such as chat front ends often re-encode uploads as WebP.
+void TestWebpDecoding() {
+  const std::vector<std::uint8_t> rgb{255, 0,  0,  0,  255, 0,  0,  0,  255,
+                                      10,  20, 30, 40, 50,  60, 70, 80, 90};
+  std::uint8_t* encoded = nullptr;
+  const auto size = WebPEncodeLosslessRGB(rgb.data(), 3, 2, 9, &encoded);
+  assert(size > 0);
+  const std::vector<std::uint8_t> bytes(encoded, encoded + size);
+  WebPFree(encoded);
+  const auto image = gufo::core::DecodeImage(bytes);
+  assert(image.width == 3 && image.height == 2 && image.pixels == rgb);
 }
 
 void TestImageTransportLimits() {
@@ -235,6 +251,7 @@ int main(int argc, char** argv) {
     TestRendering();
     TestToolReasoningCheckpoint();
     TestImageTransportLimits();
+    TestWebpDecoding();
     if (argc == 1) {
       std::cout << "vision input, layout and rendering: passed\n";
       return 0;

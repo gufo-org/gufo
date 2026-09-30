@@ -22,7 +22,7 @@ struct Image {
   std::vector<std::uint8_t> pixels;
 };
 
-/// PNG and JPEG only. Decoding checks dimensions before allocating pixels.
+/// PNG, JPEG and WebP. Decoding checks dimensions before allocating pixels.
 [[nodiscard]] Image DecodeImage(std::span<const std::uint8_t> bytes);
 [[nodiscard]] std::vector<std::uint8_t> ReadImageFile(
     const std::filesystem::path& path);

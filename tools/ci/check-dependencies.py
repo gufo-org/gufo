@@ -28,6 +28,7 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "OpenSSL",
     "libpng",
     "libjpeg-turbo",
+    "libwebp",
     "DS4",
     "h3.c",
     "ccv",

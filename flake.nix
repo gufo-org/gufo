@@ -294,6 +294,7 @@
               pkgsSys.curl
               pkgsSys.libpng
               pkgsSys.libjpeg
+              pkgsSys.libwebp
               pkgsSys.openssl
             ];
             src = staticAnalysisSource;
@@ -408,6 +409,7 @@
               pkgsSys.curl
               pkgsSys.libpng
               pkgsSys.libjpeg
+              pkgsSys.libwebp
               pkgsSys.openssl
             ];
             src = testSource;
