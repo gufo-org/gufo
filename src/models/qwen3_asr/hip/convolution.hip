@@ -4,6 +4,10 @@
 #include <stdexcept>
 
 #include "src/models/qwen3_asr/hip/audio_ops.hpp"
+#if defined(__GFX12__)
+#include <cstdio>
+#endif
+// GUFO_RDNA4_STUBBED: WMMA kernels trap on gfx12 (see RDNA4_PORT.md)
 
 namespace gufo::models::qwen3_asr::hip {
 namespace {
@@ -36,7 +40,14 @@ __global__ void PackWeights(const unsigned short* source,
 // products to one WMMA instruction, preserving the matrix accumulation used
 // by the BF16 checkpoint teacher while sharing each input across channels.
 __global__ __launch_bounds__(128) void FirstConvolution(
-    const unsigned short* input, const unsigned short* weight, B* output) {
+    const unsigned short* input, const unsigned short* weight, B* output) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   constexpr int Pixels = 64 * 50, M = 96, N = 64;
   const int lane = threadIdx.x % 32, wave = threadIdx.x / 32;
   const int channel0 = blockIdx.x * M, pixel0 = blockIdx.y * N;
@@ -76,6 +87,7 @@ __global__ __launch_bounds__(128) void FirstConvolution(
     }
   }
 }
+#endif
 
 // Match the teacher's BF16 GEMM accumulation: 128-pixel tiles rotate the
 // channel/tap reduction by 128 products, wrapping at K=4320. A fixed starting
@@ -83,7 +95,14 @@ __global__ __launch_bounds__(128) void FirstConvolution(
 // losslessly once; im2col stays in LDS instead of a full device tensor.
 template<int Height, int Width, int M, int N, int WM, int WN>
 __global__ __launch_bounds__(WM * WN * 32) void Convolution(
-    const unsigned short* input, const unsigned short* weight, B* output) {
+    const unsigned short* input, const unsigned short* weight, B* output) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   constexpr int C = 16, K = C * 9, T = WM * WN * 32;
   constexpr int OH = (Height + 1) / 2, OW = (Width + 1) / 2, Pixels = OH * OW;
   constexpr int MR = M / (16 * WM), NR = N / (16 * WN);
@@ -142,6 +161,7 @@ __global__ __launch_bounds__(WM * WN * 32) void Convolution(
           output[r * Pixels + p] = B(acc[m][n][i]);
       }
 }
+#endif
 }  // namespace
 
 void LaunchPackConvolutionWeights(const void* input, void* output,

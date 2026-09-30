@@ -6,6 +6,10 @@
 #include "src/models/minimax_h3/dense.hip.hpp"
 #include "src/models/minimax_h3/dit.hpp"
 #include "src/models/minimax_h3/dit_ops.hip.hpp"
+#if defined(__GFX12__)
+#include <cstdio>
+#endif
+// GUFO_RDNA4_STUBBED: WMMA kernels trap on gfx12 (see RDNA4_PORT.md)
 namespace gufo::minimax_h3::dit_ops {
 namespace {
 __device__ hip_bfloat16 Bf16(float x) {
@@ -108,7 +112,14 @@ template<bool Tail>
 __launch_bounds__(256) __global__
     void HiddenProjection(const std::uint16_t* w, const std::uint16_t* x,
                           hip_bfloat16* y, int n, int m, int k,
-                          int tile_offset) {
+                          int tile_offset) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   constexpr int BM = 256, BN = 128, WM = 4, WN = 2;
   constexpr int RS = BM / 16, TS = BN / 16, WRS = RS / WM, WTS = TS / WN;
   int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, sl = lane % 16,
@@ -176,6 +187,7 @@ __launch_bounds__(256) __global__
     }
   }
 }
+#endif
 
 // Project the checkpoint's interleaved [head][Q,K,V][128] rows, then
 // consume each BF16-rounded head in LDS. This retains the four-FMA norm
@@ -185,7 +197,14 @@ __launch_bounds__(256) __global__
                        std::uint16_t* q, std::uint16_t* key,
                        std::uint16_t* value, const std::uint16_t* qw,
                        const std::uint16_t* kw, const std::uint16_t* cosine,
-                       const std::uint16_t* sine, int n, int m, int k) {
+                       const std::uint16_t* sine, int n, int m, int k) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   constexpr int BM = 256, BN = 128, WM = 4, WN = 2;
   constexpr int RS = BM / 16, TS = BN / 16, WRS = RS / WM, WTS = TS / WN;
   int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, sl = lane % 16,
@@ -296,12 +315,20 @@ __launch_bounds__(256) __global__
     }
   }
 }
+#endif
 // Fuse both BF16 projections and SwiGLU into the down projection layout.
 template<bool Tail>
 __launch_bounds__(256) __global__
     void FfnUpProjection(const std::uint16_t* g, const std::uint16_t* u,
                          const std::uint16_t* x, std::uint16_t* y, int n, int m,
-                         int k, const float* lookup, int tile_offset) {
+                         int k, const float* lookup, int tile_offset) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   constexpr int M = 128, N = 128, WM = 4, WN = 2;
   constexpr int WR = M / (WM * 16), WT = N / (WN * 16);
   int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, sl = lane % 16,
@@ -379,6 +406,7 @@ __launch_bounds__(256) __global__
     }
   }
 }
+#endif
 
 void LaunchHiddenProjection(const std::uint16_t* packed_weight,
                             const std::uint16_t* packed_input,

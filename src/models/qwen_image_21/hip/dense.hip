@@ -3,6 +3,10 @@
 
 #include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
+#if defined(__GFX12__)
+#include <cstdio>
+#endif
+// GUFO_RDNA4_STUBBED: WMMA kernels trap on gfx12 (see RDNA4_PORT.md)
 
 namespace gufo::models::qwen_image_21::hip {
 namespace {
@@ -55,7 +59,14 @@ __global__ void PackDense(const std::uint16_t* input, std::uint16_t* output,
 template<int BM, int BN, int WM, int WN, bool Ragged>
 __launch_bounds__(WM * WN * 32) __global__
     void DenseProjection(const std::uint16_t* w, const std::uint16_t* x,
-                         hip_bfloat16* y, int n, int m, int k) {
+                         hip_bfloat16* y, int n, int m, int k) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   constexpr int RS = BM / 16, TS = BN / 16, WRS = RS / WM, WTS = TS / WN;
   int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, sl = lane % 16,
       wr = wave / WN, wt = wave % WN;
@@ -128,6 +139,7 @@ __launch_bounds__(WM * WN * 32) __global__
           y[std::size_t(t) * m + r] = Bf16(acc[i][j][l]);
       }
 }
+#endif
 
 // Fuse both trained projections and SwiGLU, preserving each BF16 boundary.
 // Store the exact result directly in the following projection's packed layout.
@@ -135,7 +147,14 @@ template<int M, int N, int WM, int WN>
 __launch_bounds__(WM * WN * 32) __global__
     void GatedProjection(const std::uint16_t* g, const std::uint16_t* u,
                          const std::uint16_t* x, hip_bfloat16* y, int n, int m,
-                         int k) {
+                         int k) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   constexpr int WR = M / (WM * 16), WT = N / (WN * 16);
   int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, sl = lane % 16,
       wr = wave / WN, wt = wave % WN, rb = blockIdx.y * M, tb = blockIdx.x * N;
@@ -188,6 +207,7 @@ __launch_bounds__(WM * WN * 32) __global__
         }
       }
 }
+#endif
 
 }  // namespace
 

@@ -5,6 +5,10 @@
 
 #include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
+#if defined(__GFX12__)
+#include <cstdio>
+#endif
+// GUFO_RDNA4_STUBBED: WMMA kernels trap on gfx12 (see RDNA4_PORT.md)
 
 namespace gufo::models::qwen_image_21::hip {
 namespace {
@@ -65,7 +69,14 @@ __launch_bounds__(WM * WN * 32) __global__
     void ImplicitConvolution3(const unsigned short* x, const unsigned short* w,
                               const B* bias, B* out, int height, int width,
                               int cin, int cout, int padding, int out_height,
-                              int out_width) {
+                              int out_width) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   constexpr int T = WM * WN * 32, WR = M / (16 * WM), WT = N / (16 * WN);
   __shared__ __align__(16) unsigned short tile[N][C * 9 + 8];
   int tid = threadIdx.x, lane = tid % 32, wave = tid / 32, sl = lane % 16,
@@ -150,6 +161,7 @@ __launch_bounds__(WM * WN * 32) __global__
               Bf16(float(Bf16(acc[i][j][z])) + (bias ? float(bias[r]) : 0.0F));
       }
 }
+#endif
 
 template<int Stride, int Upscale>
 void Convolve(const std::uint16_t* input, const std::uint16_t* weights,

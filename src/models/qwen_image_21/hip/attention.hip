@@ -3,6 +3,10 @@
 
 #include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
+#if defined(__GFX12__)
+#include <cstdio>
+#endif
+// GUFO_RDNA4_STUBBED: WMMA kernels trap on gfx12 (see RDNA4_PORT.md)
 
 namespace gufo::models::qwen_image_21::hip {
 namespace {
@@ -30,7 +34,14 @@ __global__ void FusedAttention(const std::uint16_t* queries,
                                const std::uint16_t* values,
                                hip_bfloat16* output, int heads, int rows,
                                int count, int query_start, int query_count,
-                               const int* limits) {
+                               const int* limits) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   __shared__ float p[32][129], v[16][129], stats[128][3];
   __shared__ int last_key;
   const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32;
@@ -179,6 +190,7 @@ __global__ void FusedAttention(const std::uint16_t* queries,
             Bf16(accum[y][x] / stats[tid / 16 + y * 16][1]);
     }
 }
+#endif
 }  // namespace
 
 void FusedAttention128(const std::uint16_t* queries, const std::uint16_t* keys,

@@ -4,6 +4,10 @@
 #include <cstddef>
 
 #include "src/models/minimax_h3/attention.hip.hpp"
+#if defined(__GFX12__)
+#include <cstdio>
+#endif
+// GUFO_RDNA4_STUBBED: WMMA kernels trap on gfx12 (see RDNA4_PORT.md)
 
 namespace gufo::minimax_h3::dit_ops {
 using BufferResource = __attribute__((ext_vector_type(4))) unsigned;
@@ -90,7 +94,14 @@ template<bool PackedOutput>
 __global__ __launch_bounds__(256, 1) void WmmaAttention(
     const std::uint16_t* query, const std::uint16_t* key,
     const std::uint16_t* value, std::uint16_t* output, std::uint32_t rows,
-    std::uint32_t heads) {
+    std::uint32_t heads) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
   union Staging {
     std::uint16_t key[32][136];
     std::uint16_t value[128][40];
@@ -227,6 +238,7 @@ __global__ __launch_bounds__(256, 1) void WmmaAttention(
     }
   }
 }
+#endif
 
 // Short sequences retain 128-key local softmax tiles and normalize after each
 // tile. In particular, round local (not running-max-scaled) probabilities to
@@ -235,7 +247,14 @@ __global__ __launch_bounds__(256, 1) void WmmaAttention(
 __global__ __launch_bounds__(128) void ShortAttention(
     const std::uint16_t* query, const std::uint16_t* key,
     const std::uint16_t* value, std::uint16_t* output, std::uint32_t rows,
-    std::uint32_t heads) {
+    std::uint32_t heads) 
+#if defined(__GFX12__)
+{
+  printf("gufo rdna4-port: %s not ported to gfx12\n", __func__);
+  __builtin_trap();
+}
+#else
+{
 #pragma clang fp contract(off)
   union Staging {
     std::uint16_t key[128][136];
@@ -343,6 +362,7 @@ __global__ __launch_bounds__(128) void ShortAttention(
         output[(std::size_t(row) * heads + blockIdx.y) * 128 + d * 16 + i +
                (lane / 16) * 8] = Bf16(result[d][i]);
 }
+#endif
 
 }  // namespace
 
