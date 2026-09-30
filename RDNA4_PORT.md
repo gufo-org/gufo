@@ -61,6 +61,15 @@ A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
       moe/w8a8 的 wave64 flags 限 gfx1151。
 - [x] qfn attention（WmmaCausalAttentionKernel）：S/O＋rescale＋tail＋
       epilogue 同 Qwen 模式移植（tail/epilogue 為邏輯讀，只換 row）。
+- [x] qfn W8A8/RoutedF16/DenseF16 trap-stub（行號插入法；教訓：大括號
+      掃描器遇到 #if 分支不對稱會複製貼上整段，大檔一律行號手術）。
+      舊 Wmma/WmmaI8 overload 留作純前端樁（後端靠 unreachable 消除，
+      實測成立）。
+- [x] Qwen3.8-27B-Q3_K_M 下載完成（~/models，13.23GiB；Flash-Next/DS4
+      太大不考慮；Q2 走 sdot4 而 gfx1201 無 dot1-insts，故選 Q3）。
+- [ ] qfn mmvq（stub 完，MoE  Variant 日後再說）。
+- [ ] ds4_q8（stub 完，日後再說）。
+- [ ] 全量 build → diagnose → Q3 serve 點火。
 - [ ] qfn W8A8（WmmaI8，3563）：同 Qwen quant 模式（a0/a1 雙 call＋
       dw＋scratch[tok][row] 雙 tile 寫回）。
 - [ ] qfn fused-dequant GEMM ×2（4122/5006，a_lo/a_hi）：K32 雙 call 結構，
