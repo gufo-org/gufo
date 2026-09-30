@@ -1577,7 +1577,9 @@ static bool dspark_cache_tensors(const ds4_dspark_model *d) {
             return false;
         }
     }
-    fprintf(stderr, "ds4: DSpark support model cached %.2f GiB of tensor spans in %.3fs\n",
+    gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kInfo, "ds4",
+            "DSpark support model cached %.2f GiB of tensor spans in %.3fs",
             (double)total / 1073741824.0, ds4_now_seconds() - start);
     return true;
 }
@@ -1602,9 +1604,10 @@ int ds4_dspark_open(ds4_dspark_model **out, const char *path) {
         return 1;
       }
 
-    fprintf(stderr,
-            "ds4: DSpark support model loaded stages=%u block=%u markov_rank=%u "
-            "noise_token=%u target_layers=%u\n",
+    gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kInfo, "ds4",
+            "DSpark support model loaded stages=%u block=%u markov_rank=%u "
+            "noise_token=%u target_layers=%u",
             d->n_stages,
             d->block_size,
             d->markov_rank,
