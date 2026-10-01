@@ -1593,7 +1593,7 @@ void TestSnapshotDoesNotBlockOtherRequests() {
 void TestCapturesAtCapacityAllowQueuedProgress() {
   for (const auto [multi, history] :
        {std::pair{false, false}, {true, false}, {false, true}, {true, true}}) {
-    for (const std::size_t capacity : {1U, 2U, 4U}) {
+    for (const std::size_t capacity : {1U, 2U, 4U, 8U}) {
       auto control = std::make_shared<FakeControl>();
       control->max_context = 4096;
       control->multi_token_decode = multi;
@@ -1624,7 +1624,8 @@ void TestCapturesAtCapacityAllowQueuedProgress() {
       }
       for (std::size_t i = capacity; i < capacity * 2; ++i)
         requests.push_back(scheduler->Submit(
-            {static_cast<TextRunnerToken>(i + 1), 10}, 7, 0.0F));
+            {static_cast<TextRunnerToken>(i + 1), 10}, 7, 0.0F, {}, false,
+            ClientMetadata(std::to_string(i))));
       // Cancellation while a history copy is in flight must release the
       // slot after joining, without publishing an unexecuted prompt suffix.
       if (history)

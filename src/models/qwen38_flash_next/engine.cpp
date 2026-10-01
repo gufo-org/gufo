@@ -320,6 +320,8 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
     AssignError(error_msg, "snapshot needs a synced, non-empty context");
     return nullptr;
   }
+  if (!session_->CheckCancellation(error_msg))
+    return nullptr;
   const auto token_count = static_cast<std::uint32_t>(tokens_.size());
   const auto identity = ImageIdentity(token_count);
   const std::uint32_t hidden_rows = KeptHiddenRows();

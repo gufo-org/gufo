@@ -554,7 +554,7 @@ struct TextRunnerPool::Request::Impl {
        std::vector<std::size_t> shared_prefix_boundaries,
        const sampling::SamplingConfig& sampling_config,
        std::shared_ptr<const TextPromptContext> prompt_context,
-       std::size_t cache_prefix_tokens)
+       std::size_t cache_prefix_tokens, bool overlap_snapshots)
       : runner(std::move(model_runner)),
         disk_store(std::move(persistent_store)),
         lease(std::move(state_lease)),
@@ -564,7 +564,8 @@ struct TextRunnerPool::Request::Impl {
         decode_ready(prefill_offset == prompt.size()),
         sampler(sampling_config, prompt),
         context(std::move(prompt_context)),
-        retain_fallback(cache_prefix_tokens != 0) {
+        retain_fallback(cache_prefix_tokens != 0),
+        overlap_snapshots(overlap_snapshots) {
     // On a warm continuation the reused frontier is already a safe fallback.
     // Freeze it before prefill, then retain this turn's own stable boundary
     // before mutable assistant framing.
@@ -827,6 +828,11 @@ struct TextRunnerPool::Request::Impl {
 
   void CaptureBoundarySnapshot(std::size_t position, bool history,
                                bool shared) noexcept {
+    if (!overlap_snapshots) {
+      // A single execution slot has no peer work to overlap with the copy.
+      CaptureBoundarySnapshotNow(position, history, shared);
+      return;
+    }
     // The scheduler already parks leases with a pending snapshot. Reuse that
     // path so allocation, eviction and copying do not stall unrelated users.
     // Direct callers and cancellation join before touching this lease again.
@@ -927,6 +933,7 @@ struct TextRunnerPool::Request::Impl {
   sampling::SamplerState sampler;
   std::shared_ptr<const TextPromptContext> context;
   bool retain_fallback{false};
+  bool overlap_snapshots{false};
   std::size_t fallback_position{0};
   /// This turn's stable boundary when the reused frontier sits before it, so
   /// the boundary is checkpointed after the frozen fallback instead of being
@@ -1655,7 +1662,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   return Request(std::make_unique<Request::Impl>(
       impl_->validated.runner, impl_->disk_store, std::move(lease),
       std::move(prompt), std::move(boundaries), sampling_config,
-      std::move(context), cache_prefix_tokens));
+      std::move(context), cache_prefix_tokens, impl_->cache.capacity() > 1));
 }
 
 TextRunnerPool::Request TextRunnerPool::Acquire(
