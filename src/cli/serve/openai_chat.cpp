@@ -1338,6 +1338,11 @@ ParsedGeneration ParseGeneration(
     ChatRequest::ToolChoice choice, bool enforce_required) {
   ParsedGeneration parsed;
   std::string_view content = raw;
+  const bool recognize_tools =
+      !tools.empty() && choice != ChatRequest::ToolChoice::kNone;
+  const auto tool_marker = [recognize_tools](std::string_view text) {
+    return recognize_tools ? EarliestMarker(text) : std::string_view::npos;
+  };
 
   constexpr std::string_view kThinkStart = "<think>";
   constexpr std::string_view kThinkEnd = "</think>";
@@ -1347,10 +1352,10 @@ ParsedGeneration ParseGeneration(
       content.remove_prefix(kThinkStart.size());
     }
     std::size_t think_end = content.find(kThinkEnd);
-    if (EarliestMarker(content) < think_end)
+    if (tool_marker(content) < think_end)
       think_end = std::string_view::npos;
     if (think_end == std::string_view::npos) {
-      const auto marker = EarliestMarker(content);
+      const auto marker = tool_marker(content);
       parsed.reasoning_content = std::string(Trim(content.substr(0, marker)));
       if (marker == std::string_view::npos) {
         if (enforce_required && choice == ChatRequest::ToolChoice::kRequired)
@@ -1382,7 +1387,7 @@ ParsedGeneration ParseGeneration(
     if (think_start != std::string_view::npos) {
       const std::size_t think_content_start = think_start + kThinkStart.size();
       std::size_t think_end = content.find(kThinkEnd, think_content_start);
-      const auto marker = EarliestMarker(content.substr(think_content_start));
+      const auto marker = tool_marker(content.substr(think_content_start));
       if (marker != std::string_view::npos &&
           think_content_start + marker < think_end)
         think_end = std::string_view::npos;
@@ -1402,7 +1407,7 @@ ParsedGeneration ParseGeneration(
         }
       } else {
         const auto remaining = content.substr(think_content_start);
-        const auto marker = EarliestMarker(remaining);
+        const auto marker = tool_marker(remaining);
         parsed.reasoning_content =
             std::string(Trim(remaining.substr(0, marker)));
         parsed.text = std::string(content.substr(0, think_start));
@@ -1649,10 +1654,12 @@ public:
 
   StreamingTextFilter(
       TextGenerationBackend::InitialOutputState initial_output_state,
-      EmitCallback emit_piece, bool structured = false, bool tool_only = false)
+      EmitCallback emit_piece, bool structured, bool tool_only,
+      bool recognize_tools)
       : emit_piece_(std::move(emit_piece)),
         raw_content_(structured || tool_only),
-        tool_only_(tool_only) {
+        tool_only_(tool_only),
+        recognize_tools_(recognize_tools) {
     if (initial_output_state ==
         TextGenerationBackend::InitialOutputState::kReasoning) {
       state_ = State::kThinking;
@@ -1696,8 +1703,9 @@ public:
     if (state_ == State::kThinking) {
       constexpr std::string_view kThinkEnd = "</think>";
       const std::size_t end_pos = pending_.find(kThinkEnd);
-      const auto marker =
-          raw_content_ ? std::string::npos : EarliestMarker(pending_);
+      const auto marker = raw_content_ || !recognize_tools_
+                              ? std::string::npos
+                              : EarliestMarker(pending_);
       if (marker < end_pos) {
         if (marker > 0 && !emit_piece_(pending_.substr(0, marker), true))
           return false;
@@ -1716,7 +1724,8 @@ public:
         state_ = State::kContent;
         trim_reasoning_separator_ = true;
       } else {
-        std::size_t held = raw_content_ ? 0 : HeldMarkerPrefix(pending_);
+        std::size_t held =
+            raw_content_ || !recognize_tools_ ? 0 : HeldMarkerPrefix(pending_);
         for (std::size_t len = std::min(pending_.size(), kThinkEnd.size() - 1);
              len > 0; --len) {
           if (kThinkEnd.starts_with(pending_.substr(pending_.size() - len))) {
@@ -1746,7 +1755,8 @@ public:
         pending_.erase(0, first);
         trim_reasoning_separator_ = false;
       }
-      const std::size_t marker = EarliestMarker(pending_);
+      const std::size_t marker =
+          recognize_tools_ ? EarliestMarker(pending_) : std::string::npos;
       if (marker != std::string::npos) {
         if (marker > 0 && !emit_piece_(pending_.substr(0, marker), false)) {
           return false;
@@ -1757,7 +1767,8 @@ public:
         return true;
       }
 
-      const std::size_t held = HeldMarkerPrefix(pending_);
+      const std::size_t held =
+          recognize_tools_ ? HeldMarkerPrefix(pending_) : 0;
       const std::size_t ready = pending_.size() - held;
       if (ready > 0 && !emit_piece_(pending_.substr(0, ready), false)) {
         return false;
@@ -1851,6 +1862,7 @@ private:
   bool tool_mode_{false};
   bool raw_content_{false};
   bool tool_only_{false};
+  bool recognize_tools_{false};
   std::size_t emitted_content_bytes_{0};
   bool trim_reasoning_separator_{false};
 };
@@ -2201,8 +2213,9 @@ HttpResponse StreamingResponse(
                   return connected;
                 },
                 request.chat.response_format != nullptr,
-                request.chat.constrained_tools &&
-                    !request.chat.response_format);
+                request.chat.constrained_tools && !request.chat.response_format,
+                !request.chat.tools.empty() &&
+                    request.chat.tool_choice != ChatRequest::ToolChoice::kNone);
 
             TextGenerationBackend::ProgressCallback on_progress;
             if (request.chat.return_progress) {
@@ -2499,7 +2512,9 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
           return false;
         },
         chat.response_format != nullptr,
-        chat.constrained_tools && !chat.response_format);
+        chat.constrained_tools && !chat.response_format,
+        !chat.tools.empty() &&
+            chat.tool_choice != ChatRequest::ToolChoice::kNone);
     try {
       TextGenerationBackend::ProgressCallback on_progress;
       if (writer && chat.return_progress) {

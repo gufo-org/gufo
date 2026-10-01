@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 import socket
 import time
+from tool_agent import agent_tools
 from urllib.parse import urlsplit
 from metrics import Recorder
 
@@ -183,7 +184,8 @@ def main():
                 if args.tools:
                     body["tools"] = [{"type": "function", "function": {
                         "name": "read_fixture", "description": "Read the fixture.",
-                        "parameters": {"type": "object", "properties": {}}}}]
+                        "parameters": {"type": "object", "properties": {}}}},
+                        *agent_tools()]
                 if thinking and args.reasoning_effort:
                     body["reasoning_effort"] = args.reasoning_effort
                 initial = {**body, "messages": list(messages),

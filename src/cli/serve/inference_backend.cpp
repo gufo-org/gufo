@@ -67,7 +67,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
   if (!request.tools.empty() &&
       request.tool_choice != ChatRequest::ToolChoice::kNone) {
     std::vector<sampling::JsonConstraint::Tool> tools;
-    std::vector<sampling::JsonConstraint::Tool> native_tools;
+    std::vector<std::pair<json::Value, bool>> schemas;
     auto format = runner.ToolFormat();
     for (const auto& tool : request.tools) {
       const auto definition = tool.definition_json.empty()
@@ -77,10 +77,6 @@ std::optional<ChatRequest> ConstrainChatRequest(
       const auto* strict = function ? function->find("strict") : nullptr;
       const bool enforce = strict && strict->as_bool();
       auto schema = json::parse(tool.parameters_json);
-      const auto* properties = schema.find("properties");
-      const auto* additional = schema.find("additionalProperties");
-      const bool untyped = !enforce && (!properties || properties->empty()) &&
-                           (!additional || additional->is_bool());
       if (!enforce) {
         if (!schema.contains("type"))
           schema["type"] = "object";
@@ -89,34 +85,20 @@ std::optional<ChatRequest> ConstrainChatRequest(
         if (!schema.contains("additionalProperties"))
           schema["additionalProperties"] = false;
       }
-      std::shared_ptr<const sampling::JsonConstraint> arguments;
-      std::shared_ptr<const sampling::JsonConstraint> native;
-      try {
-        arguments = sampling::JsonConstraint::Compile(schema, enforce);
-        native =
-            sampling::JsonConstraint::ToolParameters(schema, enforce, format);
-      } catch (const std::invalid_argument&) {
-        if (enforce)
-          throw;
-        // Non-strict tool parameters are guidance, unlike response_format.
-        // An unrestricted/unsupported tool schema must not prevent a valid
-        // structured answer. Keep the declared tool name and JSON arguments.
-        arguments = sampling::JsonConstraint::Object();
-        // An untyped non-strict tool already uses best-effort native values.
-        // Preserve that template: injecting a competing JSON envelope changes
-        // the prompt, cache identity and even whether the model ends its turn.
-        if (untyped)
-          native = sampling::JsonConstraint::OpenToolParameters(format);
-      }
-      tools.emplace_back(tool.name, std::move(arguments));
-      native_tools.emplace_back(tool.name, std::move(native));
+      auto native =
+          sampling::JsonConstraint::ToolParameters(schema, enforce, format);
+      tools.emplace_back(tool.name, std::move(native));
+      schemas.emplace_back(std::move(schema), enforce);
     }
-    if (std::ranges::all_of(native_tools, [](const auto& tool) {
-          return tool.second != nullptr;
-        }))
-      tools = std::move(native_tools);
-    else
+    if (std::ranges::any_of(
+            tools, [](const auto& tool) { return tool.second == nullptr; })) {
       format = sampling::JsonConstraint::ToolFormat::kJson;
+      // Compile the fallback only when native parameter tags cannot represent
+      // these values. Normal native requests reuse the cached grammar directly.
+      for (std::size_t i = 0; i < tools.size(); ++i)
+        tools[i].second = sampling::JsonConstraint::ToolParameters(
+            schemas[i].first, schemas[i].second, format);
+    }
     grammar = sampling::JsonConstraint::WithTools(
         grammar, std::move(tools),
         request.tool_choice == ChatRequest::ToolChoice::kRequired,

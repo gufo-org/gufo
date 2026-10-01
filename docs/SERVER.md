@@ -655,13 +655,16 @@ omitted controls keep their model/CLI defaults.
 Tool calls are emitted only for declared functions when `tool_choice` allows
 calling tools. With `auto`, ordinary text and reasoning remain allowed; once a
 call starts, decoding constrains its name and argument format. Non-strict tools
-keep optional arguments optional. Untyped arguments retain native best-effort
-semantics; schemas that cannot use native tags fall back to JSON.
+keep optional arguments optional. Open nested objects retain native syntax and
+declared requirements/types, including nested fields; unsupported schema
+keywords remain guidance. Values that are ambiguous in native tags use JSON.
 `tool_choice: "required"` constrains decoding to a declared call,
 so the requirement is forced rather than checked afterwards. Where the backend
 cannot constrain sampling, an unmet `required` choice still returns
 `tool_choice_unsatisfied` (HTTP 502, or an SSE error after streaming starts).
 Stops and token limits terminate normally without emitting incomplete calls.
+With no tools or `tool_choice:"none"`, tool markers are ordinary text and do
+not interrupt reasoning or delay streaming.
 
 Stop sequences match accepted output bytes, including reasoning and tool
 markup, before streaming or response parsing. Partial prefixes are buffered;

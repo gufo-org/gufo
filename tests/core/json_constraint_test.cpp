@@ -995,6 +995,134 @@ void TestOpenNativeTools() {
   }
 }
 
+void TestNonStrictAgentTools() {
+  // Pi's ordinary edit schema leaves nested objects open. This must not switch
+  // the entire tool set to JSON or alter the model's native chat template.
+  const auto schema = parse(R"({"type":"object","properties":{
+    "path":{"type":"string"},
+    "edits":{"type":"array","items":{"type":"object","properties":{
+      "oldText":{"type":"string"},"newText":{"type":"string"}},
+      "required":["oldText","newText"]}}},
+    "required":["path","edits"],"additionalProperties":false})");
+  using Format = JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto parameters =
+        JsonConstraint::ToolParameters(schema, false, format);
+    assert(parameters);
+    const std::string edits =
+        R"([{"oldText":"return a - b","newText":"return a + b"}])";
+    const std::string call =
+        format == Format::kQwen
+            ? "<tool_call>\n<function=edit>\n<parameter=path>\ncalc.py\n"
+              "</parameter>\n<parameter=edits>\n" +
+                  edits + "\n</parameter>\n</function>\n</tool_call>"
+            : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"edit\">\n"
+              "<｜DSML｜parameter name=\"path\" string=\"true\">calc.py"
+              "</｜DSML｜parameter>\n"
+              "<｜DSML｜parameter name=\"edits\" string=\"false\">" +
+                  edits +
+                  "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+                  "</｜DSML｜tool_calls>";
+    for (const bool required : {false, true}) {
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"edit", parameters}}, required, false, format);
+      assert(Accepts(*grammar, call));
+      assert(!Accepts(*grammar, call.substr(0, call.size() - 1)));
+      assert(Accepts(*grammar, "No edit is needed.") == !required);
+      const std::string empty =
+          format == Format::kQwen
+              ? "<tool_call>\n<function=edit>\n</function>\n</tool_call>"
+              : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"edit\">\n"
+                "</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+      assert(!Accepts(*grammar, empty));
+      auto wrong_type = call;
+      wrong_type.replace(wrong_type.find(edits), edits.size(), "false");
+      assert(!Accepts(*grammar, wrong_type));
+      for (const char* invalid :
+           {R"([{}])", R"([{"oldText":"a"}])",
+            R"([{"oldText":"a","newText":42}])",
+            R"([{"oldText":"a","newText":"b","oldText":42}])",
+            R"([{"oldText":"a","newText":"b","\u006fldText":42}])"}) {
+        auto nested = call;
+        nested.replace(nested.find(edits), edits.size(), invalid);
+        assert(!Accepts(*grammar, nested));
+      }
+      auto extra = call;
+      extra.replace(extra.find(edits), edits.size(),
+                    R"([{"oldText":"a","newText":"b","note":{"line":3}}])");
+      assert(Accepts(*grammar, extra));
+      auto missing = call;
+      const auto edits_begin = missing.find(
+          format == Format::kQwen ? "<parameter=edits>"
+                                  : "<｜DSML｜parameter name=\"edits\"");
+      const std::string close =
+          format == Format::kQwen ? "</parameter>\n" : "</｜DSML｜parameter>\n";
+      missing.erase(edits_begin, missing.find(close, edits_begin) +
+                                     close.size() - edits_begin);
+      assert(!Accepts(*grammar, missing));
+      auto unknown = call;
+      unknown.replace(unknown.find("edit"), 4, "undeclared");
+      assert(!Accepts(*grammar, unknown));
+    }
+    bool rejected = false;
+    try {
+      (void)JsonConstraint::ToolParameters(schema, true, format);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+    // Open nested objects must not bypass the existing exact JSON fallback
+    // for a scalar whose literal value contains the native closing delimiter.
+    auto ambiguous = schema;
+    ambiguous["properties"]["path"]["const"] =
+        format == Format::kQwen ? "a\n</parameter>b" : "a</｜DSML｜parameter>b";
+    assert(!JsonConstraint::ToolParameters(ambiguous, false, format));
+  }
+  // Best-effort reference handling must remain bounded too.
+  const auto cyclic = parse(R"({"$ref":"#","type":"object"})");
+  assert(JsonConstraint::ToolParameters(cyclic, false, Format::kQwen));
+
+  // Open-object support belongs to non-strict tools, never strict response
+  // schemas. Both native and JSON fallback arguments retain nested schemas.
+  const auto json =
+      JsonConstraint::ToolParameters(schema, false, Format::kJson);
+  assert(Accepts(*json,
+                 R"({"path":"a","edits":[{"oldText":"a","newText":"b"}]})"));
+  assert(!Accepts(*json, R"({"path":"a","edits":[{}]})"));
+  bool rejected = false;
+  try {
+    (void)JsonConstraint::Compile(schema, false);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  // Additional-property schemas and escaped/metacharacter keys must not
+  // weaken the declared property rules. The key matcher sees decoded Unicode.
+  const auto extras = parse(R"({
+    "type":"object","properties":{"value":{"type":"object",
+      "properties":{"a.b":{"type":"integer"},"😀":{"type":"string"}},
+      "required":["a.b","😀"],"additionalProperties":{"type":"boolean"}}},
+    "required":["value"],"additionalProperties":false})");
+  const auto extra_json =
+      JsonConstraint::ToolParameters(extras, false, Format::kJson);
+  assert(Accepts(*extra_json, R"({"value":{"a.b":3,"😀":"x","other":true}})"));
+  assert(Accepts(*extra_json, R"({"value":{"a.b":3,"😀":"x","aXb":false}})"));
+  for (const char* invalid :
+       {R"({"value":{"a.b":3,"😀":"x","other":1}})",
+        R"({"value":{"a.b":3,"😀":"x","a.b":false}})",
+        R"({"value":{"a.b":3,"😀":"x","a\u002eb":false}})",
+        R"({"value":{"a.b":3,"😀":"x","\ud83d\ude00":false}})"})
+    assert(!Accepts(*extra_json, invalid));
+  auto finite = extras;
+  finite["properties"]["value"]["enum"] = parse(
+      R"([{"a.b":3,"😀":"x","other":true},{"a.b":3,"😀":"x","other":42}])");
+  const auto finite_json =
+      JsonConstraint::ToolParameters(finite, false, Format::kJson);
+  assert(Accepts(*finite_json, R"({"value":{"a.b":3,"😀":"x","other":true}})"));
+  assert(!Accepts(*finite_json, R"({"value":{"a.b":3,"😀":"x","other":42}})"));
+}
+
 int main(int argc, char** argv) {
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
@@ -1038,6 +1166,7 @@ int main(int argc, char** argv) {
   TestAutomaticTools();
   TestNativeTools();
   TestOpenNativeTools();
+  TestNonStrictAgentTools();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";
 }

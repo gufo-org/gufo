@@ -27,6 +27,7 @@ from metrics import CaseComplete, Recorder
 from tool_reasoning import check_tool_reasoning, response_result
 from discovery import check_discovery
 from image_inputs import check_image_inputs
+from tool_agent import check_tool_agent, check_tool_agent_loop
 
 
 class CompletionStreamChoice(CompletionChoice):
@@ -2328,7 +2329,7 @@ def check_server_metrics(client, model, checks, width):
 
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
               "tool-reasoning",
-              "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "metrics")
 
 
@@ -2416,6 +2417,9 @@ def main():
             "auto-tools": lambda: check_auto_tools(client, args.model, checks, args.vision),
             "tool-edges": lambda: check_tool_edges(client, args.model, checks),
             "tool-reasoning": lambda: check_tool_reasoning(client, args.model, checks, chat_result),
+            "tool-agent": lambda: check_tool_agent(
+                client, args.model, checks, chat_result, args.vision, image_content),
+            "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
             "state-edges": lambda: check_state_edges(
                 client, args.model, checks, args.speculative, args.vision),
             "sampling-defaults": lambda: check_sampling_defaults(

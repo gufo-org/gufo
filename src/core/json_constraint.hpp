@@ -41,6 +41,8 @@ public:
                                              const json::Value& reference);
   // Returns null when a schema cannot be represented unambiguously by native
   // parameter tags. The caller retains the exact JSON schema in that case.
+  // Non-strict tools permit open nested objects. Unsupported keywords retain
+  // best-effort native framing without relaxing strict response schemas.
   static std::shared_ptr<const JsonConstraint> ToolParameters(
       const json::Value& schema, bool strict, ToolFormat format);
   // Best-effort native framing for non-strict tools with no declared argument

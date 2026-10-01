@@ -63,6 +63,8 @@ regressions before publishing. Noisy evidence stays visibly inconclusive and
 unqualified; do not widen margins or stop at reporting failures. Use the code
 diff to select affected metrics; unrelated timing variance does not justify
 another full matrix.
+For reported coding-agent loops, also replay the affected workflow with
+`tests/functional/pi_agent.py`; retain its sessions and inspect actual tool results.
 Retain numerical quality tests and the standard speed benchmark. Keep these
 tests in `tests/functional/`, outside hosted model CI; avoid full sweeps.
 

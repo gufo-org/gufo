@@ -701,5 +701,25 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
             self.assertIsNotNone(process.returncode)
 
 
+class PiWatchdogTest(unittest.TestCase):
+    def test_repeated_command_can_make_progress(self):
+        from pi_agent import repeated_actions
+
+        def history(outputs):
+            result = []
+            for index, output in enumerate(outputs):
+                result += [
+                    {"role": "assistant", "content": [{
+                        "type": "toolCall", "id": str(index), "name": "bash",
+                        "arguments": {"command": "node test.js"}}]},
+                    {"role": "toolResult", "toolCallId": str(index),
+                     "content": [{"type": "text", "text": output}]}]
+            return result
+
+        self.assertEqual(repeated_actions(history(["same error"] * 6)), 6)
+        self.assertEqual(repeated_actions(history([
+            "missing module", "case 1 fails", "case 2 fails", "ok"])), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

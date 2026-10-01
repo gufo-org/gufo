@@ -211,7 +211,7 @@ gufo::server::HttpRequest Request(
 
 void TestStreamingIsLive() {
   FakeBackend backend;
-  backend.pieces = {"Hel", "lo"};
+  backend.pieces = {"Hel<tool_call>", "lo"};
   backend.finish_reason =
       gufo::server::TextGenerationBackend::FinishReason::kLength;
   backend.block_after_first_piece = true;
@@ -248,7 +248,8 @@ void TestStreamingIsLive() {
     Expect(output_condition.wait_for(
                lock, 2s,
                [&] {
-                 return output.find(R"("content":"Hel")") != std::string::npos;
+                 return output.find(R"("content":"Hel<tool_call>")") !=
+                        std::string::npos;
                }),
            "First content delta is written promptly");
     Expect(!backend.completed.load(),
@@ -2205,6 +2206,102 @@ void TestToolMarkersInsideConstrainedReasoning() {
           }
 }
 
+void TestToolMarkersWhenToolsDisabled() {
+  using gufo::json::Value;
+  const std::string thought =
+      "Quoted <tool_call> and <｜DSML｜tool_calls> are reasoning data.";
+  const std::string answer =
+      "Literal <tool_call><function=f></function></tool_call> end.";
+  for (const bool responses : {false, true})
+    for (const bool stream : {false, true})
+      for (const bool declared : {false, true})
+        for (const int phase : {0, 1, 2}) {
+          auto body = gufo::json::parse(R"({
+            "model":"test-model","messages":[{"role":"user","content":"Explain syntax"}],
+            "tool_choice":"none"})");
+          body["stream"] = stream;
+          body["chat_template_kwargs"]["enable_thinking"] = phase != 0;
+          if (declared)
+            body["tools"] =
+                gufo::json::parse(R"([{"type":"function","function":{
+              "name":"f","parameters":{"type":"object","properties":{},"additionalProperties":false}}}])");
+          const bool incomplete = phase == 2;
+          const auto expected_thought = phase ? thought : std::string{};
+          const auto expected_answer = incomplete ? std::string{} : answer;
+          const auto raw = expected_thought + (phase == 1 ? "</think>" : "") +
+                           expected_answer;
+          FakeBackend backend;
+          backend.finish_reason =
+              incomplete
+                  ? gufo::server::TextGenerationBackend::FinishReason::kLength
+                  : gufo::server::TextGenerationBackend::FinishReason::kStop;
+          for (char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+          gufo::server::HttpResponse response;
+          if (responses) {
+            if (declared) {
+              auto tool = *body["tools"].items()[0].find("function");
+              tool["type"] = "function";
+              body["tools"] = Value::array();
+              body["tools"].push_back(std::move(tool));
+            }
+            gufo::server::ChatRequest chat;
+            chat.reasoning.enabled = phase != 0;
+            Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+                   "disabled tools have valid Responses controls");
+            response = gufo::server::CreateOpenAiResponse(
+                Request(body.dump()), backend, chat, 4096, {}, stream);
+          } else
+            response =
+                gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          std::string text, reasoning;
+          const auto inspect = [&](const Value& event) {
+            if (responses) {
+              if (stream) {
+                if (event.member_str("type") == "response.output_text.delta")
+                  text += event.member_str("delta");
+                if (event.member_str("type") ==
+                    "response.reasoning_summary_text.delta")
+                  reasoning += event.member_str("delta");
+              } else
+                for (const auto& item : event.find("output")->items()) {
+                  Expect(item.member_str("type") != "function_call",
+                         "disabled tools never become API calls");
+                  for (const auto* field : {"content", "summary"})
+                    if (const auto* parts = item.find(field))
+                      for (const auto& part : parts->items())
+                        (std::string_view(field) == "content" ? text
+                                                              : reasoning) +=
+                            part.member_str("text");
+                }
+            } else
+              for (const auto& choice : event.find("choices")->items()) {
+                const auto* message = choice.find(stream ? "delta" : "message");
+                if (!message)
+                  continue;
+                Expect(!message->contains("tool_calls"),
+                       "disabled tools never become API calls");
+                text += message->member_str("content");
+                reasoning += message->member_str("reasoning_content");
+              }
+          };
+          Expect(response.status == 200,
+                 "disabled tool marker request succeeds");
+          if (stream)
+            response.streaming_body([&](std::string_view chunk) {
+              const auto pos = chunk.find("data: ");
+              if (pos != std::string_view::npos &&
+                  !chunk.substr(pos + 6).starts_with("[DONE]"))
+                inspect(gufo::json::parse(chunk.substr(pos + 6)));
+              return true;
+            });
+          else
+            inspect(gufo::json::parse(response.body));
+          Expect(text == expected_answer && reasoning == expected_thought,
+                 "disabled tool markers preserve content and reasoning phases");
+        }
+}
+
 void TestNativeToolTransports() {
   using gufo::json::Value;
   using Finish = gufo::server::TextGenerationBackend::FinishReason;
@@ -2571,7 +2668,7 @@ void TestResponsesOutput() {
 
 void TestResponsesLiveAndCancellation() {
   FakeBackend backend;
-  backend.pieces = {"first", "second"};
+  backend.pieces = {"<tool_call>first", "second"};
   backend.block_after_first_piece = true;
   auto response = gufo::server::CreateOpenAiResponse(Request("{}"), backend, {},
                                                      0, {}, true);
@@ -2702,6 +2799,7 @@ int main() {
   TestStreamingPromptProgress();
   TestResponsesPromptProgress();
   TestToolMarkersInsideConstrainedReasoning();
+  TestToolMarkersWhenToolsDisabled();
   TestStopSequencesAndDefaultFields();
   TestStructuredResponseFormat();
   TestStructuredToolTruncation();

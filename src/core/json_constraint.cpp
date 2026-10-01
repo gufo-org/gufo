@@ -75,8 +75,9 @@ class JsonConstraintCompiler {
 public:
   using Sequence = JsonConstraint::Sequence;
   using Rule = JsonConstraint::Rule;
-  explicit JsonConstraintCompiler(const json::Value& schema, bool strict)
-      : schema_(schema), strict_(strict) {
+  explicit JsonConstraintCompiler(const json::Value& schema, bool strict,
+                                  bool tool = false)
+      : schema_(schema), strict_(strict), open_objects_(tool && !strict) {
     // Literal bytes occupy the first 256 terminal classes.
     for (unsigned i = 0; i < 256; ++i) {
       std::bitset<256> bits;
@@ -195,7 +196,7 @@ public:
   }
 
   std::shared_ptr<const JsonConstraint> ToolParameters(
-      JsonConstraint::ToolFormat format) {
+      JsonConstraint::ToolFormat format, bool best_effort = false) {
     // Native envelope/typed-parameter approach: llama.cpp common/parsers/
     // qwen3-coder.cpp and deepseek.cpp at
     // 6a2743f028f78bfb88a7189607b49bde30df3769. Unlike an injected JSON
@@ -203,7 +204,10 @@ public:
     // template.
     using Format = JsonConstraint::ToolFormat;
     const auto* root = &schema_;
+    std::set<const json::Value*> seen;
     while (const auto* ref = root->find("$ref")) {
+      if (!seen.insert(root).second)
+        return {};
       if (!Without(*root, {"$ref", "$defs", "title", "description"}).empty())
         return {};
       root = Reference(*ref);
@@ -214,15 +218,21 @@ public:
         root->contains("const") || root->contains("enum"))
       return {};
     const auto* properties = root->find("properties");
-    if (!properties)
+    if (!properties || !properties->is_object())
       return {};
     if (const auto* extra = root->find("additionalProperties");
         extra && (!extra->is_bool() || extra->as_bool()))
       return {};
     std::set<std::string> required;
-    if (const auto* fields = root->find("required"))
-      for (const auto& field : fields->items())
+    if (const auto* fields = root->find("required")) {
+      if (!fields->is_array())
+        return {};
+      for (const auto& field : fields->items()) {
+        if (!field.is_string() || !properties->contains(field.str()))
+          return {};
         required.insert(field.str());
+      }
+    }
     std::vector<std::pair<std::string, std::uint32_t>> members;
     for (const auto& [name, original] : properties->members()) {
       if (name.empty() || name.find_first_of("<>\"=\r\n") != std::string::npos)
@@ -235,7 +245,10 @@ public:
                std::string_view::npos))
         return {};
       const auto* schema = &original;
+      seen.clear();
       while (const auto* ref = schema->find("$ref")) {
+        if (!seen.insert(schema).second)
+          return {};
         if (!Without(*schema, {"$ref", "title", "description"}).empty())
           return {};
         schema = Reference(*ref);
@@ -271,6 +284,14 @@ public:
           if (matcher->Check("").complete)
             value = Optional(value);
         }
+      } else if (best_effort) {
+        // Keep the known parameter type for unsupported non-strict keywords.
+        // Their contents remain guidance;
+        // unlike an unrestricted whole-call fallback, required parameters
+        // cannot disappear and JSON-valued arguments must still be valid JSON.
+        value = type->str() == "array"    ? GenericArray(kMaxDepth)
+                : type->str() == "object" ? GenericObject(kMaxDepth)
+                                          : Primitive(type->str());
       } else {
         value = Visit(original, 1);
       }
@@ -411,13 +432,15 @@ private:
       return generic_values_.at(depth);
     Sequence alternatives{string_, number_, bool_, null_};
     if (depth) {
-      const auto value = GenericValue(depth - 1);
-      const auto tail = Repeat(Seq({ws_, Byte(','), ws_, value}));
-      alternatives.push_back(
-          Seq({Byte('['), ws_, Optional(Seq({value, tail})), ws_, Byte(']')}));
+      alternatives.push_back(GenericArray(depth));
       alternatives.push_back(GenericObject(depth));
     }
     return generic_values_[depth] = Alt(alternatives);
+  }
+  std::uint32_t GenericArray(std::size_t depth) {
+    const auto value = GenericValue(depth - 1);
+    const auto tail = Repeat(Seq({ws_, Byte(','), ws_, value}));
+    return Seq({Byte('['), ws_, Optional(Seq({value, tail})), ws_, Byte(']')});
   }
   std::uint32_t GenericObject(std::size_t depth) {
     const auto value = GenericValue(depth - 1);
@@ -584,9 +607,11 @@ private:
         if (!previous->is_object() || !value.is_object())
           Invalid("properties must be an object");
         const bool left_closed = left.contains("additionalProperties") &&
+                                 left.find("additionalProperties")->is_bool() &&
                                  !left.find("additionalProperties")->as_bool();
         const bool right_closed =
             right.contains("additionalProperties") &&
+            right.find("additionalProperties")->is_bool() &&
             !right.find("additionalProperties")->as_bool();
         auto properties = json::Value::object();
         for (const auto& [name, child] : previous->members()) {
@@ -612,7 +637,7 @@ private:
         const auto permits = [&](const json::Value& schema) {
           const auto* closed = schema.find("additionalProperties");
           const auto* fields = schema.find("properties");
-          return !closed || closed->as_bool() ||
+          return !closed || !closed->is_bool() || closed->as_bool() ||
                  (fields && fields->contains(name));
         };
         if (permits(left) && permits(right))
@@ -697,8 +722,8 @@ private:
             return {};
       static const auto no_properties = json::Value::object();
       const auto* properties = schema.find("properties");
-      if (!properties && schema.contains("additionalProperties") &&
-          !schema.find("additionalProperties")->as_bool())
+      const auto* additional = schema.find("additionalProperties");
+      if (!properties && additional)
         properties = &no_properties;
       if (properties) {
         result = json::Value::object();
@@ -712,10 +737,15 @@ private:
         }
         for (const auto& [name, item] : value.members())
           if (!properties->contains(name)) {
-            if (schema.contains("additionalProperties") &&
-                !schema.find("additionalProperties")->as_bool())
+            if (additional && additional->is_bool() && !additional->as_bool())
               return {};
-            result.append_member(name, item);
+            if (additional && additional->is_object()) {
+              auto candidate = ValueFor(*additional, item, depth + 1);
+              if (!candidate)
+                return {};
+              result.append_member(name, std::move(*candidate));
+            } else
+              result.append_member(name, item);
           }
       }
     }
@@ -1136,8 +1166,12 @@ private:
     if (!properties)
       properties = &empty_properties;
     const auto* additional = schema.find("additionalProperties");
-    if (!properties || !properties->is_object() || !additional ||
-        !additional->is_bool() || additional->as_bool())
+    const bool closed =
+        additional && additional->is_bool() && !additional->as_bool();
+    if (!properties->is_object() ||
+        (additional && !additional->is_bool() && !additional->is_object()))
+      Invalid("invalid object properties or additionalProperties");
+    if (!closed && !open_objects_)
       Invalid("objects require properties and additionalProperties: false");
     properties_ += properties->size();
     if (properties_ > 5000)
@@ -1159,6 +1193,48 @@ private:
     // Two suffix states represent whether a comma is needed. Optional fields
     // remain in schema order without enumerating every property subset.
     std::array<std::uint32_t, 2> suffix{Seq({}), Seq({})};
+    if (!closed) {
+      // Open-object approach: llama.cpp common/json-schema-to-grammar.cpp at
+      // e358d59178377be4c58ba567925e05faadbccb57. Retain declared field schemas
+      // and allow extra keys after them. Exclude declared names from
+      // the wildcard rule: otherwise an extra, incorrectly typed duplicate
+      // could overwrite the validated field. Match decoded Unicode so JSON
+      // escapes cannot bypass the exclusion.
+      std::uint32_t key = string_;
+      if (!properties->empty()) {
+        std::string pattern = "^(?!(?:";
+        bool separator = false;
+        for (const auto& [name, value] : properties->members()) {
+          (void)value;
+          if (separator)
+            pattern += '|';
+          separator = true;
+          for (unsigned char byte : name) {
+            if (byte < 0x20) {
+              constexpr char hex[] = "0123456789abcdef";
+              pattern += "\\x";
+              pattern += hex[byte >> 4];
+              pattern += hex[byte & 15];
+            } else {
+              if (std::string_view("^$\\.*+?()[]{}|/").find(byte) !=
+                  std::string_view::npos)
+                pattern += '\\';
+              pattern += static_cast<char>(byte);
+            }
+          }
+        }
+        pattern += ")$)";
+        auto predicate = json::Value::object();
+        predicate["pattern"] = std::move(pattern);
+        key = Lexeme(JsonSchemaLexeme::String(predicate));
+      }
+      const auto value = additional && additional->is_object()
+                             ? Visit(*additional, depth + 1)
+                             : GenericValue(kMaxDepth - depth);
+      const auto member = Seq({key, ws_, Byte(':'), ws_, value});
+      const auto tail = Repeat(Seq({ws_, Byte(','), ws_, member}));
+      suffix = {Optional(Seq({member, tail})), tail};
+    }
     for (auto it = properties->members().rbegin();
          it != properties->members().rend(); ++it) {
       const auto& [key, value] = *it;
@@ -1214,6 +1290,7 @@ private:
   }
   const json::Value& schema_;
   bool strict_;
+  bool open_objects_;
   std::shared_ptr<JsonConstraint> grammar_{new JsonConstraint};
   std::uint32_t ws_, string_, integer_, number_, bool_, null_;
   std::map<std::size_t, std::uint32_t> generic_values_;
@@ -1254,21 +1331,52 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::Object() {
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
     const json::Value& schema, bool strict, ToolFormat format) {
-  // Validate with the same compiler as JSON output before selecting a native
-  // representation. Unsupported non-strict schemas are handled by the caller.
-  const auto validated = Compile(schema, strict);
-  if (format == ToolFormat::kJson)
-    return validated;
-  using Key = std::pair<std::shared_ptr<const JsonConstraint>, ToolFormat>;
+  // Ordinary agent tools leave nested objects open. Preserve their declared
+  // requirements/types and native framing without relaxing strict output
+  // schemas or injecting a second protocol into the model's chat template.
+  using Key = std::tuple<std::string, bool, ToolFormat>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
-  const Key key{validated, format};
+  const Key key{schema.dump(), strict, format};
+  if (std::get<0>(key).size() > kMaxSchemaBytes)
+    Invalid("maximum schema size is 2 MiB");
   {
     const std::lock_guard lock(mutex);
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
-  auto grammar = JsonConstraintCompiler(schema, strict).ToolParameters(format);
+  std::shared_ptr<const JsonConstraint> grammar;
+  bool best_effort = false;
+  try {
+    grammar = JsonConstraintCompiler(schema, strict, true).Compile(false);
+  } catch (const std::invalid_argument&) {
+    if (strict)
+      throw;
+    best_effort = true;
+  }
+  if (format != ToolFormat::kJson) {
+    try {
+      grammar = JsonConstraintCompiler(schema, strict, true)
+                    .ToolParameters(format, best_effort);
+    } catch (const std::invalid_argument&) {
+      if (strict)
+        throw;
+      grammar.reset();
+      best_effort = true;
+    }
+  }
+  if (!grammar && format == ToolFormat::kJson && !strict)
+    grammar = Object();
+  if (!grammar && best_effort) {
+    const auto* properties = schema.find("properties");
+    const auto* additional = schema.find("additionalProperties");
+    // Only untyped tools can use arbitrary native parameters. A typed schema
+    // may have failed native compilation because literal delimiters or unions
+    // cannot be represented faithfully; keep its JSON envelope in that case.
+    if ((!properties || properties->empty()) &&
+        (!additional || additional->is_bool()))
+      grammar = OpenToolParameters(format);
+  }
   const std::lock_guard lock(mutex);
   if (cache.size() >= 16)
     cache.erase(cache.begin());

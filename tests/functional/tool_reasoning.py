@@ -2,6 +2,7 @@
 
 import json
 import sys
+from copy import deepcopy
 
 from metrics import validate_tool_events
 
@@ -52,6 +53,38 @@ def response_result(client, request, streaming):
                 finish="tool_calls" if calls else "stop", usage=response.usage.to_dict())
 
 
+def check_disabled_tool_markers(client, model, checks, chat_result):
+    literal = "Example: <tool_call> and <｜DSML｜tool_calls> are literal text."
+    prompt = "Copy exactly this one line, without quotes or code fences:\n" + literal
+    function = {"name": "echo", "parameters": {"type": "object", "properties": {
+        "text": {"type": "string"}}, "required": ["text"], "additionalProperties": False}}
+    for endpoint in ("chat", "responses"):
+        for declared in (False, True):
+            request = dict(model=model, temperature=0, extra_body={"seed": 41})
+            if endpoint == "chat":
+                request.update(messages=[{"role": "user", "content": prompt}],
+                               reasoning_effort="none", max_completion_tokens=128)
+                if declared:
+                    request.update(tools=[{"type": "function", "function": function}],
+                                   tool_choice="none")
+                result = chat_result(client, request, True)
+            else:
+                request.update(input=prompt, reasoning={"effort": "none"},
+                               max_output_tokens=128, store=False)
+                if declared:
+                    request.update(tools=[{"type": "function", **function}], tool_choice="none")
+                result = response_result(client, request, True)
+            name = f"tool_markers_disabled_{endpoint}_{declared}"
+            checks[name] = result
+            print(f"CHECK {name}", file=sys.stderr, flush=True)
+            assert result["text"].strip() == literal and not result["tools"], result
+            assert not result["reasoning"] and result["finish"] == "stop", result
+            if declared:
+                usage = result["usage"]
+                details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
+                assert details["cached_tokens"] > 0, result
+
+
 def check_tool_reasoning(client, model, checks, chat_result):
     schema = {"type": "object", "properties": {
         "path": {"type": "string", "const": ARGUMENTS["path"]},
@@ -72,8 +105,13 @@ def check_tool_reasoning(client, model, checks, chat_result):
             assert usage["gufo"]["prefill_tokens"] == tokens, usage
 
     for strict in (True, False):
+        parameters = deepcopy(schema)
+        if not strict:
+            # Ordinary agent schemas leave nested objects open. They must
+            # retain native tool syntax while quoting protocol tags too.
+            del parameters["properties"]["edits"]["items"]["additionalProperties"]
         function = {"name": "edit", "description": "Return an edit for review; never execute it.",
-                    "parameters": schema, "strict": strict}
+                    "parameters": parameters, "strict": strict}
         chat = dict(model=model, messages=[{"role": "user", "content": PROMPT}],
                     tools=[{"type": "function", "function": function}],
                     tool_choice="required", parallel_tool_calls=False,
@@ -112,3 +150,4 @@ def check_tool_reasoning(client, model, checks, chat_result):
             record(f"tool_reasoning_stopped_{mode}_{label}", result)
             assert result["reasoning"].strip() == thought[:cut].strip(), result
             assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
+    check_disabled_tool_markers(client, model, checks, chat_result)

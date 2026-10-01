@@ -50,7 +50,9 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys and named Responses metadata |
-| `tool-reasoning` | Quoted tool tags stay in reasoning; edit arguments stay intact across Chat, Responses, streaming and early stops |
+| `tool-reasoning` | Quoted tags, literal edits, early stops and disabled tools across Chat/Responses |
+| `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
+| `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops, image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |
@@ -76,6 +78,15 @@ Model runs stay outside hosted CI; CI checks the runner and measurement logic.
 For metrics changes, run `--suite metrics` with AR and the affected speculative
 mode. It checks all three text endpoints and reconciles cancelled work with the
 terminal logs. Scrapes are not recorded as generation requests.
+
+For real coding-agent regressions, run `pi_agent.py` against a local server with
+`--base-url`, `--model`, `--pi /path/to/pi-0.87.0`, `--server-log`, and a fresh
+`--output` directory.
+It replays #368's five tasks, verifies the generated code independently, and
+retains Pi sessions, HTTP/SSE and per-request timings. It executes generated
+commands in disposable fixtures using isolated Pi configuration. Use `--passes 1`
+for a focused check; the default five passes matches the reported debug workload.
+`--conversation --context-file FILE` additionally tests retained long history.
 
 Every request checks its applicable response format, expected output and timings.
 Missing measurements fail. `comparison.json` reports per-request prefill, decode,
