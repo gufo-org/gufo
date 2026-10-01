@@ -102,8 +102,13 @@ std::vector<std::uint8_t> MakeWeights(gufo::core::GgmlType type,
       case gufo::core::GgmlType::kIQ4_NL:
       case gufo::core::GgmlType::kIQ4_XS:
       case gufo::core::GgmlType::kIQ3_S:
+      case gufo::core::GgmlType::kIQ2_XS:
       case gufo::core::GgmlType::kQ8_0:
         tame_half(block);  // d is first
+        break;
+      case gufo::core::GgmlType::kQ2_K:
+        tame_half(block + 80);  // d is last
+        tame_half(block + 82);  // dmin is last
         break;
       default:
         break;
@@ -901,6 +906,10 @@ int main() {
     TestFp16MixedPair(gate, up, 263, 259);
   }
   TestFusedSwiGLU(Type::kQ4_K, Type::kQ5_K, 65, 768);
+  TestFusedSwiGLU(Type::kIQ2_XS, Type::kIQ2_XS, 66, 768);
+  TestFusedSwiGLU(Type::kIQ2_XS, Type::kIQ2_XS, 17408, 5120);
+  TestFusedSwiGLU(Type::kQ2_K, Type::kQ2_K, 66, 768);
+  TestFusedSwiGLU(Type::kQ2_K, Type::kQ2_K, 5120, 17408);
   TestFusedSwiGLU(Type::kQ8_0, Type::kQ8_0, 17408, 5120);
   TestFusedSwiGLU(Type::kQ6_K, Type::kQ6_K, 17408, 5120);
   if (g_failed) {

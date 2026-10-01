@@ -421,6 +421,43 @@ void FillQ8_0(std::vector<std::uint8_t>& bytes, std::size_t rows,
   }
 }
 
+void FillIQ2_XS(std::vector<std::uint8_t>& bytes, std::size_t rows,
+                 std::size_t row_bytes, auto&& next) {
+  for (std::size_t row = 0; row < rows; ++row) {
+    auto* blocks = reinterpret_cast<gufo::quant::block_iq2_xs*>(
+        bytes.data() + (row * row_bytes));
+    const std::size_t count = row_bytes / sizeof(gufo::quant::block_iq2_xs);
+    for (std::size_t b = 0; b < count; ++b) {
+      blocks[b].d = TestScaleHalf(b);
+      for (auto& value : blocks[b].qs) {
+        value = static_cast<std::uint16_t>(next() & 0xFFFFU);
+      }
+      for (auto& value : blocks[b].scales) {
+        value = static_cast<std::uint8_t>(next() & 0xFFU);
+      }
+    }
+  }
+}
+
+void FillQ2_K(std::vector<std::uint8_t>& bytes, std::size_t rows,
+              std::size_t row_bytes, auto&& next) {
+  for (std::size_t row = 0; row < rows; ++row) {
+    auto* blocks = reinterpret_cast<gufo::quant::block_q2_K*>(
+        bytes.data() + (row * row_bytes));
+    const std::size_t count = row_bytes / sizeof(gufo::quant::block_q2_K);
+    for (std::size_t b = 0; b < count; ++b) {
+      blocks[b].d = TestScaleHalf(b);
+      blocks[b].dmin = TestScaleHalf(b + 1000);
+      for (auto& value : blocks[b].scales) {
+        value = static_cast<std::uint8_t>(next() & 0xFFU);
+      }
+      for (auto& value : blocks[b].qs) {
+        value = static_cast<std::uint8_t>(next() & 0xFFU);
+      }
+    }
+  }
+}
+
 void FillQ6_K(std::vector<std::uint8_t>& bytes, std::size_t rows,
               std::size_t row_bytes, auto&& next) {
   for (std::size_t row = 0; row < rows; ++row) {
@@ -575,6 +612,16 @@ int main() {
       [](std::vector<std::uint8_t>& bytes, std::size_t rows,
          std::size_t row_bytes,
          auto&& next) { FillQ6_K(bytes, rows, row_bytes, next); });
+  TestFusedSSMInputProjectionMatchesGemv(
+      gufo::core::GgmlType::kIQ2_XS, "IQ2_XS",
+      [](std::vector<std::uint8_t>& bytes, std::size_t rows,
+         std::size_t row_bytes,
+         auto&& next) { FillIQ2_XS(bytes, rows, row_bytes, next); });
+  TestFusedSSMInputProjectionMatchesGemv(
+      gufo::core::GgmlType::kQ2_K, "Q2_K",
+      [](std::vector<std::uint8_t>& bytes, std::size_t rows,
+         std::size_t row_bytes,
+         auto&& next) { FillQ2_K(bytes, rows, row_bytes, next); });
   TestBatchedFfnDownMatchesGemv(
       gufo::core::GgmlType::kQ6_K, "Q6_K ffn_down", 5120, 17408,
       [](std::vector<std::uint8_t>& bytes, std::size_t rows,
