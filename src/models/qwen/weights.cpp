@@ -69,7 +69,8 @@ enum class TensorRole : std::uint8_t {
              type == core::GgmlType::kQ8_0 || type == core::GgmlType::kQ4_K ||
              type == core::GgmlType::kQ3_K || type == core::GgmlType::kQ5_K ||
              type == core::GgmlType::kQ6_K || type == core::GgmlType::kIQ4_NL ||
-             type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ3_S;
+             type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ3_S ||
+             type == core::GgmlType::kIQ2_XS || type == core::GgmlType::kQ2_K;
     case TensorRole::kNorm:
     case TensorRole::kSsmParameter:
       // HIP norm, convolution, and recurrence kernels consume these tensors as
@@ -84,7 +85,8 @@ enum class TensorRole : std::uint8_t {
              type == core::GgmlType::kQ5_K || type == core::GgmlType::kQ6_K ||
              type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ3_K ||
              type == core::GgmlType::kIQ4_NL ||
-             type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ3_S;
+             type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ3_S ||
+             type == core::GgmlType::kIQ2_XS || type == core::GgmlType::kQ2_K;
   }
   return false;
 }

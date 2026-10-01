@@ -448,6 +448,30 @@ __global__ void DequantizeQ6KToBf16Kernel(const void* __restrict__ w,
 // opt-c162-q8k-prefill-dequant (extended): type-dispatched entry point that
 // converts a quantized weight region (Q8_0/Q5_K/Q6_K/Q8_K) into a BF16 scratch
 // for the prefill hipblas GEMM path.
+// Generic Sub16 dequantizer for formats with a DecodeQuantSub16 branch but
+// no dedicated kernel above (IQ2_XS, Q2_K). One warp per 256-block.
+template<core::GgmlType WType>
+__global__ void DequantizeSub16ToBf16Kernel(const void* __restrict__ w,
+                                           hip_bfloat16* __restrict__ out,
+                                           std::size_t n_blocks) {
+  const std::size_t tid = threadIdx.x;
+  const std::size_t lane_id = tid & 31u;
+  const std::size_t warp_id = tid >> 5u;
+  const std::size_t b = (blockIdx.x * (blockDim.x >> 5u)) + warp_id;
+  if (b >= n_blocks) {
+    return;
+  }
+  const std::size_t row_bytes = QuantRowBytes(WType, 256);
+  const auto* row =
+      static_cast<const std::uint8_t*>(w) + (b * row_bytes);
+  hip_bfloat16* out_blk = out + (b * 256);
+#pragma unroll
+  for (std::size_t k = 0; k < 8; ++k) {
+    const std::size_t j = lane_id + (32u * k);
+    out_blk[j] = hip_bfloat16(QuantBlockElement(WType, row, j));
+  }
+}
+
 void LaunchDequantizeToBf16(core::GgmlType type, const void* w,
                             hip_bfloat16* out, std::size_t n_elems,
                             hipStream_t stream) {
@@ -484,6 +508,24 @@ void LaunchDequantizeToBf16(core::GgmlType type, const void* w,
                                   block_threads, 0, stream>>>(w, out, n_blocks);
     } else {
       LaunchDequantizeQ8KToBf16(w, out, n_elems, stream);
+    }
+    return;
+  }
+  if (type == core::GgmlType::kIQ2_XS || type == core::GgmlType::kQ2_K) {
+    if (n_elems % 256 != 0) {
+      return;
+    }
+    const std::size_t n_blocks = n_elems / 256;
+    const std::size_t grid =
+        (n_blocks + warps_per_block - 1U) / warps_per_block;
+    if (type == core::GgmlType::kIQ2_XS) {
+      DequantizeSub16ToBf16Kernel<core::GgmlType::kIQ2_XS>
+          <<<static_cast<unsigned int>(grid), block_threads, 0, stream>>>(
+              w, out, n_blocks);
+    } else {
+      DequantizeSub16ToBf16Kernel<core::GgmlType::kQ2_K>
+          <<<static_cast<unsigned int>(grid), block_threads, 0, stream>>>(
+              w, out, n_blocks);
     }
     return;
   }
