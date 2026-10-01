@@ -42,6 +42,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 
 | Suite | Checks |
 | --- | --- |
+| `discovery` | Health, readiness, model ID/context and advertised text/image inputs; no generation |
 | `responses` | SDK buffered, streaming and async Responses |
 | `stops` | Text, Unicode, reasoning and tool stops; peer isolation |
 | `conversation` | Thinking/efforts, images, cancellation and RAM reuse |
@@ -57,6 +58,10 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
 | `metrics` | Live Prometheus counters, uncached work, endpoint totals, queueing and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, RAM and disk restart |
+
+For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
+the server command. Projectors can load automatically beside the weights, so
+the expectation is explicit rather than inferred from `--mmproj`.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`

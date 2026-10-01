@@ -21,6 +21,7 @@ from metrics import (CaseComplete, Recorder, canonical, compare, join_server_tim
                      qualify, summarize, validate_tool_events)
 from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit
+from discovery import assert_model_listing
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
@@ -36,6 +37,70 @@ class FunctionalRunnerTest(unittest.TestCase):
                        {"tools": [{"function": {"name": "edit", "arguments": "{}"}}]}):
             with self.subTest(change=change), self.assertRaises(AssertionError):
                 assert_edit({**result, **change})
+
+    def test_discovery_requires_an_explicit_expectation_before_starting_a_server(self):
+        for suite in ("discovery", "all"):
+            argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
+                    "--suite", suite, "--record-baseline", "--", "gufo", "serve", "llm"]
+            with self.subTest(suite=suite), patch.object(sys, "argv", argv), \
+                    patch.object(functional, "server") as start, \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                functional.main()
+            self.assertEqual(error.exception.code, 2)
+            start.assert_not_called()
+
+    def test_discovery_requires_expected_capabilities_and_model_metadata(self):
+        entry = {"id": "test", "object": "model", "created": 1, "owned_by": "gufo",
+                 "context_length": 8192, "architecture": {"input_modalities": ["text"]}}
+        listing = {"object": "list", "data": [entry]}
+        assert_model_listing(listing, "test", 8192, ["text"])
+        image = {**entry, "architecture": {"input_modalities": ["text", "image"]}}
+        assert_model_listing({**listing, "data": [image]}, "test", 8192, ["text", "image"])
+        for invalid in (
+            {**listing, "data": []}, {**listing, "data": [entry, entry]},
+            {**listing, "data": [{k: v for k, v in entry.items() if k != "architecture"}]},
+            *({**listing, "data": [{**entry, **change}]} for change in (
+                {"id": "wrong"}, {"context_length": 4096}, {"owned_by": "wrong"},
+                {"created": True}, {"architecture": {"input_modalities": ["image"]}},
+                {"architecture": {"input_modalities": ["text", "image"]}})),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises((AssertionError, KeyError)):
+                assert_model_listing(invalid, "test", 8192, ["text"])
+
+    def test_discovery_fingerprints_ignore_only_creation_time(self):
+        def measurement(value, endpoint="/v1/models"):
+            parts = [(1, json.dumps(value).encode())]
+            return summarize(parts, False, True, (endpoint, {}, 200))
+        listing = {"object": "list", "data": [{"id": "test", "created": 1,
+                   "context_length": 8192, "architecture": {"input_modalities": ["text"]}}]}
+        _, first = measurement(listing)
+        entry = listing["data"][0]
+        self.assertEqual(first, measurement({**listing, "data": [{**entry, "created": 2}]})[1])
+        for change in ({"id": "other"}, {"context_length": 4096},
+                       {"architecture": {"input_modalities": ["text", "image"]}}):
+            self.assertNotEqual(first, measurement({**listing, "data": [{**entry, **change}]})[1])
+        self.assertNotEqual(measurement({"status": "ok"}, "/health")[1],
+                            measurement({"status": "broken"}, "/health")[1])
+
+    def test_discovery_timings_do_not_require_generation_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "discovery.requests.json").write_text(json.dumps({"requests": [{
+                "index": 0, "endpoint": "/v1/models", "request_id": "r1",
+                "output_sha256": "models", "metrics": {}}]}))
+            (root / "server.log").write_text(
+                "[http] request=r1 event=completed duration_ms=0.2\n")
+            join_server_timings(root)
+            row = json.loads((root / "discovery.requests.json").read_text())["requests"][0]
+            self.assertEqual(row["metrics"], {"server_duration_ms": .2})
+            (root / "server.log").write_text("")
+            with self.assertRaisesRegex(ValueError, "no completed"):
+                join_server_timings(root)
+            for endpoint in ("/health", "/v1/health", "/ready", "/v1/ready"):
+                (root / "discovery.requests.json").write_text(json.dumps({"requests": [{
+                    "index": 0, "endpoint": endpoint, "request_id": "r1",
+                    "output_sha256": "probe", "wall_ms": 1, "metrics": {}}]}))
+                join_server_timings(root)
 
     def test_prompt_progress_contract_and_output_order(self):
         def event(processed, elapsed=0):
@@ -234,7 +299,8 @@ class FunctionalRunnerTest(unittest.TestCase):
             root = Path(directory)
             path = root / "responses.requests.json"
             path.write_text(json.dumps({"version": 1, "requests": [{
-                "index": 0, "request_id": "r7", "metrics": {}, "output_sha256": "output"}]}))
+                "index": 0, "endpoint": "/v1/responses", "request_id": "r7",
+                "metrics": {}, "output_sha256": "output"}]}))
             (root / "server.log").write_text(
                 "[INFO] request=r7 event=completed duration_ms=12 queue_ms=1 ttft_ms=3\n")
             join_server_timings(root)

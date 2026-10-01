@@ -27,7 +27,8 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("responses", "stops", "conversation", "structured", "structured-limits", "tool-reasoning",
+SUITES = ("discovery", "responses", "stops", "conversation", "structured", "structured-limits",
+          "tool-reasoning",
           "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "metrics", "cache")
 SAMPLING = {
@@ -40,13 +41,14 @@ SAMPLING = {
     "--repeat-last-n": ("repeat_last_n", int),
 }
 COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides",
-                     "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256")
+                     "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256",
+                     "expected_input_modalities")
 
 
 def provenance():
     source = hashlib.sha256()
     for name in ("run.py", "metrics.py", "progress.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
-                 "tool_reasoning.py"):
+                 "tool_reasoning.py", "discovery.py"):
         source.update((TESTS / name).read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
     kernel_command = Path("/proc/cmdline")
@@ -207,6 +209,8 @@ def main():
     parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"), required=True)
     parser.add_argument("--suite", action="append", choices=("all", *SUITES), required=True,
                         help="Repeat to select affected suites; use all for an explicit full run")
+    parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
+                        help="Expected loaded inputs for the discovery suite")
     parser.add_argument("--startup-timeout", type=float, default=240)
     parser.add_argument("--suite-timeout", type=float, default=900)
     qualification = parser.add_mutually_exclusive_group(required=True)
@@ -221,6 +225,8 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- ./result/bin/gufo serve llm --model PATH [server options]")
     args = parser.parse_args()
+    if ("discovery" in args.suite or "all" in args.suite) and args.expected_input_modalities is None:
+        parser.error("discovery requires --expected-input-modalities text or text,image")
     if args.allow_missing_progress and not args.record_baseline:
         parser.error("--allow-missing-progress is only for --record-baseline")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -290,6 +296,7 @@ def main():
               "suites": {}, "through_case": args.through_case,
               "allow_missing_progress": args.allow_missing_progress,
               "started_ns": time.time_ns(), "status": "running"}
+    report["expected_input_modalities"] = args.expected_input_modalities
     report_path = output / "report.json"
     write_json(report_path, report)
 
@@ -359,6 +366,8 @@ def main():
                             "--context", option(command, "--context")]
                 if vision:
                     sdk_args += ["--vision"]
+                if args.expected_input_modalities is not None:
+                    sdk_args += ["--expected-input-modalities", args.expected_input_modalities]
                 if option(command, "--think") is not None:
                     sdk_args += ["--server-thinking", option(command, "--think")]
                 if suite == through_suite:

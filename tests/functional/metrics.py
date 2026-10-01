@@ -10,6 +10,9 @@ import time
 
 SLOWDOWN = .05
 NOISE_MS = 3
+PROBE_ENDPOINTS = ("/health", "/v1/health", "/ready", "/v1/ready")
+DISCOVERY_ENDPOINTS = (*PROBE_ENDPOINTS, "/v1/models")
+GENERATION_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/responses")
 
 
 class CaseComplete(BaseException):
@@ -112,7 +115,7 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         require(isinstance(error.get("message"), str) and isinstance(error.get("type"), str),
                 "error.message and error.type must be strings")
         return
-    if endpoint not in ("/v1/chat/completions", "/v1/completions", "/v1/responses"):
+    if endpoint not in GENERATION_ENDPOINTS:
         return  # SDK checks /models separately.
     require(status == 200, "unexpected successful status")
     response_events = endpoint == "/v1/responses" and body.get("stream")
@@ -299,6 +302,14 @@ def summarize(parts, streaming, ended, contract=None):
         usage["gufo"] = {aliases.get(key, key): value for key, value in timings.items()}
     if contract:
         validate_response(events, *contract, ended, usage, output, choices)
+        if contract[0] in DISCOVERY_ENDPOINTS:
+            assert ended and not streaming and len(events) == 1, "incomplete discovery response"
+            value = events[0]
+            if contract[0] == "/v1/models" and contract[2] == 200:
+                # Model IDs and capabilities are stable; creation time is not.
+                value = {**value, "data": [{k: v for k, v in entry.items() if k != "created"}
+                                          for entry in value["data"]]}
+            return {}, digest(value)
     measured = {key: value for key, value in usage.get("gufo", {}).items()
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
                 and math.isfinite(value)}
@@ -620,6 +631,8 @@ def join_server_timings(directory):
         for row in payload["requests"]:
             fields = completed.get(row.get("request_id"))
             if not fields:
+                if row.get("endpoint") in PROBE_ENDPOINTS:
+                    continue  # Probes are deliberately quiet; client timing is retained.
                 raise ValueError(f"{path.name}:{row['index']}: no completed server log")
             measured = row.setdefault("metrics", {})
             for field in ("duration_ms", "queue_ms", "ttft_ms", "cache_restore_ms"):
@@ -637,7 +650,7 @@ def join_server_timings(directory):
                     measured[alias] = value
             if "server_duration_ms" not in measured:
                 raise ValueError(f"missing request duration in {log}")
-            if row.get("output_sha256"):
+            if row.get("output_sha256") and row["endpoint"] in GENERATION_ENDPOINTS:
                 for field in ("queue_ms", "ttft_ms"):
                     if field not in measured:
                         raise ValueError(f"{path.name}:{row['index']}: missing {field}")

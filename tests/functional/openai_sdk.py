@@ -25,6 +25,7 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, Ope
 from openai.types import Completion, CompletionChoice
 from metrics import CaseComplete, Recorder
 from tool_reasoning import check_tool_reasoning
+from discovery import check_discovery
 
 
 class CompletionStreamChoice(CompletionChoice):
@@ -1998,9 +1999,6 @@ def check_events(events, reasoning):
 
 
 def check_responses(client, model, checks, options, async_local_only, expect_reasoning):
-    models = client.models.list()
-    assert model in {item.id for item in models.data}, models
-    checks["model_discovery"] = {"models": [item.id for item in models.data]}
     prompt = "What is two plus two? Reply briefly."
     request = dict(model=model, input=prompt, temperature=0, max_output_tokens=256,
                    reasoning={"effort": "low" if expect_reasoning else "none"}, store=False)
@@ -2327,13 +2325,16 @@ def check_server_metrics(client, model, checks, width):
     completed("metrics_after_cancel_cached", lambda: chat_result(client, common))
 
 
-SDK_SUITES = ("responses", "stops", "conversation", "structured", "structured-limits", "tool-reasoning",
+SDK_SUITES = ("discovery", "responses", "stops", "conversation", "structured", "structured-limits",
+              "tool-reasoning",
               "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "metrics")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
+                        help="Expected loaded inputs for the discovery suite")
     parser.add_argument("--base-url", required=True, help="http://127.0.0.1:PORT/v1")
     parser.add_argument("--model", required=True, help="Gufo served model name")
     parser.add_argument("--expect-reasoning", action="store_true")
@@ -2358,6 +2359,8 @@ def main():
     parser.add_argument("--speculative", choices=("off", "mtp", "dflash2", "dspark"),
                         default="off", help="Server mode; determines sampled replay guarantees")
     args = parser.parse_args()
+    if args.suite in ("discovery", "all") and args.expected_input_modalities is None:
+        parser.error("discovery requires --expected-input-modalities text or text,image")
     if args.suite in ("all", "sampling-defaults") and not args.sampling_preset:
         parser.error("--sampling-preset is required for all/sampling-defaults")
     if not isinstance(args.sampling_overrides, dict):
@@ -2384,6 +2387,7 @@ def main():
               "sampling_preset": args.sampling_preset,
               "sampling_overrides": args.sampling_overrides, "suites": {},
               "through_case": args.through_case, "status": "running"}
+    report["expected_input_modalities"] = args.expected_input_modalities
     recorder = Recorder(args.output.with_suffix(".requests.json") if args.output else None,
                         args.through_case)
     checks = CheckResults(report, args.output, recorder)
@@ -2394,6 +2398,9 @@ def main():
                                      "response": [recorder.response_hook]}
     )) as client:
         suites = {
+            "discovery": lambda: check_discovery(
+                client, args.model, checks, args.context,
+                args.expected_input_modalities.split(",")),
             "responses": lambda: check_responses(client, args.model, checks, options,
                                                    async_local_only, args.expect_reasoning),
             "stops": lambda: check_stops(client, args.model, checks),
