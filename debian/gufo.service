@@ -1,0 +1,18 @@
+[Unit]
+Description=Gufo Strix Halo inference server
+Documentation=https://github.com/gufo-org/gufo
+After=network.target
+
+[Service]
+Type=simple
+User=gufo
+Group=llm-servers
+WorkingDirectory=/var/lib/gufo
+EnvironmentFile=-/etc/gufo/gufo.env
+ExecStart=/usr/bin/gufo serve --host 0.0.0.0 --port 8080 llm --model ${GUFO_MODEL}
+LimitMEMLOCK=infinity
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

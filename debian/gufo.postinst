@@ -1,0 +1,28 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+  # Shared group for LLM server services. Members (gufo, lemonade, ...)
+  # share the model cache below.
+  if ! getent group llm-servers > /dev/null 2>&1; then
+    addgroup --system llm-servers
+  fi
+  # Dedicated system user for the Gufo server. Runtime state lives in
+  # the user's home directory (/var/lib/gufo).
+  if ! getent passwd gufo > /dev/null 2>&1; then
+    adduser --system --ingroup llm-servers --home /var/lib/gufo \
+      --shell /usr/sbin/nologin gufo
+  fi
+  # GPU device access: /dev/kfd and /dev/dri/renderD* require membership
+  # in the video and render groups.
+  usermod -a -G video,render gufo
+  # Shared Hugging Face cache for model weights. Group-owned with the
+  # setgid bit so new files inherit the llm-servers group; any member
+  # (gufo, lemonade, ...) can read and download models. Survives purge
+  # (shared data).
+  install -d -o gufo -g llm-servers -m 2775 /var/lib/huggingface/hub
+fi
+
+#DEBHELPER#
+
+exit 0
