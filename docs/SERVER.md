@@ -624,7 +624,7 @@ carries chunks with an empty delta (Chat) or empty text (Completions) and a
 top-level `prompt_progress` object:
 
 ```json
-"prompt_progress": {"total": 4096, "cache": 1024, "processed": 2048, "time_ms": 850}
+{"prompt_progress": {"total": 4096, "cache": 1024, "processed": 2048, "time_ms": 850}}
 ```
 
 `processed` includes cached tokens; a full cache hit reports `processed == total`.
