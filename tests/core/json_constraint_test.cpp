@@ -1047,6 +1047,18 @@ void TestNonStrictAgentTools() {
         nested.replace(nested.find(edits), edits.size(), invalid);
         assert(!Accepts(*grammar, nested));
       }
+      // #304: preserve multiline edits through JSON escapes. Raw controls in
+      // an array's string must be excluded during generation, before parsing.
+      auto multiline = call;
+      multiline.replace(
+          multiline.find(edits), edits.size(),
+          R"([{"oldText":"a,\n  b","newText":"a,\n\tJSX,\n  b"}])");
+      assert(Accepts(*grammar, multiline));
+      auto raw_controls = call;
+      raw_controls.replace(
+          raw_controls.find(edits), edits.size(),
+          "[{\"oldText\":\"a,\n  b\",\"newText\":\"a,\n\tJSX,\n  b\"}]");
+      assert(!Accepts(*grammar, raw_controls));
       auto extra = call;
       extra.replace(extra.find(edits), edits.size(),
                     R"([{"oldText":"a","newText":"b","note":{"line":3}}])");
