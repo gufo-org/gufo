@@ -65,7 +65,7 @@ class ShutdownSignals {
 public:
   ShutdownSignals() {
     shutdown_signal.store(0, std::memory_order_relaxed);
-    struct sigaction action {};
+    struct sigaction action{};
     action.sa_handler = RequestShutdown;
     ::sigemptyset(&action.sa_mask);
     if (::sigaction(SIGINT, &action, &previous_interrupt_) != 0)
@@ -86,8 +86,8 @@ public:
   ShutdownSignals& operator=(const ShutdownSignals&) = delete;
 
 private:
-  struct sigaction previous_interrupt_ {};
-  struct sigaction previous_terminate_ {};
+  struct sigaction previous_interrupt_{};
+  struct sigaction previous_terminate_{};
 };
 
 // ---------------------------------------------------------------------------
@@ -1483,9 +1483,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
 }
 
 void HttpServer::handle_connection(int client_fd) {
-  const struct timeval tv {
-    120, 0
-  };
+  const struct timeval tv{120, 0};
   ::setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   ::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -1649,7 +1647,7 @@ void HttpServer::handle_connection(int client_fd) {
       connected = SendAll(client_fd, head);
       if (connected) {
         std::mutex write_mutex;
-        std::condition_variable write_cv;
+        std::condition_variable_any write_cv;
         auto last_write = std::chrono::steady_clock::now();
         const auto send_body = [&](std::string_view chunk) {
           const std::lock_guard lock(write_mutex);
@@ -1659,7 +1657,6 @@ void HttpServer::handle_connection(int client_fd) {
               chunked ? SendChunk(client_fd, chunk) : SendAll(client_fd, chunk);
           if (connected && !chunk.empty()) {
             last_write = std::chrono::steady_clock::now();
-            write_cv.notify_all();
           }
           return connected;
         };
@@ -1667,16 +1664,18 @@ void HttpServer::handle_connection(int client_fd) {
         if (IsEventStream(resp) &&
             options_.sse_heartbeat_interval.count() > 0) {
           heartbeat = std::jthread([&](std::stop_token stop) {
-            std::stop_callback wake_on_stop(stop,
-                                            [&] { write_cv.notify_all(); });
             std::unique_lock lock(write_mutex);
             while (!stop.stop_requested() && connected) {
               const auto deadline =
                   last_write + options_.sse_heartbeat_interval;
-              if (write_cv.wait_until(lock, deadline) ==
-                      std::cv_status::timeout &&
-                  !stop.stop_requested() && connected &&
-                  std::chrono::steady_clock::now() >= deadline) {
+              // Stop-aware waiting cannot miss a stop requested just before
+              // sleeping. Ordinary writes only move the deadline; they need
+              // not wake a second thread for every generated token.
+              write_cv.wait_until(lock, stop, deadline,
+                                  [&] { return !connected; });
+              if (!stop.stop_requested() && connected &&
+                  std::chrono::steady_clock::now() >=
+                      last_write + options_.sse_heartbeat_interval) {
                 // SSE comments carry bytes without changing the API event
                 // stream.
                 connected = chunked ? SendChunk(client_fd, ": ping\n\n")

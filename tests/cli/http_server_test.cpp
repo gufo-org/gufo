@@ -189,6 +189,16 @@ public:
               },
       };
     });
+    server.add("POST", "/sse-finish", [](const auto& request, auto&) {
+      return gufo::server::HttpResponse{
+          .headers = {{"Content-Type", "text/event-stream"}},
+          .streaming_body = [fail = !request.body.empty()](const auto& write) {
+            (void)write("data: first\n\n");
+            if (fail)
+              throw std::runtime_error("injected SSE failure");
+            (void)write("data: [DONE]\n\n");
+          }};
+    });
     std::string error;
     assert(server.start(&error));
     worker = std::jthread([this, handle_signals] {
@@ -914,6 +924,36 @@ void TestSseHeartbeat() {
   assert(last != std::string::npos);
   assert(response.find("data: [DONE]\n\n", last) != std::string::npos);
   assert(response.ends_with("0\r\n\r\n"));
+
+  const auto legacy = server.Send("POST /sse-idle HTTP/1.0\r\n\r\n");
+  assert(legacy.find("Transfer-Encoding:") == std::string::npos);
+  assert(legacy.find(": ping\n\n") != std::string::npos);
+  assert(legacy.ends_with("data: [DONE]\n\n"));
+
+  RunningServer disabled({.sse_heartbeat_interval = {}});
+  assert(disabled.Post("/sse-idle", "").find(": ping") == std::string::npos);
+}
+
+void TestSseHeartbeatShutdown() {
+  // Quick completion and exceptions can request stop while the heartbeat
+  // thread is entering its wait. Cleanup must not wait for this deadline:
+  // Send() has a three-second socket timeout.
+  RunningServer server({.sse_heartbeat_interval = std::chrono::seconds(30)});
+  std::vector<std::jthread> clients;
+  for (int client = 0; client < 8; ++client) {
+    clients.emplace_back([&] {
+      for (int request = 0; request < 16; ++request) {
+        const bool fail = request % 2 != 0;
+        const auto response = server.Post("/sse-finish", fail ? "fail" : "");
+        ExpectStatus(response, 200);
+        assert(response.find("data: first\n\n") != std::string::npos);
+        assert(response.find(": ping") == std::string::npos);
+        assert(response.ends_with("0\r\n\r\n") == !fail);
+        assert((response.find("data: [DONE]\n\n") != std::string::npos) ==
+               !fail);
+      }
+    });
+  }
 }
 
 void TestSignalShutdown() {
@@ -975,6 +1015,7 @@ int main() {
   TestPeerDisconnect();
   TestStreamingFraming();
   TestSseHeartbeat();
+  TestSseHeartbeatShutdown();
   TestSignalShutdown();
   std::cout << "HTTP transport checks passed.\n";
 }
