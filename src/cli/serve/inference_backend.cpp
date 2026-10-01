@@ -937,12 +937,18 @@ public:
     if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
       capacity = free_bytes;
     }
+    // Snapshot buffers are device allocations, but on a unified-memory APU
+    // they are carved from the same RAM as every host allocation, and HIP's
+    // free figure does not see host pressure. Cap them by the host budget too.
+    std::size_t snapshot_capacity = HostSnapshotBudgetBytes();
+    if (capacity.has_value())
+      snapshot_capacity = std::min(snapshot_capacity, *capacity);
     return {
         .resident_weights_bytes = resident_weights,
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = usage.request_state_bytes,
         .temporary_scratch_bytes = usage.temporary_scratch_bytes,
-        .retained_snapshot_capacity_bytes = capacity,
+        .retained_snapshot_capacity_bytes = snapshot_capacity,
         .requires_device_runtime_lock = true,
     };
   }
