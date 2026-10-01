@@ -132,7 +132,8 @@ whole model state before advancing. Positions lie on a 2,048-token grid spread
 across the prompt; the final grid point is within 2,048 tokens of its end.
 Warm continuations skip grid positions less than 2,048 tokens beyond the reused
 frontier. Capture runs asynchronously while that session is frozen, so other
-requests can continue. Coincident RAM and disk boundaries share one copy. Admission
+requests can continue; a single execution slot skips the extra worker.
+Coincident RAM and disk boundaries share one copy. Admission
 remains subject to the existing byte budget, and intermediate copies preserve
 the original branching fallback. These intermediate checkpoints live in RAM;
 the disk tier continues to retain prompt and learned shared-prefix boundaries.

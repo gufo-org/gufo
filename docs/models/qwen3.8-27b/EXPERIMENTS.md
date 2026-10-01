@@ -2,8 +2,7 @@
 
 | Experiment | Decision / qualification |
 | --- | --- |
-| Conversation retention separate from execution sessions | Correctness candidate: 128 checkpoint records and an automatic RAM cap of 32 GiB, limited by the model budget. AR/DFlash2 rotation controls pass; DFlash2 growth, edits/rewind, cancellation and disk restart pass. The existing JSON-stop formatting failure remains; HTTP timings are not qualified. |
-| Bounded history-edit checkpoints | Correctness candidate: Q4 AR/DFlash2 edits reuse earlier state and match forced-cold output, with cancellation/RAM/disk restore passing. Existing JSON-stop whitespace failure reproduces on main; full HTTP qualification remains incomplete. Q8 was not rerun. [Functional checks](../../../tests/functional/README.md). |
+| Conversation checkpoints | Retained: bounded edit checkpoints and advancing conversation boundaries. Q4/Q8 AR and DFlash2 cancellation, image replay and disk restart pass; Q4 edits and growing histories match cold answer controls. [Functional checks](../../../tests/functional/README.md). |
 | Bounded prefill submission for cancellation | Retained: Q4/Q8 AR resume in 302/412 ms after a prefill disconnect; DFlash2 in 214/281 ms. Exact image/snapshot logits and seeded replay; matched 2,504-token C1 prefill times remain within 1.7% across all four modes. Two reusable events, no tensor allocation or arithmetic change. |
 | Quantized verification row groups | Retained per shape; scalar FP32 bits, full target logits and private acceptance/RNG must match. |
 | Shared DFlash2 body/context injection | Retained across requests; independent attention, convolution, history and selector state. |
