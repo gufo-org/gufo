@@ -28,7 +28,7 @@ from tool_reasoning import check_tool_reasoning, response_result
 from discovery import check_discovery
 from image_inputs import check_image_inputs
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
-                        check_untyped_agent_tools)
+                        check_untyped_agent_tools, check_mixed_tool_schemas)
 
 
 class CompletionStreamChoice(CompletionChoice):
@@ -2330,7 +2330,7 @@ def check_server_metrics(client, model, checks, width):
 
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
               "tool-reasoning",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "sampling-defaults", "sampling-ranges", "batch",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "metrics")
 
 
@@ -2424,6 +2424,8 @@ def main():
             "tool-history": lambda: check_tool_history(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-untyped": lambda: check_untyped_agent_tools(
+                client, args.model, checks, chat_result, args.vision, image_content),
+            "tool-mixed": lambda: check_mixed_tool_schemas(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "state-edges": lambda: check_state_edges(
                 client, args.model, checks, args.speculative, args.vision),

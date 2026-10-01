@@ -1178,7 +1178,6 @@ void TestUntypedNonStrictTools() {
         const auto text :
         {R"({"type":"object","additionalProperties":true})",
          R"({"type":"object","unevaluatedProperties":true})",
-         R"({"type":"object","unevaluatedProperties":false})",
          R"({"type":"object","additionalProperties":true,"dependentRequired":{"a":["b"]}})",
          R"({"type":"object","properties":{},"additionalProperties":true})",
          R"({"type":"object","properties":{},"additionalProperties":false,"unevaluatedProperties":true})"}) {
@@ -1204,7 +1203,7 @@ void TestUntypedNonStrictTools() {
     // A genuinely closed empty schema still describes a zero-argument tool.
     for (const auto text :
          {R"({"type":"object","properties":{},"additionalProperties":false})",
-          R"({})"}) {
+          R"({"type":"object","unevaluatedProperties":false})", R"({})"}) {
       const auto parameters =
           JsonConstraint::ToolParameters(parse(text), false, format);
       assert(parameters);
@@ -1212,6 +1211,10 @@ void TestUntypedNonStrictTools() {
           nullptr, {{"record", parameters}}, true, false, format);
       assert(Accepts(*grammar, begin + end));
       assert(!Accepts(*grammar, begin + value + end));
+      const auto json =
+          JsonConstraint::ToolParameters(parse(text), false, Format::kJson);
+      assert(Accepts(*json, "{}"));
+      assert(!Accepts(*json, R"({"value":"alpha"})"));
     }
     // Open properties do not erase exact finite values or typed extras.
     for (
@@ -1228,6 +1231,149 @@ void TestUntypedNonStrictTools() {
           JsonConstraint::ToolParameters(schema, false, Format::kJson);
       assert(Accepts(*json, R"({"value":"alpha"})"));
       assert(!Accepts(*json, R"({"value":42})"));
+    }
+  }
+}
+
+void TestMixedBestEffortToolRoutes() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto call = [](Format format, std::string_view name,
+                       std::string_view value, bool string = true) {
+    return format == Format::kQwen
+               ? "<tool_call>\n<function=record>\n<parameter=" +
+                     std::string(name) + ">\n" + std::string(value) +
+                     "\n</parameter>\n</function>\n</tool_call>"
+               : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
+                 "<｜DSML｜parameter name=\"" +
+                     std::string(name) + "\" string=\"" +
+                     (string ? "true" : "false") + "\">" + std::string(value) +
+                     "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+                     "</｜DSML｜tool_calls>";
+  };
+  for (
+      const auto text :
+      {R"({"type":"object","unevaluatedProperties":true})",
+       R"({"type":"object","oneOf":[{"properties":{"a":{"type":"string"}},"required":["a"]}]})",
+       R"({"type":"object","allOf":[{"properties":{"a":{"type":"string"}},"required":["a"]}]})"}) {
+    const auto json =
+        JsonConstraint::ToolParameters(parse(text), false, Format::kJson);
+    assert(json && Accepts(*json, R"({"a":"x"})"));
+  }
+  for (
+      const auto text :
+      {R"({"$schema":"http://json-schema.org/draft-07/schema#","$id":"urn:record","$comment":"annotation",
+            "$ref":"#/definitions/A","definitions":{"A":{"type":"object",
+            "properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false}}})",
+       R"({"type":"object","$ref":"#/$defs/A","$defs":{"A":{"type":"object",
+            "properties":{"a":{"type":"string"}},"required":["a"]}}})",
+       R"({"$ref":"#/$defs/A","default":{"a":"x"},"examples":[{"a":"x"}],
+            "$defs":{"A":{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}}})",
+       R"({"type":"object","properties":{"a":{"type":"string","format":"uri","minLength":1}},
+            "required":["a"],"additionalProperties":false})"}) {
+    for (const auto format :
+         {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+      const auto parameters =
+          JsonConstraint::ToolParameters(parse(text), false, format);
+      assert(parameters);
+      if (format == Format::kJson) {
+        assert(Accepts(*parameters, R"({"a":"x"})"));
+        assert(!Accepts(*parameters, "{}"));
+      } else {
+        const auto grammar = JsonConstraint::WithTools(
+            nullptr, {{"record", parameters}}, true, false, format);
+        assert(Accepts(*grammar, call(format, "a", "x")));
+        assert(!Accepts(*grammar, call(format, "other", "x")));
+      }
+    }
+  }
+  const auto nested =
+      parse(R"({"type":"object","properties":{"m":{"type":"object",
+    "patternProperties":{"^k":{"type":"integer"}},"additionalProperties":false}},
+    "required":["m"]})");
+  for (const auto format : {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+    const auto parameters =
+        JsonConstraint::ToolParameters(nested, false, format);
+    assert(parameters);
+    if (format == Format::kJson) {
+      assert(Accepts(*parameters, R"({"m":{"k1":1}})"));
+      assert(!Accepts(*parameters, "{}"));
+    } else {
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"record", parameters}}, true, false, format);
+      assert(Accepts(*grammar, call(format, "m", R"({"k1":1})", false)));
+    }
+  }
+  auto finite = nested;
+  finite["const"] = parse(R"({"m":{"k1":1}})");
+  const auto finite_json =
+      JsonConstraint::ToolParameters(finite, false, Format::kJson);
+  assert(Accepts(*finite_json, R"({"m":{"k1":1}})"));
+  assert(!Accepts(*finite_json, R"({"m":{}})"));
+  for (
+      const auto text :
+      {R"({"type":"object","properties":{"a":{"type":"string"}},"required":["a"],
+            "patternProperties":{"^x_":{"type":"string"}}})",
+       R"({"type":"object","properties":{"a":{"type":"string"}},"required":["a"],
+            "dependentSchemas":{"a":{"properties":{"x_b":{"type":"string"}}}}})",
+       R"({"type":"object","properties":{"a":{"type":"string"}},"required":["a"],
+            "additionalProperties":true})"}) {
+    for (const auto format :
+         {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+      const auto parameters =
+          JsonConstraint::ToolParameters(parse(text), false, format);
+      assert(parameters);
+      if (format == Format::kJson) {
+        assert(Accepts(*parameters, R"({"a":"1","x_b":"2"})"));
+        assert(!Accepts(*parameters, R"({"a":1,"x_b":"2"})"));
+        assert(!Accepts(*parameters, R"({"x_b":"2"})"));
+        assert(!Accepts(*parameters, R"({"a":"1","a":2})"));
+      } else {
+        const auto grammar = JsonConstraint::WithTools(
+            nullptr, {{"record", parameters}}, true, false, format);
+        auto both = call(format, "a", "1");
+        const auto extra =
+            format == Format::kQwen
+                ? "<parameter=x_b>\n2\n</parameter>\n"
+                : "<｜DSML｜parameter name=\"x_b\" string=\"true\">2"
+                  "</｜DSML｜parameter>\n";
+        const auto offset = both.find(
+            format == Format::kQwen ? "</function>" : "</｜DSML｜invoke>");
+        both.insert(offset, extra);
+        assert(Accepts(*grammar, both));
+        assert(!Accepts(*grammar, call(format, "x_b", "2")));
+        auto duplicate = both;
+        duplicate.replace(duplicate.find("x_b"), 3, "a");
+        assert(!Accepts(*grammar, duplicate));
+      }
+    }
+  }
+  // Ambiguous raw strings must still use JSON: Qwen cannot distinguish
+  // the string "null" from null without a JSON representation.
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto nullable = parse(R"({"type":"object","properties":{"a":{
+      "anyOf":[{"type":"string"},{"type":"null"}]}},"required":["a"]})");
+    assert(!JsonConstraint::ToolParameters(nullable, false, format));
+    const auto json =
+        JsonConstraint::ToolParameters(nullable, false, Format::kJson);
+    assert(Accepts(*json, R"({"a":null})"));
+    assert(Accepts(*json, R"({"a":"null"})"));
+  }
+  // Ignoring a numeric format annotation must retain supported bounds.
+  const auto integer = parse(R"({"type":"object","properties":{"a":{
+    "type":"integer","format":"int32","minimum":5,"maximum":10}},
+    "required":["a"]})");
+  for (const auto format : {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+    const auto parameters =
+        JsonConstraint::ToolParameters(integer, false, format);
+    assert(parameters);
+    if (format == Format::kJson) {
+      assert(Accepts(*parameters, R"({"a":5})"));
+      assert(!Accepts(*parameters, R"({"a":4})"));
+    } else {
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"record", parameters}}, true, false, format);
+      assert(Accepts(*grammar, call(format, "a", "5", false)));
+      assert(!Accepts(*grammar, call(format, "a", "4", false)));
     }
   }
 }
@@ -1277,6 +1423,7 @@ int main(int argc, char** argv) {
   TestOpenNativeTools();
   TestNonStrictAgentTools();
   TestUntypedNonStrictTools();
+  TestMixedBestEffortToolRoutes();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";
 }

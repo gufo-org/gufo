@@ -613,7 +613,7 @@ ordinary continuation.
   to every OpenAI-compatible service. Historical names in assistant
   `tool_calls` and Responses `function_call` items are preserved verbatim,
   including Unicode and names absent from the current tools. This does not
-  authorize new calls to them. History still requires a string name and
+  authorize new calls to them. History still requires a non-empty string name and
   JSON-object arguments; embedded NUL names are unsupported. Malformed history
   and invalid declarations return 400 before generation.
 - shared top-k, min-p, repeat, frequency and presence sampling controls
@@ -658,8 +658,11 @@ calling tools. With `auto`, ordinary text and reasoning remain allowed; once a
 call starts, decoding constrains its name and argument format. Non-strict tools
 keep optional arguments optional. Open nested objects retain native syntax and
 declared requirements/types, including nested fields; unsupported schema
-keywords remain guidance. Untyped arguments retain native best-effort semantics.
-Constrained JSON keys follow schema order, with additional keys last.
+keywords remain guidance. Unsupported rules that admit extra properties leave
+those objects open while preserving declared types and requirements. Untyped
+arguments survive both native and JSON framing. Annotated references and URI
+formats retain native framing; ambiguous string/null unions use JSON to preserve
+types. Constrained JSON keys follow schema order, with additional keys last.
 Values that are ambiguous in native tags use JSON.
 `tool_choice: "required"` constrains decoding to a declared call,
 so the requirement is forced rather than checked afterwards. Where the backend

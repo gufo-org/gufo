@@ -216,6 +216,8 @@ bool ParseContent(const json::Value* content,
 // tool names are data and are kept. Non-ASCII bytes are excluded as well: a
 // name is placed in a prompt the model reads and in operator logs, where
 // confusable and invisible characters buy a client nothing.
+// Historical names reach the same renderers unchanged; they describe past
+// output and do not declare a tool the model is allowed to call now.
 constexpr std::string_view kToolNameRule =
     "function names require 1-64 printable ASCII characters other than "
     "spaces, '<', '>', '\"' and '\\'";
@@ -258,8 +260,11 @@ bool ParseHistoricalFunction(const json::Value& function,
                              std::string* error) {
   const auto* name = function.find("name");
   const auto* arguments = function.find("arguments");
-  if (!name || !name->is_string() || !arguments || !arguments->is_string()) {
-    *error = "historical function calls require string name and arguments";
+  if (!name || !name->is_string() || name->str().empty() || !arguments ||
+      !arguments->is_string()) {
+    *error =
+        "historical function calls require a non-empty name and string "
+        "arguments";
     return false;
   }
   // History is a record, not a declaration of a tool the model may call now.

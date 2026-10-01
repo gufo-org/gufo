@@ -29,7 +29,7 @@ from metrics import compare, comparison_status, join_server_timings, timing_meas
 TESTS = Path(__file__).resolve().parent
 SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
           "tool-reasoning",
-          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "sampling-defaults", "sampling-ranges", "batch",
+          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "metrics", "cache")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
@@ -343,6 +343,8 @@ def main():
         ("text-cancel", ["--case", "content-preserve0-sampled0", "--discard-assistant"]),
         ("thinking-tool-cancel", ["--case", "reasoning_content-preserve1-sampled1",
                                  "--reasoning-effort", "high", "--tools"]),
+        ("legacy-tool-cancel", ["--case", "content-preserve1-sampled0",
+                               "--tools", "--legacy-tool-history"]),
     ]
     if vision:
         image_fixture(output / "red.png")

@@ -676,7 +676,6 @@ void TestToolNameCharacters() {
                                               "…",
                                               "reаd",
                                               "​read",
-                                              "",
                                               std::string(65, 'n')};
   for (const std::string& name : unrenderable) {
     FakeBackend declared;
@@ -715,9 +714,9 @@ void TestToolNameCharacters() {
 
 void TestMalformedHistoricalFunctions() {
   for (const auto source :
-       {R"({"arguments":"{}"})", R"({"name":null,"arguments":"{}"})",
-        R"({"name":42,"arguments":"{}"})", R"({"name":"read"})",
-        R"({"name":"read","arguments":{}})",
+       {R"({"arguments":"{}"})", R"({"name":"","arguments":"{}"})",
+        R"({"name":null,"arguments":"{}"})", R"({"name":42,"arguments":"{}"})",
+        R"({"name":"read"})", R"({"name":"read","arguments":{}})",
         R"({"name":"read","arguments":null})",
         R"({"name":"read","arguments":"[]"})",
         R"({"name":"read","arguments":"["})",

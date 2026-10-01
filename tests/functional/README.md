@@ -55,6 +55,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
 | `tool-untyped` | Open/typed tools, refs and finite values: framing, arguments, streaming, turns, limits, stops/retry and sampled peers |
+| `tool-mixed` | JSON-only neighbors, annotated refs, extra keys, URI and nullable arguments across Chat/Responses; images, stops/retry and sampled peers |
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops, image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |
@@ -62,7 +63,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `progress` | Opt-in progress on all text endpoints; output/sampling equality, limits, stops, images, batching and cancel/resume |
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
 | `metrics` | Live Prometheus counters, uncached work, endpoint totals, queueing and cancellation |
-| `cache` | Interrupted text/thinking/tool/image histories, RAM and disk restart |
+| `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart |
 
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
 the server command. Projectors can load automatically beside the weights, so
