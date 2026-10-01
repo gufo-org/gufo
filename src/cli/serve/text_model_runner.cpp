@@ -1083,6 +1083,8 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
                       : impl_->prompt.size();
   if (!impl_->checkpoints.empty())
     frontier = std::min(frontier, impl_->checkpoints.front());
+  if (!impl_->boundaries.empty())
+    frontier = std::min(frontier, impl_->boundaries.front());
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
   auto step = impl_->runner->Prefill(

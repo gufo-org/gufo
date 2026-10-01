@@ -1360,6 +1360,11 @@ void TestSharedPrefixIsLearnedAndRestoredAcrossConversations() {
   // Conversation C restores the shared prefix and prefills only its turn.
   {
     TextRunnerPool pool(runner, 1, disk_cache);
+    auto exact = pool.Acquire({7, 7, 7});
+    Expect(exact.cache_disk_hit() && exact.prefill_complete() &&
+               exact.SelectNext().token == 90,
+           "an exact shared-prefix restore has a current decode frontier");
+    exact.Invalidate();
     auto request = pool.Acquire({7, 7, 7, 9});
     Expect(request.cache_hit() && request.cache_disk_hit() &&
                request.cached_prompt_tokens() == 3,
