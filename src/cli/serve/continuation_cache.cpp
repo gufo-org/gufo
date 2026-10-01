@@ -90,8 +90,20 @@ struct ContinuationCache::Impl {
   // Rank extra copies before the last useful checkpoint of a prefix family.
   // Exact tokens and input identity, not client IDs or hashes, establish that
   // another continuation can keep the family reusable after this removal.
-  [[nodiscard]] int RemovalPriority(std::size_t candidate) const {
+  [[nodiscard]] int RemovalPriority(
+      std::size_t candidate, std::span<const ContinuationToken> incoming = {},
+      std::span<const std::uint8_t> incoming_identity = {}) const {
     const auto& entry = *entries[candidate];
+    // A new continuation also makes its own earlier copies redundant. During
+    // cold prefill those may all be history snapshots, so no retained
+    // continuation yet exists to protect another conversation's last copy.
+    if (entry.tokens.size() < incoming.size() &&
+        std::ranges::equal(entry.input_identity, incoming_identity) &&
+        IsPrefix(entry.tokens, incoming)) {
+      if (entry.purpose == SnapshotPurpose::kRetry)
+        return 0;
+      return entry.purpose == SnapshotPurpose::kHistory ? 1 : 2;
+    }
     for (std::size_t other = state_count; other < entries.size(); ++other) {
       const auto& peer = *entries[other];
       if (other == candidate || !peer.valid ||
@@ -648,6 +660,12 @@ bool ContinuationCache::ReserveSnapshot(
   std::vector<SnapshotEvent> events;
   bool admitted = false;
   const int max_priority = MaxRemovalPriority(purpose);
+  const auto incoming = purpose == SnapshotPurpose::kContinuation
+                            ? replacement_prefix
+                            : std::span<const ContinuationToken>{};
+  const auto priority_for = [&](std::size_t candidate) {
+    return impl_->RemovalPriority(candidate, incoming, input_identity);
+  };
   {
     const std::lock_guard<std::mutex> lock(impl_->mutex);
     const auto make_event = [&](SnapshotEventAction action,
@@ -676,7 +694,7 @@ bool ContinuationCache::ReserveSnapshot(
         [&] {
           for (std::size_t i = impl_->state_count; i < impl_->entries.size();
                ++i)
-            if (i != source_index && impl_->RemovalPriority(i) <= max_priority)
+            if (i != source_index && priority_for(i) <= max_priority)
               return false;
           return true;
         }()) {
@@ -695,7 +713,7 @@ bool ContinuationCache::ReserveSnapshot(
               (!allow_source && candidate == source_index)) {
             continue;
           }
-          const int rank = impl_->RemovalPriority(candidate);
+          const int rank = priority_for(candidate);
           if (rank > max_priority)
             continue;
           if (rank < priority ||
@@ -728,8 +746,8 @@ bool ContinuationCache::ReserveSnapshot(
         std::size_t target = oldest_snapshot(false);
         // Advance this family before sacrificing another family's last copy.
         // Verify the source: another lease may have replaced its record.
-        if (can_replace_source() && (target == impl_->entries.size() ||
-                                     impl_->RemovalPriority(target) == 3))
+        if (can_replace_source() &&
+            (target == impl_->entries.size() || priority_for(target) == 3))
           target = source_index;
         if (target == impl_->entries.size() && !preserve_source) {
           target = oldest_snapshot(true);
@@ -802,6 +820,12 @@ std::size_t ContinuationCache::Commit(
     SnapshotPurpose purpose) {
   const std::size_t token_count = tokens.size();
   const int max_priority = MaxRemovalPriority(purpose);
+  const auto incoming = purpose == SnapshotPurpose::kContinuation
+                            ? std::span<const ContinuationToken>(tokens)
+                            : std::span<const ContinuationToken>{};
+  const auto priority_for = [&](std::size_t candidate) {
+    return impl_->RemovalPriority(candidate, incoming, input_identity);
+  };
   const std::size_t snapshot_bytes =
       snapshot != nullptr ? snapshot->PayloadBytes() : 0;
   SnapshotEventReason skip_reason = SnapshotEventReason::kCaptureFailure;
@@ -894,7 +918,7 @@ std::size_t ContinuationCache::Commit(
                   entry.tokens.size() <= source.tokens.size() ||
                   IsPrefix(entry.tokens, tokens) ||
                   !IsPrefix(source.tokens, entry.tokens) ||
-                  impl_->RemovalPriority(candidate) > max_priority)
+                  priority_for(candidate) > max_priority)
                 continue;
               if (entry.snapshot_last_used < oldest) {
                 target = candidate;
@@ -914,7 +938,7 @@ std::size_t ContinuationCache::Commit(
               continue;
             }
             const auto& entry = *impl_->entries[candidate];
-            const int rank = impl_->RemovalPriority(candidate);
+            const int rank = priority_for(candidate);
             if (rank > max_priority)
               continue;
             if (rank < priority ||

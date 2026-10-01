@@ -580,6 +580,53 @@ void TestOptionalPublicationRechecksRecordPressure() {
   }
 }
 
+void TestNewConversationReplacesItsOwnHistoryFirst() {
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotPurpose;
+  // Exercise record pressure and byte pressure independently.
+  for (const std::size_t records : {4U, 8U}) {
+    std::vector<std::size_t> invalidations(1);
+    gufo::server::ContinuationCache cache(
+        1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+        {.restore = [](auto&, const auto&) {},
+         .capacity_bytes = [=] { return records == 4 ? 1024U : 32U; },
+         .on_event = {}},
+        records);
+    const std::vector<ContinuationToken> existing{1, 2};
+    auto first = cache.Acquire(existing);
+    Expect(first.TryReserveSnapshot(8, existing.size()),
+           "the existing conversation fits");
+    first.Commit(existing, std::make_unique<FakeSnapshot>(1, 8));
+
+    const std::vector<ContinuationToken> prompt{9, 8, 7, 6};
+    auto incoming = cache.Acquire(prompt);
+    for (std::size_t count = 1; count != prompt.size(); ++count) {
+      std::vector<ContinuationToken> prefix(prompt.begin(),
+                                            prompt.begin() + count);
+      Expect(incoming.TryReserveSnapshot(8, count, true,
+                                         SnapshotPurpose::kHistory),
+             "the incoming conversation's intermediate history fits");
+      incoming.PublishSnapshot(prefix, std::make_unique<FakeSnapshot>(9, 8),
+                               true);
+    }
+    Expect(incoming.TryReserveSnapshot(8, prompt.size(), false,
+                                       SnapshotPurpose::kContinuation, prompt),
+           "the new final checkpoint can replace redundant history");
+    Expect(incoming.HasSnapshotFor(existing),
+           "byte admission preserves another conversation's last checkpoint");
+    incoming.Commit(prompt, std::make_unique<FakeSnapshot>(9, 8));
+
+    auto previous = cache.Acquire(existing);
+    Expect(previous.cached_tokens() == existing.size(),
+           "publication preserves another conversation's last checkpoint");
+    previous.Invalidate();
+    auto next = cache.Acquire(prompt);
+    Expect(next.cached_tokens() == prompt.size(),
+           "the incoming conversation retains its new complete checkpoint");
+    next.Invalidate();
+  }
+}
+
 void TestRetryDoesNotDisplaceEarlierHistory() {
   using gufo::server::ContinuationToken;
   using gufo::server::SnapshotPurpose;
@@ -952,6 +999,7 @@ int main() {
   TestEntryReplacementLogsRemovedSnapshot();
   TestRetentionPrefersExtraCopiesUnderPressure();
   TestOptionalPublicationRechecksRecordPressure();
+  TestNewConversationReplacesItsOwnHistoryFirst();
   TestRetryDoesNotDisplaceEarlierHistory();
   TestEditedTailReplacementPreservesSharedCheckpoints();
   TestReplacedSourceDoesNotEvictAnotherBranchTail();
