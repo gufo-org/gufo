@@ -49,16 +49,20 @@ is not a quality pass. Broaden checks when shared behavior changes or failures
 expose risk.
 
 Text API functional/regression tests live in [tests/functional/](tests/functional/README.md).
-For shared text changes, run affected suites in both AR and speculative modes
-for the four target profiles listed there; verify loaded mode and actual drafts.
-Compare clean main with the rebased PR using identical production toolchains,
-settings and cache history. Include `long-context` and `cache` for continuation
-changes. Correctness and expected prefill/cache work are strict; timings are
+Select suites explicitly. Model-specific changes need the affected model/modes;
+use all four profiles only for shared behavior changes. Run correctness on the
+candidate; use main for matched affected timing controls and suspected regressions,
+not a duplicate full correctness run. Reuse baseline evidence only when revision,
+toolchain, harness, model, settings and cache history match. Include `long-context`
+and `cache` for continuation changes; verify loaded mode and actual drafts.
+Correctness and expected prefill/cache work are strict; timings are
 mandatory per request/phase at 5% and 3 ms, never averaged across requests.
 Run once, investigate flags, then alternate main/PR only for affected histories;
 use unchanged-main controls when needed and retain every result. Fix confirmed
 regressions before publishing. Noisy evidence stays visibly inconclusive and
-unqualified; do not widen margins or stop at reporting failures.
+unqualified; do not widen margins or stop at reporting failures. Use the code
+diff to select affected metrics; unrelated timing variance does not justify
+another full matrix.
 Retain numerical quality tests and the standard speed benchmark. Keep these
 tests in `tests/functional/`, outside hosted model CI; avoid full sweeps.
 

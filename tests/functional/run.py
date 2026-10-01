@@ -204,8 +204,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True,
                         help="New report directory; existing results are never overwritten")
     parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"), required=True)
-    parser.add_argument("--suite", action="append", choices=("all", *SUITES),
-                        help="Repeat to select focused suites; default: all")
+    parser.add_argument("--suite", action="append", choices=("all", *SUITES), required=True,
+                        help="Repeat to select affected suites; use all for an explicit full run")
     parser.add_argument("--startup-timeout", type=float, default=240)
     parser.add_argument("--suite-timeout", type=float, default=900)
     qualification = parser.add_mutually_exclusive_group(required=True)
@@ -227,7 +227,7 @@ def main():
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
     if option(command, "--api-key") is not None:
         parser.error("omit --api-key for the isolated loopback test server")
-    selected = args.suite or ["all"]
+    selected = args.suite
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")

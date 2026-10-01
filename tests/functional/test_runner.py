@@ -386,6 +386,16 @@ class FunctionalRunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             functional.sampling_overrides(["--temperature", "0", "--temperature=1"])
 
+    def test_runner_requires_explicit_suites_before_starting_server(self):
+        args = ["run.py", "--record-baseline", "--output", "/unused",
+                "--sampling-preset", "qwen38", "--", "gufo", "serve", "llm",
+                "--model", "fixture.gguf"]
+        with patch.object(sys, "argv", args), patch.object(functional, "server") as start, \
+             contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            functional.main()
+        self.assertEqual(error.exception.code, 2)
+        start.assert_not_called()
+
     def test_runner_inconclusive_is_nonzero_and_correctness_still_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

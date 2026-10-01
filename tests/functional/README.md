@@ -14,15 +14,18 @@ nix develop -c python3 tests/functional/run.py \
 Then use the candidate binary, a new output directory and
 `--baseline /tmp/api-baseline` instead of `--record-baseline`. Keep the model,
 server options and suite order identical, with no competing GPU/build work.
-Use clean main and the rebased PR with the same production toolchain. The first
-run records a reference; the second checks the change.
+Use clean main and the rebased PR with the same production toolchain. Compare
+only affected suites. Reuse matching baseline evidence; do not repeat the whole
+correctness matrix on main. A baseline must match the revision, harness,
+toolchain, weights, settings and preceding cache history.
 
 Use `deepseek4` for DeepSeek. Pass the model's normal speculative options for
 DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
 `--mmproj` enables image cases. Keep informational server logging enabled.
 
-Each invocation tests **one model and one mode**. For shared text changes, run
-the affected suites once per row/mode below; no full benchmark sweep is needed.
+Each invocation tests **one model and one mode**. Model-specific changes need
+only the affected target/modes. For shared text changes, run the affected suites
+once per row/mode below; no full benchmark sweep is needed.
 
 | Target | `--speculative` modes | Sidecar option |
 | --- | --- | --- |
@@ -52,7 +55,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, RAM and disk restart |
 
-Repeat `--suite` to select affected tests; omitting it runs everything. For long
+Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
 uses its own 8 GiB disk budget and 1 GiB staging area inside the output directory.
 Model runs stay outside hosted CI; CI checks the runner and measurement logic.
@@ -64,7 +67,9 @@ changed output/token counts or unexpected prefill/cache work fail immediately.
 Timing margins remain **both 5% and 3 ms**. One overrun is **inconclusive**, not
 proof of regression. Exit codes: **0 pass, 1 fail, 2 inconclusive/unqualified**.
 
-Investigate flags; rerun only affected histories, alternating main and PR.
+Use the code diff to identify affected paths. Investigate their timing flags;
+rerun only affected histories, alternating main and PR. Keep unrelated timing
+variance visible without expanding into another full matrix.
 `--through-case long-context:long_cancel_replay` replays preceding selected
 suites/cases and stops before the next request. Keep the original suite arguments
 and server/cache settings. Disk-restore investigations use the `cache` suite.
