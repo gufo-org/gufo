@@ -116,7 +116,19 @@ A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
       kernel——原先是 no-op 靜默零權重！）；(3) decode 避開 fused
       kernels（packed_format 限舊格式；fused 核對新格式未驗證，
       先走 proven unfused GEMV，效能債另案）。
-- [ ] fused SwiGLU/QKV kernels 的 IQ2_XS/Q2_K 審計＋啟用（效能）。
+- [x] P2 結論（fused decode，2026-10-01）：fused 被冤枉了——當初關掉時
+      解碼器本身就是壞的。解碼器修好後重開 packed_format，144 ✓。
+      證明：fused SSM（bit-exact 0 differ，IQ2_XS/Q2_K新測項）、
+      fused SwiGLU（0 differ，含新測項 small＋production shapes）、
+      serve 並發 batch=2 正常。單 stream batch=1 本來就不觸發 fused
+      （要 batch>=2），所以之前 unfused 跑得好不代表 fused 好——
+      現在兩邊都驗過了。
+- [x] P2 附帶查明（test 紅燈定性）：q4kxl 的 packed-projection
+      FAIL 是 wave64 中立化的預期結果（TryLaunch 回 false →
+      buffer 留 NaN → 100% differ），不是算錯；wave32 fallback
+      另有測試覆蓋且全過。FP16-prefill RMSE~500x 則是 fp16 port
+      本體未完成（batch>=1024 才會進，16GB 卡上大文件 prompt 才
+      會踩到），列 P4 另案，不擋上線。
 - [x] P1 結論（WKQuant-PreQuantized 之謎，2026-10-01）：standalone
       harness 下 Q3_K/Q4_K/Q5_K/IQ2_XS 經 PreQuantized 全部輸出偏小
       （r=0.67 但幅度差 300 倍）——但 serve（Q3_K_M）是好的。

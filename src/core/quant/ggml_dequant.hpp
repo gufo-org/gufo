@@ -87,6 +87,14 @@ struct block_iq2_xs {
   std::uint8_t scales[8];
 };
 
+struct block_q2_K {
+  std::uint8_t scales[16];
+  std::uint8_t qs[64];
+  std::uint16_t d;
+  std::uint16_t dmin;
+};
+static_assert(sizeof(block_q2_K) == 84, "block_q2_K must be 84 bytes");
+
 // IQ3_S: super-block of 256. Each group of 8 elements indexes the 512-entry
 // kIq3sGrid table (8 low bits in qs, 1 high bit in qh) and carries a per-group
 // sign byte; scales holds two 4-bit sub-block scales per byte.
