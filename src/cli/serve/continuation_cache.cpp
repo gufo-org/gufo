@@ -210,14 +210,15 @@ std::size_t ContinuationCache::Lease::Commit(
 
 std::size_t ContinuationCache::Lease::PublishSnapshot(
     std::vector<ContinuationToken> tokens,
-    std::shared_ptr<const ContinuationSnapshot> snapshot) {
+    std::shared_ptr<const ContinuationSnapshot> snapshot,
+    bool preserve_source) {
   if (cache_ == nullptr)
     throw std::logic_error("continuation cache lease is empty");
   const auto identity = InputIdentity(tokens.size());
   const auto retained = cache_->Commit(
       index_, source_index_, reserved_snapshot_bytes_, std::move(tokens),
       std::move(snapshot), {identity.begin(), identity.end()}, {}, {}, false,
-      &source_index_);
+      preserve_source ? nullptr : &source_index_);
   reserved_snapshot_bytes_ = 0;
   return retained;
 }

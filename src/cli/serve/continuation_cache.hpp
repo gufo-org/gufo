@@ -161,9 +161,12 @@ public:
 
     /// Publishes a reserved immutable checkpoint without releasing this state.
     /// Peers can fork it before this lease advances the live continuation.
+    /// Intermediate captures preserve the original branching source so later
+    /// byte/entry admission cannot replace the required fallback with them.
     std::size_t PublishSnapshot(
         std::vector<ContinuationToken> tokens,
-        std::shared_ptr<const ContinuationSnapshot> snapshot);
+        std::shared_ptr<const ContinuationSnapshot> snapshot,
+        bool preserve_source = false);
 
     /// Atomically publishes the state and the exact tokens it represents.
     ///

@@ -453,6 +453,9 @@ void TextModelRunner::RestorePersistentSnapshot(
 }
 
 struct TextRunnerPool::Impl {
+  static constexpr std::size_t kIntermediateCheckpoints = 4;
+  static constexpr std::size_t kSnapshotEntriesPerSession =
+      kIntermediateCheckpoints + 2;
   Impl(std::shared_ptr<TextModelRunner> model_runner, std::size_t state_count,
        std::optional<TextRunnerDiskCacheOptions> disk_cache_options)
       : validated(ValidateRunner(std::move(model_runner), state_count)),
@@ -468,8 +471,9 @@ struct TextRunnerPool::Impl {
               return state;
             },
             MakeSnapshotSupport(&validated),
-            state_count <= std::numeric_limits<std::size_t>::max() / 2
-                ? state_count * 2
+            state_count <= std::numeric_limits<std::size_t>::max() /
+                               kSnapshotEntriesPerSession
+                ? state_count * kSnapshotEntriesPerSession
                 : state_count) {
     // Entry and byte limits constrain retention independently of session count.
     if (validated.descriptor.capabilities.snapshot) {
@@ -585,6 +589,23 @@ struct TextRunnerPool::Request::Impl {
       runner->PreparePrefixReuse(
           state,
           std::span<const TextRunnerToken>(prompt).first(prefill_offset));
+    }
+    const auto capabilities = runner->Descriptor().capabilities;
+    if (capabilities.incremental_prefill && capabilities.prefix_reuse &&
+        capabilities.snapshot && capabilities.fork) {
+      // Limit copy work on cold long prompts, but keep the last checkpoint
+      // within one grid interval of the end for the common late-edit case.
+      constexpr std::size_t interval = 2048;
+      const auto grid_points = (prompt.size() - 1) / interval;
+      const auto count =
+          std::min(grid_points, TextRunnerPool::Impl::kIntermediateCheckpoints);
+      for (std::size_t point = 1; point <= count; ++point) {
+        const auto position = grid_points * point / count * interval;
+        if (position > prefill_offset && position != snapshot_tokens.size() &&
+            !lease.HasSnapshotFor(
+                std::span<const TextRunnerToken>(prompt).first(position)))
+          checkpoints.push_back(position);
+      }
     }
   }
 
@@ -755,6 +776,46 @@ struct TextRunnerPool::Request::Impl {
       prompt_snapshot.reset();
   }
 
+  void CaptureIntermediateSnapshot(std::size_t position) noexcept {
+    const auto started = std::chrono::steady_clock::now();
+    std::size_t bytes = 0;
+    bool reserved = false;
+    try {
+      const auto& state = dynamic_cast<const TextRunnerState&>(lease.state());
+      if (runner->CheckpointPosition(state) != position)
+        return;
+      const auto prefix =
+          std::span<const TextRunnerToken>(prompt).first(position);
+      if (lease.HasSnapshotFor(prefix))
+        return;
+      bytes = runner->SnapshotPayloadBytes(state);
+      // Intermediate copies must not displace the frontier this request
+      // branched from, including its stable image/reasoning fallback.
+      reserved = lease.TryReserveSnapshot(bytes, position, true);
+      if (!reserved)
+        return;
+      std::shared_ptr<const TextRunnerSnapshot> snapshot =
+          runner->Snapshot(state);
+      if (!snapshot) {
+        lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure, bytes,
+                           position);
+        reserved = false;
+        return;
+      }
+      snapshot_metrics.snapshot_bytes += lease.PublishSnapshot(
+          {prefix.begin(), prefix.end()}, std::move(snapshot), true);
+      reserved = false;
+    } catch (...) {
+      if (reserved)
+        lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure, bytes,
+                           position);
+    }
+    snapshot_metrics.snapshot_ms +=
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started)
+            .count();
+  }
+
   /// Persists the continuation at a shared-prefix boundary reached by prefill.
   ///
   /// The boundary was learned from stored entries that agree with this prompt
@@ -819,6 +880,8 @@ struct TextRunnerPool::Request::Impl {
   std::vector<TextRunnerToken> snapshot_tokens;
   /// Ascending prefill positions to persist, all inside (cached, prompt size).
   std::vector<std::size_t> boundaries;
+  /// Bounded intermediate positions retained in RAM before state advances.
+  std::vector<std::size_t> checkpoints;
   std::vector<TextRunnerToken> generated;
   std::size_t prefill_offset{0};
   bool decode_ready{false};
@@ -966,15 +1029,24 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     max_input_tokens = std::min(
         max_input_tokens, impl_->boundaries.front() - impl_->prefill_offset);
   }
+  while (!impl_->checkpoints.empty() &&
+         impl_->checkpoints.front() <= impl_->prefill_offset)
+    impl_->checkpoints.erase(impl_->checkpoints.begin());
+  if (!impl_->checkpoints.empty())
+    max_input_tokens = std::min(
+        max_input_tokens, impl_->checkpoints.front() - impl_->prefill_offset);
 
   const std::size_t remaining = impl_->prompt.size() - impl_->prefill_offset;
   impl_->state_reusable = false;
   // Complete the model frontier at the cache boundary, including logits and
   // draft catch-up. Its snapshot can then be restored independently.
-  const auto model_prompt = std::span<const TextRunnerToken>(impl_->prompt)
-                                .first(impl_->prefill_offset < snapshot_position
-                                           ? snapshot_position
-                                           : impl_->prompt.size());
+  auto frontier = impl_->prefill_offset < snapshot_position
+                      ? snapshot_position
+                      : impl_->prompt.size();
+  if (!impl_->checkpoints.empty())
+    frontier = std::min(frontier, impl_->checkpoints.front());
+  const auto model_prompt =
+      std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
   auto step = impl_->runner->Prefill(
       dynamic_cast<TextRunnerState&>(impl_->lease.state()), model_prompt,
       impl_->prefill_offset, max_input_tokens);
@@ -995,6 +1067,11 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   impl_->state_reusable = true;
   if (!reached_frontier && impl_->prefill_offset == snapshot_position)
     impl_->CapturePromptSnapshot(false);
+  if (!impl_->checkpoints.empty() &&
+      impl_->checkpoints.front() == impl_->prefill_offset) {
+    impl_->checkpoints.erase(impl_->checkpoints.begin());
+    impl_->CaptureIntermediateSnapshot(impl_->prefill_offset);
+  }
   if (!impl_->boundaries.empty() &&
       impl_->boundaries.front() == impl_->prefill_offset) {
     impl_->boundaries.erase(impl_->boundaries.begin());

@@ -65,6 +65,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
 | `metrics` | Live Prometheus counters, uncached work, endpoint totals, queueing and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart |
+| `cache-edits` | Prevent full re-prefills after history edits: last-user changes and older-tool truncation, with unchanged replay and cold output controls |
 
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
 the server command. Projectors can load automatically beside the weights, so
@@ -91,6 +92,29 @@ retains Pi sessions, HTTP/SSE and per-request timings. It executes generated
 commands in disposable fixtures using isolated Pi configuration. Use `--passes 1`
 for a focused check; the default five passes matches the reported debug workload.
 `--conversation --context-file FILE` additionally tests retained long history.
+
+To check prefix reuse after history edits in isolation, use a production binary
+with local weights:
+
+```sh
+nix develop -c python3 tests/functional/run.py \
+  --record-baseline --output /tmp/cache-edits --sampling-preset qwen38 \
+  --suite cache-edits -- \
+  ./build/release/gufo serve llm --model /path/to/model.gguf \
+  --sessions 1 --context 8192 --speculative off
+```
+
+`cache-edits` expects the unchanged prompt to reuse all prompt tokens, then a
+late edit to reuse at least half the prompt. It fails on full re-prefill or
+insufficient reuse; `--record-baseline` does not suppress this failure. Both
+edit shapes finish before the reuse assertion fails, retaining their request
+timings, common-prefix/checkpoint diagnostics and forced-cold output controls
+in `cache-edits.json`, `cache-edits.requests.json` and `server.log`. The cold
+controls bypass lookup only after measuring the edited request. Thinking is
+off and the tool history is scripted, so the check does not depend on
+generated reasoning or the model choosing to call a tool. No disk cache is
+needed. A failing run cannot qualify as a performance baseline. The
+reuse threshold does not prescribe exact checkpoint spacing.
 
 Every request checks its applicable response format, expected output and timings.
 Missing measurements fail. `comparison.json` reports per-request prefill, decode,

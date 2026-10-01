@@ -2,6 +2,7 @@
 
 | Experiment | Decision / qualification |
 | --- | --- |
+| Bounded history-edit checkpoints | Correctness candidate: Q4 AR/DFlash2 edits reuse earlier state and match forced-cold output, with cancellation/RAM/disk restore passing. Existing JSON-stop whitespace failure reproduces on main; full HTTP qualification remains incomplete. Q8 was not rerun. [Functional checks](../../../tests/functional/README.md). |
 | Bounded prefill submission for cancellation | Retained: Q4/Q8 AR resume in 302/412 ms after a prefill disconnect; DFlash2 in 214/281 ms. Exact image/snapshot logits and seeded replay; matched 2,504-token C1 prefill times remain within 1.7% across all four modes. Two reusable events, no tensor allocation or arithmetic change. |
 | Quantized verification row groups | Retained per shape; scalar FP32 bits, full target logits and private acceptance/RNG must match. |
 | Shared DFlash2 body/context injection | Retained across requests; independent attention, convolution, history and selector state. |

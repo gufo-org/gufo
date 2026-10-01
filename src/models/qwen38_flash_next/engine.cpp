@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <thread>
 #include <type_traits>
 
 #include "src/core/gguf_reader.hpp"
@@ -445,18 +446,38 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
 
 SessionSnapshot::SessionSnapshot(std::uint64_t size)
     : data_(new std::uint8_t[size]), size_(size) {
-  // Snapshot copies first-touch hundreds of MiB. Let Linux back the interior
-  // with transparent huge pages instead of faulting one 4 KiB page at a time.
-  // Advise only complete pages belonging to this allocation; this is optional
-  // and does not pin memory or change the serialized payload.
+  // Populate before asking for huge pages: first-touching an advised buffer
+  // can synchronously compact fragmented UMA memory for seconds. Background
+  // collapse may still promote the populated pages. Restrict both hints to
+  // complete pages owned by this allocation; neither changes the payload.
   const long page = sysconf(_SC_PAGESIZE);
   if (page > 0) {
     const auto address = reinterpret_cast<std::uintptr_t>(data_.get());
     const auto skip = (page - address % page) % page;
     if (size > skip) {
       const auto length = (size - skip) / page * page;
-      if (length != 0)
+      if (length != 0) {
+        // Bound the fault workers to four, with at least 32 MiB each. This
+        // avoids replacing compaction stalls with serial base-page faults.
+        const auto workers = std::min<std::size_t>(4, length / (32ULL << 20));
+        if (workers > 1) {
+          const auto pages = length / page;
+          std::vector<std::jthread> faults;
+          for (std::size_t worker = 0; worker < workers; ++worker) {
+            const auto begin = pages * worker / workers * page;
+            const auto end = pages * (worker + 1) / workers * page;
+            faults.emplace_back([this, skip, begin, end] {
+              (void)madvise(data_.get() + skip + begin, end - begin,
+                            MADV_POPULATE_WRITE);
+            });
+          }
+          // Join before huge-page advice or any snapshot writer uses the
+          // buffer.
+        } else {
+          (void)madvise(data_.get() + skip, length, MADV_POPULATE_WRITE);
+        }
         (void)madvise(data_.get() + skip, length, MADV_HUGEPAGE);
+      }
     }
   }
 }

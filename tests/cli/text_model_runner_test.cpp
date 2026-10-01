@@ -994,6 +994,85 @@ void TestWarmChatCheckpointsDoNotSplitPrefill() {
   dropped.Cancel();
 }
 
+void TestHistoryEditsRestoreIntermediateCheckpoints() {
+  class LongSnapshotRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = SnapshotRunner::Descriptor();
+      descriptor.max_context = 32768;
+      return descriptor;
+    }
+  };
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<LongSnapshotRunner>(stats, 64, 256, 4096);
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(10000, 1);
+  auto original = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  while (!original.prefill_complete())
+    (void)original.Prefill(32768);
+  original.Commit();
+  const auto captures = stats->snapshot_captures;
+
+  auto unchanged = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  Expect(unchanged.prefill_complete() &&
+             unchanged.cached_prompt_tokens() == prompt.size(),
+         "complete prompt retries still reuse every token");
+  unchanged.Commit();
+  Expect(stats->snapshot_captures == captures,
+         "an unchanged retry does not recapture intermediate state");
+
+  prompt[9000] = 2;
+  auto late_edit = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  Expect(late_edit.cache_hit() && late_edit.cached_prompt_tokens() == 8192,
+         "late edits resume from the nearest earlier intermediate checkpoint");
+  while (!late_edit.prefill_complete())
+    (void)late_edit.Prefill(32768);
+  late_edit.Commit();
+
+  prompt[4500] = 3;
+  auto earlier_edit = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  Expect(
+      earlier_edit.cache_hit() && earlier_edit.cached_prompt_tokens() == 4096,
+      "committing a late edit preserves earlier usable checkpoints");
+  earlier_edit.Invalidate();
+  Expect(stats->states_created == 1,
+         "intermediate checkpoint entries allocate no extra execution states");
+
+  auto limited_stats = std::make_shared<FakeStats>();
+  TextRunnerPool limited_pool(
+      std::make_shared<LongSnapshotRunner>(limited_stats, 64, 256,
+                                           3 * sizeof(FakeSnapshot)),
+      1);
+  std::vector<TextRunnerToken> root_prompt(1000, 1);
+  auto root = limited_pool.Acquire(root_prompt);
+  (void)root.Prefill(32768);
+  root.Commit();
+  std::vector<TextRunnerToken> extension(10000, 1);
+  auto continued = limited_pool.Acquire(extension, {}, {}, {}, true, 9900);
+  while (!continued.prefill_complete())
+    (void)continued.Prefill(32768);
+  continued.Commit();
+  extension[1500] = 2;
+  auto branched = limited_pool.Acquire(extension, {}, {}, {}, true, 9900);
+  Expect(branched.cached_prompt_tokens() == root_prompt.size(),
+         "intermediate admission never evicts the reused branching fallback");
+  branched.Invalidate();
+
+  auto cancel_stats = std::make_shared<FakeStats>();
+  TextRunnerPool cancel_pool(
+      std::make_shared<LongSnapshotRunner>(cancel_stats, 64, 256, 4096), 1);
+  auto interrupted =
+      cancel_pool.Acquire(std::vector<TextRunnerToken>(10000, 1));
+  (void)interrupted.Prefill(32768);
+  (void)interrupted.Prefill(1024);
+  interrupted.Cancel();
+  auto resumed = cancel_pool.Acquire(std::vector<TextRunnerToken>(10000, 1));
+  Expect(resumed.cached_prompt_tokens() == 2048,
+         "cancellation retains completed intermediate state, not partial work");
+  resumed.Invalidate();
+}
+
 void TestChatFallbackSurvivesSnapshotBudgetPressure() {
   auto stats = std::make_shared<FakeStats>();
   auto runner =
@@ -1312,15 +1391,19 @@ void TestSnapshotCaptureFailureReleasesReservationAndKeepsRequestSuccessful() {
 /// full re-prefills. It must be visible, unlike exact replacement.
 void TestEntryCapacityEvictionIsLogged() {
   auto stats = std::make_shared<FakeStats>();
-  auto runner = std::make_shared<SnapshotRunner>(stats);
-  // One session, so the cache holds two entries and a third distinct prefix
+  auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256, 4096);
+  // One session, so the cache holds six entries and a seventh distinct prefix
   // must displace one of them.
   TextRunnerPool pool(runner, 1);
 
-  const std::array<std::vector<TextRunnerToken>, 3> prefixes{
+  const std::array<std::vector<TextRunnerToken>, 7> prefixes{
       std::vector<TextRunnerToken>{1, 2, 3},
       std::vector<TextRunnerToken>{4, 5, 6},
-      std::vector<TextRunnerToken>{7, 8, 9}};
+      std::vector<TextRunnerToken>{7, 8, 9},
+      std::vector<TextRunnerToken>{10, 11, 12},
+      std::vector<TextRunnerToken>{13, 14, 15},
+      std::vector<TextRunnerToken>{16, 17, 18},
+      std::vector<TextRunnerToken>{19, 20, 21}};
   for (const auto& prefix : prefixes) {
     auto request = pool.Acquire(prefix);
     Expect(request.Prefill(prefix.size()).decode_ready,
@@ -1350,7 +1433,7 @@ void TestSnapshotCacheCapacityIsReportedAtStartup() {
     std::clog.rdbuf(previous);
     const auto output = startup_log.str();
     const std::string expected =
-        "event=snapshot_cache_configured sessions=2 snapshot_entries=4 "
+        "event=snapshot_cache_configured sessions=2 snapshot_entries=12 "
         "capacity_bytes=" +
         std::to_string(budget) + "\n";
     const auto position = output.find(expected);
@@ -1376,6 +1459,7 @@ int main() {
   TestPromptReuseCanBeDisabledPerRequest();
   TestStableChatPrefixSurvivesInterruptedFraming();
   TestWarmChatCheckpointsDoNotSplitPrefill();
+  TestHistoryEditsRestoreIntermediateCheckpoints();
   TestChatFallbackSurvivesSnapshotBudgetPressure();
   TestFullChatCheckpointRestoresWithoutSuffixPrefill();
   TestDiskOnlyCaptureReservesBudgetBeforeCommit();
