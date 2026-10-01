@@ -1,17 +1,5 @@
 # KV Cache
 
-Status: describes `main` as of 2026-10-01
-
-How Gufo avoids recomputing a prompt it has already processed, and what that
-costs. This is the subject of the `kvcache` issue label.
-
-Operator-facing flags and guarantees are specified in
-[the server contract](SERVER.md#hip-execution). This document explains the
-mechanism behind them.
-
-Factual claims are marked **(measured)** when they come from running the
-server and **(source)** when they come only from reading the implementation.
-
 ## What "KV cache" means here
 
 Two different things share the name. Keeping them apart avoids most of the
