@@ -1,6 +1,7 @@
 """Fast checks for the functional runner's failure reporting and process ownership."""
 
 import contextlib
+import base64
 import importlib.util
 import io
 import json
@@ -22,11 +23,45 @@ from metrics import (CaseComplete, Recorder, canonical, compare, join_server_tim
 from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit
 from discovery import assert_model_listing
+from image_inputs import assert_color, image_cases, invalid_image_cases
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_image_inputs_require_a_projector_before_starting_a_server(self):
+        argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
+                "--suite", "image-inputs", "--record-baseline", "--", "gufo", "serve", "llm"]
+        with patch.object(sys, "argv", argv), patch.object(functional, "server") as start, \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            functional.main()
+        self.assertEqual(error.exception.code, 2)
+        start.assert_not_called()
+
+    def test_image_inputs_cover_real_formats_and_require_the_correct_color(self):
+        def image(color):
+            return {"image_url": {"url": "data:image/png;base64,AQID"}}
+        cases = dict(image_cases(image))
+        self.assertEqual(len(cases), 7)
+        jpeg = base64.b64decode(cases["jpeg"].split(",", 1)[1], validate=True)
+        self.assertEqual(len(jpeg), 384)
+        self.assertTrue(jpeg.startswith(b"\xff\xd8") and jpeg.endswith(b"\xff\xd9"))
+        for name in ("webp_lossless", "webp_lossy"):
+            data = base64.b64decode(cases[name].split(",", 1)[1], validate=True)
+            self.assertEqual(data[:4], b"RIFF")
+            self.assertEqual(int.from_bytes(data[4:8], "little"), len(data) - 8)
+            self.assertEqual(data[8:12], b"WEBP")
+        self.assertEqual(len(invalid_image_cases(image)), 5)
+        result = {"text": "red", "reasoning": "", "finish": "stop", "usage": {
+            "prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 0},
+            "gufo": {"prefill_tokens": 100}}}
+        assert_color(result, "red")
+        for change in ({"text": "blue"}, {"text": "not red"}, {"reasoning": "leaked"},
+                       {"finish": "length"}, {"usage": {**result["usage"],
+                        "prompt_tokens_details": {"cached_tokens": 100}}}):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_color({**result, **change}, "red")
+
     def test_tool_reasoning_requires_the_bug_trigger_and_exact_edit(self):
         result = {"text": "", "reasoning": "Quoted <tool_call> is file data.",
                   "finish": "tool_calls", "tools": [{"function": {

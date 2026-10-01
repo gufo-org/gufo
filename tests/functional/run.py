@@ -27,7 +27,7 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "responses", "stops", "conversation", "structured", "structured-limits",
+SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
           "tool-reasoning",
           "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "metrics", "cache")
@@ -48,7 +48,7 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
 def provenance():
     source = hashlib.sha256()
     for name in ("run.py", "metrics.py", "progress.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
-                 "tool_reasoning.py", "discovery.py"):
+                 "tool_reasoning.py", "discovery.py", "image_inputs.py"):
         source.update((TESTS / name).read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
     kernel_command = Path("/proc/cmdline")
@@ -238,11 +238,14 @@ def main():
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
     if option(command, "--api-key") is not None:
         parser.error("omit --api-key for the isolated loopback test server")
+    if "image-inputs" in args.suite and option(command, "--mmproj") is None:
+        parser.error("image-inputs requires --mmproj in the server command")
     selected = args.suite
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite != "auto-tools"]
+        selected = [suite for suite in SUITES if suite != "auto-tools"
+                    and (suite != "image-inputs" or option(command, "--mmproj") is not None)]
     selected = list(dict.fromkeys(selected))
     disk_enabled = "cache" in selected
     try:

@@ -728,6 +728,23 @@ void TestCompatibilityRequests() {
                501);
   assert(server.backend->calls == calls);
 
+  for (const auto& [url, expected] :
+       {std::pair{"data:image/gif;base64,AA==", "image/gif"},
+        std::pair{"data:image/png,AA==", "base64"},
+        std::pair{"data:image/png;base64,A===", "base64"}}) {
+    const auto input = parse(
+        R"({"input":[{"role":"user","content":[{"type":"input_image","image_url":)" +
+        gufo::json::Value(url).dump() +
+        R"(},{"type":"input_text","text":"describe"}]}]})");
+    const auto rejected = server.Post("/v1/responses", input.dump());
+    ExpectStatus(rejected, 400);
+    const auto parsed = parse(rejected.substr(rejected.find("\r\n\r\n") + 4));
+    const auto& error = *parsed.find("error");
+    assert(error.member_str("code") == "invalid_request");
+    assert(error.member_str("message").find(expected) != std::string::npos);
+  }
+  assert(server.backend->calls == calls);
+
   const auto structured =
       response_body(server.Post("/v1/responses",
                                 R"({"input":[{"role":"user","content":[

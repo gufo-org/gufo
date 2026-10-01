@@ -46,6 +46,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `responses` | SDK buffered, streaming and async Responses |
 | `stops` | Text, Unicode, reasoning and tool stops; peer isolation |
 | `conversation` | Thinking/efforts, images, cancellation and RAM reuse |
+| `image-inputs` | PNG, JPEG and WebP uploads in Chat and Responses; URL spellings, bad uploads and recovery |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys and named Responses metadata |
@@ -62,6 +63,9 @@ draft limit for this suite. Audio and image/video generation have separate tests
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
 the server command. Projectors can load automatically beside the weights, so
 the expectation is explicit rather than inferred from `--mmproj`.
+
+For `image-inputs`, pass the model's `--mmproj` in the server command. It uses
+small fixed images and is included in `all` only when `--mmproj` is supplied.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`

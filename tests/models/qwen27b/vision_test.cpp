@@ -108,6 +108,41 @@ void TestWebpDecoding() {
   WebPFree(encoded);
   const auto image = gufo::core::DecodeImage(bytes);
   assert(image.width == 3 && image.height == 2 && image.pixels == rgb);
+
+  // Dropping alpha must retain RGB, not blend it onto a background.
+  std::vector<std::uint8_t> rgba;
+  for (std::size_t i = 0; i < rgb.size(); i += 3) {
+    rgba.insert(rgba.end(), rgb.begin() + i, rgb.begin() + i + 3);
+    rgba.push_back(128);
+  }
+  const auto alpha_size =
+      WebPEncodeLosslessRGBA(rgba.data(), 3, 2, 12, &encoded);
+  assert(alpha_size > 0);
+  const std::vector<std::uint8_t> alpha_bytes(encoded, encoded + alpha_size);
+  WebPFree(encoded);
+  assert(gufo::core::DecodeImage(alpha_bytes).pixels == rgb);
+
+  const auto rejects = [](const std::vector<std::uint8_t>& input,
+                          std::string_view message) {
+    bool rejected = false;
+    try {
+      (void)gufo::core::DecodeImage(input);
+    } catch (const std::invalid_argument& error) {
+      rejected = std::string_view(error.what()).find(message) !=
+                 std::string_view::npos;
+    }
+    assert(rejected);
+  };
+  auto truncated = bytes;
+  truncated.resize(24);
+  rejects(truncated, "invalid WebP");
+  // VP8L's packed dimensions: 8192x8192 exceeds the decoded pixel budget.
+  auto oversized = bytes;
+  assert(oversized[20] == 0x2f);
+  const std::uint32_t dimensions = 8191U | (8191U << 14);
+  for (std::size_t i = 0; i < 4; ++i)
+    oversized[21 + i] = static_cast<std::uint8_t>(dimensions >> (8 * i));
+  rejects(oversized, "decoded pixel limit");
 }
 
 void TestImageTransportLimits() {

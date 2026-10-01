@@ -24,8 +24,9 @@ import openai
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
 from openai.types import Completion, CompletionChoice
 from metrics import CaseComplete, Recorder
-from tool_reasoning import check_tool_reasoning
+from tool_reasoning import check_tool_reasoning, response_result
 from discovery import check_discovery
+from image_inputs import check_image_inputs
 
 
 class CompletionStreamChoice(CompletionChoice):
@@ -2325,7 +2326,7 @@ def check_server_metrics(client, model, checks, width):
     completed("metrics_after_cancel_cached", lambda: chat_result(client, common))
 
 
-SDK_SUITES = ("discovery", "responses", "stops", "conversation", "structured", "structured-limits",
+SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
               "tool-reasoning",
               "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "metrics")
@@ -2361,6 +2362,8 @@ def main():
     args = parser.parse_args()
     if args.suite in ("discovery", "all") and args.expected_input_modalities is None:
         parser.error("discovery requires --expected-input-modalities text or text,image")
+    if args.suite == "image-inputs" and not args.vision:
+        parser.error("image-inputs requires --vision and a loaded projector")
     if args.suite in ("all", "sampling-defaults") and not args.sampling_preset:
         parser.error("--sampling-preset is required for all/sampling-defaults")
     if not isinstance(args.sampling_overrides, dict):
@@ -2405,6 +2408,8 @@ def main():
                                                    async_local_only, args.expect_reasoning),
             "stops": lambda: check_stops(client, args.model, checks),
             "conversation": lambda: check_conversations(client, args.model, checks, args.vision),
+            "image-inputs": lambda: check_image_inputs(
+                client, args.model, checks, image_content, chat_result, response_result),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
             "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
@@ -2426,7 +2431,8 @@ def main():
                 args.allow_missing_progress),
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency),
         }
-        selected = (list(suites) if args.suite == "all" else
+        selected = ([name for name in suites if name != "image-inputs" or args.vision]
+                    if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
         for name in selected:
             started = time.monotonic()
