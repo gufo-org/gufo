@@ -732,6 +732,13 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
       return InvalidCompatibilityRequest("'ignore_eos' must be a boolean");
     ignore_eos = value->as_bool();
   }
+  bool return_progress = false;
+  if (const auto* value = body.find("return_progress");
+      value != nullptr && !value->is_null()) {
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'return_progress' must be a boolean");
+    return_progress = value->as_bool();
+  }
   std::vector<std::string> stop_sequences;
   if (const auto error = ParseStopSequences(
           body.find("stop"), StopSequenceFormat::kOpenAi, &stop_sequences))
@@ -747,9 +754,9 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                "invalid_request_error", "missing_prompt");
   }
 
-  auto generation =
-      b.start_complete(prompt, max_tokens, sampling_config, req.is_cancelled,
-                       stream, ignore_eos, req.client_id, stop_sequences);
+  auto generation = b.start_complete(
+      prompt, max_tokens, sampling_config, req.is_cancelled, stream, ignore_eos,
+      req.client_id, stop_sequences, return_progress);
   const std::string id = "cmpl-" + RandomId();
   const long long created = Now();
   const std::string model = b.model_id();
@@ -764,12 +771,13 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                     {"X-Accel-Buffering", "no"}},
         .streaming_body =
             [generation = std::move(generation), id, created, model,
-             include_usage,
+             include_usage, return_progress,
              stream_log](const HttpResponse::BodyWriter& writer) {
               const auto write_chunk =
                   [&](std::string_view piece, std::string_view finish_reason,
                       const json::Value* usage = nullptr,
-                      const json::Value* timings = nullptr) {
+                      const json::Value* timings = nullptr,
+                      const json::Value* progress = nullptr) {
                     json::Value chunk = json::Value::object();
                     chunk["id"] = id;
                     chunk["object"] = "text_completion";
@@ -792,17 +800,30 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                       chunk["usage"] = *usage;
                     if (timings != nullptr)
                       chunk["timings"] = *timings;
+                    if (progress != nullptr)
+                      chunk["prompt_progress"] = *progress;
                     return writer("data: " + chunk.dump() + "\n\n");
                   };
               core::Utf8Decoder decoder;
               bool connected = true;
+              TextGenerationBackend::ProgressCallback on_progress;
+              if (return_progress) {
+                on_progress =
+                    [&](const TextGenerationBackend::PromptProgress& value) {
+                      const auto progress = PromptProgressJson(value);
+                      connected =
+                          write_chunk({}, {}, nullptr, nullptr, &progress);
+                      return connected;
+                    };
+              }
               try {
-                const auto result =
-                    generation->Wait([&](std::string_view piece) {
+                const auto result = generation->Wait(
+                    [&](std::string_view piece) {
                       const auto text = decoder.Push(piece, false);
                       connected = write_chunk(text, {});
                       return connected;
-                    });
+                    },
+                    on_progress);
                 stream_log->details = GenerationLogDetails(result);
                 RecordServerMetrics(result);
                 if (!connected || result.cancelled)

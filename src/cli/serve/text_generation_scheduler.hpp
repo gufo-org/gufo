@@ -58,6 +58,7 @@ public:
   using Result = TextGenerationBackend::Result;
   using CancellationCheck = TextGenerationBackend::CancellationCheck;
   using TokenCallback = TextGenerationBackend::TokenCallback;
+  using ProgressCallback = TextGenerationBackend::ProgressCallback;
 
   struct RequestMetadata {
     std::string client_id{"anonymous"};
@@ -68,6 +69,7 @@ public:
     std::size_t cache_prefix_tokens{0};
     bool stop_at_eos{true};
     std::vector<std::string> stop_sequences;
+    bool return_progress{false};
   };
 
   class Request {
@@ -85,8 +87,10 @@ public:
     [[nodiscard]] TextRequestPhase phase() const noexcept;
 
     /// Consumes queued output pieces on the calling thread and waits for the
-    /// scheduler-owned request to become terminal.
-    Result Wait(const TokenCallback& on_token = {});
+    /// scheduler-owned request to become terminal. Streaming requests report
+    /// only the latest prompt progress, always before their first piece.
+    Result Wait(const TokenCallback& on_token = {},
+                const ProgressCallback& on_progress = {});
     void Cancel() noexcept;
 
   private:

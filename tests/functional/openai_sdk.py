@@ -59,7 +59,7 @@ class CheckResults(dict):
         self.save()
 
 
-def chat_result(client, request, streaming=False):
+def chat_result(client, request, streaming=False, on_chunk=None, on_open=None):
     """Accumulate typed SDK chunks, including Gufo's reasoning/usage extensions."""
     result = client.chat.completions.create(
         **request, stream=streaming,
@@ -75,7 +75,11 @@ def chat_result(client, request, streaming=False):
         }
     text, reasoning, tools, finish, usage = "", "", [], None, None
     with result:
+        if on_open:
+            on_open()
         for chunk in result:
+            if on_chunk:
+                on_chunk(chunk)
             if chunk.usage:
                 usage = chunk.usage.to_dict()
             for choice in chunk.choices:
@@ -477,7 +481,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
                 record("completions_" + label, first)
 
 
-def completion_result(client, request, streaming=False):
+def completion_result(client, request, streaming=False, on_chunk=None):
     # Use the SDK's ordinary legacy stream path, then validate the wire shape
     # with only its in-progress finish_reason made nullable. Keep the original
     # shared client immutable; other threads still use strict Chat/Responses.
@@ -490,6 +494,8 @@ def completion_result(client, request, streaming=False):
     text, finish, usage = "", None, None
     with result:
         for chunk in result:
+            if on_chunk:
+                on_chunk(chunk)
             CompletionStreamFrame.model_validate(chunk.to_dict())
             if chunk.usage:
                 usage = chunk.usage.to_dict()
@@ -2080,6 +2086,134 @@ def check_responses(client, model, checks, options, async_local_only, expect_rea
     checks["async_concurrent"] = asyncio.run(concurrent())
 
 
+def check_prompt_progress(client, model, checks, width, vision, allow_missing):
+    from progress import ProgressTrace
+    from server_metrics import ServerMetrics, assert_accounting
+
+    metrics = ServerMetrics(client.base_url)
+    before = metrics.idle()
+    request_start = len(checks.recorder.rows)
+
+    prompt = "Count from one to one hundred, separated by commas."
+    common = dict(model=model, temperature=0, seed=42, max_completion_tokens=24,
+                  messages=[{"role": "system", "content": "Follow the user's instructions. " * 48},
+                            {"role": "user", "content": prompt}],
+                  extra_body={"presence_penalty": 0, "cache_prompt": False,
+                              "chat_template_kwargs": {"enable_thinking": False}})
+
+    def chat(name, request, enabled=True):
+        trace = ProgressTrace(enabled is True, allow_missing)
+        result = chat_result(client, {**request, "extra_body": {
+            **request.get("extra_body", {}), "return_progress": enabled}}, True, trace)
+        trace.finish(checks.recorder.rows[-1]["metrics"])
+        checks[name] = {**result, "progress": trace.updates}
+        return result
+
+    def signature(result):
+        return result["text"], result["reasoning"], result["tools"], result["finish"]
+
+    off = chat("progress_cold_off", common, False)
+    on = chat("progress_cold_on", common)
+    assert signature(off) == signature(on), (off, on)
+    cached = {**common, "extra_body": {**common["extra_body"], "cache_prompt": True}}
+    replay = chat("progress_cached", cached)
+    assert signature(on) == signature(replay)
+    assert replay["usage"]["gufo"]["prefill_tokens"] == 0
+    sampled = {**cached, "temperature": .7, "top_p": .85, "presence_penalty": .3,
+               "frequency_penalty": .2, "extra_body": {
+                   **cached["extra_body"], "presence_penalty": .3, "top_k": 20, "min_p": .05}}
+    a = chat("progress_sampled_off", sampled, False)
+    b = chat("progress_sampled_on", sampled)
+    assert signature(a) == signature(b), (a, b)
+    thinking = {**cached, "max_completion_tokens": 2, "reasoning_effort": "high",
+                "extra_body": {**cached["extra_body"], "chat_template_kwargs": {"enable_thinking": True}}}
+    a = chat("progress_thinking_limit_off", thinking, False)
+    b = chat("progress_thinking_limit_on", thinking)
+    assert signature(a) == signature(b) and b["usage"]["completion_tokens"] == 2
+    assert off["text"], off
+    stopped = chat("progress_stop", {**cached, "stop": off["text"][:1]})
+    assert stopped["finish"] == "stop"
+    assert signature(chat("progress_after_stop", cached, None)) == signature(on)
+
+    trace = ProgressTrace(True, allow_missing)
+    result = completion_result(client, dict(
+        model=model, prompt="One, two, three,", max_tokens=16, temperature=0,
+        extra_body={"return_progress": True}), True, trace)
+    trace.finish(checks.recorder.rows[-1]["metrics"])
+    checks["progress_completions"] = {**result, "progress": trace.updates}
+    trace = ProgressTrace(True, allow_missing)
+    with client.responses.create(model=model, input=prompt, max_output_tokens=16,
+                                 temperature=0, reasoning={"effort": "none"}, stream=True,
+                                 extra_body={"return_progress": True}) as stream:
+        events = []
+        for event in stream:
+            trace(event)
+            events.append(event)
+    trace.finish(checks.recorder.rows[-1]["metrics"])
+    checks["progress_responses"] = {"result": check_events(events, False), "progress": trace.updates}
+
+    if vision:
+        image_request = {**cached, "messages": [{"role": "user", "content": [
+            image_content("red"), {"type": "text", "text": "Name the color of this image."}]}]}
+        a = chat("progress_image_off", image_request, False)
+        b = chat("progress_image_on_cached", image_request)
+        assert signature(a) == signature(b) and "red" in b["text"].lower()
+        assert b["usage"]["cached_tokens"] > 0
+
+    # Response headers precede model output, unlike coalesced body chunks.
+    # Use them to order admissions while still overlapping prefills, so
+    # main/PR timings compare the same queue position.
+    admitted = [threading.Event() for _ in range(width)]
+
+    def peer(index):
+        if index:
+            assert admitted[index - 1].wait(30), "peer stream did not start"
+        trace = ProgressTrace(index % 2 == 0, allow_missing)
+
+        request = {**cached, "extra_body": {**cached["extra_body"],
+                                          "return_progress": index % 2 == 0}}
+        result = chat_result(client, request, True, trace, admitted[index].set)
+        return result, trace
+    with ThreadPoolExecutor(width) as pool:
+        results = list(pool.map(peer, range(width)))
+    for result, trace in results:
+        assert signature(result) == signature(on)
+        # Usage is request-local; recorder completion order is concurrent here.
+        trace.finish({"prompt_tokens": result["usage"]["prompt_tokens"],
+                      "cached_tokens": result["usage"]["cached_tokens"]})
+    assert_accounting(before, metrics.idle(), checks.recorder.rows[request_start:])
+    checks["progress_batch"] = [{"result": result, "progress": trace.updates}
+                               for result, trace in results]
+
+    # Cancel during prompt processing, before text/reasoning; then retry the
+    # same history. A revision without progress uses its first output chunk as
+    # the control cancellation point and is never a feature qualification.
+    interrupted = {**common, "max_completion_tokens": 256, "extra_body": {
+        **common["extra_body"], "return_progress": True},
+        "messages": [{"role": "system", "content": "Remember this context. " * 512},
+                     {"role": "user", "content": prompt}]}
+    received = False
+    with client.chat.completions.create(**interrupted, stream=True) as stream:
+        for chunk in stream:
+            if getattr(chunk, "prompt_progress", None) is not None:
+                received = True
+                break
+            if allow_missing and any(choice.delta.content for choice in chunk.choices):
+                break
+        else:
+            raise AssertionError("did not reach cancellation point")
+    assert received or allow_missing
+    checks["progress_cancel"] = {"progress_received": received}
+    recovered = chat("progress_cancel_resume", {
+        **interrupted, "max_completion_tokens": 8,
+        "extra_body": {**interrupted["extra_body"], "cache_prompt": True}})
+    replay = chat("progress_cancel_replay", {
+        **interrupted, "max_completion_tokens": 8,
+        "extra_body": {**interrupted["extra_body"], "cache_prompt": True}})
+    assert signature(recovered) == signature(replay)
+    assert replay["usage"]["gufo"]["prefill_tokens"] == 0
+
+
 def check_server_metrics(client, model, checks, width):
     from server_metrics import (ServerMetrics, assert_accounting, PROMPT, GENERATED,
                                 PROCESSING, DEFERRED, PROMPT_SPEED, GENERATED_SPEED)
@@ -2194,7 +2328,7 @@ def check_server_metrics(client, model, checks, width):
 
 SDK_SUITES = ("responses", "stops", "conversation", "structured", "structured-limits",
               "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
-              "long-context", "state-edges", "metrics")
+              "long-context", "state-edges", "progress", "metrics")
 
 
 def main():
@@ -2214,6 +2348,8 @@ def main():
     parser.add_argument("--output", type=Path, help="Write a partial report after every case")
     parser.add_argument("--through-case",
                         help="Replay the suite prefix and stop before the next request")
+    parser.add_argument("--allow-missing-progress", action="store_true",
+                        help="Timing control only for revisions predating return_progress")
     parser.add_argument("--concurrency", type=int, default=4,
                         help="Requests in the batch suite; must fit server --sessions")
     parser.add_argument("--context", type=int, default=8192,
@@ -2276,6 +2412,9 @@ def main():
                 client, args.model, checks, args.concurrency, args.vision, args.speculative),
             "long-context": lambda: check_long_context(
                 client, args.model, checks, args.context, args.vision),
+            "progress": lambda: check_prompt_progress(
+                client, args.model, checks, args.concurrency, args.vision,
+                args.allow_missing_progress),
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency),
         }
         selected = (list(suites) if args.suite == "all" else

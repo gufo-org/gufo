@@ -1732,6 +1732,89 @@ void TestAdmissionLoggingIsDebugTierOnly() {
          "a refusal names the limit and the rejected client");
 }
 
+void TestPromptProgressPrecedesStreamedTokens() {
+  using gufo::server::TextGenerationBackend;
+  auto control = std::make_shared<FakeControl>();
+  control->prefill_capacity = 2;
+  auto scheduler = MakeScheduler(control, 1);
+  auto run = [&](std::vector<TextRunnerToken> prompt, bool stream,
+                 bool report_progress = true) {
+    std::vector<TextGenerationBackend::PromptProgress> progress;
+    std::size_t tokens = 0;
+    TextGenerationScheduler::RequestMetadata metadata;
+    metadata.return_progress = report_progress;
+    auto request =
+        scheduler->Submit(std::move(prompt), 2, 0.0F, {}, stream, metadata);
+    (void)request.Wait(
+        [&](std::string_view) {
+          ++tokens;
+          return true;
+        },
+        [&](const TextGenerationBackend::PromptProgress& value) {
+          Expect(tokens == 0, "prompt progress precedes generated tokens");
+          Expect(
+              progress.empty() || value.processed >= progress.back().processed,
+              "prompt progress never moves backwards");
+          progress.push_back(value);
+          return true;
+        });
+    return progress;
+  };
+
+  const auto cold = run({7, 70, 71, 72, 73}, true);
+  Expect(!cold.empty() && cold.back().total == 5 && cold.back().cache == 0 &&
+             cold.back().processed == 5 && cold.back().time_ms >= 0,
+         "cold prompt progress ends with the complete prompt");
+
+  const auto cached = run({7, 70, 71, 72, 73, 700, 701, 80}, true);
+  Expect(!cached.empty() && cached.back().total == 8 &&
+             cached.back().cache == 7 && cached.back().processed == 8,
+         "cached prompt progress counts reused tokens as processed");
+
+  Expect(run({9, 90, 91}, false).empty(),
+         "buffered requests do not publish prompt progress");
+  Expect(run({9, 90, 91}, true, false).empty(),
+         "streaming alone does not enable progress publication");
+}
+
+void TestPromptProgressCancellation() {
+  for (const bool callback_throws : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->prefill_capacity = 2;
+    control->block_prefill_label = 1;
+    auto scheduler = MakeScheduler(control, 2);
+    TextGenerationScheduler::RequestMetadata metadata;
+    metadata.return_progress = true;
+    auto request =
+        scheduler->Submit({1, 10, 11, 12}, 8, 0.0F, {}, true, metadata);
+    control->WaitForPrefill(1);
+    std::binary_semaphore received(0);
+    auto consume = std::async(std::launch::async, [&] {
+      try {
+        const auto result = request.Wait({}, [&](const auto&) {
+          received.release();
+          if (callback_throws)
+            throw std::runtime_error("progress callback failed");
+          return false;
+        });
+        Expect(!callback_throws && result.cancelled,
+               "progress callback can cancel before the first token");
+      } catch (const std::runtime_error& error) {
+        Expect(callback_throws &&
+                   std::string_view(error.what()) == "progress callback failed",
+               "progress callback exceptions propagate");
+      }
+    });
+    Expect(received.try_acquire_for(kTestTimeout), "initial progress is live");
+    request.Cancel();
+    control->ReleasePrefill();
+    consume.get();
+    const auto peer = scheduler->Submit({2, 20}, 2, 0.0F).Wait();
+    Expect(!peer.cancelled && peer.completion_tokens == 2,
+           "progress cancellation leaves peer state usable");
+  }
+}
+
 void TestIgnoreEosIsRequestScoped() {
   auto control = std::make_shared<FakeControl>();
   control->eos_after = 0;
@@ -1780,6 +1863,8 @@ int main() {
   ::setenv("NO_COLOR", "1", 1);
   TestProgressLoggingIsOptInAndBounded();
   TestAdmissionLoggingIsDebugTierOnly();
+  TestPromptProgressPrecedesStreamedTokens();
+  TestPromptProgressCancellation();
   TestIgnoreEosIsRequestScoped();
   TestEmptyTokenIsPublished();
   TestStopSequenceChunkBoundaries();

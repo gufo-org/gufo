@@ -72,6 +72,7 @@ struct ScheduledRequest {
   sampling::SamplingConfig sampling;
   TextGenerationScheduler::CancellationCheck external_cancellation;
   bool publish_token_pieces{false};
+  bool publish_prompt_progress{false};
   TextGenerationScheduler::Clock::time_point request_start;
   std::optional<TextGenerationScheduler::Clock::time_point> deadline;
   std::size_t max_output_bytes{0};
@@ -88,6 +89,7 @@ struct ScheduledRequest {
   std::size_t inter_token_samples{0};
   std::size_t last_decode_progress_tokens{0};
   double last_decode_progress_ms{0.0};
+  std::optional<TextGenerationScheduler::Clock::time_point> prefill_start;
   bool decode_due{false};
   std::optional<TextRunnerToken> preview_token;
   bool advance_pending{false};
@@ -98,6 +100,7 @@ struct ScheduledRequest {
   std::mutex output_mutex;
   std::condition_variable output_condition;
   std::deque<std::string> output_pieces;
+  std::optional<TextGenerationBackend::PromptProgress> pending_progress;
   std::size_t buffered_output_bytes{0};
   // A stalled consumer trips backpressure on every token, so the debug line is
   // written once per request. Only the scheduler thread touches this.
@@ -217,6 +220,33 @@ void LogBackpressure(const std::shared_ptr<ScheduledRequest>& request,
   // the piece, which is the question an operator asks when a stream stalls.
   LogBackpressure(request, reason, buffered, piece_bytes);
   return false;
+}
+
+/// Replaces unread progress, so a slow consumer holds at most one update.
+void PublishPromptProgress(const std::shared_ptr<ScheduledRequest>& request) {
+  if (!request->publish_prompt_progress) {
+    return;
+  }
+  const auto now = TextGenerationScheduler::Clock::now();
+  if (!request->prefill_start.has_value()) {
+    request->prefill_start = now;
+  }
+  const std::size_t total = request->result.prompt_tokens;
+  const std::size_t cache =
+      std::min(request->result.cached_prompt_tokens, total);
+  const TextGenerationBackend::PromptProgress progress{
+      .total = total,
+      .cache = cache,
+      .processed = std::min(cache + request->result.prefill_tokens, total),
+      .time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     now - *request->prefill_start)
+                     .count(),
+  };
+  {
+    const std::lock_guard<std::mutex> lock(request->output_mutex);
+    request->pending_progress = progress;
+  }
+  request->output_condition.notify_one();
 }
 
 bool CancellationRequested(const std::shared_ptr<ScheduledRequest>& request) {
@@ -619,6 +649,7 @@ struct TextGenerationScheduler::Impl {
                                        .count();
         request->result.resident_requests_at_admission =
             prefilling.size() + decoding.size() + capturing + 1;
+        PublishPromptProgress(request);
         request->phase.store(TextRequestPhase::kAdmitted,
                              std::memory_order_release);
         request->phase.store(request->runner_request.prefill_complete()
@@ -672,6 +703,7 @@ struct TextGenerationScheduler::Impl {
       request->result.max_prefill_chunk_tokens = std::max(
           request->result.max_prefill_chunk_tokens, step.consumed_tokens);
       LogPrefillProgress(request, step.consumed_tokens, step_ms);
+      PublishPromptProgress(request);
 
       if (decoder_runnable) {
         ++request->result.active_decode_prefill_chunks;
@@ -1394,7 +1426,7 @@ TextRequestPhase TextGenerationScheduler::Request::phase() const noexcept {
 }
 
 TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
-    const TokenCallback& on_token) {
+    const TokenCallback& on_token, const ProgressCallback& on_progress) {
   if (!*this) {
     throw std::logic_error("text scheduler request is empty");
   }
@@ -1411,15 +1443,19 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
 
   while (true) {
     std::string piece;
+    std::optional<TextGenerationBackend::PromptProgress> progress;
     bool has_piece = false;
     bool terminal = false;
     {
       std::unique_lock<std::mutex> lock(impl_->request->output_mutex);
       impl_->request->output_condition.wait(lock, [&] {
         return impl_->request->terminal ||
+               impl_->request->pending_progress.has_value() ||
                !impl_->request->output_pieces.empty();
       });
-      if (!impl_->request->output_pieces.empty()) {
+      if (impl_->request->pending_progress.has_value()) {
+        progress = std::exchange(impl_->request->pending_progress, {});
+      } else if (!impl_->request->output_pieces.empty()) {
         has_piece = true;
         const std::size_t piece_bytes =
             QueuedPieceCost(impl_->request->output_pieces.front());
@@ -1434,9 +1470,9 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
       }
     }
 
-    if (has_piece && deliver_pieces && on_token) {
+    const auto deliver = [&](const auto& callback, const auto& value) {
       try {
-        if (!on_token(piece)) {
+        if (!callback(value)) {
           consumer_cancelled = true;
           deliver_pieces = false;
           Cancel();
@@ -1446,6 +1482,12 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
         deliver_pieces = false;
         Cancel();
       }
+    };
+    if (progress.has_value() && deliver_pieces && on_progress) {
+      deliver(on_progress, *progress);
+    }
+    if (has_piece && deliver_pieces && on_token) {
+      deliver(on_token, piece);
     }
     if (terminal) {
       break;
@@ -1552,6 +1594,8 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->sampling = sampling;
   request->external_cancellation = is_cancelled;
   request->publish_token_pieces = publish_token_pieces;
+  request->publish_prompt_progress =
+      publish_token_pieces && metadata.return_progress;
   request->request_start = metadata.request_start;
   request->deadline = metadata.deadline;
   if (!request->deadline.has_value() &&

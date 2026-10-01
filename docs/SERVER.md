@@ -596,6 +596,7 @@ ordinary continuation.
 - `stop`: null, one string, or an array of up to four strings
 - `stream`
 - `stream_options.include_usage`
+- `return_progress` (see [Prompt progress](#prompt-progress))
 - `tools` and `tool_choice` when supported. Function tools accept the nested
   Chat Completions shape and the flat Responses-style `{type,name,parameters}`
   shape. Missing or null `parameters` become `{}`. `parametersJsonSchema` is
@@ -614,6 +615,24 @@ ordinary continuation.
 
 Streaming objects use `chat.completion.chunk` and end with the compatibility
 sentinel expected by common clients.
+
+### Prompt progress
+
+Streaming `/v1/chat/completions`, `/v1/completions` and `/v1/responses` requests accept
+llama-server's `return_progress: true`. Before the first token, the stream
+carries chunks with an empty delta (Chat) or empty text (Completions) and a
+top-level `prompt_progress` object:
+
+```json
+"prompt_progress": {"total": 4096, "cache": 1024, "processed": 2048, "time_ms": 850}
+```
+
+`processed` includes cached tokens; a full cache hit reports `processed == total`.
+`time_ms` measures prompt-processing wall time. Updates follow prefill chunks;
+a slow client receives only the newest pending update. Responses uses
+`response.in_progress` events. Omitted, false or null disables progress;
+other non-boolean values return 400. Buffered requests ignore the flag.
+Disabled progress adds no progress queue updates or consumer wakeups.
 
 The adapter must not implement a second inference path. It converts messages
 into the same prompt and sampling structures used by `/v1/responses`.

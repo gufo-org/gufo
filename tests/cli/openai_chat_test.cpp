@@ -27,6 +27,33 @@ void Expect(bool condition, std::string_view message) {
   }
 }
 
+/// Reports fixed prompt progress before delegating token generation.
+class ProgressRequest final
+    : public gufo::server::TextGenerationBackend::GenerationRequest {
+public:
+  using Backend = gufo::server::TextGenerationBackend;
+
+  ProgressRequest(std::shared_ptr<GenerationRequest> inner,
+                  std::vector<Backend::PromptProgress> progress)
+      : inner_(std::move(inner)), progress_(std::move(progress)) {}
+
+  Backend::Result Wait(const Backend::TokenCallback& on_token,
+                       const Backend::ProgressCallback& on_progress) override {
+    for (const auto& value : progress_) {
+      if (on_progress && !on_progress(value)) {
+        inner_->Cancel();
+        break;
+      }
+    }
+    return inner_->Wait(on_token, on_progress);
+  }
+  void Cancel() noexcept override { inner_->Cancel(); }
+
+private:
+  std::shared_ptr<GenerationRequest> inner_;
+  std::vector<Backend::PromptProgress> progress_;
+};
+
 class FakeBackend final : public gufo::server::TextGenerationBackend {
 public:
   [[nodiscard]] std::string model_id() const override { return "test-model"; }
@@ -122,8 +149,10 @@ public:
       throw gufo::server::TextGenerationError(*reject_on_start,
                                               "injected admission rejection");
     }
-    return TextGenerationBackend::start_chat(request, max_tokens, sampling,
-                                             is_cancelled, stream_output);
+    return std::make_shared<ProgressRequest>(
+        TextGenerationBackend::start_chat(request, max_tokens, sampling,
+                                          is_cancelled, stream_output),
+        progress);
   }
 
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override {
@@ -144,6 +173,7 @@ public:
   }
 
   std::vector<std::string> pieces;
+  std::vector<PromptProgress> progress;
   std::string cache_miss_reason;
   FinishReason finish_reason{FinishReason::kStop};
   std::string stop_sequence;
@@ -2409,7 +2439,104 @@ void TestResponsesLiveAndCancellation() {
 
 }  // namespace
 
+void TestStreamingPromptProgress() {
+  FakeBackend backend;
+  backend.pieces = {"Hel", "lo"};
+  backend.progress = {{.total = 7, .cache = 5, .processed = 5, .time_ms = 0},
+                      {.total = 7, .cache = 5, .processed = 7, .time_ms = 3}};
+  const auto stream = [&](std::string_view options) {
+    auto response = gufo::server::HandleOpenAiChat(
+        Request(
+            R"({"model":"test-model","messages":[{"role":"user","content":"hello"}],)"
+            R"("stream":true)" +
+            std::string(options) + "}"),
+        backend);
+    Expect(response.status == 200 && response.streaming_body,
+           "progress request streams");
+    std::string output;
+    response.streaming_body([&](std::string_view chunk) {
+      output.append(chunk);
+      return true;
+    });
+    return output;
+  };
+
+  const auto output = stream(R"(,"return_progress":true)");
+  const auto first = output.find(
+      R"("delta":{},"finish_reason":null}],)"
+      R"("prompt_progress":{"total":7,"cache":5,"processed":5,"time_ms":0}})");
+  const auto last = output.find(
+      R"("delta":{},"finish_reason":null}],)"
+      R"("prompt_progress":{"total":7,"cache":5,"processed":7,"time_ms":3}})");
+  const auto content = output.find(R"("content":"Hel")");
+  Expect(first != std::string::npos && last != std::string::npos &&
+             first < last && last < content,
+         "empty-delta prompt progress chunks precede streamed content");
+
+  for (const auto* options :
+       {"", R"(,"return_progress":false)", R"(,"return_progress":null)"}) {
+    Expect(stream(options).find("prompt_progress") == std::string::npos,
+           "prompt progress is opt-in");
+  }
+
+  const auto invalid = gufo::server::HandleOpenAiChat(
+      Request(
+          R"({"model":"test-model","messages":[{"role":"user","content":"hello"}],)"
+          R"("stream":true,"return_progress":"yes"})"),
+      backend);
+  Expect(invalid.status == 400 &&
+             invalid.body.find("invalid_return_progress") != std::string::npos,
+         "return_progress must be a boolean");
+}
+
+void TestResponsesPromptProgress() {
+  FakeBackend backend;
+  backend.pieces = {"Hel", "lo"};
+  backend.progress = {{.total = 7, .cache = 5, .processed = 5, .time_ms = 0},
+                      {.total = 7, .cache = 5, .processed = 7, .time_ms = 3}};
+  for (const auto* setting : {"true", "false", "null"}) {
+    gufo::server::ChatRequest chat;
+    const auto body = gufo::json::parse(std::string(R"({"return_progress":)") +
+                                        setting + "}");
+    Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+           "Responses accepts boolean and null progress settings");
+    const auto response = gufo::server::CreateOpenAiResponse(
+        Request(body.dump()), backend, chat, 8, {}, true);
+    std::size_t sequence = 0, progress_count = 0;
+    bool content_seen = false;
+    response.streaming_body([&](std::string_view chunk) {
+      const auto offset = chunk.find("data: ");
+      Expect(offset != std::string_view::npos, "Responses SSE contains data");
+      const auto event = gufo::json::parse(chunk.substr(offset + 6));
+      Expect(event.member_size("sequence_number") == sequence++,
+             "progress preserves contiguous Responses sequence numbers");
+      if (const auto* progress = event.find("prompt_progress")) {
+        Expect(
+            !content_seen &&
+                event.member_str("type") == "response.in_progress" &&
+                event.find("response")->member_str("status") == "in_progress",
+            "Responses progress precedes content in an in_progress event");
+        Expect(
+            progress->member_size("processed") == (progress_count == 0 ? 5 : 7),
+            "Responses progress preserves cached and processed counts");
+        ++progress_count;
+      }
+      content_seen |= event.member_str("type") == "response.output_text.delta";
+      return true;
+    });
+    Expect(content_seen && progress_count == (chat.return_progress ? 2 : 0),
+           "Responses progress is opt-in and preserves content");
+  }
+  gufo::server::ChatRequest chat;
+  Expect(gufo::server::ParseOpenAiResponseControls(
+             gufo::json::parse(R"({"return_progress":1})"), &chat)
+             .has_value(),
+         "Responses rejects non-boolean progress settings");
+}
+
 int main() {
+  TestStreamingPromptProgress();
+  TestResponsesPromptProgress();
   TestStopSequencesAndDefaultFields();
   TestStructuredResponseFormat();
   TestStructuredToolTruncation();

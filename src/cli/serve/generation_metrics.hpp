@@ -124,6 +124,17 @@ inline json::Value GenerationTimings(
   return timings;
 }
 
+/// llama-server `prompt_progress` object for streamed `return_progress`.
+inline json::Value PromptProgressJson(
+    const TextGenerationBackend::PromptProgress& progress) {
+  json::Value value = json::Value::object();
+  value["total"] = progress.total;
+  value["cache"] = progress.cache;
+  value["processed"] = progress.processed;
+  value["time_ms"] = progress.time_ms;
+  return value;
+}
+
 }  // namespace gufo::server
 
 #endif  // GUFO_SERVER_GENERATION_METRICS_HPP_

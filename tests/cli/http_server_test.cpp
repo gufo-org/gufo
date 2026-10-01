@@ -30,6 +30,31 @@ using gufo::server::LogLevelFromName;
 using gufo::server::LogLevelName;
 using gufo::server::TextGenerationBackend;
 
+/// Reports fixed prompt progress before delegating token generation.
+class ProgressRequest final : public TextGenerationBackend::GenerationRequest {
+public:
+  ProgressRequest(std::shared_ptr<GenerationRequest> inner,
+                  std::vector<TextGenerationBackend::PromptProgress> progress)
+      : inner_(std::move(inner)), progress_(std::move(progress)) {}
+
+  TextGenerationBackend::Result Wait(
+      const TextGenerationBackend::TokenCallback& on_token,
+      const TextGenerationBackend::ProgressCallback& on_progress) override {
+    for (const auto& value : progress_) {
+      if (on_progress && !on_progress(value)) {
+        inner_->Cancel();
+        break;
+      }
+    }
+    return inner_->Wait(on_token, on_progress);
+  }
+  void Cancel() noexcept override { inner_->Cancel(); }
+
+private:
+  std::shared_ptr<GenerationRequest> inner_;
+  std::vector<TextGenerationBackend::PromptProgress> progress_;
+};
+
 class FakeBackend final : public TextGenerationBackend {
 public:
   struct Call {
@@ -56,11 +81,14 @@ public:
       const gufo::sampling::SamplingConfig& sampling,
       const CancellationCheck& cancellation, bool stream, bool ignore_eos,
       std::string_view client_id,
-      const std::vector<std::string>& stop_sequences) override {
+      const std::vector<std::string>& stop_sequences,
+      bool return_progress) override {
     last_ignore_eos = ignore_eos;
-    return TextGenerationBackend::start_complete(prompt, max_tokens, sampling,
-                                                 cancellation, stream, false,
-                                                 client_id, stop_sequences);
+    return std::make_shared<ProgressRequest>(
+        TextGenerationBackend::start_complete(
+            prompt, max_tokens, sampling, cancellation, stream, false,
+            client_id, stop_sequences, return_progress),
+        progress);
   }
   SamplingDefaults sampling_defaults() const override { return defaults; }
   SamplingDefaults defaults;
@@ -135,6 +163,7 @@ public:
   }
   std::atomic<int> calls{0};
   std::atomic<bool> last_ignore_eos{false};
+  std::vector<PromptProgress> progress;
   std::atomic<int> failure{0};
   std::string forced_stop_sequence;
   gufo::ReasoningOptions reasoning;
@@ -1203,6 +1232,38 @@ void TestSignalShutdown() {
 
 }  // namespace
 
+void TestRawCompletionPromptProgress() {
+  RunningServer server;
+  server.backend->progress = {
+      {.total = 4, .cache = 1, .processed = 4, .time_ms = 2}};
+  const auto response =
+      server.Post("/v1/completions",
+                  R"({"prompt":"hello","stream":true,"return_progress":true})");
+  ExpectStatus(response, 200);
+  const auto progress = response.find(
+      R"("choices":[{"text":"","index":0,"logprobs":null,"finish_reason":null}],)"
+      R"("prompt_progress":{"total":4,"cache":1,"processed":4,"time_ms":2}})");
+  assert(progress != std::string::npos);
+  assert(progress < response.find(R"("text":"ok")"));
+
+  const auto plain =
+      server.Post("/v1/completions", R"({"prompt":"hello","stream":true})");
+  ExpectStatus(plain, 200);
+  assert(plain.find("prompt_progress") == std::string::npos);
+  const auto null_progress =
+      server.Post("/v1/completions",
+                  R"({"prompt":"hello","stream":true,"return_progress":null})");
+  ExpectStatus(null_progress, 200);
+  assert(null_progress.find("prompt_progress") == std::string::npos);
+  const auto buffered = server.Post(
+      "/v1/completions", R"({"prompt":"hello","return_progress":true})");
+  ExpectStatus(buffered, 200);
+  assert(buffered.find("prompt_progress") == std::string::npos);
+  ExpectStatus(server.Post("/v1/completions",
+                           R"({"prompt":"hello","return_progress":1})"),
+               400);
+}
+
 int main() {
   // The log assertions below match "[LEVEL] [component]" text written to a
   // redirected stderr sink, so the real stderr's TTY state must not add ANSI
@@ -1219,6 +1280,7 @@ int main() {
   TestFallbackBackendMetrics();
   TestCompatibilityRequests();
   TestRawCompletionStreaming();
+  TestRawCompletionPromptProgress();
   TestCompatibilityStopSequences();
   TestCompatibilityThinkingDefaults();
   TestResponseSamplingDefaults();

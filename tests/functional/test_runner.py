@@ -19,11 +19,33 @@ functional = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(functional)
 from metrics import (CaseComplete, Recorder, canonical, compare, join_server_timings,
                      qualify, summarize, validate_tool_events)
+from progress import ProgressTrace
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_prompt_progress_contract_and_output_order(self):
+        def event(processed, elapsed=0):
+            return {"prompt_progress": {"total": 10, "cache": 2,
+                                        "processed": processed, "time_ms": elapsed},
+                    "choices": [{"delta": {}, "finish_reason": None}]}
+        trace = ProgressTrace(True)
+        trace(event(2))
+        trace(event(10, 5))
+        trace({"choices": [{"delta": {"content": "ok"}}]})
+        trace.finish({"prompt_tokens": 10, "cached_tokens": 2})
+        with self.assertRaises(AssertionError):
+            trace(event(10, 6))
+        for invalid in (event(1), event(11), event(3, -1)):
+            with self.subTest(event=invalid), self.assertRaises(AssertionError):
+                ProgressTrace(True)(invalid)
+        with self.assertRaises(AssertionError):
+            ProgressTrace(False)(event(2))
+        with self.assertRaises(AssertionError):
+            ProgressTrace(True).finish({"prompt_tokens": 10, "cached_tokens": 2})
+        ProgressTrace(True, allow_missing=True).finish({})
+
     def test_prometheus_contract_rejects_missing_and_invalid_metrics(self):
         text = "".join(f"# HELP {name} Description\n# TYPE {name} {kind}\n{name} 0\n"
                        for name, kind in TYPES.items())
@@ -260,6 +282,11 @@ class FunctionalRunnerTest(unittest.TestCase):
         measured, fingerprint = summarize([(1, data[:split]), (7, data[split:])], True, True)
         self.assertEqual(measured["client_ttft_ms"], 7)
         self.assertEqual(measured["decode_ms_per_token"], 4)
+        progress = b'data: {"choices":[{"index":0,"delta":{},"finish_reason":null}],"prompt_progress":{"total":10,"cache":0,"processed":5,"time_ms":1}}\n\n'
+        with_progress, same_output = summarize(
+            [(.5, progress), (1, data[:split]), (7, data[split:])], True, True)
+        self.assertEqual(with_progress, measured)
+        self.assertEqual(same_output, fingerprint)
         buffered = json.dumps({"choices": [{"index": 0, "message": {"content": "é"},
                                            "finish_reason": "stop"}], "usage": usage}).encode()
         self.assertEqual(summarize([(9, buffered)], False, True)[1], fingerprint)

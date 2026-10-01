@@ -780,6 +780,14 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     }
     output->stream = stream->as_bool();
   }
+  if (const json::Value* progress = body.find("return_progress");
+      progress != nullptr && !progress->is_null()) {
+    if (!progress->is_bool()) {
+      return Error(400, "Bad Request", "'return_progress' must be a boolean",
+                   "invalid_return_progress");
+    }
+    output->chat.return_progress = progress->as_bool();
+  }
   if (const json::Value* options = body.find("stream_options");
       options != nullptr && !options->is_null()) {
     if (!options->is_object()) {
@@ -1892,6 +1900,14 @@ public:
     return Lifecycle("response.created") && Lifecycle("response.in_progress");
   }
 
+  bool Progress(const TextGenerationBackend::PromptProgress& progress) {
+    auto event = json::Value::object();
+    event["type"] = "response.in_progress";
+    event["response"] = response_;
+    event["prompt_progress"] = PromptProgressJson(progress);
+    return Emit(std::move(event));
+  }
+
   bool Append(std::string_view text, bool reasoning) {
     if (text.empty())
       return true;
@@ -2190,10 +2206,24 @@ HttpResponse StreamingResponse(
                 request.chat.constrained_tools &&
                     !request.chat.response_format);
 
+            TextGenerationBackend::ProgressCallback on_progress;
+            if (request.chat.return_progress) {
+              on_progress =
+                  [&](const TextGenerationBackend::PromptProgress& progress) {
+                    auto chunk =
+                        ChoiceChunk(id, created, model, json::Value::object());
+                    chunk["prompt_progress"] = PromptProgressJson(progress);
+                    connected = connected && writer(Sse(chunk));
+                    return connected;
+                  };
+            }
+
             try {
-              const auto result = generation->Wait([&](std::string_view piece) {
-                return connected && filter.Push(piece);
-              });
+              const auto result = generation->Wait(
+                  [&](std::string_view piece) {
+                    return connected && filter.Push(piece);
+                  },
+                  on_progress);
               stream_log->details = GenerationLogDetails(result);
               RecordServerMetrics(result);
               if (!connected || result.cancelled) {
@@ -2384,6 +2414,13 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
   }
   *chat = std::move(parsed.chat);
 
+  if (const auto* progress = body.find("return_progress");
+      progress != nullptr && !progress->is_null()) {
+    if (!progress->is_bool())
+      return Error(400, "Bad Request", "'return_progress' must be a boolean",
+                   "invalid_return_progress");
+    chat->return_progress = progress->as_bool();
+  }
   if (const auto* cache = body.find("cache_prompt")) {
     if (!cache->is_bool())
       return Error(400, "Bad Request", "'cache_prompt' must be a boolean",
@@ -2466,11 +2503,19 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
         chat.response_format != nullptr,
         chat.constrained_tools && !chat.response_format);
     try {
-      const auto result = writer
-                              ? generation->Wait([&](std::string_view piece) {
-                                  return filter.Push(piece);
-                                })
-                              : generation->Wait();
+      TextGenerationBackend::ProgressCallback on_progress;
+      if (writer && chat.return_progress) {
+        on_progress =
+            [&](const TextGenerationBackend::PromptProgress& progress) {
+              return output.Progress(progress);
+            };
+      }
+      const auto result =
+          writer
+              ? generation->Wait(
+                    [&](std::string_view piece) { return filter.Push(piece); },
+                    on_progress)
+              : generation->Wait();
       stream_log->details = GenerationLogDetails(result);
       RecordServerMetrics(result);
       if (!writer) {
