@@ -2,6 +2,7 @@
 
 | Experiment | Decision / evidence |
 | --- | --- |
+| Conversation retention separate from execution sessions | Correctness candidate: four rotating histories and a long history interrupted by eight small requests remain reusable with one execution session. AR/MTP uncached-answer controls pass; RAM-pressure and concurrent-publication CPU checks pass. HTTP timings remain inconclusive. |
 | Bounded history-edit checkpoints and snapshot page preparation | Correctness candidate: retain earlier resumable state without changing model arithmetic; populate pages before huge-page advice to avoid repeatable first-touch stalls. Four fault workers retained over serial/eight-worker variants. Native snapshot replay and AR/MTP edit controls pass; HTTP timing qualification remains inconclusive. [Functional checks](../../../tests/functional/README.md). |
 | Prefix-independent MTP cache projections | Retained: exact seeded replay across prompt splits and checkpoint replacement, using shared Q8 row arithmetic. [Checks and timings](artifacts/mtp-cache-replay.json). |
 | Skip discarded MTP outputs | Retained: K/V-only prefill, compact catch-up and wider projection tiles; C1 costs remeasured. Prefill is within 0.3% of main; d0 TG remains 1.1% slower, d4K TG is 0.4% faster. |

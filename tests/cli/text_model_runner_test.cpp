@@ -1505,20 +1505,14 @@ void TestSnapshotCaptureFailureReleasesReservationAndKeepsRequestSuccessful() {
 /// full re-prefills. It must be visible, unlike exact replacement.
 void TestEntryCapacityEvictionIsLogged() {
   auto stats = std::make_shared<FakeStats>();
-  auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256, 4096);
-  // One session, so the cache holds six entries and a seventh distinct prefix
-  // must displace one of them.
+  auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256, 8192);
+  // Checkpoint records are bounded independently of execution sessions.
   TextRunnerPool pool(runner, 1);
 
-  const std::array<std::vector<TextRunnerToken>, 7> prefixes{
-      std::vector<TextRunnerToken>{1, 2, 3},
-      std::vector<TextRunnerToken>{4, 5, 6},
-      std::vector<TextRunnerToken>{7, 8, 9},
-      std::vector<TextRunnerToken>{10, 11, 12},
-      std::vector<TextRunnerToken>{13, 14, 15},
-      std::vector<TextRunnerToken>{16, 17, 18},
-      std::vector<TextRunnerToken>{19, 20, 21}};
-  for (const auto& prefix : prefixes) {
+  for (std::size_t i = 0;
+       i <= gufo::server::TextRunnerRamCacheOptions::kMaxEntries; ++i) {
+    const std::vector<TextRunnerToken> prefix{
+        static_cast<TextRunnerToken>(i + 1), 0};
     auto request = pool.Acquire(prefix);
     Expect(request.Prefill(prefix.size()).decode_ready,
            "each distinct prefix reaches its snapshot boundary");
@@ -1529,34 +1523,52 @@ void TestEntryCapacityEvictionIsLogged() {
   }
 
   // The first prefix was evicted, so it can no longer be reused.
-  auto evicted = pool.Acquire(prefixes.front());
+  auto evicted = pool.Acquire({1, 0});
   Expect(!evicted.cache_hit(),
          "the oldest retained prefix is gone once the entries are full");
   evicted.Invalidate();
 }
 
 void TestSnapshotCacheCapacityIsReportedAtStartup() {
-  for (const std::size_t budget : {0U, 256U}) {
-    auto stats = std::make_shared<FakeStats>();
-    auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256, budget);
-    std::ostringstream startup_log;
-    auto* previous = std::clog.rdbuf(startup_log.rdbuf());
-    {
-      TextRunnerPool pool(runner, 2);
+  for (const std::size_t budget :
+       {std::size_t{0}, std::size_t{256}, std::size_t{64} << 30}) {
+    for (const std::size_t requested :
+         {std::size_t{0}, std::size_t{64}, std::size_t{48} << 30}) {
+      for (const std::size_t sessions : {1U, 2U}) {
+        auto stats = std::make_shared<FakeStats>();
+        auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256, budget);
+        std::ostringstream startup_log;
+        auto* previous = std::clog.rdbuf(startup_log.rdbuf());
+        {
+          TextRunnerPool pool(runner, sessions, std::nullopt,
+                              {.capacity_bytes = requested});
+        }
+        std::clog.rdbuf(previous);
+        const auto output = startup_log.str();
+        const std::string expected =
+            "event=snapshot_cache_configured sessions=" +
+            std::to_string(sessions) +
+            " snapshot_entries=128 "
+            "capacity_bytes=" +
+            std::to_string(
+                std::min(budget, requested == 0
+                                     ? gufo::server::TextRunnerRamCacheOptions::
+                                           kAutomaticMaxBytes
+                                     : requested)) +
+            "\n";
+        const auto position = output.find(expected);
+        Expect(position != std::string::npos &&
+                   output.find(expected, position + expected.size()) ==
+                       std::string::npos,
+               "startup reports actual session, entry and byte limits once");
+        Expect(
+            output.find("retained_conversations") == std::string::npos,
+            "startup does not present session count as conversation capacity");
+        Expect(
+            stats->states_created == sessions,
+            "checkpoint record capacity never creates extra execution states");
+      }
     }
-    std::clog.rdbuf(previous);
-    const auto output = startup_log.str();
-    const std::string expected =
-        "event=snapshot_cache_configured sessions=2 snapshot_entries=12 "
-        "capacity_bytes=" +
-        std::to_string(budget) + "\n";
-    const auto position = output.find(expected);
-    Expect(position != std::string::npos &&
-               output.find(expected, position + expected.size()) ==
-                   std::string::npos,
-           "startup reports actual session, entry and byte limits once");
-    Expect(output.find("retained_conversations") == std::string::npos,
-           "startup does not present session count as conversation capacity");
   }
 }
 

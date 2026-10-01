@@ -25,6 +25,7 @@ from tool_reasoning import ARGUMENTS, assert_edit
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_growth import check_cache_growth
+from cache_rotation import check_cache_rotation
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
@@ -185,6 +186,54 @@ class FunctionalRunnerTest(unittest.TestCase):
                     "index": 0, "endpoint": endpoint, "request_id": "r1",
                     "output_sha256": "probe", "wall_ms": 1, "metrics": {}}]}))
                 join_server_timings(root)
+
+    def run_cache_rotation(self, lost=False, contaminated=False):
+        requests, checks, previous = [], {}, {}
+
+        def chat_result(client, body):
+            requests.append(json.loads(json.dumps(body)))
+            label = body["messages"][0]["content"].splitlines()[0]
+            side = "_side_" in label
+            total = (64 if side else 12000 if label.endswith("main") else 3000) \
+                + (len(body["messages"]) - 2) * 100
+            cold = body.get("extra_body", {}).get("cache_prompt") is False
+            cached = 0 if cold or lost else max(0, previous.get(label, 0) - 5)
+            previous[label] = total
+            code = "ALPHA" if side else "BETA" if label.endswith("main") \
+                else label.rsplit("_", 1)[-1]
+            if contaminated and cached:
+                code = "WRONG"
+            return {"text": code, "reasoning": "", "tools": [], "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached}}}
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_cache_rotation(None, "fixture", checks, chat_result)
+        return requests, checks
+
+    def test_cache_rotation_delays_controls_and_replays_actual_answers(self):
+        requests, checks = self.run_cache_rotation()
+        self.assertEqual(len(checks), 27)
+        self.assertEqual([body["messages"][0]["content"].splitlines()[0]
+                          for body in requests[:4]],
+                         ["cache_rotation_" + code for code in ("RED", "GREEN", "BLUE", "GOLD")])
+        self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is False
+                            for body in requests[-5:]))
+        for warm, cold in zip([requests[21], *requests[8:12]], requests[-5:]):
+            self.assertEqual(warm["messages"], cold["messages"])
+        for body in requests[4:12]:
+            code = body["messages"][0]["content"].splitlines()[0].rsplit("_", 1)[-1]
+            self.assertTrue(all(message["content"] == code for message in body["messages"]
+                                if message["role"] == "assistant"))
+
+    def test_cache_rotation_rejects_lost_history(self):
+        with self.assertRaisesRegex(AssertionError, "lost its checkpoint"):
+            self.run_cache_rotation(lost=True)
+
+    def test_cache_rotation_rejects_cross_conversation_answers(self):
+        with self.assertRaises(AssertionError):
+            self.run_cache_rotation(contaminated=True)
 
     def run_cache_growth(self, pinned=False, missing_reasoning=False):
         requests, checks, previous = [], {}, {}

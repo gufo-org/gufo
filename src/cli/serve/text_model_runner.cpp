@@ -339,7 +339,7 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
 }
 
 ContinuationCache::SnapshotSupport MakeSnapshotSupport(
-    ValidatedRunner* validated) {
+    ValidatedRunner* validated, TextRunnerRamCacheOptions options) {
   if (validated == nullptr || !validated->descriptor.capabilities.snapshot ||
       !validated->descriptor.capabilities.fork) {
     return {};
@@ -359,9 +359,14 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
             ReconcileStateBytes(validated->resources, text_state);
           },
       .capacity_bytes =
-          [validated] {
+          [validated, options] {
             const auto resources = validated->runner->ResourceClaim();
-            return resources.retained_snapshot_capacity_bytes.value_or(0);
+            const auto limit =
+                options.capacity_bytes == 0
+                    ? TextRunnerRamCacheOptions::kAutomaticMaxBytes
+                    : options.capacity_bytes;
+            return std::min(
+                limit, resources.retained_snapshot_capacity_bytes.value_or(0));
           },
       .on_event = EmitSnapshotEvent,
   };
@@ -454,10 +459,9 @@ void TextModelRunner::RestorePersistentSnapshot(
 
 struct TextRunnerPool::Impl {
   static constexpr std::size_t kIntermediateCheckpoints = 4;
-  static constexpr std::size_t kSnapshotEntriesPerSession =
-      kIntermediateCheckpoints + 2;
   Impl(std::shared_ptr<TextModelRunner> model_runner, std::size_t state_count,
-       std::optional<TextRunnerDiskCacheOptions> disk_cache_options)
+       std::optional<TextRunnerDiskCacheOptions> disk_cache_options,
+       TextRunnerRamCacheOptions ram_cache_options)
       : validated(ValidateRunner(std::move(model_runner), state_count)),
         cache(
             state_count,
@@ -470,11 +474,8 @@ struct TextRunnerPool::Impl {
               ReconcileStateBytes(validated.resources, *state);
               return state;
             },
-            MakeSnapshotSupport(&validated),
-            state_count <= std::numeric_limits<std::size_t>::max() /
-                               kSnapshotEntriesPerSession
-                ? state_count * kSnapshotEntriesPerSession
-                : state_count) {
+            MakeSnapshotSupport(&validated, ram_cache_options),
+            TextRunnerRamCacheOptions::kMaxEntries) {
     // Entry and byte limits constrain retention independently of session count.
     if (validated.descriptor.capabilities.snapshot) {
       Logger::Info("cache",
@@ -715,7 +716,13 @@ struct TextRunnerPool::Request::Impl {
     retain_snapshot = false;
     try {
       retain_snapshot = lease.TryReserveSnapshot(
-          snapshot_bytes, snapshot_tokens.size(), retain_fallback);
+          snapshot_bytes, snapshot_tokens.size(),
+          retain_fallback && (fallback_position == 0 ||
+                              snapshot_tokens.size() == prompt.size()),
+          retain_fallback && snapshot_tokens.size() == prompt.size()
+              ? SnapshotPurpose::kRetry
+              : SnapshotPurpose::kContinuation,
+          snapshot_tokens);
     } catch (...) {
       return;
     }
@@ -814,7 +821,8 @@ struct TextRunnerPool::Request::Impl {
       bytes = runner->SnapshotPayloadBytes(state);
       // Intermediate copies must not displace the frontier this request
       // branched from, including its stable image/reasoning fallback.
-      reserved = lease.TryReserveSnapshot(bytes, position, true);
+      reserved = lease.TryReserveSnapshot(bytes, position, true,
+                                          SnapshotPurpose::kHistory);
       if (!reserved)
         return;
       std::shared_ptr<const TextRunnerSnapshot> snapshot =
@@ -1312,9 +1320,10 @@ void TextRunnerPool::Request::Invalidate() noexcept {
 
 TextRunnerPool::TextRunnerPool(
     std::shared_ptr<TextModelRunner> runner, std::size_t state_count,
-    std::optional<TextRunnerDiskCacheOptions> disk_cache)
+    std::optional<TextRunnerDiskCacheOptions> disk_cache,
+    TextRunnerRamCacheOptions ram_cache)
     : impl_(std::make_unique<Impl>(std::move(runner), state_count,
-                                   std::move(disk_cache))) {}
+                                   std::move(disk_cache), ram_cache)) {}
 
 TextRunnerPool::~TextRunnerPool() = default;
 

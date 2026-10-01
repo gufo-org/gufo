@@ -42,6 +42,14 @@ struct TextPreparedPrompt {
   std::size_t cache_prefix_tokens{0};
 };
 
+struct TextRunnerRamCacheOptions {
+  static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
+  static constexpr std::size_t kMaxEntries = 128;
+  /// Zero selects min(model snapshot budget, 32 GiB), after session allocation.
+  /// Explicit limits are still clamped to the model's snapshot budget.
+  std::size_t capacity_bytes{0};
+};
+
 struct TextRunnerDiskCacheOptions {
   static constexpr std::size_t kDefaultCapacityBytes =
       std::size_t{8} * 1024U * 1024U * 1024U;
@@ -424,7 +432,8 @@ public:
 
   TextRunnerPool(
       std::shared_ptr<TextModelRunner> runner, std::size_t state_count,
-      std::optional<TextRunnerDiskCacheOptions> disk_cache = std::nullopt);
+      std::optional<TextRunnerDiskCacheOptions> disk_cache = std::nullopt,
+      TextRunnerRamCacheOptions ram_cache = {});
   ~TextRunnerPool();
 
   TextRunnerPool(const TextRunnerPool&) = delete;

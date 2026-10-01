@@ -473,6 +473,176 @@ void TestEntryReplacementLogsRemovedSnapshot() {
          "entry replacement keeps exact aggregate accounting");
 }
 
+void TestRetentionPrefersExtraCopiesUnderPressure() {
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotPurpose;
+  // With three records entry pressure binds; with eight records bytes bind.
+  for (const std::size_t records : {3U, 8U}) {
+    std::vector<std::size_t> invalidations(1);
+    std::size_t created = 0;
+    gufo::server::ContinuationCache cache(
+        1,
+        [&] { return std::make_unique<FakeState>(created++, &invalidations); },
+        {.restore =
+             [](auto& state, const auto& snapshot) {
+               dynamic_cast<FakeState&>(state).value =
+                   dynamic_cast<const FakeSnapshot&>(snapshot).value;
+             },
+         .capacity_bytes = [] { return 24; },
+         .on_event = {}},
+        records);
+    auto save = [&](std::vector<ContinuationToken> tokens,
+                    SnapshotPurpose purpose, std::size_t stable = 0) {
+      auto lease = cache.Acquire(tokens, {}, {}, {}, true, stable);
+      Expect(lease.TryReserveSnapshot(8, tokens.size(), false, purpose),
+             "copy is admitted");
+      lease.Commit(tokens, std::make_unique<FakeSnapshot>(tokens.front(), 8));
+      Expect(cache.retained_snapshot_bytes() <= 24 &&
+                 cache.reserved_snapshot_bytes() == 0,
+             "retention stays bounded after every publication");
+    };
+    save({1, 2}, SnapshotPurpose::kContinuation);
+    save({1, 2, 3}, SnapshotPurpose::kRetry, 2);
+    save({8, 9}, SnapshotPurpose::kContinuation);
+    save({6, 7}, SnapshotPurpose::kContinuation);
+    for (const auto tag : {1U, 8U, 6U}) {
+      auto returned = cache.Acquire(
+          std::vector<ContinuationToken>{tag, tag == 1 ? 2U : tag + 1, 0});
+      Expect(returned.cached_tokens() == 2 &&
+                 dynamic_cast<FakeState&>(returned.state()).value == tag,
+             "dropping a retry preserves independent conversation payloads");
+      returned.Invalidate();
+    }
+    auto optional = cache.Acquire(std::vector<ContinuationToken>{4, 5});
+    Expect(!optional.TryReserveSnapshot(8, 2, true, SnapshotPurpose::kHistory),
+           "an optional copy cannot evict a last useful continuation");
+    optional.Invalidate();
+    Expect(cache.retained_snapshot_bytes() == 24 && created == 1 &&
+               cache.entry_capacity() == records,
+           "checkpoint records allocate no extra execution states");
+
+    const std::vector<ContinuationToken> next{1, 2, 9};
+    auto advancing = cache.Acquire(next);
+    Expect(advancing.TryReserveSnapshot(8, 3, false,
+                                        SnapshotPurpose::kContinuation, next),
+           "a new boundary can replace its own old boundary under pressure");
+    advancing.Commit(next, std::make_unique<FakeSnapshot>(1, 8));
+    for (const auto& tokens : {std::vector<ContinuationToken>{1, 2, 9, 0},
+                               std::vector<ContinuationToken>{8, 9, 0},
+                               std::vector<ContinuationToken>{6, 7, 0}}) {
+      auto returned = cache.Acquire(tokens);
+      Expect(returned.cached_tokens() == tokens.size() - 1,
+             "advancing one conversation does not evict another family's last "
+             "checkpoint");
+      returned.Invalidate();
+    }
+  }
+}
+
+void TestOptionalPublicationRechecksRecordPressure() {
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t created = 0;
+  std::vector<gufo::server::SnapshotEvent> events;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(created++, &invalidations); },
+      {.restore = [](auto&, const auto&) {},
+       .capacity_bytes = [] { return 64; },
+       .on_event = [&](const auto& event) { events.push_back(event); }},
+      2);
+  auto initial = cache.Acquire(std::vector<ContinuationToken>{1});
+  Expect(initial.TryReserveSnapshot(8, 1), "first boundary reserves bytes");
+  initial.Commit({1}, std::make_unique<FakeSnapshot>(1, 8));
+
+  auto pending = cache.Acquire(std::vector<ContinuationToken>{9});
+  Expect(pending.TryReserveSnapshot(8, 1, true, SnapshotPurpose::kHistory),
+         "optional capture sees a free record before a peer publishes");
+  auto peer = cache.Acquire(std::vector<ContinuationToken>{8});
+  Expect(peer.TryReserveSnapshot(8, 1),
+         "peer capture fits aggregate reservations");
+  peer.Commit({8}, std::make_unique<FakeSnapshot>(8, 8));
+  Expect(pending.Commit({9}, std::make_unique<FakeSnapshot>(9, 8)) == 0,
+         "optional publication refuses to evict a last copy after concurrent "
+         "admission");
+  Expect(cache.retained_snapshot_bytes() == 16 &&
+             cache.reserved_snapshot_bytes() == 0 && events.size() == 1 &&
+             events.front().reason ==
+                 gufo::server::SnapshotEventReason::kEntryCapacity,
+         "skipped publication releases its reservation and reports record "
+         "pressure");
+  for (const auto tag : {1U, 8U}) {
+    auto returned = cache.Acquire(std::vector<ContinuationToken>{tag, 0});
+    Expect(
+        returned.cache_hit() && returned.cached_tokens() == 1,
+        "concurrent optional publication preserves both continuation families");
+    returned.Invalidate();
+  }
+}
+
+void TestRetryDoesNotDisplaceEarlierHistory() {
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotPurpose;
+  for (const std::size_t records : {3U, 8U}) {
+    std::vector<std::size_t> invalidations(1);
+    gufo::server::ContinuationCache cache(
+        1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+        {.restore = [](auto&, const auto&) {},
+         .capacity_bytes = [] { return 24; },
+         .on_event = {}},
+        records);
+    const auto save = [&](std::vector<ContinuationToken> tokens,
+                          SnapshotPurpose purpose) {
+      auto lease = cache.Acquire(tokens);
+      Expect(lease.TryReserveSnapshot(8, tokens.size(), false, purpose),
+             "initial checkpoints fit");
+      lease.Commit(tokens, std::make_unique<FakeSnapshot>(1, 8));
+    };
+    save({1}, SnapshotPurpose::kHistory);
+    save({1, 2}, SnapshotPurpose::kContinuation);
+    save({8}, SnapshotPurpose::kContinuation);
+    auto retry = cache.Acquire(std::vector<ContinuationToken>{1, 2, 3});
+    Expect(!retry.TryReserveSnapshot(8, 3, true, SnapshotPurpose::kRetry),
+           "an exact retry cannot discard the earlier edit checkpoint");
+    retry.Invalidate();
+    auto edited = cache.Acquire(std::vector<ContinuationToken>{1, 9});
+    Expect(edited.cached_tokens() == 1,
+           "earlier history remains reusable after skipped retry admission");
+    edited.Invalidate();
+  }
+  std::vector<std::size_t> invalidations(2);
+  std::size_t created = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(created++, &invalidations); },
+      {.restore = [](auto&, const auto&) {},
+       .capacity_bytes = [] { return 64; },
+       .on_event = {}},
+      3);
+  for (const auto& tokens : {std::vector<ContinuationToken>{1}, {1, 2}}) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(8, tokens.size(), false,
+                                    tokens.size() == 1
+                                        ? SnapshotPurpose::kHistory
+                                        : SnapshotPurpose::kContinuation),
+           "history and stable boundary fit before concurrent admission");
+    lease.Commit(tokens, std::make_unique<FakeSnapshot>(1, 8));
+  }
+  auto retry = cache.Acquire(std::vector<ContinuationToken>{1, 2, 3});
+  Expect(retry.TryReserveSnapshot(8, 3, true, SnapshotPurpose::kRetry),
+         "retry sees a free record before a peer publishes");
+  auto peer = cache.Acquire(std::vector<ContinuationToken>{8});
+  Expect(peer.TryReserveSnapshot(8, 1), "peer fits aggregate reservations");
+  peer.Commit({8}, std::make_unique<FakeSnapshot>(8, 8));
+  Expect(
+      retry.Commit({1, 2, 3}, std::make_unique<FakeSnapshot>(1, 8)) == 0,
+      "retry publication rechecks history priority after concurrent admission");
+  auto edited = cache.Acquire(std::vector<ContinuationToken>{1, 9});
+  Expect(
+      edited.cached_tokens() == 1 && cache.reserved_snapshot_bytes() == 0,
+      "concurrent retry publication preserves earlier history and accounting");
+  edited.Invalidate();
+}
+
 void TestEditedTailReplacementPreservesSharedCheckpoints() {
   std::vector<std::size_t> invalidations(1);
   gufo::server::ContinuationCache cache(
@@ -780,6 +950,9 @@ int main() {
   TestAbandonedReservationIsReleased();
   TestReservationMismatchSkipsRetentionWithoutFailingCommit();
   TestEntryReplacementLogsRemovedSnapshot();
+  TestRetentionPrefersExtraCopiesUnderPressure();
+  TestOptionalPublicationRechecksRecordPressure();
+  TestRetryDoesNotDisplaceEarlierHistory();
   TestEditedTailReplacementPreservesSharedCheckpoints();
   TestReplacedSourceDoesNotEvictAnotherBranchTail();
   TestCacheCandidateDetailIsDebugTierOnly();

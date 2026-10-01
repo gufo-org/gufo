@@ -64,7 +64,9 @@ Their detailed contracts are defined in [Command-Line Interface](CLI.md) and
 Qwen HTTP requests share one immutable `QwenGpuModel` containing the mapped
 weights and tokenizer. Each request leases a preallocated `QwenGpuExecutor`
 with independent KV, recurrent, graph, activation, and logit state.
-`--sessions N` controls the bounded session pool. The scheduler batches ready
+`--sessions N` controls the bounded execution session pool, not the number of
+remembered conversations. Checkpoints have separate entry and memory limits;
+see [KV cache](KV-CACHE.md#limits). The scheduler batches ready
 requests when the model runner supports their execution mode.
 
 Text serving defaults match llama.cpp for context and generation length:
@@ -173,6 +175,13 @@ work can batch across ready requests. See the
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 
+`--cache-ram-bytes 0` (the default) selects an automatic snapshot budget capped
+at 32 GiB and the model's reported available snapshot memory. A positive value
+sets a byte cap, still clamped to that model budget. The 128 checkpoint records
+are independent of `--sessions`; more than one can belong to a conversation.
+Payloads are allocated only when captured. Under pressure, optional copies
+give way before another conversation's last useful checkpoint.
+
 Prompt reuse is enabled by default; how the cache finds, retains and
 evicts that state is described in [the KV cache](KV-CACHE.md).
 `cache_prompt: false` on
@@ -182,9 +191,9 @@ requests retain a checkpoint before the assistant-generation suffix, including
 when a client drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
 also accounts for tokenization changes where adjacent user/tool turns join.
 Qwen requests retain this checkpoint with thinking enabled or disabled.
-Warm continuations checkpoint the reused frontier and prefill the new suffix
-together. A second full-prompt checkpoint enables exact retries without
-prefill; both checkpoints share the existing snapshot-memory budget.
+Warm continuations preserve the reused frontier before prefill and save the
+new stable boundary too. A second full-prompt checkpoint enables exact retries
+without prefill; all copies share the same snapshot-memory budget.
 Exact live continuations reuse generated tokens. The server reports cached
 and newly processed tokens separately; resuming from the checkpoint processes
 the short suffix. System instructions, tool definitions and image identities
