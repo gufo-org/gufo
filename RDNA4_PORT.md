@@ -123,9 +123,12 @@ A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
       判定：harness 測的是 serve 不走的死路（serve 小 batch 走
       native small-batch／dequant+hipBLAS／GEMV，全部 proven）。
       死路特徵：r 高（結構對）但幅度差百倍（疑似 Q8ActTile 在小
-      batch 下多數 tile 被標 dead）。不修（動它風險大於收益），
-      但開 speculative verification 前必須先修（verification chunk
-      走這條路）。
+      batch 下多數 tile 被標 dead）。不修（動它風險大於收益）。
+- [x] P1 補充（2026-10-01）：MTP/DFlash 不被 P1 擋。查證：
+      verification 走 Fp32/Bf16 GEMM（dflash/batch.cpp、executor.cpp），
+      不是 PreQuantized；MTP 是 qfn 的事（125B 上不了 16GB 卡）；
+      DFlash 要另外的 draft GGUF（--dflash-model，手上沒有）。
+      真擋 speculative 的是缺 draft 檔＋VRAM，不是 P1。
 - [ ] 全量 build → diagnose → Q3 serve 點火。
 - [ ] qfn W8A8（WmmaI8，3563）：同 Qwen quant 模式（a0/a1 雙 call＋
       dw＋scratch[tok][row] 雙 tile 寫回）。
