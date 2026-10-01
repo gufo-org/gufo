@@ -67,7 +67,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart |
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
 | `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, and compare with uncached responses |
-| `cache-rotation` | Keep useful history when switching between conversations or making small side requests; compare each answer with its own uncached control |
+| `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
 
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
 the server command. Projectors can load automatically beside the weights, so
@@ -130,6 +130,9 @@ Uncached controls run only after all cache measurements and must match the full
 answer, reasoning, tool calls, finish reason and completion-token count. Run it
 with `--suite cache-rotation` and `--sessions 1`. Per-request metrics are retained
 for timing comparisons and explicit RAM-budget pressure runs.
+It also checks the startup cache cap against half the host RAM available before
+model loading and the requested limit. A large `--cache-ram-bytes` value exercises
+the host cap without filling the cache or forcing an out-of-memory stall.
 
 `cache-growth` runs four turns per conversation, with reasoning omitted,
 reasoning replayed, and thinking disabled. Reuse must reach the previous

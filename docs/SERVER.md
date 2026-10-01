@@ -176,9 +176,12 @@ Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 
 `--cache-ram-bytes 0` (the default) selects an automatic snapshot budget capped
-at 32 GiB and the model's reported available snapshot memory. A positive value
-sets a byte cap, still clamped to that model budget. The 128 checkpoint records
-are independent of `--sessions`; more than one can belong to a conversation.
+at 32 GiB and half the available host RAM after model/state allocation, respecting
+container limits. 27B also checks HIP free memory. A positive value sets a byte
+cap, still clamped to that model budget; it cannot bypass the host-memory cap.
+Disk staging and temporary disk-save buffers are separate from this RAM budget.
+The 128 checkpoint records are independent of `--sessions`; more than one can
+belong to a conversation.
 Payloads are allocated only when captured. Under pressure, optional copies
 give way before another conversation's last useful checkpoint.
 

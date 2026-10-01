@@ -196,11 +196,11 @@ loop stops rather than trying the next candidate, in both tiers **(source)**.
 ## Limits
 
 Independent limits can each bind first. Payload memory is allocated only when
-captured; retained snapshots and captures in progress share the RAM budget.
+captured; RAM-retained snapshots and their captures in progress share the RAM budget.
 
 | Limit | Default | Set by |
 | --- | --- | --- |
-| Retained snapshot bytes, RAM | smaller of 32 GiB and the model's reported snapshot budget | `--cache-ram-bytes` |
+| Retained snapshot bytes, RAM | smaller of 32 GiB and half the available host RAM; 27B also checks HIP free memory | `--cache-ram-bytes` |
 | RAM checkpoint records | 128, independent of `--sessions` | internal safety limit |
 | Disk bytes | 8 GiB | `--cache-disk-bytes` |
 | Disk staging bytes | smallest of 1 GiB, `MemAvailable / 8`, the disk budget | `--cache-disk-staging-bytes` |
@@ -211,11 +211,16 @@ Zero does not disable reuse. For an 8 GiB cap, use
 `--cache-ram-bytes 8589934592`.
 
 The model budget is sampled after weights and execution states are allocated,
-then fixed for the server run. Flash-Next reports half the available host
-memory, respecting container/cgroup limits; Qwen3.8-27B reports free device
-memory from HIP. Both compete for Strix Halo's unified physical memory.
+then fixed for the server run. Flash-Next and Qwen3.8-27B use half the available
+host RAM, respecting container/cgroup limits. 27B also clamps this to HIP's free
+device memory. CPU and GPU allocations compete for the same physical RAM on
+Strix Halo, so HIP's free-memory estimate alone is not enough.
+For example, 44 GiB available at load gives at most a 22 GiB RAM cache,
+even when HIP reports more free memory. An explicit limit cannot bypass this
+model budget.
 The RAM payload budget excludes weights, execution states, token metadata
-and disk staging.
+and disk staging. It also excludes temporary host buffers used to save
+checkpoints to disk; this is not a limit on total server memory.
 
 The 32 GiB automatic cap limits default growth on a lightly loaded machine.
 It leaves room for several 27B histories: two 3.7 GB checkpoints per history

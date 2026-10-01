@@ -25,7 +25,7 @@ from tool_reasoning import ARGUMENTS, assert_edit
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_growth import check_cache_growth
-from cache_rotation import check_cache_rotation
+from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
@@ -186,6 +186,34 @@ class FunctionalRunnerTest(unittest.TestCase):
                     "index": 0, "endpoint": endpoint, "request_id": "r1",
                     "output_sha256": "probe", "wall_ms": 1, "metrics": {}}]}))
                 join_server_timings(root)
+
+    def test_cache_rotation_checks_host_headroom_and_requested_limits(self):
+        gib = 1024**3
+        def log(capacity, sessions=1, entries=128):
+            return (f"event=snapshot_cache_configured sessions={sessions} "
+                    f"snapshot_entries={entries} capacity_bytes={capacity}\n")
+        self.assertEqual(host_available_bytes("MemTotal: 9 kB\nMemAvailable: 4096 kB\n"),
+                         4096 * 1024)
+        for invalid in ("", "MemAvailable: 0 kB\n", "MemAvailable: invalid kB\n"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                host_available_bytes(invalid)
+        for available, requested, capacity in (
+            (44 * gib, 0, 22 * gib), (128 * gib, 0, 32 * gib),
+            (44 * gib, 20 * gib, 20 * gib), (44 * gib, 64 * gib, 22 * gib),
+            (128 * gib, 48 * gib, 48 * gib),
+        ):
+            result = check_snapshot_budget(log(capacity), available, requested, 1)
+            self.assertEqual(result["capacity_bytes"], capacity)
+        for output, available, requested in (
+            (log(32 * gib), 44 * gib, 0),  # A fixed cap can exceed host headroom.
+            (log(64 * gib), 44 * gib, 64 * gib),  # Overrides cannot bypass it.
+            (log(48 * gib), 128 * gib, 0), (log(21 * gib), 44 * gib, 20 * gib),
+            (log(0), 44 * gib, 0), (log(20 * gib, sessions=4), 44 * gib, 0),
+            (log(20 * gib, entries=8), 44 * gib, 0), ("", 44 * gib, 0),
+            (log(20 * gib) * 2, 44 * gib, 0),
+        ):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                check_snapshot_budget(output, available, requested, 1)
 
     def run_cache_rotation(self, lost=False, contaminated=False):
         requests, checks, previous = [], {}, {}

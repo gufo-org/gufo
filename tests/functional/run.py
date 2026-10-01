@@ -357,9 +357,16 @@ def main():
         ]
     ready_to_restore = []
     try:
+        if "cache-rotation" in selected:
+            from cache_rotation import check_snapshot_budget, host_available_bytes
+            available_before_load = host_available_bytes(Path("/proc/meminfo").read_text())
         startup_started = time.monotonic()
         with server(command, output / "server.log", args.startup_timeout):
             report["startup_ms"] = (time.monotonic() - startup_started) * 1000
+            if "cache-rotation" in selected:
+                report["snapshot_budget"] = check_snapshot_budget(
+                    (output / "server.log").read_text(), available_before_load,
+                    int(option(command, "--cache-ram-bytes", "0")), sessions)
             for suite in selected:
                 if suite == "cache":
                     continue
