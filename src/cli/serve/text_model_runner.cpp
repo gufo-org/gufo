@@ -575,8 +575,16 @@ struct TextRunnerPool::Request::Impl {
         context && !std::ranges::equal(context->CacheIdentity(prefill_offset),
                                        context->CacheIdentity(count));
     if (retain_fallback && lease.cache_hit() && prefill_offset <= count &&
-        !new_images)
+        !new_images) {
+      // Freezing the reused frontier must not cost this turn its own stable
+      // boundary. A client that rewrites the assistant turn, as one dropping
+      // reasoning does, diverges after that boundary, so retaining only the
+      // frontier pins every later turn to the same early position and the
+      // re-prefilled tail grows for the rest of the conversation.
+      if (prefill_offset < count)
+        stable_prefix_position = count;
       count = prefill_offset;
+    }
     if (lease.restored_from_disk() && prefill_offset == prompt.size())
       count = prompt.size();
     snapshot_tokens.reserve(prompt.size());
@@ -645,7 +653,17 @@ struct TextRunnerPool::Request::Impl {
       prompt_snapshot.reset();
       retain_snapshot = false;
       fallback_position = snapshot_tokens.size();
-      snapshot_tokens = prompt;
+      // Take this turn's stable boundary next, before the complete prompt.
+      // The boundary is a prefix of whatever the client sends next, while the
+      // complete prompt ends in assistant framing the client may rewrite.
+      if (stable_prefix_position > snapshot_tokens.size() &&
+          stable_prefix_position < prompt.size()) {
+        snapshot_tokens.assign(prompt.begin(),
+                               prompt.begin() + stable_prefix_position);
+        stable_prefix_position = 0;
+      } else {
+        snapshot_tokens = prompt;
+      }
       prompt_snapshot_attempted = false;
     }
   }
@@ -897,6 +915,10 @@ struct TextRunnerPool::Request::Impl {
   std::shared_ptr<const TextPromptContext> context;
   bool retain_fallback{false};
   std::size_t fallback_position{0};
+  /// This turn's stable boundary when the reused frontier sits before it, so
+  /// the boundary is checkpointed after the frozen fallback instead of being
+  /// skipped. Zero once taken, or when the two positions coincide.
+  std::size_t stable_prefix_position{0};
   [[nodiscard]] std::span<const std::uint8_t> InputIdentity(
       std::size_t token_count) const {
     return context ? context->CacheIdentity(token_count)

@@ -950,7 +950,7 @@ void TestStableChatPrefixSurvivesInterruptedFraming() {
   next.Invalidate();
 }
 
-void TestWarmChatCheckpointsDoNotSplitPrefill() {
+void TestWarmChatCheckpointsStopAtTheStableBoundary() {
   auto stats = std::make_shared<FakeStats>();
   TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
   Expect(pool.capacity() == 1 && stats->states_created == 1,
@@ -968,9 +968,15 @@ void TestWarmChatCheckpointsDoNotSplitPrefill() {
   Expect(continuation.cached_prompt_tokens() == 6 &&
              continuation.cache_restore_bytes() == 0,
          "retained reasoning reuses generated tokens without a restore");
+  // The warm turn stops once at its own stable boundary so that boundary is
+  // checkpointed. Without that stop the conversation keeps falling back to
+  // this turn's frontier for every later turn that rewrites the assistant.
   const auto step = continuation.Prefill(64);
-  Expect(step.consumed_tokens == 3 && step.decode_ready,
-         "warm prefill processes user and assistant framing in one pass");
+  Expect(step.consumed_tokens == 1 && !step.decode_ready,
+         "warm prefill stops at the stable boundary before assistant framing");
+  const auto framing = continuation.Prefill(64);
+  Expect(framing.consumed_tokens == 2 && framing.decode_ready,
+         "assistant framing completes in the following pass");
   const auto second = continuation.SelectNext().token;
   continuation.Advance();
   continuation.Commit();
@@ -987,10 +993,13 @@ void TestWarmChatCheckpointsDoNotSplitPrefill() {
   // Empty reasoning changes 40,41 into 50,51 in the replayed assistant.
   auto dropped = pool.Acquire({1, 2, 3, 40, 41, first, 7, 50, 51, 8, 40, 41},
                               {}, {}, {}, true, 10);
-  Expect(dropped.cached_prompt_tokens() == 6,
-         "the exact retry did not replace the earlier branching fallback");
+  Expect(dropped.cached_prompt_tokens() == 7,
+         "omitted reasoning resumes from the previous turn's stable boundary "
+         "rather than the frontier before it");
+  Expect(!dropped.Prefill(64).decode_ready,
+         "the rewritten turn stops at its own boundary in turn");
   Expect(dropped.Prefill(64).decode_ready,
-         "omitted reasoning prefills only the remaining suffix, in one pass");
+         "omitted reasoning prefills the remaining suffix");
   dropped.Cancel();
 }
 
@@ -1097,6 +1106,61 @@ void TestHistoryEditsRestoreIntermediateCheckpoints() {
   Expect(short_edit.cached_prompt_tokens() == 6144,
          "skipping a redundant warm checkpoint retains earlier edit recovery");
   short_edit.Invalidate();
+}
+
+/// A client that rewrites the assistant turn, as one that drops reasoning
+/// does, diverges after the previous turn's stable boundary. Each warm turn
+/// must therefore checkpoint its own boundary: if only the reused frontier is
+/// retained, every later turn falls back to the same early position and the
+/// re-prefilled tail grows for the rest of the conversation.
+void TestWarmHitAdvancesTheStableCheckpoint() {
+  auto stats = std::make_shared<FakeStats>();
+  TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
+
+  // Cold turn. The stable boundary is 3; 40,41 is the assistant framing.
+  auto first = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  Expect(!first.Prefill(64).decode_ready, "cold chat stops at its boundary");
+  Expect(first.Prefill(64).decode_ready, "cold chat completes its suffix");
+  const auto reply = first.SelectNext().token;
+  first.Advance();
+  first.Commit();
+
+  // Warm turn replaying the assistant verbatim, then a new user turn. Its
+  // stable boundary is 7, past the frontier of 6 that it reuses.
+  auto second =
+      pool.Acquire({1, 2, 3, 40, 41, reply, 7, 40, 41}, {}, {}, {}, true, 7);
+  Expect(second.cached_prompt_tokens() == 6,
+         "the warm turn resumes from the generated frontier");
+  Expect(!second.Prefill(64).decode_ready,
+         "the warm turn stops to checkpoint its stable boundary");
+  Expect(second.Prefill(64).decode_ready, "the warm turn prefills its suffix");
+  second.SelectNext();
+  second.Advance();
+  second.Commit();
+
+  // The client now drops the reasoning from that assistant turn, so 40,41
+  // becomes 50,51 and the prompt diverges at token 7 -- exactly the previous
+  // turn's stable boundary.
+  auto third = pool.Acquire({1, 2, 3, 40, 41, reply, 7, 50, 51, 8, 40, 41}, {},
+                            {}, {}, true, 10);
+  Expect(third.cached_prompt_tokens() == 7,
+         "a warm turn checkpoints its own stable boundary, not only the "
+         "frontier it reused");
+  Expect(!third.Prefill(64).decode_ready,
+         "the rewritten turn stops at its own boundary in turn");
+  Expect(third.Prefill(64).decode_ready, "the rewritten turn prefills");
+  third.SelectNext();
+  third.Advance();
+  third.Commit();
+
+  // Dropping reasoning again must keep advancing rather than falling back to
+  // the original frontier for a third time.
+  auto fourth =
+      pool.Acquire({1, 2, 3, 40, 41, reply, 7, 50, 51, 8, 60, 61, 11, 40, 41},
+                   {}, {}, {}, true, 13);
+  Expect(fourth.cached_prompt_tokens() == 10,
+         "successive rewritten turns resume from the latest boundary");
+  fourth.Cancel();
 }
 
 void TestChatFallbackSurvivesSnapshotBudgetPressure() {
@@ -1217,8 +1281,10 @@ void TestNewImageGetsAStableCheckpoint() {
                                  {}, image, true, 9);
     Expect(followup.cached_prompt_tokens() == 7,
            "rewritten assistant framing does not reprocess the earlier image");
+    Expect(!followup.Prefill(64).decode_ready,
+           "the warm turn stops to checkpoint its own stable boundary");
     Expect(followup.Prefill(64).decode_ready,
-           "unchanged images keep the single-pass warm prefill path");
+           "assistant framing completes after the boundary is saved");
     followup.Commit();
   }
 }
@@ -1484,7 +1550,8 @@ int main() {
   TestCancellationRetainsOnlyCompletedWork();
   TestPromptReuseCanBeDisabledPerRequest();
   TestStableChatPrefixSurvivesInterruptedFraming();
-  TestWarmChatCheckpointsDoNotSplitPrefill();
+  TestWarmChatCheckpointsStopAtTheStableBoundary();
+  TestWarmHitAdvancesTheStableCheckpoint();
   TestHistoryEditsRestoreIntermediateCheckpoints();
   TestChatFallbackSurvivesSnapshotBudgetPressure();
   TestFullChatCheckpointRestoresWithoutSuffixPrefill();
