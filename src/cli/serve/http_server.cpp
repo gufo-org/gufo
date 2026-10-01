@@ -635,6 +635,13 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     if (backend->max_context() > 0)
       model["context_length"] =
           static_cast<std::size_t>(backend->max_context());
+    json::Value input_modalities = json::Value::array();
+    input_modalities.push_back("text");
+    if (backend->supports_images())
+      input_modalities.push_back("image");
+    json::Value architecture = json::Value::object();
+    architecture["input_modalities"] = std::move(input_modalities);
+    model["architecture"] = std::move(architecture);
     data.push_back(std::move(model));
   }
   if (video_jobs != nullptr && video_jobs->ready()) {

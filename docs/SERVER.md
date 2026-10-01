@@ -740,9 +740,12 @@ Verify with `tests/functional/openai_sdk.py --suite tools`,
 
 `GET /v1/models` lists the configured text model and ready audio/video
 services. Entries provide `id`, `object`, `created` and `owned_by`; the text
-entry also provides `context_length`, while audio/video entries describe their
-capability. Send the returned model ID in requests. Text requests naming another
-model return 404.
+entry also provides `context_length` and `architecture.input_modalities`: `["text"]`
+for text-only serving or `["text", "image"]` when a vision encoder is loaded.
+Image support reflects the loaded projector, not the model name; launching a
+vision-capable model without its projector advertises text only. Audio/video
+entries describe their capability. Send the returned model ID in requests.
+Text requests naming another model return 404.
 
 ## Errors
 

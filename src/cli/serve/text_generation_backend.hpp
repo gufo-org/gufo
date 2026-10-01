@@ -241,6 +241,8 @@ public:
   /// Maximum tokens accepted by the loaded model under the configured context.
   /// Zero when no text model is loaded.
   [[nodiscard]] virtual std::uint32_t max_context() const { return 0; }
+  /// Whether the loaded backend accepts image inputs in chat requests.
+  [[nodiscard]] virtual bool supports_images() const { return false; }
   [[nodiscard]] virtual SamplingDefaults sampling_defaults() const {
     return {};
   }
