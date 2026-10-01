@@ -473,6 +473,85 @@ void TestEntryReplacementLogsRemovedSnapshot() {
          "entry replacement keeps exact aggregate accounting");
 }
 
+void TestEditedTailReplacementPreservesSharedCheckpoints() {
+  std::vector<std::size_t> invalidations(1);
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {
+          .restore = [](gufo::server::ContinuationState&,
+                        const gufo::server::ContinuationSnapshot&) {},
+          .capacity_bytes = [] { return 64; },
+          .on_event = {},
+      },
+      3);
+  for (const std::vector<gufo::server::ContinuationToken>& prompt :
+       {std::vector<gufo::server::ContinuationToken>{1}, {1, 2}, {1, 2, 3}}) {
+    auto lease = cache.Acquire(prompt);
+    Expect(lease.TryReserveSnapshot(8, prompt.size()),
+           "shared prefix and original tail fit the byte budget");
+    lease.Commit(prompt, std::make_unique<FakeSnapshot>(prompt.size(), 8));
+  }
+  {
+    auto edited =
+        cache.Acquire(std::vector<gufo::server::ContinuationToken>{1, 2, 9});
+    Expect(edited.cached_tokens() == 2, "edited tail reuses the shared prefix");
+    Expect(edited.TryReserveSnapshot(8, 3), "new tail fits the byte budget");
+    edited.Commit({1, 2, 9}, std::make_unique<FakeSnapshot>(3, 8));
+  }
+  auto earlier =
+      cache.Acquire(std::vector<gufo::server::ContinuationToken>{1, 8});
+  Expect(earlier.cached_tokens() == 1,
+         "entry pressure replaces the incompatible tail, not the older prefix");
+  earlier.Invalidate();
+  Expect(cache.retained_snapshot_bytes() == 24,
+         "tail replacement preserves exact byte accounting");
+}
+
+void TestReplacedSourceDoesNotEvictAnotherBranchTail() {
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {
+          .restore = [](gufo::server::ContinuationState&,
+                        const gufo::server::ContinuationSnapshot&) {},
+          .capacity_bytes = [] { return 64; },
+          .on_event = {},
+      },
+      3);
+  const auto save = [&](std::vector<gufo::server::ContinuationToken> prompt) {
+    auto lease = cache.Acquire(prompt);
+    Expect(lease.TryReserveSnapshot(8, prompt.size()),
+           "snapshot fits byte budget");
+    lease.Commit(prompt, std::make_unique<FakeSnapshot>(prompt.size(), 8));
+  };
+  save({1});
+  save({8});
+  save({8, 2});
+
+  auto pending =
+      cache.Acquire(std::vector<gufo::server::ContinuationToken>{1, 3});
+  Expect(pending.cached_tokens() == 1, "pending branch reuses its own root");
+  // Another execution slot makes the pending request's source the oldest
+  // entry, then replaces it. The lease still has the original model state.
+  for (const std::vector<gufo::server::ContinuationToken>& prompt :
+       {std::vector<gufo::server::ContinuationToken>{8}, {8, 2}}) {
+    auto touch = cache.Acquire(prompt);
+    touch.Commit({});
+  }
+  save({7});
+  save({7, 5});
+  Expect(pending.TryReserveSnapshot(8, 2),
+         "pending branch can retain its tail");
+  pending.Commit({1, 3}, std::make_unique<FakeSnapshot>(2, 8));
+
+  auto other =
+      cache.Acquire(std::vector<gufo::server::ContinuationToken>{7, 5, 6});
+  Expect(other.cached_tokens() == 2,
+         "a replaced source index cannot identify another conversation's tail");
+  other.Invalidate();
+}
+
 // The summarised cache lines stay at INFO/WARN; which candidate was rejected,
 // and by which guard, is only worth the bytes when the operator asked for it.
 void TestCacheCandidateDetailIsDebugTierOnly() {
@@ -701,6 +780,8 @@ int main() {
   TestAbandonedReservationIsReleased();
   TestReservationMismatchSkipsRetentionWithoutFailingCommit();
   TestEntryReplacementLogsRemovedSnapshot();
+  TestEditedTailReplacementPreservesSharedCheckpoints();
+  TestReplacedSourceDoesNotEvictAnotherBranchTail();
   TestCacheCandidateDetailIsDebugTierOnly();
   TestWaitingAcquireReportsCandidateSkips();
   std::cout << "All continuation cache tests passed\n";

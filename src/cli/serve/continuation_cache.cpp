@@ -784,6 +784,31 @@ std::size_t ContinuationCache::Commit(
           }
         }
         if (target == no_entry) {
+          // An edited branch can replace its old, incompatible tail before
+          // evicting checkpoints of the shared prefix. This keeps a new stable
+          // boundary and complete prompt within the same bounded entry pool.
+          if (source_index < impl_->entries.size()) {
+            const auto& source = *impl_->entries[source_index];
+            std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
+            for (std::size_t candidate = 0; candidate < impl_->entries.size();
+                 ++candidate) {
+              const auto& entry = *impl_->entries[candidate];
+              if (!source.valid || source.tokens.empty() ||
+                  !IsPrefix(source.tokens, tokens) || !entry.valid ||
+                  candidate == source_index ||
+                  entry.input_identity != input_identity ||
+                  entry.tokens.size() <= source.tokens.size() ||
+                  IsPrefix(entry.tokens, tokens) ||
+                  !IsPrefix(source.tokens, entry.tokens))
+                continue;
+              if (entry.snapshot_last_used < oldest) {
+                target = candidate;
+                oldest = entry.snapshot_last_used;
+              }
+            }
+          }
+        }
+        if (target == no_entry) {
           std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
           for (std::size_t candidate = 0; candidate < impl_->entries.size();
                ++candidate) {

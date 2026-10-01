@@ -66,6 +66,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `metrics` | Live Prometheus counters, uncached work, endpoint totals, queueing and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart |
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
+| `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, and compare with uncached responses |
 
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
 the server command. Projectors can load automatically beside the weights, so
@@ -119,6 +120,17 @@ reuse threshold does not prescribe exact checkpoint spacing.
 The rewind case models Pi-style branching: keep the conversation before an
 older user message, edit that message, and remove every later turn. It checks
 the server request, not Pi's interface or optional branch summaries.
+
+`cache-growth` runs four turns per conversation, with reasoning omitted,
+reasoning replayed, and thinking disabled. Reuse must reach the previous
+turn's prompt except for at most 16 assistant-opening tokens. An unchanged
+retry must reuse the full prompt and reproduce its exact output and token count.
+Visible answers, tool calls, finish reasons and reasoning presence are compared
+with uncached runs after measuring the whole conversation, so the controls cannot
+hide a cache that stopped advancing. Run it with `--suite cache-growth`; no disk cache
+is needed. Request timings and responses are retained even when reuse fails.
+Free-form reasoning text may differ between different prefill chunk shapes;
+the uncached controls do not require identical reasoning text or length.
 
 Every request checks its applicable response format, expected output and timings.
 Missing measurements fail. `comparison.json` reports per-request prefill, decode,

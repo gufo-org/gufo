@@ -565,8 +565,8 @@ struct TextRunnerPool::Request::Impl {
         context(std::move(prompt_context)),
         retain_fallback(cache_prefix_tokens != 0) {
     // On a warm continuation the reused frontier is already a safe fallback.
-    // Freeze it before prefill, then process the entire new suffix together.
-    // Cold requests still checkpoint before mutable assistant framing.
+    // Freeze it before prefill, then retain this turn's own stable boundary
+    // before mutable assistant framing.
     auto count = cache_prefix_tokens == 0 ? prompt.size() : cache_prefix_tokens;
     // A newly consumed image needs its own stable checkpoint. Otherwise the
     // next assistant turn can invalidate the complete prompt's framing and
@@ -613,6 +613,7 @@ struct TextRunnerPool::Request::Impl {
         if (position > prefill_offset &&
             position - prefill_offset >= interval &&
             position != snapshot_tokens.size() &&
+            position != stable_prefix_position &&
             !lease.HasSnapshotFor(
                 std::span<const TextRunnerToken>(prompt).first(position)))
           checkpoints.push_back(position);
@@ -643,8 +644,9 @@ struct TextRunnerPool::Request::Impl {
       // Admission may refuse it without discarding the fallback.
       if (prompt_snapshot && retain_snapshot) {
         try {
-          snapshot_metrics.snapshot_bytes += lease.PublishSnapshot(
-              snapshot_tokens, std::move(prompt_snapshot));
+          snapshot_metrics.snapshot_bytes +=
+              lease.PublishSnapshot(snapshot_tokens, std::move(prompt_snapshot),
+                                    fallback_position != 0);
         } catch (...) {
           lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure,
                              snapshot_bytes, snapshot_tokens.size());

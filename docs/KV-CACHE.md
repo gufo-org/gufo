@@ -161,6 +161,12 @@ byte admission and global eviction also determine how much history remains
 resumable. Workloads with more retained histories than entries can still lose
 reuse under round-robin traffic. See #341.
 
+When entries are full, an edited branch prefers replacing an incompatible
+checkpoint after its reused prefix over evicting an earlier shared checkpoint.
+Other entry eviction and byte-budget admission still use age order. Saving a
+warm turn's newer boundary also preserves its original resume point during
+admission, so optional copies cannot immediately displace that fallback.
+
 The limit is reported at startup:
 
 ```text
@@ -244,8 +250,11 @@ Anything that changes the token prefix. In practice:
   checkpoints after it. Appending a new one does not.
 - **Reasoning the client cannot replay** — thinking is on by default for Qwen
   and `reasoning_content` is not part of the OpenAI schema, so an ordinary
-  client omits it when sending the conversation back. The retained checkpoint
-  then stops advancing for the rest of the session **(measured)**. See #335.
+  client omits it when sending the conversation back. Gufo retains each turn's
+  boundary before the assistant opening, so the next turn can reuse the prior
+  history and process the rewritten assistant plus new input. That boundary
+  must be saved on warm hits too; retaining only the old resume point caused
+  cache reuse to stop advancing for the rest of the session. See #335.
 
 These do **not** invalidate reuse **(measured)**: changing `temperature`,
 `top_p`, `seed`, `max_tokens`, penalties or `stop` between turns; streaming

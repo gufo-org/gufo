@@ -24,6 +24,7 @@ from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
+from cache_growth import check_cache_growth
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
@@ -184,6 +185,59 @@ class FunctionalRunnerTest(unittest.TestCase):
                     "index": 0, "endpoint": endpoint, "request_id": "r1",
                     "output_sha256": "probe", "wall_ms": 1, "metrics": {}}]}))
                 join_server_timings(root)
+
+    def run_cache_growth(self, pinned=False, missing_reasoning=False):
+        requests, checks, previous = [], {}, {}
+
+        def chat_result(client, body):
+            # Model-independent checks of request ordering and failure reporting.
+            requests.append(json.loads(json.dumps(body)))
+            label = body["messages"][0]["content"].splitlines()[0]
+            total = 3000 + (len(body["messages"]) - 2) * 100
+            last = previous.get(label, 0)
+            if body["extra_body"].get("cache_prompt") is False:
+                cached = 0
+            elif total == last:
+                cached = total
+            else:
+                cached = 2995 if pinned and "drop_reasoning" in label else last - 5
+            previous[label] = total
+            return {"text": "BETA", "reasoning": "The code word is BETA."
+                    if body["reasoning_effort"] == "low" and not missing_reasoning else "",
+                    "tools": [], "finish": "stop", "usage": {
+                        "prompt_tokens": total, "cached_tokens": cached,
+                        "completion_tokens": 8,
+                        "gufo": {"prefill_tokens": total - cached}}}
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_cache_growth(None, "fixture", checks, chat_result)
+        return requests, checks
+
+    def test_cache_growth_uses_real_replay_shapes_and_delays_cold_controls(self):
+        requests, checks = self.run_cache_growth()
+        self.assertEqual(len(checks), 27)
+        for offset, replay in enumerate(("drop_reasoning", "keep_reasoning", "thinking_off")):
+            history = requests[offset * 9:(offset + 1) * 9]
+            self.assertEqual([len(body["messages"]) for body in history[:4]], [2, 4, 6, 8])
+            self.assertIs(history[0]["extra_body"]["cache_prompt"], False)
+            self.assertTrue(all("cache_prompt" not in body["extra_body"]
+                                for body in history[1:5]))
+            self.assertTrue(all(body["extra_body"]["cache_prompt"] is False
+                                for body in history[5:]))
+            self.assertEqual(history[4]["messages"], history[3]["messages"])
+            for warm, cold in zip(history[:4], history[5:]):
+                self.assertEqual(warm["messages"], cold["messages"])
+            for message in history[3]["messages"]:
+                if message["role"] == "assistant":
+                    self.assertEqual("reasoning_content" in message, replay == "keep_reasoning")
+
+    def test_cache_growth_rejects_a_frozen_checkpoint(self):
+        with self.assertRaisesRegex(AssertionError, "cache did not advance"):
+            self.run_cache_growth(pinned=True)
+
+    def test_cache_growth_requires_actual_reasoning(self):
+        with self.assertRaises(AssertionError):
+            self.run_cache_growth(missing_reasoning=True)
 
     def test_prompt_progress_contract_and_output_order(self):
         def event(processed, elapsed=0):

@@ -31,6 +31,7 @@ from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_hist
                         check_untyped_agent_tools, check_mixed_tool_schemas,
                         check_tool_schema_edges)
 from cache_edits import check_cache_edits
+from cache_growth import check_cache_growth
 
 
 class CompletionStreamChoice(CompletionChoice):
@@ -2333,7 +2334,7 @@ def check_server_metrics(client, model, checks, width):
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
               "tool-reasoning",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-              "long-context", "state-edges", "progress", "metrics", "cache-edits")
+              "long-context", "state-edges", "progress", "metrics", "cache-edits", "cache-growth")
 
 
 def main():
@@ -2446,6 +2447,7 @@ def main():
                 args.allow_missing_progress),
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency),
             "cache-edits": lambda: check_cache_edits(client, args.model, checks, chat_result),
+            "cache-growth": lambda: check_cache_growth(client, args.model, checks, chat_result),
         }
         selected = ([name for name in suites if name != "image-inputs" or args.vision]
                     if args.suite == "all" else

@@ -1106,6 +1106,28 @@ void TestHistoryEditsRestoreIntermediateCheckpoints() {
   Expect(short_edit.cached_prompt_tokens() == 6144,
          "skipping a redundant warm checkpoint retains earlier edit recovery");
   short_edit.Invalidate();
+
+  auto aligned_stats = std::make_shared<FakeStats>();
+  TextRunnerPool aligned_pool(
+      std::make_shared<LongSnapshotRunner>(aligned_stats, 64, 256, 4096), 1);
+  auto aligned_root =
+      aligned_pool.Acquire(std::vector<TextRunnerToken>(1000, 1));
+  (void)aligned_root.Prefill(32768);
+  aligned_root.Commit();
+  std::vector<TextRunnerToken> aligned_prompt(5000, 1);
+  auto aligned = aligned_pool.Acquire(aligned_prompt, {}, {}, {}, true, 4096);
+  while (!aligned.prefill_complete())
+    (void)aligned.Prefill(32768);
+  aligned.Commit();
+  Expect(aligned_stats->snapshot_captures == 3,
+         "a nearby grid point is skipped and the stable boundary is captured "
+         "only once");
+  aligned_prompt[4096] = 2;
+  auto aligned_next =
+      aligned_pool.Acquire(aligned_prompt, {}, {}, {}, true, 4096);
+  Expect(aligned_next.cached_prompt_tokens() == 4096,
+         "an aligned stable boundary remains reusable after assistant changes");
+  aligned_next.Invalidate();
 }
 
 /// A client that rewrites the assistant turn, as one that drops reasoning
@@ -1134,7 +1156,7 @@ void TestWarmHitAdvancesTheStableCheckpoint() {
   Expect(!second.Prefill(64).decode_ready,
          "the warm turn stops to checkpoint its stable boundary");
   Expect(second.Prefill(64).decode_ready, "the warm turn prefills its suffix");
-  second.SelectNext();
+  (void)second.SelectNext();
   second.Advance();
   second.Commit();
 
@@ -1149,7 +1171,7 @@ void TestWarmHitAdvancesTheStableCheckpoint() {
   Expect(!third.Prefill(64).decode_ready,
          "the rewritten turn stops at its own boundary in turn");
   Expect(third.Prefill(64).decode_ready, "the rewritten turn prefills");
-  third.SelectNext();
+  (void)third.SelectNext();
   third.Advance();
   third.Commit();
 
