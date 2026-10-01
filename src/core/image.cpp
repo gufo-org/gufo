@@ -4,8 +4,8 @@
 #include <jpeglib.h>
 #include <netinet/in.h>
 #include <png.h>
-#include <webp/decode.h>
 #include <sys/socket.h>
+#include <webp/decode.h>
 
 #include <algorithm>
 #include <array>
@@ -370,7 +370,8 @@ Image DecodeWebp(std::span<const std::uint8_t> bytes) {
   ValidateDimensions(static_cast<std::uint32_t>(width),
                      static_cast<std::uint32_t>(height));
   Image image{static_cast<std::uint32_t>(width),
-              static_cast<std::uint32_t>(height), {}};
+              static_cast<std::uint32_t>(height),
+              {}};
   image.pixels.resize(std::size_t{image.width} * image.height * 3);
   if (WebPDecodeRGBInto(bytes.data(), bytes.size(), image.pixels.data(),
                         image.pixels.size(),

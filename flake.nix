@@ -288,6 +288,7 @@
               pkgsSys.clang-tools
               pkgsSys.cmake
               pkgsSys.ninja
+              pkgsSys.pkg-config
               pkgsSys.python3
               pkgsSys.findutils
               pkgsSys.icu
@@ -404,6 +405,7 @@
               pkgsSys.ccache
               pkgsSys.cmake
               pkgsSys.ninja
+              pkgsSys.pkg-config
               (if full then pkgsSys.python3.withPackages (ps: [ ps.numpy ]) else pkgsSys.python3)
               pkgsSys.icu
               pkgsSys.curl
