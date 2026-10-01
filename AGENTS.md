@@ -49,6 +49,8 @@ is not a quality pass. Broaden checks when shared behavior changes or failures
 expose risk.
 
 Text API functional/regression tests live in [tests/functional/](tests/functional/README.md).
+For shared text changes, run affected suites in both AR and speculative modes
+for the four target profiles listed there; verify loaded mode and actual drafts.
 Compare clean main with the rebased PR using identical production toolchains,
 settings and cache history. Include `long-context` and `cache` for continuation
 changes. Correctness and expected prefill/cache work are strict; timings are

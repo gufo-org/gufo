@@ -1522,6 +1522,103 @@ def check_tool_edges(client, model, checks):
         checks[f"responses_literal_cr_key{key!r}"] = result.to_dict()
 
 
+def check_state_edges(client, model, checks, speculative, vision=False):
+    """Mode proof and request-local grammar state across limits, errors and reuse."""
+    common = dict(model=model, temperature=0, top_p=1, seed=91,
+                  extra_body={"presence_penalty": 0, "frequency_penalty": 0,
+                              "repeat_penalty": 1, "top_k": 0, "min_p": 0,
+                              "chat_template_kwargs": {"enable_thinking": False}})
+    probe = chat_result(client, {
+        **common, "messages": [{"role": "user", "content":
+        "Count from one to one hundred, separated by commas. Start with 1."}],
+        "max_completion_tokens": 32}, True)
+    assert probe["usage"]["completion_tokens"] == 32 and probe["finish"] == "length", probe
+    proposed = probe["usage"]["draft_tokens"]
+    assert (proposed == 0 if speculative == "off" else proposed > 0), (speculative, probe)
+    checks["execution_mode_probe"] = probe
+
+    empty = {"name": "ping", "strict": True}  # Omitted parameters means no arguments.
+    tiny = chat_result(client, {
+        **common, "messages": [{"role": "user", "content": "Call ping."}],
+        "tools": [{"type": "function", "function": empty}], "tool_choice": "required",
+        "max_completion_tokens": 1, "reasoning_effort": "low",
+        "extra_body": {**common["extra_body"],
+                       "chat_template_kwargs": {"enable_thinking": True}}}, True)
+    assert tiny["finish"] == "length" and not tiny["tools"], tiny
+    checks["thinking_tool_one_token"] = tiny
+
+    options = {key: value for key, value in common.items() if key != "seed"}
+    options["extra_body"] = {key: value for key, value in common["extra_body"].items()
+                             if key != "chat_template_kwargs"}
+    options["extra_body"]["seed"] = common["seed"]
+    options.update(reasoning={"effort": "none"}, store=False, max_output_tokens=96)
+    with client.responses.stream(**{
+            **options, "input": "Call ping.", "tools": [{"type": "function", **empty}],
+            "tool_choice": {"type": "function", "name": "ping"}}) as events:
+        list(events)
+        result = events.get_final_response()
+    calls = [item for item in result.output if item.type == "function_call"]
+    assert result.status == "completed" and len(calls) == 1
+    assert calls[0].name == "ping" and json.loads(calls[0].arguments) == {}, result
+    checks["zero_argument_tool_after_limit"] = result.to_dict()
+
+    def function(value):
+        return {"name": "record", "strict": True, "parameters": {
+            "type": "object", "properties": {
+                "payload": {"type": "object", "properties": {
+                    "id": {"type": "string"}, "call_id": {"type": "string"}},
+                    "required": ["id", "call_id"], "additionalProperties": False,
+                    "enum": [{"id": value, "call_id": "literal"}]}},
+            "required": ["payload"], "additionalProperties": False}}
+
+    # The name and prompt are identical; only data inside the schema changes.
+    for value in ("alpha", "beta"):
+        with client.responses.stream(**{
+                **options, "input": "Call record with its required payload.",
+                "temperature": .7 if value == "beta" else 0,
+                "top_p": .8, "tools": [{"type": "function", **function(value)}],
+                "tool_choice": {"type": "function", "name": "record"}}) as events:
+            list(events)
+            result = events.get_final_response()
+        calls = [item for item in result.output if item.type == "function_call"]
+        assert result.status == "completed" and len(calls) == 1, result
+        assert json.loads(calls[0].arguments) == {
+            "payload": {"id": value, "call_id": "literal"}}, result
+        checks[f"schema_payload_{value}"] = result.to_dict()
+
+    content = "Call record with its required payload."
+    if vision:
+        content = [image_content("red"), {"type": "text", "text": content}]
+    request = {**common, "messages": [{"role": "user", "content": content}],
+               "tools": [{"type": "function", "function": function("alpha")}],
+               "tool_choice": {"type": "function", "function": {"name": "record"}},
+               "parallel_tool_calls": False, "max_completion_tokens": 96}
+    stopped = chat_result(client, {**request, "stop": "alpha"}, True)
+    assert stopped["finish"] == "stop" and not stopped["tools"], stopped
+    checks["tool_argument_stop"] = stopped
+
+    completed = chat_result(client, request, True)
+    assert completed["finish"] == "tool_calls" and len(completed["tools"]) == 1, completed
+    assert json.loads(completed["tools"][0]["function"]["arguments"]) == {
+        "payload": {"id": "alpha", "call_id": "literal"}}, completed
+    assert completed["usage"]["cached_tokens"] > 0, completed
+    checks["tool_argument_stop_retry"] = completed
+
+    invalid = {"name": "record", "strict": True, "parameters": {"$ref": "#"}}
+    try:
+        client.chat.completions.create(**{
+            **request, "tools": [{"type": "function", "function": invalid}]})
+    except openai.BadRequestError as error:
+        assert error.code == "invalid_tools", error
+        checks["cyclic_schema_rejected"] = {"status": 400, "code": error.code}
+    else:
+        raise AssertionError("nonproductive schema cycle was accepted")
+    replay = chat_result(client, request)
+    assert replay["tools"][0]["function"] == completed["tools"][0]["function"], replay
+    assert replay["usage"]["gufo"]["prefill_tokens"] == 0, replay
+    checks["schema_error_did_not_poison_cache"] = replay
+
+
 def check_auto_tools(client, model, checks, vision=False):
     """Automatic calls retain prose, loose schemas, replay and both transports."""
     from concurrent.futures import ThreadPoolExecutor
@@ -1958,7 +2055,7 @@ def check_responses(client, model, checks, options, async_local_only, expect_rea
 
 SDK_SUITES = ("responses", "stops", "conversation", "structured", "structured-limits",
               "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
-              "long-context")
+              "long-context", "state-edges")
 
 
 def main():
@@ -2030,6 +2127,8 @@ def main():
             "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
             "auto-tools": lambda: check_auto_tools(client, args.model, checks, args.vision),
             "tool-edges": lambda: check_tool_edges(client, args.model, checks),
+            "state-edges": lambda: check_state_edges(
+                client, args.model, checks, args.speculative, args.vision),
             "sampling-defaults": lambda: check_sampling_defaults(
                 client, args.model, checks, args.sampling_preset, args.sampling_overrides,
                 args.vision, args.server_thinking),

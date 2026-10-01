@@ -15,6 +15,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import signal
 import socket
 import struct
@@ -28,7 +29,7 @@ from metrics import compare, comparison_status, join_server_timings, timing_meas
 TESTS = Path(__file__).resolve().parent
 SUITES = ("responses", "stops", "conversation", "structured", "structured-limits",
           "tools", "auto-tools", "tool-edges", "sampling-defaults", "sampling-ranges", "batch",
-          "long-context", "cache")
+          "long-context", "state-edges", "cache")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -39,7 +40,7 @@ SAMPLING = {
     "--repeat-last-n": ("repeat_last_n", int),
 }
 COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides",
-                     "vision", "environment", "harness_sha256", "build_inputs_sha256")
+                     "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256")
 
 
 def provenance():
@@ -84,6 +85,34 @@ def write_json(path, value):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n")
     temporary.replace(path)
+
+
+def execution_coverage(directory, requested):
+    """Verify the loaded mode and actual draft work, including after restart."""
+    logs = [directory / "server.log"]
+    if (directory / "server-restarted.log").is_file():
+        logs.append(directory / "server-restarted.log")
+    for path in logs:
+        modes = [match.group(1) for line in path.read_text().splitlines()
+                 if "event=load_completed" in line and "kind=text" in line
+                 for match in [re.search(r"\bspeculative=(\w+)", line)] if match]
+        if modes != [requested]:
+            raise ValueError(f"{path.name}: requested {requested}, loaded modes {modes}")
+    proposed, accepted = 0, 0
+    for path in directory.glob("*.requests.json"):
+        for row in json.loads(path.read_text())["requests"]:
+            metrics = row.get("metrics", {})
+            if "draft_tokens" not in metrics and not metrics.get("completion_tokens"):
+                continue  # Rejected requests perform no model work.
+            p, a = metrics.get("draft_tokens"), metrics.get("draft_tokens_accepted")
+            if type(p) is not int or type(a) is not int or not 0 <= a <= p:
+                raise ValueError(f"{path.name}: missing/invalid speculative counters")
+            if requested == "off" and p:
+                raise ValueError(f"{path.name}: AR request executed speculative drafts")
+            proposed += p
+            accepted += a
+    return {"loaded_mode": requested, "draft_tokens": proposed,
+            "draft_tokens_accepted": accepted, "draft_execution_observed": proposed > 0}
 
 
 def compare_lifecycle(comparison, baseline, candidate):
@@ -252,7 +281,8 @@ def main():
               "binary": str(Path(command[0]).resolve()),
               "mode": "baseline" if args.record_baseline else "qualification",
               "sampling_preset": args.sampling_preset, "sampling_overrides": overrides,
-              "vision": vision, "suites": {}, "through_case": args.through_case,
+              "vision": vision, "speculative": speculative,
+              "suites": {}, "through_case": args.through_case,
               "started_ns": time.time_ns(), "status": "running"}
     report_path = output / "report.json"
     write_json(report_path, report)
@@ -355,6 +385,7 @@ def main():
                         else "failed")
     try:
         join_server_timings(output)
+        report["execution"] = execution_coverage(output, speculative)
     except (ValueError, OSError) as error:
         report.update(status="failed", measurements_error=str(error))
     report["functional_status"] = report["status"]

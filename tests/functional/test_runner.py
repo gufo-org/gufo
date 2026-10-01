@@ -17,10 +17,82 @@ spec = importlib.util.spec_from_file_location(
     "functional", ROOT / "tests/functional/run.py")
 functional = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(functional)
-from metrics import CaseComplete, Recorder, canonical, compare, join_server_timings, qualify, summarize
+from metrics import (CaseComplete, Recorder, canonical, compare, join_server_timings,
+                     qualify, summarize, validate_tool_events)
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_fingerprints_preserve_schema_payload_ids(self):
+        for key in ("schema", "parameters", "metadata", "arguments"):
+            self.assertNotEqual(canonical({key: {"id": "a", "call_id": "x"}}),
+                                canonical({key: {"id": "b", "call_id": "x"}}))
+        def request(value):
+            return {"tools": [{"type": "function", "function": {
+                "name": "f", "parameters": {"type": "object", "const": {"id": value}}}}]}
+        self.assertNotEqual(canonical(request("alpha")), canonical(request("beta")))
+        self.assertNotEqual(canonical({"id": "user-data-a"}), canonical({"id": "user-data-b"}))
+        def history(identifier):
+            return {"input": [
+                {"type": "function_call", "id": identifier + "-item", "call_id": identifier,
+                 "name": "f", "arguments": '{"id":"literal"}'},
+                {"type": "function_call_output", "call_id": identifier, "output": "ok"}]}
+        self.assertEqual(canonical(history("call_a")), canonical(history("call_b")))
+
+    def test_tool_event_arguments_and_identifiers_match_final_output(self):
+        added = {"type": "function_call", "id": "fc1", "call_id": "call1",
+                 "name": "f", "arguments": "", "status": "in_progress"}
+        done = {**added, "arguments": '{"id":"literal"}', "status": "completed"}
+        events = [
+            {"type": "response.output_item.added", "output_index": 0, "item": added},
+            {"type": "response.function_call_arguments.delta", "output_index": 0,
+             "item_id": "fc1", "delta": '{"id":'},
+            {"type": "response.function_call_arguments.delta", "output_index": 0,
+             "item_id": "fc1", "delta": '"literal"}'},
+            {"type": "response.function_call_arguments.done", "output_index": 0,
+             "item_id": "fc1", "name": "f", "arguments": done["arguments"]},
+            {"type": "response.output_item.done", "output_index": 0, "item": done}]
+        validate_tool_events(events, {"output": [done]})
+        validate_tool_events(events[:2], None)  # A cancelled stream may be partial.
+        for index, key, value in ((1, "delta", '{"id":"wrong"}'), (2, "item_id", "other"),
+                                   (3, "name", "wrong"), (4, "output_index", 1)):
+            corrupt = json.loads(json.dumps(events))
+            corrupt[index][key] = value
+            with self.assertRaises(ValueError):
+                validate_tool_events(corrupt, {"output": [done]})
+        with self.assertRaises(ValueError):
+            validate_tool_events(events, {"output": [{**done, "call_id": "other"}]})
+        with self.assertRaises(ValueError):
+            validate_tool_events(events, {"output": []})
+
+    def test_mode_coverage_checks_loader_restart_and_executed_drafts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "server.log"
+            records = root / "state-edges.requests.json"
+            def prepare(mode, proposed, accepted):
+                log.write_text(f"[loader] event=load_completed kind=text speculative={mode}\n")
+                records.write_text(json.dumps({"requests": [{"metrics": {
+                    "completion_tokens": 32, "draft_tokens": proposed,
+                    "draft_tokens_accepted": accepted}}]}))
+            prepare("off", 0, 0)
+            self.assertFalse(functional.execution_coverage(root, "off")["draft_execution_observed"])
+            for mode in ("dflash2", "mtp", "dspark"):
+                prepare(mode, 7, 4)
+                self.assertTrue(functional.execution_coverage(root, mode)["draft_execution_observed"])
+                with self.assertRaisesRegex(ValueError, "loaded modes"):
+                    functional.execution_coverage(root, "off")
+            prepare("off", 7, 4)
+            with self.assertRaisesRegex(ValueError, "AR request"):
+                functional.execution_coverage(root, "off")
+            prepare("mtp", 4, 7)
+            with self.assertRaisesRegex(ValueError, "counters"):
+                functional.execution_coverage(root, "mtp")
+            prepare("mtp", 7, 4)
+            (root / "server-restarted.log").write_text(
+                "[loader] event=load_completed kind=text speculative=off\n")
+            with self.assertRaisesRegex(ValueError, "server-restarted"):
+                functional.execution_coverage(root, "mtp")
+
     def test_each_endpoint_timing_location_and_split_usage_chunk(self):
         timing = {"prompt_n": 1, "prompt_ms": 2, "predicted_ms": 3,
                   "cache_restore_ms": 0, "cache_snapshot_ms": 0, "cache_disk_enqueue_ms": 0}
@@ -337,6 +409,7 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
                      patch.object(functional, "server", return_value=contextlib.nullcontext()), \
                      patch.object(functional, "provenance", return_value={}), \
                      patch.object(functional, "join_server_timings"), \
+                     patch.object(functional, "execution_coverage", return_value={}), \
                      contextlib.redirect_stdout(io.StringIO()):
                     code = functional.main()
                 return code, json.loads((root / name / "report.json").read_text())
@@ -381,6 +454,7 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
                      patch.object(functional, "server", return_value=contextlib.nullcontext()), \
                      patch.object(functional, "provenance", return_value={}), \
                      patch.object(functional, "join_server_timings"), \
+                     patch.object(functional, "execution_coverage", return_value={}), \
                      contextlib.redirect_stdout(io.StringIO()):
                     status = functional.main()
                 report = json.loads((root / "report/report.json").read_text())

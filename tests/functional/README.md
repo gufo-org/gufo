@@ -21,6 +21,22 @@ Use `deepseek4` for DeepSeek. Pass the model's normal speculative options for
 DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
 `--mmproj` enables image cases. Keep informational server logging enabled.
 
+Each invocation tests **one model and one mode**. For shared text changes, run
+the affected suites once per row/mode below; no full benchmark sweep is needed.
+
+| Target | `--speculative` modes | Sidecar option |
+| --- | --- | --- |
+| Qwen27B Q4_K_XL | `off`, `dflash2` | `--dflash-model` |
+| Qwen27B Q8_K_XL | `off`, `dflash2` | `--dflash-model` |
+| Flash-Next Q4_K_XL | `off`, `mtp` | `--mtp-model` |
+| DeepSeek Flash 0731 | `off`, `dspark` | `--dspark-model` |
+
+Keep the sidecar path in the `off` command to test the explicit override.
+`report.json` checks the loaded mode and records observed draft counts; `off`
+must perform zero drafts. `state-edges` requires actual draft execution when
+enabled, so a loaded-but-unused sidecar cannot qualify that mode. Use the normal
+draft limit for this suite. Audio and image/video generation have separate tests.
+
 | Suite | Checks |
 | --- | --- |
 | `responses` | SDK buffered, streaming and async Responses |
@@ -29,6 +45,7 @@ DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys and named Responses metadata |
+| `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops, image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |
 | `batch` | Independent requests across Chat, Responses and Completions; sessions 1–8 |

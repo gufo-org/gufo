@@ -19,18 +19,26 @@ class CaseComplete(BaseException):
 def canonical(value):
     """Ignore generated identifiers, never tool arguments or message text."""
     identifiers = {}
+    payloads = {"schema", "parameters", "parametersJsonSchema", "input_schema",
+                "arguments", "metadata", "tools", "const", "enum", "default", "examples"}
 
     def visit(item):
         if isinstance(item, list):
             return [visit(child) for child in item]
         if not isinstance(item, dict):
             return item
+        protocol = item.get("type") in (
+            "function", "function_call", "function_call_output",
+            "message", "reasoning", "item_reference") or item.get("role") in (
+                "assistant", "tool") or item.get("object") in (
+                    "response", "chat.completion", "chat.completion.chunk", "text_completion")
         result = {}
         for key, child in sorted(item.items()):
-            if key in ("id", "call_id", "tool_call_id", "previous_response_id") \
+            if (protocol and key in ("id", "call_id", "tool_call_id")
+                    or key == "previous_response_id") \
                     and isinstance(child, str):
                 child = identifiers.setdefault(child, f"identifier-{len(identifiers)}")
-            result[key] = visit(child)
+            result[key] = child if key in payloads else visit(child)
         return result
 
     return json.dumps(visit(value), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -38,6 +46,57 @@ def canonical(value):
 
 def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def validate_tool_events(events, output):
+    """A correct final response must not hide corrupted streamed arguments."""
+    items, completed = {}, {}
+    for event in events:
+        kind = event.get("type")
+        if kind == "response.output_item.added":
+            index, item = event.get("output_index"), event.get("item", {})
+            if type(index) is not int or index < 0 or index in items or not item.get("id"):
+                raise ValueError("invalid or duplicate Responses output item")
+            items[index] = {"item": item, "arguments": item.get("arguments", ""),
+                            "done": False}
+        elif kind in ("response.function_call_arguments.delta",
+                      "response.function_call_arguments.done"):
+            index = event.get("output_index")
+            row = items.get(index)
+            if (not row or row["item"].get("type") != "function_call"
+                    or event.get("item_id") != row["item"]["id"]
+                    or index in completed or row["done"]):
+                raise ValueError("tool argument event has no matching active item")
+            if kind.endswith(".delta"):
+                if not isinstance(event.get("delta"), str):
+                    raise ValueError("tool argument delta must be a string")
+                row["arguments"] += event["delta"]
+            else:
+                if event.get("arguments") != row["arguments"]:
+                    raise ValueError("streamed tool arguments differ from arguments.done")
+                if "name" in event and event["name"] != row["item"].get("name"):
+                    raise ValueError("tool argument event changed function name")
+                row["done"] = True
+        elif kind == "response.output_item.done":
+            index, item = event.get("output_index"), event.get("item", {})
+            row = items.get(index)
+            if not row or index in completed or any(
+                    item.get(key) != row["item"].get(key) for key in ("id", "type")):
+                raise ValueError("completed Responses item does not match its opener")
+            if item.get("type") == "function_call" and (
+                    not row["done"] or item.get("arguments") != row["arguments"]
+                    or any(item.get(key) != row["item"].get(key)
+                           for key in ("name", "call_id"))):
+                raise ValueError("completed tool item differs from its streamed arguments")
+            completed[index] = item
+    if output is not None:
+        for index, item in enumerate(output["output"]):
+            if item.get("type") == "function_call" and completed.get(index) != item:
+                raise ValueError("terminal tool call differs from its streamed item")
+        if any(item.get("type") == "function_call"
+               and (index >= len(output["output"]) or output["output"][index] != item)
+               for index, item in completed.items()):
+            raise ValueError("completed streamed tool call is missing from final output")
 
 
 def validate_response(events, endpoint, body, status, ended, usage, output, choices):
@@ -65,6 +124,7 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         for event in events:
             if event.get("type", "").endswith(".delta"):
                 require(isinstance(event.get("delta"), str), "delta must be a string")
+        validate_tool_events(events, output)
     for event in events:
         for choice in event.get("choices", []):
             require(type(choice.get("index")) is int, "choice.index must be an integer")
@@ -144,7 +204,10 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         definition = definitions[name]
         if definition.get("strict"):
             from jsonschema import Draft202012Validator, FormatChecker
-            Draft202012Validator(definition["parameters"],
+            schema = definition.get("parameters")
+            if schema is None:
+                schema = {"type": "object", "properties": {}, "additionalProperties": False}
+            Draft202012Validator(schema,
                                  format_checker=FormatChecker()).validate(arguments)
     # Validate complete structured answers independently from Gufo's grammar.
     specification = body.get("response_format", body.get("text", {}).get("format", {}))
@@ -239,6 +302,10 @@ def summarize(parts, streaming, ended, contract=None):
     measured = {key: value for key, value in usage.get("gufo", {}).items()
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
                 and math.isfinite(value)}
+    for field, alias in (("draft_tokens", "draft_n"),
+                         ("draft_tokens_accepted", "draft_n_accepted")):
+        if field in usage or alias in measured:
+            measured[field] = usage.get(field, measured.pop(alias, None))
     for key, alternatives in (
         ("prompt_tokens", ("prompt_tokens", "input_tokens")),
         ("completion_tokens", ("completion_tokens", "output_tokens")),
@@ -561,6 +628,13 @@ def join_server_timings(directory):
                     if not math.isfinite(value) or value < 0:
                         raise ValueError(f"invalid {field} in {log}")
                     measured.setdefault("server_" + field if field == "duration_ms" else field, value)
+            for field, alias in (("draft_proposed", "draft_tokens"),
+                                 ("draft_accepted", "draft_tokens_accepted")):
+                if field in fields:
+                    value = int(fields[field])
+                    if value < 0 or alias in measured and measured[alias] != value:
+                        raise ValueError(f"invalid/inconsistent {field} in {log}")
+                    measured[alias] = value
             if "server_duration_ms" not in measured:
                 raise ValueError(f"missing request duration in {log}")
             if row.get("output_sha256"):
