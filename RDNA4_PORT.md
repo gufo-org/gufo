@@ -117,9 +117,15 @@ A=1/B=lane→128+16(l%16)。四組一致。探針：/tmp/wmma_map*.hip。
       kernels（packed_format 限舊格式；fused 核對新格式未驗證，
       先走 proven unfused GEMV，效能債另案）。
 - [ ] fused SwiGLU/QKV kernels 的 IQ2_XS/Q2_K 審計＋啟用（效能）。
-- [ ] WKQuant-PreQuantized 路徑對非 native 格式的正確性（abstest 顯示
-      Q4_K/IQ2_XS 經此路輸出偏小；serve 不走此路故不擋上線；可能是
-      harness 誤用，需查明）。
+- [x] P1 結論（WKQuant-PreQuantized 之謎，2026-10-01）：standalone
+      harness 下 Q3_K/Q4_K/Q5_K/IQ2_XS 經 PreQuantized 全部輸出偏小
+      （r=0.67 但幅度差 300 倍）——但 serve（Q3_K_M）是好的。
+      判定：harness 測的是 serve 不走的死路（serve 小 batch 走
+      native small-batch／dequant+hipBLAS／GEMV，全部 proven）。
+      死路特徵：r 高（結構對）但幅度差百倍（疑似 Q8ActTile 在小
+      batch 下多數 tile 被標 dead）。不修（動它風險大於收益），
+      但開 speculative verification 前必須先修（verification chunk
+      走這條路）。
 - [ ] 全量 build → diagnose → Q3 serve 點火。
 - [ ] qfn W8A8（WmmaI8，3563）：同 Qwen quant 模式（a0/a1 雙 call＋
       dw＋scratch[tok][row] 雙 tile 寫回）。

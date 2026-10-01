@@ -405,6 +405,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       gemm_weight(layer.attn_qkv, arena_.d_scratch_bf16, arena_.d_normed,
                   arena_.d_ssm_qkv, ssm_qkv_size, hidden_size,
                   arena_.d_scratch_q8_act);
+
       gemm_weight(layer.attn_gate, arena_.d_scratch_bf16, arena_.d_normed,
                   arena_.d_ssm_gate, ssm_inner_size, hidden_size,
                   arena_.d_scratch_q8_act);
