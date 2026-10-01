@@ -630,13 +630,19 @@ struct TextRunnerPool::Request::Impl {
   }
 
   void CapturePromptSnapshot(bool wait = true) noexcept {
+    if (boundary_capture) {
+      if (!wait && snapshot_future.wait_for(std::chrono::seconds(0)) !=
+                       std::future_status::ready)
+        return;
+      FinishSnapshot();
+    }
     if (!prompt_snapshot_attempted)
       StartPromptSnapshot(wait);
     if (snapshot_future.valid()) {
       if (!wait && snapshot_future.wait_for(std::chrono::seconds(0)) !=
                        std::future_status::ready)
         return;
-      FinishPromptSnapshot();
+      FinishSnapshot();
     }
     if (prompt_snapshot_attempted && prefill_offset == snapshot_tokens.size() &&
         snapshot_tokens.size() < prompt.size()) {
@@ -806,101 +812,97 @@ struct TextRunnerPool::Request::Impl {
       prompt_snapshot.reset();
   }
 
-  void CaptureIntermediateSnapshot(std::size_t position) noexcept {
+  void FinishSnapshot() noexcept {
+    if (!boundary_capture) {
+      FinishPromptSnapshot();
+      return;
+    }
+    try {
+      (void)snapshot_future.get();
+    } catch (...) {
+      // The boundary worker handles failed capture/admission internally.
+    }
+    boundary_capture = false;
+  }
+
+  void CaptureBoundarySnapshot(std::size_t position, bool history,
+                               bool shared) noexcept {
+    // The scheduler already parks leases with a pending snapshot. Reuse that
+    // path so allocation, eviction and copying do not stall unrelated users.
+    // Direct callers and cancellation join before touching this lease again.
+    try {
+      snapshot_future =
+          std::async(std::launch::async, [this, position, history, shared] {
+            CaptureBoundarySnapshotNow(position, history, shared);
+            return std::unique_ptr<TextRunnerSnapshot>{};
+          });
+      boundary_capture = true;
+    } catch (...) {
+      // Optional caching must not fail the request if a worker cannot start.
+    }
+  }
+
+  void CaptureBoundarySnapshotNow(std::size_t position, bool history,
+                                  bool shared) noexcept {
     const auto started = std::chrono::steady_clock::now();
     std::size_t bytes = 0;
     bool reserved = false;
+    bool failed = false;
     try {
+      const auto capabilities = runner->Descriptor().capabilities;
+      if (!capabilities.prefix_reuse || !capabilities.snapshot ||
+          !capabilities.fork)
+        return;
       const auto& state = dynamic_cast<const TextRunnerState&>(lease.state());
       if (runner->CheckpointPosition(state) != position)
         return;
       const auto prefix =
           std::span<const TextRunnerToken>(prompt).first(position);
-      if (lease.HasSnapshotFor(prefix))
-        return;
+      const auto identity = InputIdentity(position);
       bytes = runner->SnapshotPayloadBytes(state);
       // Intermediate copies must not displace the frontier this request
       // branched from, including its stable image/reasoning fallback.
-      reserved = lease.TryReserveSnapshot(bytes, position, true,
-                                          SnapshotPurpose::kHistory);
-      if (!reserved)
+      if (history && !lease.HasSnapshotFor(prefix))
+        reserved = lease.TryReserveSnapshot(bytes, position, true,
+                                            SnapshotPurpose::kHistory);
+      std::unique_ptr<ContinuationDiskStore::CaptureReservation> persistence;
+      if (shared && disk_store && !disk_store->Touch(*runner, prefix, identity))
+        persistence =
+            disk_store->ReserveCapture(*runner, position, bytes, identity);
+      if (!reserved && !persistence)
         return;
       std::shared_ptr<const TextRunnerSnapshot> snapshot =
           runner->Snapshot(state);
-      if (!snapshot) {
-        lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure, bytes,
-                           position);
+      failed = !snapshot;
+      if (snapshot && reserved) {
+        snapshot_metrics.snapshot_bytes += lease.PublishSnapshot(
+            {prefix.begin(), prefix.end()}, snapshot, true);
         reserved = false;
-        return;
       }
-      snapshot_metrics.snapshot_bytes += lease.PublishSnapshot(
-          {prefix.begin(), prefix.end()}, std::move(snapshot), true);
-      reserved = false;
-    } catch (...) {
-      if (reserved)
-        lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure, bytes,
-                           position);
-    }
-    snapshot_metrics.snapshot_ms +=
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - started)
-            .count();
-  }
-
-  /// Persists the continuation at a shared-prefix boundary reached by prefill.
-  ///
-  /// The boundary was learned from stored entries that agree with this prompt
-  /// up to `position`, so the next conversation sharing that prefix restores
-  /// it instead of prefilling it again. The bounded worker persists the
-  /// immutable snapshot without blocking other requests on disk I/O.
-  void CaptureSharedPrefix(std::size_t position) noexcept {
-    if (disk_store == nullptr || position == 0 || position >= prompt.size()) {
-      return;
-    }
-    const auto start = std::chrono::steady_clock::now();
-    bool failed = false;
-    try {
-      const auto capabilities = runner->Descriptor().capabilities;
-      if (!capabilities.prefix_reuse || !capabilities.snapshot ||
-          !capabilities.fork) {
-        return;
-      }
-      const auto& state = dynamic_cast<const TextRunnerState&>(lease.state());
-      if (runner->CheckpointPosition(state) != position) {
-        return;
-      }
-      const auto prefix =
-          std::span<const TextRunnerToken>(prompt).first(position);
-      const auto identity = InputIdentity(position);
-      // Another request may have stored this prefix meanwhile.
-      if (disk_store->Touch(*runner, prefix, identity)) {
-        return;
-      }
-      if (!disk_store->CanSave(*runner, position,
-                               runner->SnapshotPayloadBytes(state), identity))
-        return;
-      std::shared_ptr<const TextRunnerSnapshot> snapshot =
-          runner->Snapshot(state);
-      if (snapshot == nullptr) {
-        return;
-      }
-      const auto saved = disk_store->SaveAsync(
-          runner, {prefix.begin(), prefix.end()}, std::move(snapshot),
-          {identity.begin(), identity.end()});
-      if (saved != 0) {
-        ++snapshot_metrics.shared_prefix_snapshots;
-        snapshot_metrics.shared_prefix_bytes += saved;
+      // A RAM checkpoint and a learned disk boundary can coincide. Share the
+      // immutable copy instead of reading the same device state twice.
+      if (snapshot && persistence) {
+        const auto saved = disk_store->SaveAsync(
+            runner, {prefix.begin(), prefix.end()}, std::move(snapshot),
+            {identity.begin(), identity.end()}, std::move(persistence));
+        if (saved != 0) {
+          ++snapshot_metrics.shared_prefix_snapshots;
+          snapshot_metrics.shared_prefix_bytes += saved;
+        }
       }
     } catch (...) {
-      // Best effort: the request itself is unaffected.
       failed = true;
     }
-    snapshot_metrics.shared_prefix_ms +=
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - start)
-            .count();
-    if (failed) {
-      snapshot_metrics.shared_prefix_failures += 1;
+    if (reserved)
+      lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure, bytes, position);
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    if (history)
+      snapshot_metrics.snapshot_ms += elapsed;
+    if (shared) {
+      snapshot_metrics.shared_prefix_ms += elapsed;
+      snapshot_metrics.shared_prefix_failures += failed;
     }
   }
 
@@ -913,6 +915,7 @@ struct TextRunnerPool::Request::Impl {
   std::vector<std::size_t> boundaries;
   /// Bounded intermediate positions retained in RAM before state advances.
   std::vector<std::size_t> checkpoints;
+  bool boundary_capture{false};
   std::vector<TextRunnerToken> generated;
   std::size_t prefill_offset{0};
   bool decode_ready{false};
@@ -1102,16 +1105,18 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   impl_->state_reusable = true;
   if (!reached_frontier && impl_->prefill_offset == snapshot_position)
     impl_->CapturePromptSnapshot(false);
-  if (!impl_->checkpoints.empty() &&
-      impl_->checkpoints.front() == impl_->prefill_offset) {
+  const bool history = !impl_->checkpoints.empty() &&
+                       impl_->checkpoints.front() == impl_->prefill_offset;
+  const bool shared = !impl_->boundaries.empty() &&
+                      impl_->boundaries.front() == impl_->prefill_offset;
+  if (history)
     impl_->checkpoints.erase(impl_->checkpoints.begin());
-    impl_->CaptureIntermediateSnapshot(impl_->prefill_offset);
-  }
-  if (!impl_->boundaries.empty() &&
-      impl_->boundaries.front() == impl_->prefill_offset) {
+  if (shared)
     impl_->boundaries.erase(impl_->boundaries.begin());
-    impl_->CaptureSharedPrefix(impl_->prefill_offset);
-  }
+  // A prompt/fallback capture also persists this boundary. Do not start a
+  // second worker over the same state or replace its pending result.
+  if ((history || shared) && impl_->prefill_offset != snapshot_position)
+    impl_->CaptureBoundarySnapshot(impl_->prefill_offset, history, shared);
   return step;
 }
 
@@ -1262,7 +1267,7 @@ TextRunnerPool::Request::Cancel() noexcept {
     // Join only an existing capture; cancellation must not start a new copy
     // or execute the pending selected token merely to retain the session.
     if (impl_->snapshot_future.valid())
-      impl_->FinishPromptSnapshot();
+      impl_->FinishSnapshot();
     auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
     state.SetCancellationCheck({});
     const auto capabilities = impl_->runner->Descriptor().capabilities;

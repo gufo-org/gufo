@@ -95,55 +95,18 @@ commands in disposable fixtures using isolated Pi configuration. Use `--passes 1
 for a focused check; the default five passes matches the reported debug workload.
 `--conversation --context-file FILE` additionally tests retained long history.
 
-To check prefix reuse after history edits in isolation, use a production binary
-with local weights:
+Cache checks use real assistant replies and run cold controls after the warm
+history, so the controls cannot hide a missed checkpoint. `cache-edits` checks
+latest-message edits, shortened tool results and rewinds. `cache-growth` checks
+omitted, preserved and explicitly discarded reasoning, plus thinking off.
+`cache-rotation` visits four conversations and eight small side requests; use
+`--sessions 1` to verify retention is independent of execution slots. It also
+checks the startup RAM cap; byte/record pressure is covered by CPU tests.
 
-```sh
-nix develop -c python3 tests/functional/run.py \
-  --record-baseline --output /tmp/cache-edits --sampling-preset qwen38 \
-  --suite cache-edits -- \
-  ./build/release/gufo serve llm --model /path/to/model.gguf \
-  --sessions 1 --context 8192 --speculative off
-```
-
-`cache-edits` expects the unchanged prompt to reuse all prompt tokens, then a
-late edit to reuse at least half the prompt. It fails on full re-prefill or
-insufficient reuse; `--record-baseline` does not suppress this failure. All three
-edit shapes finish before the reuse assertion fails, retaining their request
-timings, common-prefix/checkpoint diagnostics and forced-cold output controls
-in `cache-edits.json`, `cache-edits.requests.json` and `server.log`. The cold
-controls bypass lookup only after measuring the edited request. Thinking is
-off and the tool history is scripted, so the check does not depend on
-generated reasoning or the model choosing to call a tool. No disk cache is
-needed. A failing run cannot qualify as a performance baseline. The
-reuse threshold does not prescribe exact checkpoint spacing.
-
-The rewind case models Pi-style branching: keep the conversation before an
-older user message, edit that message, and remove every later turn. It checks
-the server request, not Pi's interface or optional branch summaries.
-
-`cache-rotation` visits four independent conversations for three rounds, then
-returns to a longer conversation after eight tiny side requests. With one
-execution session and no disk cache, each return must reuse the previous prompt
-except at most 16 chat-framing tokens. Actual assistant answers are replayed.
-Uncached controls run only after all cache measurements and must match the full
-answer, reasoning, tool calls, finish reason and completion-token count. Run it
-with `--suite cache-rotation` and `--sessions 1`. Per-request metrics are retained
-for timing comparisons and explicit RAM-budget pressure runs.
-It also checks the startup cache cap against half the host RAM available before
-model loading and the requested limit. A large `--cache-ram-bytes` value exercises
-the host cap without filling the cache or forcing an out-of-memory stall.
-
-`cache-growth` runs four turns per conversation, with reasoning omitted,
-reasoning replayed, and thinking disabled. Reuse must reach the previous
-turn's prompt except for at most 16 assistant-opening tokens. An unchanged
-retry must reuse the full prompt and reproduce its exact output and token count.
-Visible answers, tool calls, finish reasons and reasoning presence are compared
-with uncached runs after measuring the whole conversation, so the controls cannot
-hide a cache that stopped advancing. Run it with `--suite cache-growth`; no disk cache
-is needed. Request timings and responses are retained even when reuse fails.
-Free-form reasoning text may differ between different prefill chunk shapes;
-the uncached controls do not require identical reasoning text or length.
+Unchanged retries must reproduce the complete output with zero prefill. Edited
+histories must retain a useful earlier prefix and match their cold answer;
+free-form reasoning may vary with prefill chunk shapes. Use the recorded
+requests and phase timings to investigate failures, not a full model sweep.
 
 Every request checks its applicable response format, expected output and timings.
 Missing measurements fail. `comparison.json` reports per-request prefill, decode,

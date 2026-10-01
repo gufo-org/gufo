@@ -292,8 +292,9 @@ class FunctionalRunnerTest(unittest.TestCase):
 
     def test_cache_growth_uses_real_replay_shapes_and_delays_cold_controls(self):
         requests, checks = self.run_cache_growth()
-        self.assertEqual(len(checks), 27)
-        for offset, replay in enumerate(("drop_reasoning", "keep_reasoning", "thinking_off")):
+        self.assertEqual(len(checks), 36)
+        for offset, replay in enumerate(("drop_reasoning", "keep_reasoning",
+                                        "discard_reasoning", "thinking_off")):
             history = requests[offset * 9:(offset + 1) * 9]
             self.assertEqual([len(body["messages"]) for body in history[:4]], [2, 4, 6, 8])
             self.assertIs(history[0]["extra_body"]["cache_prompt"], False)
@@ -302,11 +303,14 @@ class FunctionalRunnerTest(unittest.TestCase):
             self.assertTrue(all(body["extra_body"]["cache_prompt"] is False
                                 for body in history[5:]))
             self.assertEqual(history[4]["messages"], history[3]["messages"])
+            self.assertIs(history[0]["extra_body"]["chat_template_kwargs"]["preserve_thinking"],
+                          replay != "discard_reasoning")
             for warm, cold in zip(history[:4], history[5:]):
                 self.assertEqual(warm["messages"], cold["messages"])
             for message in history[3]["messages"]:
                 if message["role"] == "assistant":
-                    self.assertEqual("reasoning_content" in message, replay == "keep_reasoning")
+                    self.assertEqual("reasoning_content" in message,
+                                     replay in ("keep_reasoning", "discard_reasoning"))
 
     def test_cache_growth_rejects_a_frozen_checkpoint(self):
         with self.assertRaisesRegex(AssertionError, "cache did not advance"):

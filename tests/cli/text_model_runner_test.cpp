@@ -470,13 +470,16 @@ public:
   std::function<void()> before_serialize;
   PersistentSnapshotRunner(std::shared_ptr<FakeStats> stats,
                            std::string identity,
-                           std::size_t retained_snapshot_capacity_bytes = 256)
+                           std::size_t retained_snapshot_capacity_bytes = 256,
+                           std::size_t max_context = 64)
       : SnapshotRunner(std::move(stats), 64, 256,
                        retained_snapshot_capacity_bytes),
-        identity_(identity.begin(), identity.end()) {}
+        identity_(identity.begin(), identity.end()),
+        max_context_(max_context) {}
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
     auto descriptor = SnapshotRunner::Descriptor();
+    descriptor.max_context = max_context_;
     descriptor.persistence = gufo::server::TextRunnerPersistenceDescriptor{
         .compatibility_identity = identity_,
         .payload_version = 1,
@@ -549,6 +552,7 @@ private:
   }
 
   std::vector<std::uint8_t> identity_;
+  std::size_t max_context_;
 };
 
 class TemporaryDirectory {
@@ -1369,6 +1373,52 @@ void TestSharedPrefixIsLearnedAndRestoredAcrossConversations() {
   }
 }
 
+void TestCoincidentCacheBoundariesShareOneCopy() {
+  for (const bool stable : {false, true}) {
+    TemporaryDirectory directory;
+    const TextRunnerDiskCacheOptions disk_cache{
+        .directory = directory.path(),
+        .capacity_bytes = 1024 * 1024,
+        .staging_capacity_bytes = 64 * 1024,
+        .shared_prefix_min_tokens = 2048,
+    };
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<PersistentSnapshotRunner>(
+        stats, "artifact-A", 1024, 4096);
+    std::vector<TextRunnerToken> prompt(2050, 7);
+    prompt[2048] = 1;
+    {
+      TextRunnerPool pool(runner, 1, disk_cache);
+      auto source = pool.Acquire(prompt);
+      while (!source.prefill_complete())
+        (void)source.Prefill(4096);
+      source.Commit();
+    }
+    prompt[2048] = 2;
+    {
+      TextRunnerPool pool(runner, 1, disk_cache);
+      auto branch = pool.Acquire(prompt, {}, {}, {}, true, stable ? 2048 : 0);
+      const auto before = stats->snapshot_captures;
+      Expect(branch.Prefill(4096).consumed_tokens == 2048,
+             "disk boundary coincides with a history or stable checkpoint");
+      Expect(branch.Prefill(4096).consumed_tokens == 2 &&
+                 stats->snapshot_captures == before + 1,
+             "one immutable copy serves both coincident boundaries");
+      branch.Commit();
+    }
+    prompt[2048] = 3;
+    {
+      TextRunnerPool pool(runner, 1, disk_cache);
+      auto restored = pool.Acquire(prompt);
+      Expect(restored.cache_disk_hit() &&
+                 restored.cached_prompt_tokens() == 2048 &&
+                 restored.Prefill(4096).consumed_tokens == 2,
+             "the shared copy survives a restart with its exact position");
+      restored.Commit();
+    }
+  }
+}
+
 void TestDiskOnlyCaptureReservesBudgetBeforeCommit() {
   TemporaryDirectory directory;
   auto stats = std::make_shared<FakeStats>();
@@ -1618,6 +1668,7 @@ int main() {
   TestSnapshotCacheCapacityIsReportedAtStartup();
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
+  TestCoincidentCacheBoundariesShareOneCopy();
   TestMeasuredStateIsReconciledWithClaim();
   TestSnapshotBudgetRefusalDoesNotFailCompletedRequest();
   std::ostringstream failure_log;

@@ -130,7 +130,9 @@ can retain up to four intermediate checkpoints in addition to its branching
 fallback and complete prompt. Prefill stops at those positions and captures the
 whole model state before advancing. Positions lie on a 2,048-token grid spread
 across the prompt; the final grid point is within 2,048 tokens of its end.
-Warm continuations capture only positions beyond the reused frontier. Admission
+Warm continuations skip grid positions less than 2,048 tokens beyond the reused
+frontier. Capture runs asynchronously while that session is frozen, so other
+requests can continue. Coincident RAM and disk boundaries share one copy. Admission
 remains subject to the existing byte budget, and intermediate copies preserve
 the original branching fallback. These intermediate checkpoints live in RAM;
 the disk tier continues to retain prompt and learned shared-prefix boundaries.
@@ -322,7 +324,7 @@ Reading them:
   history interrupted by tiny side requests, edits/rewind, advancing boundaries,
   cancellation and disk restart. Uncached controls check the answers; CPU tests
   exercise byte and record pressure without loading models.
-- `tools/serving/check-continuation.py` covers cancellation, reasoning replay,
+- `tests/functional/continuation.py` covers cancellation, reasoning replay,
   images and restart persistence against a live server.
 - `tests/cli/continuation_cache_test.cpp`,
   `tests/cli/continuation_disk_store_test.cpp` and

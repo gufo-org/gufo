@@ -6,7 +6,7 @@ import sys
 
 def check_cache_growth(client, model, checks, chat_result):
     failures = []
-    for replay in ("drop_reasoning", "keep_reasoning", "thinking_off"):
+    for replay in ("drop_reasoning", "keep_reasoning", "discard_reasoning", "thinking_off"):
         label = "cache_growth_" + replay
         thinking = replay != "thinking_off"
         messages = [{"role": "system", "content": label + "\n" +
@@ -15,7 +15,8 @@ def check_cache_growth(client, model, checks, chat_result):
         request = dict(model=model, temperature=0, seed=31,
                        max_completion_tokens=128,
                        reasoning_effort="low" if thinking else "none",
-                       extra_body={"chat_template_kwargs": {"preserve_thinking": True}})
+                       extra_body={"chat_template_kwargs": {
+                           "preserve_thinking": replay != "discard_reasoning"}})
 
         def chat(phase, body):
             result = chat_result(client, body)
@@ -70,7 +71,7 @@ def check_cache_growth(client, model, checks, chat_result):
             history.append((deepcopy(body), result))
             previous_total, previous_reused = total, reused
             assistant = {"role": "assistant", "content": result["text"]}
-            if replay == "keep_reasoning":
+            if replay in ("keep_reasoning", "discard_reasoning"):
                 assistant["reasoning_content"] = result["reasoning"]
             messages.append(assistant)
 

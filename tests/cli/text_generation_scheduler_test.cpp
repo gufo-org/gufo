@@ -1542,8 +1542,10 @@ void TestFirstTokenPrecedesSnapshotAndPreservesBudget() {
 }
 
 void TestSnapshotDoesNotBlockOtherRequests() {
-  for (const bool multi : {false, true}) {
+  for (const auto [multi, history] :
+       {std::pair{false, false}, {true, false}, {false, true}, {true, true}}) {
     auto control = std::make_shared<FakeControl>();
+    control->max_context = 4096;
     control->multi_token_decode = multi;
     control->preview_first_token = true;
     control->supports_batched_advance = true;
@@ -1557,14 +1559,18 @@ void TestSnapshotDoesNotBlockOtherRequests() {
       }
     };
     auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
-    auto first = scheduler->Submit({1, 10}, 7, 0.0F);
+    const std::vector<TextRunnerToken> prompt =
+        history ? std::vector<TextRunnerToken>(2049, 1)
+                : std::vector<TextRunnerToken>{1, 10};
+    auto first = scheduler->Submit(prompt, 7, 0.0F);
     const bool started = entered.try_acquire_for(kTestTimeout);
     auto second = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 7, 0.0F);
     auto result = std::async(std::launch::async, [&] { return second.Wait(); });
     const bool independent =
         result.wait_for(kTestTimeout) == std::future_status::ready;
     release.release();
-    Expect(started && independent, "one capture must not block other requests");
+    Expect(started && independent,
+           "neither an intermediate nor a final capture blocks other requests");
     const auto second_result = result.get();
     Expect(second_result.tokens == ExpectedTokens(2, 7),
            "other request stays independent");
@@ -1578,16 +1584,18 @@ void TestSnapshotDoesNotBlockOtherRequests() {
         control->first_request_advance_ns.load(std::memory_order_relaxed) / 1e6;
     Expect(advance_ms > 0 && first_result.decode_ms >= advance_ms,
            "async snapshot time must not be subtracted from timed model work");
-    auto cached = scheduler->Submit({1, 10}, 7, 0.0F).Wait();
+    auto cached = scheduler->Submit(prompt, 7, 0.0F).Wait();
     Expect(cached.cache_hit && cached.tokens == ExpectedTokens(1, 7),
            "asynchronous capture retains the immutable prompt frontier");
   }
 }
 
 void TestCapturesAtCapacityAllowQueuedProgress() {
-  for (const bool multi : {false, true}) {
+  for (const auto [multi, history] :
+       {std::pair{false, false}, {true, false}, {false, true}, {true, true}}) {
     for (const std::size_t capacity : {1U, 2U, 4U}) {
       auto control = std::make_shared<FakeControl>();
+      control->max_context = 4096;
       control->multi_token_decode = multi;
       control->preview_first_token = true;
       control->supports_batched_advance = true;
@@ -1606,26 +1614,45 @@ void TestCapturesAtCapacityAllowQueuedProgress() {
         TextGenerationScheduler::RequestMetadata metadata;
         // Exercise captures during prefill as well as after first-token
         // publication, including the single-slot admission deadlock.
-        metadata.cache_prefix_tokens = multi ? 1 : 0;
+        metadata.cache_prefix_tokens = multi && !history ? 1 : 0;
+        auto prompt = std::vector<TextRunnerToken>(history ? 2049 : 2, 10);
+        prompt.front() = static_cast<TextRunnerToken>(i + 1);
         requests.push_back(
-            scheduler->Submit({static_cast<TextRunnerToken>(i + 1), 10}, 7,
-                              0.0F, {}, false, metadata));
+            scheduler->Submit(prompt, 7, 0.0F, {}, false, metadata));
         Expect(entered.try_acquire_for(kTestTimeout),
                "every resident reaches snapshot capture");
       }
       for (std::size_t i = capacity; i < capacity * 2; ++i)
         requests.push_back(scheduler->Submit(
             {static_cast<TextRunnerToken>(i + 1), 10}, 7, 0.0F));
+      // Cancellation while a history copy is in flight must release the
+      // slot after joining, without publishing an unexecuted prompt suffix.
+      if (history)
+        requests.front().Cancel();
       release.release(static_cast<std::ptrdiff_t>(capacity));
       auto results = std::async(std::launch::async, [&] {
-        for (std::size_t i = 0; i < requests.size(); ++i)
-          Expect(requests[i].Wait().tokens ==
-                     ExpectedTokens(static_cast<TextRunnerToken>(i + 1), 7),
-                 "capture and queued requests retain independent output");
+        for (std::size_t i = 0; i < requests.size(); ++i) {
+          const auto result = requests[i].Wait();
+          if (history && i == 0)
+            Expect(result.cancelled && result.tokens.empty(),
+                   "cancellation joins only completed history work");
+          else
+            Expect(result.tokens ==
+                       ExpectedTokens(static_cast<TextRunnerToken>(i + 1), 7),
+                   "capture and queued requests retain independent output");
+        }
       });
       Expect(results.wait_for(kTestTimeout) == std::future_status::ready,
              "all slots capturing must not deadlock queued admission");
       results.get();
+      if (history) {
+        auto prompt = std::vector<TextRunnerToken>(2049, 10);
+        prompt.front() = 1;
+        const auto resumed = scheduler->Submit(prompt, 7, 0.0F).Wait();
+        Expect(resumed.cache_hit && resumed.cached_prompt_tokens == 2048 &&
+                   resumed.tokens == ExpectedTokens(1, 7),
+               "cancelled intermediate capture restores its exact frontier");
+      }
     }
   }
 }
