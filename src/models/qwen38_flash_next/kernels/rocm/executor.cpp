@@ -2471,7 +2471,9 @@ bool Executor::GreedyMtpPredictions(std::span<ArgmaxCandidate> predictions,
   std::vector<sampling::TokenPenalty> penalties;
   if (sampler.config().penalties_enabled()) {
     penalties.reserve(rows * (sampler.penalties().size() + rows));
-    auto tentative = sampler;
+    // Drafts may violate the target grammar. Only their conditional penalty
+    // history is needed here; FinishDecode checks each winner's grammar.
+    auto tentative = sampler.WithoutConstraint();
     GreedyPenaltyRows batch{};
     for (std::size_t row = 0; row < rows; ++row) {
       const auto counts = tentative.penalties();

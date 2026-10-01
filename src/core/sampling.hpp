@@ -101,7 +101,7 @@ public:
   /// Set penalties_applied only for a winner computed with this state's exact
   /// penalty arithmetic and history; raw model argmaxes leave it false.
   [[nodiscard]] bool CanSelectArgmax(TokenId token,
-                                      bool penalties_applied = false) const;
+                                     bool penalties_applied = false) const;
   /// A lazy tool grammar can admit the entire vocabulary before a call.
   /// Retain ordinary CPU/GPU sampling while its mask makes no restriction.
   [[nodiscard]] bool NeedsConstraintMask() const;

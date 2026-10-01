@@ -117,5 +117,176 @@
     },
     "derived_reduction_in_logit_download_bytes": 58603048,
     "scope": "Diagnostic CLI pp32/tg64 with presence_penalty=1.5. Kernel timings only; not throughput qualification."
+  },
+  "rebase_review": {
+    "date": "2026-10-01",
+    "main_commit": "6a32726068f21f94db0761edba1da00eefe99c4b",
+    "candidate_commit": "2b129b580af76aafa956e5b4ddb13900f87d8cba",
+    "candidate_note": "Includes the subsequent WithoutConstraint staging fix; final source changes after this build are formatting only.",
+    "production_binary": "/nix/store/c5nxk1xaqpv4syf0qiv4k842wiagv834-gufo-0-unstable-2b129b5-dirty/bin/gufo",
+    "method": "One matched warmed run per case, same C8 server/capacity8192 and GPU_MAX_HW_QUEUES=4. Short-prompt tg128 controls; compare each request independently. Tool calls have 24 generated tokens. No repeated sweep.",
+    "all_matched_outputs_equal": true,
+    "affected_decode_timings": "pass: every measured request is within 5% and 3 ms; all C8 rows improve 10.56% to 15.17%",
+    "per_request": [
+      {
+        "case": "C1/row0",
+        "tokens": 128,
+        "main_tok_s": 29.297,
+        "pr_tok_s": 30.216,
+        "main_decode_ms": 4369.091,
+        "pr_decode_ms": 4236.187
+      },
+      {
+        "case": "C8/row0",
+        "tokens": 128,
+        "main_tok_s": 12.549,
+        "pr_tok_s": 14.453,
+        "main_decode_ms": 10200.048,
+        "pr_decode_ms": 8856.582
+      },
+      {
+        "case": "C8/row1",
+        "tokens": 128,
+        "main_tok_s": 12.643,
+        "pr_tok_s": 14.315,
+        "main_decode_ms": 10124.045,
+        "pr_decode_ms": 8941.773
+      },
+      {
+        "case": "C8/row2",
+        "tokens": 128,
+        "main_tok_s": 12.643,
+        "pr_tok_s": 13.978,
+        "main_decode_ms": 10124.064,
+        "pr_decode_ms": 9156.947
+      },
+      {
+        "case": "C8/row3",
+        "tokens": 128,
+        "main_tok_s": 12.758,
+        "pr_tok_s": 14.194,
+        "main_decode_ms": 10032.709,
+        "pr_decode_ms": 9018.108
+      },
+      {
+        "case": "C8/row4",
+        "tokens": 128,
+        "main_tok_s": 12.549,
+        "pr_tok_s": 14.061,
+        "main_decode_ms": 10200.003,
+        "pr_decode_ms": 9103.07
+      },
+      {
+        "case": "C8/row5",
+        "tokens": 128,
+        "main_tok_s": 12.488,
+        "pr_tok_s": 13.818,
+        "main_decode_ms": 10249.553,
+        "pr_decode_ms": 9263.448
+      },
+      {
+        "case": "C8/row6",
+        "tokens": 128,
+        "main_tok_s": 12.245,
+        "pr_tok_s": 13.883,
+        "main_decode_ms": 10453.224,
+        "pr_decode_ms": 9220.093
+      },
+      {
+        "case": "C8/row7",
+        "tokens": 128,
+        "main_tok_s": 12.549,
+        "pr_tok_s": 14.194,
+        "main_decode_ms": 10200.034,
+        "pr_decode_ms": 9018.066
+      },
+      {
+        "case": "unpenalized C1",
+        "tokens": 128,
+        "main_tok_s": 34.106,
+        "pr_tok_s": 34.114,
+        "main_decode_ms": 3753.048,
+        "pr_decode_ms": 3752.13
+      },
+      {
+        "case": "auto/warmup",
+        "tokens": 24,
+        "main_tok_s": 54.945,
+        "pr_tok_s": 58.443,
+        "main_decode_ms": 436.804,
+        "pr_decode_ms": 410.655
+      },
+      {
+        "case": "auto/measured",
+        "tokens": 24,
+        "main_tok_s": 56.775,
+        "pr_tok_s": 61.756,
+        "main_decode_ms": 422.72,
+        "pr_decode_ms": 388.628
+      },
+      {
+        "case": "required/warmup",
+        "tokens": 24,
+        "main_tok_s": 56.871,
+        "pr_tok_s": 60.755,
+        "main_decode_ms": 422.007,
+        "pr_decode_ms": 395.031
+      },
+      {
+        "case": "required/measured",
+        "tokens": 24,
+        "main_tok_s": 58.392,
+        "pr_tok_s": 61.301,
+        "main_decode_ms": 411.016,
+        "pr_decode_ms": 391.51
+      }
+    ],
+    "other_timing_flags": [
+      {
+        "case": "C8/row0",
+        "phase": "queue_ms",
+        "main_ms": 7.571,
+        "pr_ms": 19.518
+      },
+      {
+        "case": "C8/row1",
+        "phase": "queue_ms",
+        "main_ms": 22.656,
+        "pr_ms": 27.665
+      },
+      {
+        "case": "C8/row5",
+        "phase": "queue_ms",
+        "main_ms": 4.449,
+        "pr_ms": 22.559
+      }
+    ],
+    "other_timing_assessment": "C8 admission order differs between launches. These queue-only flags are outside the changed decode path; every affected request has faster decode and no TTFT regression. They are not claimed as queue-time qualification.",
+    "standard_cli_pp2048_tg128": {
+      "repetitions": 1,
+      "presence_penalty": 1.5,
+      "main_pp_tok_s": 1647.3,
+      "pr_pp_tok_s": 1647.03,
+      "main_tg_tok_s": 55.6,
+      "pr_tg_tok_s": 58.75
+    },
+    "checks": {
+      "hosted_cpu_tests": 36,
+      "functional_runner_tests": 17,
+      "focused_cpu_gpu_tests": 5,
+      "model_sampling_configs": 25,
+      "model_batch_widths": [
+        2,
+        4,
+        6,
+        8
+      ],
+      "functional_suites": [
+        "sampling-ranges",
+        "batch",
+        "structured-limits"
+      ],
+      "coverage": "AR/MTP exact logits and histories, positive/negative penalties, RNG, budgets1..8, peer cancellation, image snapshot replacement, RAM restore, OpenAI SDK Chat/Responses/Completions, greedy auto/required tool penalties and constrained replay"
+    }
   }
 }

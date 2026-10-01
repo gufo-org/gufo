@@ -539,7 +539,7 @@ def check_sampling_ranges(client, model, checks):
         for top_p in (0., .0001, 1.):
             response = create(**body, temperature=0, top_p=top_p)
             checks[f"range_{endpoint}_valid_{top_p}"] = response.to_dict()
-        response = create(**body, temperature=.7, top_p=0, seed=42)
+        response = create(**body, temperature=.7, top_p=0, extra_body={"seed": 42})
         checks[f"range_{endpoint}_sampled_zero"] = response.to_dict()
 
 
@@ -1836,6 +1836,29 @@ def check_structured_limits(client, model, checks, vision=False):
         assert result["finish"] == "length" and result["usage"]["completion_tokens"] == n, result
         assert not result["text"] and not result["tools"], result
         record(f"schema_tool_limit_{n}", result)
+
+    # Greedy GPU winners include penalties, but still obey the tool grammar.
+    # Invalid speculative proposals must not mutate its state while staging
+    # conditional penalty histories.
+    for choice in ("auto", "required"):
+        request = dict(model=model, temperature=0, seed=79,
+            presence_penalty=1.5, frequency_penalty=.2,
+            max_completion_tokens=96, tool_choice=choice, parallel_tool_calls=False,
+            messages=[{"role": "user", "content": "Call echo with text alpha."}],
+            tools=[{"type": "function", "function": {"name": "echo", "strict": True,
+                "parameters": {"type": "object", "properties": {
+                    "text": {"type": "string", "const": "alpha"}},
+                    "required": ["text"], "additionalProperties": False}}}],
+            extra_body={"repeat_penalty": 1.1,
+                        "chat_template_kwargs": {"enable_thinking": False}})
+        first = chat_result(client, request, True)
+        replay = chat_result(client, request)
+        for result in (first, replay):
+            assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+            call = result["tools"][0]["function"]
+            assert call["name"] == "echo" and json.loads(call["arguments"]) == {"text": "alpha"}, result
+        assert replay["usage"]["cached_tokens"] > 0, replay
+        record(f"schema_greedy_tool_penalties_{choice}", [first, replay])
 
     # A non-strict tool schema can be broader than the response-format subset.
     result = chat_result(client, {**common, "tools": [{

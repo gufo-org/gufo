@@ -205,7 +205,7 @@ bool SamplingConfig::can_use_unmodified_argmax() const noexcept {
 }
 
 bool SamplerState::CanSelectArgmax(TokenId token,
-                                 bool penalties_applied) const {
+                                   bool penalties_applied) const {
   if (pending_sample_ || config_.temperature != 0.0F ||
       (!penalties_applied && config_.penalties_enabled()))
     return false;
