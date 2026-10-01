@@ -169,10 +169,12 @@ def main():
                     messages[1:1] = [first_user,
                                      {"role": "assistant", "content": "Ready."}]
                 if args.tools:
+                    # A legacy call may have an invalid declaration name.
+                    # Its completed record must survive interruption/restore.
                     messages.extend([
                         {"role": "assistant", "content": "", "reasoning_content": "Read the fixture.",
                          "tool_calls": [{"id": "fixture-call", "type": "function", "function": {
-                             "name": "read_fixture", "arguments": "{}"}}]},
+                             "name": "…", "arguments": "{}"}}]},
                         {"role": "tool", "tool_call_id": "fixture-call",
                          "content": "The fixture is ready. Answer the user's request directly."}])
                 body = {"model": args.model, "messages": messages, "max_tokens": 256,

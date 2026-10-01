@@ -610,11 +610,12 @@ ordinary continuation.
   which frame a rendered call; dotted and namespaced names such as
   `github.create_issue` are accepted. OpenAI itself documents a narrower set
   for this field, so a name outside `[A-Za-z0-9_-]` is portable to gufo but not
-  to every OpenAI-compatible service. The same name rule applies to an
-  assistant `tool_calls` entry that replays a call. Unsupported tool types,
-  malformed entries, unrenderable declared names and non-object parameters
-  return 400 `invalid_tools` before generation; because messages parse first,
-  an unrenderable name in a replayed call returns 400 `invalid_messages`.
+  to every OpenAI-compatible service. Historical names in assistant
+  `tool_calls` and Responses `function_call` items are preserved verbatim,
+  including Unicode and names absent from the current tools. This does not
+  authorize new calls to them. History still requires a string name and
+  JSON-object arguments; embedded NUL names are unsupported. Malformed history
+  and invalid declarations return 400 before generation.
 - shared top-k, min-p, repeat, frequency and presence sampling controls
 
 Streaming objects use `chat.completion.chunk` and end with the compatibility
@@ -657,7 +658,9 @@ calling tools. With `auto`, ordinary text and reasoning remain allowed; once a
 call starts, decoding constrains its name and argument format. Non-strict tools
 keep optional arguments optional. Open nested objects retain native syntax and
 declared requirements/types, including nested fields; unsupported schema
-keywords remain guidance. Values that are ambiguous in native tags use JSON.
+keywords remain guidance. Untyped arguments retain native best-effort semantics.
+Constrained JSON keys follow schema order, with additional keys last.
+Values that are ambiguous in native tags use JSON.
 `tool_choice: "required"` constrains decoding to a declared call,
 so the requirement is forced rather than checked afterwards. Where the backend
 cannot constrain sampling, an unmet `required` choice still returns

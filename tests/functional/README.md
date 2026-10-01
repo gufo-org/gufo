@@ -53,6 +53,8 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `tool-reasoning` | Quoted tags, literal edits, early stops and disabled tools across Chat/Responses |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
+| `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
+| `tool-untyped` | Open/typed tools, refs and finite values: framing, arguments, streaming, turns, limits, stops/retry and sampled peers |
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops, image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |

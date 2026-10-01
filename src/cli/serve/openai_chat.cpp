@@ -210,8 +210,8 @@ bool ParseContent(const json::Value* content,
   return true;
 }
 
-// A tool name reaches the Qwen and DeepSeek renderers unescaped, inside
-// "<function=NAME>" and "name=\"NAME\"", so the characters that frame a call
+// Declared names reach Qwen and DeepSeek unescaped inside "<function=NAME>"
+// and "name=\"NAME\"", so the characters that frame a call
 // are excluded. The dots, colons and slashes that agent harnesses give bridged
 // tool names are data and are kept. Non-ASCII bytes are excluded as well: a
 // name is placed in a prompt the model reads and in operator logs, where
@@ -251,6 +251,27 @@ bool ParseArguments(std::string_view arguments,
     });
   }
   return true;
+}
+
+bool ParseHistoricalFunction(const json::Value& function,
+                             tokenization::ChatMessage::ToolCall* call,
+                             std::string* error) {
+  const auto* name = function.find("name");
+  const auto* arguments = function.find("arguments");
+  if (!name || !name->is_string() || !arguments || !arguments->is_string()) {
+    *error = "historical function calls require string name and arguments";
+    return false;
+  }
+  // History is a record, not a declaration of a tool the model may call now.
+  // Preserve names as llama.cpp common/chat.cpp does at
+  // f1cee9941b0e843ea260bf8dd9a090fbd9711b6a. NUL cannot pass through the
+  // DeepSeek tokenizer's C-string interface.
+  if (name->str().find('\0') != std::string::npos) {
+    *error = "historical function names cannot contain NUL";
+    return false;
+  }
+  call->name = name->str();
+  return ParseArguments(arguments->str(), &call->arguments, error);
 }
 
 bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
@@ -304,21 +325,8 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
     }
     tokenization::ChatMessage::ToolCall call;
     call.id = item.member_str("id");
-    call.name = function->member_str("name");
-    const std::string arguments = function->member_str("arguments");
-    // A replayed call is rendered like a fresh one, so it carries the same
-    // name rule: a name that cannot be framed is rejected wherever it enters.
-    if (!call.name.empty() && !RenderableToolName(call.name)) {
-      *error = std::string(kToolNameRule);
+    if (!ParseHistoricalFunction(*function, &call, error))
       return false;
-    }
-    if (call.name.empty() || arguments.empty() ||
-        !ParseArguments(arguments, &call.arguments, error)) {
-      if (error->empty()) {
-        *error = "assistant tool calls require a name and JSON arguments";
-      }
-      return false;
-    }
     message->tool_calls.push_back(std::move(call));
   }
   return true;
@@ -2345,11 +2353,7 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
     if (kind == "function_call") {
       tokenization::ChatMessage::ToolCall call;
       call.id = id->str();
-      call.name = item.member_str("name");
-      const auto* arguments = item.find("arguments");
-      if (!RenderableToolName(call.name) || !arguments ||
-          !arguments->is_string() ||
-          !ParseArguments(arguments->str(), &call.arguments, error))
+      if (!ParseHistoricalFunction(item, &call, error))
         return false;
       message->role = tokenization::ChatRole::kAssistant;
       message->tool_calls.push_back(std::move(call));

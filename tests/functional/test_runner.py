@@ -29,6 +29,54 @@ from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_pi_proxy_discovery_and_missing_content_type(self):
+        import http.client
+        import http.server
+        import threading
+        from pi_agent import Recorder as PiRecorder
+
+        class Upstream(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                if "untyped" not in self.path:
+                    self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"object":"list","data":[]}')
+
+        with tempfile.TemporaryDirectory() as directory, \
+                http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream) as upstream:
+            with PiRecorder(f"http://127.0.0.1:{upstream.server_port}",
+                            Path(directory)) as proxy:
+                workers = [threading.Thread(target=s.serve_forever, daemon=True)
+                           for s in (upstream, proxy)]
+                for worker in workers:
+                    worker.start()
+                try:
+                    for suffix, content_type in (
+                            ("", "application/json"),
+                            ("?untyped=1", "application/octet-stream")):
+                        connection = http.client.HTTPConnection(
+                            "127.0.0.1", proxy.server_port, timeout=5)
+                        try:
+                            connection.request("GET", "/v1/models" + suffix)
+                            response = connection.getresponse()
+                            self.assertEqual(response.status, 200)
+                            self.assertEqual(response.getheader("Content-Type"), content_type)
+                            self.assertEqual(json.loads(response.read()),
+                                             {"object": "list", "data": []})
+                        finally:
+                            connection.close()
+                    self.assertEqual(proxy.requests, [])
+                    self.assertEqual(list(Path(directory).iterdir()), [])
+                finally:
+                    for server in (proxy, upstream):
+                        server.shutdown()
+                    for worker in workers:
+                        worker.join(timeout=5)
+
     def test_image_inputs_require_a_projector_before_starting_a_server(self):
         argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
                 "--suite", "image-inputs", "--record-baseline", "--", "gufo", "serve", "llm"]

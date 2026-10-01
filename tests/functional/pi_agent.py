@@ -60,6 +60,26 @@ class Proxy(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    def do_GET(self):
+        if urllib.parse.urlsplit(self.path).path != "/v1/models":
+            self.send_error(404, "Only /v1/models is available for discovery")
+            return
+        conn = http.client.HTTPConnection(
+            self.server.upstream.hostname, self.server.upstream.port, timeout=30)
+        try:
+            conn.request("GET", self.path)
+            response = conn.getresponse()
+            body = response.read()
+            self.send_response(response.status)
+            self.send_header("Content-Type", response.getheader("Content-Type") or "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (OSError, http.client.HTTPException):
+            self.send_error(502, "Model discovery failed upstream")
+        finally:
+            conn.close()
+
     def do_POST(self):
         server = self.server
         with server.lock:
@@ -79,7 +99,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             row["status"] = response.status
             row["request_id"] = response.getheader("X-Request-ID")
             self.send_response(response.status)
-            self.send_header("Content-Type", response.getheader("Content-Type"))
+            self.send_header("Content-Type", response.getheader("Content-Type") or "application/octet-stream")
             self.send_header("Connection", "close")
             self.end_headers()
             chunks = []
@@ -343,8 +363,9 @@ def main():
     env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "SHELL", "SSL_CERT_FILE"}}
     env.update(PI_CODING_AGENT_DIR=str(config), PI_OFFLINE="1", PI_TELEMETRY="0")
     rows = []
+    cases = ["simple"] + list(PROMPTS) * args.passes
     try:
-        for index, name in enumerate(["simple"] + list(PROMPTS) * args.passes):
+        for index, name in enumerate(cases):
             rows.append(run_case(args, recorder, env, index, name))
             save(args.output / "report.json", {**metadata, "cases": rows, "requests": recorder.requests})
             if rows[-1]["status"] != "pass":
@@ -352,7 +373,7 @@ def main():
     finally:
         recorder.shutdown()
         recorder.server_close()
-    return 0 if len(rows) == 1 + 5 * args.passes and all(r["status"] == "pass" for r in rows) else 1
+    return 0 if len(rows) == len(cases) and all(r["status"] == "pass" for r in rows) else 1
 
 
 if __name__ == "__main__":

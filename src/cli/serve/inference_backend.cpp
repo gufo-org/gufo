@@ -77,14 +77,6 @@ std::optional<ChatRequest> ConstrainChatRequest(
       const auto* strict = function ? function->find("strict") : nullptr;
       const bool enforce = strict && strict->as_bool();
       auto schema = json::parse(tool.parameters_json);
-      if (!enforce) {
-        if (!schema.contains("type"))
-          schema["type"] = "object";
-        if (!schema.contains("properties"))
-          schema["properties"] = json::Value::object();
-        if (!schema.contains("additionalProperties"))
-          schema["additionalProperties"] = false;
-      }
       auto native =
           sampling::JsonConstraint::ToolParameters(schema, enforce, format);
       tools.emplace_back(tool.name, std::move(native));

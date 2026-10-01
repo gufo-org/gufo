@@ -662,10 +662,8 @@ void TestToolNameCharacters() {
            "The same name is accepted when a message replays a call");
   }
 
-  // The Qwen and DeepSeek renderers append a name verbatim, so a name that
-  // frames a call is refused at both entry points rather than corrupting one.
-  // Non-ASCII is refused with them: a confusable name reaches the prompt and
-  // the operator's logs, where it can only mislead.
+  // New declarations retain their name restrictions. Historical calls are
+  // records from an earlier turn and must not strand the conversation (#357).
   const std::vector<std::string> unrenderable{"bad>name",
                                               "bad<name",
                                               "bad\"name",
@@ -675,6 +673,7 @@ void TestToolNameCharacters() {
                                               "bad\x7F"
                                               "name",
                                               "outil_traçage",
+                                              "…",
                                               "reаd",
                                               "​read",
                                               "",
@@ -688,18 +687,68 @@ void TestToolNameCharacters() {
                declared.chat_calls == 0,
            "An unrenderable declared name fails with invalid_tools");
 
-    if (name.empty())
-      continue;  // An empty replayed name has its own error message.
-    // Messages parse before tools, so a replayed name reports the message
-    // code. Both routes refuse the name; only the code differs.
     FakeBackend replayed;
     const auto replay_response =
         gufo::server::HandleOpenAiChat(Request(replay(name)), replayed);
-    Expect(replay_response.status == 400 &&
-               replay_response.body.find("invalid_messages") !=
-                   std::string::npos &&
-               replayed.chat_calls == 0,
-           "An unrenderable replayed name fails with invalid_messages");
+    Expect(replay_response.status == 200 && replayed.chat_calls == 1 &&
+               replayed.last_request.messages[1].tool_calls[0].name == name &&
+               replayed.last_request.messages[1].tool_calls[0].id == "call_1" &&
+               replayed.last_request.messages[2].tool_call_id == "call_1",
+           "Historical names and result pairing survive unchanged");
+
+    auto item = gufo::json::parse(
+        R"({"type":"function_call","call_id":"call_1","name":"placeholder",
+            "arguments":"{\"path\":\"a.txt\"}"})");
+    item["name"] = name;
+    gufo::tokenization::ChatMessage message;
+    gufo::core::ImageReadBudget budget;
+    std::string error;
+    Expect(gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
+                                                    &error) &&
+               message.tool_calls.size() == 1 &&
+               message.tool_calls[0].name == name &&
+               message.tool_calls[0].id == "call_1" &&
+               message.tool_calls[0].arguments[0].value == "a.txt",
+           "Responses preserves the same historical names and arguments");
+  }
+}
+
+void TestMalformedHistoricalFunctions() {
+  for (const auto source :
+       {R"({"arguments":"{}"})", R"({"name":null,"arguments":"{}"})",
+        R"({"name":42,"arguments":"{}"})", R"({"name":"read"})",
+        R"({"name":"read","arguments":{}})",
+        R"({"name":"read","arguments":null})",
+        R"({"name":"read","arguments":"[]"})",
+        R"({"name":"read","arguments":"["})",
+        R"({"name":"read","arguments":"{\"x\":\"raw\nnewline\"}"})",
+        R"({"name":"read\u0000file","arguments":"{}"})"}) {
+    const auto function = gufo::json::parse(source);
+    auto body = gufo::json::parse(R"({
+      "model":"test-model","messages":[{"role":"user","content":"continue"}]
+    })");
+    auto assistant =
+        gufo::json::parse(R"({"role":"assistant","tool_calls":[]})");
+    auto call = gufo::json::parse(R"({"id":"call_1","type":"function"})");
+    call["function"] = function;
+    assistant["tool_calls"].push_back(std::move(call));
+    body["messages"].push_back(std::move(assistant));
+    FakeBackend backend;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+    Expect(response.status == 400 && backend.chat_calls == 0 &&
+               response.body.find("invalid_messages") != std::string::npos,
+           "Malformed history is rejected before model work");
+    auto item = function;
+    item["type"] = "function_call";
+    item["call_id"] = "call_1";
+    gufo::tokenization::ChatMessage message;
+    gufo::core::ImageReadBudget budget;
+    std::string error;
+    Expect(!gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
+                                                     &error) &&
+               !error.empty(),
+           "Responses rejects malformed history with an explanation");
   }
 }
 
@@ -2833,6 +2882,7 @@ int main() {
   TestToolParameterCompatibility();
   TestInvalidToolsFailBeforeGeneration();
   TestToolNameCharacters();
+  TestMalformedHistoricalFunctions();
   TestQwenToolBoundariesAndSchema();
   TestDeepSeekToolCallsAreStructured();
   TestDeepSeekRepeatedToolParameters();

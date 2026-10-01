@@ -122,7 +122,9 @@ public:
     null_ = Literal("null");
   }
 
-  std::shared_ptr<const JsonConstraint> Compile(bool object_only) {
+  std::shared_ptr<const JsonConstraint> Compile(
+      bool object_only, bool ignore_unknown_keys = false) {
+    ignore_unknown_keys_ = ignore_unknown_keys && open_objects_;
     if (object_only) {
       grammar_->root_ = Seq({ws_, GenericObject(kMaxDepth), ws_});
       grammar_->prompt_ = "Respond with a single valid JSON object.";
@@ -197,6 +199,7 @@ public:
 
   std::shared_ptr<const JsonConstraint> ToolParameters(
       JsonConstraint::ToolFormat format, bool best_effort = false) {
+    ignore_unknown_keys_ = best_effort && !strict_;
     // Native envelope/typed-parameter approach: llama.cpp common/parsers/
     // qwen3-coder.cpp and deepseek.cpp at
     // 6a2743f028f78bfb88a7189607b49bde30df3769. Unlike an injected JSON
@@ -285,11 +288,19 @@ public:
             value = Optional(value);
         }
       } else if (best_effort) {
-        // Keep the known parameter type for unsupported non-strict keywords.
-        // Their contents remain guidance;
-        // unlike an unrestricted whole-call fallback, required parameters
-        // cannot disappear and JSON-valued arguments must still be valid JSON.
-        value = type->str() == "array"    ? GenericArray(kMaxDepth)
+        // An unsupported keyword elsewhere must not erase this parameter's
+        // supported nested constraints. Probe separately: a failed Visit can
+        // leave unfinished recursive rules in its compiler.
+        bool supported = true;
+        try {
+          auto probe = JsonConstraintCompiler(schema_, strict_, true);
+          probe.ignore_unknown_keys_ = ignore_unknown_keys_;
+          (void)probe.Visit(original, 1);
+        } catch (const std::invalid_argument&) {
+          supported = false;
+        }
+        value = supported                 ? Visit(original, 1)
+                : type->str() == "array"  ? GenericArray(kMaxDepth)
                 : type->str() == "object" ? GenericObject(kMaxDepth)
                                           : Primitive(type->str());
       } else {
@@ -974,7 +985,7 @@ private:
                                                     "minLength",
                                                     "maxLength"};
     for (const auto& [key, value] : schema.members()) {
-      if (!allowed.contains(key))
+      if (!allowed.contains(key) && !ignore_unknown_keys_)
         Invalid("unsupported keyword: " + key);
       if ((key == "title" || key == "description") && !value.is_string())
         Invalid(key + " must be a string");
@@ -1291,6 +1302,7 @@ private:
   const json::Value& schema_;
   bool strict_;
   bool open_objects_;
+  bool ignore_unknown_keys_{false};
   std::shared_ptr<JsonConstraint> grammar_{new JsonConstraint};
   std::uint32_t ws_, string_, integer_, number_, bool_, null_;
   std::map<std::size_t, std::uint32_t> generic_values_;
@@ -1345,36 +1357,73 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
+  const auto* properties = schema.find("properties");
+  const auto* additional = schema.find("additionalProperties");
+  const bool untyped = !strict && (!properties || properties->empty()) &&
+                       (!additional || additional->is_bool());
+  auto normalized = schema;
+  // A root reference already supplies the object schema. Injecting an empty,
+  // closed sibling object would intersect away its declared arguments.
+  if (!strict && !normalized.contains("$ref")) {
+    if (!normalized.contains("type"))
+      normalized["type"] = "object";
+    // Finite object values also supply their own fields.
+    if (!normalized.contains("const") && !normalized.contains("enum")) {
+      if (!normalized.contains("properties"))
+        normalized["properties"] = json::Value::object();
+      if (!normalized.contains("additionalProperties"))
+        normalized["additionalProperties"] = false;
+    }
+  }
   std::shared_ptr<const JsonConstraint> grammar;
   bool best_effort = false;
   try {
-    grammar = JsonConstraintCompiler(schema, strict, true).Compile(false);
+    // Validation-only on the native route; JSON fallback keeps this grammar.
+    grammar = JsonConstraintCompiler(normalized, strict, true).Compile(false);
   } catch (const std::invalid_argument&) {
     if (strict)
       throw;
     best_effort = true;
-  }
-  if (format != ToolFormat::kJson) {
+    // Unsupported non-strict keywords are guidance, but must not discard
+    // supported nested requirements, bounds or finite values.
     try {
-      grammar = JsonConstraintCompiler(schema, strict, true)
-                    .ToolParameters(format, best_effort);
+      grammar =
+          JsonConstraintCompiler(normalized, strict, true).Compile(false, true);
     } catch (const std::invalid_argument&) {
-      if (strict)
-        throw;
       grammar.reset();
-      best_effort = true;
+    }
+  }
+  const bool preserve_root =
+      grammar && (schema.contains("const") || schema.contains("enum") ||
+                  schema.contains("anyOf") || schema.contains("$ref"));
+  if (format != ToolFormat::kJson) {
+    const bool open = additional && additional->is_bool() &&
+                      additional->as_bool() && !schema.contains("const") &&
+                      !schema.contains("enum") && !schema.contains("anyOf") &&
+                      !schema.contains("$ref");
+    // An open/untyped non-strict tool must not force JSON framing or become
+    // an empty-arguments grammar after server defaults are applied (#324).
+    if (untyped && !preserve_root && (best_effort || open)) {
+      grammar = OpenToolParameters(format);
+    } else {
+      try {
+        grammar = JsonConstraintCompiler(normalized, strict, true)
+                      .ToolParameters(format, best_effort);
+      } catch (const std::invalid_argument&) {
+        if (strict)
+          throw;
+        grammar.reset();
+        best_effort = true;
+      }
     }
   }
   if (!grammar && format == ToolFormat::kJson && !strict)
     grammar = Object();
   if (!grammar && best_effort) {
-    const auto* properties = schema.find("properties");
-    const auto* additional = schema.find("additionalProperties");
     // Only untyped tools can use arbitrary native parameters. A typed schema
     // may have failed native compilation because literal delimiters or unions
     // cannot be represented faithfully; keep its JSON envelope in that case.
-    if ((!properties || properties->empty()) &&
-        (!additional || additional->is_bool()))
+    if (untyped && !preserve_root)
       grammar = OpenToolParameters(format);
   }
   const std::lock_guard lock(mutex);

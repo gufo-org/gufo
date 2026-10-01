@@ -1089,6 +1089,32 @@ void TestNonStrictAgentTools() {
     ambiguous["properties"]["path"]["const"] =
         format == Format::kQwen ? "a\n</parameter>b" : "a</｜DSML｜parameter>b";
     assert(!JsonConstraint::ToolParameters(ambiguous, false, format));
+    // Unsupported root annotations do not relax supported nested requirements.
+    auto annotated = schema;
+    annotated["unevaluatedProperties"] = true;
+    annotated["properties"]["edits"]["x-client-extension"] = true;
+    annotated["properties"]["edits"]["items"]["unevaluatedProperties"] = true;
+    const auto annotated_parameters =
+        JsonConstraint::ToolParameters(annotated, false, format);
+    assert(annotated_parameters);
+    const auto annotated_call = JsonConstraint::WithTools(
+        nullptr, {{"edit", annotated_parameters}}, true, false, format);
+    assert(Accepts(*annotated_call, call));
+    auto referenced = parse(R"({"$ref":"#/$defs/edit","$defs":{}})");
+    referenced["$defs"]["edit"] = schema;
+    const auto referenced_parameters =
+        JsonConstraint::ToolParameters(referenced, false, format);
+    assert(referenced_parameters);
+    const auto referenced_call = JsonConstraint::WithTools(
+        nullptr, {{"edit", referenced_parameters}}, true, false, format);
+    assert(Accepts(*referenced_call, call));
+    for (const char* invalid : {R"([{}])", R"([{"oldText":"a"}])",
+                                R"([{"oldText":"a","newText":42}])"}) {
+      auto nested = call;
+      nested.replace(nested.find(edits), edits.size(), invalid);
+      assert(!Accepts(*annotated_call, nested));
+      assert(!Accepts(*referenced_call, nested));
+    }
   }
   // Best-effort reference handling must remain bounded too.
   const auto cyclic = parse(R"({"$ref":"#","type":"object"})");
@@ -1135,6 +1161,77 @@ void TestNonStrictAgentTools() {
   assert(!Accepts(*finite_json, R"({"value":{"a.b":3,"😀":"x","other":42}})"));
 }
 
+void TestUntypedNonStrictTools() {
+  using Format = JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const bool qwen = format == Format::kQwen;
+    const std::string begin =
+        qwen ? "<tool_call>\n<function=record>\n"
+             : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n";
+    const std::string end = qwen ? "</function>\n</tool_call>"
+                                 : "</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+    const std::string value =
+        qwen ? "<parameter=value>\nalpha\n</parameter>\n"
+             : "<｜DSML｜parameter name=\"value\" string=\"true\">alpha"
+               "</｜DSML｜parameter>\n";
+    for (
+        const auto text :
+        {R"({"type":"object","additionalProperties":true})",
+         R"({"type":"object","unevaluatedProperties":true})",
+         R"({"type":"object","unevaluatedProperties":false})",
+         R"({"type":"object","additionalProperties":true,"dependentRequired":{"a":["b"]}})",
+         R"({"type":"object","properties":{},"additionalProperties":true})",
+         R"({"type":"object","properties":{},"additionalProperties":false,"unevaluatedProperties":true})"}) {
+      const auto parameters =
+          JsonConstraint::ToolParameters(parse(text), false, format);
+      assert(parameters);
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"record", parameters}}, false, false, format);
+      assert(Accepts(*grammar, begin + value + end));
+      assert(Accepts(*grammar, begin + end));
+      const auto final_answer = JsonConstraint::Compile(
+          parse(
+              R"({"type":"object","properties":{"done":{"type":"boolean","const":true}},
+                    "required":["done"],"additionalProperties":false})"),
+          false);
+      const auto combined = JsonConstraint::WithTools(
+          final_answer, {{"record", parameters}}, false, false, format);
+      assert(Accepts(*combined, R"({"done":true})"));
+      assert(!Accepts(*combined, R"({"done":false})"));
+      assert(!Accepts(*combined, R"({"other":true})"));
+      assert(Accepts(*combined, begin + value + end));
+    }
+    // A genuinely closed empty schema still describes a zero-argument tool.
+    for (const auto text :
+         {R"({"type":"object","properties":{},"additionalProperties":false})",
+          R"({})"}) {
+      const auto parameters =
+          JsonConstraint::ToolParameters(parse(text), false, format);
+      assert(parameters);
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"record", parameters}}, true, false, format);
+      assert(Accepts(*grammar, begin + end));
+      assert(!Accepts(*grammar, begin + value + end));
+    }
+    // Open properties do not erase exact finite values or typed extras.
+    for (
+        const auto text :
+        {R"({"type":"object","additionalProperties":true,"const":{"value":"alpha"}})",
+         R"({"type":"object","const":{"value":"alpha"}})",
+         R"({"type":"object","enum":[{"value":"alpha"}],"unevaluatedProperties":true})",
+         R"({"type":"object","additionalProperties":true,"const":{"value":"alpha"},"unevaluatedProperties":true})",
+         R"({"type":"object","additionalProperties":true,"enum":[{"value":"alpha"}]})",
+         R"({"type":"object","additionalProperties":{"type":"string"}})"}) {
+      const auto schema = parse(text);
+      assert(!JsonConstraint::ToolParameters(schema, false, format));
+      const auto json =
+          JsonConstraint::ToolParameters(schema, false, Format::kJson);
+      assert(Accepts(*json, R"({"value":"alpha"})"));
+      assert(!Accepts(*json, R"({"value":42})"));
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
@@ -1179,6 +1276,7 @@ int main(int argc, char** argv) {
   TestNativeTools();
   TestOpenNativeTools();
   TestNonStrictAgentTools();
+  TestUntypedNonStrictTools();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";
 }

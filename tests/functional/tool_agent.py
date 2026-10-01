@@ -5,7 +5,94 @@ from copy import deepcopy
 import json
 import sys
 
+import openai
+
 from tool_reasoning import response_result
+
+
+def check_tool_history(client, model, checks, chat_result, vision, image_content):
+    """Old names do not declare new tools or prevent the next turn (#357)."""
+    tools = [{"type": "function", "function": {
+        "name": "finish", "parameters": {"type": "object", "properties": {
+            "value": {"type": "string", "const": "RECOVERED"}},
+            "required": ["value"], "additionalProperties": False}}}]
+    prompt = "These are completed historical operations. Continue from their results."
+    content = ([image_content("red"), {"type": "text", "text": prompt}]
+               if vision else prompt)
+    messages = [{"role": "user", "content": content}]
+    for _ in range(38):
+        messages += [{"role": "assistant", "content": "Acknowledged."},
+                     {"role": "user", "content": "Continue keeping the earlier record."}]
+    calls = [{"id": f"old_{i}", "type": "function",
+              "function": {"name": name, "arguments": '{"value":"historical"}'}}
+             for i, name in enumerate(("…", "legacy 工具"))]
+    messages += [{"role": "assistant", "content": None, "tool_calls": calls},
+                 {"role": "tool", "tool_call_id": "old_1", "content": "Unknown tool; no action taken."},
+                 {"role": "tool", "tool_call_id": "old_0", "content": "Unknown tool; no action taken."},
+                 {"role": "user", "content": "Call finish once with value RECOVERED. No explanation."}]
+    chat = dict(model=model, messages=messages, tools=tools, tool_choice="required",
+                parallel_tool_calls=False, temperature=0, seed=41,
+                reasoning_effort="none", max_completion_tokens=128)
+    # Use actual Responses function_call items, not Chat-shaped message items.
+    items = deepcopy(messages[:-4])
+    if vision:
+        image = image_content("red")["image_url"]["url"]
+        items[0]["content"] = [{"type": "input_image", "image_url": image},
+                               {"type": "input_text", "text": prompt}]
+    for call in calls:
+        items.append({"type": "function_call", "call_id": call["id"], **call["function"]})
+    items += [{"type": "function_call_output", "call_id": "old_1", "output": "Unknown tool; no action taken."},
+              {"type": "function_call_output", "call_id": "old_0", "output": "Unknown tool; no action taken."},
+              messages[-1]]
+    responses = dict(model=model, input=items,
+                     tools=[{"type": "function", **t["function"], "strict": False} for t in tools],
+                     tool_choice="required", parallel_tool_calls=False,
+                     temperature=0, extra_body={"seed": 41}, reasoning={"effort": "none"},
+                     max_output_tokens=128, store=False)
+
+    def verify(name, result, cached=False):
+        checks[name] = result
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        function = result["tools"][0]["function"]
+        assert function["name"] == "finish", result
+        assert json.loads(function["arguments"]) == {"value": "RECOVERED"}, result
+        assert not result["text"].strip() and not result["reasoning"], result
+        if cached:
+            usage = result["usage"]
+            details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
+            total = usage.get("input_tokens", usage.get("prompt_tokens"))
+            assert details["cached_tokens"] >= total - 1, result
+        return function
+
+    for endpoint, request in (("chat", chat), ("responses", responses)):
+        generate = chat_result if endpoint == "chat" else response_result
+        first = verify(f"history_{endpoint}", generate(client, request, False))
+        # The same name remains invalid as a NEW declaration.
+        invalid = deepcopy(request)
+        target = invalid["tools"][0]["function"] if endpoint == "chat" else invalid["tools"][0]
+        target["name"] = "…"
+        try:
+            generate(client, invalid, True)
+            raise AssertionError("invalid tool declaration was accepted")
+        except openai.BadRequestError as error:
+            assert error.status_code == 400, error
+        again = verify(f"history_{endpoint}_retry", generate(client, request, True), cached=True)
+        assert again == first, (again, first)
+
+    stopped = chat_result(client, {**chat, "stop": "RECOVERED"}, True)
+    checks["history_stop"] = stopped
+    assert stopped["finish"] == "stop" and not stopped["tools"], stopped
+    limited = chat_result(client, {**chat, "max_completion_tokens": 2}, True)
+    checks["history_limit"] = limited
+    assert limited["finish"] == "length" and not limited["tools"], limited
+    verify("history_resume", chat_result(client, chat, True), cached=True)
+    with ThreadPoolExecutor(2) as pool:
+        peers = list(pool.map(lambda _: chat_result(
+            client, {**chat, "temperature": .7, "top_p": .8, "presence_penalty": .3}, True),
+            range(2)))
+    for i, result in enumerate(peers):
+        verify(f"history_sampled_peer_{i}", result, cached=True)
 
 
 def agent_tools():
@@ -22,6 +109,122 @@ def agent_tools():
             "name": "read", "description": "Read a file.",
             "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
             "required": ["path"]}}}]
+
+def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_content):
+    """An untyped neighbor must neither switch framing nor erase arguments."""
+    def record(name, result):
+        checks[name] = result
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+        return result
+
+    def check_call(result, name="record", arguments=None):
+        expected = {"value": "alpha"} if arguments is None else arguments
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        function = result["tools"][0]["function"]
+        assert function["name"] == name, result
+        assert json.loads(function["arguments"]) == expected, result
+        assert not result["text"].strip() and not result["reasoning"], result
+
+    common = dict(model=model, tool_choice="auto", parallel_tool_calls=False,
+                  temperature=0, seed=41, max_completion_tokens=128,
+                  reasoning_effort="none", presence_penalty=0)
+    for name, keyword in (("open_object", "additionalProperties"),
+                          ("unsupported_keyword", "unevaluatedProperties")):
+        function = {"name": "record", "description": "Record a value.", "strict": False,
+                    "parameters": {"type": "object", keyword: True}}
+        tools = [*agent_tools(), {"type": "function", "function": function}]
+        control = {**common, "tools": tools, "max_completion_tokens": 8,
+                   "messages": [{"role": "user", "content": "Reply OK without using tools."}],
+                   "extra_body": {"cache_prompt": False}}
+        opened = record(f"untyped_{name}_prompt", chat_result(client, control))
+        closed_tools = deepcopy(tools)
+        closed_tools[-1]["function"]["parameters"][keyword] = False
+        closed = record(f"untyped_{name}_control", chat_result(
+            client, {**control, "tools": closed_tools}))
+        delta = opened["usage"]["prompt_tokens"] - closed["usage"]["prompt_tokens"]
+        assert abs(delta) <= 2, ("open tool changed the tool protocol", name, delta)
+
+        # The schema deliberately provides no parameter types. State the
+        # intended type explicitly: "with a JSON object" can ask the model
+        # to pass that entire object as the value instead.
+        prompt = ("Call record exactly once with one parameter named value. "
+                  "Its value is the string alpha, not a nested object. Then stop.")
+        content = ([image_content("red"), {"type": "text", "text": prompt}]
+                   if vision else prompt)
+        request = {**common, "tools": tools, "messages": [{"role": "user", "content": content}]}
+        for streaming in (False, True):
+            result = record(f"untyped_{name}_chat_{streaming}",
+                            chat_result(client, request, streaming))
+            check_call(result)
+            if streaming:
+                assert result["usage"]["cached_tokens"] > 0, result
+        chat_calls = result["tools"]
+        responses = dict(model=model, input=prompt, tool_choice="auto",
+                         parallel_tool_calls=False, store=False, temperature=0,
+                         reasoning={"effort": "none"}, max_output_tokens=128,
+                         extra_body={"seed": 41, "presence_penalty": 0},
+                         tools=[{"type": "function", **t["function"], "strict": False}
+                                for t in tools])
+        result = record(f"untyped_{name}_responses", response_result(client, responses, True))
+        check_call(result)
+        # Keep the same schema set and history: a result must be consumed once,
+        # not trigger the record loop reported by the client.
+        continued = {**request, "messages": [
+            *request["messages"],
+            {"role": "assistant", "content": None, "tool_calls": chat_calls},
+            {"role": "tool", "tool_call_id": chat_calls[0]["id"], "content": "Recorded alpha."},
+            {"role": "user", "content": "Finished. Do not call tools. Reply DONE."}]}
+        done = record(f"untyped_{name}_finish", chat_result(client, continued, True))
+        assert done["finish"] == "stop" and not done["tools"] and "DONE" in done["text"], done
+
+        # A typed neighbor retains nested requirements despite the open tool.
+        edit_prompt = ('Call edit once on calc.py with edits [{"oldText":"a","newText":"b"}]. '
+                       'Do not call record or read. No explanation.')
+        edit = {**request, "messages": [{"role": "user", "content": edit_prompt}]}
+        edited = record(f"untyped_{name}_typed_neighbor", chat_result(client, edit, True))
+        check_call(edited, "edit", {"path": "calc.py", "edits": [{"oldText": "a", "newText": "b"}]})
+        limited = record(f"untyped_{name}_limit", chat_result(
+            client, {**request, "tool_choice": "required", "max_completion_tokens": 2}, True))
+        assert limited["finish"] == "length" and not limited["tools"], limited
+        stopped = record(f"untyped_{name}_stop", chat_result(
+            client, {**request, "stop": "alpha"}, True))
+        assert stopped["finish"] == "stop" and not stopped["tools"], stopped
+        retry = record(f"untyped_{name}_retry", chat_result(client, request, True))
+        check_call(retry)
+        assert retry["usage"]["cached_tokens"] > 0, retry
+        # Batch unlike grammars, not just identical requests.
+        with ThreadPoolExecutor(2) as pool:
+            peers = list(pool.map(lambda body: chat_result(
+                client, {**body, "temperature": .7, "top_p": .8}, True), (request, edit)))
+        record(f"untyped_{name}_sampled_peers", peers)
+        check_call(peers[0])
+        check_call(peers[1], "edit", {"path": "calc.py", "edits": [{"oldText": "a", "newText": "b"}]})
+
+    annotated = deepcopy(edit)
+    parameters = annotated["tools"][0]["function"]["parameters"]
+    parameters["unevaluatedProperties"] = True
+    parameters["properties"]["edits"]["x-client-extension"] = True
+    parameters["properties"]["edits"]["items"]["unevaluatedProperties"] = True
+    result = record("untyped_supported_nested_fields", chat_result(client, annotated, True))
+    check_call(result, "edit", {"path": "calc.py", "edits": [{"oldText": "a", "newText": "b"}]})
+    result = record("untyped_supported_nested_responses", response_result(client, {
+        **responses, "input": edit_prompt,
+        "tools": [{"type": "function", **t["function"], "strict": False}
+                  for t in annotated["tools"]]}, True))
+    check_call(result, "edit", {"path": "calc.py", "edits": [{"oldText": "a", "newText": "b"}]})
+    referenced = deepcopy(edit)
+    function = referenced["tools"][0]["function"]
+    function["parameters"] = {"$ref": "#/$defs/edit",
+                              "$defs": {"edit": function["parameters"]}}
+    result = record("untyped_referenced_tool", chat_result(client, referenced, True))
+    check_call(result, "edit", {"path": "calc.py", "edits": [{"oldText": "a", "newText": "b"}]})
+    finite = deepcopy(request)
+    finite["tools"][-1]["function"]["parameters"] = {
+        "type": "object", "const": {"value": "alpha"}, "unevaluatedProperties": True}
+    finite["tool_choice"] = {"type": "function", "function": {"name": "record"}}
+    finite["messages"] = [{"role": "user", "content": "Call record with value beta."}]
+    result = record("untyped_finite_object", chat_result(client, finite, True))
+    check_call(result)
 
 
 def check_tool_agent_json(client, model, checks, chat_result):
