@@ -471,20 +471,14 @@ struct TextRunnerPool::Impl {
             state_count <= std::numeric_limits<std::size_t>::max() / 2
                 ? state_count * 2
                 : state_count) {
-    // Retained capacity is not obvious from --sessions alone: a request keeps
-    // a fallback checkpoint as well as its own, so the entries hold about one
-    // conversation per session. Report it once so an operator can size the
-    // server against the number of conversations in rotation, not just the
-    // number of concurrent requests.
+    // Entry and byte limits constrain retention independently of session count.
     if (validated.descriptor.capabilities.snapshot) {
-      Logger::Info(
-          "cache",
-          "event=snapshot_cache_configured sessions=" +
-              std::to_string(state_count) +
-              " snapshot_entries=" + std::to_string(cache.entry_capacity()) +
-              " retained_conversations=" + std::to_string(state_count) +
-              " capacity_bytes=" +
-              std::to_string(cache.snapshot_capacity_bytes()));
+      Logger::Info("cache",
+                   "event=snapshot_cache_configured sessions=" +
+                       std::to_string(state_count) + " snapshot_entries=" +
+                       std::to_string(cache.entry_capacity()) +
+                       " capacity_bytes=" +
+                       std::to_string(cache.snapshot_capacity_bytes()));
     }
     if (disk_cache_options.has_value()) {
       if (!validated.descriptor.persistence.has_value()) {

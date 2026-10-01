@@ -1339,10 +1339,28 @@ void TestEntryCapacityEvictionIsLogged() {
 }
 
 void TestSnapshotCacheCapacityIsReportedAtStartup() {
-  auto stats = std::make_shared<FakeStats>();
-  auto runner = std::make_shared<SnapshotRunner>(stats);
-  TextRunnerPool pool(runner, 2);
-  (void)pool;
+  for (const std::size_t budget : {0U, 256U}) {
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256, budget);
+    std::ostringstream startup_log;
+    auto* previous = std::clog.rdbuf(startup_log.rdbuf());
+    {
+      TextRunnerPool pool(runner, 2);
+    }
+    std::clog.rdbuf(previous);
+    const auto output = startup_log.str();
+    const std::string expected =
+        "event=snapshot_cache_configured sessions=2 snapshot_entries=4 "
+        "capacity_bytes=" +
+        std::to_string(budget) + "\n";
+    const auto position = output.find(expected);
+    Expect(position != std::string::npos &&
+               output.find(expected, position + expected.size()) ==
+                   std::string::npos,
+           "startup reports actual session, entry and byte limits once");
+    Expect(output.find("retained_conversations") == std::string::npos,
+           "startup does not present session count as conversation capacity");
+  }
 }
 
 }  // namespace
@@ -1383,14 +1401,7 @@ int main() {
           eviction_log.str().find("reason=entry_capacity") != std::string::npos,
       "evicting a retained prefix for entry capacity is reported");
 
-  std::ostringstream startup_log;
-  previous = std::clog.rdbuf(startup_log.rdbuf());
   TestSnapshotCacheCapacityIsReportedAtStartup();
-  std::clog.rdbuf(previous);
-  Expect(startup_log.str().find("event=snapshot_cache_configured") !=
-                 std::string::npos &&
-             startup_log.str().find("sessions=2") != std::string::npos,
-         "retained snapshot capacity is reported once at startup");
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
   TestMeasuredStateIsReconciledWithClaim();
