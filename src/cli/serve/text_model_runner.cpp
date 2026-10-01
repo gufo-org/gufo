@@ -593,15 +593,18 @@ struct TextRunnerPool::Request::Impl {
     const auto capabilities = runner->Descriptor().capabilities;
     if (capabilities.incremental_prefill && capabilities.prefix_reuse &&
         capabilities.snapshot && capabilities.fork) {
-      // Limit copy work on cold long prompts, but keep the last checkpoint
-      // within one grid interval of the end for the common late-edit case.
+      // A reused frontier already bounds the work lost on an edit. Do not
+      // split a short continuation just to copy a nearby grid checkpoint.
+      // Cold long prompts still retain the last grid point for late edits.
       constexpr std::size_t interval = 2048;
       const auto grid_points = (prompt.size() - 1) / interval;
       const auto count =
           std::min(grid_points, TextRunnerPool::Impl::kIntermediateCheckpoints);
       for (std::size_t point = 1; point <= count; ++point) {
         const auto position = grid_points * point / count * interval;
-        if (position > prefill_offset && position != snapshot_tokens.size() &&
+        if (position > prefill_offset &&
+            position - prefill_offset >= interval &&
+            position != snapshot_tokens.size() &&
             !lease.HasSnapshotFor(
                 std::span<const TextRunnerToken>(prompt).first(position)))
           checkpoints.push_back(position);

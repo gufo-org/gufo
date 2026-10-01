@@ -1071,6 +1071,32 @@ void TestHistoryEditsRestoreIntermediateCheckpoints() {
   Expect(resumed.cached_prompt_tokens() == 2048,
          "cancellation retains completed intermediate state, not partial work");
   resumed.Invalidate();
+
+  auto short_stats = std::make_shared<FakeStats>();
+  TextRunnerPool short_pool(
+      std::make_shared<LongSnapshotRunner>(short_stats, 64, 256, 4096), 1);
+  std::vector<TextRunnerToken> short_prompt(7900, 1);
+  auto short_root = short_pool.Acquire(short_prompt);
+  while (!short_root.prefill_complete())
+    (void)short_root.Prefill(32768);
+  short_root.Commit();
+  const auto before_short = short_stats->snapshot_captures;
+  short_stats->prefill_spans.clear();
+  short_prompt.resize(8400, 1);
+  auto short_turn = short_pool.Acquire(short_prompt);
+  Expect(short_turn.cached_prompt_tokens() == 7900,
+         "short continuation starts from the previous frontier");
+  Expect(short_turn.Prefill(32768).decode_ready,
+         "crossing a nearby grid point does not split a short continuation");
+  short_turn.Commit();
+  Expect(short_stats->prefill_spans == std::vector<std::size_t>{500} &&
+             short_stats->snapshot_captures == before_short + 1,
+         "short continuation captures only its completed prompt");
+  short_prompt[7800] = 2;
+  auto short_edit = short_pool.Acquire(short_prompt);
+  Expect(short_edit.cached_prompt_tokens() == 6144,
+         "skipping a redundant warm checkpoint retains earlier edit recovery");
+  short_edit.Invalidate();
 }
 
 void TestChatFallbackSurvivesSnapshotBudgetPressure() {
