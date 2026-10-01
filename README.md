@@ -193,6 +193,58 @@ The same source, compiler flags and install rules serve both builds. Nix pins
 the complete toolchain for reproducible comparisons; changing the compiler or
 math libraries requires the affected model's quality checks.
 
+### Debian package
+
+The `debian/` directory builds two packages with `dpkg-buildpackage`:
+
+- `gufo` — the binary, runtime data and license notices.
+- `gufo-rocm-repo` — registers the AMD ROCm apt repository and signing key,
+  because the ROCm libraries Gufo needs (hipblaslt, rocwmma and the HIP
+  runtime) are not available in the Debian or Ubuntu repositories.
+
+Build the packages on a Debian or Ubuntu machine with the ROCm development
+packages installed from the AMD repository:
+
+```sh
+sudo apt install dpkg-dev debhelper cmake ninja-build pkg-config \
+  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev
+# ROCm development packages from the AMD repository (see below).
+sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \
+  hipcub-dev rocprim-dev rocwmma-dev
+dpkg-buildpackage -b
+```
+
+This produces `gufo_<version>_amd64.deb` and `gufo-rocm-repo_<version>_all.deb`
+in the parent directory. The build host and the target machines must use the
+same ROCm source, because the binary records the ROCm library paths at build
+time.
+
+On a target machine, install the repository package first, then Gufo:
+
+```sh
+sudo apt install ./gufo-rocm-repo_*.deb
+sudo apt update
+sudo apt install ./gufo_*.deb
+```
+
+The install creates a dedicated `gufo` system user and a `gufo.service`
+systemd unit that runs the LLM server from the user's home directory
+(`/var/lib/gufo`). Configure the model and start the service:
+
+```sh
+sudo install -d -o gufo -g gufo /var/lib/gufo/models
+sudo cp /path/to/model.gguf /var/lib/gufo/models/
+sudo sed -i 's|GUFO_MODEL=.*|GUFO_MODEL=/var/lib/gufo/models/model.gguf|' \
+  /etc/gufo/gufo.env
+sudo systemctl restart gufo
+```
+
+The service listens on port 8080; check it with `systemctl status gufo` and
+`journalctl -u gufo`. The target machine needs an AMD Strix Halo GPU
+(`gfx1151`), the amdgpu kernel driver with gfx1151 support, and read/write
+access to `/dev/kfd` and `/dev/dri` for the `gufo` user (the package adds it
+to the `video` and `render` groups). Model weights are acquired separately.
+
 ## License
 
 Gufo's original code is [MIT licensed](LICENSE). Adapted code and dependencies

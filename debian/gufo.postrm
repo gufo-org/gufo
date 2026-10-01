@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "purge" ]; then
+  # Remove the dedicated system user; the home directory
+  # (/var/lib/gufo) is kept in case it holds model weights.
+  if getent passwd gufo > /dev/null 2>&1; then
+    deluser --system gufo || true
+  fi
+fi
+
+#DEBHELPER#
+
+exit 0

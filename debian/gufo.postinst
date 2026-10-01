@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+  # Dedicated system user for the Gufo server. Model weights live in
+  # the user's home directory (/var/lib/gufo/models).
+  if ! getent passwd gufo > /dev/null 2>&1; then
+    adduser --system --group --home /var/lib/gufo \
+      --shell /usr/sbin/nologin gufo
+  fi
+  # GPU device access: /dev/kfd and /dev/dri/renderD* require membership
+  # in the video and render groups.
+  usermod -a -G video,render gufo
+fi
+
+#DEBHELPER#
+
+exit 0

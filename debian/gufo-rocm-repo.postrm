@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "purge" ]; then
+  rm -f /etc/apt/sources.list.d/gufo-rocm.list
+  rm -f /etc/apt/preferences.d/gufo-rocm-pin
+fi
+
+exit 0
