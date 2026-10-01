@@ -1,5 +1,11 @@
 # Gufo RDNA4 (gfx1201) Port — 進度紀錄
 
+> 狀態（2026-10-01）：基礎 bring-up 完成並凍結，找人接手。
+> PR1（IQ2_XS/Q2_K，與顯卡無關）：https://github.com/gufo-org/gufo/pull/355
+> PR2（本分支，RDNA4 RFC）：待開。已知缺口見「剩餘工作」。
+> 驗證環境：RX 9070 (gfx1201) + ROCm 7.2.4，`gufo diagnose` PASS，
+> Qwen3.8-27B Q3_K_M（c2048，21.8 tok/s）/ IQ2_XS（c8192，~19 tok/s）serve 驗證過。
+
 分支：`rdna4-port`（基於上游 main，commit f783fed 起）
 機器：192.168.68.67（Nobara），Intel Ultra 7 265K + AMD RX 9070（gfx1201，56CU）
 ROCm：7.2.4，`__GFX12__` 宏確認可用。VRAM 16GB discrete（非 Strix Halo 統一記憶體）。
