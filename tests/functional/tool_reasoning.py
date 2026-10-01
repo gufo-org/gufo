@@ -107,8 +107,8 @@ def check_tool_reasoning(client, model, checks, chat_result):
     for strict in (True, False):
         parameters = deepcopy(schema)
         if not strict:
-            # Ordinary agent schemas leave nested objects open. They must
-            # retain native tool syntax while quoting protocol tags too.
+            # Ordinary agent schemas leave nested objects open. Their nested
+            # requirements must survive quoted protocol tags too.
             del parameters["properties"]["edits"]["items"]["additionalProperties"]
         function = {"name": "edit", "description": "Return an edit for review; never execute it.",
                     "parameters": parameters, "strict": strict}

@@ -43,8 +43,11 @@ public:
   // parameter tags. The caller retains the exact JSON schema in that case.
   // Non-strict tools permit open nested objects. Unsupported keywords retain
   // best-effort native framing without relaxing strict response schemas.
+  // Required calls keep compact JSON for extended schemas; ordinary native
+  // calls retain their existing prompt and continuation representation.
   static std::shared_ptr<const JsonConstraint> ToolParameters(
-      const json::Value& schema, bool strict, ToolFormat format);
+      const json::Value& schema, bool strict, ToolFormat format,
+      bool required = false);
   // Best-effort native framing for non-strict tools with no declared argument
   // types. It preserves the model's native string/DSML typed-value semantics.
   static std::shared_ptr<const JsonConstraint> OpenToolParameters(

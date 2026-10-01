@@ -68,6 +68,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
       request.tool_choice != ChatRequest::ToolChoice::kNone) {
     std::vector<sampling::JsonConstraint::Tool> tools;
     std::vector<std::pair<json::Value, bool>> schemas;
+    const bool required =
+        request.tool_choice == ChatRequest::ToolChoice::kRequired;
     auto format = runner.ToolFormat();
     for (const auto& tool : request.tools) {
       const auto definition = tool.definition_json.empty()
@@ -77,8 +79,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
       const auto* strict = function ? function->find("strict") : nullptr;
       const bool enforce = strict && strict->as_bool();
       auto schema = json::parse(tool.parameters_json);
-      auto native =
-          sampling::JsonConstraint::ToolParameters(schema, enforce, format);
+      auto native = sampling::JsonConstraint::ToolParameters(schema, enforce,
+                                                             format, required);
       tools.emplace_back(tool.name, std::move(native));
       schemas.emplace_back(std::move(schema), enforce);
     }
@@ -92,8 +94,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
             schemas[i].first, schemas[i].second, format);
     }
     grammar = sampling::JsonConstraint::WithTools(
-        grammar, std::move(tools),
-        request.tool_choice == ChatRequest::ToolChoice::kRequired,
+        grammar, std::move(tools), required,
         !request.response_format && request.parallel_tool_calls, format);
     if (format == sampling::JsonConstraint::ToolFormat::kJson)
       instruction +=

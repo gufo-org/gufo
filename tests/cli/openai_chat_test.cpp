@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "src/core/json.hpp"
+#include "src/core/json_constraint.hpp"
 
 namespace {
 
@@ -2564,6 +2565,80 @@ void TestNativeReferencedArgumentTypes() {
     }
 }
 
+void TestWildcardToolTypes() {
+  using gufo::json::Value;
+  using Constraint = gufo::sampling::JsonConstraint;
+  using Format = Constraint::ToolFormat;
+  const auto schema = gufo::json::parse(R"({"type":"object",
+    "properties":{"value":{"type":"string"}},"required":["value"],
+    "patternProperties":{"^x_":{"type":"integer"}}})");
+  const auto arguments = gufo::json::parse(
+      R"({"value":"alpha","x_n":1,"x_b":true,"x_z":null,"x_a":[1],"x_o":{"n":1},"x_s":"1"})");
+  for (const auto native : {Format::kQwen, Format::kDeepSeek}) {
+    auto parameters = Constraint::ToolParameters(schema, false, native);
+    const auto format = parameters ? native : Format::kJson;
+    if (!parameters)
+      parameters = Constraint::ToolParameters(schema, false, format);
+    const auto grammar = Constraint::WithTools(
+        nullptr, {{"record", parameters}}, true, false, format);
+    std::string call;
+    if (format == Format::kJson) {
+      call =
+          "<tool_call>{\"name\":\"record\",\"arguments\":" + arguments.dump() +
+          "}</tool_call>";
+    } else {
+      call = "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n";
+      for (const auto& [name, value] : arguments.members())
+        call += "<｜DSML｜parameter name=\"" + name + "\" string=\"" +
+                (value.is_string() ? "true" : "false") + "\">" +
+                (value.is_string() ? value.str() : value.dump()) +
+                "</｜DSML｜parameter>\n";
+      call += "</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+    }
+    auto state = grammar->Start();
+    for (unsigned char byte : call)
+      state = grammar->Advance(state, byte);
+    Expect(grammar->Complete(state), "round-trip call is grammar-admissible");
+    for (bool responses : {false, true}) {
+      auto body = gufo::json::parse(R"({"model":"test-model",
+        "messages":[{"role":"user","content":"call record"}],
+        "tools":[{"type":"function","function":{"name":"record","strict":false}}],
+        "tool_choice":"auto"})");
+      auto tool = body["tools"].items()[0];
+      tool["function"]["parameters"] = schema;
+      body["tools"] = Value::array();
+      body["tools"].push_back(std::move(tool));
+      FakeBackend backend;
+      backend.pieces = {call};
+      gufo::server::HttpResponse response;
+      if (responses) {
+        gufo::server::ChatRequest chat;
+        Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+               "wildcard Responses controls are accepted");
+        response = gufo::server::CreateOpenAiResponse(
+            Request(body.dump()), backend, chat, 256, {}, false);
+      } else {
+        response =
+            gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      }
+      Expect(response.status == 200, "wildcard call succeeds");
+      const auto output = gufo::json::parse(response.body);
+      const auto encoded =
+          responses
+              ? output.find("output")->items().back().member_str("arguments")
+              : output.find("choices")
+                    ->items()[0]
+                    .find("message")
+                    ->find("tool_calls")
+                    ->items()[0]
+                    .find("function")
+                    ->member_str("arguments");
+      Expect(encoded == arguments.dump(),
+             "wildcard JSON types survive transport");
+    }
+  }
+}
+
 void TestToolMetadataAndFraming() {
   using gufo::json::Value;
   auto body = gufo::json::parse(R"({
@@ -2857,6 +2932,7 @@ int main() {
   TestResponsesOutput();
   TestNativeToolTransports();
   TestNativeReferencedArgumentTypes();
+  TestWildcardToolTypes();
   TestToolMetadataAndFraming();
   TestResponsesLiveAndCancellation();
   TestCachePromptOption();

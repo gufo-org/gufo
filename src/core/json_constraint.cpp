@@ -31,12 +31,19 @@ constexpr std::size_t kMaxWork = 2000000;
 
 // Some unsupported applicators admit fields outside "properties". Ignoring
 // them must not turn a best-effort tool into a closed, empty object.
-bool AdmitsExtraProperties(const json::Value& schema) {
+bool HasPropertySchemas(const json::Value& schema) {
   for (const auto* name :
-       {"patternProperties", "dependentSchemas", "oneOf", "allOf"}) {
+       {"patternProperties", "dependentSchemas", "dependencies", "if", "then",
+        "else", "oneOf", "allOf"}) {
     if (const auto* value = schema.find(name); value && !value->empty())
       return true;
   }
+  return false;
+}
+
+bool AdmitsExtraProperties(const json::Value& schema) {
+  if (HasPropertySchemas(schema))
+    return true;
   const auto* unevaluated = schema.find("unevaluatedProperties");
   return unevaluated && (!unevaluated->is_bool() || unevaluated->as_bool());
 }
@@ -185,6 +192,13 @@ public:
           "Respond with a single JSON object matching this JSON Schema:\n" +
           schema_.dump();
     }
+    return Finish();
+  }
+
+private:
+  std::shared_ptr<const JsonConstraint> Finish() {
+    // Native parameters need the same productivity check as JSON. Otherwise
+    // an impossible required field can admit its tag and then dead-end.
     // A recursive schema must have a finite witness. References that recurse
     // without first consuming input are invalid for a predictive grammar.
     std::vector<bool> productive(grammar_->rules_.size()), nullable(productive);
@@ -238,6 +252,7 @@ public:
     return std::move(grammar_);
   }
 
+public:
   std::shared_ptr<const JsonConstraint> ToolParameters(
       JsonConstraint::ToolFormat format, bool best_effort = false) {
     ignore_unknown_keys_ = best_effort && !strict_;
@@ -258,7 +273,14 @@ public:
     const auto* properties = root->find("properties");
     if (!properties || !properties->is_object())
       return {};
-    const bool open = !ClosedProperties(*root, best_effort) && !strict_;
+    const bool open = !strict_ && !ClosedProperties(*root, best_effort) &&
+                      (root->contains("additionalProperties") ||
+                       (best_effort && AdmitsExtraProperties(*root)));
+    // Qwen has no type flag for wildcard parameters. Unknown names are text
+    // in its parser: emitting native tags would turn 1/true/null/[]/{} into
+    // strings. Preserve JSON types instead of guessing from their spelling.
+    if (open && format == Format::kQwen)
+      return {};
     if (const auto* extra = root->find("additionalProperties");
         extra && !extra->is_bool() &&
         !(best_effort && AdmitsExtraProperties(*root)))
@@ -377,15 +399,13 @@ public:
     grammar_->root_ =
         open ? Seq({body, Repeat(OpenToolParameter(format, *properties))})
              : body;
-    (void)grammar_->Start();
-    return std::move(grammar_);
+    return Finish();
   }
 
   std::shared_ptr<const JsonConstraint> OpenToolParameters(
       JsonConstraint::ToolFormat format) {
     grammar_->root_ = Repeat(OpenToolParameter(format, json::Value::object()));
-    (void)grammar_->Start();
-    return std::move(grammar_);
+    return Finish();
   }
 
 private:
@@ -1160,6 +1180,12 @@ private:
       return Alt(branches);
     }
     const auto* type = schema.find("type");
+    // An unconstrained leaf is a valid JSON Schema, not a reason to discard
+    // the requirements on its containing array/object.
+    if (!type && open_objects_ &&
+        Without(schema, {"title", "description", "default", "examples"})
+            .empty())
+      return GenericValue(kMaxDepth - depth);
     std::vector<std::string> types;
     if (type && type->is_string())
       types.push_back(type->str());
@@ -1429,14 +1455,14 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::Object() {
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
-    const json::Value& schema, bool strict, ToolFormat format) {
+    const json::Value& schema, bool strict, ToolFormat format, bool required) {
   // Ordinary agent tools leave nested objects open. Preserve their declared
   // requirements/types and native framing without relaxing strict output
   // schemas or injecting a second protocol into the model's chat template.
-  using Key = std::tuple<std::string, bool, ToolFormat>;
+  using Key = std::tuple<std::string, bool, ToolFormat, bool>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
-  const Key key{schema.dump(), strict, format};
+  const Key key{schema.dump(), strict, format, required};
   if (std::get<0>(key).size() > kMaxSchemaBytes)
     Invalid("maximum schema size is 2 MiB");
   {
@@ -1464,20 +1490,25 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
   }
   std::shared_ptr<const JsonConstraint> grammar;
   bool best_effort = false;
+  const bool extended_native =
+      !required || format == ToolFormat::kJson || untyped;
   try {
     // Validation-only on the native route; JSON fallback keeps this grammar.
-    grammar = JsonConstraintCompiler(normalized, strict, true).Compile(false);
+    grammar = JsonConstraintCompiler(normalized, strict, extended_native)
+                  .Compile(false);
   } catch (const std::invalid_argument&) {
     if (strict)
       throw;
     best_effort = true;
     // Unsupported non-strict keywords are guidance, but must not discard
     // supported nested requirements, bounds or finite values.
-    try {
-      grammar =
-          JsonConstraintCompiler(normalized, strict, true).Compile(false, true);
-    } catch (const std::invalid_argument&) {
-      grammar.reset();
+    if (extended_native) {
+      try {
+        grammar = JsonConstraintCompiler(normalized, strict, true)
+                      .Compile(false, true);
+      } catch (const std::invalid_argument&) {
+        grammar.reset();
+      }
     }
   }
   const bool preserve_root =
@@ -1487,12 +1518,13 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
       additional && additional->is_bool() && additional->as_bool();
   // Use the same untyped decision on both routes: a JSON-only neighbor must
   // not turn a best-effort tool into an empty-arguments grammar (#324).
-  const bool open_untyped = untyped && !preserve_root &&
-                            !ClosedProperties(schema, best_effort) &&
-                            (best_effort || open);
+  const bool open_untyped =
+      grammar && untyped && !preserve_root &&
+      !ClosedProperties(schema, best_effort) && (best_effort || open) &&
+      !(format == ToolFormat::kQwen && HasPropertySchemas(schema));
   if (open_untyped) {
     grammar = OpenToolParameters(format);
-  } else if (format != ToolFormat::kJson) {
+  } else if (grammar && format != ToolFormat::kJson) {
     try {
       grammar = JsonConstraintCompiler(normalized, strict, true)
                     .ToolParameters(format, best_effort);

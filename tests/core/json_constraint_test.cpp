@@ -1096,10 +1096,19 @@ void TestNonStrictAgentTools() {
     annotated["properties"]["edits"]["items"]["unevaluatedProperties"] = true;
     const auto annotated_parameters =
         JsonConstraint::ToolParameters(annotated, false, format);
-    assert(annotated_parameters);
-    const auto annotated_call = JsonConstraint::WithTools(
-        nullptr, {{"edit", annotated_parameters}}, true, false, format);
-    assert(Accepts(*annotated_call, call));
+    // Root wildcards cannot preserve arbitrary JSON types in Qwen's tags.
+    assert(bool(annotated_parameters) == (format == Format::kDeepSeek));
+    const auto annotated_call =
+        annotated_parameters ? JsonConstraint::WithTools(
+                                   nullptr, {{"edit", annotated_parameters}},
+                                   true, false, format)
+                             : nullptr;
+    if (annotated_call)
+      assert(Accepts(*annotated_call, call));
+    const auto annotated_json =
+        JsonConstraint::ToolParameters(annotated, false, Format::kJson);
+    assert(Accepts(*annotated_json,
+                   R"({"path":"a","edits":[{"oldText":"a","newText":"b"}]})"));
     auto referenced = parse(R"({"$ref":"#/$defs/edit","$defs":{}})");
     referenced["$defs"]["edit"] = schema;
     const auto referenced_parameters =
@@ -1112,13 +1121,17 @@ void TestNonStrictAgentTools() {
                                 R"([{"oldText":"a","newText":42}])"}) {
       auto nested = call;
       nested.replace(nested.find(edits), edits.size(), invalid);
-      assert(!Accepts(*annotated_call, nested));
+      if (annotated_call)
+        assert(!Accepts(*annotated_call, nested));
+      assert(!Accepts(*annotated_json,
+                      std::string(R"({"path":"a","edits":)") + invalid + "}"));
       assert(!Accepts(*referenced_call, nested));
     }
   }
   // Best-effort reference handling must remain bounded too.
   const auto cyclic = parse(R"({"$ref":"#","type":"object"})");
-  assert(JsonConstraint::ToolParameters(cyclic, false, Format::kQwen));
+  assert(!JsonConstraint::ToolParameters(cyclic, false, Format::kQwen));
+  assert(JsonConstraint::ToolParameters(cyclic, false, Format::kJson));
 
   // Open-object support belongs to non-strict tools, never strict response
   // schemas. Both native and JSON fallback arguments retain nested schemas.
@@ -1321,6 +1334,10 @@ void TestMixedBestEffortToolRoutes() {
          {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
       const auto parameters =
           JsonConstraint::ToolParameters(parse(text), false, format);
+      if (format == Format::kQwen) {
+        assert(!parameters);
+        continue;
+      }
       assert(parameters);
       if (format == Format::kJson) {
         assert(Accepts(*parameters, R"({"a":"1","x_b":"2"})"));
@@ -1378,6 +1395,96 @@ void TestMixedBestEffortToolRoutes() {
   }
 }
 
+void TestToolSchemaSafety() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto ordinary = parse(R"({"type":"object","properties":{
+    "value":{"type":"string","const":"alpha"}},"required":["value"],
+    "additionalProperties":false})");
+  const auto uri = parse(R"({"type":"object","properties":{
+    "url":{"type":"string","format":"uri"}},"required":["url"]})");
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    // Keep established native calls and automatic agent framing. Forced
+    // extended calls use the shorter JSON representation they had on main.
+    assert(JsonConstraint::ToolParameters(ordinary, false, format, true));
+    assert(JsonConstraint::ToolParameters(uri, false, format));
+    assert(!JsonConstraint::ToolParameters(uri, false, format, true));
+  }
+  for (
+      const auto text :
+      {R"({"type":"object","properties":{"x":{"type":"integer","minimum":5,"maximum":2}},"required":["x"]})",
+       R"({"type":"object","properties":{"x":{"$ref":"#"}},"required":["x"]})",
+       R"({"$ref":"#"})"}) {
+    const auto schema = parse(text);
+    for (const auto format : {Format::kQwen, Format::kDeepSeek})
+      assert(!JsonConstraint::ToolParameters(schema, false, format));
+    const auto json =
+        JsonConstraint::ToolParameters(schema, false, Format::kJson);
+    assert(json && Accepts(*json, R"({"x":5})"));
+  }
+
+  // Optional impossible branches are pruned rather than admitting dead
+  // prefixes. The remaining native call must still have a finite completion.
+  const auto optional = parse(R"({"type":"object","properties":{
+    "x":{"type":"integer","minimum":5,"maximum":2},
+    "y":{"type":"string","const":"ok"}},"required":["y"],
+    "additionalProperties":false})");
+  const auto parameters =
+      JsonConstraint::ToolParameters(optional, false, Format::kQwen);
+  assert(parameters);
+  const auto native = JsonConstraint::WithTools(
+      nullptr, {{"record", parameters}}, true, false, Format::kQwen);
+  assert(Accepts(
+      *native,
+      "<tool_call>\n<function=record>\n<parameter=y>\nok\n</parameter>\n"
+      "</function>\n</tool_call>"));
+  auto state = native->Start();
+  for (unsigned char byte :
+       std::string("<tool_call>\n<function=record>\n<parameter=x>\n"))
+    state = native->Advance(state, byte);
+  assert(state.empty());
+
+  for (
+      const auto extension :
+      {R"({"patternProperties":{"^payload$":{"type":"integer"}}})",
+       R"({"if":{"properties":{"kind":{"const":"x"}}},"then":{"properties":{"payload":{"type":"integer"}},"required":["payload"]}})",
+       R"({"if":{"properties":{"kind":{"const":"y"}}},"else":{"properties":{"payload":{"type":"integer"}},"required":["payload"]}})",
+       R"({"dependencies":{"kind":{"properties":{"payload":{"type":"integer"}},"required":["payload"]}}})"}) {
+    auto schema = parse(extension);
+    schema["type"] = "object";
+    schema["properties"] = parse(R"({"kind":{"type":"string"}})");
+    schema["required"] = parse(R"(["kind"])");
+    assert(!JsonConstraint::ToolParameters(schema, false, Format::kQwen));
+    const auto json =
+        JsonConstraint::ToolParameters(schema, false, Format::kJson);
+    for (const auto value : {"1", "true", "null", "[1]", R"({"x":1})"}) {
+      // Unsupported branches remain guidance. Types that the model chooses
+      // must reach the HTTP parser intact, rather than becoming raw strings.
+      assert(Accepts(*json,
+                     std::string(R"({"kind":"x","payload":)") + value + "}"));
+    }
+    assert(!Accepts(*json, R"({"kind":1,"payload":1})"));
+    assert(!Accepts(*json, R"({"payload":1})"));
+    const auto ds =
+        JsonConstraint::ToolParameters(schema, false, Format::kDeepSeek);
+    assert(ds);
+  }
+  const auto metadata = parse(R"({"type":"object","properties":{
+    "edits":{"type":"array","items":{"type":"object","properties":{
+      "oldText":{"type":"string"},"newText":{"type":"string"},"metadata":{}},
+      "required":["oldText","newText"]}}},"required":["edits"]})");
+  const auto json =
+      JsonConstraint::ToolParameters(metadata, false, Format::kJson);
+  assert(Accepts(
+      *json,
+      R"({"edits":[{"oldText":"a","newText":"b","metadata":{"x":1}}]})"));
+  assert(!Accepts(*json, R"({"edits":[{}]})"));
+  assert(!Accepts(*json, R"({"edits":[{"oldText":1,"newText":"b"}]})"));
+  for (const auto format : {Format::kQwen, Format::kDeepSeek})
+    assert(JsonConstraint::ToolParameters(metadata, false, format));
+  for (const auto format : {Format::kQwen, Format::kDeepSeek})
+    assert(!JsonConstraint::ToolParameters(metadata, false, format, true));
+}
+
 int main(int argc, char** argv) {
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
@@ -1424,6 +1531,7 @@ int main(int argc, char** argv) {
   TestNonStrictAgentTools();
   TestUntypedNonStrictTools();
   TestMixedBestEffortToolRoutes();
+  TestToolSchemaSafety();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";
 }

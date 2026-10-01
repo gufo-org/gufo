@@ -658,15 +658,16 @@ calling tools. With `auto`, ordinary text and reasoning remain allowed; once a
 call starts, decoding constrains its name and argument format. Non-strict tools
 keep optional arguments optional. Open nested objects retain native syntax and
 declared requirements/types, including nested fields; unsupported schema
-keywords remain guidance. Unsupported rules that admit extra properties leave
-those objects open while preserving declared types and requirements. Untyped
-arguments survive both native and JSON framing. Annotated references and URI
-formats retain native framing; ambiguous string/null unions use JSON to preserve
-types. Constrained JSON keys follow schema order, with additional keys last.
-Values that are ambiguous in native tags use JSON.
-`tool_choice: "required"` constrains decoding to a declared call,
-so the requirement is forced rather than checked afterwards. Where the backend
-cannot constrain sampling, an unmet `required` choice still returns
+keywords remain guidance. Unsupported property-admitting rules, including
+conditional branches, leave those objects open without discarding declared
+requirements. Qwen wildcard fields and ambiguous string/null unions use JSON
+to preserve types. Constrained JSON keys follow schema order, with additional
+keys last. Impossible non-strict schemas fall back to JSON-object arguments;
+impossible strict schemas are rejected before generation.
+`tool_choice: "required"` and named choices constrain decoding to a declared
+call. Extended schemas retain compact JSON on this path, avoiding extra
+native framing tokens; ordinary native calls keep their existing format. Where
+the backend cannot constrain sampling, an unmet `required` choice still returns
 `tool_choice_unsatisfied` (HTTP 502, or an SSE error after streaming starts).
 Stops and token limits terminate normally without emitting incomplete calls.
 With no tools or `tool_choice:"none"`, tool markers are ordinary text and do

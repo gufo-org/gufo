@@ -402,6 +402,94 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
         record(name, chat_result(client, body, True), arguments)
 
 
+def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content):
+    """Admitted arguments preserve JSON types; invalid schemas cannot dead-end."""
+    wildcard = {"type": "object", "properties": {"value": {"type": "string"}},
+                "required": ["value"], "patternProperties": {"^x_": {}}}
+    branch = {"properties": {"payload": {"type": "integer"}}, "required": ["payload"]}
+    conditional = {"type": "object", "properties": {"kind": {"type": "string"}},
+                   "required": ["kind"], "if": {"properties": {"kind": {"const": "x"}}},
+                   "then": branch}
+    dependency = {"type": "object", "properties": {"kind": {"type": "string"}},
+                  "required": ["kind"], "dependencies": {"kind": branch}}
+    metadata = {"type": "object", "properties": {
+        "edits": {"type": "array", "items": {"type": "object", "properties": {
+            "oldText": {"type": "string", "const": "a"},
+            "newText": {"type": "string", "const": "b"}, "metadata": {}},
+            "required": ["oldText", "newText"]}}}, "required": ["edits"]}
+    cases = [
+        ("wildcard", wildcard, {"value": "alpha", "x_n": 1, "x_b": True,
+                               "x_z": None, "x_a": [1], "x_o": {"n": 1}, "x_s": "1"}, "auto"),
+        ("conditional", conditional, {"kind": "x", "payload": 1}, "auto"),
+        ("dependency", dependency, {"kind": "x", "payload": 1}, "auto"),
+        ("empty_interval", {"type": "object", "properties": {
+            "x": {"type": "integer", "minimum": 5, "maximum": 2}},
+            "required": ["x"]}, {"x": 5}, "required"),
+        ("recursive", {"type": "object", "properties": {"x": {"$ref": "#"}},
+                       "required": ["x"]}, {"x": 5}, "required"),
+        # Require this operation so optional tool selection cannot bypass the
+        # nested-constraint check by returning ordinary text.
+        ("metadata", metadata, {"edits": [{"oldText": "a", "newText": "b",
+                                         "metadata": {"n": 1}}]}, "required"),
+        ("uri", {"type": "object", "properties": {
+            "url": {"type": "string", "format": "uri"}}, "required": ["url"]},
+         {"url": "https://example.org/test"}, "required"),
+    ]
+
+    def save(label, result, expected):
+        checks["schema_edges_" + label] = result
+        print("CHECK schema_edges_" + label, file=sys.stderr, flush=True)
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        call = result["tools"][0]["function"]
+        assert call["name"] == "record", result
+        actual = json.loads(call["arguments"])
+        # Python equality equates true and 1; canonical JSON also checks types.
+        assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True), result
+        return result
+
+    for index, (name, schema, arguments, choice) in enumerate(cases):
+        prompt = ("Call record exactly once with these exact JSON arguments: " +
+                  json.dumps(arguments) + ". Preserve every key and JSON type. No explanation.")
+        if name in ("empty_interval", "recursive"):
+            prompt += " The supplied schema is advisory and inconsistent; pass x as the integer 5."
+        tools = [{"type": "function", "function": {
+            "name": "record", "strict": False, "parameters": schema}}]
+        content = ([image_content("red"), {"type": "text", "text": prompt}]
+                   if vision and name == "wildcard" else prompt)
+        chat = dict(model=model, tools=tools, tool_choice=choice, parallel_tool_calls=False,
+                    temperature=0, presence_penalty=0, seed=41, max_completion_tokens=192,
+                    reasoning_effort="none", messages=[{"role": "user", "content": content}],
+                    extra_body={"cache_prompt": True})
+        input_content = ([{"role": "user", "content": [
+            {"type": "input_image", "image_url": image_content("red")["image_url"]["url"]},
+            {"type": "input_text", "text": prompt}]}]
+            if vision and name == "wildcard" else prompt)
+        responses = dict(model=model, input=input_content, tool_choice=choice,
+                         parallel_tool_calls=False, temperature=0,
+                         reasoning={"effort": "none"}, max_output_tokens=192, store=False,
+                         extra_body={"seed": 41, "presence_penalty": 0, "cache_prompt": True},
+                         tools=[{"type": "function", **t["function"]} for t in tools])
+        save(name + "_chat", chat_result(client, chat, bool(index % 2)), arguments)
+        save(name + "_responses", response_result(
+            client, responses, not bool(index % 2)), arguments)
+        if name == "uri":
+            repeated = save(name + "_cached", chat_result(client, chat, True), arguments)
+            assert repeated["usage"]["gufo"]["prefill_tokens"] == 0, repeated
+            for label, update, finish in (
+                    ("limit", {"max_completion_tokens": 2}, "length"),
+                    ("stop", {"stop": "example.org"}, "stop")):
+                result = chat_result(client, {**chat, **update}, True)
+                checks["schema_edges_" + label] = result
+                assert result["finish"] == finish and not result["tools"], result
+            save("resume", chat_result(client, chat, True), arguments)
+        if name == "metadata":
+            sampled = {**chat, "tool_choice": "required", "temperature": .7, "top_p": .8}
+            with ThreadPoolExecutor(2) as pool:
+                peers = list(pool.map(lambda _: chat_result(client, sampled, True), range(2)))
+            for i, result in enumerate(peers):
+                save(f"sampled_peer_{i}", result, arguments)
+
+
 def check_tool_agent(client, model, checks, chat_result, vision, image_content):
     def record(name, result):
         checks[name] = result
