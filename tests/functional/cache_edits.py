@@ -7,9 +7,9 @@ import sys
 def check_cache_edits(client, model, checks, chat_result):
     # Start each shape with a complete synthetic history, so no earlier request
     # has already supplied a convenient checkpoint before the edit. Distinct
-    # prompt heads keep the two histories independent even with --sessions 1.
+    # prompt heads keep the histories independent even with --sessions 1.
     failures = []
-    for shape in ("last_user", "older_tool"):
+    for shape in ("last_user", "older_tool", "rewind"):
         label = "cache_edit_" + shape
         messages = [
             {"role": "system", "content": label + "\n" +
@@ -35,6 +35,13 @@ def check_cache_edits(client, model, checks, chat_result):
             ]
         else:
             messages.append({"role": "user", "content": "Reply with only ALPHA."})
+            if shape == "rewind":
+                messages += [
+                    {"role": "assistant", "content": "ALPHA"},
+                    {"role": "user", "content": "Reply with only GAMMA."},
+                    {"role": "assistant", "content": "GAMMA"},
+                    {"role": "user", "content": "Reply with only ALPHA."},
+                ]
         request = dict(model=model, messages=messages, temperature=0, seed=31,
                        max_completion_tokens=16, extra_body={
                            "chat_template_kwargs": {"enable_thinking": False}})
@@ -71,6 +78,13 @@ def check_cache_edits(client, model, checks, chat_result):
         edited_request = deepcopy(request)
         if shape == "last_user":
             edited_request["messages"][-1]["content"] = "Reply with only BETA."
+        elif shape == "rewind":
+            # Return to the first instruction, edit it, and discard every later
+            # turn, as when branching from an older user message in Pi.
+            edited_request["messages"] = edited_request["messages"][:4]
+            edited_request["messages"][-1]["content"] = "Reply with only BETA."
+            assert edited_request["messages"][:-1] == messages[:3]
+            assert len(edited_request["messages"]) < len(messages)
         else:
             # Truncate only an older tool result, keeping its status, tool
             # definition, call IDs, system prompt and latest exchange intact.
@@ -78,6 +92,8 @@ def check_cache_edits(client, model, checks, chat_result):
                 "The fixture status is BETA.\n" + "Routine archive entry.\n" * 32)
         edited = chat("edited", edited_request)
         prompt, reused, prefilled = work(edited)
+        if shape == "rewind":
+            assert prompt < total, (edited, cold)
         detail = edited["usage"]["gufo"]
         evidence = {"prompt_tokens": prompt, "cached_tokens": reused,
                     "prefill_tokens": prefilled,
@@ -109,5 +125,5 @@ def check_cache_edits(client, model, checks, chat_result):
         assert edited["text"].strip() == "BETA" and not edited["reasoning"] \
             and not edited["tools"], edited
 
-    # Retain both reproductions and their cold output controls before failing.
+    # Retain all reproductions and their cold output controls before failing.
     assert not failures, "\n".join(failures)
