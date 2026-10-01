@@ -329,6 +329,9 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << tokenization::QwenChatTemplate::OfficialTemplateSha256() << '\n'
            << "state_abi=" << state_abi << '\n'
            << "payload_layout=qwen-gfx1151-live-prefix-v3\n"
+           // Older learned boundaries could keep logits from an earlier
+           // prefix. Their payload has no readiness tag to distinguish them.
+           << "checkpoint_frontier=complete-prefix-v1\n"
            << "numerics=qwen-bf16-fp32-prefill-v1\n"
            << "rmsnorm=fused-square-sum-v1\n"
            << "prefill_attention=visible-causal-tail-v1\n"
