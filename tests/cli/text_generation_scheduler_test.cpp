@@ -1360,6 +1360,36 @@ void TestDecodeActivePrefillIsBounded(bool multi_token, bool batched) {
          "chunk metrics capture the selected active-decode policy");
 }
 
+void TestDecodeRoundsBetweenPrefillChunks() {
+  auto control = std::make_shared<FakeControl>();
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(
+      control, 2, {.decode_active_tokens = 2, .decode_rounds_per_chunk = 3});
+  auto request_a = scheduler->Submit({1}, 40, 0.0F);
+  control->WaitForAdvance(1);
+  auto request_b = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F);
+  control->ReleaseAdvance();
+
+  Expect(request_a.Wait().tokens == ExpectedTokens(1, 40),
+         "the running request keeps its trajectory with more decode rounds");
+  Expect(request_b.Wait().tokens == ExpectedTokens(2, 2),
+         "the prompt keeps its trajectory with more decode rounds");
+  const auto events = control->Events();
+  std::vector<std::size_t> chunks;
+  for (std::size_t index = 0; index < events.size(); ++index)
+    if (events[index].kind == EventKind::kPrefill && events[index].label == 2)
+      chunks.push_back(index);
+  Expect(chunks.size() == 4, "the prompt is still split into bounded chunks");
+  for (std::size_t chunk = 1; chunk < chunks.size(); ++chunk) {
+    std::size_t rounds = 0;
+    for (std::size_t index = chunks[chunk - 1] + 1; index < chunks[chunk];
+         ++index)
+      rounds += events[index].kind == EventKind::kAdvance &&
+                events[index].label == 1;
+    Expect(rounds == 3, "the running request gets every owed decode round");
+  }
+}
+
 void TestPrefillYieldsToEveryDueDecoder(bool multi_token, bool batched) {
   auto control = std::make_shared<FakeControl>();
   control->multi_token_decode = multi_token;
@@ -3209,6 +3239,7 @@ int main() {
       TestPrefillYieldsToEveryDueDecoder(multi_token, batched);
     }
   }
+  TestDecodeRoundsBetweenPrefillChunks();
   TestNonIncrementalRunnerFallsBackSafely();
   TestPendingLimitsRejectBeforeStateAdmission();
   TestPendingClientsAreRoundRobinAndIndividuallyBounded();
