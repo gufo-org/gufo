@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -90,10 +91,36 @@ struct ContinuationCache::Impl {
   // Rank extra copies before the last useful checkpoint of a prefix family.
   // Exact tokens and input identity, not client IDs or hashes, establish that
   // another continuation can keep the family reusable after this removal.
+  /// A continuation that two retained continuations extend and then diverge
+  /// after is the prefix they share, such as a system prompt. No copy
+  /// replaces it, so it is never ranked as redundant.
+  [[nodiscard]] bool IsBranchPoint(std::size_t candidate) const {
+    const auto& entry = *entries[candidate];
+    if (entry.purpose != SnapshotPurpose::kContinuation)
+      return false;
+    std::optional<ContinuationToken> next;
+    for (std::size_t other = state_count; other < entries.size(); ++other) {
+      const auto& peer = *entries[other];
+      if (other == candidate || !peer.valid ||
+          peer.purpose != SnapshotPurpose::kContinuation ||
+          peer.input_identity != entry.input_identity ||
+          peer.tokens.size() <= entry.tokens.size() ||
+          !IsPrefix(entry.tokens, peer.tokens))
+        continue;
+      const auto token = peer.tokens[entry.tokens.size()];
+      if (next.has_value() && *next != token)
+        return true;
+      next = token;
+    }
+    return false;
+  }
+
   [[nodiscard]] int RemovalPriority(
       std::size_t candidate, std::span<const ContinuationToken> incoming = {},
       std::span<const std::uint8_t> incoming_identity = {}) const {
     const auto& entry = *entries[candidate];
+    if (IsBranchPoint(candidate))
+      return 3;
     // A new continuation also makes its own earlier copies redundant. During
     // cold prefill those may all be history snapshots, so no retained
     // continuation yet exists to protect another conversation's last copy.
@@ -645,6 +672,33 @@ std::size_t ContinuationCache::CachedPrefixTokens(
         entry->live_tokens.size() > longest &&
         matches(entry->live_tokens, entry->live_identity))
       longest = entry->live_tokens.size();
+  }
+  return longest;
+}
+
+std::size_t ContinuationCache::CommonPrefixTokens(
+    std::span<const ContinuationToken> prompt,
+    std::span<const std::uint8_t> input_identity,
+    std::span<const ContinuationInputPrefix> input_prefixes) const {
+  // Records store one identity for their complete token list. Requiring it to
+  // match the prompt's identity at that length conservatively skips records
+  // whose images differ anywhere, so a boundary never spans an image change.
+  const auto common = [&](const auto& tokens, const auto& identity) {
+    if (tokens.empty() ||
+        !std::ranges::equal(
+            identity,
+            PrefixInputIdentity(input_identity, input_prefixes, tokens.size())))
+      return std::size_t{0};
+    return static_cast<std::size_t>(std::ranges::mismatch(tokens, prompt).in1 -
+                                    tokens.begin());
+  };
+  const std::lock_guard<std::mutex> lock(impl_->mutex);
+  std::size_t longest = 0;
+  for (const auto& entry : impl_->entries) {
+    if (entry->valid)
+      longest = std::max(longest, common(entry->tokens, entry->input_identity));
+    longest =
+        std::max(longest, common(entry->live_tokens, entry->live_identity));
   }
   return longest;
 }

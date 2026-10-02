@@ -661,11 +661,6 @@ struct TextGenerationScheduler::Impl {
     }
   }
 
-  /// Concurrent prompts that share at least this many uncached tokens wait
-  /// for one prefill instead of repeating it. Shorter shared prefixes cost
-  /// less to prefill again than an extra checkpoint and a serialized start.
-  static constexpr std::size_t kSharedPrefillMinTokens = 512;
-
   /// Parks a cold request behind a resident one that is still prefilling the
   /// longest prefix both prompts share. That request publishes a checkpoint
   /// there, so this one restores it instead of prefilling the same tokens in
@@ -705,16 +700,17 @@ struct TextGenerationScheduler::Impl {
         common = shared;
       }
     }
-    if (leader == nullptr || common < kSharedPrefillMinTokens)
+    if (leader == nullptr ||
+        common < TextRunnerPool::Request::kSharedPrefixMinTokens)
       return false;
     // A longer retained prefix, such as this conversation's previous turn,
     // already beats waiting for a peer.
     const auto cached =
         runner_pool->CachedPrefixTokens(prompt, request->prompt_context.get());
-    if (common < cached + kSharedPrefillMinTokens)
+    if (common < cached + TextRunnerPool::Request::kSharedPrefixMinTokens)
       return false;
     const auto position = leader->runner_request.ShareCheckpoint(common);
-    if (position < cached + kSharedPrefillMinTokens)
+    if (position < cached + TextRunnerPool::Request::kSharedPrefixMinTokens)
       return false;
     request->prefix_leader = std::move(leader);
     request->prefix_position = position;

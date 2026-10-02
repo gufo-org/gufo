@@ -1402,6 +1402,55 @@ void TestSharedPrefixIsLearnedAndRestoredAcrossConversations() {
   }
 }
 
+void TestRamLearnsDivergenceBoundaries() {
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentSnapshotRunner>(
+      stats, "ram-boundary", std::size_t{1} << 20, 4096);
+  TextRunnerPool pool(runner, 1);
+  // Conversations share a system prompt, then each has its own tail. Below
+  // 2048 tokens no grid checkpoint exists, so only learning can help.
+  const auto conversation = [](std::size_t shared, TextRunnerToken tail) {
+    std::vector<TextRunnerToken> prompt;
+    for (std::size_t index = 0; index < shared; ++index)
+      prompt.push_back(static_cast<TextRunnerToken>(100 + index % 50));
+    for (TextRunnerToken index = 0; index < 600; ++index)
+      prompt.push_back(tail + index);
+    return prompt;
+  };
+  const auto run = [&](const std::vector<TextRunnerToken>& prompt) {
+    auto request = pool.Acquire(prompt);
+    const auto cached = request.cached_prompt_tokens();
+    std::vector<std::size_t> steps;
+    while (!request.prefill_complete())
+      steps.push_back(request.Prefill(4096).consumed_tokens);
+    (void)request.Commit();
+    return std::pair{cached, steps};
+  };
+
+  const auto [first_cached, first_steps] = run(conversation(1000, 10000));
+  Expect(first_cached == 0 && first_steps == std::vector<std::size_t>{1600},
+         "the first conversation has nothing to share");
+  const auto [second_cached, second_steps] = run(conversation(1000, 20000));
+  Expect(second_cached == 0 &&
+             second_steps == std::vector<std::size_t>({1000, 600}),
+         "the second conversation stops at the divergence point to retain it");
+  const auto [third_cached, third_steps] = run(conversation(1000, 30000));
+  Expect(third_cached == 1000 && third_steps == std::vector<std::size_t>{600},
+         "later conversations restore the learned boundary exactly");
+  const auto [short_cached, short_steps] = run(conversation(300, 40000));
+  Expect(short_cached == 0 && short_steps == std::vector<std::size_t>{900},
+         "a short shared prefix is not worth an extra checkpoint");
+  // An edit near the end diverges inside this request's own final tokens;
+  // its stable checkpoint covers that, so no extra copy is taken.
+  auto edited = conversation(1000, 30000);
+  edited.back() += 1;
+  auto request = pool.Acquire(edited);
+  Expect(request.cached_prompt_tokens() == 1000 &&
+             request.Prefill(4096).consumed_tokens == 600,
+         "a late divergence does not stop prefill for another checkpoint");
+  request.Invalidate();
+}
+
 void TestCoincidentCacheBoundariesShareOneCopy() {
   for (const bool stable : {false, true}) {
     TemporaryDirectory directory;
@@ -1697,6 +1746,7 @@ int main() {
   TestSnapshotCacheCapacityIsReportedAtStartup();
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
+  TestRamLearnsDivergenceBoundaries();
   TestCoincidentCacheBoundariesShareOneCopy();
   TestMeasuredStateIsReconciledWithClaim();
   TestSnapshotBudgetRefusalDoesNotFailCompletedRequest();

@@ -94,6 +94,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
 | `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, including Messages thinking blocks, and compare with uncached responses |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
+| `cache-shared-prefix` | New conversations under one system prompt, one after another, with long and short tasks: from the third on they restore the whole shared prefix; compare answers with uncached controls |
 | `cache-concurrency` | Concurrent identical prompts, shared-system fan-out with short and long tasks, short or no shared prefixes, a retained conversation beside a newcomer, and a cancelled leader; check waits, prefill work and uncached answers |
 
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before

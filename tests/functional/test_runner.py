@@ -25,6 +25,7 @@ from tool_reasoning import ARGUMENTS, assert_edit
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
+from cache_shared_prefix import check_cache_shared_prefix
 from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
 from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
@@ -432,6 +433,52 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_concurrency_rejects_waiting_without_a_shared_prefix(self):
         with self.assertRaisesRegex(AssertionError, "waited without a shared prefix"):
             self.run_cache_concurrency(regress="wait")
+
+    def run_cache_shared_prefix(self, regress=False):
+        import re
+        seen, requests = {}, []
+
+        def tokens(messages):
+            return sum(len(m["content"]) // 4 + 10 for m in messages)
+
+        def chat_result(client, body):
+            # Model-independent server model: the second conversation under a
+            # system prompt learns its boundary, later ones restore it.
+            requests.append(json.loads(json.dumps(body)))
+            messages = body["messages"]
+            label = messages[0]["content"].split("\n")[0]
+            total = tokens(messages)
+            cached = 0
+            if body.get("extra_body", {}).get("cache_prompt") is not False:
+                count = seen.get(label, 0)
+                seen[label] = count + 1
+                if count == 1:
+                    cached = 2048
+                elif count >= 2:
+                    cached = 2048 if regress else tokens(messages[:1])
+            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
+            return {"text": code[1] if code else "Z", "reasoning": "", "tools": [],
+                    "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached}}}
+
+        checks = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_cache_shared_prefix(None, "fixture", checks, chat_result)
+        return requests, checks
+
+    def test_cache_shared_prefix_runs_conversations_then_cold_controls(self):
+        requests, checks = self.run_cache_shared_prefix()
+        for group in ("long_tasks", "short_tasks"):
+            self.assertTrue(all(f"{group}_{index}" in checks for index in range(4)))
+            self.assertTrue(all(f"{group}_cold_{index}" in checks for index in range(4)))
+        warm = [body for body in requests if "extra_body" not in body]
+        self.assertEqual(len(warm), 8)
+
+    def test_cache_shared_prefix_rejects_grid_only_reuse(self):
+        with self.assertRaisesRegex(AssertionError, "of the shared system prompt"):
+            self.run_cache_shared_prefix(regress=True)
 
     def test_prompt_progress_contract_and_output_order(self):
         def event(processed, elapsed=0):

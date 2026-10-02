@@ -422,13 +422,16 @@ public:
     /// publish a RAM checkpoint before prefilling past it, reusing a planned
     /// checkpoint within kSharedCheckpointSlack tokens. Zero when the runner
     /// cannot snapshot or this request is no longer before that position.
-    /// An awaited checkpoint has requests waiting for it, so it is retained
-    /// with continuation priority rather than as an optional copy.
-    [[nodiscard]] std::size_t ShareCheckpoint(std::size_t common_tokens,
-                                              bool awaited = true);
+    /// Other requests depend on it, waiting now or arriving later, so it is
+    /// retained with continuation priority rather than as an optional copy.
+    [[nodiscard]] std::size_t ShareCheckpoint(std::size_t common_tokens);
     /// A planned checkpoint this close to the shared position is cheaper to
     /// use than capturing another one: followers prefill the gap themselves.
     static constexpr std::size_t kSharedCheckpointSlack = 64;
+    /// A shared prefix must add at least this many tokens to what a request
+    /// can already restore before it waits for a peer or captures an extra
+    /// checkpoint for later requests. Shorter gaps cost less to prefill again.
+    static constexpr std::size_t kSharedPrefixMinTokens = 512;
 
     void PrepareBatchExecution();
     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);

@@ -194,6 +194,35 @@ remains subject to the existing byte budget, and intermediate copies preserve
 the original branching fallback. These intermediate checkpoints live in RAM;
 the disk tier continues to retain prompt and learned shared-prefix boundaries.
 
+### Learned divergence points
+
+Grid checkpoints sit at fixed positions, not where conversations actually
+diverge. Agents start many conversations with the same system prompt and tool
+definitions, then a different task:
+
+```text
+Conversation 1:  [ shared 4,500 tokens ][ task A, 10,000 tokens ]
+grid checkpoints:       ^2,048    ^6,144    ^10,240    ^14,336
+```
+
+Only the 2,048 checkpoint lies inside the shared part, so a second
+conversation would restore 2,048 tokens and prefill the other 2,450 shared
+tokens again. The longer the tasks, the further the grid spreads.
+
+The point that matters, token 4,500, is unknown until a second prompt shows
+where the two differ. When a request arrives, the cache compares it with the
+tokens of every retained checkpoint and live frontier of the same input
+identity. If the longest common prefix adds at least 512 tokens to what the
+request can already restore, the request stops its prefill there and retains
+an extra checkpoint. Other conversations depend on it, so it is retained like a
+stable boundary, not as an optional copy, and the branch-point rule below keeps
+it while it is shared. From the third conversation on, every new one restores
+the whole shared prefix and prefills only its own task. A divergence within
+the request's last 64 tokens, such as an edited final message, is covered by
+its own stable checkpoint and takes no extra copy. The same position from the same prefix family is captured
+once; records whose images differ from the prompt are not used to find it.
+Without disk, this needs no configuration.
+
 Execution and retention have separate limits. `--sessions N` allocates N
 mutable execution states and controls active request concurrency. A separate
 pool holds **128 immutable checkpoint records**, regardless of session count.
@@ -209,7 +238,9 @@ When space is needed, RAM retention prefers removing:
 
 1. A full-prompt retry copy with a stable fallback still retained.
 2. An intermediate copy with a related stable continuation retained.
-3. An older stable boundary covered by a newer one.
+3. An older stable boundary covered by a newer one. A checkpoint that two
+   retained conversations extend and then diverge after is the prefix they
+   share, not an older turn, and never counts as covered.
 4. Remaining checkpoints, oldest-used first within each priority.
 
 Under entry pressure, an edited branch can first replace its incompatible
@@ -310,13 +341,11 @@ global least-recently-used, without conversation or rebuild-cost awareness.
 written before a restart restored a 24,866-token prompt in 1.8 s against about
 50 s for a cold prefill **(measured)**.
 
-It also **learns exact shared-prefix boundaries**, which the RAM tier does
-not currently do. When several prompts share a long prefix and then diverge, it can
-capture a checkpoint at the divergence point so later conversations resume from
-it. RAM's intermediate checkpoints may reuse part of a shared prefix; disk can
-retain the learned divergence boundary itself. The boundary is not learned on
-first sight; in one run it became usable from the fifth conversation
-**(measured)**. See #267.
+It also **learns shared-prefix boundaries** that survive restarts. RAM learns a
+divergence point from the second conversation and restores it from the third
+(see above); the disk index needs more conversations, and in one run its
+boundary became usable from the fifth **(measured)**. When both tiers choose the
+same position, one capture feeds both. See #267.
 
 **Disk checkpoints are spaced at least 2048 tokens apart.** A conversation
 advances a few hundred tokens per turn, so writing every turn serialises, fsyncs

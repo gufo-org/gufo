@@ -249,6 +249,15 @@ public:
       std::span<const std::uint8_t> input_identity = {},
       std::span<const ContinuationInputPrefix> input_prefixes = {}) const;
 
+  /// Longest prefix prompt shares with any retained checkpoint or live
+  /// frontier of the same input identity, whether or not that record ends
+  /// there. This is where prompts diverge, so a checkpoint captured there
+  /// serves later prompts that share it. Leases nothing.
+  [[nodiscard]] std::size_t CommonPrefixTokens(
+      std::span<const ContinuationToken> prompt,
+      std::span<const std::uint8_t> input_identity = {},
+      std::span<const ContinuationInputPrefix> input_prefixes = {}) const;
+
   [[nodiscard]] std::size_t capacity() const noexcept;
   /// Immutable checkpoint records, independent of execution capacity().
   [[nodiscard]] std::size_t entry_capacity() const noexcept;
