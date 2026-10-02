@@ -754,10 +754,12 @@ void TestGeneratedFrontierForksBeforeMutation() {
 }
 
 void TestGeneratedFrontierPersistsForForks() {
+  // Persist every frontier; spacing is checked below and by the disk store.
   TemporaryDirectory directory;
   const TextRunnerDiskCacheOptions disk{.directory = directory.path(),
                                         .capacity_bytes = 4096,
-                                        .staging_capacity_bytes = 4096};
+                                        .staging_capacity_bytes = 4096,
+                                        .min_checkpoint_step_tokens = 0};
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<PersistentSnapshotRunner>(stats, "artifact-A");
   {
@@ -778,6 +780,26 @@ void TestGeneratedFrontierPersistsForForks() {
          "disk forks restore the generated checkpoint before suffix prefill");
   Expect(restored.Prefill(16).consumed_tokens == 1,
          "disk restoration does not re-prefill known generated tokens");
+
+  // With the default step, the generated frontier one token past the prompt
+  // is not written; a restart resumes from the prompt and re-prefills it.
+  TemporaryDirectory spaced_directory;
+  const TextRunnerDiskCacheOptions spaced{.directory = spaced_directory.path(),
+                                          .capacity_bytes = 4096,
+                                          .staging_capacity_bytes = 4096};
+  {
+    TextRunnerPool pool(runner, 2, spaced);
+    auto root = pool.Acquire({1, 2, 3});
+    root.Prefill(3);
+    (void)root.SelectNext();
+    root.Advance();
+    root.Commit();
+  }
+  TextRunnerPool spaced_restart(runner, 1, spaced);
+  auto resumed = spaced_restart.Acquire({1, 2, 3, 90, 5});
+  Expect(resumed.cache_disk_hit() && resumed.cached_prompt_tokens() == 3 &&
+             resumed.Prefill(16).consumed_tokens == 2,
+         "spaced disk checkpoints resume from the nearest stored prefix");
 }
 
 void TestCancellationRetainsOnlyCompletedWork() {
@@ -1213,7 +1235,8 @@ void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
   TemporaryDirectory directory;
   const TextRunnerDiskCacheOptions disk_cache{.directory = directory.path(),
                                               .capacity_bytes = 8192,
-                                              .staging_capacity_bytes = 4096};
+                                              .staging_capacity_bytes = 4096,
+                                              .min_checkpoint_step_tokens = 0};
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<PersistentSnapshotRunner>(stats, "artifact-A");
   {
@@ -1249,7 +1272,8 @@ void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
   const TextRunnerDiskCacheOptions legacy_disk{
       .directory = legacy_directory.path(),
       .capacity_bytes = 8192,
-      .staging_capacity_bytes = 4096};
+      .staging_capacity_bytes = 4096,
+      .min_checkpoint_step_tokens = 0};
   {
     TextRunnerPool writer(runner, 1, legacy_disk);
     auto old = writer.Acquire({1, 2, 3, 40, 41});
