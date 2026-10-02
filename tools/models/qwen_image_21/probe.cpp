@@ -1,3 +1,4 @@
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -10,7 +11,7 @@ int main(int argc, char** argv) {
   using namespace gufo::models::qwen_image_21;
   if (argc < 3) {
     std::cerr << "usage: qwen_image_21_probe MODEL_DIR OUTPUT_DIR [PROMPT] "
-                 "[SIZE] [STEPS] [IMAGE|-] [--trajectory]\n";
+                 "[SIZE] [STEPS] [IMAGE|-] [--trajectory] [--seed N]\n";
     return 2;
   }
   try {
@@ -24,10 +25,21 @@ int main(int argc, char** argv) {
     request.seed = 42;
     if (argc > 6 && std::string_view(argv[6]) != "-")
       request.images.push_back(DecodeImage(gufo::core::ReadImageFile(argv[6])));
-    const bool trajectory =
-        argc > 7 && std::string_view(argv[7]) == "--trajectory";
-    if (argc > 8 || (argc > 7 && !trajectory))
-      throw std::invalid_argument("unknown probe option");
+    bool trajectory = false;
+    for (int i = 7; i < argc; ++i) {
+      const std::string_view option(argv[i]);
+      if (option == "--trajectory") {
+        trajectory = true;
+      } else if (option == "--seed" && i + 1 < argc) {
+        const std::string_view value(argv[++i]);
+        const auto [end, error] = std::from_chars(
+            value.data(), value.data() + value.size(), request.seed);
+        if (error != std::errc{} || end != value.data() + value.size())
+          throw std::invalid_argument("invalid probe seed");
+      } else {
+        throw std::invalid_argument("unknown probe option");
+      }
+    }
     std::ofstream ids(output / "tokens.txt");
     for (auto id : model.Tokenize(request.prompt))
       ids << id << '\n';

@@ -1,5 +1,6 @@
 #include "src/models/qwen_image_21/model.hpp"
 
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -37,9 +38,33 @@ int main(int argc, char** argv) {
   }
   const Image image{
       2, 2, {255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 0, 127, 63, 21, 255}};
+  // Initial noise must not repeat the noise that generated a reference at the
+  // same seed and size. Re-editing the result must also use a new stream.
+  assert(InitialNoiseSeed(42, {}) == 42);
+  assert(InitialNoiseSeed(0, {}) == 0);
+  const std::array references{image};
+  const auto edit_seed = InitialNoiseSeed(42, references);
+  // Independent hashlib SHA-256 golden, little-endian fields and digest.
+  assert(edit_seed == 9781428742393689377ULL);
+  assert(InitialNoiseSeed(42, references) == edit_seed);
+  assert(InitialNoiseSeed(43, references) != edit_seed);
+  auto changed = image;
+  changed.rgba[0] ^= 1;
+  assert(InitialNoiseSeed(42, std::array{changed}) != edit_seed);
+  changed = image;
+  changed.rgba[3] ^= 1;
+  assert(InitialNoiseSeed(42, std::array{changed}) != edit_seed);
+  const auto pair_seed = InitialNoiseSeed(42, std::array{image, changed});
+  assert(pair_seed != edit_seed);
+  assert(pair_seed != InitialNoiseSeed(42, std::array{changed, image}));
+  changed = image;
+  changed.width = 1;
+  changed.height = 4;
+  assert(InitialNoiseSeed(42, std::array{changed}) != edit_seed);
   const auto roundtrip = DecodeImage(EncodePng(image));
   assert(roundtrip.width == image.width && roundtrip.height == image.height);
   assert(roundtrip.rgba == image.rgba);
+  assert(InitialNoiseSeed(42, std::array{roundtrip}) == edit_seed);
   Image textured{65, 17, std::vector<std::uint8_t>(65 * 17 * 4)};
   for (std::size_t i = 0; i < textured.rgba.size(); ++i)
     textured.rgba[i] = static_cast<std::uint8_t>((i * 73) ^ (i >> 3));

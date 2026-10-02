@@ -561,7 +561,11 @@ Result Model::Generate(const Request& request,
     result.metrics.prompt_ms = Milliseconds(start);
     // Generate independent full-precision normal draws; seed replay never
     // depends on admission order, wall time, or another request's RNG.
-    std::mt19937_64 rng(request.seed);
+    // A generated reference can otherwise reuse exactly the same noise when
+    // edited at the same size and seed. Bind edit noise to its reference
+    // pixels, including later edits of an edit, without changing generation or
+    // replay.
+    std::mt19937_64 rng(InitialNoiseSeed(request.seed, prompt.images));
     std::normal_distribution<float> normal(0, 1);
     std::vector<float> noise(static_cast<std::size_t>(height) * width * 64);
     for (float& value : noise)

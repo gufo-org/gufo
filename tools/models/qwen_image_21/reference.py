@@ -6,6 +6,7 @@ UPSTREAM.md for the source and model revisions used for qualification.
 """
 
 import argparse
+import hashlib
 from importlib.metadata import version
 import json
 from pathlib import Path
@@ -27,6 +28,8 @@ def main():
     parser.add_argument("--image", type=Path)
     parser.add_argument("--teacher-force", action="store_true",
                         help="Replay each official block with Gufo's saved block inputs")
+    parser.add_argument("--skip-decode", action="store_true",
+                        help="Compare denoising latents without running the VAE decoder")
     args = parser.parse_args()
     torch.set_num_threads(8)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -37,7 +40,8 @@ def main():
                              "transformers": version("transformers"),
                              "diffusers": version("diffusers"),
                              "model_revision": Path(args.model).name,
-                             "teacher_forced": args.teacher_force}}
+                             "teacher_forced": args.teacher_force,
+                             "decoded": not args.skip_decode}}
     step = [0]
 
     def replace(name, tensor, channel_first=False):
@@ -116,10 +120,21 @@ def main():
         ), with_kwargs=True)
         block.register_forward_hook(lambda module, inputs, out, i=i: compare(f"vision.block.{i}", out))
     visual.merger.register_forward_hook(lambda module, inputs, out: compare("vision.output", out))
+    encode_vae_image = pipe._encode_vae_image
+
+    def compare_encoded_image(*inputs, **kwargs):
+        value = encode_vae_image(*inputs, **kwargs)
+        compare("vae.encoded", value, True)
+        return value
+
+    pipe._encode_vae_image = compare_encoded_image
     for i, layer in enumerate(pipe.transformer.transformer_blocks):
         def dit_input(module, inputs, kwargs, i=i):
             kwargs = dict(kwargs)
             name = f"dit.{step[0]}.input" if i == 0 else f"dit.{step[0]}.block.{i - 1}"
+            if i == 0:
+                compare(name, kwargs["hidden_states"])
+                compare(f"dit.{step[0]}.modulation", kwargs["modulation"])
             kwargs["hidden_states"] = replace(name, kwargs["hidden_states"])
             kwargs["modulation"] = replace(f"dit.{step[0]}.modulation", kwargs["modulation"])
             return inputs, kwargs
@@ -157,6 +172,7 @@ def main():
         return values
 
     noise = np.fromfile(args.native / "noise.f32", dtype=np.float32).reshape(1, target_rows, 64)
+    records["reference"]["initial_noise_sha256"] = hashlib.sha256(noise.tobytes()).hexdigest()
     latent = torch.from_numpy(noise).to(device="cuda", dtype=torch.bfloat16)
     kwargs = {}
     if args.image:
@@ -165,9 +181,22 @@ def main():
         result = pipe(
             prompt=args.prompt, width=args.size, height=args.size,
             num_inference_steps=args.steps, latents=latent,
+            output_type="latent" if args.skip_decode else "pil",
             callback_on_step_end=callback, **kwargs
         )
-    result.images[0].save(args.output / "image.png")
+    if not args.skip_decode:
+        result.images[0].save(args.output / "image.png")
+        native_image = args.native / "image.png"
+        if native_image.exists():
+            a = np.asarray(result.images[0].convert("RGBA"), dtype=np.float64)
+            with Image.open(native_image) as image:
+                b = np.asarray(image.convert("RGBA"), dtype=np.float64)
+            if a.shape != b.shape:
+                records["png"] = {"shape_mismatch": [list(b.shape), list(a.shape)]}
+            else:
+                mse = float(np.mean((a - b) ** 2))
+                records["png"] = {"exact": mse == 0,
+                                  "psnr_db": float(10 * np.log10(255 ** 2 / mse)) if mse else None}
     compare("sigmas", pipe.scheduler.sigmas)
     tokenizer_ids = pipe.processor.tokenizer.encode(args.prompt)
     native_ids = [int(x) for x in (args.native / "tokens.txt").read_text().split()]
@@ -184,7 +213,9 @@ def main():
         # A matched BF16 block must stay within a 1% relative-L2 envelope.
         # Full trajectories are reported separately, without pretending that
         # this local rounding tolerance proves general perceptual quality.
-        if args.teacher_force and ".block." in name and record.get("relative_l2", 0) > 0.01:
+        matched = (".block." in name or name == "vae.encoded"
+                   or (name.startswith("dit.") and name.endswith((".input", ".modulation"))))
+        if args.teacher_force and matched and record.get("relative_l2", 0) > 0.01:
             failures.append(f"{name}: matched-block relative L2 exceeds 0.01")
     if tokenizer_ids != native_ids:
         failures.append("tokenizer mismatch")

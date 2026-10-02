@@ -20,6 +20,10 @@ struct Image {
 Image DecodeImage(std::span<const std::uint8_t> bytes);
 std::vector<std::uint8_t> EncodePng(const Image& image);
 Image ResizeImage(const Image& image, int width, int height);
+/// Keep edit noise independent of the noise that generated its references.
+/// Supply the canonical resized RGBA references; generation retains its seed.
+std::uint64_t InitialNoiseSeed(std::uint64_t seed,
+                               std::span<const Image> images);
 
 struct Request {
   std::string prompt;

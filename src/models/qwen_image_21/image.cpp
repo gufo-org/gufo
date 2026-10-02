@@ -3,12 +3,14 @@
 #include <png.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <numbers>
 #include <stdexcept>
 
+#include "src/core/crypto/sha256.hpp"
 #include "src/models/qwen_image_21/model.hpp"
 
 namespace gufo::models::qwen_image_21 {
@@ -72,6 +74,34 @@ std::vector<Filter> LanczosFilters(int input, int output) {
 }
 
 }  // namespace
+
+std::uint64_t InitialNoiseSeed(std::uint64_t seed,
+                               std::span<const Image> images) {
+  if (images.empty())
+    return seed;
+  crypto::Sha256Hasher hash;
+  constexpr std::uint8_t domain[] = "Qwen-Image-2.1 edit noise v1";
+  hash.Update(domain);
+  const auto append = [&](std::uint64_t value) {
+    std::array<std::uint8_t, 8> bytes{};
+    for (int i = 0; i < 8; ++i)
+      bytes[i] = static_cast<std::uint8_t>(value >> (8 * i));
+    hash.Update(bytes);
+  };
+  append(seed);
+  append(images.size());
+  for (const auto& image : images) {
+    CheckImage(image);
+    append(image.width);
+    append(image.height);
+    hash.Update(image.rgba);
+  }
+  const auto digest = hash.Finish();
+  std::uint64_t result = 0;
+  for (int i = 0; i < 8; ++i)
+    result |= static_cast<std::uint64_t>(digest[i]) << (8 * i);
+  return result;
+}
 
 Image DecodeImage(std::span<const std::uint8_t> bytes) {
   if (bytes.size() > core::kMaxEncodedImageBytes || bytes.size() < 8)

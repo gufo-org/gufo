@@ -79,6 +79,64 @@
         "psnr_db": 56.577859398966446,
         "mae_255": 0.12286758422851562
       }
+    },
+    "edit_1024": {
+      "date": "2026-10-02",
+      "size": 1024,
+      "steps": 40,
+      "seed": 42,
+      "prompt": "Make the teapot blue and add a steaming cup of tea next to it",
+      "source_image": "https://github.com/user-attachments/assets/1c455332-6915-47df-bee8-cb123ad44456",
+      "source_sha256": "b96fb1411c81ddb45c74638d8042621ea76caf8d0068dd35fe812d606dafccb9",
+      "reference": {
+        "torch": "2.12.0",
+        "transformers": "5.17.0",
+        "diffusers": "0.41.0.dev0",
+        "model_revision": "b3179ad355be050328e483a9dfdd9e60cd62adfa",
+        "teacher_forced": false,
+        "decoded": true,
+        "initial_noise_sha256": "40e1b4f6212aa62380529f8e6c9bcc1ddaa5081dcbe0ef68d9dd10c4d35e3c52",
+        "diffusers_revision": "80c7ed262aeffbeb43ef13ae04baeb9b84515a69",
+        "sdpa": "PyTorch AOTriton",
+        "miopen_find_mode": 2
+      },
+      "noise_seed_policy": "SHA-256 of requested seed and ordered canonical RGBA references, v1",
+      "boundaries": {
+        "latent.39": {
+          "relative_l2": 0.007127651325940724,
+          "cosine": 0.9999746320176784
+        },
+        "vae.decoded": {
+          "relative_l2": 0.006881480825055806,
+          "cosine": 0.9999764634708304
+        }
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 51.85192189579336,
+        "channels": "RGBA"
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      },
+      "visual_check": "Blue teapot, steaming cup and saucer; source scene retained in native and official images.",
+      "diagnosis": "Original same-noise 1024 edit also reproduces the posterization in the official pipeline; changing seed to 43 restores the edit on unmodified Gufo.",
+      "serving": {
+        "build": "Nix production",
+        "openai_sdk": "2.41.1",
+        "checks": [
+          "explicit_1024_equals_auto",
+          "equivalent_rgb_rgba_replay",
+          "restart_replay",
+          "multiple_references",
+          "n2_matches_individual_seeds",
+          "concurrent_requests_match_individual_seeds",
+          "size_change_replay",
+          "disconnect_recovery_replay"
+        ],
+        "disconnect_recovery_seconds": 6.548268012003973
+      }
     }
   },
   "vae_first_convolution": {

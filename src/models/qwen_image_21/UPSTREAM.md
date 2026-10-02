@@ -44,6 +44,12 @@ compare matched block inputs as well as the complete trajectory. Do not change
 weights, remove reference images, reduce precision or skip diffusion steps to
 pass a speed gate.
 
+Gufo's RNG differs from PyTorch's. Compare shared initial noise, not numeric
+seeds alone. Edit RNG seeds also bind the ordered, resized RGBA references:
+reusing a generation seed must not replay the noise that generated the source.
+This preserves repeatability for identical requests, including successive edits,
+without changing the denoising formulas.
+
 Diffusers and Transformers source is Apache-2.0 licensed. The separately
 downloaded weights use the
 [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/LICENSE),

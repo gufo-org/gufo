@@ -51,6 +51,11 @@ jq -r '.data[0].b64_json' response.json | base64 --decode > output.png
 | References | Up to 10 PNG/JPEG uploads, 20 MiB encoded and 32 megapixels combined; the HTTP body limit also applies. |
 | `background` | `auto`, `transparent`, or `opaque` (composite over white). |
 
+Edit noise combines `seed` with the resized reference pixels. The same edit
+replays exactly, including after restarting the server, while editing an image
+with its generation seed no longer reuses its original noise. Seeded edits
+therefore differ from older Gufo releases; generation seeds are unchanged.
+
 The official repository recommends 2048²; Gufo follows the pinned Diffusers
 1024² default. Set `size` explicitly for larger output. Output is PNG/base64;
 URL output, separate masks, streaming and `input_fidelity` are unsupported.
