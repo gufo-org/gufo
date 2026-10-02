@@ -1115,6 +1115,13 @@ void TestMinimumCheckpointStep() {
   Expect(
       SaveTokens(store, *runner, {1, 2}, *MakeSnapshot(*runner, 1, 2)).stored,
       "the first checkpoint has no covering prefix and is stored");
+  Expect(store.WithinCheckpointStep(*runner,
+                                    std::vector<TextRunnerToken>{1, 2, 3, 4}) &&
+             !store.WithinCheckpointStep(
+                 *runner, std::vector<TextRunnerToken>{1, 2, 3, 4, 5}) &&
+             !store.WithinCheckpointStep(*runner,
+                                         std::vector<TextRunnerToken>{8, 8}),
+         "callers can skip a capture the step would discard");
   Expect(!SaveTokens(store, *runner, {1, 2, 3, 4}, *MakeSnapshot(*runner, 2, 4))
                  .stored &&
              events.back().reason == ContinuationDiskEventReason::kMinStep,

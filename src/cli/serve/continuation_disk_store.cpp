@@ -1136,18 +1136,12 @@ struct ContinuationDiskStore::Impl {
     // Shared prefixes are exempt: they exist to give a new conversation a place
     // to start from, and they sit only a few tokens past a deeper entry by
     // construction.
-    if (options.min_checkpoint_step_tokens != 0 && !shared_prefix) {
-      const auto base = FindLongestInputCandidate(runner, checkpoint_tokens,
-                                                  input_identity, {});
-      if (base != entries.end() &&
-          base->tokens.size() < checkpoint_tokens.size() &&
-          checkpoint_tokens.size() - base->tokens.size() <
-              options.min_checkpoint_step_tokens) {
-        Emit(ContinuationDiskEventAction::kSkipped,
-             ContinuationDiskEventReason::kMinStep, 0, 0,
-             checkpoint_tokens.size());
-        return {};
-      }
+    if (!shared_prefix &&
+        WithinCheckpointStep(runner, checkpoint_tokens, input_identity)) {
+      Emit(ContinuationDiskEventAction::kSkipped,
+           ContinuationDiskEventReason::kMinStep, 0, 0,
+           checkpoint_tokens.size());
+      return {};
     }
 
     std::size_t payload_bytes = 0;
@@ -1399,6 +1393,19 @@ struct ContinuationDiskStore::Impl {
     return boundaries;
   }
 
+  [[nodiscard]] bool WithinCheckpointStep(
+      const TextModelRunner& runner, std::span<const TextRunnerToken> tokens,
+      std::span<const std::uint8_t> input_identity) {
+    if (options.min_checkpoint_step_tokens == 0 ||
+        !DescriptorForInput(runner, input_identity).persistence.has_value())
+      return false;
+    const auto base =
+        FindLongestInputCandidate(runner, tokens, input_identity, {});
+    return base != entries.end() && base->tokens.size() < tokens.size() &&
+           tokens.size() - base->tokens.size() <
+               options.min_checkpoint_step_tokens;
+  }
+
   [[nodiscard]] bool Touch(const TextModelRunner& runner,
                            std::span<const TextRunnerToken> tokens,
                            std::span<const std::uint8_t> input_identity) {
@@ -1576,6 +1583,15 @@ bool ContinuationDiskStore::Touch(
   if (!permit)
     return false;
   return impl_->Touch(runner, tokens, input_identity);
+}
+
+bool ContinuationDiskStore::WithinCheckpointStep(
+    const TextModelRunner& runner, std::span<const TextRunnerToken> tokens,
+    std::span<const std::uint8_t> input_identity) {
+  const ScopedOperationPermit permit(impl_->operation_gate, false);
+  if (!permit)
+    return false;
+  return impl_->WithinCheckpointStep(runner, tokens, input_identity);
 }
 
 std::size_t ContinuationDiskStore::entry_count() const noexcept {

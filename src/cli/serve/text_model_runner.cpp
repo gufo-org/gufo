@@ -743,6 +743,12 @@ struct TextRunnerPool::Request::Impl {
       try {
         if (!disk_store)
           return;
+        // Copying device state only for disk is costly on the request path.
+        // Skip it when the disk store would discard the checkpoint anyway.
+        if (disk_store->WithinCheckpointStep(
+                *runner, snapshot_tokens,
+                InputIdentity(snapshot_tokens.size())))
+          return;
         disk_capture = disk_store->ReserveCapture(
             *runner, snapshot_tokens.size(), snapshot_bytes,
             InputIdentity(snapshot_tokens.size()));

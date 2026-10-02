@@ -185,6 +185,13 @@ public:
                            std::span<const TextRunnerToken> tokens,
                            std::span<const std::uint8_t> input_identity = {});
 
+  /// True when a stored prefix lies less than min_checkpoint_step_tokens
+  /// before tokens, so saving them as a continuation would be skipped. Lets
+  /// callers avoid capturing a snapshot only to have it discarded.
+  [[nodiscard]] bool WithinCheckpointStep(
+      const TextModelRunner& runner, std::span<const TextRunnerToken> tokens,
+      std::span<const std::uint8_t> input_identity = {});
+
   [[nodiscard]] std::size_t entry_count() const noexcept;
   [[nodiscard]] std::size_t retained_bytes() const noexcept;
   [[nodiscard]] std::size_t capacity_bytes() const noexcept;
