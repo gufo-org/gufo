@@ -861,6 +861,39 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
                 self.assertEqual(report["status"], expected)
                 self.assertEqual(status, 0 if expected == "passed" else 1)
 
+    def test_disk_cache_is_removed_after_restart_checks(self):
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                # Stands in for the server filling its runner-owned disk cache.
+                (root / "continuation.py").write_text(f'''
+import json, sys
+from pathlib import Path
+output = Path(sys.argv[sys.argv.index("--output") + 1])
+(output.parent / "disk").mkdir(exist_ok=True)
+(output.parent / "disk" / "entry.kvc").write_bytes(b"x")
+output.write_text(json.dumps([{{"exact": True}}]))
+output.with_suffix(".requests.json").write_text(json.dumps({{"version": 1, "requests": [{{
+    "status": "complete", "wall_ms": 1, "endpoint": "/v1/chat/completions",
+    "request_sha256": "fixture"}}]}}))
+sys.exit({exit_code})
+''')
+                args = ["run.py", "--record-baseline", "--output", str(root / "report"),
+                        "--sampling-preset", "qwen38", "--suite", "cache", "--",
+                        sys.executable, "serve", "llm", "--model", "fixture.gguf"]
+                with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
+                     patch.object(functional, "server", return_value=contextlib.nullcontext()), \
+                     patch.object(functional, "provenance", return_value={}), \
+                     patch.object(functional, "join_server_timings"), \
+                     patch.object(functional, "execution_coverage", return_value={}), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    functional.main()
+                report = json.loads((root / "report/report.json").read_text())
+                self.assertEqual(report["status"], "failed" if exit_code else "passed")
+                self.assertIn("--cache-disk", report["command"])
+                self.assertFalse((root / "report/disk").exists())
+                self.assertTrue((root / "report/text-cancel.json").is_file())
+
     def test_server_is_reaped_on_startup_timeout_and_test_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             with socket.socket() as reserve:

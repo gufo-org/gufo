@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import signal
 import socket
 import struct
@@ -409,6 +410,11 @@ def main():
         report["status"] = "interrupted"
         write_json(report_path, report)
         raise
+    finally:
+        # The servers have exited. Each run's snapshots can fill the whole
+        # disk budget, and the restart checks were their only reader.
+        if disk_enabled:
+            shutil.rmtree(output / "disk", ignore_errors=True)
     report["status"] = ("passed" if report["suites"] and "error" not in report
                         and all(row["status"] == "passed" for row in report["suites"].values())
                         else "failed")

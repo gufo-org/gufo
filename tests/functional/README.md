@@ -78,7 +78,8 @@ small fixed images and is included in `all` only when `--mmproj` is supplied.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
-uses its own 8 GiB disk budget and 1 GiB staging area inside the output directory.
+uses its own 8 GiB disk budget and 1 GiB staging area inside the output directory;
+the runner removes that disk cache when the run ends, keeping reports and logs.
 For timing controls on revisions predating progress, use `--allow-missing-progress`
 with `--record-baseline`. Candidate qualification always requires progress events.
 Model runs stay outside hosted CI; CI checks the runner and measurement logic.
