@@ -327,10 +327,12 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
     if (event.reason == ContinuationDiskEventReason::kSaved) {
       line << " write_ms=" << event.elapsed_ms;
       Logger::Info("cache", line.str());
-    } else if (event.reason == ContinuationDiskEventReason::kLru) {
-      // Staying inside a configured budget is expected operation, but it has
-      // to be visible: otherwise a run that evicts every other conversation
-      // looks identical to one that never cached anything.
+    } else if (event.reason == ContinuationDiskEventReason::kLru ||
+               event.reason == ContinuationDiskEventReason::kMinStep) {
+      // Staying inside a configured budget or skipping a checkpoint that
+      // barely advances is expected operation, but it has to be visible:
+      // otherwise a run that evicts every other conversation looks identical
+      // to one that never cached anything.
       Logger::Info("cache", line.str());
     } else {
       Logger::Warn("cache", line.str());

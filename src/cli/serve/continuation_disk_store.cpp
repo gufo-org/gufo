@@ -1137,8 +1137,8 @@ struct ContinuationDiskStore::Impl {
     // to start from, and they sit only a few tokens past a deeper entry by
     // construction.
     if (options.min_checkpoint_step_tokens != 0 && !shared_prefix) {
-      const auto base = FindLongestInputCandidate(
-          runner, checkpoint_tokens, input_identity, {});
+      const auto base = FindLongestInputCandidate(runner, checkpoint_tokens,
+                                                  input_identity, {});
       if (base != entries.end() &&
           base->tokens.size() < checkpoint_tokens.size() &&
           checkpoint_tokens.size() - base->tokens.size() <
