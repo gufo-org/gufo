@@ -2493,6 +2493,14 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
   return {};
 }
 
+GeneratedText SplitGeneratedText(
+    std::string_view text, TextGenerationBackend::InitialOutputState initial) {
+  auto generated =
+      ParseGeneration(text, initial, {}, ChatRequest::ToolChoice::kNone, false);
+  return {.reasoning = std::move(generated.reasoning_content),
+          .text = std::move(generated.text)};
+}
+
 HttpResponse CreateOpenAiResponse(const HttpRequest& request,
                                   TextGenerationBackend& backend,
                                   const ChatRequest& chat,

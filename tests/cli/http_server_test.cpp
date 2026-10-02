@@ -820,6 +820,47 @@ void TestCompatibilityRequests() {
           "max_tokens":2})"));
   assert(anthropic.member_str("stop_reason") == "end_turn");
   assert(server.backend->LastCall().chat.messages[0].content == "Be concise.");
+
+  // Messages reports reasoning in its own block and restores replayed blocks
+  // as the assistant thought.
+  server.backend->SetOutput("<think>plan</think>answer");
+  const auto thinking = response_body(server.Post(
+      "/v1/messages", R"({"messages":[{"role":"user","content":"hi"}],
+          "thinking":{"type":"enabled","budget_tokens":1024}})"));
+  const auto blocks = thinking.find("content")->items();
+  assert(blocks.size() == 2 && blocks[0].member_str("type") == "thinking" &&
+         blocks[0].member_str("thinking") == "plan" &&
+         blocks[0].contains("signature") &&
+         blocks[1].member_str("type") == "text" &&
+         blocks[1].member_str("text") == "answer");
+  assert(server.backend->LastCall().chat.reasoning.enabled == true);
+  response_body(server.Post("/v1/messages", R"({"messages":[
+      {"role":"user","content":"hi"},
+      {"role":"assistant","content":[
+        {"type":"thinking","thinking":"plan","signature":""},
+        {"type":"text","text":"answer"}]},
+      {"role":"user","content":"next"}],
+    "thinking":{"type":"disabled"}})"));
+  const auto replayed = server.backend->LastCall().chat;
+  assert(replayed.reasoning.enabled == false);
+  assert(replayed.messages.size() == 3 &&
+         replayed.messages[1].thought == "plan" &&
+         replayed.messages[1].content == "answer");
+  server.backend->SetOutput("answer");
+  const auto plain = response_body(server.Post(
+      "/v1/messages", R"({"messages":[{"role":"user","content":"hi"}]})"));
+  assert(plain.find("content")->items().size() == 1 &&
+         plain.find("content")->items()[0].member_str("text") == "answer");
+  for (const auto* invalid :
+       {R"({"messages":[{"role":"user","content":[
+           {"type":"thinking","thinking":"plan"}]}]})",
+        R"({"messages":[{"role":"user","content":"hi"}],"thinking":true})",
+        R"({"messages":[{"role":"user","content":"hi"}],
+            "thinking":{"type":"adaptive"}})",
+        R"({"messages":[{"role":"user","content":"hi"}],
+            "thinking":{"type":"enabled","budget_tokens":0}})"})
+    ExpectStatus(server.Post("/v1/messages", invalid), 400);
+  server.backend->SetOutput("ok");
 }
 
 void TestModelInputModalities() {

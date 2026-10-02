@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <csignal>
 #include <cstdlib>
@@ -420,13 +421,24 @@ tokenization::ChatRole RoleFrom(const std::string& r) {
   return tokenization::ChatRole::kUser;
 }
 
-bool ReadTextContent(const json::Value* content, std::string* out) {
+// Messages replays assistant reasoning as thinking blocks. Restore it as the
+// turn's thought so the prompt reproduces the generated tokens.
+bool ReadTextContent(const json::Value* content, std::string* out,
+                     std::string* thought = nullptr) {
   if (content == nullptr)
     return false;
   if (content->is_string()) {
     *out = content->get_str();
   } else if (content->is_array()) {
     for (const auto& part : content->items()) {
+      if (thought != nullptr && part.is_object() &&
+          part.member_str("type") == "thinking") {
+        const auto* thinking = part.find("thinking");
+        if (thinking == nullptr || !thinking->is_string())
+          return false;
+        *thought += thinking->str();
+        continue;
+      }
       const auto* text = part.find("text");
       const auto type = part.member_str("type");
       if (!part.is_object() || text == nullptr || !text->is_string() ||
@@ -505,7 +517,11 @@ bool ReadTextMessages(const json::Value* input,
           *parse_error = std::move(error);
         return false;
       }
-    } else if (!ReadTextContent(item.find("content"), &message.content))
+    } else if (!ReadTextContent(
+                   item.find("content"), &message.content,
+                   message.role == tokenization::ChatRole::kAssistant
+                       ? &message.thought
+                       : nullptr))
       return false;
     if (responses && message.role == tokenization::ChatRole::kAssistant &&
         !messages->empty() &&
@@ -533,6 +549,7 @@ struct CompatibilityAllowances {
   bool stream_options{false};
   bool ignore_eos{false};
   bool response_controls{false};
+  bool thinking{false};
 };
 
 // Validate the text subset before dispatch so a client never gets an answer
@@ -592,7 +609,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     if (field != allowances.stop_field &&
         !(field == "stream_options" && allowances.stream_options) &&
         !(field == "ignore_eos" && allowances.ignore_eos) &&
-        body.contains(field) &&
+        !(field == "thinking" && allowances.thinking) && body.contains(field) &&
         !(allowances.response_controls &&
           (field == "text" || field == "reasoning" || field == "tools" ||
            field == "tool_choice" || field == "parallel_tool_calls"))) {
@@ -969,6 +986,28 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
              "invalid_prompt");
 }
 
+// Messages selects reasoning with thinking.type. budget_tokens has no native
+// equivalent, so enabled thinking keeps the server's effort.
+std::optional<HttpResponse> ReadThinking(const json::Value& body,
+                                         ReasoningOptions* reasoning) {
+  const auto* thinking = body.find("thinking");
+  if (thinking == nullptr)
+    return {};
+  const auto* type = thinking->is_object() ? thinking->find("type") : nullptr;
+  if (type == nullptr || !type->is_string() ||
+      (type->str() != "enabled" && type->str() != "disabled"))
+    return InvalidCompatibilityRequest(
+        "'thinking.type' must be enabled or disabled");
+  if (const auto* budget = thinking->find("budget_tokens");
+      budget != nullptr &&
+      (!budget->is_number() || budget->as_double() < 1 ||
+       std::floor(budget->as_double()) != budget->as_double()))
+    return InvalidCompatibilityRequest(
+        "'thinking.budget_tokens' must be a positive integer");
+  reasoning->enabled = type->str() == "enabled";
+  return {};
+}
+
 HttpResponse AnthropicMessages(const HttpRequest& req,
                                TextGenerationBackend& b) try {
   json::Value body;
@@ -979,11 +1018,18 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
                "parse_error");
   }
 
+  ChatRequest chat;
+  chat.reasoning = b.reasoning_defaults();
+  if (body.is_object()) {
+    if (auto error = ReadThinking(body, &chat.reasoning))
+      return std::move(*error);
+  }
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(
           body, b, "max_tokens", &max_tokens, &sampling_config,
-          b.reasoning_defaults().enabled, {.stop_field = "stop_sequences"})) {
+          chat.reasoning.enabled,
+          {.stop_field = "stop_sequences", .thinking = true})) {
     return std::move(*error);
   }
 
@@ -1002,14 +1048,16 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
         "for images and tools");
   }
 
-  ChatRequest chat{std::move(messages)};
+  chat.messages = std::move(messages);
   chat.client_id = req.client_id;
-  chat.reasoning = b.reasoning_defaults();
   if (const auto error = ParseStopSequences(body.find("stop_sequences"),
                                             StopSequenceFormat::kAnthropic,
                                             &chat.stop_sequences))
     return InvalidCompatibilityRequest(*error);
+  const auto initial = b.initial_output_state(chat);
   const auto res = b.chat(chat, max_tokens, sampling_config, req.is_cancelled);
+  const auto generated =
+      SplitGeneratedText(core::Utf8Decoder{}.Push(res.text, true), initial);
 
   json::Value resp = json::Value::object();
   resp["id"] = "msg_" + RandomId();
@@ -1017,10 +1065,20 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   resp["role"] = "assistant";
   resp["model"] = b.model_id();
   json::Value content = json::Value::array();
-  json::Value txt = json::Value::object();
-  txt["type"] = "text";
-  txt["text"] = core::Utf8Decoder{}.Push(res.text, true);
-  content.push_back(std::move(txt));
+  if (!generated.reasoning.empty()) {
+    // Local reasoning is not signed; clients replay the block unchanged.
+    json::Value thinking = json::Value::object();
+    thinking["type"] = "thinking";
+    thinking["thinking"] = generated.reasoning;
+    thinking["signature"] = "";
+    content.push_back(std::move(thinking));
+  }
+  if (!generated.text.empty() || content.empty()) {
+    json::Value txt = json::Value::object();
+    txt["type"] = "text";
+    txt["text"] = generated.text;
+    content.push_back(std::move(txt));
+  }
   resp["content"] = std::move(content);
   resp["stop_reason"] =
       res.finish_reason == TextGenerationBackend::FinishReason::kLength

@@ -578,8 +578,12 @@ The other compatibility routes are deliberately limited:
 All four routes validate the loaded model, positive integer limits and shared
 sampling controls. Messages and `/completion` reject streaming; all reject
 multiple candidates. Responses and Messages honor the server's thinking defaults.
-Native Messages rejects tools, `thinking`, and `output_config`; use Chat
-Completions for tool/reasoning controls. Completions routes accept `stop`;
+Messages accepts `thinking.type` (`enabled` or `disabled`); `budget_tokens`
+has no native equivalent and keeps the server's effort. Reasoning is returned
+as a `thinking` block before the `text` block, with an empty `signature`.
+Replay assistant `thinking` blocks unchanged so later turns reuse the cached
+prompt. Messages rejects tools and `output_config`; use Chat Completions for
+tool and reasoning-effort controls. Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
 and template-aware message counting are not implemented.

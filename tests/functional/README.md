@@ -66,7 +66,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `metrics` | Live Prometheus counters, uncached work, endpoint totals, queueing and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart; disk checkpoint spacing for a growing conversation and a branch restored after restart |
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
-| `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, and compare with uncached responses |
+| `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, including Messages thinking blocks, and compare with uncached responses |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
 
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
