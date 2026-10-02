@@ -24,6 +24,7 @@ from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
+from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
 from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
@@ -214,6 +215,29 @@ class FunctionalRunnerTest(unittest.TestCase):
         ):
             with self.subTest(output=output), self.assertRaises(ValueError):
                 check_snapshot_budget(output, available, requested, 1)
+
+    def test_disk_spacing_checks_drained_logs(self):
+        def event(tokens, reason="saved"):
+            action = "stored" if reason == "saved" else "skipped"
+            return (f"[cache] event=disk_cache action={action} reason={reason} "
+                    f"file_bytes=1 payload_bytes=1 tokens={tokens} retained_bytes=1\n")
+        totals = (2400, 2680, 2960, 3240, 3520, 5960, 6240)
+        report = {"turns": [{"measured": {"total": total}} for total in totals]}
+        skips = "".join(event(total, "min_step") for total in totals[1:5] + totals[6:])
+        grown = event(310) + event(2396) + skips + event(5956)
+        restored = event(3012)
+        summary = check_disk_spacing(grown, restored, report)
+        self.assertEqual(summary["stored_tokens"], [2396, 5956])
+        self.assertEqual(summary["shared_boundary_tokens"], [3012])
+        for label, grown_log, restored_log in (
+            ("every turn written", grown + event(2700), restored),
+            ("long turn missing", event(2396) + skips, restored),
+            ("first turn missing", skips + event(5956), restored),
+            ("no skips", event(2396) + event(5956), restored),
+            ("shared boundary skipped", grown, event(3012, "min_step")),
+        ):
+            with self.subTest(label), self.assertRaises(ValueError):
+                check_disk_spacing(grown_log, restored_log, report)
 
     def run_cache_rotation(self, lost=False, contaminated=False):
         requests, checks, previous = [], {}, {}
@@ -866,7 +890,7 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
             with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 # Stands in for the server filling its runner-owned disk cache.
-                (root / "continuation.py").write_text(f'''
+                child = f'''
 import json, sys
 from pathlib import Path
 output = Path(sys.argv[sys.argv.index("--output") + 1])
@@ -877,19 +901,28 @@ output.with_suffix(".requests.json").write_text(json.dumps({{"version": 1, "requ
     "status": "complete", "wall_ms": 1, "endpoint": "/v1/chat/completions",
     "request_sha256": "fixture"}}]}}))
 sys.exit({exit_code})
-''')
+'''
+                for script in ("continuation.py", "cache_disk_spacing.py"):
+                    (root / script).write_text(child)
+
+                def server(command, log, timeout):
+                    log.touch()
+                    return contextlib.nullcontext()
+
                 args = ["run.py", "--record-baseline", "--output", str(root / "report"),
                         "--sampling-preset", "qwen38", "--suite", "cache", "--",
                         sys.executable, "serve", "llm", "--model", "fixture.gguf"]
                 with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
-                     patch.object(functional, "server", return_value=contextlib.nullcontext()), \
+                     patch.object(functional, "server", side_effect=server), \
+                     patch.object(sys.modules["cache_disk_spacing"], "check_disk_spacing",
+                                  return_value={}), \
                      patch.object(functional, "provenance", return_value={}), \
                      patch.object(functional, "join_server_timings"), \
                      patch.object(functional, "execution_coverage", return_value={}), \
                      contextlib.redirect_stdout(io.StringIO()):
                     functional.main()
                 report = json.loads((root / "report/report.json").read_text())
-                self.assertEqual(report["status"], "failed" if exit_code else "passed")
+                self.assertEqual(report["status"], "failed" if exit_code else "passed", report)
                 self.assertIn("--cache-disk", report["command"])
                 self.assertFalse((root / "report/disk").exists())
                 self.assertTrue((root / "report/text-cancel.json").is_file())
