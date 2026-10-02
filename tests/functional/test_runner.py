@@ -304,19 +304,41 @@ class FunctionalRunnerTest(unittest.TestCase):
                 cached = 2995 if pinned and "drop_reasoning" in label else last - 5
             previous[label] = total
             return {"text": "BETA", "reasoning": "The code word is BETA."
-                    if body["reasoning_effort"] == "low" and not missing_reasoning else "",
+                    if body.get("reasoning_effort", "low") != "none"
+                    and not missing_reasoning else "",
                     "tools": [], "finish": "stop", "usage": {
                         "prompt_tokens": total, "cached_tokens": cached,
                         "completion_tokens": 8,
                         "gufo": {"prefill_tokens": total - cached}}}
 
+        class MessagesClient:
+            """Messages replay reproduces the previous turn, completion included."""
+            def __init__(self):
+                self.previous = {}
+
+            def post(self, path, body, cast_to):
+                assert path == "/messages" and cast_to is object
+                label = body["system"].splitlines()[0]
+                total = 3000 + (len(body["messages"]) - 1) * 100
+                last = self.previous.get(label, 0)
+                cached = total if total == last else min(total, last + 8) if last else 0
+                self.previous[label] = total
+                thinking = body["thinking"]["type"] == "enabled"
+                blocks = ([{"type": "thinking", "thinking": "The code word is BETA.",
+                            "signature": ""}] if thinking else [])
+                return {"content": blocks + [{"type": "text", "text": "BETA"}],
+                        "stop_reason": "end_turn",
+                        "usage": {"input_tokens": total, "cache_read_input_tokens": cached,
+                                  "output_tokens": 8},
+                        "timings": {"prompt_n": total - cached}}
+
         with contextlib.redirect_stderr(io.StringIO()):
-            check_cache_growth(None, "fixture", checks, chat_result)
+            check_cache_growth(MessagesClient(), "fixture", checks, chat_result)
         return requests, checks
 
     def test_cache_growth_uses_real_replay_shapes_and_delays_cold_controls(self):
         requests, checks = self.run_cache_growth()
-        self.assertEqual(len(checks), 36)
+        self.assertEqual(len(checks), 54)
         for offset, replay in enumerate(("drop_reasoning", "keep_reasoning",
                                         "discard_reasoning", "thinking_off")):
             history = requests[offset * 9:(offset + 1) * 9]
