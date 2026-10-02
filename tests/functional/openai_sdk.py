@@ -31,6 +31,7 @@ from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_hist
                         check_untyped_agent_tools, check_mixed_tool_schemas,
                         check_tool_schema_edges)
 from cache_edits import check_cache_edits
+from cache_concurrency import check_cache_concurrency
 from cache_growth import check_cache_growth
 from cache_rotation import check_cache_rotation
 
@@ -2359,7 +2360,7 @@ def check_server_metrics(client, model, checks, width):
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
               "tool-reasoning",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-              "long-context", "state-edges", "progress", "metrics", "cache-edits", "cache-growth", "cache-rotation")
+              "long-context", "state-edges", "progress", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency")
 
 
 def main():
@@ -2474,6 +2475,8 @@ def main():
             "cache-edits": lambda: check_cache_edits(client, args.model, checks, chat_result),
             "cache-growth": lambda: check_cache_growth(client, args.model, checks, chat_result),
             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
+            "cache-concurrency": lambda: check_cache_concurrency(
+                client, args.model, checks, chat_result, args.concurrency),
         }
         selected = ([name for name in suites if name != "image-inputs" or args.vision]
                     if args.suite == "all" else

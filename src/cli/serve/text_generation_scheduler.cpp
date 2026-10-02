@@ -1,6 +1,7 @@
 #include "src/cli/serve/text_generation_scheduler.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -9,6 +10,7 @@
 #include <iterator>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <stop_token>
@@ -107,6 +109,12 @@ struct ScheduledRequest {
   bool backpressure_logged{false};
   // Only the scheduler worker changes this, from admission through cleanup.
   bool counted_processing{false};
+  // Admission waits at most once for a resident request to publish the
+  // prompt prefix both share. Only the scheduler thread touches these.
+  std::shared_ptr<ScheduledRequest> prefix_leader;
+  std::size_t prefix_position{0};
+  bool prefix_considered{false};
+  std::optional<TextGenerationScheduler::Clock::time_point> prefix_wait_start;
   std::exception_ptr failure;
   bool terminal{false};
 };
@@ -653,19 +661,154 @@ struct TextGenerationScheduler::Impl {
     }
   }
 
+  /// Concurrent prompts that share at least this many uncached tokens wait
+  /// for one prefill instead of repeating it. Shorter shared prefixes cost
+  /// less to prefill again than an extra checkpoint and a serialized start.
+  static constexpr std::size_t kSharedPrefillMinTokens = 512;
+
+  /// Parks a cold request behind a resident one that is still prefilling the
+  /// longest prefix both prompts share. That request publishes a checkpoint
+  /// there, so this one restores it instead of prefilling the same tokens in
+  /// lockstep. Prefill runs one request at a time, so waiting costs nothing.
+  [[nodiscard]] bool WaitForSharedPrefix(
+      const std::shared_ptr<ScheduledRequest>& request,
+      std::span<const std::deque<std::shared_ptr<ScheduledRequest>>* const>
+          residents,
+      std::size_t waiting) {
+    if (std::exchange(request->prefix_considered, true) ||
+        !request->cache_prompt ||
+        // Parked requests hold no session; bound them like admitted ones.
+        waiting + 1 >= runner_pool->capacity())
+      return false;
+    std::shared_ptr<ScheduledRequest> leader;
+    std::size_t common = 0;
+    const std::span<const TextRunnerToken> prompt(request->prompt);
+    for (const auto* list : residents) {
+      for (const auto& resident : *list) {
+        if (IsTerminal(resident) || !resident->runner_request ||
+            resident->runner_request.prefill_complete())
+          continue;
+        const auto other = resident->runner_request.prompt();
+        const auto shared = static_cast<std::size_t>(
+            std::ranges::mismatch(prompt, other).in1 - prompt.begin());
+        if (shared <= common ||
+            shared <= resident->runner_request.prefill_position())
+          continue;
+        const auto identity =
+            request->prompt_context
+                ? request->prompt_context->CacheIdentity(shared)
+                : std::span<const std::uint8_t>{};
+        if (!std::ranges::equal(
+                identity, resident->runner_request.input_identity(shared)))
+          continue;
+        leader = resident;
+        common = shared;
+      }
+    }
+    if (leader == nullptr || common < kSharedPrefillMinTokens)
+      return false;
+    // A longer retained prefix, such as this conversation's previous turn,
+    // already beats waiting for a peer.
+    const auto cached =
+        runner_pool->CachedPrefixTokens(prompt, request->prompt_context.get());
+    if (common < cached + kSharedPrefillMinTokens)
+      return false;
+    const auto position = leader->runner_request.ShareCheckpoint(common);
+    if (position < cached + kSharedPrefillMinTokens)
+      return false;
+    request->prefix_leader = std::move(leader);
+    request->prefix_position = position;
+    request->prefix_wait_start = Clock::now();
+    if (Logger::Enabled(LogLevel::kDebug)) {
+      std::ostringstream line;
+      line << "event=shared_prefix_wait id=" << request->id
+           << " leader=" << request->prefix_leader->id << " tokens=" << position
+           << " cached=" << cached << " prompt_tokens=" << prompt.size();
+      Logger::Debug("cache", line.str());
+    }
+    return true;
+  }
+
+  /// A parked request resumes once its leader's checkpoint is retained, or
+  /// once the leader can no longer publish it.
+  [[nodiscard]] bool SharedPrefixSettled(
+      const std::shared_ptr<ScheduledRequest>& request) const {
+    const auto& leader = request->prefix_leader;
+    if (IsTerminal(leader) || !leader->runner_request ||
+        leader->runner_request.prefill_complete() ||
+        leader->runner_request.prefill_position() > request->prefix_position)
+      return true;
+    return leader->runner_request.prefill_position() ==
+               request->prefix_position &&
+           runner_pool->CachedPrefixTokens(request->prompt,
+                                           request->prompt_context.get()) >=
+               request->prefix_position;
+  }
+
+  /// Drops stopped parked requests and releases settled ones in arrival
+  /// order. Released requests are admitted before newer queued ones.
+  void UpdateWaiting(std::deque<std::shared_ptr<ScheduledRequest>>& waiting) {
+    for (auto it = waiting.begin(); it != waiting.end();) {
+      const auto& request = *it;
+      if (CompleteIfStopped(request)) {
+        it = waiting.erase(it);
+        continue;
+      }
+      if (request->prefix_leader && SharedPrefixSettled(request)) {
+        const double wait_ms = std::chrono::duration<double, std::milli>(
+                                   Clock::now() - *request->prefix_wait_start)
+                                   .count();
+        request->result.shared_prefix_wait_ms = wait_ms;
+        if (Logger::Enabled(LogLevel::kDebug)) {
+          std::ostringstream line;
+          line << "event=shared_prefix_ready id=" << request->id
+               << " leader=" << request->prefix_leader->id
+               << " tokens=" << request->prefix_position
+               << " wait_ms=" << wait_ms;
+          Logger::Debug("cache", line.str());
+        }
+        request->prefix_leader.reset();
+      }
+      ++it;
+    }
+  }
+
+  [[nodiscard]] static std::shared_ptr<ScheduledRequest> PopReleased(
+      std::deque<std::shared_ptr<ScheduledRequest>>& waiting) {
+    const auto released = std::ranges::find_if(
+        waiting,
+        [](const auto& request) { return request->prefix_leader == nullptr; });
+    if (released == waiting.end())
+      return {};
+    auto request = std::move(*released);
+    waiting.erase(released);
+    return request;
+  }
+
   void Admit(std::deque<std::shared_ptr<ScheduledRequest>>& prefilling,
              std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
-             std::size_t capturing, const std::stop_token& stop_token) {
+             std::deque<std::shared_ptr<ScheduledRequest>>& capturing,
+             std::deque<std::shared_ptr<ScheduledRequest>>& waiting,
+             const std::stop_token& stop_token) {
+    UpdateWaiting(waiting);
+    const std::array<const std::deque<std::shared_ptr<ScheduledRequest>>*, 2>
+        residents{&prefilling, &capturing};
     // Captures retain their runner lease until decoding resumes.
     while (!stop_token.stop_requested() &&
-           prefilling.size() + decoding.size() + capturing <
+           prefilling.size() + decoding.size() + capturing.size() <
                runner_pool->capacity()) {
-      auto request = PopQueued();
+      auto request = PopReleased(waiting);
+      if (request == nullptr)
+        request = PopQueued();
       if (request == nullptr) {
         return;
       }
       try {
         if (CompleteIfStopped(request)) {
+          continue;
+        }
+        if (WaitForSharedPrefix(request, residents, waiting.size())) {
+          waiting.push_back(std::move(request));
           continue;
         }
 
@@ -705,7 +848,7 @@ struct TextGenerationScheduler::Impl {
                                        Clock::now() - request->request_start)
                                        .count();
         request->result.resident_requests_at_admission =
-            prefilling.size() + decoding.size() + capturing + 1;
+            prefilling.size() + decoding.size() + capturing.size() + 1;
         PublishPromptProgress(request);
         request->phase.store(TextRequestPhase::kAdmitted,
                              std::memory_order_release);
@@ -1312,7 +1455,8 @@ struct TextGenerationScheduler::Impl {
 
   void CancelRemaining(
       std::deque<std::shared_ptr<ScheduledRequest>>& prefilling,
-      std::deque<std::shared_ptr<ScheduledRequest>>& decoding) noexcept {
+      std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
+      std::deque<std::shared_ptr<ScheduledRequest>>& waiting) noexcept {
     std::vector<std::shared_ptr<ScheduledRequest>> remaining_queued;
     {
       const std::lock_guard<std::mutex> lock(queue_mutex);
@@ -1333,14 +1477,20 @@ struct TextGenerationScheduler::Impl {
     for (const auto& request : decoding) {
       CompleteCancelled(request);
     }
+    for (const auto& request : waiting) {
+      CompleteCancelled(request);
+    }
     prefilling.clear();
     decoding.clear();
+    waiting.clear();
   }
 
   void Run(const std::stop_token& stop_token) noexcept {
     std::deque<std::shared_ptr<ScheduledRequest>> prefilling;
     std::deque<std::shared_ptr<ScheduledRequest>> decoding;
     std::deque<std::shared_ptr<ScheduledRequest>> capturing;
+    // Cold requests waiting for a resident prefill of their shared prefix.
+    std::deque<std::shared_ptr<ScheduledRequest>> waiting;
     while (!stop_token.stop_requested()) {
       if (device_lost.load(std::memory_order_acquire))
         break;
@@ -1358,7 +1508,7 @@ struct TextGenerationScheduler::Impl {
             prefilling.push_back(std::move(request));
         }
       }
-      Admit(prefilling, decoding, capturing.size(), stop_token);
+      Admit(prefilling, decoding, capturing, waiting, stop_token);
       if (device_lost.load(std::memory_order_acquire))
         break;
       if (prefilling.empty() && decoding.empty()) {
@@ -1368,7 +1518,7 @@ struct TextGenerationScheduler::Impl {
                  (queued_count != 0 &&
                   capturing.size() < runner_pool->capacity());
         };
-        if (capturing.empty())
+        if (capturing.empty() && waiting.empty())
           queue_condition.wait(lock, wake);
         else
           queue_condition.wait_for(lock, std::chrono::milliseconds(1), wake);
@@ -1464,7 +1614,7 @@ struct TextGenerationScheduler::Impl {
     }
     for (auto& request : capturing)
       decoding.push_back(std::move(request));
-    CancelRemaining(prefilling, decoding);
+    CancelRemaining(prefilling, decoding, waiting);
   }
 
   std::shared_ptr<TextRunnerPool> runner_pool;

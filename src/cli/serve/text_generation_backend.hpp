@@ -196,6 +196,9 @@ public:
     std::size_t physical_execution_width{1};
     std::size_t max_buffered_output_bytes{0};
     double queue_ms{0.0};
+    /// Part of queue_ms spent waiting for a concurrent request to publish
+    /// the prompt prefix both share.
+    double shared_prefix_wait_ms{0.0};
     double cache_restore_ms{0.0};
     double cache_snapshot_ms{0.0};
     double cache_disk_enqueue_ms{0.0};

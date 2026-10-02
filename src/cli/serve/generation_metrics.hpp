@@ -71,7 +71,9 @@ inline std::string GenerationLogDetails(
       << " cache_restore_ms=" << result.cache_restore_ms
       << " queue_depth=" << result.queue_depth_at_submit
       << " resident_at_admission=" << result.resident_requests_at_admission
-      << " queue_ms=" << result.queue_ms << " ttft_ms=" << result.ttft_ms
+      << " queue_ms=" << result.queue_ms
+      << " shared_prefix_wait_ms=" << result.shared_prefix_wait_ms
+      << " ttft_ms=" << result.ttft_ms
       << " prefill_tps=" << PrefillTokensPerSecond(result) << " decode_tps="
       << (result.decode_ms > 0
               ? 1000.0 * result.completion_tokens / result.decode_ms

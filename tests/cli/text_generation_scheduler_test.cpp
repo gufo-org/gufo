@@ -560,6 +560,203 @@ TextRequestMetadata ClientMetadata(std::string client_id) {
   };
 }
 
+std::vector<TextRunnerToken> SharedPrompt(std::size_t shared,
+                                          TextRunnerToken tail_start,
+                                          std::size_t tail) {
+  std::vector<TextRunnerToken> prompt{1};
+  for (std::size_t index = 1; index < shared; ++index)
+    prompt.push_back(1000 + static_cast<TextRunnerToken>(index));
+  for (std::size_t index = 0; index < tail; ++index)
+    prompt.push_back(tail_start + static_cast<TextRunnerToken>(index));
+  return prompt;
+}
+
+std::shared_ptr<FakeControl> SharedPrefixControl(bool snapshots) {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 4096;
+  control->prefill_capacity = 256;
+  if (snapshots)
+    control->snapshot_callback = [] {};
+  return control;
+}
+
+void TestConcurrentSharedPrefixesPrefillOnce() {
+  auto control = SharedPrefixControl(true);
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 4);
+  const auto leader_prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = scheduler->Submit(leader_prompt, 2, 0.0F);
+  control->WaitForPrefill(1);
+  // Arrivals while the leader prefills: an identical prompt, one diverging
+  // after the shared system prompt, and one sharing too little to wait for.
+  auto identical = scheduler->Submit(leader_prompt, 2, 0.0F);
+  auto diverging = scheduler->Submit(SharedPrompt(1200, 8000, 100), 2, 0.0F);
+  auto unrelated = scheduler->Submit(SharedPrompt(100, 9000, 900), 2, 0.0F);
+  control->ReleasePrefill();
+  const auto a = leader.Wait();
+  const auto b = identical.Wait();
+  const auto d = diverging.Wait();
+  const auto e = unrelated.Wait();
+  for (const auto* result : {&a, &b, &d, &e})
+    Expect(result->tokens == ExpectedTokens(1, 2),
+           "shared-prefix waiting preserves every output");
+  Expect(a.prefill_tokens == 1300 && a.shared_prefix_wait_ms == 0.0,
+         "the leader prefills its prompt without waiting");
+  Expect(b.cached_prompt_tokens == 1299 && b.prefill_tokens == 1 &&
+             b.shared_prefix_wait_ms > 0.0,
+         "an identical arrival restores the leader's last prefill position");
+  Expect(
+      d.cached_prompt_tokens == 1200 && d.prefill_tokens == 100 &&
+          d.shared_prefix_wait_ms > 0.0,
+      "a diverging arrival restores the shared prefix and prefills its tail");
+  Expect(e.cached_prompt_tokens == 0 && e.prefill_tokens == 1000 &&
+             e.shared_prefix_wait_ms == 0.0,
+         "a short shared prefix is prefilled without waiting");
+}
+
+// The leader is cancelled while the worker is still inside its first prefill
+// chunk, before the follower can be admitted, so the follower never waits.
+void TestLeaderCancelledBeforeFollowerIsAdmitted() {
+  auto control = SharedPrefixControl(true);
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 2);
+  const auto prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = scheduler->Submit(prompt, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto follower = scheduler->Submit(prompt, 2, 0.0F);
+  leader.Cancel();
+  control->ReleasePrefill();
+  const auto a = leader.Wait();
+  const auto b = follower.Wait();
+  Expect(a.cancelled, "the leader is cancelled");
+  Expect(!b.cancelled && b.tokens == ExpectedTokens(1, 2) &&
+             b.cached_prompt_tokens + b.prefill_tokens == prompt.size(),
+         "a follower admitted after its leader's cancellation prefills alone");
+}
+
+void TestParkedFollowerSurvivesLeaderCancellation() {
+  for (const bool fail_capture : {false, true}) {
+    auto control = SharedPrefixControl(true);
+    control->block_prefill_label = 1;
+    std::binary_semaphore entered(0), release(0);
+    std::atomic<unsigned> captures{0};
+    control->snapshot_callback = [&] {
+      if (captures.fetch_add(1) == 0) {
+        entered.release();
+        if (!release.try_acquire_for(kTestTimeout))
+          throw std::runtime_error("shared snapshot gate timed out");
+        if (fail_capture)
+          throw std::runtime_error("injected shared snapshot failure");
+      }
+    };
+    auto scheduler = MakeScheduler(control, 2);
+    const auto prompt = SharedPrompt(1200, 7000, 100);
+    auto leader = scheduler->Submit(prompt, 2, 0.0F);
+    control->WaitForPrefill(1);
+    auto follower = scheduler->Submit(prompt, 2, 0.0F);
+    control->ReleasePrefill();
+
+    // This fresh short prompt has no grid or fallback snapshot at 1299.
+    // Only the parked follower asks the leader to capture that boundary.
+    const bool capturing = entered.try_acquire_for(kTestTimeout);
+    const auto events = control->Events();
+    const bool at_shared_boundary =
+        !events.empty() && events.back().kind == EventKind::kPrefill &&
+        events.back().index + events.back().count == prompt.size() - 1;
+    leader.Cancel();
+    release.release();
+    Expect(capturing && at_shared_boundary,
+           "the follower is parked before its leader is cancelled");
+
+    auto completed = std::async(std::launch::async, [&] {
+      return std::pair{leader.Wait(), follower.Wait()};
+    });
+    Expect(completed.wait_for(kTestTimeout) == std::future_status::ready,
+           "a parked follower is released after leader cancellation");
+    const auto [a, b] = completed.get();
+    Expect(a.cancelled && a.tokens.empty(),
+           "the leader is cancelled before completing prefill");
+    Expect(!b.cancelled && b.tokens == ExpectedTokens(1, 2) &&
+               b.shared_prefix_wait_ms > 0.0 &&
+               b.cached_prompt_tokens + b.prefill_tokens == prompt.size(),
+           "the parked follower completes with exact prompt accounting");
+    Expect(b.cached_prompt_tokens == (fail_capture ? 0 : prompt.size() - 1),
+           "only a successfully captured shared checkpoint is reused");
+
+    auto next = std::async(std::launch::async, [&] {
+      return scheduler->Submit({2, 20, 21}, 2, 0.0F).Wait();
+    });
+    Expect(next.wait_for(kTestTimeout) == std::future_status::ready,
+           "leader cancellation leaves capacity for an independent request");
+    const auto next_result = next.get();
+    Expect(!next_result.cancelled && next_result.tokens == ExpectedTokens(2, 2),
+           "the independent request completes with its own state");
+  }
+}
+
+void TestSharedPrefixWaitRequiresSnapshots() {
+  auto control = SharedPrefixControl(false);
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 2);
+  const auto prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = scheduler->Submit(prompt, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto follower = scheduler->Submit(prompt, 2, 0.0F);
+  control->ReleasePrefill();
+  (void)leader.Wait();
+  const auto b = follower.Wait();
+  Expect(b.tokens == ExpectedTokens(1, 2) && b.shared_prefix_wait_ms == 0.0 &&
+             b.prefill_tokens == prompt.size(),
+         "runners without snapshots never park concurrent requests");
+}
+
+void TestRetainedHistoryBeatsSharedPrefixWait() {
+  auto control = SharedPrefixControl(true);
+  auto scheduler = MakeScheduler(control, 3);
+  const auto history = SharedPrompt(1200, 7000, 100);
+  (void)scheduler->Submit(history, 1, 0.0F).Wait();
+  {
+    const std::lock_guard<std::mutex> lock(control->mutex);
+    control->block_prefill_label = 1;
+  }
+  auto leader = scheduler->Submit(SharedPrompt(1200, 8000, 100), 2, 0.0F);
+  control->WaitForPrefill(1);
+  // The next turn of the retained conversation shares more with its own
+  // checkpoint than with the leader, so it must not wait for the leader.
+  auto next_turn = history;
+  next_turn.insert(next_turn.end(), {9001, 9002, 9003});
+  auto continuation = scheduler->Submit(next_turn, 2, 0.0F);
+  control->ReleasePrefill();
+  const auto c = continuation.Wait();
+  (void)leader.Wait();
+  Expect(c.shared_prefix_wait_ms == 0.0 &&
+             c.cached_prompt_tokens >= history.size(),
+         "a longer retained prefix is reused without waiting");
+}
+
+void TestAwaitedCheckpointSurvivesCachePressure() {
+  auto control = SharedPrefixControl(true);
+  auto scheduler = MakeScheduler(control, 2);
+  // Fill every checkpoint record with unrelated conversations, as on a
+  // long-running server. Optional copies can no longer be admitted.
+  for (TextRunnerToken label = 2; label < 200; ++label)
+    (void)scheduler->Submit({label, 1, 2}, 1, 0.0F).Wait();
+  {
+    const std::lock_guard<std::mutex> lock(control->mutex);
+    control->block_prefill_label = 1;
+  }
+  auto leader = scheduler->Submit(SharedPrompt(1200, 7000, 100), 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto follower = scheduler->Submit(SharedPrompt(1200, 8000, 100), 2, 0.0F);
+  control->ReleasePrefill();
+  (void)leader.Wait();
+  const auto result = follower.Wait();
+  Expect(result.shared_prefix_wait_ms > 0.0 &&
+             result.cached_prompt_tokens == 1200 &&
+             result.prefill_tokens == 100,
+         "a checkpoint peers wait for is retained under cache pressure");
+}
+
 void TestIdlePrefillUsesBulkWorkUnit() {
   auto control = std::make_shared<FakeControl>();
   auto scheduler = MakeScheduler(control, 1, {.decode_active_tokens = 2});
@@ -2043,6 +2240,12 @@ int main() {
   TestSnapshotDoesNotBlockOtherRequests();
   TestFirstTokenPrecedesSnapshotAndPreservesBudget();
   TestIdlePrefillUsesBulkWorkUnit();
+  TestConcurrentSharedPrefixesPrefillOnce();
+  TestLeaderCancelledBeforeFollowerIsAdmitted();
+  TestParkedFollowerSurvivesLeaderCancellation();
+  TestSharedPrefixWaitRequiresSnapshots();
+  TestRetainedHistoryBeatsSharedPrefixWait();
+  TestAwaitedCheckpointSurvivesCachePressure();
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRunnerCanReuseExactIncrementalText();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();

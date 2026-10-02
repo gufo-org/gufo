@@ -162,6 +162,41 @@ void TestWaitingAcquireCanBeCancelled() {
   held.Commit({1, 2, 3});
 }
 
+void TestCachedPrefixTokensPeeksWithoutLeasing() {
+  std::vector<std::size_t> invalidations(1);
+  std::size_t next_id = 0;
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {
+          .restore = [](gufo::server::ContinuationState&,
+                        const gufo::server::ContinuationSnapshot&) {},
+          .capacity_bytes = [] { return 1024; },
+          .on_event = {},
+      });
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2, 3}) == 0,
+         "an empty cache has no reusable prefix");
+  {
+    auto root = cache.Acquire(Tokens{1, 2, 3});
+    Expect(root.TryReserveSnapshot(sizeof(std::size_t), 3),
+           "root snapshot reserves capacity");
+    root.Commit({1, 2, 3}, std::make_unique<FakeSnapshot>(7));
+  }
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2, 3, 4}) == 3,
+         "a retained prefix of the prompt is reported");
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2}) == 0 &&
+             cache.CachedPrefixTokens(Tokens{1, 9, 3, 4}) == 0,
+         "shorter or diverging prompts do not reuse the checkpoint");
+  const std::vector<std::uint8_t> image{5};
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2, 3, 4}, image) == 0,
+         "a different input identity does not match");
+  // Peeking leases nothing: the single state slot remains available.
+  auto lease = cache.Acquire(Tokens{1, 2, 3, 4});
+  Expect(lease.cache_hit() && lease.cached_tokens() == 3,
+         "a peek does not consume the checkpoint or the state slot");
+  lease.Invalidate();
+}
+
 void TestSnapshotCanBranchIntoTwoIndependentStateSlots() {
   std::vector<std::size_t> invalidations(2);
   std::size_t next_id = 0;
@@ -991,6 +1026,7 @@ int main() {
   TestLongestAvailablePrefixWins();
   TestWaitingAcquireCanBeCancelled();
   TestSnapshotCanBranchIntoTwoIndependentStateSlots();
+  TestCachedPrefixTokensPeeksWithoutLeasing();
   TestByteCapacityEvictsBeforeSnapshotAllocation();
   TestConcurrentReservationsCannotOvercommitBudget();
   TestImpossibleReservationPreservesRetainedEntries();

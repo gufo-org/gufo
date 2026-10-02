@@ -1623,6 +1623,7 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
       result.requested_logical_concurrency;
   metrics["physical_execution_width"] = result.physical_execution_width;
   metrics["queue_ms"] = result.queue_ms;
+  metrics["shared_prefix_wait_ms"] = result.shared_prefix_wait_ms;
   metrics["prefill_ms"] = result.prefill_ms;
   metrics["decode_ms"] = result.decode_ms;
   metrics["ttft_ms"] = result.ttft_ms;

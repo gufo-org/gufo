@@ -622,6 +622,33 @@ ContinuationCache::Lease ContinuationCache::Acquire(
   }
 }
 
+std::size_t ContinuationCache::CachedPrefixTokens(
+    std::span<const ContinuationToken> prompt,
+    std::span<const std::uint8_t> input_identity,
+    std::span<const ContinuationInputPrefix> input_prefixes) const {
+  const auto matches = [&](const auto& tokens, const auto& identity) {
+    return IsPrefix(tokens, prompt) &&
+           std::ranges::equal(
+               identity, PrefixInputIdentity(input_identity, input_prefixes,
+                                             tokens.size()));
+  };
+  // Same candidates as Acquire: retained checkpoints, and live frontiers
+  // whose state is not leased.
+  const std::lock_guard<std::mutex> lock(impl_->mutex);
+  std::size_t longest = 0;
+  for (const auto& entry : impl_->entries) {
+    if (entry->valid && (impl_->snapshot_mode() || entry->available) &&
+        entry->tokens.size() > longest &&
+        matches(entry->tokens, entry->input_identity))
+      longest = entry->tokens.size();
+    if (impl_->snapshot_mode() && entry->available &&
+        entry->live_tokens.size() > longest &&
+        matches(entry->live_tokens, entry->live_identity))
+      longest = entry->live_tokens.size();
+  }
+  return longest;
+}
+
 std::size_t ContinuationCache::capacity() const noexcept {
   return impl_->state_count;
 }

@@ -94,6 +94,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
 | `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, including Messages thinking blocks, and compare with uncached responses |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
+| `cache-concurrency` | Concurrent identical prompts, shared-system fan-out with short and long tasks, short or no shared prefixes, a retained conversation beside a newcomer, and a cancelled leader; check waits, prefill work and uncached answers |
 
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
 the server command. Projectors can load automatically beside the weights, so
@@ -129,6 +130,10 @@ omitted, preserved and explicitly discarded reasoning, plus thinking off.
 `cache-rotation` visits four conversations and eight small side requests; use
 `--sessions 1` to verify retention is independent of execution slots. It also
 checks the startup RAM cap; byte/record pressure is covered by CPU tests.
+`cache-concurrency` sends each group at once. With `--sessions 2` or more,
+requests sharing a long prefix must wait for one prefill and then prefill only
+their own tail; groups sharing little or nothing must not wait. With
+`--sessions 1` no request may wait.
 
 Unchanged retries must reproduce the complete output with zero prefill. After a
 restart, disk restores may re-prefill less than one 2048-token disk step;

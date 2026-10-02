@@ -410,6 +410,25 @@ public:
     [[nodiscard]] bool cache_disk_hit() const noexcept;
     [[nodiscard]] std::size_t prompt_tokens() const noexcept;
     [[nodiscard]] bool prefill_complete() const noexcept;
+    [[nodiscard]] std::span<const TextRunnerToken> prompt() const noexcept;
+    /// Prompt tokens already in model state, restored or prefilled.
+    [[nodiscard]] std::size_t prefill_position() const noexcept;
+    [[nodiscard]] std::span<const std::uint8_t> input_identity(
+        std::size_t token_count) const;
+
+    /// Lets another request reuse this prompt's first common_tokens.
+    ///
+    /// Returns the position, at most common_tokens, where this request will
+    /// publish a RAM checkpoint before prefilling past it, reusing a planned
+    /// checkpoint within kSharedCheckpointSlack tokens. Zero when the runner
+    /// cannot snapshot or this request is no longer before that position.
+    /// An awaited checkpoint has requests waiting for it, so it is retained
+    /// with continuation priority rather than as an optional copy.
+    [[nodiscard]] std::size_t ShareCheckpoint(std::size_t common_tokens,
+                                              bool awaited = true);
+    /// A planned checkpoint this close to the shared position is cheaper to
+    /// use than capturing another one: followers prefill the gap themselves.
+    static constexpr std::size_t kSharedCheckpointSlack = 64;
 
     void PrepareBatchExecution();
     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
@@ -470,6 +489,11 @@ public:
       bool stop_at_eos = true);
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
+  /// Longest RAM-retained prefix of prompt that Acquire could reuse, without
+  /// leasing a state. An upper bound: Acquire may still prefer a shorter one.
+  [[nodiscard]] std::size_t CachedPrefixTokens(
+      std::span<const TextRunnerToken> prompt,
+      const TextPromptContext* context) const;
 
 private:
   struct Impl;

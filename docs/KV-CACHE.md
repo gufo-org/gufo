@@ -123,6 +123,62 @@ and all remaining checkpoints fall after the edit, reuse is impossible:
 That gap between "common prefix" and "reused" is the signature of the
 exact-prefix limitation. See #331.
 
+## Concurrent requests sharing a prefix
+
+Checkpoints help a request only once they exist. When several requests that
+share a prefix arrive together, such as subagents started from one system
+prompt or a retry sent before the first attempt returns, none of them finds a
+checkpoint, and each would prefill the shared tokens again. Prefill runs one
+request at a time, so the copies cost the sum of all prefills, and all
+requests finish together at the end.
+
+Instead, a cold request that shares a long prefix with a request already
+prefilling it waits for that one:
+
+```mermaid
+sequenceDiagram
+  participant L as Leader (resident)
+  participant S as Scheduler
+  participant F as Follower (arrives later)
+  F->>S: arrives, shares N tokens with L
+  S->>L: publish a checkpoint at N
+  Note over F: parked, holds no session
+  L->>L: prefill to N, capture
+  S->>F: admit
+  F->>F: restore N, prefill its own tail
+```
+
+1. On admission, the scheduler compares the new prompt with every resident
+   request still prefilling and takes the longest exact token prefix with
+   matching input identity.
+2. It waits only when the shared prefix is at least 512 tokens longer than
+   what the request could already restore, the resident request has not yet
+   prefilled past that point, and the runner supports snapshots. A
+   conversation continuing from its own retained turn therefore never waits
+   for a newcomer that shares only its system prompt.
+3. The resident request stops its prefill at the shared position and
+   publishes a RAM checkpoint there, as for intermediate checkpoints. A
+   checkpoint it already plans within 64 tokens is used instead. Identical
+   prompts share up to the leader's last prompt token or its stable boundary.
+4. The waiting request holds no session. Once the checkpoint is retained, or
+   the leader passes the position, finishes or is cancelled, it is admitted
+   ahead of newer requests and acquires its cache as usual.
+
+Because requests are waiting for it, that checkpoint is retained with the
+priority of a conversation's stable boundary: on a full cache it replaces the
+least recently used checkpoint rather than being refused as an optional copy.
+Waiting is still advisory, like admission: if the checkpoint does not fit at
+all or the leader is cancelled, the request prefills by itself. A request
+waits at most once, and at most `--sessions - 1` requests wait at a time. With
+`--sessions 1` nothing waits, because a second request is never admitted
+while the first prefills.
+
+Measured on Flash-Next with `--sessions 4` and a 3.8k-token shared system
+prompt, four concurrent requests took 13.4 s with each prefilling 3.9k tokens.
+Prefilling the shared prefix once and restoring it took 4.6 s, each request
+then prefilling 115 tokens **(measured)**. With a 242-token shared prefix the
+gain was about 1 s of 9 s, which is why short prefixes do not wait.
+
 ## What gets retained
 
 The unit of retention is a **checkpoint**, not a conversation. A single request
@@ -325,7 +381,9 @@ still populate the cache.
 
 Per-request outcomes appear in the completion log and in `usage.gufo`:
 `cache_hit`, `cache_miss_reason`, `cache_common_prefix_tokens`,
-`cache_checkpoint_tokens`, `cache_restore_bytes`, `cache_restore_ms`, plus
+`cache_checkpoint_tokens`, `cache_restore_bytes`, `cache_restore_ms`,
+`shared_prefix_wait_ms` (time spent waiting for a concurrent request, part of
+`queue_ms`), plus
 `prompt_n` (newly processed) and `cache_n` (reused) in the llama.cpp-compatible
 `timings` object. Miss reasons are `no_checkpoint`, `prefix_changed`,
 `input_changed` and `disabled`.
@@ -334,6 +392,11 @@ Reading them:
 
 - `cache_n` growing turn over turn while `prompt_n` stays flat is healthy
   reuse.
+- Concurrent requests with a shared prefix: one has `shared_prefix_wait_ms`
+  zero and prefills the prefix; the others wait, then report the prefix in
+  `cache_n` and only their own tail in `prompt_n`. With `--log-level debug`,
+  `event=shared_prefix_wait` and `event=shared_prefix_ready` name the leader
+  and position.
 - `cache_n` **pinned** at the same value while `prompt_n` grows every turn is a
   checkpoint that stopped advancing. See #335.
 - A large `cache_common_prefix_tokens` on a miss means a long prefix agreed and
@@ -352,6 +415,12 @@ Reading them:
 - `tests/functional/cache_disk_spacing.py`, part of the `cache` suite, checks
   disk checkpoint spacing for a growing conversation, the restore after
   restart, and that a learned branch boundary is still written.
+- `tests/functional/cache_concurrency.py` (`cache-concurrency`) sends
+  identical prompts, shared-system fan-out with short and long tasks, short or
+  no shared prefixes, a retained conversation beside a newcomer and a
+  cancelled leader at once, checking waits, prefill work and uncached answers.
+  `tests/cli/text_generation_scheduler_test.cpp` covers the same cases, plus
+  runners without snapshots, without loading a model.
 - `tests/cli/continuation_cache_test.cpp`,
   `tests/cli/continuation_disk_store_test.cpp` and
   `tests/cli/text_model_runner_test.cpp` cover retention, admission, eviction
