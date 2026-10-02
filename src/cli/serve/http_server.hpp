@@ -152,7 +152,8 @@ private:
 };
 
 /// Scheduled requests already counted tokens live. Other backends contribute
-/// at completion; both update the last-request speed gauges.
+/// at completion; both update the last-request speed gauges and the
+/// per-request totals.
 inline void RecordServerMetrics(const TextGenerationBackend::Result& result) {
   if (!result.token_metrics_recorded) {
     // Older backends may only report prompt/cache totals. Infer their completed
@@ -167,6 +168,29 @@ inline void RecordServerMetrics(const TextGenerationBackend::Result& result) {
     detail::TotalGenTokens().fetch_add(result.completion_tokens,
                                        std::memory_order_relaxed);
   }
+  const auto add_seconds = [](std::atomic<double>& total, double ms) {
+    double current = total.load(std::memory_order_relaxed);
+    while (!total.compare_exchange_weak(current, current + ms / 1000.0,
+                                        std::memory_order_relaxed)) {
+    }
+  };
+  detail::TotalCachedPromptTokens().fetch_add(
+      std::min(result.cached_prompt_tokens, result.prompt_tokens),
+      std::memory_order_relaxed);
+  add_seconds(detail::TotalPromptSeconds(), result.prefill_ms);
+  add_seconds(detail::TotalGenSeconds(), result.decode_ms);
+  const std::uint64_t sequence_tokens =
+      result.prompt_tokens + result.completion_tokens;
+  std::uint64_t max_tokens =
+      detail::MaxSequenceTokens().load(std::memory_order_relaxed);
+  while (max_tokens < sequence_tokens &&
+         !detail::MaxSequenceTokens().compare_exchange_weak(
+             max_tokens, sequence_tokens, std::memory_order_relaxed)) {
+  }
+  detail::TotalDraftTokens().fetch_add(result.draft_tokens,
+                                       std::memory_order_relaxed);
+  detail::TotalDraftAcceptedTokens().fetch_add(result.draft_accepted_tokens,
+                                               std::memory_order_relaxed);
   const double prompt_per_second = PrefillTokensPerSecond(result);
   const double tok_per_sec =
       (result.decode_ms > 0.0 && result.completion_tokens > 0)

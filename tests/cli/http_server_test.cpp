@@ -80,6 +80,8 @@ public:
   bool supports_images() const override { return image_support.load(); }
   std::atomic<bool> image_support{false};
   std::uint32_t max_context() const override { return 65536; }
+  std::vector<SessionState> session_states() const override { return sessions; }
+  std::vector<SessionState> sessions;
   std::shared_ptr<GenerationRequest> start_complete(
       std::string_view prompt, std::size_t max_tokens,
       const gufo::sampling::SamplingConfig& sampling,
@@ -569,6 +571,11 @@ void TestFallbackBackendMetrics() {
     for (const bool stream : {false, true}) {
       const auto prompt_before = metrics::TotalPromptTokens().load();
       const auto generated_before = metrics::TotalGenTokens().load();
+      const auto cached_before = metrics::TotalCachedPromptTokens().load();
+      const auto drafts_before = metrics::TotalDraftTokens().load();
+      const auto accepted_before = metrics::TotalDraftAcceptedTokens().load();
+      const auto prompt_seconds_before = metrics::TotalPromptSeconds().load();
+      const auto gen_seconds_before = metrics::TotalGenSeconds().load();
       auto body = gufo::json::parse(endpoint.body);
       body["model"] = "test";
       body["stream"] = stream;
@@ -579,6 +586,19 @@ void TestFallbackBackendMetrics() {
       assert(response.find("llamacpp:prompt_tokens_total " +
                            std::to_string(prompt_before + 2) + "\n") !=
              std::string::npos);
+      assert(response.find("llamacpp:prompt_tokens_cached_total " +
+                           std::to_string(cached_before + 8) + "\n") !=
+             std::string::npos);
+      assert(response.find("llamacpp:spec_decode_num_draft_tokens_total " +
+                           std::to_string(drafts_before + 8) + "\n") !=
+             std::string::npos);
+      assert(response.find("llamacpp:spec_decode_num_accepted_tokens_total " +
+                           std::to_string(accepted_before + 4) + "\n") !=
+             std::string::npos);
+      assert(metrics::TotalPromptSeconds().load() - prompt_seconds_before >
+                 0.0039 &&
+             metrics::TotalGenSeconds().load() - gen_seconds_before > 0.0019);
+      assert(metrics::MaxSequenceTokens().load() >= 11);
       assert(response.find("llamacpp:tokens_predicted_total " +
                            std::to_string(generated_before + 1) + "\n") !=
              std::string::npos);
@@ -610,6 +630,97 @@ void TestFallbackBackendMetrics() {
            prompt_before + test.expected_prompt);
     assert(metrics::TotalGenTokens().load() == generated_before + 2);
   }
+}
+
+void TestLlamaSlotsAndMetrics() {
+  RunningServer server;
+  const auto get = [&](const std::string& path) {
+    const auto response = server.Send("GET " + path + " HTTP/1.1\r\n\r\n");
+    ExpectStatus(response, 200);
+    return response.substr(response.find("\r\n\r\n") + 4);
+  };
+  const auto expect_slot = [](const gufo::json::Value& slot, std::size_t id,
+                              bool processing) {
+    assert(slot.member_size("id", 99) == id);
+    assert(slot.member_size("n_ctx") == 65536);
+    assert(slot.find("speculative")->is_bool());
+    assert(slot.find("is_processing")->as_bool(!processing) == processing);
+    assert(slot.find("state")->as_double() == (processing ? 1 : 0));
+    assert(slot.find("task_id")->as_double() ==
+           slot.find("id_task")->as_double());
+    for (const char* key : {"n_prompt_tokens", "n_prompt_tokens_cache",
+                            "n_prompt_tokens_processed"}) {
+      assert(slot.find(key)->is_number());
+    }
+    assert(slot.find("prompt")->is_string() &&
+           slot.member_str("prompt").empty());
+    assert(slot.member_str("model") == "test");
+    const auto* next = slot.find("next_token");
+    assert(next != nullptr && next->is_array() && next->size() == 1);
+    const auto& token = next->items().front();
+    assert(token.find("has_next_token")->as_bool(!processing) == processing);
+    assert(token.find("has_new_line")->is_bool());
+    assert(token.find("n_remain")->is_number() &&
+           token.find("n_decoded")->is_number());
+  };
+
+  // Backends without a session pool report one idle slot.
+  auto slots = gufo::json::parse(get("/slots"));
+  assert(slots.is_array() && slots.size() == 1);
+  const auto& fallback = slots.items().front();
+  expect_slot(fallback, 0, false);
+  assert(fallback.find("id_task")->as_double() == -1);
+  assert(fallback.member_size("n_prompt_tokens", 99) == 0);
+  assert(fallback.find("next_token")
+             ->items()
+             .front()
+             .find("n_remain")
+             ->as_double() == -1);
+  assert(get("/metrics").find("llamacpp:kv_cache_usage_ratio 0\n") !=
+         std::string::npos);
+
+  server.backend->sessions.resize(2);
+  server.backend->sessions[1] = {
+      .processing = true,
+      .speculative = true,
+      .request_id = 42,
+      .prompt_tokens = 10,
+      .cached_prompt_tokens = 8,
+      .processed_prompt_tokens = 2,
+      .generated_tokens = 3,
+      .remaining_tokens = 5,
+  };
+  slots = gufo::json::parse(get("/v1/slots"));
+  assert(slots.size() == 2);
+  expect_slot(slots.items()[0], 0, false);
+  const auto& busy = slots.items()[1];
+  expect_slot(busy, 1, true);
+  assert(busy.find("speculative")->as_bool() &&
+         busy.member_size("id_task") == 42 &&
+         busy.member_size("n_prompt_tokens") == 10 &&
+         busy.member_size("n_prompt_tokens_cache") == 8 &&
+         busy.member_size("n_prompt_tokens_processed") == 2);
+  const auto& token = busy.find("next_token")->items().front();
+  assert(token.member_size("n_remain") == 5 &&
+         token.member_size("n_decoded") == 3);
+
+  const auto metrics = get("/metrics");
+  std::ostringstream ratio;
+  ratio << "llamacpp:kv_cache_usage_ratio " << 13.0 / (2.0 * 65536) << "\n";
+  assert(metrics.find(ratio.str()) != std::string::npos);
+  for (const std::string counter :
+       {"prompt_tokens_total", "prompt_tokens_cached_total",
+        "prompt_seconds_total", "tokens_predicted_total",
+        "tokens_predicted_seconds_total", "n_tokens_max",
+        "spec_decode_num_draft_tokens_total",
+        "spec_decode_num_accepted_tokens_total"}) {
+    assert(metrics.find("# HELP llamacpp:" + counter + " ") !=
+           std::string::npos);
+    assert(metrics.find("# TYPE llamacpp:" + counter + " counter\n") !=
+           std::string::npos);
+  }
+  assert(metrics.find("# TYPE llamacpp:kv_cache_usage_ratio gauge\n") !=
+         std::string::npos);
 }
 
 void TestCompatibilityRequests() {
@@ -1502,6 +1613,7 @@ int main() {
   TestAuthorization();
   TestFramingAndMetrics();
   TestFallbackBackendMetrics();
+  TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
   TestModelInputModalities();
   TestRawCompletionStreaming();

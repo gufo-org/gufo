@@ -22,6 +22,31 @@ inline std::atomic<std::uint64_t>& TotalGenTokens() {
   static std::atomic<std::uint64_t> count{0};
   return count;
 }
+// Request totals below are added once per request when it completes.
+inline std::atomic<std::uint64_t>& TotalCachedPromptTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
+inline std::atomic<double>& TotalPromptSeconds() {
+  static std::atomic<double> seconds{0.0};
+  return seconds;
+}
+inline std::atomic<double>& TotalGenSeconds() {
+  static std::atomic<double> seconds{0.0};
+  return seconds;
+}
+inline std::atomic<std::uint64_t>& MaxSequenceTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
+inline std::atomic<std::uint64_t>& TotalDraftTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
+inline std::atomic<std::uint64_t>& TotalDraftAcceptedTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
 inline std::atomic<double>& LastPromptSpeed() {
   static std::atomic<double> val{0.0};
   return val;

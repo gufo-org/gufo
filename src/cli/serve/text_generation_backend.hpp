@@ -139,6 +139,20 @@ public:
   };
   using ProgressCallback = std::function<bool(const PromptProgress&)>;
 
+  /// One execution session for llama-server `/slots`. Idle sessions report
+  /// zero counts rather than the previous request's.
+  struct SessionState {
+    bool processing{false};
+    bool speculative{false};
+    std::uint64_t request_id{0};
+    std::size_t prompt_tokens{0};
+    std::size_t cached_prompt_tokens{0};
+    /// Prompt tokens prefilled so far, excluding cached tokens.
+    std::size_t processed_prompt_tokens{0};
+    std::size_t generated_tokens{0};
+    std::size_t remaining_tokens{0};
+  };
+
   enum class FinishReason : std::uint8_t {
     kStop,
     kStopSequence,
@@ -256,6 +270,10 @@ public:
   /// Maximum tokens accepted by the loaded model under the configured context.
   /// Zero when no text model is loaded.
   [[nodiscard]] virtual std::uint32_t max_context() const { return 0; }
+  /// Live execution sessions; empty when the backend has no session pool.
+  [[nodiscard]] virtual std::vector<SessionState> session_states() const {
+    return {};
+  }
   /// Whether the loaded backend accepts image inputs in chat requests.
   [[nodiscard]] virtual bool supports_images() const { return false; }
   [[nodiscard]] virtual SamplingDefaults sampling_defaults() const {

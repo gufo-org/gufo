@@ -3576,6 +3576,17 @@ std::uint32_t InferenceBackend::max_context() const {
 #endif
 }
 
+std::vector<InferenceBackend::SessionState> InferenceBackend::session_states()
+    const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr ? state->scheduler->SessionStates()
+                          : std::vector<SessionState>{};
+#else
+  return {};
+#endif
+}
+
 InferenceBackend::SamplingDefaults InferenceBackend::sampling_defaults() const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();

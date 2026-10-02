@@ -1193,30 +1193,102 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend&) {
   return Ok(resp);
 }
 
+/// llama-server slots, one per execution session. `task_id`, `state` and an
+/// always-empty `prompt` remain for older clients; prompt text is not exposed.
 HttpResponse LlamaSlots(const HttpRequest&, TextGenerationBackend& b) {
+  auto sessions = b.session_states();
+  if (sessions.empty()) {
+    sessions.emplace_back();
+  }
+  const std::size_t context = b.max_context();
+  const std::string model = b.model_id();
   json::Value resp = json::Value::array();
-  json::Value slot = json::Value::object();
-  slot["id"] = 0;
-  slot["task_id"] = 0;
-  slot["state"] = 0;
-  slot["prompt"] = "";
-  slot["next_token"] = json::Value();
-  slot["model"] = b.model_id();
-  resp.push_back(std::move(slot));
+  for (std::size_t index = 0; index < sessions.size(); ++index) {
+    const auto& session = sessions[index];
+    const std::int64_t task =
+        session.processing ? static_cast<std::int64_t>(session.request_id) : -1;
+    json::Value next_token = json::Value::object();
+    next_token["has_next_token"] = session.processing;
+    next_token["has_new_line"] = false;
+    next_token["n_remain"] =
+        session.processing ? static_cast<std::int64_t>(session.remaining_tokens)
+                           : std::int64_t{-1};
+    next_token["n_decoded"] = session.generated_tokens;
+    json::Value slot = json::Value::object();
+    slot["id"] = index;
+    slot["n_ctx"] = context;
+    slot["speculative"] = session.speculative;
+    slot["is_processing"] = session.processing;
+    slot["id_task"] = task;
+    slot["task_id"] = task;
+    slot["state"] = session.processing ? 1 : 0;
+    slot["n_prompt_tokens"] = session.prompt_tokens;
+    slot["n_prompt_tokens_cache"] = session.cached_prompt_tokens;
+    slot["n_prompt_tokens_processed"] = session.processed_prompt_tokens;
+    slot["prompt"] = "";
+    slot["next_token"] = json::Value::array();
+    slot["next_token"].push_back(std::move(next_token));
+    slot["model"] = model;
+    resp.push_back(std::move(slot));
+  }
   return Ok(resp);
 }
 
-HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend&) {
+/// Context held by in-flight requests across all sessions.
+double KvCacheUsageRatio(const TextGenerationBackend& b) {
+  const auto sessions = b.session_states();
+  const std::size_t capacity = sessions.size() * b.max_context();
+  if (capacity == 0) {
+    return 0.0;
+  }
+  std::size_t used = 0;
+  for (const auto& session : sessions) {
+    used += session.prompt_tokens + session.generated_tokens;
+  }
+  return static_cast<double>(used) / static_cast<double>(capacity);
+}
+
+HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
   std::ostringstream out;
   out << "# HELP llamacpp:prompt_tokens_total Total prompt tokens processed, "
          "excluding cache hits\n"
       << "# TYPE llamacpp:prompt_tokens_total counter\n"
       << "llamacpp:prompt_tokens_total "
       << detail::TotalPromptTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:prompt_tokens_cached_total Total prompt tokens "
+         "reused from cache\n"
+      << "# TYPE llamacpp:prompt_tokens_cached_total counter\n"
+      << "llamacpp:prompt_tokens_cached_total "
+      << detail::TotalCachedPromptTokens().load(std::memory_order_relaxed)
+      << "\n"
+      << "# HELP llamacpp:prompt_seconds_total Prompt process time\n"
+      << "# TYPE llamacpp:prompt_seconds_total counter\n"
+      << "llamacpp:prompt_seconds_total "
+      << detail::TotalPromptSeconds().load(std::memory_order_relaxed) << "\n"
       << "# HELP llamacpp:tokens_predicted_total Total tokens generated\n"
       << "# TYPE llamacpp:tokens_predicted_total counter\n"
       << "llamacpp:tokens_predicted_total "
       << detail::TotalGenTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:tokens_predicted_seconds_total Predict process "
+         "time\n"
+      << "# TYPE llamacpp:tokens_predicted_seconds_total counter\n"
+      << "llamacpp:tokens_predicted_seconds_total "
+      << detail::TotalGenSeconds().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:n_tokens_max Largest observed n_tokens.\n"
+      << "# TYPE llamacpp:n_tokens_max counter\n"
+      << "llamacpp:n_tokens_max "
+      << detail::MaxSequenceTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:spec_decode_num_draft_tokens_total Total draft "
+         "tokens proposed\n"
+      << "# TYPE llamacpp:spec_decode_num_draft_tokens_total counter\n"
+      << "llamacpp:spec_decode_num_draft_tokens_total "
+      << detail::TotalDraftTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:spec_decode_num_accepted_tokens_total Total draft "
+         "tokens accepted\n"
+      << "# TYPE llamacpp:spec_decode_num_accepted_tokens_total counter\n"
+      << "llamacpp:spec_decode_num_accepted_tokens_total "
+      << detail::TotalDraftAcceptedTokens().load(std::memory_order_relaxed)
+      << "\n"
       << "# HELP llamacpp:prompt_tokens_seconds Prompt processing speed in "
          "tokens per second\n"
       << "# TYPE llamacpp:prompt_tokens_seconds gauge\n"
@@ -1237,9 +1309,10 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend&) {
       << "# TYPE llamacpp:requests_deferred gauge\n"
       << "llamacpp:requests_deferred "
       << detail::RequestsDeferred().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:kv_cache_usage_ratio KV cache usage ratio\n"
+      << "# HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated "
+         "tokens over sessions times context; excludes retained cache\n"
       << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
-      << "llamacpp:kv_cache_usage_ratio 0.0\n";
+      << "llamacpp:kv_cache_usage_ratio " << KvCacheUsageRatio(b) << "\n";
   return {.status = 200,
           .reason = "OK",
           .body = out.str(),

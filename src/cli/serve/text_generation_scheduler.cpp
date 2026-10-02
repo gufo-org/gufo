@@ -8,6 +8,7 @@
 #include <exception>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -27,6 +28,7 @@ namespace gufo::server {
 namespace {
 
 constexpr std::size_t kDecodeProgressInterval = 50;
+constexpr std::size_t kNoSession = std::numeric_limits<std::size_t>::max();
 
 struct OutputBudget {
   explicit OutputBudget(std::size_t byte_limit) : limit(byte_limit) {}
@@ -62,6 +64,17 @@ struct OutputBudget {
   std::atomic<std::size_t> max_buffered_bytes{0};
 };
 
+struct ScheduledRequest;
+
+/// Requests holding each execution session, for `/slots`. The mutex is a leaf:
+/// nothing else is locked while it is held.
+struct SessionTable {
+  explicit SessionTable(std::size_t count) : requests(count) {}
+
+  std::mutex mutex;
+  std::vector<std::shared_ptr<const ScheduledRequest>> requests;
+};
+
 struct ScheduledRequest {
   std::uint64_t id{0};
   std::string client_id{"anonymous"};
@@ -80,6 +93,7 @@ struct ScheduledRequest {
   std::size_t max_output_bytes{0};
   std::size_t max_buffered_output_bytes{0};
   std::shared_ptr<OutputBudget> output_budget;
+  std::shared_ptr<SessionTable> sessions;
 
   std::atomic<bool> cancellation_requested{false};
   std::atomic<TextRequestPhase> phase{TextRequestPhase::kQueued};
@@ -115,6 +129,14 @@ struct ScheduledRequest {
   std::size_t prefix_position{0};
   bool prefix_considered{false};
   std::optional<TextGenerationScheduler::Clock::time_point> prefix_wait_start;
+  // The held `/slots` session while counted_processing is set. Only the
+  // scheduler worker changes it.
+  std::size_t session{kNoSession};
+  // Copies of result counters for `/slots`, which reads them from another
+  // thread while the scheduler worker updates `result`.
+  std::atomic<std::size_t> live_cached_prompt_tokens{0};
+  std::atomic<std::size_t> live_prefill_tokens{0};
+  std::atomic<std::size_t> live_generated_tokens{0};
   std::exception_ptr failure;
   bool terminal{false};
 };
@@ -147,6 +169,12 @@ void PublishTerminal(const std::shared_ptr<ScheduledRequest>& request,
     request->failure = std::move(failure);
     request->terminal = true;
     if (std::exchange(request->counted_processing, false)) {
+      if (request->session != kNoSession) {
+        const std::lock_guard<std::mutex> sessions_lock(
+            request->sessions->mutex);
+        request->sessions->requests[std::exchange(request->session, kNoSession)]
+            .reset();
+      }
       detail::RequestsProcessing().fetch_sub(1, std::memory_order_relaxed);
     }
     request->phase.store(TextRequestPhase::kTerminal,
@@ -292,6 +320,7 @@ struct TextGenerationScheduler::Impl {
       throw std::invalid_argument(
           "text generation scheduler runner pool must not be null");
     }
+    sessions = std::make_shared<SessionTable>(runner_pool->capacity());
     if (prefill_policy.decode_active_tokens == 0) {
       throw std::invalid_argument(
           "active-decode prefill budget must be at least one token");
@@ -441,7 +470,18 @@ struct TextGenerationScheduler::Impl {
     auto request = std::move(client.requests.front());
     client.requests.pop_front();
     // Admission reserves a session before potentially slow cache preparation.
-    // Publish the transfer before removing it from the deferred count.
+    // Publish the transfer before removing it from the deferred count. Admit
+    // holds fewer than capacity requests here, so a session is always free.
+    {
+      const std::lock_guard<std::mutex> sessions_lock(sessions->mutex);
+      const auto free = std::find(sessions->requests.begin(),
+                                  sessions->requests.end(), nullptr);
+      if (free != sessions->requests.end()) {
+        request->session =
+            static_cast<std::size_t>(free - sessions->requests.begin());
+        *free = request;
+      }
+    }
     request->counted_processing = true;
     detail::RequestsProcessing().fetch_add(1, std::memory_order_relaxed);
     SetQueuedCountLocked(queued_count - 1);
@@ -469,6 +509,35 @@ struct TextGenerationScheduler::Impl {
       return true;
     }
     return false;
+  }
+
+  [[nodiscard]] std::vector<TextGenerationBackend::SessionState>
+  SessionSnapshot() const {
+    std::vector<TextGenerationBackend::SessionState> states(
+        runner_pool->capacity());
+    const std::lock_guard<std::mutex> lock(sessions->mutex);
+    for (std::size_t index = 0; index < states.size(); ++index) {
+      auto& state = states[index];
+      state.speculative = multi_token_decode;
+      const auto& request = sessions->requests[index];
+      if (request == nullptr) {
+        continue;
+      }
+      // Identity, prompt size and limit are fixed before admission.
+      const std::size_t generated =
+          request->live_generated_tokens.load(std::memory_order_relaxed);
+      state.processing = true;
+      state.request_id = request->id;
+      state.prompt_tokens = request->result.prompt_tokens;
+      state.cached_prompt_tokens =
+          request->live_cached_prompt_tokens.load(std::memory_order_relaxed);
+      state.processed_prompt_tokens =
+          request->live_prefill_tokens.load(std::memory_order_relaxed);
+      state.generated_tokens = generated;
+      state.remaining_tokens =
+          request->token_limit - std::min(generated, request->token_limit);
+    }
+    return states;
   }
 
   [[nodiscard]] std::vector<std::shared_ptr<ScheduledRequest>> QueuedSnapshot()
@@ -836,6 +905,8 @@ struct TextGenerationScheduler::Impl {
         request->result.cache_checkpoint_tokens = lookup.checkpoint_tokens;
         request->result.cached_prompt_tokens =
             request->runner_request.cached_prompt_tokens();
+        request->live_cached_prompt_tokens.store(
+            request->result.cached_prompt_tokens, std::memory_order_relaxed);
         request->result.cache_restore_bytes =
             request->runner_request.cache_restore_bytes();
         request->result.cache_restore_ms =
@@ -897,6 +968,8 @@ struct TextGenerationScheduler::Impl {
               .count();
       request->result.prefill_ms += step_ms;
       request->result.prefill_tokens += step.consumed_tokens;
+      request->live_prefill_tokens.store(request->result.prefill_tokens,
+                                         std::memory_order_relaxed);
       detail::TotalPromptTokens().fetch_add(step.consumed_tokens,
                                             std::memory_order_relaxed);
       ++request->result.prefill_chunks;
@@ -1002,6 +1075,8 @@ struct TextGenerationScheduler::Impl {
     }
     request->generated_output_bytes += selection.piece.size();
     request->result.tokens.push_back(selection.token);
+    request->live_generated_tokens.store(request->result.tokens.size(),
+                                         std::memory_order_relaxed);
     detail::TotalGenTokens().fetch_add(1, std::memory_order_relaxed);
     const auto piece = request->stop_filter.enabled()
                            ? request->stop_filter.Push(selection.piece)
@@ -1621,6 +1696,7 @@ struct TextGenerationScheduler::Impl {
   TextPrefillPolicy prefill_policy;
   TextSchedulerPolicy scheduler_policy;
   std::shared_ptr<OutputBudget> output_budget;
+  std::shared_ptr<SessionTable> sessions;
   bool incremental_prefill_supported{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
@@ -1784,6 +1860,11 @@ bool TextGenerationScheduler::device_lost() const noexcept {
   return impl_->device_lost.load(std::memory_order_acquire);
 }
 
+std::vector<TextGenerationScheduler::SessionState>
+TextGenerationScheduler::SessionStates() const {
+  return impl_->SessionSnapshot();
+}
+
 std::size_t TextGenerationScheduler::buffered_output_bytes() const noexcept {
   return impl_->output_budget->buffered_bytes.load(std::memory_order_relaxed);
 }
@@ -1862,6 +1943,7 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->max_buffered_output_bytes =
       impl_->scheduler_policy.max_buffered_output_bytes_per_request;
   request->output_budget = impl_->output_budget;
+  request->sessions = impl_->sessions;
 
   // A refusal is reported and thrown after the lock below is released.
   // Admission-line inputs are snapshotted under the queue mutex and the

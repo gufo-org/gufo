@@ -1477,6 +1477,79 @@ void TestMetricsDuringCacheAdmission() {
          "failed admission releases the session for replacement work");
 }
 
+void TestSessionStatesFollowAdmittedRequests() {
+  namespace metrics = gufo::server::detail;
+  const auto processing_before = metrics::RequestsProcessing().load();
+  auto control = std::make_shared<FakeControl>();
+  control->block_advance_label = 1;
+  control->block_prefill_label = 2;
+  auto scheduler = MakeScheduler(control, 2);
+  const auto all_idle = [&] {
+    const auto states = scheduler->SessionStates();
+    return states.size() == 2 &&
+           std::none_of(states.begin(), states.end(), [](const auto& state) {
+             return state.processing || state.request_id != 0 ||
+                    state.prompt_tokens != 0 || state.generated_tokens != 0;
+           });
+  };
+  Expect(all_idle(), "every session starts idle");
+
+  auto first = scheduler->Submit({1, 10}, 8, 0.0F);
+  control->WaitForAdvance(1);
+  auto states = scheduler->SessionStates();
+  Expect(states[0].processing && states[0].request_id == first.id() &&
+             states[0].prompt_tokens == 2 &&
+             states[0].cached_prompt_tokens == 0 &&
+             states[0].processed_prompt_tokens == 2 &&
+             states[0].generated_tokens == 1 &&
+             states[0].remaining_tokens == 7 && !states[1].processing,
+         "a decoding request reports its session progress");
+  auto second = scheduler->Submit({2, 20, 21}, 1, 0.0F);
+  Expect(!scheduler->SessionStates()[1].processing,
+         "a queued request does not hold a session");
+  control->ReleaseAdvance();
+  control->WaitForPrefill(2);
+  states = scheduler->SessionStates();
+  Expect(states[0].processing && states[0].request_id == first.id() &&
+             states[1].processing && states[1].request_id == second.id() &&
+             states[1].prompt_tokens == 3 &&
+             states[1].processed_prompt_tokens == 0 &&
+             states[1].generated_tokens == 0 && states[1].remaining_tokens == 1,
+         "concurrent requests hold distinct sessions");
+  Expect(metrics::RequestsProcessing().load() - processing_before == 2,
+         "processing sessions match the processing gauge");
+  control->ReleasePrefill();
+  Expect(first.Wait().tokens.size() == 8 && second.Wait().tokens.size() == 1,
+         "both requests complete");
+  Expect(all_idle(), "completed requests release their sessions");
+
+  auto cache_control = std::make_shared<FakeControl>();
+  cache_control->snapshot_callback = [] {};
+  auto cache_scheduler = MakeScheduler(cache_control, 2);
+  (void)cache_scheduler->Submit({1, 10}, 1, 0.0F).Wait();
+  {
+    const std::lock_guard<std::mutex> lock(cache_control->mutex);
+    cache_control->block_prefill_label = 1;
+  }
+  auto continuation = cache_scheduler->Submit({1, 10, 100, 11}, 2, 0.0F);
+  cache_control->WaitForPrefill(1);
+  const auto resumed = cache_scheduler->SessionStates().front();
+  Expect(resumed.processing && resumed.request_id == continuation.id() &&
+             resumed.prompt_tokens == 4 && resumed.cached_prompt_tokens == 3 &&
+             resumed.processed_prompt_tokens == 0,
+         "a continuation reports its cached prompt tokens");
+  continuation.Cancel();
+  cache_control->ReleasePrefill();
+  Expect(continuation.Wait().cancelled, "continuation is cancelled");
+  Expect(!cache_scheduler->SessionStates().front().processing,
+         "cancelled requests release their sessions");
+
+  auto speculative = std::make_shared<FakeControl>();
+  speculative->multi_token_decode = true;
+  Expect(MakeScheduler(speculative, 1)->SessionStates().front().speculative,
+         "multi-token decoding is reported as speculative");
+}
+
 void TestQueuedAndPrefillCancellation() {
   {
     auto control = std::make_shared<FakeControl>();
@@ -2274,6 +2347,7 @@ int main() {
   TestQueuedAndPrefillCancellation();
   TestServerMetricsAreLive();
   TestMetricsDuringCacheAdmission();
+  TestSessionStatesFollowAdmittedRequests();
   TestDecodeCancellationAndStateReclamation();
   TestFourResidentRequestsMakeProgress();
   TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement();
