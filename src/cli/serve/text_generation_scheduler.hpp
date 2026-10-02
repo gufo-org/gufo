@@ -113,6 +113,9 @@ public:
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  /// Set once a failed work unit finds the runner's device unusable; later
+  /// submissions and failures report TextGenerationErrorCode::kDeviceLost.
+  [[nodiscard]] bool device_lost() const noexcept;
   [[nodiscard]] std::size_t buffered_output_bytes() const noexcept;
   [[nodiscard]] std::size_t max_buffered_output_bytes() const noexcept;
 

@@ -29,7 +29,12 @@ enum class TextGenerationErrorCode : std::uint8_t {
   kOutputBackpressure,
   kSchedulerStopping,
   kToolChoiceUnsatisfied,
+  kDeviceLost,
 };
+
+/// Client-facing message for a GPU context that can no longer execute work.
+inline constexpr const char* kDeviceLostMessage =
+    "GPU context lost; restart required";
 
 class TextGenerationError final : public std::runtime_error {
 public:
@@ -47,6 +52,7 @@ public:
       case TextGenerationErrorCode::kOutputLimit:
       case TextGenerationErrorCode::kOutputBackpressure:
       case TextGenerationErrorCode::kSchedulerStopping:
+      case TextGenerationErrorCode::kDeviceLost:
         return 503;
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
         return 502;
@@ -69,12 +75,15 @@ public:
         return "scheduler_stopping";
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
         return "tool_choice_unsatisfied";
+      case TextGenerationErrorCode::kDeviceLost:
+        return "device_lost";
     }
     return "generation_error";
   }
   [[nodiscard]] bool retryable() const noexcept {
     return code_ != TextGenerationErrorCode::kOutputLimit &&
-           code_ != TextGenerationErrorCode::kToolChoiceUnsatisfied;
+           code_ != TextGenerationErrorCode::kToolChoiceUnsatisfied &&
+           code_ != TextGenerationErrorCode::kDeviceLost;
   }
 
 private:
@@ -238,6 +247,9 @@ public:
 
   [[nodiscard]] virtual std::string model_id() const = 0;
   [[nodiscard]] virtual bool ready() const = 0;
+  /// True once a failed generation showed that the execution device can no
+  /// longer run work, for example after a GPU reset. The loss is permanent.
+  [[nodiscard]] virtual bool device_lost() const { return false; }
   /// Maximum tokens accepted by the loaded model under the configured context.
   /// Zero when no text model is loaded.
   [[nodiscard]] virtual std::uint32_t max_context() const { return 0; }

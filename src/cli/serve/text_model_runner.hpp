@@ -322,6 +322,10 @@ public:
   /// Retain a safe executed frontier when cancellation interrupts publication
   /// of a completed speculative block. Called with cancellation checks cleared.
   virtual void PrepareCancellation(TextRunnerState&) const {}
+  /// Bounded check, run only after a failed work unit, that the execution
+  /// device still accepts work. False means the context is permanently lost;
+  /// a probe that is still pending at its bound reports true.
+  [[nodiscard]] virtual bool DeviceUsable() const { return true; }
 
   /// Captures an immutable exact continuation at CheckpointPosition(state).
   ///

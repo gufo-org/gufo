@@ -89,6 +89,10 @@ struct HttpServerOptions {
   std::size_t max_connections{16};
   std::string api_key;
   std::chrono::milliseconds sse_heartbeat_interval{std::chrono::seconds(15)};
+  /// Called once, on a request thread, when the text backend first reports a
+  /// lost device. Health, readiness and generation answer 503 `device_lost`
+  /// from then on; the hook decides how the process exits.
+  std::function<void()> on_device_lost{};
 };
 
 /// Minimal bounded HTTP/1.1 server for trusted-LAN model serving.
@@ -125,6 +129,7 @@ private:
   struct ConnectionWorker;
 
   HttpResponse handle_request(const HttpRequest& req);
+  bool device_lost();
   void handle_connection(int client_fd);
   void reap_workers();
   void register_routes();
@@ -140,6 +145,7 @@ private:
   std::string api_key_hash_;
   int listen_fd_ = -1;
   std::atomic<bool> stopped_{false};
+  std::atomic<bool> device_lost_reported_{false};
   std::mutex workers_mutex_;
   std::vector<std::unique_ptr<ConnectionWorker>> workers_;
   std::vector<std::pair<std::pair<std::string, std::string>, Handler>> routes_;

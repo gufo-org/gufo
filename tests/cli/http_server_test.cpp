@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "src/cli/serve/logging.hpp"
 
@@ -75,6 +76,7 @@ public:
   }
   std::string model_id() const override { return "test"; }
   bool ready() const override { return true; }
+  bool device_lost() const override { return lost.load(); }
   bool supports_images() const override { return image_support.load(); }
   std::atomic<bool> image_support{false};
   std::uint32_t max_context() const override { return 65536; }
@@ -111,6 +113,16 @@ public:
       throw std::length_error("context exceeded");
     if (failure == 2)
       throw std::invalid_argument("invalid prompt");
+    // A failed probe: the scheduler reports device loss from then on.
+    if (failure == 3) {
+      lost = true;
+      throw gufo::server::TextGenerationError(
+          gufo::server::TextGenerationErrorCode::kDeviceLost,
+          gufo::server::kDeviceLostMessage);
+    }
+    // A failure on a device that still accepts work.
+    if (failure == 4)
+      throw std::runtime_error("unspecified launch failure");
     Result result;
     if (wait_for_disconnect) {
       entered.release();
@@ -167,6 +179,7 @@ public:
   std::atomic<bool> last_ignore_eos{false};
   std::vector<PromptProgress> progress;
   std::atomic<int> failure{0};
+  std::atomic<bool> lost{false};
   std::string forced_stop_sequence;
   gufo::ReasoningOptions reasoning;
   bool wait_for_disconnect{false};
@@ -937,6 +950,73 @@ void TestRawCompletionStreaming() {
       400);
 }
 
+void TestDeviceLoss() {
+  std::atomic<int> hook_calls{0};
+  RunningServer server({.on_device_lost = [&] { ++hook_calls; }});
+  const std::string chat =
+      R"({"model":"test","messages":[{"role":"user","content":"hi"}]})";
+
+  // A failure while the device still accepts work keeps the existing contract.
+  server.backend->failure = 4;
+  const auto failed = server.Post("/v1/completions", R"({"prompt":"hello"})");
+  ExpectStatus(failed, 500);
+  assert(failed.find("\"code\":\"server_exception\"") != std::string::npos);
+  ExpectStatus(server.Send("GET /health HTTP/1.1\r\n\r\n"), 200);
+  ExpectStatus(server.Send("GET /ready HTTP/1.1\r\n\r\n"), 200);
+  assert(hook_calls == 0);
+
+  // A stream has committed its status; the terminal event names the loss.
+  server.backend->failure = 3;
+  const auto stream =
+      server.Post("/v1/completions", R"({"prompt":"hello","stream":true})");
+  ExpectStatus(stream, 200);
+  assert(stream.find("\"code\":\"device_lost\"") != std::string::npos);
+  assert(stream.find(gufo::server::kDeviceLostMessage) != std::string::npos);
+  assert(hook_calls == 1);
+
+  server.backend->failure = 0;
+  for (const std::string path : {"/health", "/v1/health", "/healthz", "/ready",
+                                 "/v1/ready", "/readyz"}) {
+    const auto response = server.Send("GET " + path + " HTTP/1.1\r\n\r\n");
+    ExpectStatus(response, 503);
+    assert(response.find("\"status\":\"device_lost\"") != std::string::npos);
+    assert(response.find("\"code\":\"device_lost\"") != std::string::npos);
+  }
+  const int calls = server.backend->calls;
+  for (const auto& [path, body] :
+       {std::pair<std::string, std::string>{"/v1/chat/completions", chat},
+        {"/v1/completions", R"({"prompt":"hello","stream":true})"},
+        {"/v1/embeddings", R"({"input":"hello"})"}}) {
+    const auto response = server.Post(path, body);
+    ExpectStatus(response, 503);
+    assert(response.find("\"code\":\"device_lost\"") != std::string::npos);
+    assert(response.find("Retry-After") == std::string::npos);
+  }
+  assert(server.backend->calls == calls);
+  // Routes that never reach the device keep answering.
+  ExpectStatus(server.Send("GET /v1/models HTTP/1.1\r\n\r\n"), 200);
+  ExpectStatus(server.Send("GET /metrics HTTP/1.1\r\n\r\n"), 200);
+  assert(hook_calls == 1);
+
+  // Before a response starts, the failing request itself gets the 503.
+  std::atomic<int> first_hook_calls{0};
+  RunningServer first({.on_device_lost = [&] { ++first_hook_calls; }});
+  first.backend->failure = 3;
+  for (const auto& [path, body] :
+       {std::pair<std::string, std::string>{"/v1/completions",
+                                            R"({"prompt":"hello"})"},
+        {"/v1/chat/completions", chat}}) {
+    const auto response = first.Post(path, body);
+    ExpectStatus(response, 503);
+    assert(response.find("\"code\":\"device_lost\"") != std::string::npos);
+    assert(response.find(gufo::server::kDeviceLostMessage) !=
+           std::string::npos);
+    assert(response.find("Retry-After") == std::string::npos);
+  }
+  assert(first.backend->calls == 1);
+  assert(first_hook_calls == 1);
+}
+
 void TestInvalidBindSettings() {
   for (const int port : {-1, 65536}) {
     HttpServer server("127.0.0.1", port, nullptr);
@@ -1326,6 +1406,7 @@ int main() {
   TestCompatibilityRequests();
   TestModelInputModalities();
   TestRawCompletionStreaming();
+  TestDeviceLoss();
   TestRawCompletionPromptProgress();
   TestCompatibilityStopSequences();
   TestCompatibilityThinkingDefaults();

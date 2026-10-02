@@ -401,6 +401,19 @@ HttpResponse Err(int status, const char* reason, const char* message,
   return {.status = status, .reason = reason, .body = e.dump()};
 }
 
+// Health, readiness and generation share one body once the device is lost:
+// `status` matches the health/readiness shape and `error` the API error shape.
+HttpResponse DeviceLost() {
+  json::Value error = json::Value::object();
+  error["message"] = kDeviceLostMessage;
+  error["type"] = "server_error";
+  error["code"] = "device_lost";
+  json::Value body = json::Value::object();
+  body["status"] = "device_lost";
+  body["error"] = std::move(error);
+  return {.status = 503, .reason = "Service Unavailable", .body = body.dump()};
+}
+
 HttpResponse NotImplemented(const HttpRequest&, TextGenerationBackend&) {
   return Err(501, "Not Implemented",
              "endpoint not implemented on this text model", "server_error",
@@ -1466,12 +1479,16 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   if (req.method == "GET" &&
       (req.path == "/health" || req.path == "/v1/health" ||
        req.path == "/healthz")) {
+    if (device_lost())
+      return DeviceLost();
     json::Value body = json::Value::object();
     body["status"] = "ok";
     return Ok(body);
   }
   if (req.method == "GET" && (req.path == "/ready" || req.path == "/v1/ready" ||
                               req.path == "/readyz")) {
+    if (device_lost())
+      return DeviceLost();
     const bool ready = (backend_ != nullptr && backend_->ready()) ||
                        (video_jobs_ != nullptr && video_jobs_->ready()) ||
                        (tts_ != nullptr && tts_->ready()) ||
@@ -1544,11 +1561,28 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   }
   for (const auto& entry : routes_) {
     if (entry.first.first == req.method && entry.first.second == req.path) {
+      if (req.method == "POST" && device_lost())
+        return DeviceLost();
       return entry.second(req, *backend_);
     }
   }
   return Err(404, "Not Found", "no route for this path",
              "invalid_request_error", "not_found");
+}
+
+bool HttpServer::device_lost() {
+  if (backend_ == nullptr || !backend_->device_lost())
+    return false;
+  if (options_.on_device_lost &&
+      !device_lost_reported_.exchange(true, std::memory_order_acq_rel)) {
+    try {
+      options_.on_device_lost();
+    } catch (const std::exception& error) {
+      Logger::Error("server", "event=device_lost_hook_failed reason=" +
+                                  std::string(error.what()));
+    }
+  }
+  return true;
 }
 
 void HttpServer::handle_connection(int client_fd) {
@@ -1851,6 +1885,8 @@ void HttpServer::handle_connection(int client_fd) {
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   }
+  // Act on a loss found by this request now, not at the next health probe.
+  (void)device_lost();
 }
 
 }  // namespace gufo::server

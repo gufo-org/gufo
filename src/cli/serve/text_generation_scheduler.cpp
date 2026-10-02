@@ -515,7 +515,40 @@ struct TextGenerationScheduler::Impl {
     }
     request->result.completion_tokens = request->result.tokens.size();
     LogDecodeProgress(request, true);
-    PublishTerminal(request, std::move(failure), true);
+    PublishTerminal(request, ClassifyFailure(std::move(failure)), true);
+  }
+
+  // A GPU reset leaves this process's device context permanently unusable,
+  // and every later work unit then fails with a raw driver message. Probe the
+  // device only after a model failure, on this thread between work units, so
+  // the probe never overlaps this scheduler's own GPU work.
+  [[nodiscard]] std::exception_ptr ClassifyFailure(
+      std::exception_ptr failure) noexcept {
+    if (failure == nullptr)
+      return failure;
+    try {
+      std::string reason = "unknown failure";
+      try {
+        std::rethrow_exception(failure);
+      } catch (const TextGenerationError&) {
+        return failure;
+      } catch (const std::exception& error) {
+        reason = error.what();
+      } catch (...) {
+        // A non-standard exception keeps the generic reason.
+      }
+      if (!device_lost.load(std::memory_order_acquire)) {
+        if (runner_pool->runner().DeviceUsable())
+          return failure;
+        device_lost.store(true, std::memory_order_release);
+        Logger::Error("scheduler",
+                      "event=device_lost remedy=restart reason=" + reason);
+      }
+      return std::make_exception_ptr(TextGenerationError(
+          TextGenerationErrorCode::kDeviceLost, kDeviceLostMessage));
+    } catch (...) {
+      return failure;
+    }
   }
 
   void CompleteDeadline(
@@ -1387,6 +1420,7 @@ struct TextGenerationScheduler::Impl {
   std::deque<PendingClient> queued_clients;
   std::size_t queued_count{0};
   bool stopping{false};
+  std::atomic<bool> device_lost{false};
   std::size_t consecutive_active_prefill_chunks{0};
   std::atomic<std::uint64_t> next_request_id{1};
   std::jthread worker;
@@ -1530,6 +1564,10 @@ std::size_t TextGenerationScheduler::capacity() const noexcept {
   return impl_->runner_pool->capacity();
 }
 
+bool TextGenerationScheduler::device_lost() const noexcept {
+  return impl_->device_lost.load(std::memory_order_acquire);
+}
+
 std::size_t TextGenerationScheduler::buffered_output_bytes() const noexcept {
   return impl_->output_budget->buffered_bytes.load(std::memory_order_relaxed);
 }
@@ -1632,6 +1670,10 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
     if (impl_->stopping) {
       throw TextGenerationError(TextGenerationErrorCode::kSchedulerStopping,
                                 "text generation scheduler is stopping");
+    }
+    if (impl_->device_lost.load(std::memory_order_acquire)) {
+      throw TextGenerationError(TextGenerationErrorCode::kDeviceLost,
+                                kDeviceLostMessage);
     }
     if (impl_->queued_count >= impl_->scheduler_policy.max_pending_requests) {
       refused = true;

@@ -359,7 +359,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/responses` | Text/images, structured output, optional SSE streaming |
 | `POST` | `/v1/chat/completions` | Main chat, streaming, image and tool API |
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
-| `GET` | `/health` | Process liveness (aliases: `/v1/health`, `/healthz`) |
+| `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`) |
 | `GET` | `/ready` | Model and backend readiness (aliases: `/v1/ready`, `/readyz`) |
 | `GET` | `/metrics` | Prometheus-format operational metrics (text LLM serving only) |
 
@@ -796,7 +796,7 @@ Use appropriate HTTP status codes:
 - `429` admission queue full or rate limit exceeded
 - `499` internally recorded client cancellation
 - `500` internal failure
-- `503` model or backend unavailable
+- `503` model or backend unavailable, or GPU context lost (`device_lost`)
 
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
@@ -843,9 +843,39 @@ state; the prompt snapshot remains available for safe replay. Image identity,
 positions and speculative state participate in restoration and cache isolation.
 
 `GET /health` reports process liveness. `GET /ready` returns 503 until a model
-service is ready, then reports `status` and the active model. It does not expose
-a GPU health matrix. HTTP model replacement and persistent Responses
+service is ready, then reports `status` and the active model. Neither performs
+GPU work on each poll. HTTP model replacement and persistent Responses
 conversations are not implemented.
+
+A GPU reset (for example `amdgpu` recovering from a MES hang) permanently
+invalidates the process's HIP context. Loss is detected when a text generation
+fails: an idle server with a dead GPU stays healthy until its next request.
+After such a failure the scheduler runs a bounded device probe (a 4-byte
+memset on a private stream, at most 5 s). Only a hard HIP error from the probe
+marks the device lost. A probe still pending after 5 s may be queued behind
+long kernels, so it logs `event=device_probe_timeout` and counts as usable. A
+usable device leaves the original failure unchanged. A lost device logs
+`event=device_lost remedy=restart reason=<driver error>` once and makes the
+loss permanent for the process:
+
+- the failing request reports `device_lost`: a 503 with
+  `GPU context lost; restart required` and no `Retry-After` before the
+  response starts, or the same code in the stream's terminal error event
+  after it started. `/v1/responses` streams end with `response.failed`
+  carrying the Responses `server_error` code, since that code enum is closed;
+  the message names the device loss;
+- `/health`, `/ready` and their aliases return 503 with
+  `{"status":"device_lost","error":{...,"code":"device_lost"}}`;
+- every text-backend `POST` route, including unimplemented stubs that would
+  otherwise answer 501, returns 503 `device_lost` without reaching the device;
+- `gufo serve` logs `event=device_lost_shutdown`, runs the `SIGTERM` shutdown
+  and exits with status 75 (`EX_TEMPFAIL`), also when an external `SIGTERM`
+  stops it after the loss. Teardown can block on the dead device, so the
+  process exits with status 75 after 10 s regardless.
+
+Run the server under a supervisor that restarts on failure, such as systemd
+`Restart=on-failure` or a container `restart: always`/`on-failure` policy;
+a restart is the only recovery.
 
 ## Metrics
 
@@ -866,7 +896,7 @@ tokens; `cache_n` counts reused tokens. llama-swap uses these fields on every
 turn. Gufo-specific details stay in `usage.gufo`.
 
 TODO: real slot/KV metrics, a validated administrative reload/drain interface,
-and automatic recovery after device reset or suspend/resume.
+and in-process recovery after device reset or suspend/resume.
 
 ## Troubleshooting logs
 
