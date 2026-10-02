@@ -262,6 +262,25 @@ retain the learned divergence boundary itself. The boundary is not learned on
 first sight; in one run it became usable from the fifth conversation
 **(measured)**. See #267.
 
+**Disk checkpoints are spaced at least 2048 tokens apart.** A conversation
+advances a few hundred tokens per turn, so writing every turn serialises, fsyncs
+and retains a nearly identical snapshot. A checkpoint less than 2048 tokens past
+the longest stored entry that is still a prefix of it is skipped and logged as
+`min_step`; the RAM tier still retains it. When RAM does not retain it either,
+the device state is not copied at all, so a skipped checkpoint costs no capture
+time on the request path. Learned shared-prefix boundaries are
+exempt, because they sit close to a deeper entry by construction. On a
+Qwen3.8-27B functional run this cut disk writes from 31 to 5 and written bytes
+from 6.97 GiB to 1.37 GiB **(measured)**.
+
+The trade-off is what a disk-only restore resumes from. After a restart, or
+once RAM evicted the conversation, a request restores the nearest stored entry
+and re-prefills up to 2048 tokens plus its own turn, instead of resuming
+exactly at the previous frontier. Greedy output is unchanged. Sampled output can
+differ from the pre-restart response, because the re-prefilled gap follows
+different chunk shapes, as with any partial hit. Plain continuation from RAM is
+unaffected.
+
 Disk entries are evicted by global LRU on last access, so one active run whose
 checkpoints are all recent will displace every other conversation in age order
 **(measured)**. See #275.
@@ -302,6 +321,7 @@ still populate the cache.
 | `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |
 | `event=disk_cache action=removed reason=lru` | a disk entry was evicted to stay inside `--cache-disk-bytes` |
 | `event=disk_cache action=skipped reason=staging_capacity` | a checkpoint exceeded `--cache-disk-staging-bytes` and was never written |
+| `event=disk_cache action=skipped reason=min_step` | a checkpoint was less than 2048 tokens past a stored prefix; RAM still retains it |
 
 Per-request outcomes appear in the completion log and in `usage.gufo`:
 `cache_hit`, `cache_miss_reason`, `cache_common_prefix_tokens`,
@@ -326,7 +346,12 @@ Reading them:
   cancellation and disk restart. Uncached controls check the answers; CPU tests
   exercise byte and record pressure without loading models.
 - `tests/functional/continuation.py` covers cancellation, reasoning replay,
-  images and restart persistence against a live server.
+  images and restart persistence against a live server. After a restart,
+  greedy and exact restores must reproduce their output; sampled restores may
+  re-prefill less than one disk step.
+- `tests/functional/cache_disk_spacing.py`, part of the `cache` suite, checks
+  disk checkpoint spacing for a growing conversation, the restore after
+  restart, and that a learned branch boundary is still written.
 - `tests/cli/continuation_cache_test.cpp`,
   `tests/cli/continuation_disk_store_test.cpp` and
   `tests/cli/text_model_runner_test.cpp` cover retention, admission, eviction
