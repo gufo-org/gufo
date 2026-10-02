@@ -64,7 +64,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `progress` | Opt-in progress on all text endpoints; output/sampling equality, limits, stops, images, batching and cancel/resume |
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
 | `metrics` | Live Prometheus counters, uncached work, endpoint totals, queueing and cancellation |
-| `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart |
+| `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart; disk checkpoint spacing for a growing conversation and a branch restored after restart |
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
 | `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, and compare with uncached responses |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
@@ -103,7 +103,9 @@ omitted, preserved and explicitly discarded reasoning, plus thinking off.
 `--sessions 1` to verify retention is independent of execution slots. It also
 checks the startup RAM cap; byte/record pressure is covered by CPU tests.
 
-Unchanged retries must reproduce the complete output with zero prefill. Edited
+Unchanged retries must reproduce the complete output with zero prefill. After a
+restart, disk restores may re-prefill less than one 2048-token disk step;
+greedy and zero-prefill restores must still reproduce their output. Edited
 histories must retain a useful earlier prefix and match their cold answer;
 free-form reasoning may vary with prefill chunk shapes. Use the recorded
 requests and phase timings to investigate failures, not a full model sweep.

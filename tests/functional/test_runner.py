@@ -24,6 +24,7 @@ from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
+from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
 from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
@@ -214,6 +215,29 @@ class FunctionalRunnerTest(unittest.TestCase):
         ):
             with self.subTest(output=output), self.assertRaises(ValueError):
                 check_snapshot_budget(output, available, requested, 1)
+
+    def test_disk_spacing_checks_drained_logs(self):
+        def event(tokens, reason="saved"):
+            action = "stored" if reason == "saved" else "skipped"
+            return (f"[cache] event=disk_cache action={action} reason={reason} "
+                    f"file_bytes=1 payload_bytes=1 tokens={tokens} retained_bytes=1\n")
+        totals = (2400, 2680, 2960, 3240, 3520, 5960, 6240)
+        report = {"turns": [{"measured": {"total": total}} for total in totals]}
+        skips = "".join(event(total, "min_step") for total in totals[1:5] + totals[6:])
+        grown = event(310) + event(2396) + skips + event(5956)
+        restored = event(3012)
+        summary = check_disk_spacing(grown, restored, report)
+        self.assertEqual(summary["stored_tokens"], [2396, 5956])
+        self.assertEqual(summary["shared_boundary_tokens"], [3012])
+        for label, grown_log, restored_log in (
+            ("every turn written", grown + event(2700), restored),
+            ("long turn missing", event(2396) + skips, restored),
+            ("first turn missing", skips + event(5956), restored),
+            ("no skips", event(2396) + event(5956), restored),
+            ("shared boundary skipped", grown, event(3012, "min_step")),
+        ):
+            with self.subTest(label), self.assertRaises(ValueError):
+                check_disk_spacing(grown_log, restored_log, report)
 
     def run_cache_rotation(self, lost=False, contaminated=False):
         requests, checks, previous = [], {}, {}

@@ -48,7 +48,8 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
 def provenance():
     source = hashlib.sha256()
     for name in ("run.py", "metrics.py", "progress.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
-                 "tool_reasoning.py", "tool_agent.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_rotation.py"):
+                 "tool_reasoning.py", "tool_agent.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_rotation.py",
+                 "cache_disk_spacing.py"):
         source.update((TESTS / name).read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
     kernel_command = Path("/proc/cmdline")
@@ -356,6 +357,7 @@ def main():
                                       "--image", str(output / "red.png")]),
         ]
     ready_to_restore = []
+    spacing = False
     try:
         if "cache-rotation" in selected:
             from cache_rotation import check_snapshot_budget, host_available_bytes
@@ -393,7 +395,12 @@ def main():
                             "--url", base_url, "--model", model, "--prefix-repetitions", "16",
                             "--output", str(output / (label + ".json")), *extra]):
                         ready_to_restore.append(label)
-        if ready_to_restore:
+                # Last, so the drained log after this offset belongs to it.
+                spacing_offset = (output / "server.log").stat().st_size
+                spacing = run("disk-spacing", "cache_disk_spacing.py", [
+                    "--url", base_url, "--model", model,
+                    "--output", str(output / "disk-spacing.json")])
+        if ready_to_restore or spacing:
             startup_started = time.monotonic()
             with server(command, output / "server-restarted.log", args.startup_timeout):
                 report["restart_ms"] = (time.monotonic() - startup_started) * 1000
@@ -402,6 +409,19 @@ def main():
                         "--url", base_url, "--model", model,
                         "--restore", str(output / (label + ".json")),
                         "--output", str(output / (label + "-disk.json"))])
+                if spacing:
+                    spacing = run("disk-spacing-disk", "cache_disk_spacing.py", [
+                        "--url", base_url, "--model", model,
+                        "--restore", str(output / "disk-spacing.json"),
+                        "--output", str(output / "disk-spacing-disk.json")])
+        if spacing:
+            from cache_disk_spacing import check_disk_spacing
+            with (output / "server.log").open() as log:
+                log.seek(spacing_offset)
+                grown_log = log.read()
+            report["disk_spacing"] = check_disk_spacing(
+                grown_log, (output / "server-restarted.log").read_text(),
+                json.loads((output / "disk-spacing.json").read_text())[0])
     except Exception as error:
         report["error"] = str(error)
         report["traceback"] = traceback.format_exc()
