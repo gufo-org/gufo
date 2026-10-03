@@ -76,6 +76,8 @@ public:
   }
   [[nodiscard]] InitialOutputState initial_output_state(
       const gufo::server::ChatRequest& request) const override {
+    if (initial_output_state_override)
+      return *initial_output_state_override;
     return request.reasoning.enabled.value_or(false)
                ? InitialOutputState::kReasoning
                : InitialOutputState::kContent;
@@ -194,6 +196,7 @@ public:
   gufo::server::ChatRequest last_request;
   SamplingDefaults defaults;
   gufo::ReasoningOptions reasoning_defaults_value;
+  std::optional<InitialOutputState> initial_output_state_override;
   std::size_t last_max_tokens{0};
   std::size_t reasoning_tokens{0};
   float last_temperature{0.0F};
@@ -1474,6 +1477,69 @@ void TestStreamingPromptOpenedReasoning() {
          "Streaming answer switches to content after think end");
   Expect(output.find(R"("content":"Check")") == std::string::npos,
          "Reasoning is never exposed as visible content");
+}
+
+void TestInitialOutputPhases() {
+  using gufo::json::Value;
+  struct Case {
+    std::string text;
+    bool automatic{false};
+  };
+  for (const auto& item :
+       {Case{"<think>literal example</think>"},
+        Case{" \n<think>literal example</think>\nanswer"},
+        Case{"<think>unfinished example"},
+        Case{"<think>Check carefully.</think>\nAnswer.", true}}) {
+    for (const bool stream : {false, true}) {
+      FakeBackend backend;
+      // Disabled thinking starts in the content phase. Tags requested as
+      // literal output remain data. Automatic detection still recognizes an
+      // initial reasoning block, including across token boundaries.
+      if (item.automatic)
+        backend.initial_output_state_override =
+            FakeBackend::InitialOutputState::kAuto;
+      for (const char byte : item.text)
+        backend.pieces.emplace_back(1, byte);
+      auto body = gufo::json::parse(R"({
+        "model":"test-model","messages":[]
+      })");
+      if (!item.automatic)
+        body["reasoning_effort"] = "none";
+      auto message = Value::object();
+      message["role"] = "user";
+      message["content"] =
+          item.automatic
+              ? "Answer carefully."
+              : "Copy this XML exactly, without code fences: " + item.text;
+      body["messages"].push_back(std::move(message));
+      body["stream"] = stream;
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 200, "output-phase request succeeds");
+      std::string content, reasoning;
+      const auto collect = [&](const Value& message) {
+        content += message.member_str("content");
+        reasoning += message.member_str("reasoning_content");
+      };
+      if (stream) {
+        response.streaming_body([&](std::string_view chunk) {
+          const auto payload = chunk.substr(chunk.find("data: ") + 6);
+          if (!payload.starts_with("[DONE]")) {
+            const auto event = gufo::json::parse(payload);
+            for (const auto& choice : event.find("choices")->items())
+              collect(*choice.find("delta"));
+          }
+          return true;
+        });
+      } else {
+        const auto output = gufo::json::parse(response.body);
+        collect(*output.find("choices")->items()[0].find("message"));
+      }
+      Expect(content == (item.automatic ? "Answer." : item.text) &&
+                 reasoning == (item.automatic ? "Check carefully." : ""),
+             "initial output phase controls reasoning tag interpretation");
+    }
+  }
 }
 
 void TestConflictingReasoningControlsAreRejected() {
@@ -3269,6 +3335,7 @@ int main() {
   TestPiReasoningControlsAndOutputFraming();
   TestPiNativeDeepSeekThinkingObject();
   TestStreamingPromptOpenedReasoning();
+  TestInitialOutputPhases();
   TestConflictingReasoningControlsAreRejected();
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
