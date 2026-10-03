@@ -308,7 +308,8 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
     }
   }
   append(std::string_view(*rendered).substr(cursor));
-  // The boundary starts an assistant special token, after every image.
+  // The boundary starts a special token (the assistant turn, or a final user
+  // turn an agent replaces each request), after every image.
   // Encode only the mutable suffix; never decode or resize images twice.
   const auto suffix = tokenizer.Encode(
       std::string_view(*rendered).substr(stable_prefix_bytes), tok_options);

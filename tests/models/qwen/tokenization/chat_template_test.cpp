@@ -692,6 +692,77 @@ void TestEmptyReasoningReplayChangesThinkingSuffixTokens() {
          "Replayed reasoning keeps the full prompt as a prefix");
 }
 
+void TestStableBoundaryPrecedesReplacedFinalUserTurn() {
+  using gufo::tokenization::ChatMessage;
+  using gufo::tokenization::ChatRole;
+  using gufo::tokenization::QwenChatTemplate;
+
+  gufo::tokenization::ChatTemplateOptions options;
+  options.add_generation_prompt = true;
+  const auto render = [&](const std::vector<ChatMessage>& messages) {
+    std::size_t stable = 0;
+    auto text = QwenChatTemplate::Render(messages, {}, options, nullptr,
+                                         nullptr, &stable);
+    Expect(text.has_value(), "conversation renders");
+    return std::pair{*text, stable};
+  };
+  const std::vector<ChatMessage> history = {
+      {ChatRole::kSystem, "You are an agent."},
+      {ChatRole::kUser, "Start the task."},
+      {ChatRole::kAssistant, "Reading."},
+      {ChatRole::kTool, "file contents"},
+  };
+  // Each request ends with per-turn context that the next request replaces.
+  auto first = history;
+  first.push_back({ChatRole::kUser, "Runtime context, turn 1."});
+  auto second = history;
+  second.push_back({ChatRole::kAssistant, "Done."});
+  second.push_back({ChatRole::kUser, "Runtime context, turn 2."});
+  const auto [first_text, first_stable] = render(first);
+  const auto [second_text, second_stable] = render(second);
+  Expect(first_stable < first_text.size() &&
+             first_text.compare(first_stable, 12, "<|im_start|>") == 0,
+         "boundary starts the final user turn");
+  Expect(second_text.starts_with(first_text.substr(0, first_stable)),
+         "boundary prefixes a request that replaces the final user turn");
+  Expect(second_stable > first_stable, "boundary advances with the history");
+
+  // A client that keeps the user turn still finds the boundary as a prefix.
+  auto kept = first;
+  kept.push_back({ChatRole::kAssistant, "Done."});
+  kept.push_back({ChatRole::kUser, "Next."});
+  const auto [kept_text, kept_stable] = render(kept);
+  Expect(kept_text.starts_with(first_text.substr(0, first_stable)),
+         "boundary prefixes an appended conversation");
+  // A user turn after an assistant reply is ordinary chat: it is kept, so the
+  // boundary stays before the generation prompt.
+  Expect(kept_text.compare(kept_stable, std::string::npos,
+                           gufo::tokenization::GenerationPrompt(
+                               options.enable_thinking)) == 0,
+         "ordinary chat keeps the boundary before the generation prompt");
+
+  // Context sent as a second user message after the real query also moves it.
+  auto query = history;
+  query.push_back({ChatRole::kAssistant, "Done."});
+  query.push_back({ChatRole::kUser, "Real question."});
+  query.push_back({ChatRole::kUser, "Runtime context, turn 2."});
+  const auto [query_text, query_stable] = render(query);
+  Expect(query_text.compare(query_stable, 12, "<|im_start|>") == 0 &&
+             query_text.substr(query_stable).find("Runtime context") !=
+                 std::string::npos &&
+             query_text.substr(query_stable).find("Real question") ==
+                 std::string::npos,
+         "boundary precedes trailing context after the real query");
+
+  // The opening user turn has no earlier assistant: nothing to replace.
+  const std::vector<ChatMessage> opening = {{ChatRole::kUser, "Hello"}};
+  const auto [opening_text, opening_stable] = render(opening);
+  Expect(opening_text.compare(opening_stable, std::string::npos,
+                              gufo::tokenization::GenerationPrompt(
+                                  options.enable_thinking)) == 0,
+         "opening turn keeps the boundary before the generation prompt");
+}
+
 }  // namespace
 
 int main() {
@@ -709,6 +780,7 @@ int main() {
   TestToolRendering();
   TestToolReplayPreservesGeneratedPrefix();
   TestEmptyReasoningReplayChangesThinkingSuffixTokens();
+  TestStableBoundaryPrecedesReplacedFinalUserTurn();
   std::cout << "All QwenChatTemplate tests passed successfully!\n";
   return 0;
 }
