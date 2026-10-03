@@ -66,8 +66,8 @@ struct OutputBudget {
 
 struct ScheduledRequest;
 
-/// Requests holding each execution session, for `/slots`. The mutex is a leaf:
-/// nothing else is locked while it is held.
+/// Requests holding each execution session, for `/slots`. No other mutex is
+/// acquired while this table's mutex is held.
 struct SessionTable {
   explicit SessionTable(std::size_t count) : requests(count) {}
 

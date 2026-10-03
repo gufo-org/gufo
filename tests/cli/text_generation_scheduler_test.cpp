@@ -1699,6 +1699,8 @@ void TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement() {
              "injected scheduler runner failure";
   }
   Expect(failed, "runner failure reaches the submitting client");
+  Expect(!scheduler->SessionStates().front().processing,
+         "a failed request releases its visible session");
   // A probe still pending at its bound also reports a usable device.
   Expect(control->device_probes == 1 && !scheduler->device_lost(),
          "a failure on a usable device is probed once and stays recoverable");
@@ -1747,6 +1749,10 @@ void TestDeviceLossIsStickyAndReported() {
                      "shutdown never resets a cancelled lost-device request");
   Expect(control->invalidations == invalidations_before_loss,
          "lost-device failure skips state invalidation and its HIP cleanup");
+  const auto states = scheduler->SessionStates();
+  Expect(std::none_of(states.begin(), states.end(),
+                      [](const auto& state) { return state.processing; }),
+         "device loss retires visible sessions without HIP cleanup");
   const auto events = control->Events();
   Expect(std::none_of(events.begin(), events.end(),
                       [](const auto& event) { return event.label != 9; }),

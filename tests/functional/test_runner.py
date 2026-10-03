@@ -29,6 +29,8 @@ from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
 from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
+                            CACHED, MAX_SEQUENCE, DRAFTS, ACCEPTED, PROMPT_SECONDS,
+                            GENERATED_SECONDS, KV_USAGE, assert_slots,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
 
@@ -469,6 +471,7 @@ class FunctionalRunnerTest(unittest.TestCase):
             text.replace(f"{PROCESSING} 0", f"{PROCESSING} 0.5"),
             text.replace(f"{GENERATED} 0", f"{GENERATED} nan"),
             text.replace(f"{GENERATED} 0", f"{GENERATED} inf"),
+            text.replace(f"{KV_USAGE} 0", f"{KV_USAGE} 1.1"),
         ):
             with self.subTest(text=bad), self.assertRaises(ValueError):
                 parse_metrics(bad)
@@ -478,18 +481,25 @@ class FunctionalRunnerTest(unittest.TestCase):
         rows = [
             {"http_status": 200, "status": "complete", "metrics": {
                 "prompt_tokens": 100, "cached_tokens": 98,
-                "prefill_tokens": 2, "completion_tokens": 7}},
+                "prefill_tokens": 2, "completion_tokens": 7,
+                "draft_tokens": 8, "draft_tokens_accepted": 5, "prefill_ms": 100, "decode_ms": 200}},
             {"http_status": 200, "status": "complete", "metrics": {
                 "prompt_tokens": 100, "cached_tokens": 100,
-                "prefill_tokens": 0, "completion_tokens": 3}},
+                "prefill_tokens": 0, "completion_tokens": 3,
+                "draft_tokens": 4, "draft_tokens_accepted": 2, "prefill_ms": 0, "decode_ms": 100}},
             {"http_status": 400, "status": "complete", "metrics": {}},
         ]
-        after = {PROMPT: 12, GENERATED: 20}
+        after = {**before, PROMPT: 12, GENERATED: 20, CACHED: 208,
+                 MAX_SEQUENCE: 107, DRAFTS: 22, ACCEPTED: 17,
+                 PROMPT_SECONDS: 10.1, GENERATED_SECONDS: 10.3}
         assert_accounting(before, after, rows)
         for bad in ({PROMPT: 210, GENERATED: 20}, {PROMPT: 14, GENERATED: 30},
                     {PROMPT: 12, GENERATED: 19}):
             with self.subTest(after=bad), self.assertRaises(AssertionError):
-                assert_accounting(before, bad, rows)
+                assert_accounting(before, {**after, **bad}, rows)
+        for metric in (CACHED, MAX_SEQUENCE, DRAFTS, ACCEPTED, PROMPT_SECONDS, GENERATED_SECONDS):
+            with self.subTest(metric=metric), self.assertRaises(AssertionError):
+                assert_accounting(before, {**after, metric: after[metric] + 1}, rows)
         rows[0]["status"] = "disconnected"
         with self.assertRaisesRegex(AssertionError, "missing completed"):
             assert_accounting(before, after, rows)
@@ -502,14 +512,15 @@ class FunctionalRunnerTest(unittest.TestCase):
                 {"request_id": "r2", "http_status": 200, "status": "complete"},
                 {"request_id": "r3", "http_status": 400, "status": "complete"}]}))
             (root / "metrics.json").write_text(json.dumps({"checks": {
-                "metrics_chat_cold": {"before": {PROMPT: 100, GENERATED: 200}},
+                "metrics_chat_cold": {"before": {**dict.fromkeys(COUNTERS, 0), PROMPT: 100, GENERATED: 200}},
                 "metrics_live_queue_cancel": {"cancelled": [{"cancelled": True}]},
-                "metrics_after_cancel_cached": {"after": {PROMPT: 112, GENERATED: 207}}}}))
+                "metrics_after_cancel_cached": {"after": {**dict.fromkeys(COUNTERS, 0),
+                    PROMPT: 112, GENERATED: 207, CACHED: 20, MAX_SEQUENCE: 24, DRAFTS: 8, ACCEPTED: 4}}}}))
             log = (
                 "[http] request=r1 event=completed status=200 prefill_tokens=12 "
-                "generated_tokens=3 finish=cancelled\n"
+                "generated_tokens=3 prompt_tokens=12 cached_tokens=0 draft_proposed=4 draft_accepted=2 finish=cancelled\n"
                 "[http] request=r2 event=completed status=200 prefill_tokens=0 "
-                "generated_tokens=4 finish=length\n"
+                "generated_tokens=4 prompt_tokens=20 cached_tokens=20 draft_proposed=4 draft_accepted=2 finish=length\n"
                 "[http] request=r3 event=completed status=400\n")
             (root / "server.log").write_text(log)
             self.assertEqual(validate_metrics_report(root), {"requests": 2, "cancelled": 1})
@@ -518,6 +529,22 @@ class FunctionalRunnerTest(unittest.TestCase):
             (root / "server.log").write_text(log.replace("generated_tokens=3", "generated_tokens=0"))
             with self.assertRaises(AssertionError):
                 validate_metrics_report(root)
+
+    def test_live_slots_reject_stale_identity_progress_and_prompt_disclosure(self):
+        slot = {"id": 0, "model": "test", "n_ctx": 4096, "speculative": True,
+                "is_processing": True, "id_task": 7, "task_id": 7, "state": 1,
+                "n_prompt_tokens": 20, "n_prompt_tokens_cache": 12,
+                "n_prompt_tokens_processed": 8, "prompt": "",
+                "next_token": [{"has_next_token": True, "has_new_line": False,
+                                "n_remain": 6, "n_decoded": 2}]}
+        assert_slots([slot], 1, "test", 4096, True)
+        for change in ({"prompt": "private"}, {"task_id": 0},
+                       {"n_prompt_tokens_processed": 7}, {"speculative": False},
+                       {"is_processing": False}, {"id": 2}):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_slots([{**slot, **change}], 1, "test", 4096, True)
+        with self.assertRaises(AssertionError):
+            assert_slots([slot, {**slot, "id": 1}], 2, "test", 4096, True)
 
     def test_fingerprints_preserve_schema_payload_ids(self):
         for key in ("schema", "parameters", "metadata", "arguments"):

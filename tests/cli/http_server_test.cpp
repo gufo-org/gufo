@@ -705,9 +705,11 @@ void TestLlamaSlotsAndMetrics() {
          token.member_size("n_decoded") == 3);
 
   const auto metrics = get("/metrics");
-  std::ostringstream ratio;
-  ratio << "llamacpp:kv_cache_usage_ratio " << 13.0 / (2.0 * 65536) << "\n";
-  assert(metrics.find(ratio.str()) != std::string::npos);
+  const std::string ratio_prefix = "llamacpp:kv_cache_usage_ratio ";
+  const auto ratio_pos = metrics.find("\n" + ratio_prefix);
+  assert(ratio_pos != std::string::npos);
+  assert(std::stod(metrics.substr(ratio_pos + 1 + ratio_prefix.size())) ==
+         13.0 / (2.0 * 65536));
   for (const std::string counter :
        {"prompt_tokens_total", "prompt_tokens_cached_total",
         "prompt_seconds_total", "tokens_predicted_total",

@@ -89,7 +89,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `batch` | Independent requests across Chat, Responses and Completions; sessions 1–8 |
 | `progress` | Opt-in progress on all text endpoints; output/sampling equality, limits, stops, images, batching and cancel/resume |
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
-| `metrics` | Live Prometheus counters, uncached work, endpoint totals, queueing and cancellation |
+| `metrics` | Live slots, Prometheus cache/time/draft counters, uncached work, endpoint totals, queueing and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart; disk checkpoint spacing for a growing conversation and a branch restored after restart |
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
 | `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, including Messages thinking blocks, and compare with uncached responses |
@@ -112,7 +112,9 @@ with `--record-baseline`. Candidate qualification always requires progress event
 Model runs stay outside hosted CI; CI checks the runner and measurement logic.
 For metrics changes, run `--suite metrics` with AR and the affected speculative
 mode. It checks all three text endpoints and reconciles cancelled work with the
-terminal logs. Scrapes are not recorded as generation requests.
+terminal logs. It also checks both slot endpoints, active request identities and
+progress, queued-request exclusion, prompt privacy, idle cleanup, and the
+in-flight KV ratio. Scrapes are not recorded as generation requests.
 
 For real coding-agent regressions, run `pi_agent.py` against a local server with
 `--base-url`, `--model`, `--pi /path/to/pi-0.87.0`, `--server-log`, and a fresh

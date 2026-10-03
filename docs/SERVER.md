@@ -923,6 +923,7 @@ prompt, `n_prompt_tokens_cache` the tokens restored from cache, and
 `n_remain` the remaining token budget. Idle slots report zero counts and
 `n_remain` -1. `task_id` and `state` (0 idle, 1 processing) remain for older
 clients; `prompt` is always empty. `/props` metadata is a placeholder.
+Slots and metrics are separate snapshots; requests can advance between polls.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed
