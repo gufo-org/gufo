@@ -554,6 +554,40 @@ struct ContinuationDiskStore::Impl {
       }
       return result;
     }
+
+    [[nodiscard]] bool CoveredIntermediate(
+        EntryIterator candidate,
+        std::span<const TextRunnerToken> incoming) const {
+      const auto& tokens = candidate->tokens;
+      const PrefixNode* node = this;
+      std::size_t offset = 0;
+      bool ancestor = false;
+      while (offset < tokens.size()) {
+        if (node->entry && !(*node->entry)->tokens.empty())
+          ancestor = true;
+        const auto next = node->children.find(tokens[offset]);
+        if (next == node->children.end())
+          return false;
+        const auto& child = *next->second;
+        if (child.edge.size() > tokens.size() - offset ||
+            !std::ranges::equal(child.edge, std::span(tokens).subspan(
+                                                offset, child.edge.size())))
+          return false;
+        offset += child.edge.size();
+        node = &child;
+      }
+      // Keep a shorter retained anchor for exact retries beyond a stable
+      // boundary. Two different next tokens make this a shared branch point.
+      if (!ancestor || !node->entry || *node->entry != candidate ||
+          node->children.size() > 1)
+        return false;
+      if (incoming.size() > tokens.size() &&
+          std::ranges::equal(tokens, incoming.first(tokens.size()))) {
+        return node->children.empty() ||
+               node->children.contains(incoming[tokens.size()]);
+      }
+      return !node->children.empty();
+    }
   };
 
   using PersistenceKey = std::pair<std::uint32_t, std::vector<std::uint8_t>>;
@@ -988,37 +1022,61 @@ struct ContinuationDiskStore::Impl {
     return true;
   }
 
-  [[nodiscard]] EntryIterator LeastRecentlyUsed() {
+  [[nodiscard]] std::pair<EntryIterator, ContinuationDiskEventReason>
+  SelectEvictionCandidate(
+      const TextRunnerPersistenceDescriptor* incoming_descriptor = nullptr,
+      std::span<const TextRunnerToken> incoming = {}) {
     EntryIterator selected = entries.end();
+    bool selected_covered = false;
     for (auto current = entries.begin(); current != entries.end(); ++current) {
-      if (selected == entries.end() ||
-          current->last_access < selected->last_access ||
-          (current->last_access == selected->last_access &&
-           current->filename < selected->filename)) {
+      bool covered = false;
+      // Oversized startup files have no verified tokens and cannot establish
+      // lineage. The prefix tree partitions verified entries by full identity.
+      if (!current->tokens.empty()) {
+        const auto root = prefixes.find(PrefixKey(current->persistence));
+        if (root != prefixes.end()) {
+          const auto compatible_incoming =
+              incoming_descriptor &&
+                      *incoming_descriptor == current->persistence
+                  ? incoming
+                  : std::span<const TextRunnerToken>{};
+          covered =
+              root->second.CoveredIntermediate(current, compatible_incoming);
+        }
+      }
+      if (selected == entries.end() || (covered && !selected_covered) ||
+          (covered == selected_covered &&
+           (current->last_access < selected->last_access ||
+            (current->last_access == selected->last_access &&
+             current->filename < selected->filename)))) {
         selected = current;
+        selected_covered = covered;
       }
     }
-    return selected;
+    return {selected, selected_covered
+                          ? ContinuationDiskEventReason::kSuperseded
+                          : ContinuationDiskEventReason::kLru};
   }
 
   void EvictToCapacity() {
     while (retained > options.capacity_bytes) {
-      const EntryIterator victim = LeastRecentlyUsed();
-      if (victim == entries.end() ||
-          !RemoveEntry(victim, ContinuationDiskEventReason::kLru)) {
+      const auto [victim, reason] = SelectEvictionCandidate();
+      if (victim == entries.end() || !RemoveEntry(victim, reason)) {
         break;
       }
     }
   }
 
-  bool MakeCapacity(std::size_t file_bytes) {
+  bool MakeCapacity(std::size_t file_bytes,
+                    const TextRunnerPersistenceDescriptor& incoming_descriptor,
+                    std::span<const TextRunnerToken> incoming) {
     if (file_bytes > options.capacity_bytes) {
       return false;
     }
     while (retained > options.capacity_bytes - file_bytes) {
-      const EntryIterator victim = LeastRecentlyUsed();
-      if (victim == entries.end() ||
-          !RemoveEntry(victim, ContinuationDiskEventReason::kLru)) {
+      const auto [victim, reason] =
+          SelectEvictionCandidate(&incoming_descriptor, incoming);
+      if (victim == entries.end() || !RemoveEntry(victim, reason)) {
         return false;
       }
     }
@@ -1228,7 +1286,7 @@ struct ContinuationDiskStore::Impl {
       return {};
     }
     // No visible entry is evicted until its replacement is fully durable.
-    if (!MakeCapacity(file_bytes)) {
+    if (!MakeCapacity(file_bytes, *descriptor.persistence, checkpoint_tokens)) {
       RemoveFileOnly(filename);
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kByteCapacity, file_bytes,

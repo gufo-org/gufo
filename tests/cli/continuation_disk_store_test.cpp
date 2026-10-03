@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -173,7 +174,7 @@ public:
         .persistence =
             TextRunnerPersistenceDescriptor{
                 .compatibility_identity = identity_,
-                .payload_version = 7,
+                .payload_version = persistence_payload_version,
             },
     };
   }
@@ -271,6 +272,7 @@ public:
     return destination.size();
   }
 
+  std::uint32_t persistence_payload_version{7};
   std::function<void()> before_stream;
   void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
                                 const SnapshotSink& sink) const override {
@@ -614,6 +616,465 @@ void TestSmallerStagingPreservesExistingFiles() {
         StoreOptions(directory.path(), file_bytes - 1, file_bytes - 1));
     Expect(store.retained_bytes() == 0 && CacheFiles(directory.path()).empty(),
            "unindexed files remain subject to the disk retention budget");
+  }
+}
+
+void SetDiskLruOrder(const std::vector<std::filesystem::path>& oldest_first) {
+  auto access =
+      std::filesystem::file_time_type::clock::now() - std::chrono::hours(24);
+  for (const auto& path : oldest_first) {
+    std::filesystem::last_write_time(path, access);
+    access += std::chrono::hours(1);
+  }
+  for (std::size_t index = 1; index < oldest_first.size(); ++index)
+    Expect(std::filesystem::last_write_time(oldest_first[index - 1]) <
+               std::filesystem::last_write_time(oldest_first[index]),
+           "fixture file times establish strict LRU ordering without sleeps");
+}
+
+void TestDiskPressurePreservesOnlyStableAnchor() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("12345678");
+  const std::vector<TextRunnerToken> paused{9, 9}, anchor{1, 2},
+      advanced{1, 2, 3, 4};
+  const auto small_bytes = ExpectedFileBytes(8, anchor.size());
+  const auto advanced_bytes = ExpectedFileBytes(8, advanced.size());
+  auto options = StoreOptions(directory.path(), small_bytes + advanced_bytes);
+  options.min_checkpoint_step_tokens = 2;
+  std::vector<std::filesystem::path> order;
+  {
+    ContinuationDiskStore seed(options);
+    Expect(seed.Save(runner, paused, *MakeSnapshot(runner, 9002, 2)).stored,
+           "anchor control stores the older unrelated checkpoint");
+    order = CacheFiles(directory.path());
+    Expect(order.size() == 1, "anchor control has one initial file");
+    Expect(seed.Save(runner, anchor, *MakeSnapshot(runner, 1002, 2)).stored,
+           "anchor control stores the only earlier prefix");
+    for (const auto& path : CacheFiles(directory.path()))
+      if (path != order.front())
+        order.push_back(path);
+    Expect(order.size() == 2, "anchor control has two distinct files");
+  }
+  SetDiskLruOrder(order);
+  for (int phase = 0; phase < 2; ++phase) {
+    ContinuationDiskStore store(options);
+    if (phase == 0)
+      Expect(
+          store.Save(runner, advanced, *MakeSnapshot(runner, 2004, 4)).stored,
+          "anchor control publishes the durable advanced checkpoint");
+    Expect(store.entry_count() == 2 &&
+               store.retained_bytes() == small_bytes + advanced_bytes,
+           "anchor control retains its exact two-file budget");
+    auto state = runner.CreateState();
+    const auto restored =
+        store.RestoreLongestPrefix(runner, *state, advanced, {}, anchor.size());
+    Expect(restored.restored && restored.token_count == advanced.size() &&
+               RequireFakeState(*state).value == 2004 &&
+               RequireFakeState(*state).position == advanced.size(),
+           "a later exact retry retains its only safe earlier anchor across "
+           "restart");
+  }
+}
+
+void TestCoveredIntermediateYieldsToPausedConversation() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("12345678");
+  const std::vector<TextRunnerToken> paused{9, 9, 9, 9}, anchor{1, 2},
+      intermediate{1, 2, 3, 4}, advanced{1, 2, 3, 4, 5, 6};
+  const auto paused_bytes = ExpectedFileBytes(8, paused.size());
+  const auto anchor_bytes = ExpectedFileBytes(8, anchor.size());
+  const auto intermediate_bytes = ExpectedFileBytes(8, intermediate.size());
+  const auto advanced_bytes = ExpectedFileBytes(8, advanced.size());
+  const auto budget = paused_bytes + anchor_bytes + advanced_bytes;
+  auto options = StoreOptions(directory.path(), budget);
+  options.min_checkpoint_step_tokens = 2;
+  std::vector<std::filesystem::path> order;
+  {
+    ContinuationDiskStore seed(options);
+    for (const auto& [tokens, value] :
+         std::array<std::pair<std::vector<TextRunnerToken>, std::uint64_t>, 3>{
+             std::pair{paused, std::uint64_t{9004}},
+             std::pair{anchor, std::uint64_t{1002}},
+             std::pair{intermediate, std::uint64_t{1004}}}) {
+      Expect(
+          seed.Save(runner, tokens, *MakeSnapshot(runner, value, tokens.size()))
+              .stored,
+          "pressure fixture stores each checkpoint at an allowed step");
+      const auto files = CacheFiles(directory.path());
+      const auto added = std::ranges::find_if(files, [&](const auto& path) {
+        return std::ranges::find(order, path) == order.end();
+      });
+      Expect(added != files.end() && files.size() == order.size() + 1,
+             "each fixture save adds one distinct checkpoint file");
+      order.push_back(*added);
+    }
+    Expect(paused_bytes == intermediate_bytes &&
+               seed.retained_bytes() ==
+                   paused_bytes + anchor_bytes + intermediate_bytes,
+           "either the paused or intermediate file alone can release enough "
+           "bytes");
+  }
+  SetDiskLruOrder(order);
+  std::array<bool, 2> paused_restored{};
+  for (int phase = 0; phase < 2; ++phase) {
+    ContinuationDiskStore store(options);
+    if (phase == 0) {
+      Expect(!store.WithinCheckpointStep(runner, advanced),
+             "the advanced checkpoint reaches the minimum persistence step");
+      const auto saved = store.Save(
+          runner, advanced, *MakeSnapshot(runner, 2006, advanced.size()));
+      Expect(saved.stored && saved.file_bytes == advanced_bytes,
+             "the advanced checkpoint is durably published under pressure");
+    }
+    Expect(store.entry_count() == 3 && store.retained_bytes() == budget,
+           "retention and startup accounting stay within the exact three-file "
+           "budget");
+    auto paused_state = runner.CreateState();
+    const auto paused_result =
+        store.RestoreLongestPrefix(runner, *paused_state, paused);
+    paused_restored[phase] =
+        paused_result.restored && paused_result.token_count == paused.size() &&
+        RequireFakeState(*paused_state).value == 9004 &&
+        RequireFakeState(*paused_state).position == paused.size();
+    auto state = runner.CreateState();
+    const auto restored =
+        store.RestoreLongestPrefix(runner, *state, advanced, {}, anchor.size());
+    Expect(restored.restored && restored.token_count == advanced.size() &&
+               RequireFakeState(*state).value == 2006 &&
+               RequireFakeState(*state).position == advanced.size(),
+           "the advanced exact retry remains restorable from its earlier "
+           "stable boundary");
+  }
+  if (!paused_restored[0] || !paused_restored[1])
+    std::cerr << "disk retention probe: paused_live=" << paused_restored[0]
+              << " paused_restart=" << paused_restored[1]
+              << " exact_retry_live=1 exact_retry_restart=1 retained_bytes="
+              << budget << " expected_budget=" << budget << '\n';
+  Expect(paused_restored[0] && paused_restored[1],
+         "a covered intermediate with a retained anchor yields before a paused "
+         "conversation");
+}
+
+std::vector<std::filesystem::path> SeedDiskCheckpoints(
+    const FakeRunner& runner, const ContinuationDiskStoreOptions& options,
+    std::initializer_list<
+        std::pair<std::vector<TextRunnerToken>, std::uint64_t>>
+        checkpoints) {
+  ContinuationDiskStore store(options);
+  std::vector<std::filesystem::path> paths;
+  for (const auto& [tokens, value] : checkpoints) {
+    Expect(
+        store.Save(runner, tokens, *MakeSnapshot(runner, value, tokens.size()))
+            .stored,
+        "retention control stores its independent fixture checkpoint");
+    const auto files = CacheFiles(options.directory);
+    const auto added = std::ranges::find_if(files, [&](const auto& path) {
+      return std::ranges::find(paths, path) == paths.end();
+    });
+    Expect(added != files.end() && files.size() == paths.size() + 1,
+           "retention control identifies each newly published file");
+    paths.push_back(*added);
+  }
+  return paths;
+}
+
+void ExpectDiskRestore(ContinuationDiskStore& store, const FakeRunner& runner,
+                       std::span<const TextRunnerToken> prompt,
+                       std::size_t expected_tokens, std::uint64_t value,
+                       std::size_t stable = 0) {
+  auto state = runner.CreateState();
+  const auto restored =
+      store.RestoreLongestPrefix(runner, *state, prompt, {}, stable);
+  Expect(restored.restored && restored.token_count == expected_tokens &&
+             RequireFakeState(*state).position == expected_tokens &&
+             RequireFakeState(*state).value == value,
+         "retention control restores the expected exact checkpoint payload");
+}
+
+void TestStartupPrefersCoveredIntermediate() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("12345678");
+  const std::vector<TextRunnerToken> paused{9, 9, 9, 9}, anchor{1, 2},
+      intermediate{1, 2, 3, 4}, advanced{1, 2, 3, 4, 5, 6};
+  auto options = StoreOptions(directory.path());
+  const auto paths = SeedDiskCheckpoints(
+      runner, options,
+      {{paused, 9004}, {anchor, 1002}, {intermediate, 1004}, {advanced, 2006}});
+  SetDiskLruOrder(paths);
+  options.capacity_bytes = ExpectedFileBytes(8, paused.size()) +
+                           ExpectedFileBytes(8, anchor.size()) +
+                           ExpectedFileBytes(8, advanced.size());
+  std::vector<ContinuationDiskEvent> events;
+  ContinuationDiskStore store(
+      options, [&](const auto& event) { events.push_back(event); });
+  Expect(store.entry_count() == 3 &&
+             store.retained_bytes() == options.capacity_bytes,
+         "startup pressure removes only the covered intermediate file");
+  ExpectDiskRestore(store, runner, paused, paused.size(), 9004);
+  ExpectDiskRestore(store, runner, advanced, advanced.size(), 2006,
+                    anchor.size());
+  ExpectDiskRestore(store, runner, intermediate, anchor.size(), 1002);
+  Expect(std::ranges::count_if(
+             events,
+             [](const auto& event) {
+               return event.action == ContinuationDiskEventAction::kRemoved &&
+                      event.reason == ContinuationDiskEventReason::kSuperseded;
+             }) == 1,
+         "startup reports one sanitized superseded removal");
+}
+
+void TestIncomingBranchPreservesSharedIntermediate() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("12345678");
+  const std::vector<TextRunnerToken> anchor{1, 2}, root{1, 2, 3, 4},
+      first{1, 2, 3, 4, 5, 6}, incoming{1, 2, 3, 4, 7, 8}, other_anchor{8, 8},
+      other_middle{8, 8, 8, 8}, other_tip{8, 8, 8, 8, 8, 8};
+  auto options = StoreOptions(directory.path());
+  const auto paths = SeedDiskCheckpoints(runner, options,
+                                         {{anchor, 1002},
+                                          {root, 1004},
+                                          {first, 1006},
+                                          {other_anchor, 8002},
+                                          {other_middle, 8004},
+                                          {other_tip, 8006}});
+  // The shared root would wrongly win among covered entries if the incoming
+  // checkpoint's different next token were not considered.
+  SetDiskLruOrder({paths[1], paths[4], paths[0], paths[2], paths[3], paths[5]});
+  options.capacity_bytes = 2 * ExpectedFileBytes(8, 2) +
+                           ExpectedFileBytes(8, 4) +
+                           3 * ExpectedFileBytes(8, 6);
+  for (int phase = 0; phase < 2; ++phase) {
+    ContinuationDiskStore store(options);
+    if (phase == 0)
+      Expect(
+          store.Save(runner, incoming, *MakeSnapshot(runner, 2006, 6)).stored,
+          "a new divergent child is published under pressure");
+    Expect(store.entry_count() == 6 &&
+               store.retained_bytes() == options.capacity_bytes,
+           "incoming branch protection keeps the exact bounded record set");
+    ExpectDiskRestore(store, runner, root, root.size(), 1004);
+    ExpectDiskRestore(store, runner, first, first.size(), 1006, anchor.size());
+    ExpectDiskRestore(store, runner, incoming, incoming.size(), 2006,
+                      anchor.size());
+    ExpectDiskRestore(store, runner, other_middle, other_anchor.size(), 8002);
+  }
+}
+
+void TestRepeatedEvictionReclassifiesAfterBranchRemoval() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("12345678");
+  const std::vector<TextRunnerToken> anchor{1, 2}, root{1, 2, 3, 4},
+      first{1, 2, 3, 4, 5, 6}, second{1, 2, 3, 4, 7, 8}, paused{9, 9, 9, 9};
+  const std::vector<TextRunnerToken> incoming(16, 42);
+  auto options = StoreOptions(directory.path());
+  const auto paths = SeedDiskCheckpoints(runner, options,
+                                         {{anchor, 1002},
+                                          {root, 1004},
+                                          {first, 1006},
+                                          {second, 2006},
+                                          {paused, 9004}});
+  SetDiskLruOrder({paths[2], paths[4], paths[1], paths[0], paths[3]});
+  options.capacity_bytes =
+      ExpectedFileBytes(8, anchor.size()) + ExpectedFileBytes(8, root.size()) +
+      ExpectedFileBytes(8, first.size()) + ExpectedFileBytes(8, second.size()) +
+      ExpectedFileBytes(8, paused.size());
+  std::vector<ContinuationDiskEvent> removed;
+  for (int phase = 0; phase < 2; ++phase) {
+    ContinuationDiskStore store(options, [&](const auto& event) {
+      if (event.action == ContinuationDiskEventAction::kRemoved)
+        removed.push_back(event);
+    });
+    if (phase == 0) {
+      Expect(
+          store.Save(runner, incoming, *MakeSnapshot(runner, 4216, 16)).stored,
+          "a larger unrelated checkpoint requires two evictions");
+      Expect(
+          removed.size() == 2 &&
+              removed[0].reason == ContinuationDiskEventReason::kLru &&
+              removed[0].token_count == first.size() &&
+              removed[1].reason == ContinuationDiskEventReason::kSuperseded &&
+              removed[1].token_count == root.size(),
+          "removing one branch makes its former root eligible before older "
+          "unrelated state");
+    }
+    const auto expected = ExpectedFileBytes(8, anchor.size()) +
+                          ExpectedFileBytes(8, second.size()) +
+                          ExpectedFileBytes(8, paused.size()) +
+                          ExpectedFileBytes(8, incoming.size());
+    Expect(store.entry_count() == 4 && store.retained_bytes() == expected &&
+               expected <= options.capacity_bytes,
+           "repeated removals maintain exact index and byte accounting");
+    ExpectDiskRestore(store, runner, paused, paused.size(), 9004);
+    ExpectDiskRestore(store, runner, second, second.size(), 2006,
+                      anchor.size());
+    ExpectDiskRestore(store, runner, root, anchor.size(), 1002);
+    ExpectDiskRestore(store, runner, incoming, incoming.size(), 4216);
+  }
+}
+
+void TestFailedPublicationPreservesCoveredIntermediate() {
+  TemporaryDirectory directory;
+  FakeRunner runner("12345678");
+  const std::vector<TextRunnerToken> paused{9, 9, 9, 9}, anchor{1, 2},
+      intermediate{1, 2, 3, 4}, advanced{1, 2, 3, 4, 5, 6};
+  const auto retained_before = ExpectedFileBytes(8, paused.size()) +
+                               ExpectedFileBytes(8, anchor.size()) +
+                               ExpectedFileBytes(8, intermediate.size());
+  const auto budget = ExpectedFileBytes(8, paused.size()) +
+                      ExpectedFileBytes(8, anchor.size()) +
+                      ExpectedFileBytes(8, advanced.size());
+  auto options = StoreOptions(directory.path(), budget);
+  options.min_checkpoint_step_tokens = 2;
+  std::vector<ContinuationDiskEvent> events;
+  ContinuationDiskStore store(
+      options, [&](const auto& event) { events.push_back(event); });
+  for (const auto& [tokens, value] :
+       std::array<std::pair<std::vector<TextRunnerToken>, std::uint64_t>, 3>{
+           std::pair{paused, std::uint64_t{9004}},
+           std::pair{anchor, std::uint64_t{1002}},
+           std::pair{intermediate, std::uint64_t{1004}}}) {
+    Expect(
+        store.Save(runner, tokens, *MakeSnapshot(runner, value, tokens.size()))
+            .stored,
+        "publication-failure control seeds the retained checkpoints");
+  }
+  const auto restores = [&](const auto& tokens, std::uint64_t value) {
+    auto state = runner.CreateState();
+    const auto result = store.RestoreLongestPrefix(runner, *state, tokens);
+    return result.restored && result.token_count == tokens.size() &&
+           RequireFakeState(*state).value == value &&
+           RequireFakeState(*state).position == tokens.size();
+  };
+  bool entered = false;
+  bool retained_while_streaming = false;
+  runner.before_stream = [&] {
+    entered = true;
+    retained_while_streaming =
+        store.entry_count() == 3 && store.retained_bytes() == retained_before &&
+        CacheFiles(directory.path()).size() == 3 && restores(paused, 9004) &&
+        restores(anchor, 1002) && restores(intermediate, 1004) &&
+        !store.Touch(runner, advanced);
+    throw std::runtime_error("intentional fake serialization failure");
+  };
+  const auto saved = store.Save(runner, advanced,
+                                *MakeSnapshot(runner, 2006, advanced.size()));
+  runner.before_stream = {};
+  Expect(
+      entered && retained_while_streaming && !saved.stored,
+      "existing entries remain visible before a failed publication completes");
+  Expect(store.entry_count() == 3 &&
+             store.retained_bytes() == retained_before &&
+             CacheFiles(directory.path()).size() == 3 &&
+             restores(paused, 9004) && restores(anchor, 1002) &&
+             restores(intermediate, 1004) && !store.Touch(runner, advanced),
+         "failed publication does not retire a covered intermediate or expose "
+         "the incoming key");
+  Expect(std::ranges::none_of(events,
+                              [](const auto& event) {
+                                return event.action ==
+                                       ContinuationDiskEventAction::kRemoved;
+                              }),
+         "failed publication emits no retention removal");
+}
+
+void TestIntermediateRetentionRespectsPersistencePartition() {
+  // Each case supplies either a false ancestor or false incoming extension.
+  // Test both descriptor components that token/hash comparisons cannot replace:
+  // payload version and supplemental input identity.
+  for (const bool foreign_anchor : {true, false}) {
+    for (const bool image_identity : {false, true}) {
+      TemporaryDirectory directory;
+      FakeRunner runner("12345678");
+      FakeRunner other_version("12345678");
+      other_version.persistence_payload_version = 8;
+      const FakeRunner& anchor_runner =
+          foreign_anchor && !image_identity ? other_version : runner;
+      const FakeRunner& advanced_runner =
+          !foreign_anchor && !image_identity ? other_version : runner;
+      const std::vector<std::uint8_t> anchor_identity =
+          foreign_anchor && image_identity ? std::vector<std::uint8_t>{17}
+                                           : std::vector<std::uint8_t>{};
+      const std::vector<std::uint8_t> advanced_identity =
+          !foreign_anchor && image_identity ? std::vector<std::uint8_t>{17}
+                                            : std::vector<std::uint8_t>{};
+      const std::vector<TextRunnerToken> paused{9, 9, 9, 9}, anchor{1, 2},
+          intermediate{1, 2, 3, 4}, advanced{1, 2, 3, 4, 5, 6};
+      std::size_t anchor_bytes = 0;
+      std::size_t intermediate_bytes = 0;
+      std::vector<std::filesystem::path> order;
+      {
+        ContinuationDiskStore seed(StoreOptions(directory.path()));
+        const auto save = [&](const FakeRunner& owner, const auto& tokens,
+                              std::uint64_t value,
+                              std::span<const std::uint8_t> identity) {
+          const auto result =
+              seed.Save(owner, tokens,
+                        *MakeSnapshot(owner, value, tokens.size()), identity);
+          Expect(result.stored, "partition control seeds one exact checkpoint");
+          const auto files = CacheFiles(directory.path());
+          const auto added = std::ranges::find_if(files, [&](const auto& path) {
+            return std::ranges::find(order, path) == order.end();
+          });
+          Expect(added != files.end() && files.size() == order.size() + 1,
+                 "partition control identifies each new file");
+          order.push_back(*added);
+          return result.file_bytes;
+        };
+        (void)save(runner, paused, 9004, {});
+        anchor_bytes = save(anchor_runner, anchor, 1002, anchor_identity);
+        intermediate_bytes = save(runner, intermediate, 1004, {});
+      }
+      SetDiskLruOrder(order);
+      // Obtain the incoming size through the public Save result in a separate
+      // temporary store, avoiding a duplicate of the input-descriptor encoding.
+      std::size_t advanced_bytes = 0;
+      {
+        TemporaryDirectory sizing_directory;
+        ContinuationDiskStore sizing(StoreOptions(sizing_directory.path()));
+        const auto saved =
+            sizing.Save(advanced_runner, advanced,
+                        *MakeSnapshot(advanced_runner, 2006, advanced.size()),
+                        advanced_identity);
+        Expect(saved.stored,
+               "partition control measures the incoming file size");
+        advanced_bytes = saved.file_bytes;
+      }
+      const auto budget = anchor_bytes + intermediate_bytes + advanced_bytes;
+      auto options = StoreOptions(directory.path(), budget);
+      options.min_checkpoint_step_tokens = 2;
+      for (int phase = 0; phase < 2; ++phase) {
+        ContinuationDiskStore store(options);
+        if (phase == 0)
+          Expect(
+              store
+                  .Save(advanced_runner, advanced,
+                        *MakeSnapshot(advanced_runner, 2006, advanced.size()),
+                        advanced_identity)
+                  .stored,
+              "partition control admits the incoming checkpoint under "
+              "pressure");
+        const auto restores = [&](const FakeRunner& owner, const auto& tokens,
+                                  std::uint64_t value,
+                                  std::span<const std::uint8_t> identity) {
+          auto state = owner.CreateState();
+          const auto result =
+              store.RestoreLongestPrefix(owner, *state, tokens, identity);
+          return result.restored && result.token_count == tokens.size() &&
+                 RequireFakeState(*state).value == value &&
+                 RequireFakeState(*state).position == tokens.size();
+        };
+        auto paused_state = runner.CreateState();
+        Expect(
+            !store.RestoreLongestPrefix(runner, *paused_state, paused)
+                    .restored &&
+                restores(anchor_runner, anchor, 1002, anchor_identity) &&
+                restores(runner, intermediate, 1004, {}) &&
+                restores(advanced_runner, advanced, 2006, advanced_identity) &&
+                store.entry_count() == 3 && store.retained_bytes() == budget,
+            "incompatible ancestry or coverage cannot displace an intermediate "
+            "before ordinary LRU, including restart");
+      }
+    }
   }
 }
 
@@ -1216,6 +1677,13 @@ int main() {
   TestByteAndStagingLimits();
   TestAutomaticStagingAndAdmissionDiagnostics();
   TestSmallerStagingPreservesExistingFiles();
+  TestDiskPressurePreservesOnlyStableAnchor();
+  TestCoveredIntermediateYieldsToPausedConversation();
+  TestStartupPrefersCoveredIntermediate();
+  TestIncomingBranchPreservesSharedIntermediate();
+  TestRepeatedEvictionReclassifiesAfterBranchRemoval();
+  TestFailedPublicationPreservesCoveredIntermediate();
+  TestIntermediateRetentionRespectsPersistencePartition();
   TestLruEvictionUsesActualFileBytes();
   TestAtomicPublicationAndPrivatePermissions();
   TestStartupRejectsUnsafeAndInvalidFiles();
