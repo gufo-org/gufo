@@ -263,10 +263,13 @@ bool ParseArguments(std::string_view arguments,
     *error = "tool arguments must encode a JSON object";
     return false;
   }
+  // Render typed values as the reference chat templates' tojson does (and as
+  // llama.cpp's Jinja runtime does), so a replayed call matches the tokens
+  // the model generated and its continuation checkpoint is reused.
   for (const auto& [name, value] : parsed.members()) {
     out->push_back({
         .name = name,
-        .value = value.is_string() ? value.get_str() : value.dump(),
+        .value = value.is_string() ? value.get_str() : value.tojson(),
         .is_string = value.is_string(),
     });
   }

@@ -723,6 +723,29 @@ void TestToolNameCharacters() {
   }
 }
 
+// Chat templates render typed arguments with Jinja tojson, so the model
+// generates that spelling. Replayed history must render it the same way, or
+// the next turn re-prefills the call it generated.
+void TestHistoricalTypedArgumentsUseTojson() {
+  const auto item = gufo::json::parse(
+      R"({"type":"function_call","call_id":"call_1","name":"edit",
+          "arguments":"{\"path\":\"a.txt\",\"edits\":[{\"oldText\":\"a\",\"newText\":\"b\"}],\"n\":2}"})");
+  gufo::tokenization::ChatMessage message;
+  gufo::core::ImageReadBudget budget;
+  std::string error;
+  Expect(gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
+                                                  &error) &&
+             message.tool_calls.size() == 1 &&
+             message.tool_calls[0].arguments.size() == 3 &&
+             message.tool_calls[0].arguments[0].value == "a.txt" &&
+             message.tool_calls[0].arguments[0].is_string &&
+             message.tool_calls[0].arguments[1].value ==
+                 R"([{"oldText": "a", "newText": "b"}])" &&
+             !message.tool_calls[0].arguments[1].is_string &&
+             message.tool_calls[0].arguments[2].value == "2",
+         "Typed historical arguments render as the template's tojson");
+}
+
 void TestMalformedHistoricalFunctions() {
   for (const auto source :
        {R"({"arguments":"{}"})", R"({"name":"","arguments":"{}"})",
@@ -3281,6 +3304,7 @@ void TestResponsesPromptProgress() {
 }
 
 int main() {
+  TestHistoricalTypedArgumentsUseTojson();
   TestStreamingPromptProgress();
   TestResponsesPromptProgress();
   TestToolMarkersInsideConstrainedReasoning();

@@ -682,6 +682,9 @@ union and untyped arguments keep the native syntax, as in llama.cpp: when the
 union admits strings the value is raw text, and its typed alternatives (such as
 `null` or an object) are tried before the string, so Qwen cannot return the
 literal string `"null"` for a string/null union. Strict unions use JSON.
+Historical calls render typed argument values with the chat template's
+`tojson` spelling (`", "` and `": "` separators, raw UTF-8), as llama.cpp's
+Jinja runtime does, so a replayed turn reuses the tokens the model generated.
 Constrained JSON keys follow schema order, with additional
 keys last. Impossible non-strict schemas fall back to JSON-object arguments;
 impossible strict schemas are rejected before generation.

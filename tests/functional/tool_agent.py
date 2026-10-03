@@ -404,11 +404,12 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
 
 
 def check_union_continuation(client, model, checks, chat_result):
-    """A union neighbor keeps native calls, so replayed turns reuse their output.
+    """Replayed tool turns reuse every token the model generated.
 
     Pi's web_search declares provider as an untyped anyOf of string consts.
     That switched every call to a JSON envelope while history rendered native
     XML, so each next turn re-prefilled the reasoning and call it generated.
+    Typed arguments such as edit's array must also replay as generated.
     """
     search = {"type": "function", "function": {
         "name": "web_search", "description": "Search the web.",
@@ -438,23 +439,33 @@ def check_union_continuation(client, model, checks, chat_result):
         "No explanation."}]}, True),
          "web_search", {"query": "gufo", "max_results": 3, "provider": "exa"})
 
-    messages = [{"role": "user", "content": "Read calc.py with the read tool, then stop."}]
-    first = call("read", chat_result(client, {**common, "messages": messages}, True),
-                 "read", {"path": "calc.py"})
-    assert first["reasoning"], first
-    tool_call = first["tools"][0]
-    messages += [{"role": "assistant", "content": first["text"] or None,
-                  "reasoning_content": first["reasoning"], "tool_calls": [tool_call]},
-                 {"role": "tool", "tool_call_id": tool_call["id"],
-                  "content": "def add(a, b):\n    return a - b\n"}]
-    second = chat_result(client, {**common, "messages": messages}, True)
-    checks["union_continued"] = second
-    print("CHECK union_continued", file=sys.stderr, flush=True)
-    # The client replays the reasoning and call exactly as returned, so every
-    # token of the first turn must be reused rather than prefilled again.
-    reused = first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
-    cached = second["usage"]["prompt_tokens_details"]["cached_tokens"]
-    assert cached >= reused, (first["usage"], second["usage"])
+    def continued(name, prompt, function, arguments, output):
+        messages = [{"role": "user", "content": prompt}]
+        first = call(name, chat_result(client, {**common, "messages": messages}, True),
+                     function, arguments)
+        assert first["reasoning"], first
+        tool_call = first["tools"][0]
+        messages += [{"role": "assistant", "content": first["text"] or None,
+                      "reasoning_content": first["reasoning"], "tool_calls": [tool_call]},
+                     {"role": "tool", "tool_call_id": tool_call["id"], "content": output}]
+        second = chat_result(client, {**common, "messages": messages}, True)
+        checks[f"union_{name}_continued"] = second
+        print(f"CHECK union_{name}_continued", file=sys.stderr, flush=True)
+        # The client replays the reasoning and call exactly as returned, so
+        # every token of the first turn must be reused, not prefilled again.
+        reused = first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
+        cached = second["usage"]["prompt_tokens_details"]["cached_tokens"]
+        assert cached >= reused, (first["usage"], second["usage"])
+
+    old, new = "    return a - b", "    return a + b"
+    continued("read", "Read calc.py with the read tool, then stop.", "read",
+              {"path": "calc.py"}, "def add(a, b):\n" + old + "\n")
+    # Typed arguments render with the template's tojson spacing, which the
+    # model also generates; a compact rendering re-prefilled every edit call.
+    continued("edit", "Fix calc.py by calling edit exactly once, replacing " + repr(old) +
+              " with " + repr(new) + ". Do not read it first. No explanation.", "edit",
+              {"path": "calc.py", "edits": [{"oldText": old, "newText": new}]},
+              "Replaced one block.")
 
 
 def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content):
