@@ -1,3 +1,16 @@
+gufo (0.6.0-2) unstable; urgency=medium
+
+  * Fix clean-install issues found on a bare Debian trixie system:
+    - gufo-rocm-repo depends on ca-certificates so the HTTPS AMD
+      repository can be fetched on minimal systems.
+    - Create the render group when udev's sysusers configuration has
+      not, matching the group of an existing GPU device node so mounted
+      devices stay accessible (rootful containers).
+    - Treat the shared model cache as possibly read-only when it already
+      exists, so a read-only cache mount does not fail the install.
+
+ -- Bruno Silva <avlis.onurb@gmail.com>  Sat, 03 Oct 2026 15:00:00 +0000
+
 gufo (0.6.0-1) unstable; urgency=medium
 
   * Rebuild for 0.6.0: add libwebp-dev to build dependencies.

@@ -322,6 +322,30 @@ Never remove the ROCm `-dev` packages with apt on a machine that also has
 xrt or dkms installed: AMD's dependency graph is entangled and removal
 cascades into unrelated packages (including the Gufo runtime itself).
 
+### Containers
+
+The packages also install on a bare Debian image running systemd. The
+service needs the GPU devices and pinned host memory, so a rootful Podman
+container must pass the devices and an unlimited memlock limit; the model
+cache can be mounted read-only:
+
+```sh
+sudo podman run -d --name gufo --systemd=always --network=host \
+  --ulimit memlock=-1 --device /dev/kfd --device /dev/dri \
+  -v /var/lib/huggingface/hub:/var/lib/huggingface/hub:ro \
+  debian:trixie /lib/systemd/systemd
+```
+
+Inside the container, install the packages and start the service as on a
+normal machine. The package creates the `render` group from the mounted
+device's group when udev has not (minimal images), and tolerates the
+read-only cache mount.
+
+Rootless containers cannot run the systemd service with GPU access:
+systemd resets the supplementary groups that `--group-add keep-groups`
+provides when it switches to the service user. Run the binary directly as
+in the container quickstart above instead.
+
 ## License
 
 Gufo's original code is [MIT licensed](LICENSE). Adapted code and dependencies

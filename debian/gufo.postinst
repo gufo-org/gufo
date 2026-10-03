@@ -14,13 +14,34 @@ if [ "$1" = "configure" ]; then
       --shell /usr/sbin/nologin gufo
   fi
   # GPU device access: /dev/kfd and /dev/dri/renderD* require membership
-  # in the video and render groups.
+  # in the video and render groups. The render group is defined by the
+  # udev package's sysusers configuration; create it if missing (minimal
+  # systems and containers). Match the group of an existing device node
+  # so mounted devices stay accessible (rootful containers).
+  if ! getent group render > /dev/null 2>&1; then
+    render_gid=$(stat -c '%g' /dev/kfd 2>/dev/null || true)
+    case "$render_gid" in
+      ""|0|65534)
+        addgroup --system render
+        ;;
+      *)
+        addgroup --system --gid "$render_gid" render 2>/dev/null \
+          || addgroup --system render
+        ;;
+    esac
+  fi
   usermod -a -G video,render gufo
   # Shared Hugging Face cache for model weights. Group-owned with the
   # setgid bit so new files inherit the llm-servers group; any member
   # (gufo, lemonade, ...) can read and download models. Survives purge
-  # (shared data).
-  install -d -o gufo -g llm-servers -m 2775 /var/lib/huggingface/hub
+  # (shared data). An existing directory may be a read-only mount
+  # (containers), so ownership and mode are best-effort there.
+  if [ -d /var/lib/huggingface/hub ]; then
+    chown gufo:llm-servers /var/lib/huggingface/hub 2>/dev/null || true
+    chmod 2775 /var/lib/huggingface/hub 2>/dev/null || true
+  else
+    install -d -o gufo -g llm-servers -m 2775 /var/lib/huggingface/hub
+  fi
   # Sync the systemd manager with the packaged unit file after installs
   # and upgrades. dh_installsystemd --no-enable --no-start skips its own
   # daemon-reload, so without this the manager keeps a stale cached unit
