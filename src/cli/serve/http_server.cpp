@@ -900,6 +900,10 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                     writer("data: " + event.dump() + "\n\n");
                 (void)writer("data: [DONE]\n\n");
               } catch (const std::exception& error) {
+                // The client gets a stable code instead of internals, but the
+                // cause has to survive somewhere: an error code with no reason
+                // in the log cannot be diagnosed after the fact.
+                Logger::Error("chat", error.what());
                 stream_log->error_code = "generation_failed";
                 json::Value detail = json::Value::object();
                 const char* message = error.what();

@@ -1359,7 +1359,11 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
   const std::size_t position = impl_->runner->CheckpointPosition(state);
   if (position < impl_->lease.cached_tokens() || position > checkpoint.size()) {
     throw std::runtime_error(
-        "text runner checkpoint is outside executed token history");
+        "text runner checkpoint is outside executed token history: position=" +
+        std::to_string(position) +
+        " cached=" + std::to_string(impl_->lease.cached_tokens()) +
+        " prompt=" + std::to_string(impl_->prompt.size()) +
+        " generated=" + std::to_string(impl_->generated.size()));
   }
   checkpoint.resize(position);
   if (capabilities.snapshot && capabilities.fork) {

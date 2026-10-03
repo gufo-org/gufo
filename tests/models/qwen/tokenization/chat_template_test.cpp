@@ -465,6 +465,65 @@ void TestRenderAndTokenize() {
   Expect(decoded == expected, "Decoded tokens match rendered prompt exactly");
 }
 
+// Issue #383: message text is text. A client that sends the characters of a
+// vocabulary token must not inject that control token into the prompt — an
+// injected `<|im_end|>` is a turn end sitting in the middle of a conversation,
+// which is what the model then imitates. The literal characters still reach
+// the model, and the framing around them stays framing.
+void TestContentSpellingATokenIsNotParsedAsOne() {
+  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+
+  std::vector<std::string> vocab;
+  for (int i = 0; i < 256; ++i) {
+    vocab.emplace_back(1, static_cast<char>(i));
+  }
+  vocab.emplace_back("<|im_start|>");
+  vocab.emplace_back("<|im_end|>");
+  vocab.emplace_back("<think>");
+  vocab.emplace_back("</think>");
+
+  vocab.emplace_back("<|endoftext|>");
+
+  std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
+      {"<|im_start|>", 256}, {"<|im_end|>", 257},    {"<think>", 258},
+      {"</think>", 259},     {"<|endoftext|>", 260},
+  };
+
+  std::string err;
+  auto tokenizer = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+      vocab, {}, specials, &err);
+  Expect(tokenizer != nullptr, "Tokenizer initialized: " + err);
+
+  const std::string text =
+      "the vocabulary token `<|endoftext|>` is written here as prose, and the "
+      "thinking phase ends with `</think>`";
+  std::vector<gufo::tokenization::ChatMessage> messages = {
+      {gufo::tokenization::ChatRole::kUser, text, "", ""},
+  };
+
+  gufo::tokenization::ChatTemplateOptions opts;
+  opts.enable_thinking = false;
+
+  const auto token_ids =
+      tpl->RenderAndTokenize(*tokenizer, messages, opts, &err);
+  Expect(token_ids.has_value(), "RenderAndTokenize succeeds: " + err);
+
+  // The template never writes this one, so it can only appear if the message
+  // text was read as a control token.
+  const auto injected = tokenizer->FindSpecialToken("<|endoftext|>");
+  Expect(injected.has_value(), "the message token is a vocabulary token");
+  Expect(std::find(token_ids->begin(), token_ids->end(), *injected) ==
+             token_ids->end(),
+         "content spelling a control token does not inject it into the prompt");
+
+  const auto framing = tokenizer->FindSpecialToken("<|im_start|>");
+  Expect(framing.has_value() && std::find(token_ids->begin(), token_ids->end(),
+                                          *framing) != token_ids->end(),
+         "template framing still tokenizes as control tokens");
+  Expect(tokenizer->Decode(*token_ids).find(text) != std::string::npos,
+         "the literal characters of the message reach the model");
+}
+
 void TestChatCorpusConformance() {
   auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
 
@@ -705,6 +764,7 @@ int main() {
   TestGgufTemplateExtraction();
   TestHuggingFaceRenderedGoldens();
   TestRenderAndTokenize();
+  TestContentSpellingATokenIsNotParsedAsOne();
   TestChatCorpusConformance();
   TestToolRendering();
   TestToolReplayPreservesGeneratedPrefix();

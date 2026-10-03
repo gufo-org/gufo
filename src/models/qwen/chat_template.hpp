@@ -104,6 +104,14 @@ struct ChatTemplateOptions {
   std::size_t max_output_bytes{1024ULL * 1024ULL};  ///< 1 MiB upper bound
 };
 
+/// A byte span of the rendered prompt that came from a message. Content is
+/// tokenized as text, never as framing: a `<|im_end|>` a client sends is the
+/// character string the client wrote, not a turn end inside the prompt (#383).
+struct ContentSpan {
+  std::size_t offset{0};
+  std::size_t size{0};
+};
+
 /// Longest Qwen3.8 vocabulary entry in bytes (Flash-Next GGUF, 248,320
 /// tokens). A prompt of N tokens cannot render to more than N times this.
 inline constexpr std::size_t kMaxRenderedBytesPerToken = 128;
@@ -179,7 +187,8 @@ public:
       std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
       const ChatTemplateOptions& options = {}, std::string* error_msg = nullptr,
       std::vector<std::size_t>* image_offsets = nullptr,
-      std::size_t* stable_prefix_bytes = nullptr);
+      std::size_t* stable_prefix_bytes = nullptr,
+      std::vector<ContentSpan>* content_spans = nullptr);
 
   /// Formats messages and tokenizes the rendered prompt with the given
   /// tokenizer.

@@ -287,6 +287,58 @@ public:
 private:
 };
 
+// A stop token ends the turn wherever the step holds it. One decode runs
+// several tokens, so the ending token and the tokens already executed behind
+// it are work the caller's token history has to account for: they are
+// reported, render nothing, and nothing the model wrote around the token
+// changes what the vocabulary means.
+void TestStopTokenEndsTurnAnywhereInStep() {
+  using gufo::server::TextDecodeSelection;
+  using gufo::server::TextRunnerState;
+  constexpr std::string_view kEos = "<|im_end|>";
+
+  struct TestState final : TextRunnerState {
+    void Invalidate() noexcept override {}
+  };
+
+  {
+    // The step writes "and the terminator `", then the stop token, then the
+    // rest of the sentence: the turn ends at the token, quotes and all.
+    TestState state;
+    const std::vector<TextRunnerState::DecodedToken> run = {
+        {.token = 11, .piece = "the terminator `", .stops = false},
+        {.token = 12, .piece = std::string(kEos), .stops = true},
+        {.token = 13, .piece = "` ends it.", .stops = false},
+    };
+    std::vector<TextDecodeSelection> selections;
+    const bool stop = state.ResolveDecodedRun(run, false, &selections);
+    Expect(stop, "a stop token anywhere in the step ends the turn");
+    Expect(selections.size() == 3,
+           "the ending token and the tokens the engine ran behind it are all "
+           "reported: the caller's token history has to match the session");
+    Expect(
+        selections[0].token == 11 && selections[0].piece == "the terminator `",
+        "text before the ending token is emitted");
+    Expect(selections[1].token == 12 && selections[1].piece.empty(),
+           "the ending token is accounted and renders nothing");
+    Expect(selections[2].token == 13 && selections[2].piece.empty(),
+           "a token behind the end of the turn is accounted, not rendered");
+    Expect(!selections[1].stop && !selections[2].stop,
+           "accounted tokens are not stopping selections");
+  }
+  {
+    // An engine stop that was not a stop token (context exhausted, and so on)
+    // still ends the turn even when the step emitted text.
+    TestState state;
+    const std::vector<TextRunnerState::DecodedToken> run = {
+        {.token = 31, .piece = "just text", .stops = false},
+    };
+    std::vector<TextDecodeSelection> selections;
+    Expect(state.ResolveDecodedRun(run, true, &selections),
+           "an engine stop of its own still ends the turn");
+  }
+}
+
 void TestBoundedPrefillDecodeAndPrefixReuse() {
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<FakeRunner>(stats);
@@ -1821,6 +1873,7 @@ int main() {
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
   TestRamLearnsDivergenceBoundaries();
+  TestStopTokenEndsTurnAnywhereInStep();
   TestCoincidentCacheBoundariesShareOneCopy();
   TestMeasuredStateIsReconciledWithClaim();
   TestSnapshotBudgetRefusalDoesNotFailCompletedRequest();
