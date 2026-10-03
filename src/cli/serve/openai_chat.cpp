@@ -1218,7 +1218,9 @@ std::optional<std::string> Attribute(std::string_view tag,
   return std::string(tag.substr(value_start, end - value_start));
 }
 
-void ParseDsmlCalls(std::string_view text, std::vector<ParsedToolCall>* calls) {
+void ParseDsmlCalls(
+    std::string_view text, std::vector<ParsedToolCall>* calls,
+    std::vector<std::pair<std::size_t, std::size_t>>* spans = nullptr) {
   constexpr std::array<std::string_view, 4> kInvokeStarts{
       "<｜DSML｜invoke",
       "<DSML｜invoke",
@@ -1245,6 +1247,8 @@ void ParseDsmlCalls(std::string_view text, std::vector<ParsedToolCall>* calls) {
   };
 
   std::size_t cursor = 0;
+  std::size_t envelope_begin = std::string_view::npos;
+  std::string envelope_end;
   while (cursor < text.size()) {
     std::size_t invoke_start = std::string_view::npos;
     std::size_t syntax = 0;
@@ -1253,6 +1257,34 @@ void ParseDsmlCalls(std::string_view text, std::vector<ParsedToolCall>* calls) {
       if (position < invoke_start) {
         invoke_start = position;
         syntax = index;
+      }
+    }
+    if (spans) {
+      // Examine envelope boundaries only outside the parameter/invocation
+      // ranges consumed below: an outer closing tag can be argument data.
+      if (envelope_begin == std::string_view::npos) {
+        std::string_view opening;
+        std::size_t begin = std::string_view::npos;
+        for (std::size_t index = 1; index < kToolMarkers.size(); ++index) {
+          const auto position = text.find(kToolMarkers[index], cursor);
+          if (position < begin) {
+            begin = position;
+            opening = kToolMarkers[index];
+          }
+        }
+        // Bare invocation examples outside an outer envelope are prose.
+        if (begin == std::string_view::npos)
+          break;
+        envelope_begin = begin;
+        envelope_end = "</" + std::string(opening.substr(1));
+        cursor = begin + opening.size();
+        continue;
+      } else if (const auto end = text.find(envelope_end, cursor);
+                 end < invoke_start) {
+        cursor = end + envelope_end.size();
+        spans->emplace_back(envelope_begin, cursor);
+        envelope_begin = std::string_view::npos;
+        continue;
       }
     }
     if (invoke_start == std::string_view::npos) {
@@ -1437,13 +1469,14 @@ ParsedGeneration ParseGeneration(
       marker != std::string_view::npos) {
     const std::string text_before_tools = parsed.text.substr(0, marker);
     const std::string text_from_tools = parsed.text.substr(marker);
+    std::vector<std::pair<std::size_t, std::size_t>> spans;
     // The outer envelope selects the format, as in llama.cpp's model parsers.
     // Scanning both dialects would turn a literal call inside an argument into
     // an additional API invocation.
     if (text_from_tools.starts_with("<tool_call>"))
       ParseQwenCalls(text_from_tools, tools, &parsed.tool_calls);
     else
-      ParseDsmlCalls(text_from_tools, &parsed.tool_calls);
+      ParseDsmlCalls(text_from_tools, &parsed.tool_calls, &spans);
     std::erase_if(parsed.tool_calls, [&](const auto& call) {
       return std::ranges::none_of(
           tools, [&](const auto& tool) { return tool.name == call.name; });
@@ -1452,6 +1485,20 @@ ParsedGeneration ParseGeneration(
     // complete calls, but do not expose an unfinished call as ordinary text.
     if (!parsed.tool_calls.empty() || !enforce_required) {
       parsed.text = text_before_tools;
+      std::size_t cursor = 0;
+      for (const auto& [begin, end] : spans) {
+        parsed.text += text_from_tools.substr(cursor, begin - cursor);
+        cursor = end;
+      }
+      if (!spans.empty()) {
+        const auto tail = std::string_view(text_from_tools).substr(cursor);
+        auto unfinished = EarliestMarker(tail);
+        if (unfinished == std::string_view::npos && !enforce_required &&
+            choice == ChatRequest::ToolChoice::kRequired)
+          if (const auto held = HeldMarkerPrefix(tail))
+            unfinished = tail.size() - held;
+        parsed.text += tail.substr(0, unfinished);
+      }
       parsed.hide_tool_markup = true;
     }
   }
