@@ -109,6 +109,13 @@ struct ScheduledRequest {
   bool counted_processing{false};
   std::exception_ptr failure;
   bool terminal{false};
+
+  ~ScheduledRequest() {
+    // A completed stream may be discarded without ever consuming its output.
+    // Return any remaining charge when the last request owner releases it.
+    if (output_budget != nullptr)
+      output_budget->Release(buffered_output_bytes);
+  }
 };
 
 struct PendingClient {
