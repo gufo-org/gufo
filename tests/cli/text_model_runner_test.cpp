@@ -142,6 +142,7 @@ public:
         .per_request_state_bytes = 64,
         .temporary_scratch_bytes = 16,
         .retained_snapshot_capacity_bytes = retained_snapshot_capacity_bytes_,
+        .retained_snapshot_ceiling_bytes = retained_snapshot_ceiling_bytes,
         .requires_device_runtime_lock = false,
     };
   }
@@ -279,6 +280,11 @@ protected:
   std::size_t measured_bytes_;
   std::size_t state_capacity_bytes_;
   std::size_t retained_snapshot_capacity_bytes_;
+
+public:
+  std::optional<std::size_t> retained_snapshot_ceiling_bytes;
+
+private:
 };
 
 void TestBoundedPrefillDecodeAndPrefixReuse() {
@@ -1402,6 +1408,55 @@ void TestSharedPrefixIsLearnedAndRestoredAcrossConversations() {
   }
 }
 
+void TestRamLearnsDivergenceBoundaries() {
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentSnapshotRunner>(
+      stats, "ram-boundary", std::size_t{1} << 20, 4096);
+  TextRunnerPool pool(runner, 1);
+  // Conversations share a system prompt, then each has its own tail. Below
+  // 2048 tokens no grid checkpoint exists, so only learning can help.
+  const auto conversation = [](std::size_t shared, TextRunnerToken tail) {
+    std::vector<TextRunnerToken> prompt;
+    for (std::size_t index = 0; index < shared; ++index)
+      prompt.push_back(static_cast<TextRunnerToken>(100 + index % 50));
+    for (TextRunnerToken index = 0; index < 600; ++index)
+      prompt.push_back(tail + index);
+    return prompt;
+  };
+  const auto run = [&](const std::vector<TextRunnerToken>& prompt) {
+    auto request = pool.Acquire(prompt);
+    const auto cached = request.cached_prompt_tokens();
+    std::vector<std::size_t> steps;
+    while (!request.prefill_complete())
+      steps.push_back(request.Prefill(4096).consumed_tokens);
+    (void)request.Commit();
+    return std::pair{cached, steps};
+  };
+
+  const auto [first_cached, first_steps] = run(conversation(1000, 10000));
+  Expect(first_cached == 0 && first_steps == std::vector<std::size_t>{1600},
+         "the first conversation has nothing to share");
+  const auto [second_cached, second_steps] = run(conversation(1000, 20000));
+  Expect(second_cached == 0 &&
+             second_steps == std::vector<std::size_t>({1000, 600}),
+         "the second conversation stops at the divergence point to retain it");
+  const auto [third_cached, third_steps] = run(conversation(1000, 30000));
+  Expect(third_cached == 1000 && third_steps == std::vector<std::size_t>{600},
+         "later conversations restore the learned boundary exactly");
+  const auto [short_cached, short_steps] = run(conversation(300, 40000));
+  Expect(short_cached == 0 && short_steps == std::vector<std::size_t>{900},
+         "a short shared prefix is not worth an extra checkpoint");
+  // An edit near the end diverges inside this request's own final tokens;
+  // its stable checkpoint covers that, so no extra copy is taken.
+  auto edited = conversation(1000, 30000);
+  edited.back() += 1;
+  auto request = pool.Acquire(edited);
+  Expect(request.cached_prompt_tokens() == 1000 &&
+             request.Prefill(4096).consumed_tokens == 600,
+         "a late divergence does not stop prefill for another checkpoint");
+  request.Invalidate();
+}
+
 void TestCoincidentCacheBoundariesShareOneCopy() {
   for (const bool stable : {false, true}) {
     TemporaryDirectory directory;
@@ -1609,46 +1664,113 @@ void TestEntryCapacityEvictionIsLogged() {
 }
 
 void TestSnapshotCacheCapacityIsReportedAtStartup() {
-  for (const std::size_t budget :
-       {std::size_t{0}, std::size_t{256}, std::size_t{64} << 30}) {
-    for (const std::size_t requested :
-         {std::size_t{0}, std::size_t{64}, std::size_t{48} << 30}) {
-      for (const std::size_t sessions : {1U, 2U}) {
-        auto stats = std::make_shared<FakeStats>();
-        auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256, budget);
-        std::ostringstream startup_log;
-        auto* previous = std::clog.rdbuf(startup_log.rdbuf());
-        {
-          TextRunnerPool pool(runner, sessions, std::nullopt,
-                              {.capacity_bytes = requested});
+  using gufo::server::TextRunnerRamCacheOptions;
+  // Automatic sizing takes the model budget; an explicit limit may use the
+  // larger ceiling the model reports, or the budget when it reports none.
+  for (const std::optional<std::size_t> ceiling :
+       {std::optional<std::size_t>{}, std::optional{std::size_t{128} << 30}}) {
+    for (const std::size_t budget :
+         {std::size_t{0}, std::size_t{256}, std::size_t{64} << 30}) {
+      for (const std::size_t requested :
+           {std::size_t{0}, std::size_t{64}, std::size_t{48} << 30,
+            std::size_t{96} << 30}) {
+        for (const std::size_t sessions : {1U, 2U}) {
+          auto stats = std::make_shared<FakeStats>();
+          auto runner =
+              std::make_shared<SnapshotRunner>(stats, 64, 256, budget);
+          runner->retained_snapshot_ceiling_bytes = ceiling;
+          std::ostringstream startup_log;
+          auto* previous = std::clog.rdbuf(startup_log.rdbuf());
+          {
+            TextRunnerPool pool(runner, sessions, std::nullopt,
+                                {.capacity_bytes = requested});
+          }
+          std::clog.rdbuf(previous);
+          const auto output = startup_log.str();
+          const auto automatic =
+              std::min(budget, TextRunnerRamCacheOptions::kAutomaticMaxBytes);
+          const auto maximum = ceiling.value_or(budget);
+          const auto capacity =
+              requested == 0 ? automatic : std::min(requested, maximum);
+          const std::string expected =
+              "event=snapshot_cache_configured sessions=" +
+              std::to_string(sessions) +
+              " snapshot_entries=128 capacity_bytes=" +
+              std::to_string(capacity) +
+              " automatic_bytes=" + std::to_string(automatic) +
+              " max_bytes=" + std::to_string(maximum) + "\n";
+          const auto position = output.find(expected);
+          Expect(position != std::string::npos &&
+                     output.find(expected, position + expected.size()) ==
+                         std::string::npos,
+                 "startup reports actual session, entry and byte limits once");
+          Expect(output.find("retained_conversations") == std::string::npos,
+                 "startup does not present session count as conversation "
+                 "capacity");
+          Expect(stats->states_created == sessions,
+                 "checkpoint record capacity never creates extra execution "
+                 "states");
         }
-        std::clog.rdbuf(previous);
-        const auto output = startup_log.str();
-        const std::string expected =
-            "event=snapshot_cache_configured sessions=" +
-            std::to_string(sessions) +
-            " snapshot_entries=128 "
-            "capacity_bytes=" +
-            std::to_string(
-                std::min(budget, requested == 0
-                                     ? gufo::server::TextRunnerRamCacheOptions::
-                                           kAutomaticMaxBytes
-                                     : requested)) +
-            "\n";
-        const auto position = output.find(expected);
-        Expect(position != std::string::npos &&
-                   output.find(expected, position + expected.size()) ==
-                       std::string::npos,
-               "startup reports actual session, entry and byte limits once");
-        Expect(
-            output.find("retained_conversations") == std::string::npos,
-            "startup does not present session count as conversation capacity");
-        Expect(
-            stats->states_created == sessions,
-            "checkpoint record capacity never creates extra execution states");
       }
     }
   }
+}
+
+void TestSnapshotStartupReportsSelectedLimits() {
+  class ChangingHeadroomRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = SnapshotRunner::ResourceClaim();
+      constexpr std::size_t gib = std::size_t{1} << 30;
+      // Synthetic headroom falls during state allocation, then again after
+      // cache sizing. No large buffers are allocated for these resource claims.
+      // Each claim follows Flash-Next's half-free / free-minus-4-GiB policy.
+      const auto available = stats_->states_created == 0 ? 14 * gib
+                             : post_state_claims++ == 0  ? 12 * gib
+                                                         : 11 * gib;
+      claim.retained_snapshot_capacity_bytes = available / 2;
+      claim.retained_snapshot_ceiling_bytes =
+          available - gufo::server::kHostSnapshotHeadroomBytes;
+      return claim;
+    }
+
+    mutable std::size_t post_state_claims{0};
+  };
+
+  constexpr std::size_t gib = std::size_t{1} << 30;
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<ChangingHeadroomRunner>(stats);
+  std::ostringstream startup_log;
+  auto* previous = std::clog.rdbuf(startup_log.rdbuf());
+  {
+    TextRunnerPool pool(runner, 1, std::nullopt, {.capacity_bytes = 8 * gib});
+  }
+  std::clog.rdbuf(previous);
+
+  const auto output = startup_log.str();
+  const auto event = output.find("event=snapshot_cache_configured ");
+  Expect(event != std::string::npos, "startup reports snapshot limits");
+  const auto line = output.substr(event, output.find('\n', event) - event);
+  const auto field = [&](std::string_view name) {
+    const auto start = line.find(name);
+    Expect(start != std::string::npos, "startup reports the requested field");
+    std::istringstream value(line.substr(start + name.size()));
+    std::size_t bytes = 0;
+    Expect(static_cast<bool>(value >> bytes), "startup byte field is numeric");
+    return bytes;
+  };
+  const auto capacity = field("capacity_bytes=");
+  const auto automatic = field("automatic_bytes=");
+  const auto maximum = field("max_bytes=");
+  Expect(stats->states_created == 1, "only the requested state was created");
+  Expect(capacity == 8 * gib,
+         "cache capacity uses the first post-allocation memory observation");
+  Expect(capacity <= maximum,
+         "startup maximum must not be below the selected cache capacity");
+  Expect(automatic == 6 * gib && maximum == 8 * gib,
+         "startup limits describe the claim that selected cache capacity");
 }
 
 }  // namespace
@@ -1695,8 +1817,10 @@ int main() {
       "evicting a retained prefix for entry capacity is reported");
 
   TestSnapshotCacheCapacityIsReportedAtStartup();
+  TestSnapshotStartupReportsSelectedLimits();
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
+  TestRamLearnsDivergenceBoundaries();
   TestCoincidentCacheBoundariesShareOneCopy();
   TestMeasuredStateIsReconciledWithClaim();
   TestSnapshotBudgetRefusalDoesNotFailCompletedRequest();

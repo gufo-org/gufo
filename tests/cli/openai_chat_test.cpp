@@ -35,8 +35,12 @@ public:
   using Backend = gufo::server::TextGenerationBackend;
 
   ProgressRequest(std::shared_ptr<GenerationRequest> inner,
-                  std::vector<Backend::PromptProgress> progress)
-      : inner_(std::move(inner)), progress_(std::move(progress)) {}
+                  std::vector<Backend::PromptProgress> progress,
+                  std::optional<gufo::sampling::JsonConstraint::ToolFormat>
+                      tool_format = {})
+      : inner_(std::move(inner)),
+        progress_(std::move(progress)),
+        tool_format_(tool_format) {}
 
   Backend::Result Wait(const Backend::TokenCallback& on_token,
                        const Backend::ProgressCallback& on_progress) override {
@@ -49,10 +53,15 @@ public:
     return inner_->Wait(on_token, on_progress);
   }
   void Cancel() noexcept override { inner_->Cancel(); }
+  std::optional<gufo::sampling::JsonConstraint::ToolFormat> ToolFormat()
+      const override {
+    return tool_format_;
+  }
 
 private:
   std::shared_ptr<GenerationRequest> inner_;
   std::vector<Backend::PromptProgress> progress_;
+  const std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format_;
 };
 
 class FakeBackend final : public gufo::server::TextGenerationBackend {
@@ -153,7 +162,7 @@ public:
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_chat(request, max_tokens, sampling,
                                           is_cancelled, stream_output),
-        progress);
+        progress, tool_format);
   }
 
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override {
@@ -175,6 +184,7 @@ public:
 
   std::vector<std::string> pieces;
   std::vector<PromptProgress> progress;
+  std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format;
   std::string cache_miss_reason;
   FinishReason finish_reason{FinishReason::kStop};
   std::string stop_sequence;
@@ -2390,6 +2400,11 @@ void TestNativeToolTransports() {
               body["tool_choice"] = constrained ? "required" : "auto";
               body["chat_template_kwargs"]["enable_thinking"] = thinking;
               FakeBackend backend;
+              if (constrained)
+                backend.tool_format =
+                    call.starts_with("<｜DSML｜tool_calls>")
+                        ? gufo::sampling::JsonConstraint::ToolFormat::kDeepSeek
+                        : gufo::sampling::JsonConstraint::ToolFormat::kQwen;
               const auto raw =
                   (thinking ? "Reasoning.</think>" : "") + call + " \n";
               for (char byte : raw)
@@ -2493,6 +2508,306 @@ void TestNativeToolTransports() {
       }
 }
 
+void TestJsonToolStringOwnership() {
+  using gufo::json::Value;
+  using Constraint = gufo::sampling::JsonConstraint;
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  const auto schema = gufo::json::parse(R"({
+    "type":"object","properties":{"content":{"type":"string","pattern":".*"}},
+    "required":["content"],"additionalProperties":false
+  })");
+  Expect(
+      !Constraint::ToolParameters(schema, false, Constraint::ToolFormat::kQwen),
+      "string patterns require JSON tool framing");
+  const auto grammar = Constraint::WithTools(
+      nullptr, {{"write", Constraint::Compile(schema, false)}}, false, true);
+  auto request = gufo::json::parse(R"({
+    "model":"test-model","messages":[{"role":"user","content":"write"}],
+    "tools":[]
+  })");
+  auto tool = Value::object();
+  tool["type"] = "function";
+  tool["function"]["name"] = "write";
+  tool["function"]["parameters"] = schema;
+  request["tools"].push_back(std::move(tool));
+  // Complete @aarononeal's write example from #383 as JSON string data.
+  std::string literal =
+      "<tool_call>\n<function=write>\n<parameter=content>\nAAAA\n"
+      "</parameter>\n</function>\n</tool_call>";
+  std::erase(literal, '\n');
+  for (const auto* prefix : {"", "quoted \"text\" and \\ "}) {
+    Value arguments = Value::object();
+    arguments["content"] = std::string(prefix) + literal;
+    const std::string complete =
+        "<tool_call>{\"name\":\"write\",\"arguments\":" + arguments.dump() +
+        "}</tool_call>";
+    const auto truncated =
+        complete.substr(0, complete.find(literal) + literal.size());
+    for (const bool partial : {false, true}) {
+      const auto& raw = partial ? truncated : complete;
+      auto state = grammar->Start();
+      for (const unsigned char byte : raw)
+        state = grammar->Advance(state, byte);
+      Expect(!state.empty() && grammar->Complete(state) == !partial,
+             "literal XML is an admitted JSON call or an unfinished prefix");
+      for (const auto finish : {Finish::kLength, Finish::kStopSequence}) {
+        for (const bool stream : {false, true}) {
+          auto body = request;
+          body["stream"] = stream;
+          FakeBackend backend;
+          backend.finish_reason = finish;
+          if (finish == Finish::kStopSequence)
+            backend.stop_sequence = "STOP";
+          for (const char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+          const auto response =
+              gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          Expect(response.status == 200,
+                 "JSON tool ownership request succeeds");
+          std::vector<Value> calls;
+          std::string content;
+          const auto inspect = [&](const Value& event) {
+            if (const auto* choices = event.find("choices"))
+              for (const auto& choice : choices->items()) {
+                const auto* message = choice.find(stream ? "delta" : "message");
+                if (!message)
+                  continue;
+                content += message->member_str("content");
+                if (const auto* found = message->find("tool_calls"))
+                  calls.insert(calls.end(), found->items().begin(),
+                               found->items().end());
+              }
+          };
+          if (stream) {
+            response.streaming_body([&](std::string_view chunk) {
+              const auto pos = chunk.find("data: ");
+              if (pos != std::string_view::npos &&
+                  !chunk.substr(pos + 6).starts_with("[DONE]"))
+                inspect(gufo::json::parse(chunk.substr(pos + 6)));
+              return true;
+            });
+          } else {
+            inspect(gufo::json::parse(response.body));
+          }
+          if (partial && !calls.empty())
+            std::cerr << "Truncated JSON produced: " << calls.front().dump()
+                      << '\n';
+          Expect(calls.size() == (partial ? 0 : 1),
+                 "an unfinished JSON string cannot invoke its literal XML");
+          Expect(content.empty(), "JSON tool framing stays out of content");
+          if (!partial)
+            Expect(calls.front().find("function")->member_str("arguments") ==
+                       arguments.dump(),
+                   "a complete JSON call preserves its literal XML argument");
+        }
+      }
+    }
+    for (const int rejected_shape : {0, 1, 2}) {
+      auto rejected = Value::object();
+      rejected["name"] = rejected_shape == 0 ? "undeclared" : "write";
+      rejected["arguments"] = arguments;
+      if (rejected_shape == 1)
+        rejected["name"] = "";
+      if (rejected_shape == 2) {
+        rejected["arguments"] = Value::array();
+        rejected["arguments"].push_back(std::string(prefix) + literal);
+      }
+      FakeBackend backend;
+      backend.pieces = {"<tool_call>" + rejected.dump() + "</tool_call>" +
+                        complete};
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(request.dump()), backend);
+      Expect(response.status == 200,
+             "rejected JSON calls permit later recovery");
+      const auto output = gufo::json::parse(response.body);
+      const auto* calls =
+          output.find("choices")->items()[0].find("message")->find(
+              "tool_calls");
+      Expect(
+          calls && calls->size() == 1 &&
+              calls->items()[0].find("function")->member_str("arguments") ==
+                  arguments.dump(),
+          "rejected JSON envelopes cannot invoke quoted XML during recovery");
+    }
+  }
+}
+
+void TestNativeToolDialectSelection() {
+  using gufo::json::Value;
+  using gufo::sampling::JsonConstraint;
+  using Format = JsonConstraint::ToolFormat;
+  const auto native_call = [](Format format, std::string_view path) {
+    if (format == Format::kDeepSeek)
+      return "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"read\">\n"
+             "<｜DSML｜parameter name=\"path\" string=\"true\">" +
+             std::string(path) +
+             "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+             "</｜DSML｜tool_calls>";
+    return "<tool_call>\n<function=read>\n<parameter=path>\n" +
+           std::string(path) + "\n</parameter>\n</function>\n</tool_call>";
+  };
+  // The JSON fallback leaves text before <tool_call> unconstrained. A native
+  // DeepSeek call written there remains a call, as before this change.
+  {
+    auto schema = gufo::json::parse(R"({"type":"object",
+    "properties":{"path":{"type":"string","pattern":"^[a-z.]+$"}},
+    "required":["path"],"additionalProperties":false})");
+    Expect(!JsonConstraint::ToolParameters(schema, false, Format::kDeepSeek),
+           "patterned string requires JSON tool fallback");
+    auto body = gufo::json::parse(R"({
+    "model":"test-model","reasoning_effort":"none",
+    "messages":[{"role":"user","content":"Read fixture.xml."}],
+    "tool_choice":"auto","tools":[{"type":"function","function":{
+      "name":"read","strict":false}}]})");
+    auto tool = body["tools"].items()[0];
+    tool["function"]["parameters"] = schema;
+    body["tools"] = Value::array();
+    body["tools"].push_back(std::move(tool));
+    for (const bool stream : {false, true}) {
+      body["stream"] = stream;
+      FakeBackend backend;
+      backend.tool_format = Format::kJson;
+      backend.pieces = {native_call(Format::kDeepSeek, "fixture.xml")};
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 200, "JSON fallback request succeeds");
+      std::string content;
+      std::vector<std::string> arguments;
+      const auto collect = [&](const Value& event) {
+        for (const auto& choice : event.find("choices")->items()) {
+          const auto* message = choice.find(stream ? "delta" : "message");
+          content += message->member_str("content");
+          if (const auto* calls = message->find("tool_calls"))
+            for (const auto& item : calls->items())
+              arguments.push_back(
+                  item.find("function")->member_str("arguments"));
+        }
+      };
+      if (stream) {
+        response.streaming_body([&](std::string_view chunk) {
+          const auto payload = chunk.substr(chunk.find("data: ") + 6);
+          if (!payload.starts_with("[DONE]"))
+            collect(gufo::json::parse(payload));
+          return true;
+        });
+      } else {
+        collect(gufo::json::parse(response.body));
+      }
+      Expect(arguments == std::vector<std::string>{R"({"path":"fixture.xml"})"},
+             "a native call written under the JSON fallback is returned");
+      Expect(content.find("DSML") == std::string::npos,
+             "the recognized native call is not visible content");
+    }
+  }
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto schema = gufo::json::parse(R"({"type":"object",
+    "properties":{"path":{"type":"string"}},
+    "required":["path"],"additionalProperties":false})");
+    const auto parameters =
+        JsonConstraint::ToolParameters(schema, false, format);
+    Expect(parameters != nullptr, "file tool has a supported wire format");
+    const auto grammar = JsonConstraint::WithTools(
+        nullptr, {{"read", parameters}}, false, true, format);
+    const std::string call = native_call(format, "fixture.xml");
+    const auto foreign =
+        format == Format::kDeepSeek ? Format::kQwen : Format::kDeepSeek;
+    const std::string suffix =
+        format == Format::kDeepSeek
+            ? ""
+            : " The XML root remains `<tool_calls></tool_calls>`.";
+    for (const std::string& prefix :
+         {std::string{"The XML root is `<tool_calls></tool_calls>`.\n"},
+          std::string{"The foreign wrapper is `"} +
+              (foreign == Format::kQwen ? "<tool_call>"
+                                        : "<｜DSML｜tool_calls>") +
+              "`.\n",
+          "Example syntax:\n" + native_call(foreign, "example.xml") +
+              "\nNow inspect the fixture.\n"}) {
+      const auto raw = prefix + call + suffix;
+      auto state = grammar->Start();
+      for (const unsigned char byte : raw)
+        state = grammar->Advance(state, byte);
+      Expect(grammar->Complete(state),
+             "foreign visible literals and the actual call satisfy the "
+             "production tool grammar");
+      for (const bool responses : {false, true}) {
+        for (const bool stream : {false, true}) {
+          auto body = gufo::json::parse(R"({
+          "model":"test-model","reasoning_effort":"none",
+          "messages":[{"role":"user","content":"Inspect fixture.xml and its tool_calls root element."}],
+          "tool_choice":"auto","tools":[{"type":"function","function":{
+            "name":"read","strict":false}}]})");
+          auto tool = body["tools"].items()[0];
+          tool["function"]["parameters"] = schema;
+          body["tools"] = Value::array();
+          body["tools"].push_back(std::move(tool));
+          body["stream"] = stream;
+          FakeBackend backend;
+          backend.tool_format = format;
+          for (const char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+          gufo::server::HttpResponse response;
+          if (responses) {
+            gufo::server::ChatRequest chat;
+            chat.reasoning.enabled = false;
+            Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+                   "Responses accepts the file tool");
+            response = gufo::server::CreateOpenAiResponse(
+                Request(body.dump()), backend, chat, 256, {}, stream);
+          } else {
+            response =
+                gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          }
+          Expect(response.status == 200, "native file tool request succeeds");
+          // A later backend configuration must not change an admitted stream's
+          // format. The fake snapshots this metadata on its GenerationRequest.
+          backend.tool_format.reset();
+          std::string content;
+          std::vector<std::string> arguments;
+          const auto collect = [&](const Value& event) {
+            if (responses) {
+              const auto* result = stream ? event.find("response") : &event;
+              if (!result || result->member_str("status") != "completed")
+                return;
+              for (const auto& item : result->find("output")->items()) {
+                if (item.member_str("type") == "function_call")
+                  arguments.push_back(item.member_str("arguments"));
+                else if (item.member_str("type") == "message")
+                  for (const auto& part : item.find("content")->items())
+                    content += part.member_str("text");
+              }
+            } else {
+              for (const auto& choice : event.find("choices")->items()) {
+                const auto* message = choice.find(stream ? "delta" : "message");
+                content += message->member_str("content");
+                if (const auto* calls = message->find("tool_calls"))
+                  for (const auto& item : calls->items())
+                    arguments.push_back(
+                        item.find("function")->member_str("arguments"));
+              }
+            }
+          };
+          if (stream) {
+            response.streaming_body([&](std::string_view chunk) {
+              const auto payload = chunk.substr(chunk.find("data: ") + 6);
+              if (!payload.starts_with("[DONE]"))
+                collect(gufo::json::parse(payload));
+              return true;
+            });
+          } else {
+            collect(gufo::json::parse(response.body));
+          }
+          Expect(arguments ==
+                     std::vector<std::string>{R"({"path":"fixture.xml"})"},
+                 "only the actual selected-dialect call reaches the client");
+          Expect(content == prefix + suffix,
+                 "foreign tool syntax remains literal visible content");
+        }
+      }
+    }
+  }
+}
+
 void TestNativeToolTextOutsideEnvelopes() {
   using gufo::json::Value;
   using gufo::sampling::JsonConstraint;
@@ -2511,6 +2826,8 @@ void TestNativeToolTextOutsideEnvelopes() {
   };
   const std::string suffix = "\nNo edits are requested.";
   const auto first = envelope(invoke("fixture.txt"));
+  const auto legacy =
+      "<tool_calls>" + invoke("example.txt") + "\n</tool_calls>";
   const std::string literal = "Keep </｜DSML｜tool_calls> as argument data.";
   struct Fixture {
     Format format;
@@ -2521,6 +2838,7 @@ void TestNativeToolTextOutsideEnvelopes() {
     bool canonical{true};
     Finish finish{Finish::kStop};
     bool required{false};
+    std::optional<Format> admitted_format{};
   };
   const std::vector<Fixture> fixtures{
       {Format::kQwen,
@@ -2600,6 +2918,34 @@ void TestNativeToolTextOutsideEnvelopes() {
        first + invoke("example.txt") + envelope(invoke("second.txt")) + suffix,
        invoke("example.txt") + suffix,
        {"fixture.txt", "second.txt"}},
+      {.format = Format::kDeepSeek,
+       .raw = first + suffix,
+       .text = suffix,
+       .paths = {"fixture.txt"},
+       .admitted_format = Format::kDeepSeek},
+      // A known native grammar owns only its canonical envelope. Foreign
+      // wrapper examples remain prose, including native-looking invocations.
+      {.format = Format::kDeepSeek,
+       .raw = first + "\n<tool_calls></tool_calls>" + suffix,
+       .text = "\n<tool_calls></tool_calls>" + suffix,
+       .paths = {"fixture.txt"},
+       .admitted_format = Format::kDeepSeek},
+      {.format = Format::kDeepSeek,
+       .raw = first + legacy + suffix,
+       .text = legacy + suffix,
+       .paths = {"fixture.txt"},
+       .admitted_format = Format::kDeepSeek},
+      // Unknown metadata and JSON fallback deliberately retain legacy native
+      // recognition. Both wrapped calls still belong to the tool output.
+      {.format = Format::kDeepSeek,
+       .raw = first + legacy + suffix,
+       .text = suffix,
+       .paths = {"fixture.txt", "example.txt"}},
+      {.format = Format::kJson,
+       .raw = first + legacy + suffix,
+       .text = suffix,
+       .paths = {"fixture.txt", "example.txt"},
+       .admitted_format = Format::kJson},
   };
   for (const auto& fixture : fixtures) {
     auto parameters_schema = schema;
@@ -2646,6 +2992,7 @@ void TestNativeToolTextOutsideEnvelopes() {
           body["stream"] = stream;
           body["tool_choice"] = fixture.required ? "required" : "auto";
           FakeBackend backend;
+          backend.tool_format = fixture.admitted_format;
           backend.finish_reason =
               fixture.complete ? fixture.finish : Finish::kLength;
           if (fragmented)
@@ -2666,6 +3013,7 @@ void TestNativeToolTextOutsideEnvelopes() {
                 gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
           }
           Expect(response.status == 200, "native tool request succeeds");
+          backend.tool_format.reset();
           std::string text, deltas;
           std::vector<std::string> paths;
           const auto call = [&](const Value& function) {
@@ -3163,6 +3511,8 @@ int main() {
   TestStopInsideToolArguments();
   TestResponsesOutput();
   TestNativeToolTransports();
+  TestJsonToolStringOwnership();
+  TestNativeToolDialectSelection();
   TestNativeToolTextOutsideEnvelopes();
   TestNativeReferencedArgumentTypes();
   TestWildcardToolTypes();

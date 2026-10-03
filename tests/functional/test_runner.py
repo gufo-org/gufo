@@ -22,16 +22,70 @@ from metrics import (CaseComplete, Recorder, canonical, compare, join_server_tim
                      qualify, summarize, validate_tool_events)
 from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit
+from tool_text import SUFFIXES, assert_tool_text, check_tool_text
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
+from cache_concurrency import check_cache_concurrency
+from cache_shared_prefix import check_cache_shared_prefix
 from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
 from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
+                            CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, PROMPT_SECONDS,
+                            GENERATED_SECONDS, KV_USAGE, assert_slots,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_tool_text_rejects_lost_prose_and_phantom_calls(self):
+        call = {"function": {"name": "read", "arguments": '{"path":"fixture.txt"}'}}
+        for suffix in SUFFIXES.values():
+            valid = dict(text=suffix, reasoning="", finish="tool_calls", tools=[call])
+            assert_tool_text(valid, suffix)
+            for changes in ({"text": ""}, {"text": suffix[:-1]},
+                            {"tools": [call, call]}, {"tools": []},
+                            {"tools": [{"function": {"name": "read",
+                                "arguments": '{"path":"example.txt"}'}}]},
+                            {"reasoning": "unexpected thought"}, {"finish": "length"}):
+                with self.subTest(suffix=suffix, changes=changes), self.assertRaises(AssertionError):
+                    assert_tool_text({**valid, **changes}, suffix)
+
+    def test_tool_text_dispatch_and_failed_result_retention(self):
+        requests = []
+        def collect(endpoint):
+            def result(client, request, streaming):
+                requests.append((endpoint, request, streaming))
+                prompt = (request["messages"][0]["content"] if endpoint == "chat"
+                          else request["input"])
+                suffix = next(value for value in SUFFIXES.values() if prompt.endswith(value))
+                return dict(text=suffix, reasoning="", finish="tool_calls", tools=[{
+                    "function": {"name": "read", "arguments": '{"path":"fixture.txt"}'}}])
+            return result
+        checks = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_tool_text(None, "fixture", checks, collect("chat"), collect("responses"))
+        self.assertEqual(len(requests), 8)
+        self.assertEqual(len(checks), 8)
+        self.assertEqual([(endpoint, stream) for endpoint, _, stream in requests],
+                         [("chat", False), ("chat", True),
+                          ("responses", False), ("responses", True)] * 2)
+        self.assertEqual(sum(request.get("max_completion_tokens", request.get("max_output_tokens"))
+                             for _, request, _ in requests), 3072)
+        self.assertTrue(all(request["tool_choice"] == "auto"
+                            and request["extra_body"]["cache_prompt"] is False
+                            for _, request, _ in requests))
+
+        failed = {}
+        def missing_text(client, request, streaming):
+            return {**collect("chat")(client, request, streaming), "text": ""}
+        requests.clear()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(
+                AssertionError, "cannot distinguish model instruction-following"):
+            check_tool_text(None, "fixture", failed, missing_text, collect("responses"))
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(list(failed), ["tool_text_plain_chat_buffered"])
+        self.assertEqual(failed["tool_text_plain_chat_buffered"]["text"], "")
+
     def test_pi_proxy_discovery_and_missing_content_type(self):
         import http.client
         import http.server
@@ -201,13 +255,15 @@ class FunctionalRunnerTest(unittest.TestCase):
         for available, requested, capacity in (
             (44 * gib, 0, 22 * gib), (128 * gib, 0, 32 * gib),
             (44 * gib, 20 * gib, 20 * gib), (44 * gib, 64 * gib, 22 * gib),
-            (128 * gib, 48 * gib, 48 * gib),
+            (44 * gib, 30 * gib, 30 * gib),  # Explicit limits may pass half.
+            (44 * gib, 64 * gib, 40 * gib), (128 * gib, 48 * gib, 48 * gib),
         ):
             result = check_snapshot_budget(log(capacity), available, requested, 1)
             self.assertEqual(result["capacity_bytes"], capacity)
         for output, available, requested in (
             (log(32 * gib), 44 * gib, 0),  # A fixed cap can exceed host headroom.
-            (log(64 * gib), 44 * gib, 64 * gib),  # Overrides cannot bypass it.
+            (log(64 * gib), 44 * gib, 64 * gib),  # Overrides keep 4 GiB free.
+            (log(41 * gib), 44 * gib, 64 * gib),
             (log(48 * gib), 128 * gib, 0), (log(21 * gib), 44 * gib, 20 * gib),
             (log(0), 44 * gib, 0), (log(20 * gib, sessions=4), 44 * gib, 0),
             (log(20 * gib, entries=8), 44 * gib, 0), ("", 44 * gib, 0),
@@ -304,19 +360,41 @@ class FunctionalRunnerTest(unittest.TestCase):
                 cached = 2995 if pinned and "drop_reasoning" in label else last - 5
             previous[label] = total
             return {"text": "BETA", "reasoning": "The code word is BETA."
-                    if body["reasoning_effort"] == "low" and not missing_reasoning else "",
+                    if body.get("reasoning_effort", "low") != "none"
+                    and not missing_reasoning else "",
                     "tools": [], "finish": "stop", "usage": {
                         "prompt_tokens": total, "cached_tokens": cached,
                         "completion_tokens": 8,
                         "gufo": {"prefill_tokens": total - cached}}}
 
+        class MessagesClient:
+            """Messages replay reproduces the previous turn, completion included."""
+            def __init__(self):
+                self.previous = {}
+
+            def post(self, path, body, cast_to):
+                assert path == "/messages" and cast_to is object
+                label = body["system"].splitlines()[0]
+                total = 3000 + (len(body["messages"]) - 1) * 100
+                last = self.previous.get(label, 0)
+                cached = total if total == last else min(total, last + 8) if last else 0
+                self.previous[label] = total
+                thinking = body["thinking"]["type"] == "enabled"
+                blocks = ([{"type": "thinking", "thinking": "The code word is BETA.",
+                            "signature": ""}] if thinking else [])
+                return {"content": blocks + [{"type": "text", "text": "BETA"}],
+                        "stop_reason": "end_turn",
+                        "usage": {"input_tokens": total, "cache_read_input_tokens": cached,
+                                  "output_tokens": 8},
+                        "timings": {"prompt_n": total - cached}}
+
         with contextlib.redirect_stderr(io.StringIO()):
-            check_cache_growth(None, "fixture", checks, chat_result)
+            check_cache_growth(MessagesClient(), "fixture", checks, chat_result)
         return requests, checks
 
     def test_cache_growth_uses_real_replay_shapes_and_delays_cold_controls(self):
         requests, checks = self.run_cache_growth()
-        self.assertEqual(len(checks), 36)
+        self.assertEqual(len(checks), 54)
         for offset, replay in enumerate(("drop_reasoning", "keep_reasoning",
                                         "discard_reasoning", "thinking_off")):
             history = requests[offset * 9:(offset + 1) * 9]
@@ -343,6 +421,118 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_growth_requires_actual_reasoning(self):
         with self.assertRaises(AssertionError):
             self.run_cache_growth(missing_reasoning=True)
+
+    def run_cache_concurrency(self, regress=None):
+        import re
+        import threading
+        lock, seen, previous, requests = threading.Lock(), set(), {}, []
+
+        def tokens(messages):
+            return sum(len(m["content"]) // 4 + 10 for m in messages)
+
+        def chat_result(client, body, streaming=False):
+            # Model-independent server model: the first arrival per system
+            # prompt prefills, later ones restore the shared system prompt.
+            messages = body["messages"]
+            system, label = messages[0]["content"], messages[0]["content"].split("\n")[0]
+            total = tokens(messages)
+            cold = body.get("extra_body", {}).get("cache_prompt") is False
+            key = json.dumps(messages)
+            with lock:
+                requests.append(json.loads(json.dumps(body)))
+                cached, wait = 0, 0.0
+                if cold:
+                    pass
+                elif len(messages) > 2:
+                    cached = previous[json.dumps(messages[:-2])]
+                elif len(system) > 2000 and label in seen:
+                    cached, wait = tokens(messages[:1]), 5.0
+                    if regress == "prefill":
+                        cached = 0
+                elif key in previous:
+                    cached = total
+                elif regress == "wait" and "short_shared" in label and label in seen:
+                    wait = 5.0
+                seen.add(label)
+                if not cold:
+                    previous[key] = total
+            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
+            return {"text": code[1] if code else "Z", "reasoning": "", "tools": [], "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached,
+                                       "shared_prefix_wait_ms": wait}}}
+
+        checks = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_cache_concurrency(None, "fixture", checks, chat_result, 4,
+                                    abandon=lambda client, body, delay: None)
+        return requests, checks
+
+    def test_cache_concurrency_sends_groups_and_cold_controls(self):
+        requests, checks = self.run_cache_concurrency()
+        for group in ("identical", "fanout", "long_tasks", "short_shared", "unrelated"):
+            self.assertTrue(all(f"{group}_{index}" in checks for index in range(4)))
+            self.assertTrue(all(f"{group}_cold_{index}" in checks for index in range(4)))
+        self.assertIn("history_turn_1_0", checks)
+        self.assertEqual(sum(name.startswith("cancelled_leader_") for name in checks), 3)
+        cold = [body for body in requests
+                if body.get("extra_body", {}).get("cache_prompt") is False]
+        self.assertTrue(cold and all(body["temperature"] == 0 for body in cold))
+
+    def test_cache_concurrency_rejects_followers_that_prefill_everything(self):
+        with self.assertRaisesRegex(AssertionError, "after restoring the shared prefix"):
+            self.run_cache_concurrency(regress="prefill")
+
+    def test_cache_concurrency_rejects_waiting_without_a_shared_prefix(self):
+        with self.assertRaisesRegex(AssertionError, "waited without a shared prefix"):
+            self.run_cache_concurrency(regress="wait")
+
+    def run_cache_shared_prefix(self, regress=False):
+        import re
+        seen, requests = {}, []
+
+        def tokens(messages):
+            return sum(len(m["content"]) // 4 + 10 for m in messages)
+
+        def chat_result(client, body):
+            # Model-independent server model: the second conversation under a
+            # system prompt learns its boundary, later ones restore it.
+            requests.append(json.loads(json.dumps(body)))
+            messages = body["messages"]
+            label = messages[0]["content"].split("\n")[0]
+            total = tokens(messages)
+            cached = 0
+            if body.get("extra_body", {}).get("cache_prompt") is not False:
+                count = seen.get(label, 0)
+                seen[label] = count + 1
+                if count == 1:
+                    cached = 2048
+                elif count >= 2:
+                    cached = 2048 if regress else tokens(messages[:1])
+            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
+            return {"text": code[1] if code else "Z", "reasoning": "", "tools": [],
+                    "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached}}}
+
+        checks = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_cache_shared_prefix(None, "fixture", checks, chat_result)
+        return requests, checks
+
+    def test_cache_shared_prefix_runs_conversations_then_cold_controls(self):
+        requests, checks = self.run_cache_shared_prefix()
+        for group in ("long_tasks", "short_tasks"):
+            self.assertTrue(all(f"{group}_{index}" in checks for index in range(4)))
+            self.assertTrue(all(f"{group}_cold_{index}" in checks for index in range(4)))
+        warm = [body for body in requests if "extra_body" not in body]
+        self.assertEqual(len(warm), 8)
+
+    def test_cache_shared_prefix_rejects_grid_only_reuse(self):
+        with self.assertRaisesRegex(AssertionError, "of the shared system prompt"):
+            self.run_cache_shared_prefix(regress=True)
 
     def test_prompt_progress_contract_and_output_order(self):
         def event(processed, elapsed=0):
@@ -380,6 +570,8 @@ class FunctionalRunnerTest(unittest.TestCase):
             text.replace(f"{PROCESSING} 0", f"{PROCESSING} 0.5"),
             text.replace(f"{GENERATED} 0", f"{GENERATED} nan"),
             text.replace(f"{GENERATED} 0", f"{GENERATED} inf"),
+            text.replace(f"{DRAFT_ROUNDS} 0", f"{DRAFT_ROUNDS} 0.5"),
+            text.replace(f"{KV_USAGE} 0", f"{KV_USAGE} 1.1"),
         ):
             with self.subTest(text=bad), self.assertRaises(ValueError):
                 parse_metrics(bad)
@@ -389,18 +581,25 @@ class FunctionalRunnerTest(unittest.TestCase):
         rows = [
             {"http_status": 200, "status": "complete", "metrics": {
                 "prompt_tokens": 100, "cached_tokens": 98,
-                "prefill_tokens": 2, "completion_tokens": 7}},
+                "prefill_tokens": 2, "completion_tokens": 7,
+                "draft_rounds": 3, "draft_tokens": 8, "draft_tokens_accepted": 5, "prefill_ms": 100, "decode_ms": 200}},
             {"http_status": 200, "status": "complete", "metrics": {
                 "prompt_tokens": 100, "cached_tokens": 100,
-                "prefill_tokens": 0, "completion_tokens": 3}},
+                "prefill_tokens": 0, "completion_tokens": 3,
+                "draft_rounds": 2, "draft_tokens": 4, "draft_tokens_accepted": 2, "prefill_ms": 0, "decode_ms": 100}},
             {"http_status": 400, "status": "complete", "metrics": {}},
         ]
-        after = {PROMPT: 12, GENERATED: 20}
+        after = {**before, PROMPT: 12, GENERATED: 20, CACHED: 208,
+                 MAX_SEQUENCE: 107, DRAFT_ROUNDS: 15, DRAFTS: 22, ACCEPTED: 17,
+                 PROMPT_SECONDS: 10.1, GENERATED_SECONDS: 10.3}
         assert_accounting(before, after, rows)
         for bad in ({PROMPT: 210, GENERATED: 20}, {PROMPT: 14, GENERATED: 30},
                     {PROMPT: 12, GENERATED: 19}):
             with self.subTest(after=bad), self.assertRaises(AssertionError):
-                assert_accounting(before, bad, rows)
+                assert_accounting(before, {**after, **bad}, rows)
+        for metric in (CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, PROMPT_SECONDS, GENERATED_SECONDS):
+            with self.subTest(metric=metric), self.assertRaises(AssertionError):
+                assert_accounting(before, {**after, metric: after[metric] + 1}, rows)
         rows[0]["status"] = "disconnected"
         with self.assertRaisesRegex(AssertionError, "missing completed"):
             assert_accounting(before, after, rows)
@@ -413,14 +612,15 @@ class FunctionalRunnerTest(unittest.TestCase):
                 {"request_id": "r2", "http_status": 200, "status": "complete"},
                 {"request_id": "r3", "http_status": 400, "status": "complete"}]}))
             (root / "metrics.json").write_text(json.dumps({"checks": {
-                "metrics_chat_cold": {"before": {PROMPT: 100, GENERATED: 200}},
+                "metrics_chat_cold": {"before": {**dict.fromkeys(COUNTERS, 0), PROMPT: 100, GENERATED: 200}},
                 "metrics_live_queue_cancel": {"cancelled": [{"cancelled": True}]},
-                "metrics_after_cancel_cached": {"after": {PROMPT: 112, GENERATED: 207}}}}))
+                "metrics_after_cancel_cached": {"after": {**dict.fromkeys(COUNTERS, 0),
+                    PROMPT: 112, GENERATED: 207, CACHED: 20, MAX_SEQUENCE: 24, DRAFT_ROUNDS: 3, DRAFTS: 8, ACCEPTED: 4}}}}))
             log = (
                 "[http] request=r1 event=completed status=200 prefill_tokens=12 "
-                "generated_tokens=3 finish=cancelled\n"
+                "generated_tokens=3 prompt_tokens=12 cached_tokens=0 draft_rounds=1 draft_proposed=4 draft_accepted=2 finish=cancelled\n"
                 "[http] request=r2 event=completed status=200 prefill_tokens=0 "
-                "generated_tokens=4 finish=length\n"
+                "generated_tokens=4 prompt_tokens=20 cached_tokens=20 draft_rounds=2 draft_proposed=4 draft_accepted=2 finish=length\n"
                 "[http] request=r3 event=completed status=400\n")
             (root / "server.log").write_text(log)
             self.assertEqual(validate_metrics_report(root), {"requests": 2, "cancelled": 1})
@@ -429,6 +629,22 @@ class FunctionalRunnerTest(unittest.TestCase):
             (root / "server.log").write_text(log.replace("generated_tokens=3", "generated_tokens=0"))
             with self.assertRaises(AssertionError):
                 validate_metrics_report(root)
+
+    def test_live_slots_reject_stale_identity_progress_and_prompt_disclosure(self):
+        slot = {"id": 0, "model": "test", "n_ctx": 4096, "speculative": True,
+                "is_processing": True, "id_task": 7, "task_id": 7, "state": 1,
+                "n_prompt_tokens": 20, "n_prompt_tokens_cache": 12,
+                "n_prompt_tokens_processed": 8, "prompt": "",
+                "next_token": [{"has_next_token": True, "has_new_line": False,
+                                "n_remain": 6, "n_decoded": 2}]}
+        assert_slots([slot], 1, "test", 4096, True)
+        for change in ({"prompt": "private"}, {"task_id": 0},
+                       {"n_prompt_tokens_processed": 7}, {"speculative": False},
+                       {"is_processing": False}, {"id": 2}):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_slots([{**slot, **change}], 1, "test", 4096, True)
+        with self.assertRaises(AssertionError):
+            assert_slots([slot, {**slot, "id": 1}], 2, "test", 4096, True)
 
     def test_fingerprints_preserve_schema_payload_ids(self):
         for key in ("schema", "parameters", "metadata", "arguments"):
