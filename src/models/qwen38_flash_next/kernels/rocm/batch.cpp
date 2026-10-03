@@ -2,6 +2,7 @@
 #include <array>
 #include <stdexcept>
 
+#include "alloc_fallback.hpp"
 #include "qfn_mmq.h"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -124,7 +125,7 @@ void Executor::UseScratch(const Scratch& scratch) const {
 
 bool Executor::AllocateBatch(std::string* error) const {
   return batch_logits_ != nullptr ||
-         Check(hipMalloc(&batch_logits_,
+         Check(AllocDevice(&batch_logits_,
                          static_cast<std::size_t>(kBatchSessions) *
                              std::min(kDecodeRows, options_.max_logit_rows) *
                              config().vocab_size * sizeof(float)),

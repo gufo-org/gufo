@@ -1,5 +1,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 
+#include "alloc_fallback.hpp"
+
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -50,8 +52,8 @@ struct Uploader {
     }
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
-    if (hipMalloc(&ptr, size + kTailMargin) != hipSuccess) {
-      Fail("hipMalloc failed for " + std::string(t.name) + " (" +
+    if (AllocWeights(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for " + std::string(t.name) + " (" +
            std::to_string(size) + " bytes)");
       return d;
     }
@@ -95,7 +97,7 @@ struct Uploader {
       auto& dst = part == 0 ? embedding : hidden;
       dst = combined;
       dst.cols /= 2;
-      if (hipMalloc(&dst.data, part_bytes + kTailMargin) != hipSuccess) {
+      if (AllocWeights(&dst.data, part_bytes + kTailMargin) != hipSuccess) {
         Fail("MTP split projection allocation failed");
         return;
       }
@@ -139,7 +141,7 @@ struct Uploader {
       size += t->SizeBytes();
     }
     void* ptr = nullptr;
-    if (hipMalloc(&ptr, size + kTailMargin) != hipSuccess) {
+    if (AllocWeights(&ptr, size + kTailMargin) != hipSuccess) {
       Fail("hipMalloc failed for stacked tensor");
       return d;
     }
@@ -166,7 +168,7 @@ struct Uploader {
     }
     const std::size_t count = size / sizeof(float);
     void* half = nullptr;
-    if (hipMalloc(&half, count * sizeof(std::uint16_t) + kTailMargin) !=
+    if (AllocWeights(&half, count * sizeof(std::uint16_t) + kTailMargin) !=
         hipSuccess) {
       Fail("hipMalloc failed for stacked tensor");
       return d;

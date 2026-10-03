@@ -12,9 +12,12 @@ namespace gufo::hip::detail {
 
 [[nodiscard]] inline void* AllocateDevice(std::size_t bytes) {
   void* pointer = nullptr;
-  const auto error = hipMalloc(&pointer, bytes);
+  auto error = hipMalloc(&pointer, bytes);
   if (error != hipSuccess) {
-    throw std::runtime_error(std::string("MTP hipMalloc failed: ") +
+    error = hipMallocManaged(&pointer, bytes, hipMemAttachGlobal);
+  }
+  if (error != hipSuccess) {
+    throw std::runtime_error(std::string("MTP allocation failed: ") +
                              hipGetErrorString(error));
   }
   return pointer;

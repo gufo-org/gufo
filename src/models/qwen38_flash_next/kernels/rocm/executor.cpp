@@ -1,3 +1,4 @@
+#include "alloc_fallback.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 
 #include <algorithm>
@@ -42,7 +43,7 @@ T* Alloc(std::vector<void*>& allocations, std::size_t count,
          std::string* error_msg, std::size_t* allocated_bytes = nullptr) {
   void* p = nullptr;
   const std::size_t bytes = std::max<std::size_t>(1, count) * sizeof(T);
-  if (hipMalloc(&p, bytes) != hipSuccess) {
+  if (AllocDevice(&p, bytes) != hipSuccess) {
     AssignError(error_msg,
                 "hipMalloc of " + std::to_string(bytes) + " bytes failed");
     allocations.push_back(nullptr);
@@ -609,7 +610,7 @@ bool Executor::EnsureRollback(Session& session, std::uint32_t depth,
                                             c.ssm_num_v_heads, c.ssm_head_dim);
     const auto bytes = (linear * (conv + state) + ple) * sizeof(float);
     float* allocation = nullptr;
-    if (!Check(hipMalloc(&allocation, bytes), "rollback allocation", error_msg))
+    if (!Check(AllocDevice(&allocation, bytes), "rollback allocation", error_msg))
       return false;
     session.rollback_allocations_.push_back(allocation);
     session.rollback_bytes_ += bytes;
@@ -2486,7 +2487,7 @@ bool Executor::GreedyMtpPredictions(std::span<ArgmaxCandidate> predictions,
       const auto capacity =
           std::max(penalties.size(), 2 * verification_penalty_capacity_);
       sampling::TokenPenalty* allocated = nullptr;
-      if (!Check(hipMalloc(&allocated, capacity * sizeof(*allocated)),
+      if (!Check(AllocDevice(&allocated, capacity * sizeof(*allocated)),
                  "verification penalty allocation", error_msg))
         return false;
       (void)hipFree(verification_penalties_);

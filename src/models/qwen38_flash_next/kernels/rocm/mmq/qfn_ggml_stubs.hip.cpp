@@ -1,3 +1,4 @@
+#include "../alloc_fallback.hpp"
 #include "qfn_mmq_prelude.h"
 namespace qfn_mmq {
 // SPDX-License-Identifier: MIT
@@ -135,7 +136,7 @@ struct qfn_stack_pool : public ggml_hip_pool {
         if (base) (void)hipFree(base);
         size_t next = capacity ? capacity : (size_t) 256 << 20;
         while (next < bytes) next *= 2;
-        HIP_CHECK(hipMalloc((void **) &base, next));
+        HIP_CHECK(gufo::models::qwen38_flash_next::rocm::AllocDevice((void **) &base, next));
         capacity = next;
     }
 
