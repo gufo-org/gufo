@@ -28,6 +28,15 @@ void Expect(bool condition, std::string_view message) {
   }
 }
 
+/// Streaming splits deltas differently from the buffered path, so content that
+/// differs only in surrounding whitespace is the same response.
+std::string Trimmed(const std::string& value) {
+  const auto first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos)
+    return {};
+  return value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+}
+
 /// Reports fixed prompt progress before delegating token generation.
 class ProgressRequest final
     : public gufo::server::TextGenerationBackend::GenerationRequest {
@@ -3233,6 +3242,287 @@ void TestResponsesPromptProgress() {
          "Responses rejects non-boolean progress settings");
 }
 
+// Issue #383: the model repeats the closing framing of a call it just made, and
+// a client that stores assistant content replays that markup as history on
+// every later turn. Issue #266: the same framing folded into an argument value
+// or an unfinished call silently dropped. Both are parse-path defects, so they
+// are covered here for buffered and streamed transports.
+void TestToolClosingFraming() {
+  using gufo::json::Value;
+  const auto schema = gufo::json::parse(R"({
+    "model":"test-model", "messages":[{"role":"user","content":"use f"}],
+    "tools":[{"type":"function","function":{"name":"f","parameters":{
+      "type":"object","properties":{"text":{"type":"string"}},
+      "required":["text"]}}}]
+  })");
+  const std::string call =
+      "<tool_call>\n<function=f>\n<parameter=text>\n42\n</parameter>\n"
+      "</function>\n</tool_call>";
+  const std::string prose = "Found the sessions. Let me peek at one.";
+  // Verbatim tails captured from gufo responses in #383.
+  const std::string echo = "\n\n\t\t</invoke>\n</parameter>\n</function>\n";
+  const std::string pitchfork = "`" + std::string(32, ']') + "<|tool_call|>{";
+  struct Case {
+    std::string text;
+    std::size_t calls;
+    std::string argument;
+    std::string content;
+    std::optional<gufo::sampling::JsonConstraint::ToolFormat> format{};
+    // Whether content must carry no closing framing at all. A block written in
+    // a dialect the request did not admit is prose, so its tags stay visible.
+    bool framing_free{true};
+  };
+  for (
+      const auto& item :
+      {Case{call + echo + "<|im_end|>", 1, R"({"text":"42"})", ""},
+       // Closing framing ahead of the next call is markup, not prose.
+       Case{prose + "\n\n</function_results>" + echo + call, 1,
+            R"({"text":"42"})", prose},
+       Case{call + "\n</function>\n<|tool_call|>\n" + call, 2,
+            R"({"text":"42"})", ""},
+       // A dropped parameter closer must not fold the envelope that follows it
+       // into the value the client executes.
+       Case{"<tool_call><function=f><parameter=text>df -h /home<|im_end|>==="
+            "</parameter></function></tool_call>",
+            0, "", ""},
+       Case{"<tool_call>\n<function=f>\n<parameter=text>\nls -l /home\n"
+            "<|endoftext|>\n</parameter>\n</function>\n</tool_call>",
+            0, "", ""},
+       Case{"<tool_call><function=f><parameter=text>head -5 "
+            "notes.txt<|im_end|>" +
+                pitchfork + "</parameter></function></tool_call>",
+            0, "", ""},
+       // A nested call quoted inside a newline-framed value is still data.
+       Case{"<tool_call>\n<function=f>\n<parameter=text>\n<tool_call></"
+            "tool_call>"
+            "\n</parameter>\n</function>\n</tool_call>",
+            1, R"({"text":"<tool_call></tool_call>"})", ""},
+       // The client's dialect under the admitted Qwen grammar: only the model's
+       // own envelope is a call, and the block stays visible content.
+       Case{"<invoke name=\"f\">\n<parameter name=\"text\">leakme"
+            "</parameter>\n</invoke>\n"
+            "<tool_call><function=f><parameter=text>hello</parameter>"
+            "</function></tool_call>",
+            1, R"({"text":"hello"})",
+            "<invoke name=\"f\">\n<parameter name=\"text\">leakme</parameter>\n"
+            "</invoke>",
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen, false},
+       // Alone, the client's dialect is prose too: nothing was called.
+       Case{"<invoke name=\"f\">\n<parameter name=\"text\">leakme"
+            "</parameter>\n</invoke>",
+            0, "",
+            "<invoke name=\"f\">\n<parameter name=\"text\">leakme</parameter>\n"
+            "</invoke>",
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen, false},
+       // The captured live shape, verbatim (session row 103263): the model
+       // opens the client's dialect, is cut off before any closer, then writes
+       // a complete call of its own. The truncated attempt is prose the client
+       // may keep; the complete call survives and only it is executed.
+       Case{"<invoke name=\"terminal\">\n<parameter name=\"command\">cd ~/pro"
+            "jects/personal/gufo && gh issue view 383 --json title,state,body"
+            ",labels,comments --jq '{title, state, labels: [.labels[].name], "
+            "comments: [.comments[] | {author: .author.login, body: .body}]}'"
+            " 2>&1 | head -120\n"
+            "<tool_call><function=f><parameter=text>hello</parameter>"
+            "</function></tool_call>",
+            1, R"({"text":"hello"})",
+            "<invoke name=\"terminal\">\n<parameter name=\"command\">cd ~/pro"
+            "jects/personal/gufo && gh issue view 383 --json title,state,body"
+            ",labels,comments --jq '{title, state, labels: [.labels[].name], "
+            "comments: [.comments[] | {author: .author.login, body: .body}]}'"
+            " 2>&1 | head -120",
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen},
+       // Prose before the block survives, and the block survives with it.
+       Case{"Found the gufo sessions. Let me peek at the session structure,"
+            " then extract a summary from each.\n\n<invoke name=\"f\">\n"
+            "<parameter name=\"text\">leakme</parameter>\n</invoke>",
+            0, "",
+            "Found the gufo sessions. Let me peek at the session structure, "
+            "then extract a summary from each.\n\n<invoke name=\"f\">\n"
+            "<parameter name=\"text\">leakme</parameter>\n</invoke>",
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen, false},
+       // A client-dialect block quoted inside an argument is data: the call
+       // that contains it is consumed whole and never re-scanned.
+       Case{
+           "<tool_call><function=f><parameter=text>\n<invoke name=\"f\">"
+           "<parameter name=\"text\">x</parameter></invoke>"
+           "\n</parameter></function></tool_call>",
+           1,
+           R"({"text":"<invoke name=\"f\"><parameter name=\"text\">x</parameter></invoke>"})",
+           ""}}) {
+    for (bool stream : {false, true}) {
+      auto body = schema;
+      body["stream"] = stream;
+      body["tool_choice"] = "auto";
+      FakeBackend backend;
+      backend.tool_format = item.format;
+      for (char byte : item.text)
+        backend.pieces.emplace_back(1, byte);
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 200, "closing framing request succeeds");
+      std::vector<Value> calls;
+      std::string content;
+      if (!stream) {
+        const auto output = gufo::json::parse(response.body);
+        const auto& message =
+            *output.find("choices")->items()[0].find("message");
+        if (const auto* text = message.find("content");
+            text && text->is_string())
+          content = text->get_str();
+        if (const auto* found = message.find("tool_calls"))
+          calls.assign(found->items().begin(), found->items().end());
+      } else {
+        std::string output;
+        response.streaming_body([&](std::string_view part) {
+          output += part;
+          return true;
+        });
+        std::size_t cursor = 0;
+        while ((cursor = output.find("data: ", cursor)) != std::string::npos) {
+          const auto begin = cursor + 6;
+          cursor = output.find('\n', begin);
+          const auto payload = output.substr(begin, cursor - begin);
+          if (payload == "[DONE]")
+            break;
+          const auto event = gufo::json::parse(payload);
+          const auto* choices = event.find("choices");
+          if (!choices || choices->empty())
+            continue;
+          const auto* delta = choices->items()[0].find("delta");
+          if (!delta)
+            continue;
+          content += delta->member_str("content");
+          if (const auto* found = delta->find("tool_calls"))
+            calls.insert(calls.end(), found->items().begin(),
+                         found->items().end());
+        }
+      }
+      if (calls.size() != item.calls ||
+          Trimmed(content) != Trimmed(item.content))
+        std::cerr << "Framing input: " << item.text << "\nstream: " << stream
+                  << "\nExpected calls: " << item.calls
+                  << ", actual: " << calls.size()
+                  << "\nExpected content: " << item.content
+                  << "\nActual content: " << content << '\n';
+      Expect(calls.size() == item.calls, "only complete calls are emitted");
+      Expect(Trimmed(content) == Trimmed(item.content),
+             "response content carries no tool framing");
+      if (item.framing_free)
+        Expect(content.find("</") == std::string::npos &&
+                   content.find("<|") == std::string::npos,
+               "closing framing never reaches assistant content");
+      if (!calls.empty())
+        Expect(calls.back().find("function")->member_str("arguments") ==
+                   item.argument,
+               "argument values terminate at the model's own closer");
+    }
+  }
+}
+
+// Issue #383 follow-up: a model answering *about* the dialect names its tags,
+// and that prose must survive as content. Captured from the live session whose
+// reply was truncated at the first inline mention (assistant row 103597) while
+// a phantom `terminal` call carrying "..." reached the client and ran.
+void TestProseAboutTheDialectIsNotACall() {
+  using gufo::json::Value;
+  const auto schema = gufo::json::parse(R"({
+    "model":"test-model",
+    "messages":[{"role":"user","content":"why was it a bug"}],
+    "tools":[{"type":"function","function":{"name":"f","parameters":{
+      "type":"object","properties":{"text":{"type":"string"}},
+      "required":["text"]}}}]
+  })");
+  const std::string message =
+      "Got it — no comment posted. Here's the explanation, just for you.\n"
+      "\n"
+      "## Why it was a bug\n"
+      "\n"
+      "**The setup.** The Qwen chat model was trained to signal tool calls "
+      "with special markup: `<tool_call>`. The server's job is to act as a "
+      "**translator**: it watches the raw token stream, converts that markup "
+      "into the structured tool_calls field of the OpenAI API, and makes sure "
+      "the *rest* of the markup never appears as text.\n"
+      "\n"
+      "1. **Closing tags escaped into content.** When the call parsed, gufo "
+      "removed the opening envelope but let the tail — `</parameter>`, "
+      "`</invoke>`, `</function>` — escape into content.\n"
+      "\n"
+      "The client repeats `<invoke name=\"terminal\">` in history, so the "
+      "model mimics that dialect. Quoted, the shape is:\n"
+      "\n"
+      "```\n"
+      "<invoke name=\"f\">\n"
+      "<parameter name=\"text\">x</parameter>\n"
+      "</invoke>\n"
+      "```\n"
+      "\n"
+      "The same holds for `<|tool_call|>` and for `<function=f>`. Nothing "
+      "above is a call being made, and none of it may be cut.";
+  for (bool stream : {false, true}) {
+    for (bool bytewise : {false, true}) {
+      auto body = schema;
+      body["stream"] = stream;
+      body["tool_choice"] = "auto";
+      FakeBackend backend;
+      if (bytewise) {
+        for (char byte : message)
+          backend.pieces.emplace_back(1, byte);
+      } else {
+        backend.pieces.push_back(message);
+      }
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 200, "an answer about the dialect is served");
+      std::vector<Value> calls;
+      std::string content;
+      if (!stream) {
+        const auto output = gufo::json::parse(response.body);
+        const auto& choice =
+            *output.find("choices")->items()[0].find("message");
+        if (const auto* text = choice.find("content");
+            text && text->is_string())
+          content = text->get_str();
+        if (const auto* found = choice.find("tool_calls"))
+          calls.assign(found->items().begin(), found->items().end());
+      } else {
+        std::string output;
+        response.streaming_body([&](std::string_view part) {
+          output += part;
+          return true;
+        });
+        std::size_t cursor = 0;
+        while ((cursor = output.find("data: ", cursor)) != std::string::npos) {
+          const auto begin = cursor + 6;
+          cursor = output.find('\n', begin);
+          const auto payload = output.substr(begin, cursor - begin);
+          if (payload == "[DONE]")
+            break;
+          const auto event = gufo::json::parse(payload);
+          const auto* choices = event.find("choices");
+          if (!choices || choices->empty())
+            continue;
+          const auto* delta = choices->items()[0].find("delta");
+          if (!delta)
+            continue;
+          content += delta->member_str("content");
+          if (const auto* found = delta->find("tool_calls"))
+            calls.insert(calls.end(), found->items().begin(),
+                         found->items().end());
+        }
+      }
+      if (calls.empty() && Trimmed(content) != Trimmed(message))
+        std::cerr << "Prose about the dialect, stream=" << stream
+                  << " bytewise=" << bytewise
+                  << "\nExpected content: " << message
+                  << "\nActual content: " << content << '\n';
+      Expect(calls.empty(), "prose that names the dialect is not a call");
+      Expect(Trimmed(content) == Trimmed(message),
+             "an answer about the dialect survives in full");
+    }
+  }
+}
+
 int main() {
   TestStreamingPromptProgress();
   TestResponsesPromptProgress();
@@ -3275,6 +3565,8 @@ int main() {
   TestInvalidToolsFailBeforeGeneration();
   TestToolNameCharacters();
   TestMalformedHistoricalFunctions();
+  TestToolClosingFraming();
+  TestProseAboutTheDialectIsNotACall();
   TestQwenToolBoundariesAndSchema();
   TestDeepSeekToolCallsAreStructured();
   TestDeepSeekRepeatedToolParameters();

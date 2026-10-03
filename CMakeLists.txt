@@ -372,6 +372,7 @@ if (BUILD_TESTING)
 
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp
+    src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
   )
   target_link_libraries(openai_chat_test PRIVATE gufo_core)

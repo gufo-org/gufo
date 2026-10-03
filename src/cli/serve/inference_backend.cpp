@@ -43,6 +43,15 @@
 #endif
 
 namespace gufo::server {
+
+// A selected token ends the turn only when the request asked for end-of-turn
+// detection. Speculative steps admit stop_at_eos=false and report the stop
+// themselves through ResolveDecodedRun, so this stays per-request state.
+template<typename State, typename Tokens>
+bool EndsTurn(const State& state, const Tokens& tokens, int token) {
+  return state.stop_at_eos() && tokens.IsStopToken(token);
+}
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -1166,7 +1175,7 @@ public:
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     auto& qwen = RequireQwenState(state);
     const TextRunnerToken token = qwen.SelectFrontier(sampler);
-    if (qwen.stop_at_eos() && model_->GetTokenizer().IsStopToken(token)) {
+    if (EndsTurn(qwen, model_->GetTokenizer(), token)) {
       return {
           .stop = true,
           .token = 0,
@@ -2632,6 +2641,26 @@ public:
     };
   }
 
+  // Adapter from a decoded MTP step to the shared rule: build the run, let the
+  // state resolve it per token. The engine is told not to stop on a stop token
+  // (`DecodeStep(..., stop_at_eos=false)`) precisely so the rule sees it: the
+  // ending token and the tokens behind it are executed work, and the reported
+  // history has to carry every one of them.
+  void ResolveStepTokens(QwenFlashNextTextRunnerState& qfn, bool engine_stopped,
+                         std::span<const std::int32_t> tokens,
+                         TextDecodeStep* step) const {
+    std::vector<TextRunnerState::DecodedToken> run;
+    run.reserve(tokens.size());
+    for (const std::int32_t token : tokens) {
+      run.push_back({
+          .token = static_cast<TextRunnerToken>(token),
+          .piece = model_->TokenText(token),
+          .stops = EndsTurn(qfn, *model_, token),
+      });
+    }
+    step->stop = qfn.ResolveDecodedRun(run, engine_stopped, &step->selections);
+  }
+
   [[nodiscard]] TextDecodeSelection SelectNext(
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     auto& qfn = RequireQwenFlashNextState(state);
@@ -2644,7 +2673,7 @@ public:
           "Qwen3.8-Flash-Next token selection has no logits");
     }
     const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
-    if (qfn.stop_at_eos() && model_->IsStopToken(token)) {
+    if (EndsTurn(qfn, *model_, token)) {
       return {.stop = true, .token = 0, .piece = {}};
     }
     return {
@@ -2693,8 +2722,12 @@ public:
     std::string error;
     const auto budget =
         std::min<std::size_t>(max_tokens, std::uint64_t{max_draft_tokens_} + 1);
+    // The engine is told not to stop on a stop token so the runner sees it:
+    // the ending token is executed work, and the reported history has to carry
+    // it and the tokens behind it. The engine stops only for its own reasons
+    // (context exhausted, and so on).
     if (!qfn.session().DecodeStep(budget, working_sampler, &decoded, &error,
-                                  qfn.stop_at_eos())) {
+                                  false)) {
       throw std::runtime_error("Qwen3.8-Flash-Next MTP decode failed: " +
                                error);
     }
@@ -2702,15 +2735,7 @@ public:
     // draw so the next batch retains the rejection-conditioned distribution.
     sampler.CopyDrawStateFrom(working_sampler);
     TextDecodeStep step;
-    step.stop = decoded.stop;
-    step.selections.reserve(decoded.tokens.size());
-    for (const std::int32_t token : decoded.tokens) {
-      step.selections.push_back({
-          .stop = false,
-          .token = static_cast<TextRunnerToken>(token),
-          .piece = model_->TokenText(token),
-      });
-    }
+    ResolveStepTokens(qfn, decoded.stop, decoded.tokens, &step);
     qfn.set_position(qfn.session().Position());
     const auto stats_after = qfn.session().Statistics();
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
@@ -2775,7 +2800,8 @@ public:
           {&session,
            std::min<std::size_t>(decodes[i].max_tokens,
                                  std::uint64_t{max_draft_tokens_} + 1),
-           &sampler, &results[i], state.stop_at_eos(), &outcomes[i]});
+           &sampler, &results[i],
+           /*stop_at_eos=*/false, &outcomes[i]});
     }
     std::string error;
     (void)QwenFlashNextSession::DecodeBatch(requests, &error);
@@ -2793,15 +2819,10 @@ public:
       decodes[i].sampler.get().CopyDrawStateFrom(samplers[i]);
       state.set_position(state.session().Position());
       auto& step = steps[i];
-      step.stop = results[i].stop;
+      ResolveStepTokens(state, results[i].stop, results[i].tokens, &step);
       if (active_count > 1 && !results[i].tokens.empty()) {
         step.execution_plan = {.kind = TextExecutionPlanKind::kBatched,
                                .physical_width = active_count};
-      }
-      for (const auto token : results[i].tokens) {
-        step.selections.push_back({.stop = false,
-                                   .token = static_cast<TextRunnerToken>(token),
-                                   .piece = model_->TokenText(token)});
       }
       const auto stats = state.session().Statistics();
       step.draft_tokens = stats.drafted - before[i].drafted;

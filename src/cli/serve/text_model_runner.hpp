@@ -185,6 +185,59 @@ public:
   void SetStopAtEos(bool value) noexcept { stop_at_eos_ = value; }
   [[nodiscard]] bool stop_at_eos() const noexcept { return stop_at_eos_; }
 
+  /// One decoded token: its text and whether the vocabulary ends the turn.
+  struct DecodedToken {
+    TextRunnerToken token{0};
+    std::string piece;
+    /// True when the token ends the turn.
+    bool stops{false};
+  };
+
+  /// Resolve a decoded run of tokens in order, and say whether the turn ends.
+  ///
+  /// A stop token ends the turn wherever the run holds it: one decode runs
+  /// several tokens, and the model choosing the vocabulary's terminator later
+  /// in a step is still an ending, no matter what text surrounds it.
+  ///
+  /// `engine_stopped` carries every reason the engine may have had of its own
+  /// (context exhausted, and so on). `selections` receives the pieces to emit,
+  /// in order, up to an ending turn.
+  bool ResolveDecodedRun(std::span<const DecodedToken> run, bool engine_stopped,
+                         std::vector<TextDecodeSelection>* selections) {
+    for (std::size_t index = 0; index < run.size(); ++index) {
+      const auto& decoded = run[index];
+      if (decoded.stops) {
+        // The engine executed this token before the caller saw it, so it has to
+        // be reported even though it renders nothing: the continuation
+        // checkpoint is taken after it, and dropping it here would put the
+        // session ahead of the history the caller can account for.
+        selections->push_back({
+            .stop = false,
+            .token = decoded.token,
+            .piece = {},
+        });
+        // One decode runs several tokens, so the engine has already executed
+        // whatever followed the ending one. Those tokens are past the end of
+        // the turn: accounted for, so the history still matches the session,
+        // but never rendered.
+        for (const auto& trailing : run.subspan(index + 1)) {
+          selections->push_back({
+              .stop = false,
+              .token = trailing.token,
+              .piece = {},
+          });
+        }
+        return true;
+      }
+      selections->push_back({
+          .stop = false,
+          .token = decoded.token,
+          .piece = decoded.piece,
+      });
+    }
+    return engine_stopped;
+  }
+
   /// Installs a request-scoped cancellation check for model calls that can
   /// yield internally. Implementations that only yield between work units may
   /// keep the default no-op behavior.
