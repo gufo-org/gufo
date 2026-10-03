@@ -2320,6 +2320,37 @@ def check_server_metrics(client, model, checks, width, context, speculative):
         raise AssertionError("invalid sampling request was accepted")
     completed("metrics_rejected_request", rejected)
 
+    # Prefix-sharing followers reserve admission capacity before acquiring a
+    # runner. A newer arrival must remain queued rather than exceed --sessions
+    # or become an active request missing from /slots.
+    def shared_prefix_reservations():
+        from cache_concurrency import system_prompt
+        barrier = threading.Barrier(width + 1)
+        body = {**common, "messages": [
+            {"role": "system", "content": system_prompt("metrics_slot_reservations", 220)},
+            {"role": "user", "content": "Reply with only the code ALPHA."}]}
+        observations = []
+        def send():
+            barrier.wait()
+            return chat_result(client, body)
+        with ThreadPoolExecutor(width + 1) as pool:
+            futures = [pool.submit(send) for _ in range(width + 1)]
+            while not all(future.done() for future in futures):
+                gauges = metrics.read()
+                snapshot = slots()
+                assert gauges[PROCESSING] <= width, gauges
+                observations.append({"processing": gauges[PROCESSING],
+                                     "deferred": gauges[DEFERRED], "slots": snapshot})
+                time.sleep(.01)
+            results = [future.result() for future in futures]
+        assert any(o["processing"] == width and o["deferred"] > 0
+                   for o in observations), observations
+        if width > 1:
+            assert any(r["usage"]["gufo"]["shared_prefix_wait_ms"] > 0 for r in results), results
+        assert all(r["text"].strip() == "ALPHA" for r in results), results
+        return {"results": results, "observations": observations}
+    completed("metrics_shared_prefix_reservations", shared_prefix_reservations)
+
     # Exercise live totals and the deferred gauge with every session occupied.
     # A long constrained value prevents model-specific early EOS. Disconnect
     # after observing admission; do not finish generating this value.

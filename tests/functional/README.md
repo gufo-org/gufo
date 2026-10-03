@@ -114,7 +114,9 @@ For metrics changes, run `--suite metrics` with AR and the affected speculative
 mode. It checks all three text endpoints and reconciles cancelled work with the
 terminal logs. It also checks both slot endpoints, active request identities and
 progress, queued-request exclusion, prompt privacy, idle cleanup, and the
-in-flight KV ratio. Scrapes are not recorded as generation requests.
+in-flight KV ratio. Concurrent shared-prefix requests also check that parked
+followers reserve slots and keep newer arrivals queued within `--sessions`.
+Scrapes are not recorded as generation requests.
 
 For real coding-agent regressions, run `pi_agent.py` against a local server with
 `--base-url`, `--model`, `--pi /path/to/pi-0.87.0`, `--server-log`, and a fresh

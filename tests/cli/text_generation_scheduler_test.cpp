@@ -710,6 +710,54 @@ void TestSharedPrefixWaitRequiresSnapshots() {
          "runners without snapshots never park concurrent requests");
 }
 
+void TestParkedFollowersReserveVisibleSessions() {
+  namespace metrics = gufo::server::detail;
+  auto control = SharedPrefixControl(true);
+  control->block_prefill_label = 1;
+  std::binary_semaphore entered(0), release(0);
+  std::atomic<unsigned> captures{0};
+  control->snapshot_callback = [&] {
+    if (captures.fetch_add(1) == 0) {
+      entered.release();
+      if (!release.try_acquire_for(kTestTimeout))
+        throw std::runtime_error("shared snapshot gate timed out");
+    }
+  };
+  auto scheduler = MakeScheduler(control, 2);
+  const auto processing_before = metrics::RequestsProcessing().load();
+  const auto prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = scheduler->Submit(prompt, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto follower = scheduler->Submit(prompt, 2, 0.0F);
+  control->ReleasePrefill();
+  Expect(entered.try_acquire_for(kTestTimeout),
+         "shared checkpoint capture starts");
+  auto third = scheduler->Submit({2, 20}, 2, 0.0F);
+  bool exceeded_capacity = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  while (std::chrono::steady_clock::now() < deadline) {
+    exceeded_capacity |=
+        metrics::RequestsProcessing().load() - processing_before > 2;
+    std::this_thread::yield();
+  }
+  const auto states = scheduler->SessionStates();
+  const bool reserved = states.size() == 2 && states[0].processing &&
+                        states[1].processing &&
+                        states[0].request_id == leader.id() &&
+                        states[1].request_id == follower.id();
+  const bool queued = third.phase() == TextRequestPhase::kQueued;
+  release.release();
+  (void)leader.Wait();
+  const auto reused = follower.Wait();
+  const auto independent = third.Wait();
+  Expect(!exceeded_capacity && reserved && queued,
+         "parked followers reserve sessions and keep newer arrivals queued");
+  Expect(reused.cached_prompt_tokens > 0 &&
+             independent.tokens == ExpectedTokens(2, 2),
+         "reserved followers resume and then release admission capacity");
+}
+
 void TestRetainedHistoryBeatsSharedPrefixWait() {
   auto control = SharedPrefixControl(true);
   auto scheduler = MakeScheduler(control, 3);
@@ -2370,6 +2418,7 @@ int main() {
   TestLeaderCancelledBeforeFollowerIsAdmitted();
   TestParkedFollowerSurvivesLeaderCancellation();
   TestSharedPrefixWaitRequiresSnapshots();
+  TestParkedFollowersReserveVisibleSessions();
   TestRetainedHistoryBeatsSharedPrefixWait();
   TestAwaitedCheckpointSurvivesCachePressure();
   TestRunnerCanSkipUnusedFinalAdvance();

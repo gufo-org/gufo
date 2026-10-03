@@ -750,7 +750,8 @@ struct TextGenerationScheduler::Impl {
       std::size_t waiting) {
     if (std::exchange(request->prefix_considered, true) ||
         !request->cache_prompt ||
-        // Parked requests hold no session; bound them like admitted ones.
+        // Parked requests hold no runner lease; bound their reservations like
+        // admitted ones.
         waiting + 1 >= runner_pool->capacity())
       return false;
     std::shared_ptr<ScheduledRequest> leader;
@@ -871,8 +872,16 @@ struct TextGenerationScheduler::Impl {
            prefilling.size() + decoding.size() + capturing.size() <
                runner_pool->capacity()) {
       auto request = PopReleased(waiting);
-      if (request == nullptr)
+      if (request == nullptr) {
+        // Parked followers already reserve a visible admission session. They
+        // may resume in place, but new arrivals must respect those
+        // reservations.
+        if (prefilling.size() + decoding.size() + capturing.size() +
+                waiting.size() >=
+            runner_pool->capacity())
+          return;
         request = PopQueued();
+      }
       if (request == nullptr) {
         return;
       }
@@ -1595,7 +1604,7 @@ struct TextGenerationScheduler::Impl {
         const auto wake = [&] {
           return stop_token.stop_requested() || stopping ||
                  (queued_count != 0 &&
-                  capturing.size() < runner_pool->capacity());
+                  capturing.size() + waiting.size() < runner_pool->capacity());
         };
         if (capturing.empty() && waiting.empty())
           queue_condition.wait(lock, wake);
