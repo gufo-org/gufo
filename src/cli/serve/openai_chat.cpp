@@ -64,8 +64,11 @@ ToolMarkerSet ToolMarkers(
     std::optional<sampling::JsonConstraint::ToolFormat> format) {
   using Format = sampling::JsonConstraint::ToolFormat;
   static constexpr std::array<std::string_view, 1> qwen{"<tool_call>"};
-  static constexpr std::array<std::string_view, 1> deepseek{
-      "<｜DSML｜tool_calls>"};
+  // The template writes "\n\n" before the call block. As in llama.cpp
+  // common/parsers/deepseek.cpp (TC_SEPARATOR + FC_START), that separator is
+  // framing: returning it as content would double it when history is replayed.
+  static constexpr std::array<std::string_view, 2> deepseek{
+      "\n\n<｜DSML｜tool_calls>", "<｜DSML｜tool_calls>"};
   // The JSON fallback has no native counterpart in llama.cpp. Its grammar
   // leaves text before <tool_call> unconstrained, where models still write
   // their native call syntax; keep recognizing every opener there.

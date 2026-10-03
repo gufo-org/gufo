@@ -2829,6 +2829,49 @@ void TestNativeToolDialectSelection() {
       }
     }
   }
+  // DeepSeek's template writes "\n\n" before its call block. That separator
+  // is framing, as in llama.cpp's parser; returned as content, the replayed
+  // history would carry it twice and miss the generated continuation.
+  for (const std::string prose : {"", "Reading the fixture."}) {
+    for (const bool stream : {false, true}) {
+      auto body = gufo::json::parse(R"({
+      "model":"test-model","reasoning_effort":"none",
+      "messages":[{"role":"user","content":"Read fixture.xml."}],
+      "tool_choice":"auto","tools":[{"type":"function","function":{
+        "name":"read","parameters":{"type":"object",
+        "properties":{"path":{"type":"string"}},"required":["path"]}}}]})");
+      body["stream"] = stream;
+      FakeBackend backend;
+      backend.tool_format = Format::kDeepSeek;
+      for (const char byte :
+           prose + "\n\n" + native_call(Format::kDeepSeek, "fixture.xml"))
+        backend.pieces.emplace_back(1, byte);
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      std::string content;
+      std::size_t calls = 0;
+      const auto collect = [&](const Value& event) {
+        for (const auto& choice : event.find("choices")->items()) {
+          const auto* message = choice.find(stream ? "delta" : "message");
+          content += message->member_str("content");
+          if (const auto* found = message->find("tool_calls"))
+            calls += found->size();
+        }
+      };
+      if (stream) {
+        response.streaming_body([&](std::string_view chunk) {
+          const auto payload = chunk.substr(chunk.find("data: ") + 6);
+          if (!payload.starts_with("[DONE]"))
+            collect(gufo::json::parse(payload));
+          return true;
+        });
+      } else {
+        collect(gufo::json::parse(response.body));
+      }
+      Expect(response.status == 200 && calls == 1 && content == prose,
+             "the separator before a DeepSeek call block is not content");
+    }
+  }
 }
 
 void TestNativeReferencedArgumentTypes() {
