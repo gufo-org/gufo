@@ -75,7 +75,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `image-inputs` | PNG, JPEG and WebP uploads in Chat and Responses; URL spellings, bad uploads and recovery |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
-| `tool-edges` | Referenced argument types, literal CR, unusual keys and named Responses metadata |
+| `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata and foreign tool markers in prose |
 | `tool-reasoning` | Quoted tags, literal edits, early stops and disabled tools across Chat/Responses |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |

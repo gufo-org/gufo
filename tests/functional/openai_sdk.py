@@ -1542,6 +1542,28 @@ def check_tool_edges(client, model, checks):
         assert json.loads(calls[0].arguments) == {key: literal}, result
         checks[f"responses_literal_cr_key{key!r}"] = result.to_dict()
 
+    # Prose may quote another dialect's envelope before a real call. Only the
+    # admitted format's opener starts tool output; the quote stays text.
+    read = {"name": "read", "description": "Read a file.", "parameters": {
+        "type": "object", "properties": {"path": {"type": "string"}},
+        "required": ["path"]}}
+    literal = "<tool_calls></tool_calls>"
+    prompt = (f"Reply with the exact text {literal} on the first line, then call "
+              "the read tool with path fixture.xml.")
+    for stream in (False, True):
+        result = chat_result(client, dict(
+            **common, messages=[{"role": "user", "content": prompt}],
+            tools=[{"type": "function", "function": read}], tool_choice="auto",
+            reasoning_effort="none", max_completion_tokens=200), stream)
+        assert literal in result["text"], result
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        function = result["tools"][0]["function"]
+        assert function["name"] == "read", result
+        assert json.loads(function["arguments"]) == {"path": "fixture.xml"}, result
+        assert not any(marker in result["text"] for marker in
+                       ("<tool_call>", "<function=", "</parameter>")), result
+        checks[f"foreign_marker_prose_stream{stream}"] = result
+
 
 def check_state_edges(client, model, checks, speculative, vision=False):
     """Mode proof and request-local grammar state across limits, errors and reuse."""
