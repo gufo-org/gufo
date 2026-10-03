@@ -1,0 +1,30 @@
+From ae4cffc06a368893d91be2739bb6482182681efc Mon Sep 17 00:00:00 2001
+From: Robin Voetter <rvoetter@amd.com>
+Date: Sat, 4 Apr 2026 22:22:56 +0000
+Subject: [PATCH] [rocprofiler-sdk] stop manually setting warning flags on
+ integration tests
+
+The primary motivation for this change is that -Werror is added to the compiler
+options unconditionally, which causes problems when compiling these tests during
+downstream packaging builds. The rocprofiler-sdk::tests-build-flags and
+rocprofiler-sdk::tests-common targets already include these warning flags, and this
+target also already handles setting -Werror conditionally based on ROCPROF_BUILD_WERROR.
+Some integration tests also set -Wpedantic, these have been left as-is. When
+ROCPROF_BUILD_WERROR is set to ON (default), behavior is the same as before this commit.
+---
+ tests/bin/attachment-test/CMakeLists.txt                  | 6 +++---
+ tests/bin/hip-graph/CMakeLists.txt                        | 5 +++--
+ tests/bin/hip-in-libraries/CMakeLists.txt                 | 6 +++---
+ tests/bin/hsa-code-object/CMakeLists.txt                  | 1 -
+ tests/bin/hsa-memory-allocation/CMakeLists.txt            | 3 +--
+ tests/bin/hsa-queue-dependency/CMakeLists.txt             | 1 -
+ tests/bin/multistream/CMakeLists.txt                      | 5 +++--
+ .../bin/pc-sampling/exec-mask-manipulation/CMakeLists.txt | 6 +++---
+ tests/bin/reproducible-dispatch-count/CMakeLists.txt      | 8 ++++----
+ tests/bin/reproducible-runtime/CMakeLists.txt             | 8 ++++----
+ tests/bin/scratch-memory/CMakeLists.txt                   | 3 +--
+ tests/bin/simple-transpose/CMakeLists.txt                 | 8 ++++----
+ tests/bin/transpose/CMakeLists.txt                        | 2 +-
+ tests/bin/vector-operations/CMakeLists.txt                | 2 +-
+ 14 files changed, 31 insertions(+), 33 deletions(-)
+
