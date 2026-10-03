@@ -989,10 +989,53 @@ void TestCompatibilityRequests() {
            {"type":"thinking","thinking":"plan"}]}]})",
         R"({"messages":[{"role":"user","content":"hi"}],"thinking":true})",
         R"({"messages":[{"role":"user","content":"hi"}],
-            "thinking":{"type":"adaptive"}})",
+            "thinking":{"type":"enabled","budget_tokens":0}})",
         R"({"messages":[{"role":"user","content":"hi"}],
-            "thinking":{"type":"enabled","budget_tokens":0}})"})
+            "thinking":{"type":"adaptive","display":"full"}})",
+        R"({"messages":[{"role":"user","content":"hi"}],
+            "output_config":{"effort":"adaptive"}})",
+        R"({"messages":[{"role":"user","content":"hi"}],
+            "output_config":{"effort":"minimal"}})",
+        R"({"messages":[{"role":"user","content":"hi"}],
+            "output_config":"high"})",
+        R"({"messages":[{"role":"user","content":"hi"}],
+            "output_config":{"format":{"type":"json_schema"}}})",
+        R"({"messages":[{"role":"user","content":"hi"}],
+            "reasoning_effort":"high"})",
+        R"({"messages":[{"role":"user","content":"hi"}],
+            "chat_template_kwargs":{"enable_thinking":true}})"})
     ExpectStatus(server.Post("/v1/messages", invalid), 400);
+
+  // The reasoning fields Claude Code sends on every request. Adaptive keeps
+  // the server's thinking default and the reasoning is still returned.
+  server.backend->SetOutput("<think>plan</think>answer");
+  for (const bool server_thinking : {false, true}) {
+    server.backend->reasoning.enabled = server_thinking;
+    server.backend->reasoning.effort = gufo::ReasoningEffort::kLow;
+    const auto adaptive = response_body(
+        server.Post("/v1/messages", R"({"max_tokens":256,"stream":false,
+            "thinking":{"type":"adaptive","display":"omitted"},
+            "output_config":{"effort":"xhigh"},
+            "messages":[{"role":"user","content":"hi"}]})"));
+    if (server_thinking)
+      assert(adaptive.find("content")->items()[0].member_str("thinking") ==
+             "plan");
+    const auto reasoning = server.backend->LastCall().chat.reasoning;
+    assert(reasoning.enabled == server_thinking);
+    assert(reasoning.effort == gufo::ReasoningEffort::kXHigh);
+  }
+  server.backend->reasoning = {};
+  const auto updates = response_body(server.Post(
+      "/v1/messages", R"({"messages":[{"role":"user","content":"hi"}],
+          "thinking":{"type":"enabled","display":"updates"}})"));
+  assert(updates.find("content")->items()[0].member_str("thinking") == "plan");
+  // Effort never enables thinking.
+  response_body(server.Post("/v1/messages",
+                            R"({"messages":[{"role":"user","content":"hi"}],
+          "thinking":{"type":"disabled"},"output_config":{"effort":"low"}})"));
+  assert(server.backend->LastCall().chat.reasoning.enabled == false);
+  assert(server.backend->LastCall().chat.reasoning.effort ==
+         gufo::ReasoningEffort::kLow);
   server.backend->SetOutput("ok");
 }
 
