@@ -1369,6 +1369,80 @@ void TestGeneratedOutputLimitAppliesWithoutStreaming() {
          "a scheduler-classified failure never probes the device");
 }
 
+void TestCompletedAbandonedStreamReleasesOutputBudget() {
+  for (const bool replace_handle : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->block_prefill_label = 2;
+    auto scheduler =
+        MakeScheduler(control, 1, {},
+                      {
+                          .max_buffered_output_bytes_per_request = 3,
+                          .max_buffered_output_bytes_total = 3,
+                      });
+
+    TextGenerationScheduler::Request barrier;
+    {
+      auto abandoned = scheduler->Submit({1}, 1, 0.0F, {}, true);
+      barrier = scheduler->Submit({2}, 1, 0.0F);
+      // The next request cannot enter this single runner until the first has
+      // completed. Leave its streamed token unread, as when HTTP headers fail.
+      control->WaitForPrefill(2);
+      Expect(abandoned.phase() == TextRequestPhase::kTerminal &&
+                 scheduler->buffered_output_bytes() == 3,
+             "completed stream retains its unread output before abandonment");
+      if (replace_handle)
+        abandoned = {};
+    }
+    control->ReleasePrefill();
+    Expect(barrier.Wait().tokens == ExpectedTokens(2, 1),
+           "abandoning completed output leaves the active request usable");
+
+    std::string output;
+    TextGenerationScheduler::Result replacement;
+    try {
+      replacement = scheduler->Submit({3}, 1, 0.0F, {}, true)
+                        .Wait([&](std::string_view piece) {
+                          output += piece;
+                          return true;
+                        });
+    } catch (const TextGenerationError& error) {
+      Expect(false,
+             std::string("replacement stream failed after abandonment: ") +
+                 error.what());
+    }
+    Expect(replacement.tokens == ExpectedTokens(3, 1) && output == "300" &&
+               !replacement.cancelled,
+           "replacement stream can reuse abandoned output capacity");
+    Expect(scheduler->buffered_output_bytes() == 0,
+           "abandoned and consumed output leave no reserved capacity");
+  }
+}
+
+void TestCompletedStreamOutlivesScheduler() {
+  for (const bool consume : {false, true}) {
+    TextGenerationScheduler::Request request;
+    {
+      auto scheduler = MakeScheduler(std::make_shared<FakeControl>(), 1);
+      request = scheduler->Submit({1}, 1, 0.0F, {}, true);
+      // Completion of later work proves this unread stream is already done.
+      (void)scheduler->Submit({2}, 1, 0.0F).Wait();
+      Expect(request.phase() == TextRequestPhase::kTerminal,
+             "stream completes before its scheduler is destroyed");
+    }
+    if (consume) {
+      std::string output;
+      const auto result = request.Wait([&](std::string_view piece) {
+        output += piece;
+        return true;
+      });
+      Expect(result.tokens == ExpectedTokens(1, 1) && output == "100" &&
+                 !result.cancelled,
+             "completed output remains readable after scheduler destruction");
+    }
+    // Both unread and consumed requests release their final owner here.
+  }
+}
+
 void TestMidGenerationAdmissionAndIsolatedTrajectories() {
   auto control = std::make_shared<FakeControl>();
   control->block_advance_label = 1;
@@ -2443,6 +2517,8 @@ int main() {
   TestPendingClientsAreRoundRobinAndIndividuallyBounded();
   TestExpiredQueuedRequestNeverConsumesState();
   TestSlowConsumerOutputIsBoundedAndReclaimed();
+  TestCompletedAbandonedStreamReleasesOutputBudget();
+  TestCompletedStreamOutlivesScheduler();
   TestGeneratedOutputLimitAppliesWithoutStreaming();
   TestMidGenerationAdmissionAndIsolatedTrajectories();
   TestMidGenerationRequestJoinsNextDecodeBatch();
