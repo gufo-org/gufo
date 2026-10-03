@@ -1166,11 +1166,33 @@ void ParseQwenCalls(
       }
       complete = valid && consume("</function>") && consume(end);
     } else {
-      // JSON calls already encode their argument types. Try closing markers
-      // until the preceding payload is complete JSON (a marker in a quoted
-      // string cannot terminate the call).
+      // Recovery boundaries belong to the envelope, not quoted JSON data.
+      // An unfinished string owns the remaining bytes, including tool tags.
+      bool in_string = false;
+      bool escaped = false;
       std::size_t close = 0;
-      while ((close = body.find(end, close)) != std::string_view::npos) {
+      for (; close < body.size(); ++close) {
+        const char byte = body[close];
+        if (in_string) {
+          if (escaped)
+            escaped = false;
+          else if (byte == '\\')
+            escaped = true;
+          else if (byte == '"')
+            in_string = false;
+          continue;
+        }
+        if (byte == '"') {
+          in_string = true;
+          continue;
+        }
+        if (body.substr(close).starts_with(end) ||
+            body.substr(close).starts_with(start))
+          break;
+      }
+      cursor = static_cast<std::size_t>(body.data() - text.data()) + close;
+      if (body.substr(close).starts_with(end)) {
+        cursor += end.size();
         const auto parsed = TryParseJson(Trim(body.substr(0, close)));
         if (parsed && parsed->is_object()) {
           call.name = parsed->member_str("name");
@@ -1184,9 +1206,7 @@ void ParseQwenCalls(
             complete = true;
             body.remove_prefix(close + end.size());
           }
-          break;
         }
-        close += end.size();
       }
     }
     if (complete && !tools.empty() &&

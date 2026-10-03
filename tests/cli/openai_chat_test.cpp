@@ -2493,6 +2493,130 @@ void TestNativeToolTransports() {
       }
 }
 
+void TestJsonToolStringOwnership() {
+  using gufo::json::Value;
+  using Constraint = gufo::sampling::JsonConstraint;
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  const auto schema = gufo::json::parse(R"({
+    "type":"object","properties":{"content":{"type":"string","pattern":".*"}},
+    "required":["content"],"additionalProperties":false
+  })");
+  Expect(
+      !Constraint::ToolParameters(schema, false, Constraint::ToolFormat::kQwen),
+      "string patterns require JSON tool framing");
+  const auto grammar = Constraint::WithTools(
+      nullptr, {{"write", Constraint::Compile(schema, false)}}, false, true);
+  auto request = gufo::json::parse(R"({
+    "model":"test-model","messages":[{"role":"user","content":"write"}],
+    "tools":[]
+  })");
+  auto tool = Value::object();
+  tool["type"] = "function";
+  tool["function"]["name"] = "write";
+  tool["function"]["parameters"] = schema;
+  request["tools"].push_back(std::move(tool));
+  // Complete @aarononeal's write example from #383 as JSON string data.
+  std::string literal =
+      "<tool_call>\n<function=write>\n<parameter=content>\nAAAA\n"
+      "</parameter>\n</function>\n</tool_call>";
+  std::erase(literal, '\n');
+  for (const auto* prefix : {"", "quoted \"text\" and \\ "}) {
+    Value arguments = Value::object();
+    arguments["content"] = std::string(prefix) + literal;
+    const std::string complete =
+        "<tool_call>{\"name\":\"write\",\"arguments\":" + arguments.dump() +
+        "}</tool_call>";
+    const auto truncated =
+        complete.substr(0, complete.find(literal) + literal.size());
+    for (const bool partial : {false, true}) {
+      const auto& raw = partial ? truncated : complete;
+      auto state = grammar->Start();
+      for (const unsigned char byte : raw)
+        state = grammar->Advance(state, byte);
+      Expect(!state.empty() && grammar->Complete(state) == !partial,
+             "literal XML is an admitted JSON call or an unfinished prefix");
+      for (const auto finish : {Finish::kLength, Finish::kStopSequence}) {
+        for (const bool stream : {false, true}) {
+          auto body = request;
+          body["stream"] = stream;
+          FakeBackend backend;
+          backend.finish_reason = finish;
+          if (finish == Finish::kStopSequence)
+            backend.stop_sequence = "STOP";
+          for (const char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+          const auto response =
+              gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          Expect(response.status == 200,
+                 "JSON tool ownership request succeeds");
+          std::vector<Value> calls;
+          std::string content;
+          const auto inspect = [&](const Value& event) {
+            if (const auto* choices = event.find("choices"))
+              for (const auto& choice : choices->items()) {
+                const auto* message = choice.find(stream ? "delta" : "message");
+                if (!message)
+                  continue;
+                content += message->member_str("content");
+                if (const auto* found = message->find("tool_calls"))
+                  calls.insert(calls.end(), found->items().begin(),
+                               found->items().end());
+              }
+          };
+          if (stream) {
+            response.streaming_body([&](std::string_view chunk) {
+              const auto pos = chunk.find("data: ");
+              if (pos != std::string_view::npos &&
+                  !chunk.substr(pos + 6).starts_with("[DONE]"))
+                inspect(gufo::json::parse(chunk.substr(pos + 6)));
+              return true;
+            });
+          } else {
+            inspect(gufo::json::parse(response.body));
+          }
+          if (partial && !calls.empty())
+            std::cerr << "Truncated JSON produced: " << calls.front().dump()
+                      << '\n';
+          Expect(calls.size() == (partial ? 0 : 1),
+                 "an unfinished JSON string cannot invoke its literal XML");
+          Expect(content.empty(), "JSON tool framing stays out of content");
+          if (!partial)
+            Expect(calls.front().find("function")->member_str("arguments") ==
+                       arguments.dump(),
+                   "a complete JSON call preserves its literal XML argument");
+        }
+      }
+    }
+    for (const int rejected_shape : {0, 1, 2}) {
+      auto rejected = Value::object();
+      rejected["name"] = rejected_shape == 0 ? "undeclared" : "write";
+      rejected["arguments"] = arguments;
+      if (rejected_shape == 1)
+        rejected["name"] = "";
+      if (rejected_shape == 2) {
+        rejected["arguments"] = Value::array();
+        rejected["arguments"].push_back(std::string(prefix) + literal);
+      }
+      FakeBackend backend;
+      backend.pieces = {"<tool_call>" + rejected.dump() + "</tool_call>" +
+                        complete};
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(request.dump()), backend);
+      Expect(response.status == 200,
+             "rejected JSON calls permit later recovery");
+      const auto output = gufo::json::parse(response.body);
+      const auto* calls =
+          output.find("choices")->items()[0].find("message")->find(
+              "tool_calls");
+      Expect(
+          calls && calls->size() == 1 &&
+              calls->items()[0].find("function")->member_str("arguments") ==
+                  arguments.dump(),
+          "rejected JSON envelopes cannot invoke quoted XML during recovery");
+    }
+  }
+}
+
 void TestNativeReferencedArgumentTypes() {
   using gufo::json::Value;
   const auto arguments = gufo::json::parse(
@@ -2931,6 +3055,7 @@ int main() {
   TestStopInsideToolArguments();
   TestResponsesOutput();
   TestNativeToolTransports();
+  TestJsonToolStringOwnership();
   TestNativeReferencedArgumentTypes();
   TestWildcardToolTypes();
   TestToolMetadataAndFraming();
