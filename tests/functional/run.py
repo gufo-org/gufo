@@ -29,7 +29,7 @@ from metrics import compare, comparison_status, join_server_timings, timing_meas
 
 TESTS = Path(__file__).resolve().parent
 SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
-          "tool-reasoning",
+          "tool-reasoning", "tool-text",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache")
 SAMPLING = {
@@ -49,7 +49,7 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
 def provenance():
     source = hashlib.sha256()
     for name in ("run.py", "metrics.py", "progress.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
-                 "tool_reasoning.py", "tool_agent.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py",
+                 "tool_reasoning.py", "tool_text.py", "tool_agent.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py",
                  "cache_disk_spacing.py"):
         source.update((TESTS / name).read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
@@ -246,7 +246,7 @@ def main():
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite != "auto-tools"
+        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-text")
                     and (suite != "image-inputs" or option(command, "--mmproj") is not None)]
     selected = list(dict.fromkeys(selected))
     disk_enabled = "cache" in selected

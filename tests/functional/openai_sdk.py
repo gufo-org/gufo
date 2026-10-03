@@ -25,6 +25,7 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, Ope
 from openai.types import Completion, CompletionChoice
 from metrics import CaseComplete, Recorder
 from tool_reasoning import check_tool_reasoning, response_result
+from tool_text import check_tool_text
 from discovery import check_discovery
 from image_inputs import check_image_inputs
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
@@ -2454,7 +2455,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
 
 
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
-              "tool-reasoning",
+              "tool-reasoning", "tool-text",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix")
 
@@ -2544,6 +2545,8 @@ def main():
             "tool-edges": lambda: check_tool_edges(
                 client, args.model, checks, args.sampling_preset),
             "tool-reasoning": lambda: check_tool_reasoning(client, args.model, checks, chat_result),
+            "tool-text": lambda: check_tool_text(
+                client, args.model, checks, chat_result, response_result),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
@@ -2578,7 +2581,8 @@ def main():
             "cache-shared-prefix": lambda: check_cache_shared_prefix(
                 client, args.model, checks, chat_result),
         }
-        selected = ([name for name in suites if name != "image-inputs" or args.vision]
+        selected = ([name for name in suites if name != "tool-text"
+                     and (name != "image-inputs" or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
         for name in selected:

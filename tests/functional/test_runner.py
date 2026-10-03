@@ -22,6 +22,7 @@ from metrics import (CaseComplete, Recorder, canonical, compare, join_server_tim
                      qualify, summarize, validate_tool_events)
 from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit
+from tool_text import SUFFIXES, assert_tool_text, check_tool_text
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
@@ -36,6 +37,55 @@ from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_tool_text_rejects_lost_prose_and_phantom_calls(self):
+        call = {"function": {"name": "read", "arguments": '{"path":"fixture.txt"}'}}
+        for suffix in SUFFIXES.values():
+            valid = dict(text=suffix, reasoning="", finish="tool_calls", tools=[call])
+            assert_tool_text(valid, suffix)
+            for changes in ({"text": ""}, {"text": suffix[:-1]},
+                            {"tools": [call, call]}, {"tools": []},
+                            {"tools": [{"function": {"name": "read",
+                                "arguments": '{"path":"example.txt"}'}}]},
+                            {"reasoning": "unexpected thought"}, {"finish": "length"}):
+                with self.subTest(suffix=suffix, changes=changes), self.assertRaises(AssertionError):
+                    assert_tool_text({**valid, **changes}, suffix)
+
+    def test_tool_text_dispatch_and_failed_result_retention(self):
+        requests = []
+        def collect(endpoint):
+            def result(client, request, streaming):
+                requests.append((endpoint, request, streaming))
+                prompt = (request["messages"][0]["content"] if endpoint == "chat"
+                          else request["input"])
+                suffix = next(value for value in SUFFIXES.values() if prompt.endswith(value))
+                return dict(text=suffix, reasoning="", finish="tool_calls", tools=[{
+                    "function": {"name": "read", "arguments": '{"path":"fixture.txt"}'}}])
+            return result
+        checks = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_tool_text(None, "fixture", checks, collect("chat"), collect("responses"))
+        self.assertEqual(len(requests), 8)
+        self.assertEqual(len(checks), 8)
+        self.assertEqual([(endpoint, stream) for endpoint, _, stream in requests],
+                         [("chat", False), ("chat", True),
+                          ("responses", False), ("responses", True)] * 2)
+        self.assertEqual(sum(request.get("max_completion_tokens", request.get("max_output_tokens"))
+                             for _, request, _ in requests), 3072)
+        self.assertTrue(all(request["tool_choice"] == "auto"
+                            and request["extra_body"]["cache_prompt"] is False
+                            for _, request, _ in requests))
+
+        failed = {}
+        def missing_text(client, request, streaming):
+            return {**collect("chat")(client, request, streaming), "text": ""}
+        requests.clear()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(
+                AssertionError, "cannot distinguish model instruction-following"):
+            check_tool_text(None, "fixture", failed, missing_text, collect("responses"))
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(list(failed), ["tool_text_plain_chat_buffered"])
+        self.assertEqual(failed["tool_text_plain_chat_buffered"]["text"], "")
+
     def test_pi_proxy_discovery_and_missing_content_type(self):
         import http.client
         import http.server

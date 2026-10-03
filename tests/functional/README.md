@@ -77,6 +77,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata and foreign tool markers in prose |
 | `tool-reasoning` | Quoted tags, literal edits, early stops and disabled tools across Chat/Responses |
+| `tool-text` | Opt-in tool-and-text diagnostic: one real call plus prose or a literal invocation example, buffered and streamed through both APIs |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
@@ -104,7 +105,21 @@ the expectation is explicit rather than inferred from `--mmproj`.
 For `image-inputs`, pass the model's `--mmproj` in the server command. It uses
 small fixed images and is included in `all` only when `--mmproj` is supplied.
 
-Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
+Repeat `--suite` to select affected tests; `--suite all` runs the standard suites.
+`tool-text` requires explicit selection. It sends eight bounded, greedy, uncached
+requests asking for one tool call followed by visible text. No tools are executed.
+Start with `--suite tool-text --through-case tool-text:tool_text_plain_chat_buffered`
+on the affected model in AR mode; retain that result before running the full suite
+and affected speculative mode. Each request must return the requested text
+(ignoring surrounding whitespace) and one correctly formed call. A model that
+omits the text fails this diagnostic;
+omission is not silently counted as coverage. Parsed API output cannot distinguish
+model instruction-following from parser text loss, or prove where the text appeared
+relative to the raw envelope. Deterministic adapter tests establish those raw-output
+boundaries; this live suite checks the requested tool-and-text contract and normal
+per-request timings. Missing live model evidence remains unqualified.
+
+For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
 uses its own 8 GiB disk budget and 1 GiB staging area inside the output directory;
 the runner removes that disk cache when the run ends, keeping reports and logs.
