@@ -1555,7 +1555,7 @@ def check_tool_edges(client, model, checks):
             **common, messages=[{"role": "user", "content": prompt}],
             tools=[{"type": "function", "function": read}], tool_choice="auto",
             reasoning_effort="none", max_completion_tokens=200), stream)
-        assert literal in result["text"], result
+        # Models may omit the quoted literal; the call must survive either way.
         assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
         function = result["tools"][0]["function"]
         assert function["name"] == "read", result

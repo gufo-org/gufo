@@ -66,7 +66,10 @@ ToolMarkerSet ToolMarkers(
   static constexpr std::array<std::string_view, 1> qwen{"<tool_call>"};
   static constexpr std::array<std::string_view, 1> deepseek{
       "<｜DSML｜tool_calls>"};
-  if (!format)
+  // The JSON fallback has no native counterpart in llama.cpp. Its grammar
+  // leaves text before <tool_call> unconstrained, where models still write
+  // their native call syntax; keep recognizing every opener there.
+  if (!format || *format == Format::kJson)
     return kToolMarkers;
   // Match the canonical opener selected by JsonConstraint::WithTools. Other
   // dialects are ordinary prose under that grammar, not additional calls.

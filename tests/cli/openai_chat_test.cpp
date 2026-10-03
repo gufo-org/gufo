@@ -2646,27 +2646,69 @@ void TestNativeToolDialectSelection() {
     return "<tool_call>\n<function=read>\n<parameter=path>\n" +
            std::string(path) + "\n</parameter>\n</function>\n</tool_call>";
   };
-  for (const auto format : {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+  // The JSON fallback leaves text before <tool_call> unconstrained. A native
+  // DeepSeek call written there remains a call, as before this change.
+  {
     auto schema = gufo::json::parse(R"({"type":"object",
+    "properties":{"path":{"type":"string","pattern":"^[a-z.]+$"}},
+    "required":["path"],"additionalProperties":false})");
+    Expect(!JsonConstraint::ToolParameters(schema, false, Format::kDeepSeek),
+           "patterned string requires JSON tool fallback");
+    auto body = gufo::json::parse(R"({
+    "model":"test-model","reasoning_effort":"none",
+    "messages":[{"role":"user","content":"Read fixture.xml."}],
+    "tool_choice":"auto","tools":[{"type":"function","function":{
+      "name":"read","strict":false}}]})");
+    auto tool = body["tools"].items()[0];
+    tool["function"]["parameters"] = schema;
+    body["tools"] = Value::array();
+    body["tools"].push_back(std::move(tool));
+    for (const bool stream : {false, true}) {
+      body["stream"] = stream;
+      FakeBackend backend;
+      backend.tool_format = Format::kJson;
+      backend.pieces = {native_call(Format::kDeepSeek, "fixture.xml")};
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 200, "JSON fallback request succeeds");
+      std::string content;
+      std::vector<std::string> arguments;
+      const auto collect = [&](const Value& event) {
+        for (const auto& choice : event.find("choices")->items()) {
+          const auto* message = choice.find(stream ? "delta" : "message");
+          content += message->member_str("content");
+          if (const auto* calls = message->find("tool_calls"))
+            for (const auto& item : calls->items())
+              arguments.push_back(
+                  item.find("function")->member_str("arguments"));
+        }
+      };
+      if (stream) {
+        response.streaming_body([&](std::string_view chunk) {
+          const auto payload = chunk.substr(chunk.find("data: ") + 6);
+          if (!payload.starts_with("[DONE]"))
+            collect(gufo::json::parse(payload));
+          return true;
+        });
+      } else {
+        collect(gufo::json::parse(response.body));
+      }
+      Expect(arguments == std::vector<std::string>{R"({"path":"fixture.xml"})"},
+             "a native call written under the JSON fallback is returned");
+      Expect(content.find("DSML") == std::string::npos,
+             "the recognized native call is not visible content");
+    }
+  }
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto schema = gufo::json::parse(R"({"type":"object",
     "properties":{"path":{"type":"string"}},
     "required":["path"],"additionalProperties":false})");
-    if (format == Format::kJson) {
-      // This schema forces even a native DeepSeek runner to use JSON. The
-      // admitted request must report the effective format after that fallback.
-      schema["properties"]["path"] =
-          gufo::json::parse(R"({"anyOf":[{"type":"string"},{"type":"null"}]})");
-      Expect(!JsonConstraint::ToolParameters(schema, false, Format::kDeepSeek),
-             "nullable string requires JSON tool fallback");
-    }
     const auto parameters =
         JsonConstraint::ToolParameters(schema, false, format);
     Expect(parameters != nullptr, "file tool has a supported wire format");
     const auto grammar = JsonConstraint::WithTools(
         nullptr, {{"read", parameters}}, false, true, format);
-    const std::string call =
-        format == Format::kJson
-            ? R"(<tool_call>{"name":"read","arguments":{"path":"fixture.xml"}}</tool_call>)"
-            : native_call(format, "fixture.xml");
+    const std::string call = native_call(format, "fixture.xml");
     const auto foreign =
         format == Format::kDeepSeek ? Format::kQwen : Format::kDeepSeek;
     const std::string suffix =
