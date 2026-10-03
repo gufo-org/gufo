@@ -252,6 +252,13 @@ public:
     virtual Result Wait(const TokenCallback& on_token = {},
                         const ProgressCallback& on_progress = {}) = 0;
     virtual void Cancel() noexcept = 0;
+    /// Effective constrained tool format, including any schema fallback.
+    /// Available before Wait and stable for this admitted request. Backends
+    /// without this metadata retain the adapter's legacy format detection.
+    [[nodiscard]] virtual std::optional<sampling::JsonConstraint::ToolFormat>
+    ToolFormat() const {
+      return std::nullopt;
+    }
   };
 
   TextGenerationBackend() = default;

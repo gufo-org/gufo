@@ -57,7 +57,9 @@ void SetError(std::string* error, std::string message) {
 
 std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
-    sampling::SamplingConfig* sampling) {
+    sampling::SamplingConfig* sampling,
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format =
+        nullptr) {
   if (!request.response_format &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))
@@ -98,6 +100,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
     grammar = sampling::JsonConstraint::WithTools(
         grammar, std::move(tools), required,
         !request.response_format && request.parallel_tool_calls, format);
+    if (tool_format)
+      *tool_format = format;
     if (format == sampling::JsonConstraint::ToolFormat::kJson)
       instruction +=
           "\nIf a tool is needed, respond using the JSON tool-call form "
@@ -2936,9 +2940,11 @@ struct InferenceBackend::Impl {
     ScheduledGenerationRequest(
         std::shared_ptr<const State> model_state,
         TextGenerationScheduler::Request scheduled_request,
-        InitialOutputState initial = InitialOutputState::kContent)
+        InitialOutputState initial = InitialOutputState::kContent,
+        std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {})
         : state_(std::move(model_state)),
-          request_(std::move(scheduled_request)) {
+          request_(std::move(scheduled_request)),
+          tool_format_(tool_format) {
       if (initial == InitialOutputState::kReasoning)
         reasoning_end_ = state_->scheduler->runner().Tokenize("</think>");
     }
@@ -2958,10 +2964,16 @@ struct InferenceBackend::Impl {
 
     void Cancel() noexcept override { request_.Cancel(); }
 
+    std::optional<sampling::JsonConstraint::ToolFormat> ToolFormat()
+        const override {
+      return tool_format_;
+    }
+
   private:
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
     std::vector<tokenization::TokenId> reasoning_end_;
+    const std::optional<sampling::JsonConstraint::ToolFormat> tool_format_;
   };
 
   [[nodiscard]] std::shared_ptr<const State> Snapshot() const {
@@ -3793,8 +3805,9 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   }
 
   auto effective_sampling = sampling_config;
+  std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
   auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
-                                          &effective_sampling);
+                                          &effective_sampling, &tool_format);
   const auto& effective_request = constrained ? *constrained : request;
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
@@ -3819,7 +3832,8 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
       state, std::move(scheduled_request),
-      state->scheduler->runner().InitialOutputState(effective_request));
+      state->scheduler->runner().InitialOutputState(effective_request),
+      tool_format);
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);

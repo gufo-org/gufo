@@ -35,8 +35,12 @@ public:
   using Backend = gufo::server::TextGenerationBackend;
 
   ProgressRequest(std::shared_ptr<GenerationRequest> inner,
-                  std::vector<Backend::PromptProgress> progress)
-      : inner_(std::move(inner)), progress_(std::move(progress)) {}
+                  std::vector<Backend::PromptProgress> progress,
+                  std::optional<gufo::sampling::JsonConstraint::ToolFormat>
+                      tool_format = {})
+      : inner_(std::move(inner)),
+        progress_(std::move(progress)),
+        tool_format_(tool_format) {}
 
   Backend::Result Wait(const Backend::TokenCallback& on_token,
                        const Backend::ProgressCallback& on_progress) override {
@@ -49,10 +53,15 @@ public:
     return inner_->Wait(on_token, on_progress);
   }
   void Cancel() noexcept override { inner_->Cancel(); }
+  std::optional<gufo::sampling::JsonConstraint::ToolFormat> ToolFormat()
+      const override {
+    return tool_format_;
+  }
 
 private:
   std::shared_ptr<GenerationRequest> inner_;
   std::vector<Backend::PromptProgress> progress_;
+  const std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format_;
 };
 
 class FakeBackend final : public gufo::server::TextGenerationBackend {
@@ -153,7 +162,7 @@ public:
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_chat(request, max_tokens, sampling,
                                           is_cancelled, stream_output),
-        progress);
+        progress, tool_format);
   }
 
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override {
@@ -175,6 +184,7 @@ public:
 
   std::vector<std::string> pieces;
   std::vector<PromptProgress> progress;
+  std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format;
   std::string cache_miss_reason;
   FinishReason finish_reason{FinishReason::kStop};
   std::string stop_sequence;
@@ -2390,6 +2400,11 @@ void TestNativeToolTransports() {
               body["tool_choice"] = constrained ? "required" : "auto";
               body["chat_template_kwargs"]["enable_thinking"] = thinking;
               FakeBackend backend;
+              if (constrained)
+                backend.tool_format =
+                    call.starts_with("<｜DSML｜tool_calls>")
+                        ? gufo::sampling::JsonConstraint::ToolFormat::kDeepSeek
+                        : gufo::sampling::JsonConstraint::ToolFormat::kQwen;
               const auto raw =
                   (thinking ? "Reasoning.</think>" : "") + call + " \n";
               for (char byte : raw)
@@ -2613,6 +2628,140 @@ void TestJsonToolStringOwnership() {
               calls->items()[0].find("function")->member_str("arguments") ==
                   arguments.dump(),
           "rejected JSON envelopes cannot invoke quoted XML during recovery");
+    }
+  }
+}
+
+void TestNativeToolDialectSelection() {
+  using gufo::json::Value;
+  using gufo::sampling::JsonConstraint;
+  using Format = JsonConstraint::ToolFormat;
+  const auto native_call = [](Format format, std::string_view path) {
+    if (format == Format::kDeepSeek)
+      return "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"read\">\n"
+             "<｜DSML｜parameter name=\"path\" string=\"true\">" +
+             std::string(path) +
+             "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+             "</｜DSML｜tool_calls>";
+    return "<tool_call>\n<function=read>\n<parameter=path>\n" +
+           std::string(path) + "\n</parameter>\n</function>\n</tool_call>";
+  };
+  for (const auto format : {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+    auto schema = gufo::json::parse(R"({"type":"object",
+    "properties":{"path":{"type":"string"}},
+    "required":["path"],"additionalProperties":false})");
+    if (format == Format::kJson) {
+      // This schema forces even a native DeepSeek runner to use JSON. The
+      // admitted request must report the effective format after that fallback.
+      schema["properties"]["path"] =
+          gufo::json::parse(R"({"anyOf":[{"type":"string"},{"type":"null"}]})");
+      Expect(!JsonConstraint::ToolParameters(schema, false, Format::kDeepSeek),
+             "nullable string requires JSON tool fallback");
+    }
+    const auto parameters =
+        JsonConstraint::ToolParameters(schema, false, format);
+    Expect(parameters != nullptr, "file tool has a supported wire format");
+    const auto grammar = JsonConstraint::WithTools(
+        nullptr, {{"read", parameters}}, false, true, format);
+    const std::string call =
+        format == Format::kJson
+            ? R"(<tool_call>{"name":"read","arguments":{"path":"fixture.xml"}}</tool_call>)"
+            : native_call(format, "fixture.xml");
+    const auto foreign =
+        format == Format::kDeepSeek ? Format::kQwen : Format::kDeepSeek;
+    const std::string suffix =
+        format == Format::kDeepSeek
+            ? ""
+            : " The XML root remains `<tool_calls></tool_calls>`.";
+    for (const std::string& prefix :
+         {std::string{"The XML root is `<tool_calls></tool_calls>`.\n"},
+          std::string{"The foreign wrapper is `"} +
+              (foreign == Format::kQwen ? "<tool_call>"
+                                        : "<｜DSML｜tool_calls>") +
+              "`.\n",
+          "Example syntax:\n" + native_call(foreign, "example.xml") +
+              "\nNow inspect the fixture.\n"}) {
+      const auto raw = prefix + call + suffix;
+      auto state = grammar->Start();
+      for (const unsigned char byte : raw)
+        state = grammar->Advance(state, byte);
+      Expect(grammar->Complete(state),
+             "foreign visible literals and the actual call satisfy the "
+             "production tool grammar");
+      for (const bool responses : {false, true}) {
+        for (const bool stream : {false, true}) {
+          auto body = gufo::json::parse(R"({
+          "model":"test-model","reasoning_effort":"none",
+          "messages":[{"role":"user","content":"Inspect fixture.xml and its tool_calls root element."}],
+          "tool_choice":"auto","tools":[{"type":"function","function":{
+            "name":"read","strict":false}}]})");
+          auto tool = body["tools"].items()[0];
+          tool["function"]["parameters"] = schema;
+          body["tools"] = Value::array();
+          body["tools"].push_back(std::move(tool));
+          body["stream"] = stream;
+          FakeBackend backend;
+          backend.tool_format = format;
+          for (const char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+          gufo::server::HttpResponse response;
+          if (responses) {
+            gufo::server::ChatRequest chat;
+            chat.reasoning.enabled = false;
+            Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+                   "Responses accepts the file tool");
+            response = gufo::server::CreateOpenAiResponse(
+                Request(body.dump()), backend, chat, 256, {}, stream);
+          } else {
+            response =
+                gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          }
+          Expect(response.status == 200, "native file tool request succeeds");
+          // A later backend configuration must not change an admitted stream's
+          // format. The fake snapshots this metadata on its GenerationRequest.
+          backend.tool_format.reset();
+          std::string content;
+          std::vector<std::string> arguments;
+          const auto collect = [&](const Value& event) {
+            if (responses) {
+              const auto* result = stream ? event.find("response") : &event;
+              if (!result || result->member_str("status") != "completed")
+                return;
+              for (const auto& item : result->find("output")->items()) {
+                if (item.member_str("type") == "function_call")
+                  arguments.push_back(item.member_str("arguments"));
+                else if (item.member_str("type") == "message")
+                  for (const auto& part : item.find("content")->items())
+                    content += part.member_str("text");
+              }
+            } else {
+              for (const auto& choice : event.find("choices")->items()) {
+                const auto* message = choice.find(stream ? "delta" : "message");
+                content += message->member_str("content");
+                if (const auto* calls = message->find("tool_calls"))
+                  for (const auto& item : calls->items())
+                    arguments.push_back(
+                        item.find("function")->member_str("arguments"));
+              }
+            }
+          };
+          if (stream) {
+            response.streaming_body([&](std::string_view chunk) {
+              const auto payload = chunk.substr(chunk.find("data: ") + 6);
+              if (!payload.starts_with("[DONE]"))
+                collect(gufo::json::parse(payload));
+              return true;
+            });
+          } else {
+            collect(gufo::json::parse(response.body));
+          }
+          Expect(arguments ==
+                     std::vector<std::string>{R"({"path":"fixture.xml"})"},
+                 "only the actual selected-dialect call reaches the client");
+          Expect(content == prefix + suffix,
+                 "foreign tool syntax remains literal visible content");
+        }
+      }
     }
   }
 }
@@ -3056,6 +3205,7 @@ int main() {
   TestResponsesOutput();
   TestNativeToolTransports();
   TestJsonToolStringOwnership();
+  TestNativeToolDialectSelection();
   TestNativeReferencedArgumentTypes();
   TestWildcardToolTypes();
   TestToolMetadataAndFraming();
