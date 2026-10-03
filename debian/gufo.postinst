@@ -21,6 +21,13 @@ if [ "$1" = "configure" ]; then
   # (gufo, lemonade, ...) can read and download models. Survives purge
   # (shared data).
   install -d -o gufo -g llm-servers -m 2775 /var/lib/huggingface/hub
+  # Sync the systemd manager with the packaged unit file after installs
+  # and upgrades. dh_installsystemd --no-enable --no-start skips its own
+  # daemon-reload, so without this the manager keeps a stale cached unit
+  # and warns on the next restart.
+  if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+  fi
 fi
 
 #DEBHELPER#

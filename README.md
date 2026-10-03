@@ -207,7 +207,8 @@ packages installed from the AMD repository:
 
 ```sh
 sudo apt install dpkg-dev debhelper cmake ninja-build pkg-config \
-  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev
+  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev \
+  libwebp-dev
 # ROCm development packages from the AMD repository (see below).
 sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \
   hipcub-dev rocprim-dev rocwmma-dev

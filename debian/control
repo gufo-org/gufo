@@ -4,8 +4,8 @@ Priority: optional
 Maintainer: Bruno Silva <avlis.onurb@gmail.com>
 Build-Depends: debhelper-compat (= 13), cmake (>= 3.21), ninja-build,
  pkg-config, libicu-dev, libcurl4-openssl-dev, libssl-dev, libpng-dev,
- libjpeg-dev, hipblas-dev, hipblaslt-dev, rocblas-dev, hipcub-dev,
- rocprim-dev, rocwmma-dev
+ libjpeg-dev, libwebp-dev, hipblas-dev, hipblaslt-dev, rocblas-dev,
+ hipcub-dev, rocprim-dev, rocwmma-dev
 Standards-Version: 4.7.0
 Homepage: https://github.com/gufo-org/gufo
 Rules-Requires-Root: no

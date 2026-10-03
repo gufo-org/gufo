@@ -1,3 +1,9 @@
+gufo (0.6.0-1) unstable; urgency=medium
+
+  * Rebuild for 0.6.0: add libwebp-dev to build dependencies.
+
+ -- Bruno Silva <avlis.onurb@gmail.com>  Thu, 01 Oct 2026 18:10:00 +0000
+
 gufo (0.3.0-1) unstable; urgency=medium
 
   * Initial Debian packaging: gufo binary and gufo-rocm-repo apt
