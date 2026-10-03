@@ -1616,6 +1616,30 @@ def check_state_edges(client, model, checks, speculative, vision=False):
     assert stopped["finish"] == "stop" and not stopped["tools"], stopped
     checks["tool_argument_stop"] = stopped
 
+    # A stop inside a JSON string leaves the call unfinished. A call quoted in
+    # that string is argument data and must not become a separate call. The
+    # pattern keeps the JSON envelope on native tool formats.
+    literal = ("<tool_call><function=record><parameter=content>AAAA</parameter>"
+               "</function></tool_call>")
+    quoted = {"name": "record", "parameters": {"type": "object", "properties": {
+        "content": {"type": "string", "const": literal + " ZZSTOP"},
+        "tag": {"type": "string", "pattern": "^[a-z]+$"}},
+        "required": ["content"], "additionalProperties": False}}
+    quoted_request = {**common, "messages": [{"role": "user", "content": "Call record."}],
+                      "tools": [{"type": "function", "function": quoted}],
+                      "tool_choice": {"type": "function", "function": {"name": "record"}},
+                      "max_completion_tokens": 96}
+    for stream in (False, True):
+        result = chat_result(client, {**quoted_request, "stop": "ZZSTOP"}, stream)
+        assert result["finish"] == "stop" and not result["tools"], result
+        assert "<tool_call>" not in result["text"] and "AAAA" not in result["text"], result
+        checks[f"quoted_call_argument_stop_stream{stream}"] = result
+    result = chat_result(client, quoted_request, True)
+    assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+    assert json.loads(result["tools"][0]["function"]["arguments"])["content"] == (
+        literal + " ZZSTOP"), result
+    checks["quoted_call_argument_complete"] = result
+
     completed = chat_result(client, request, True)
     assert completed["finish"] == "tool_calls" and len(completed["tools"]) == 1, completed
     assert json.loads(completed["tools"][0]["function"]["arguments"]) == {
