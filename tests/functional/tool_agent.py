@@ -292,13 +292,13 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
                   max_completion_tokens=160, reasoning_effort="none")
     inline = {"type": "object", "properties": {"value": {"type": "string"}},
               "required": ["value"], "additionalProperties": False}
-    # A nullable string deliberately needs JSON to distinguish null from the
-    # string "null". This neighbor keeps testing fallback after URI support.
+    # Typed wildcard keys have no native Qwen representation. This neighbor
+    # keeps testing the JSON fallback; non-strict unions are native (#383).
     nullable = {"type": "function", "function": {
-        "name": "lookup", "description": "Look up an optional key.",
+        "name": "lookup", "description": "Look up a key.",
         "parameters": {"type": "object", "properties": {
-            "key": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
-            "required": ["key"]}}}
+            "key": {"type": "string"}}, "required": ["key"],
+            "patternProperties": {"^x_": {"type": "integer"}}}}}
     fetch = {"type": "function", "function": {
         "name": "fetch", "description": "Fetch a URL.",
         "parameters": {"type": "object", "properties": {
@@ -387,19 +387,85 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
             "value": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
             "required": ["value"]}, {"value": None}),
         ("nullable_string", {"type": "object", "properties": {
-            "value": {"type": ["string", "null"]}}, "required": ["value"]}, {"value": "null"}),
+            "value": {"type": ["string", "null"]}}, "required": ["value"]}, {"value": "none"}),
     ):
         prompt = ("Call record exactly once with these exact arguments: " +
                   json.dumps(arguments) + ". Preserve every JSON type. No explanation.")
         if name == "nullable_string":
             # Both alternatives are valid schema values; explicitly select
-            # the string rather than measuring the model's default choice.
-            prompt += (" The value is the four-letter STRING null, not the JSON null value. "
-                       "Put the four letters inside JSON quotation marks.")
+            # the string. Qwen's native syntax, like its chat template and
+            # llama.cpp, cannot represent the four-letter string null.
+            prompt += " The value is the STRING none, not the JSON null value."
         body = {**common, "tools": [*agent_tools(), {"type": "function", "function": {
             "name": "record", "parameters": parameters}}],
             "messages": [{"role": "user", "content": prompt}]}
         record(name, chat_result(client, body, True), arguments)
+    check_union_continuation(client, model, checks, chat_result)
+
+
+def check_union_continuation(client, model, checks, chat_result):
+    """Replayed tool turns reuse every token the model generated.
+
+    Pi's web_search declares provider as an untyped anyOf of string consts.
+    That switched every call to a JSON envelope while history rendered native
+    XML, so each next turn re-prefilled the reasoning and call it generated.
+    Typed arguments such as edit's array must also replay as generated.
+    """
+    search = {"type": "function", "function": {
+        "name": "web_search", "description": "Search the web.",
+        "parameters": {"type": "object", "required": ["query"], "properties": {
+            "query": {"type": "string"},
+            "max_results": {"type": "number", "default": 5, "minimum": 1, "maximum": 10},
+            "provider": {"anyOf": [{"type": "string", "const": name}
+                                   for name in ("brave", "tavily", "exa")]}}}}}
+    tools = [*agent_tools(), search]
+    common = dict(model=model, tools=tools, tool_choice="auto", parallel_tool_calls=False,
+                  temperature=0, seed=41, reasoning_effort="low",
+                  max_completion_tokens=1024)
+
+    def call(name, result, function, arguments):
+        checks[f"union_{name}"] = result
+        print(f"CHECK union_{name}", file=sys.stderr, flush=True)
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        called = result["tools"][0]["function"]
+        assert called["name"] == function, result
+        assert json.loads(called["arguments"]) == arguments, result
+        assert not any(marker in result["text"] for marker in
+                       ("<tool_call>", "<function=", "<｜DSML｜invoke")), result
+        return result
+
+    call("search", chat_result(client, {**common, "messages": [{"role": "user", "content":
+        'Call web_search once with query "gufo", max_results 3 and provider exa. '
+        "No explanation."}]}, True),
+         "web_search", {"query": "gufo", "max_results": 3, "provider": "exa"})
+
+    def continued(name, prompt, function, arguments, output):
+        messages = [{"role": "user", "content": prompt}]
+        first = call(name, chat_result(client, {**common, "messages": messages}, True),
+                     function, arguments)
+        assert first["reasoning"], first
+        tool_call = first["tools"][0]
+        messages += [{"role": "assistant", "content": first["text"] or None,
+                      "reasoning_content": first["reasoning"], "tool_calls": [tool_call]},
+                     {"role": "tool", "tool_call_id": tool_call["id"], "content": output}]
+        second = chat_result(client, {**common, "messages": messages}, True)
+        checks[f"union_{name}_continued"] = second
+        print(f"CHECK union_{name}_continued", file=sys.stderr, flush=True)
+        # The client replays the reasoning and call exactly as returned, so
+        # every token of the first turn must be reused, not prefilled again.
+        reused = first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
+        cached = second["usage"]["prompt_tokens_details"]["cached_tokens"]
+        assert cached >= reused, (first["usage"], second["usage"])
+
+    old, new = "    return a - b", "    return a + b"
+    continued("read", "Read calc.py with the read tool, then stop.", "read",
+              {"path": "calc.py"}, "def add(a, b):\n" + old + "\n")
+    # Typed arguments render with the template's tojson spacing, which the
+    # model also generates; a compact rendering re-prefilled every edit call.
+    continued("edit", "Fix calc.py by calling edit exactly once, replacing " + repr(old) +
+              " with " + repr(new) + ". Do not read it first. No explanation.", "edit",
+              {"path": "calc.py", "edits": [{"oldText": old, "newText": new}]},
+              "Replaced one block.")
 
 
 def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content):

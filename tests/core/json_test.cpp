@@ -86,6 +86,11 @@ void TestStructures() {
   assert(ordered.members()[0].first == "z");
   assert(ordered.members()[1].first == "a");
   assert(ordered.dump() == R"({"z":1,"a":[true,null,{"n":2}]})");
+  // Jinja tojson, as Python json.dumps(ensure_ascii=False) and llama.cpp's
+  // Jinja runtime write it: spaced separators, raw UTF-8, ordered keys.
+  assert(ordered.tojson() == R"({"z": 1, "a": [true, null, {"n": 2}]})");
+  assert(parse(R"({"e":[],"o":{},"t":"\u00e9\n"})").tojson() ==
+         "{\"e\": [], \"o\": {}, \"t\": \"\xC3\xA9\\n\"}");
 
   const auto bounded = std::string(128, '[') + "null" + std::string(128, ']');
   assert(parse(bounded).is_array());

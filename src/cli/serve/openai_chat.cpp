@@ -64,8 +64,11 @@ ToolMarkerSet ToolMarkers(
     std::optional<sampling::JsonConstraint::ToolFormat> format) {
   using Format = sampling::JsonConstraint::ToolFormat;
   static constexpr std::array<std::string_view, 1> qwen{"<tool_call>"};
-  static constexpr std::array<std::string_view, 1> deepseek{
-      "<｜DSML｜tool_calls>"};
+  // The template writes "\n\n" before the call block. As in llama.cpp
+  // common/parsers/deepseek.cpp (TC_SEPARATOR + FC_START), that separator is
+  // framing: returning it as content would double it when history is replayed.
+  static constexpr std::array<std::string_view, 2> deepseek{
+      "\n\n<｜DSML｜tool_calls>", "<｜DSML｜tool_calls>"};
   // The JSON fallback has no native counterpart in llama.cpp. Its grammar
   // leaves text before <tool_call> unconstrained, where models still write
   // their native call syntax; keep recognizing every opener there.
@@ -263,10 +266,13 @@ bool ParseArguments(std::string_view arguments,
     *error = "tool arguments must encode a JSON object";
     return false;
   }
+  // Render typed values as the reference chat templates' tojson does (and as
+  // llama.cpp's Jinja runtime does), so a replayed call matches the tokens
+  // the model generated and its continuation checkpoint is reused.
   for (const auto& [name, value] : parsed.members()) {
     out->push_back({
         .name = name,
-        .value = value.is_string() ? value.get_str() : value.dump(),
+        .value = value.is_string() ? value.get_str() : value.tojson(),
         .is_string = value.is_string(),
     });
   }
@@ -1152,9 +1158,19 @@ void ParseQwenCalls(
             SchemaAccepts(*schema, *property, json::Value(std::string(value)));
         // Prefer text if the schema permits it; parsing ambiguous scalars
         // as JSON would silently change a caller's declared string type.
-        const bool is_string = string_allowed;
+        // A union also admitting other types tries those first, as
+        // llama.cpp's qwen3-coder parser does.
+        std::optional<json::Value> typed;
+        if (string_allowed && property &&
+            ResolveToolSchema(*schema, *property)) {
+          typed = TryParseJson(Trim(value));
+          if (!typed || typed->is_string() ||
+              !SchemaAccepts(*schema, *property, *typed))
+            typed.reset();
+        }
+        const bool is_string = string_allowed && !typed;
         std::string raw(is_string ? value : Trim(value));
-        if (!is_string) {
+        if (!is_string && !typed) {
           auto parsed = TryParseJson(raw);
           if (!parsed || !SchemaAccepts(*schema, *property, *parsed)) {
             raw = PythonLiteralsToJson(raw);
