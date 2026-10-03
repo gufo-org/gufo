@@ -79,6 +79,9 @@ struct HttpResponse {
   };
   std::shared_ptr<StreamLog> stream_log{};
   std::function<void(WebSocket&)> websocket{};
+  /// Text streams commit headers with their first token/progress event,
+  /// allowing generation failures before that point to return a real 5xx.
+  bool defer_stream_headers{false};
 };
 
 using Handler =

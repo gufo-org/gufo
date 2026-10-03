@@ -36,7 +36,7 @@ bool Loss() {
   return Exists("loss");
 }
 bool Inject() {
-  if (!Exists("armed") || failed.exchange(true))
+  if (Exists("probe_only") || !Exists("armed") || failed.exchange(true))
     return false;
   Mark("injected");
   return true;
@@ -75,11 +75,18 @@ extern "C" int hipMemcpyAsync(void* dst, const void* src, std::size_t bytes,
 }
 extern "C" int hipMemsetAsync(void* dst, int value, std::size_t bytes,
                               void* stream) {
-  if (failed.load() && Exists("armed") && bytes == sizeof(std::uint32_t)) {
-    Mark("probed");
+  if (bytes == sizeof(std::uint32_t)) {
     probe_stream = stream;
-    if (Loss())
-      return kLaunchFailure;
+    Mark("probe_submitted");
+    if (Exists("armed") && (failed.load() || Exists("probe_only"))) {
+      Mark("probed");
+      if (Exists("probe_only")) {
+        failed = true;
+        Mark("injected");
+      }
+      if (Loss())
+        return kLaunchFailure;
+    }
   } else {
     Cleanup();
   }

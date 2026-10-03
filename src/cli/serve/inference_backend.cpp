@@ -902,20 +902,32 @@ public:
   HipTextModelRunner(HipTextModelRunner&&) = delete;
   HipTextModelRunner& operator=(HipTextModelRunner&&) = delete;
 
+  [[nodiscard]] DeviceProbeStatus PollDevice() const override {
+    if (!probe_pending_) {
+      // Clear the failed work unit's thread-local error before probing.
+      (void)hipGetLastError();
+      if (hipMemsetAsync(probe_buffer_, 0, sizeof(std::uint32_t),
+                         probe_stream_) != hipSuccess ||
+          hipGetLastError() != hipSuccess)
+        return DeviceProbeStatus::kLost;
+      probe_pending_ = true;
+    }
+    const auto status = hipStreamQuery(probe_stream_);
+    if (status == hipErrorNotReady)
+      return DeviceProbeStatus::kPending;
+    probe_pending_ = false;
+    return status == hipSuccess ? DeviceProbeStatus::kUsable
+                                : DeviceProbeStatus::kLost;
+  }
+
   [[nodiscard]] bool DeviceUsable() const override {
     constexpr auto kTimeout = std::chrono::seconds(5);
-    // Clear the error the failed work unit left on this thread.
-    (void)hipGetLastError();
-    if (hipMemsetAsync(probe_buffer_, 0, sizeof(std::uint32_t),
-                       probe_stream_) != hipSuccess ||
-        hipGetLastError() != hipSuccess)
-      return false;
     const auto deadline = Clock::now() + kTimeout;
     for (;;) {
-      const auto status = hipStreamQuery(probe_stream_);
-      if (status == hipSuccess)
+      const auto status = PollDevice();
+      if (status == DeviceProbeStatus::kUsable)
         return true;
-      if (status != hipErrorNotReady)
+      if (status == DeviceProbeStatus::kLost)
         return false;
       if (Clock::now() >= deadline) {
         Logger::Warn("scheduler", "event=device_probe_timeout timeout_s=" +
@@ -929,6 +941,7 @@ public:
 private:
   hipStream_t probe_stream_{};
   void* probe_buffer_{};
+  mutable bool probe_pending_{false};
 };
 
 class QwenTextRunner final : public HipTextModelRunner {

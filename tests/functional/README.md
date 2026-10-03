@@ -18,7 +18,10 @@ python3 tests/functional/device_loss.py \
 ```
 
 It checks recoverable HIP errors, a pending probe's five-second timeout,
-buffered/streaming error contracts, cleanup avoidance and exit status 75. A
+buffered/streaming error contracts, idle loss without any HTTP traffic, arrival
+while an idle probe stays pending, cleanup avoidance and exit status 75. Early
+stream failures return JSON 503; a failure after the first token retains HTTP
+200 and emits a terminal SSE error. A
 blocked SSE writer must still trigger the ten-second forced-exit watchdog,
 without a health request or peer disconnect. Repeat `--case` for focused checks.
 Reports retain commands, loaded mode, actual warm-generation drafts, raw

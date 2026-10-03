@@ -848,15 +848,20 @@ state; the prompt snapshot remains available for safe replay. Image identity,
 positions and speculative state participate in restoration and cache isolation.
 
 `GET /health` reports process liveness. `GET /ready` returns 503 until a model
-service is ready, then reports `status` and the active model. Neither performs
-GPU work on each poll. HTTP model replacement and persistent Responses
+service is ready, then reports `status` and the active model. Both read the
+recorded device state without performing GPU work on each poll. HTTP model replacement and persistent Responses
 conversations are not implemented.
 
 A GPU reset (for example `amdgpu` recovering from a MES hang) permanently
-invalidates the process's HIP context. Loss is detected when a text generation
-fails: an idle server with a dead GPU stays healthy until its next request.
-After such a failure the scheduler runs a bounded device probe (a 4-byte
-memset on a private stream, at most 5 s), before invalidating request state.
+invalidates the process's HIP context. The text scheduler checks it after five
+seconds of continuous idle time, then every five seconds while idle. The probe
+uses a preallocated four-byte buffer and private stream. Submission and polling
+never wait for completion; an outstanding probe is reused. Arriving requests
+interrupt the idle wait and execute without waiting for that probe. Active
+inference performs no periodic device checks.
+
+After a generation failure the scheduler also runs a bounded device probe
+(at most 5 s), before invalidating request state.
 Only a hard HIP error from the probe
 marks the device lost. A probe still pending after 5 s may be queued behind
 long kernels, so it logs `event=device_probe_timeout` and counts as usable. A
@@ -878,6 +883,25 @@ loss permanent for the process:
   and exits with status 75 (`EX_TEMPFAIL`), also when an external `SIGTERM`
   stops it after the loss. Teardown can block on the dead device, so the
   process exits with status 75 after 10 s regardless.
+
+Text streams defer HTTP headers until the first generated output piece or
+successful termination, including a successful empty response. Chat's initial
+role and Responses lifecycle events are deferred with them. Failures before
+that point return a JSON error with an appropriate 5xx status; device loss is
+503 `device_lost`. Heartbeats begin only after headers commit. Explicit
+`return_progress: true` preserves immediate headers and live prefill progress;
+subsequent failures use terminal SSE errors even if no token has been generated
+yet. Deferred headers and the first event are sent together.
+
+`/metrics` exposes `gufo_device_lost_total`, incremented once per confirmed
+context loss, including idle detection. It stays unchanged for recoverable
+errors and pending probes. The counter resets when the process restarts; the
+fatal loss log and supervisor exit status remain useful when a metrics scrape
+misses the brief period before exit.
+
+`gufo diagnose` inspects system availability in a separate process. It cannot
+validate the serving process's existing HIP context; use the serving health
+endpoints and a supervisor restart policy for this failure mode.
 
 The listener observes the sticky loss independently of response writes, so
 a blocked streaming client cannot delay arming that watchdog. Failed resident
