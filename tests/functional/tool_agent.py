@@ -5,13 +5,13 @@ from copy import deepcopy
 import json
 import sys
 
-import openai
-
 from tool_reasoning import response_result
 
 
 def check_tool_history(client, model, checks, chat_result, vision, image_content):
     """Old names do not declare new tools or prevent the next turn (#357)."""
+    import openai
+
     tools = [{"type": "function", "function": {
         "name": "finish", "parameters": {"type": "object", "properties": {
             "value": {"type": "string", "const": "RECOVERED"}},
