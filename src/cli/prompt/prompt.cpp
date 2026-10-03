@@ -200,6 +200,10 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
         opt.min_draft_tokens = count;
         return true;
       });
+  parser.AddFlag("", "--prompt-lookup",
+                 "Qwen3.8-Flash-Next MTP: after a draft, propose the tokens "
+                 "that followed a 12+ token match earlier in the context",
+                 "Speculative", &opt.prompt_lookup);
 
   parser.AddFlag("", "--cpu",
                  "Force CPU OpenMP execution fallback instead of GPU ROCm",
@@ -671,7 +675,8 @@ std::shared_ptr<models::qwen38_flash_next::Model> LoadFlashNextModel(
        .mtp_model_path =
            opt.speculative_backend == "mtp" ? opt.mtp_model_path : "",
        .max_draft_tokens = opt.draft_tokens,
-       .vision_model_path = opt.vision_model_path},
+       .vision_model_path = opt.vision_model_path,
+       .prompt_lookup = opt.prompt_lookup},
       &error);
   PrintModelLoadTime(load_start, model != nullptr);
   if (!model)
@@ -698,6 +703,7 @@ int GenerateFlashNextResponse(const PromptOptions& opt,
   }
   sampling::SamplerState sampler(opt.sampling, prompt);
   std::vector<tokenization::TokenId> generated;
+  const auto stats_before = session.Statistics();
   const auto start = std::chrono::steady_clock::now();
   while (generated.size() < opt.max_tokens) {
     models::qwen38_flash_next::Session::DecodeResult decoded;
@@ -723,6 +729,16 @@ int GenerateFlashNextResponse(const PromptOptions& opt,
             .count();
     std::cerr << "Generated " << generated.size() << " tokens ("
               << generated.size() / seconds << " tok/s)\n";
+    const auto& stats = session.Statistics();
+    if (stats.cycles != stats_before.cycles) {
+      std::cerr << "[Speculative]: cycles="
+                << stats.cycles - stats_before.cycles
+                << " drafted=" << stats.drafted - stats_before.drafted
+                << " accepted=" << stats.accepted - stats_before.accepted
+                << " lookup_proposed=" << stats.lookup - stats_before.lookup
+                << " lookup_accepted="
+                << stats.lookup_accepted - stats_before.lookup_accepted << '\n';
+    }
     PrintTokenTrace(generated);
   }
   return 0;
@@ -889,6 +905,11 @@ static std::optional<PromptOptions> ParseTextOptions(
     }
     return std::nullopt;
   }
+  if (opt.prompt_lookup && backend != "mtp") {
+    if (error_msg != nullptr)
+      *error_msg = "--prompt-lookup requires --speculative mtp";
+    return std::nullopt;
+  }
   if (!opt.draft_policy.empty() &&
       ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
        opt.speculative_backend != "dflash2")) {
@@ -1034,6 +1055,11 @@ int RunPrompt(std::span<const char* const> args) {
   }
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (opt.prompt_lookup &&
+      reader->GetMetadataString("general.architecture") != "qwen4exp") {
+    std::cerr << "--prompt-lookup supports only Qwen3.8-Flash-Next\n";
+    return 1;
+  }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     auto model = LoadFlashNextModel(opt, *reader, model_load_start);
     if (!model)
@@ -1235,6 +1261,11 @@ int RunChat(std::span<const char* const> args) {
   std::unique_ptr<speculative::SpeculativeVerifier> verifier;
   std::shared_ptr<models::qwen38_flash_next::Model> flash_model;
   std::unique_ptr<models::qwen38_flash_next::Session> flash_session;
+  if (opt.prompt_lookup &&
+      reader->GetMetadataString("general.architecture") != "qwen4exp") {
+    std::cerr << "--prompt-lookup supports only Qwen3.8-Flash-Next\n";
+    return 1;
+  }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     flash_model = LoadFlashNextModel(opt, *reader, model_load_start);
     if (!flash_model)
