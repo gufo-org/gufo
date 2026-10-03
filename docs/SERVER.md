@@ -677,8 +677,12 @@ keep optional arguments optional. Open nested objects retain native syntax and
 declared requirements/types, including nested fields; unsupported schema
 keywords remain guidance. Unsupported property-admitting rules, including
 conditional branches, leave those objects open without discarding declared
-requirements. Qwen wildcard fields and ambiguous string/null unions use JSON
-to preserve types. Constrained JSON keys follow schema order, with additional
+requirements. Qwen wildcard fields use JSON to preserve types. Non-strict
+union and untyped arguments keep the native syntax, as in llama.cpp: when the
+union admits strings the value is raw text, and its typed alternatives (such as
+`null` or an object) are tried before the string, so Qwen cannot return the
+literal string `"null"` for a string/null union. Strict unions use JSON.
+Constrained JSON keys follow schema order, with additional
 keys last. Impossible non-strict schemas fall back to JSON-object arguments;
 impossible strict schemas are rejected before generation.
 `tool_choice: "required"` and named choices constrain decoding to a declared

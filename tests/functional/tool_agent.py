@@ -292,13 +292,13 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
                   max_completion_tokens=160, reasoning_effort="none")
     inline = {"type": "object", "properties": {"value": {"type": "string"}},
               "required": ["value"], "additionalProperties": False}
-    # A nullable string deliberately needs JSON to distinguish null from the
-    # string "null". This neighbor keeps testing fallback after URI support.
+    # Typed wildcard keys have no native Qwen representation. This neighbor
+    # keeps testing the JSON fallback; non-strict unions are native (#383).
     nullable = {"type": "function", "function": {
-        "name": "lookup", "description": "Look up an optional key.",
+        "name": "lookup", "description": "Look up a key.",
         "parameters": {"type": "object", "properties": {
-            "key": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
-            "required": ["key"]}}}
+            "key": {"type": "string"}}, "required": ["key"],
+            "patternProperties": {"^x_": {"type": "integer"}}}}}
     fetch = {"type": "function", "function": {
         "name": "fetch", "description": "Fetch a URL.",
         "parameters": {"type": "object", "properties": {
@@ -387,15 +387,15 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
             "value": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
             "required": ["value"]}, {"value": None}),
         ("nullable_string", {"type": "object", "properties": {
-            "value": {"type": ["string", "null"]}}, "required": ["value"]}, {"value": "null"}),
+            "value": {"type": ["string", "null"]}}, "required": ["value"]}, {"value": "none"}),
     ):
         prompt = ("Call record exactly once with these exact arguments: " +
                   json.dumps(arguments) + ". Preserve every JSON type. No explanation.")
         if name == "nullable_string":
             # Both alternatives are valid schema values; explicitly select
-            # the string rather than measuring the model's default choice.
-            prompt += (" The value is the four-letter STRING null, not the JSON null value. "
-                       "Put the four letters inside JSON quotation marks.")
+            # the string. Qwen's native syntax, like its chat template and
+            # llama.cpp, cannot represent the four-letter string null.
+            prompt += " The value is the STRING none, not the JSON null value."
         body = {**common, "tools": [*agent_tools(), {"type": "function", "function": {
             "name": "record", "parameters": parameters}}],
             "messages": [{"role": "user", "content": prompt}]}

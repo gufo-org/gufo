@@ -1152,9 +1152,19 @@ void ParseQwenCalls(
             SchemaAccepts(*schema, *property, json::Value(std::string(value)));
         // Prefer text if the schema permits it; parsing ambiguous scalars
         // as JSON would silently change a caller's declared string type.
-        const bool is_string = string_allowed;
+        // A union also admitting other types tries those first, as
+        // llama.cpp's qwen3-coder parser does.
+        std::optional<json::Value> typed;
+        if (string_allowed && property &&
+            ResolveToolSchema(*schema, *property)) {
+          typed = TryParseJson(Trim(value));
+          if (!typed || typed->is_string() ||
+              !SchemaAccepts(*schema, *property, *typed))
+            typed.reset();
+        }
+        const bool is_string = string_allowed && !typed;
         std::string raw(is_string ? value : Trim(value));
-        if (!is_string) {
+        if (!is_string && !typed) {
           auto parsed = TryParseJson(raw);
           if (!parsed || !SchemaAccepts(*schema, *property, *parsed)) {
             raw = PythonLiteralsToJson(raw);

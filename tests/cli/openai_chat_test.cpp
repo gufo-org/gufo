@@ -2880,6 +2880,53 @@ void TestNativeReferencedArgumentTypes() {
     }
 }
 
+void TestNativeUnionToolTypes() {
+  // Non-strict unions stay in Qwen's native syntax (#383). The parser tries
+  // their typed alternatives first, as llama.cpp's qwen3-coder parser does,
+  // while plain strings keep quotes and literal JSON text.
+  auto body = gufo::json::parse(R"({"model":"test-model",
+    "messages":[{"role":"user","content":"call record"}],
+    "tools":[{"type":"function","function":{"name":"record","parameters":{
+      "type":"object","properties":{
+        "content":{"type":"string"},
+        "provider":{"anyOf":[{"type":"string","const":"brave"},
+                             {"type":"string","const":"exa"}]},
+        "args":{"anyOf":[{"type":"string"},
+                         {"type":"object","additionalProperties":true}]},
+        "label":{"anyOf":[{"type":"string"},{"type":"null"}]},
+        "note":{"anyOf":[{"type":"string"},{"type":"null"}]},
+        "limit":{"anyOf":[{"type":"integer"},{"type":"null"}]}},
+      "required":["content"]}}}],
+    "tool_choice":"auto"})");
+  FakeBackend backend;
+  backend.pieces = {
+      "<tool_call>\n<function=record>\n"
+      "<parameter=content>\n#include \"a.h\"\n42\n</parameter>\n"
+      "<parameter=provider>\nexa\n</parameter>\n"
+      "<parameter=args>\n{\"key\": 1}\n</parameter>\n"
+      "<parameter=label>\nnull\n</parameter>\n"
+      "<parameter=note>\nplain text\n</parameter>\n"
+      "<parameter=limit>\n3\n</parameter>\n"
+      "</function>\n</tool_call>"};
+  const auto response =
+      gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+  Expect(response.status == 200, "native union call succeeds");
+  const auto output = gufo::json::parse(response.body);
+  const auto arguments = gufo::json::parse(output.find("choices")
+                                               ->items()[0]
+                                               .find("message")
+                                               ->find("tool_calls")
+                                               ->items()[0]
+                                               .find("function")
+                                               ->member_str("arguments"));
+  Expect(arguments.dump() ==
+             gufo::json::parse(R"({"content":"#include \"a.h\"\n42",
+               "provider":"exa","args":{"key":1},"label":null,
+               "note":"plain text","limit":3})")
+                 .dump(),
+         "native union arguments try typed alternatives before text");
+}
+
 void TestWildcardToolTypes() {
   using gufo::json::Value;
   using Constraint = gufo::sampling::JsonConstraint;
@@ -3250,6 +3297,7 @@ int main() {
   TestNativeToolDialectSelection();
   TestNativeReferencedArgumentTypes();
   TestWildcardToolTypes();
+  TestNativeUnionToolTypes();
   TestToolMetadataAndFraming();
   TestResponsesLiveAndCancellation();
   TestCachePromptOption();
