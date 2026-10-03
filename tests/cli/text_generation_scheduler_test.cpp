@@ -829,6 +829,53 @@ void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
          "runner-disabled prefix reuse cannot retain speculative state");
 }
 
+void TestRequestTotalsDoNotNeedAConsumer() {
+  namespace metrics = gufo::server::detail;
+  const auto wait_terminal =
+      [](const TextGenerationScheduler::Request& request) {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (request.phase() != TextRequestPhase::kTerminal) {
+          Expect(std::chrono::steady_clock::now() < deadline,
+                 "request reaches terminal without a consumer");
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      };
+  {
+    auto control = std::make_shared<FakeControl>();
+    auto scheduler = MakeScheduler(control, 1);
+    gufo::server::RecordServerMetrics(
+        scheduler->Submit({1, 10}, 1, 0.0F).Wait());
+    const auto cached_before = metrics::TotalCachedPromptTokens().load();
+    // Never waited on, like a stream whose first write fails.
+    auto abandoned = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F);
+    wait_terminal(abandoned);
+    Expect(metrics::TotalCachedPromptTokens().load() - cached_before == 3,
+           "a finished request counts before anyone reads it");
+    abandoned = {};
+    const auto consumed = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F).Wait();
+    gufo::server::RecordServerMetrics(consumed);
+    Expect(metrics::TotalCachedPromptTokens().load() - cached_before ==
+               3 + consumed.cached_prompt_tokens,
+           "reading the result does not count it again");
+  }
+  {
+    auto control = std::make_shared<FakeControl>();
+    control->incremental_prefill = false;
+    control->multi_token_decode = true;
+    control->prefix_reuse = false;
+    auto scheduler = MakeScheduler(control, 1);
+    const auto drafts_before = metrics::TotalDraftTokens().load();
+    const auto accepted_before = metrics::TotalDraftAcceptedTokens().load();
+    auto request = scheduler->Submit({7}, 5, 0.0F);
+    wait_terminal(request);
+    Expect(
+        metrics::TotalDraftTokens().load() - drafts_before == 7 &&
+            metrics::TotalDraftAcceptedTokens().load() - accepted_before == 5,
+        "draft totals count at completion");
+  }
+}
+
 void TestMultiTokenRunnerCanSwitchToBatchedExecution() {
   auto control = std::make_shared<FakeControl>();
   control->multi_token_decode = true;
@@ -2322,6 +2369,7 @@ int main() {
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRunnerCanReuseExactIncrementalText();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
+  TestRequestTotalsDoNotNeedAConsumer();
   TestMultiTokenRunnerCanSwitchToBatchedExecution();
   TestModelOwnedBatchMetrics();
   TestBatchFailureIsolation();

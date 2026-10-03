@@ -584,6 +584,7 @@ struct TextGenerationScheduler::Impl {
       request->result.cancelled = true;
       FinalizeResult(request, TextGenerationBackend::FinishReason::kCancelled);
       LogDecodeProgress(request, true);
+      RecordRequestMetrics(request->result);
       PublishTerminal(request, {}, true);
     } catch (...) {
       PublishTerminal(request, std::current_exception(), true);
@@ -705,6 +706,9 @@ struct TextGenerationScheduler::Impl {
     request->result.cache_shared_prefix_ms = cache_commit.shared_prefix_ms;
     FinalizeResult(request, finish_reason);
     LogDecodeProgress(request, true);
+    // Recorded here rather than by the HTTP adapter, so a client that leaves
+    // before reading the result still counts.
+    RecordRequestMetrics(request->result);
     PublishTerminal(request);
   }
 

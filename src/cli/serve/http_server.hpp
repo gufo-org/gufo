@@ -151,60 +151,23 @@ private:
   std::vector<std::pair<std::pair<std::string, std::string>, Handler>> routes_;
 };
 
-/// Scheduled requests already counted tokens live. Other backends contribute
-/// at completion; both update the last-request speed gauges and the
-/// per-request totals.
+/// Scheduled requests are recorded by the scheduler when they finish. Other
+/// backends contribute here, at completion.
 inline void RecordServerMetrics(const TextGenerationBackend::Result& result) {
-  if (!result.token_metrics_recorded) {
-    // Older backends may only report prompt/cache totals. Infer their completed
-    // uncached prompt, but never infer work for a partially cancelled request.
-    const auto prompt_tokens =
-        result.prefill_tokens > 0 || result.cancelled
-            ? result.prefill_tokens
-            : result.prompt_tokens -
-                  std::min(result.prompt_tokens, result.cached_prompt_tokens);
-    detail::TotalPromptTokens().fetch_add(prompt_tokens,
-                                          std::memory_order_relaxed);
-    detail::TotalGenTokens().fetch_add(result.completion_tokens,
-                                       std::memory_order_relaxed);
-  }
-  const auto add_seconds = [](std::atomic<double>& total, double ms) {
-    double current = total.load(std::memory_order_relaxed);
-    while (!total.compare_exchange_weak(current, current + ms / 1000.0,
-                                        std::memory_order_relaxed)) {
-    }
-  };
-  detail::TotalCachedPromptTokens().fetch_add(
-      std::min(result.cached_prompt_tokens, result.prompt_tokens),
-      std::memory_order_relaxed);
-  add_seconds(detail::TotalPromptSeconds(), result.prefill_ms);
-  add_seconds(detail::TotalGenSeconds(), result.decode_ms);
-  const std::uint64_t sequence_tokens =
-      result.prompt_tokens + result.completion_tokens;
-  std::uint64_t max_tokens =
-      detail::MaxSequenceTokens().load(std::memory_order_relaxed);
-  while (max_tokens < sequence_tokens &&
-         !detail::MaxSequenceTokens().compare_exchange_weak(
-             max_tokens, sequence_tokens, std::memory_order_relaxed)) {
-  }
-  detail::TotalDraftTokens().fetch_add(result.draft_tokens,
-                                       std::memory_order_relaxed);
-  detail::TotalDraftAcceptedTokens().fetch_add(result.draft_accepted_tokens,
-                                               std::memory_order_relaxed);
-  const double prompt_per_second = PrefillTokensPerSecond(result);
-  const double tok_per_sec =
-      (result.decode_ms > 0.0 && result.completion_tokens > 0)
-          ? (static_cast<double>(result.completion_tokens) /
-             (result.decode_ms / 1000.0))
-          : 0.0;
-
-  if (prompt_per_second > 0.0) {
-    detail::LastPromptSpeed().store(prompt_per_second,
-                                    std::memory_order_relaxed);
-  }
-  if (tok_per_sec > 0.0) {
-    detail::LastGenSpeed().store(tok_per_sec, std::memory_order_relaxed);
-  }
+  if (result.token_metrics_recorded)
+    return;
+  // Older backends may only report prompt/cache totals. Infer their completed
+  // uncached prompt, but never infer work for a partially cancelled request.
+  const auto prompt_tokens =
+      result.prefill_tokens > 0 || result.cancelled
+          ? result.prefill_tokens
+          : result.prompt_tokens -
+                std::min(result.prompt_tokens, result.cached_prompt_tokens);
+  detail::TotalPromptTokens().fetch_add(prompt_tokens,
+                                        std::memory_order_relaxed);
+  detail::TotalGenTokens().fetch_add(result.completion_tokens,
+                                     std::memory_order_relaxed);
+  RecordRequestMetrics(result);
 }
 
 }  // namespace gufo::server

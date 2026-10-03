@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_GENERATION_METRICS_HPP_
 #define GUFO_SERVER_GENERATION_METRICS_HPP_
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <iomanip>
@@ -22,7 +23,7 @@ inline std::atomic<std::uint64_t>& TotalGenTokens() {
   static std::atomic<std::uint64_t> count{0};
   return count;
 }
-// Request totals below are added once per request when it completes.
+// Request totals below are added once per request when it finishes.
 inline std::atomic<std::uint64_t>& TotalCachedPromptTokens() {
   static std::atomic<std::uint64_t> count{0};
   return count;
@@ -72,6 +73,49 @@ inline double PrefillTokensPerSecond(
   return result.prefill_ms > 0.0 ? static_cast<double>(result.prefill_tokens) *
                                        1000.0 / result.prefill_ms
                                  : 0.0;
+}
+
+/// Adds one finished request to the request totals and speed gauges. The
+/// scheduler calls this when a request ends, whether or not its client reads
+/// the result; failed requests are not added.
+inline void RecordRequestMetrics(const TextGenerationBackend::Result& result) {
+  const auto add_seconds = [](std::atomic<double>& total, double ms) {
+    double current = total.load(std::memory_order_relaxed);
+    while (!total.compare_exchange_weak(current, current + ms / 1000.0,
+                                        std::memory_order_relaxed)) {
+    }
+  };
+  detail::TotalCachedPromptTokens().fetch_add(
+      std::min(result.cached_prompt_tokens, result.prompt_tokens),
+      std::memory_order_relaxed);
+  add_seconds(detail::TotalPromptSeconds(), result.prefill_ms);
+  add_seconds(detail::TotalGenSeconds(), result.decode_ms);
+  const std::uint64_t sequence_tokens =
+      result.prompt_tokens + result.completion_tokens;
+  std::uint64_t max_tokens =
+      detail::MaxSequenceTokens().load(std::memory_order_relaxed);
+  while (max_tokens < sequence_tokens &&
+         !detail::MaxSequenceTokens().compare_exchange_weak(
+             max_tokens, sequence_tokens, std::memory_order_relaxed)) {
+  }
+  detail::TotalDraftTokens().fetch_add(result.draft_tokens,
+                                       std::memory_order_relaxed);
+  detail::TotalDraftAcceptedTokens().fetch_add(result.draft_accepted_tokens,
+                                               std::memory_order_relaxed);
+  const double prompt_per_second = PrefillTokensPerSecond(result);
+  const double tok_per_sec =
+      (result.decode_ms > 0.0 && result.completion_tokens > 0)
+          ? (static_cast<double>(result.completion_tokens) /
+             (result.decode_ms / 1000.0))
+          : 0.0;
+
+  if (prompt_per_second > 0.0) {
+    detail::LastPromptSpeed().store(prompt_per_second,
+                                    std::memory_order_relaxed);
+  }
+  if (tok_per_sec > 0.0) {
+    detail::LastGenSpeed().store(tok_per_sec, std::memory_order_relaxed);
+  }
 }
 
 inline std::string GenerationLogDetails(
