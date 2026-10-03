@@ -31,9 +31,17 @@ rollback and RNG. See [MTP qualification](QUALITY.md).
 
 The official template defaults to thinking on, `xhigh` effort and preserving
 prior reasoning. Use the [reasoning controls](../../SERVER.md#reasoning-controls)
-for explicit effort/thinking overrides. Native context is 262144; YaRN extension
-is unsupported. Memory grows with used context and selected rollback depth;
-admission reserves the configured capacity before creating sessions.
+for explicit effort/thinking overrides. Native context is 262144. Requesting a
+larger `--context` (serve), or a benchmark (`gufo bench`) whose depth plus
+prompt/generation tokens exceeds that, derives and enables static YaRN
+automatically, scaled to cover the request; there is no separate flag or GGUF
+key. Qwen's own guidance is that static YaRN can hurt quality on short texts,
+so only request an extended context when you need one.
+Prefill chunks whose visible context exceeds 262144 tokens use the per-token
+attention kernel rather than the fused WMMA kernel. Memory grows with used
+context and selected rollback depth (about 27.5 KiB per context token with
+MTP, measured on gfx1151); admission reserves the configured capacity before
+creating sessions.
 
 ## Images
 

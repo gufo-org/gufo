@@ -265,7 +265,7 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
 std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
     std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
     bool has_mtp, std::uint32_t max_context, std::uint32_t max_draft_tokens,
-    std::uint32_t decode_concurrency) {
+    std::uint32_t decode_concurrency, std::string_view position_policy) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen3.8-Flash-Next disk cache requires an artifact fingerprint");
@@ -289,7 +289,7 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
            << models::qwen38_flash_next::Session::kSnapshotPayloadVersion
            << '\n'
            << "context_tokens=" << max_context << '\n'
-           << "position_policy=absolute-v1\n"
+           << "position_policy=" << position_policy << '\n'
            << "adapters=none\n";
   if (has_mtp) {
     identity << "draft_backend=qfn-mtp-v1\n"
@@ -2410,7 +2410,9 @@ public:
           .compatibility_identity = QwenFlashNextCompatibilityIdentity(
               artifact_fingerprint, use_mtp_ ? mtp_fingerprint : std::string{},
               use_mtp_, max_context_, max_draft_tokens_,
-              model_->DecodeConcurrency()),
+              model_->DecodeConcurrency(),
+              models::qwen38_flash_next::RopePositionPolicy(
+                  model_->config().rope_scaling)),
           .payload_version =
               models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
       };
@@ -2973,12 +2975,21 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     return false;
   }
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
+  const auto architecture =
+      reader->GetMetadataString("general.architecture").value_or("");
+  // Read once, reused below to derive YaRN from --context for qwen4exp.
+  const std::uint32_t qwen4exp_native_context =
+      architecture == "qwen4exp"
+          ? reader->GetMetadataUint32("qwen4exp.context_length").value_or(0)
+          : 0;
   if (max_context == 0) {
-    const auto architecture =
-        reader->GetMetadataString("general.architecture").value_or("");
-    const auto native =
-        reader->GetMetadataUint64(std::string(architecture) + ".context_length")
-            .value_or(0);
+    const std::uint64_t native =
+        architecture == "qwen4exp"
+            ? qwen4exp_native_context
+            : reader
+                  ->GetMetadataUint64(std::string(architecture) +
+                                      ".context_length")
+                  .value_or(0);
     if (native < 2 || native > std::numeric_limits<std::uint32_t>::max()) {
       SetError(error,
                "GGUF has no valid native context length; specify --context");
@@ -3072,6 +3083,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                "Unsupported Qwen3.8-Flash-Next chat template: " + load_error);
       return false;
     }
+    // Static YaRN, derived from the requested --context; a request at or
+    // below the artifact's native context leaves it off.
+    const auto rope_scaling = models::qwen38_flash_next::RopeScalingForContext(
+        max_context, qwen4exp_native_context);
     // The model owns prefill geometry for both bulk and scheduled requests.
     auto model = models::qwen38_flash_next::Model::Load(
         model_path,
@@ -3085,12 +3100,20 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .vision_model_path = vision_model_path,
             .decode_concurrency = static_cast<std::uint32_t>(
                 std::clamp<std::size_t>(session_count, 1, 8)),
+            .rope_scaling = rope_scaling,
         },
         &load_error);
     if (model == nullptr) {
       SetError(error,
                "Failed to create Qwen3.8-Flash-Next model: " + load_error);
       return false;
+    }
+    if (rope_scaling) {
+      Logger::Info(
+          "loader",
+          "event=yarn factor=" + std::to_string(rope_scaling->factor) +
+              " original_context=" + std::to_string(qwen4exp_native_context) +
+              " context=" + std::to_string(max_context));
     }
     if (DiskCacheEnabled(resolved_disk_cache_config) &&
         resolved_disk_cache_config.model_artifact_fingerprint.empty() &&

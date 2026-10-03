@@ -319,6 +319,12 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     return nullptr;
   }
   const Config& c = model.config();
+  if (options.max_context > c.MaxContextLength()) {
+    AssignError(error_msg, "executor context exceeds the model context");
+    return nullptr;
+  }
+  e->context_capacity_ = std::max(c.context_length, options.max_context);
+  e->yarn_ = MakeYarnRope(c.rope_scaling, c.rotary_dim, c.rope_theta);
   const std::size_t T = e->options_.max_batch;
   e->blaslt_ = BlasLt::Create(e->stream_, error_msg);
   if (e->blaslt_ == nullptr) {
@@ -369,9 +375,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.v = f32(T * c.AttentionKvDim());
   s.iq = f32(T * c.indexer_heads * c.indexer_head_dim);
   s.ik = f32(T * c.indexer_head_dim);
-  const std::uint32_t max_blocks =
-      (c.context_length + c.compress_ratio - 1) / c.compress_ratio;
-  e->mask_words_ = (max_blocks + 31) / 32;
+  e->mask_words_ = c.SparseMaskWords(e->context_capacity_);
   s.mask = Alloc<std::uint32_t>(a, T * e->mask_words_, error_msg);
   s.scores =
       f32(static_cast<std::size_t>(e->select_chunk_) * e->mask_words_ * 32);
@@ -507,7 +511,7 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
     return nullptr;
   }
   const Config& c = config();
-  if (max_context == 0 || max_context > c.context_length) {
+  if (max_context == 0 || max_context > context_capacity_) {
     AssignError(error_msg, "session context exceeds the model context");
     return nullptr;
   }
@@ -1393,7 +1397,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
           l.attn_qkv.data, static_cast<const __half*>(s_.x_half),
           l.attn_q_norm.f32(), l.attn_k_norm.f32(), s_.q, s_.attn_gate,
           s.k_cache, s.v_cache, n_tokens, pos, c.rope_theta, c.rms_eps, stream_,
-          s.rope);
+          s.rope, yarn_);
       if (!prepared) {
         AssignError(error_msg, "fused attention projection failed");
         return false;
@@ -1407,7 +1411,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
           s_.qg, l.attn_qkv.rows, l.attn_q_norm.f32(), l.attn_k_norm.f32(),
           s_.q, s_.attn_gate, s.k_cache, s.v_cache, n_tokens, c.num_heads,
           c.num_kv_heads, c.head_dim, c.rotary_dim, pos, c.rope_theta,
-          c.rms_eps, stream_, s.rope, prefill_phase);
+          c.rms_eps, stream_, s.rope, prefill_phase, yarn_);
       if (!prepared) {
         UnpackQGate(s_.qg, l.attn_qkv.rows, s_.q, s_.attn_gate, s_.k, s_.v,
                     n_tokens, c.num_heads, c.head_dim, kv_row, stream_);
@@ -1431,9 +1435,9 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     RmsNormRows(s_.k, l.attn_k_norm.f32(), s_.k, n_tokens * c.num_kv_heads,
                 c.head_dim, 1, c.rms_eps, stream_);
     Rope(s_.q, n_tokens, c.num_heads, c.head_dim, c.rotary_dim, pos,
-         c.rope_theta, stream_, s.rope);
+         c.rope_theta, stream_, s.rope, yarn_);
     Rope(s_.k, n_tokens, c.num_kv_heads, c.head_dim, c.rotary_dim, pos,
-         c.rope_theta, stream_, s.rope);
+         c.rope_theta, stream_, s.rope, yarn_);
     StoreKv(s_.k, s.k_cache, n_tokens, kv_row, pos, stream_);
     StoreKv(s_.v, s.v_cache, n_tokens, kv_row, pos, stream_);
   }
@@ -1458,11 +1462,11 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                 n_tokens * c.indexer_heads, c.indexer_head_dim, 1, c.rms_eps,
                 stream_);
     Rope(s_.iq, n_tokens, c.indexer_heads, c.indexer_head_dim, c.rotary_dim,
-         pos, c.rope_theta, stream_, s.rope);
+         pos, c.rope_theta, stream_, s.rope, yarn_);
     PoolIndexerBlocks(s.index_k, l.indexer_k_norm.f32(), s.block_k, first_block,
                       pos, n_tokens, pool_grid, c.compress_ratio,
                       c.indexer_head_dim, c.rotary_dim, c.rope_theta, c.rms_eps,
-                      index_capacity, stream_, s.rope);
+                      index_capacity, stream_, s.rope, yarn_);
     // Align score rows to full cache lines. The selector still considers
     // only complete causal blocks, so padding cannot change the ranking.
     const std::uint32_t blocks =
@@ -2116,10 +2120,17 @@ struct SnapshotHeader {
   std::uint32_t mtp_residual_valid;
   std::uint32_t hidden_rows;
   std::uint32_t image_count;
+  // Rotated K depends on the rope scaling at every position.
+  float rope_factor;
+  std::uint32_t rope_original_context;
+  float rope_beta_fast;
+  float rope_beta_slow;
   std::array<std::int32_t, Config::kMaxPleNgram - 1> ngram_prev;
   std::uint64_t payload_bytes;
 };
 static_assert(std::is_trivially_copyable_v<SnapshotHeader>);
+// The four rope fields must not push payload_bytes off its 8-byte alignment.
+static_assert(offsetof(SnapshotHeader, payload_bytes) == 104);
 
 namespace {
 
@@ -2141,6 +2152,17 @@ SnapshotHeader MakeSnapshotHeader(const Config& c, bool has_mtp,
   h.image_count = std::ranges::count_if(
       session.VisionLayout().images,
       [&](const auto& image) { return image.offset < h.position; });
+  // Disabled scaling has one disk-cache identity ("absolute-v1" from
+  // RopePositionPolicy) regardless of whatever original_context/beta the
+  // config happens to carry, so the header must normalize to the same
+  // defaults rather than echo them raw (else two "off" configs that differ
+  // only in those unused fields would collide on identity but disagree on
+  // SameGeometry, and neither could restore the other's snapshot).
+  const RopeScaling rope = NormalizedRopeScaling(c.rope_scaling);
+  h.rope_factor = rope.factor;
+  h.rope_original_context = rope.original_context;
+  h.rope_beta_fast = rope.beta_fast;
+  h.rope_beta_slow = rope.beta_slow;
   return h;
 }
 
@@ -2152,7 +2174,11 @@ bool SameGeometry(const SnapshotHeader& h, const SnapshotHeader& mine) {
          h.kv_row == mine.kv_row &&
          h.indexer_head_dim == mine.indexer_head_dim &&
          h.compress_ratio == mine.compress_ratio && h.hc_dim == mine.hc_dim &&
-         h.ple_elems == mine.ple_elems && h.has_mtp == mine.has_mtp;
+         h.ple_elems == mine.ple_elems && h.has_mtp == mine.has_mtp &&
+         h.rope_factor == mine.rope_factor &&
+         h.rope_original_context == mine.rope_original_context &&
+         h.rope_beta_fast == mine.rope_beta_fast &&
+         h.rope_beta_slow == mine.rope_beta_slow;
 }
 
 }  // namespace
@@ -2709,7 +2735,7 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
                           nullptr, attn.k_cache, attn.v_cache, n, 0,
                           c.num_kv_heads, c.head_dim, c.rotary_dim,
                           &session.control_->mtp_position, c.rope_theta,
-                          c.rms_eps, stream_, attn.rope)) {
+                          c.rms_eps, stream_, attn.rope, false, yarn_)) {
       AssignError(error_msg, "MTP cache projection failed");
       return false;
     }
@@ -2720,11 +2746,11 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
     StoreRows(s_.ik, attn.index_k, n, c.indexer_head_dim,
               &session.control_->mtp_position, capacity, stream_);
     if (pos + n > c.indexer_top_k) {
-      PoolIndexerBlocks(attn.index_k, l.indexer_k_norm.f32(), attn.block_k,
-                        &session.control_->mtp_blocks,
-                        &session.control_->mtp_position, n, pool_grid,
-                        c.compress_ratio, c.indexer_head_dim, c.rotary_dim,
-                        c.rope_theta, c.rms_eps, capacity, stream_, attn.rope);
+      PoolIndexerBlocks(
+          attn.index_k, l.indexer_k_norm.f32(), attn.block_k,
+          &session.control_->mtp_blocks, &session.control_->mtp_position, n,
+          pool_grid, c.compress_ratio, c.indexer_head_dim, c.rotary_dim,
+          c.rope_theta, c.rms_eps, capacity, stream_, attn.rope, yarn_);
     }
     return true;
   }

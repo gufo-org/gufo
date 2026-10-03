@@ -16,6 +16,7 @@ ReferenceModel::ReferenceModel(const ModelWeights& weights, NgramTable* ngram,
                                std::uint32_t max_context, Storage storage)
     : w_(weights),
       c_(weights.config),
+      yarn_(MakeYarnRope(c_.rope_scaling, c_.rotary_dim, c_.rope_theta)),
       storage_(storage),
       ngram_(ngram),
       max_context_(max_context) {
@@ -349,7 +350,8 @@ void ReferenceModel::Attention(const LayerWeights& l, AttentionState& s,
   const auto rope = [&](float* values, std::uint32_t heads, std::uint32_t dim,
                         std::uint32_t physical) {
     if (layout == nullptr) {
-      cpu::Rope(values, heads, dim, c_.rotary_dim, physical, c_.rope_theta);
+      cpu::Rope(values, heads, dim, c_.rotary_dim, physical, c_.rope_theta,
+                yarn_);
       return;
     }
     const auto coordinates = layout->Position(physical);
@@ -359,12 +361,20 @@ void ReferenceModel::Attention(const LayerWeights& l, AttentionState& s,
         const auto axis = i % 3 == 1 && i < 33   ? 1
                           : i % 3 == 2 && i < 30 ? 2
                                                  : 0;
-        const float angle = coordinates[axis] *
-                            std::pow(c_.rope_theta, -2.0F * i / c_.rotary_dim);
+        float freq = std::pow(c_.rope_theta, -2.0F * i / c_.rotary_dim);
+        if (yarn_.enabled != 0)
+          freq *= YarnPairMultiplier(yarn_, i);
+        const float angle = coordinates[axis] * freq;
+        float cs = std::cos(angle);
+        float sn = std::sin(angle);
+        if (yarn_.enabled != 0) {
+          cs *= yarn_.mscale;
+          sn *= yarn_.mscale;
+        }
         const auto offset = static_cast<std::size_t>(h) * dim + i;
         const float a = values[offset], b = values[offset + pairs];
-        values[offset] = a * std::cos(angle) - b * std::sin(angle);
-        values[offset + pairs] = a * std::sin(angle) + b * std::cos(angle);
+        values[offset] = a * cs - b * sn;
+        values[offset + pairs] = a * sn + b * cs;
       }
     }
   };

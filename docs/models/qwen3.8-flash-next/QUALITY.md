@@ -40,6 +40,49 @@ BF16 differ by **7.83% / 8.10%**, respectively. This is numerical drift, not an
 image-answer score; **llama.cpp was not tested**. Optimizations retain native
 embedding bytes but do not resolve this gap. [Evidence](artifacts/vision-parity.json).
 
+## Extended context (YaRN)
+
+**With YaRN off, the extension is a no-op: full-model logits and served
+continuations are byte-identical to the pre-change build.** Unsloth
+UD-Q4_K_XL target, shared Q8_0 MTP; September 26–29, 2026. YaRN-off identity
+and the `--context` path were rechecked on the final build on September 29.
+
+| Check | Result |
+| --- | --- |
+| YaRN off vs. pre-change build | Full-model logit dumps byte-identical on both prefill paths (fused F16 GEMM and PrepareAttention), 1,321-token prompt; 16/16 served continuations byte-identical |
+| Prefill/decode, YaRN off | Prefill within 2% of the pre-change build at 8k/32k/131k (two runs each); decode and MTP acceptance unchanged at 29k (132/211 drafts both) |
+| Needle retrieval, YaRN on | 12/12 via both `/v1/chat/completions` and raw `/v1/completions`: factor 1.5625 at capacity 409,600 (126,820 / 297,246 / 389,499 prompt tokens); factor 2.5 at capacity 409,600 (297,247 / 389,500, chat) and at capacity 655,360 (297,246 / 585,454) |
+| Cache identity, YaRN on | A 29,646-token session cached under factor 1.5625 is not restored after restarting under factor 2.5 (full prefill; stored as a separate entry); it is restored after restarting under 1.5625 (0.8 s from disk, no prefill) |
+
+Needle retrieval passed at every tested factor/capacity pair. A
+369,989-token long read named the final scene correctly and quoted the
+excerpt's last words verbatim; one image placed after 297,964 text tokens
+in the same request (factor 2.5) was described correctly.
+
+Logit agreement between YaRN on and off is close on a shared 1,927-token
+prompt (dense attention for every implementation, since it is under the
+2,048-token indexer budget): top-1 flips and KL divergence against the CPU
+oracle and llama.cpp are similar with YaRN on or off (top-1 flips 21–29 of
+1,927 positions; KL p50 ~4e-5; KL p90 ~0.01). At depth (the last 64
+positions of long prompts), gufo versus llama.cpp agreement is 61/64 top-1
+both at 248,487 tokens with YaRN off (KL median 0.011) and at 297,484
+tokens with YaRN 1.5625 (KL median 0.008); the divergence there is gufo's
+sparse attention versus llama.cpp's dense attention, present with YaRN off
+too.
+
+Idle GTT grows with capacity under YaRN (about 27.5 KiB per context token,
+MTP resident): 88.5 GiB at capacity 262,144, 92.4 GiB at 409,600, 98.8 GiB
+at 655,360. Prefill of the part of a prompt beyond 262,144 visible tokens
+runs on the per-token attention kernel at about 350–375 tokens/s; a
+585,454-token prompt averaged 493 tokens/s overall, with decode at 36
+tokens/s.
+
+Gaps: short-text quality with YaRN on is not measured (Qwen's model card
+warns static YaRN can hurt short texts); there is no Transformers reference
+beyond the native context, so agreement above uses llama.cpp and the CPU
+oracle; and the fused WMMA kernel is not used for chunks whose visible
+context exceeds 262,144 tokens.
+
 ## Reproduce
 
 Tests live in [`tests/models/qwen38_flash_next`](../../../tests/models/qwen38_flash_next).
