@@ -867,6 +867,51 @@ void TestConcurrentStoreInstancesPublishSafely() {
       "concurrent publishers expose no partial or confused entry");
 }
 
+void TestStartupPreservesActivePublisher() {
+  TemporaryDirectory directory;
+  auto runner = std::make_shared<FakeRunner>("startup-publisher");
+  std::binary_semaphore entered(0), release(0);
+  const auto orphan = directory.path() / ".tmp-orphan";
+  {
+    ContinuationDiskStore writer(StoreOptions(directory.path()));
+    runner->before_stream = [&] {
+      entered.release();
+      release.acquire();
+    };
+    Expect(writer.SaveAsync(runner, {1, 2}, MakeSnapshot(*runner, 42, 2)) != 0,
+           "writer accepts a checkpoint before another store starts");
+    const bool started = entered.try_acquire_for(std::chrono::seconds(2));
+    if (!started)
+      release.release();
+    Expect(started, "writer reaches the temporary-file serialization barrier");
+    {
+      std::ofstream output(orphan, std::ios::binary);
+      output << "interrupted older write";
+    }
+    auto startup = std::async(std::launch::async, [&] {
+      ContinuationDiskStore reader(StoreOptions(directory.path()));
+    });
+    const bool ready =
+        startup.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    release.release();
+    startup.get();
+    writer.Flush();
+    Expect(ready, "startup does not wait for an active checkpoint writer");
+    Expect(
+        writer.entry_count() == 1 && CacheFiles(directory.path()).size() == 1,
+        "overlapping startup does not discard the active writer's checkpoint");
+  }
+  runner->before_stream = {};
+
+  ContinuationDiskStore restarted(StoreOptions(directory.path()));
+  auto state = runner->CreateState();
+  Expect(RestoreTokens(restarted, *runner, *state, {1, 2, 3}).restored &&
+             RequireFakeState(*state).value == 42,
+         "checkpoint published across startup restores its exact payload");
+  Expect(!std::filesystem::exists(orphan),
+         "startup without a publisher removes abandoned temporary files");
+}
+
 void TestSharedPrefixBoundariesAndExactDedup() {
   TemporaryDirectory directory;
   const FakeRunner runner("shared-prefix-model");
@@ -1177,6 +1222,7 @@ int main() {
   TestRootSymlinkIsRejected();
   TestConcurrentCallersRemainBoundedAndExact();
   TestConcurrentStoreInstancesPublishSafely();
+  TestStartupPreservesActivePublisher();
   std::cout << "continuation disk store tests passed\n";
   return 0;
 }
