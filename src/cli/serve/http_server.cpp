@@ -1354,13 +1354,14 @@ void HttpServer::run(bool handle_signals) {
   std::optional<ShutdownSignals> signals;
   if (handle_signals) {
     signals.emplace();
-    // A connection may disappear between poll and accept. Never let that
-    // race put the signal-aware loop back into an uninterruptible accept.
-    const int flags = ::fcntl(listen_fd_, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK) != 0)
-      throw std::system_error(errno, std::generic_category(),
-                              "configure HTTP listener");
   }
+  // Poll even without signal handling so device loss is observed while a
+  // request worker is blocked writing to a slow client. Nonblocking accept
+  // also keeps a vanished connection from wedging this observation loop.
+  const int flags = ::fcntl(listen_fd_, F_GETFL, 0);
+  if (flags < 0 || ::fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK) != 0)
+    throw std::system_error(errno, std::generic_category(),
+                            "configure HTTP listener");
   Logger::Info(
       "server",
       "event=listening address=http://" + host_ + ":" + std::to_string(port_) +
@@ -1368,6 +1369,7 @@ void HttpServer::run(bool handle_signals) {
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
   while (!stopped_.load(std::memory_order_acquire)) {
+    (void)device_lost();
     if (handle_signals) {
       const int signal = shutdown_signal.load(std::memory_order_relaxed);
       if (signal != 0) {
@@ -1376,14 +1378,14 @@ void HttpServer::run(bool handle_signals) {
         stop();
         break;
       }
-      pollfd descriptor{.fd = listen_fd_, .events = POLLIN, .revents = 0};
-      const int ready = ::poll(&descriptor, 1, 100);
-      if (ready < 0 && errno != EINTR)
-        throw std::system_error(errno, std::generic_category(),
-                                "poll HTTP listener");
-      if (ready <= 0)
-        continue;
     }
+    pollfd descriptor{.fd = listen_fd_, .events = POLLIN, .revents = 0};
+    const int ready = ::poll(&descriptor, 1, 100);
+    if (ready < 0 && errno != EINTR)
+      throw std::system_error(errno, std::generic_category(),
+                              "poll HTTP listener");
+    if (ready <= 0)
+      continue;
     const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
     if (client_fd < 0) {
       if (stopped_.load(std::memory_order_acquire)) {

@@ -851,7 +851,8 @@ A GPU reset (for example `amdgpu` recovering from a MES hang) permanently
 invalidates the process's HIP context. Loss is detected when a text generation
 fails: an idle server with a dead GPU stays healthy until its next request.
 After such a failure the scheduler runs a bounded device probe (a 4-byte
-memset on a private stream, at most 5 s). Only a hard HIP error from the probe
+memset on a private stream, at most 5 s), before invalidating request state.
+Only a hard HIP error from the probe
 marks the device lost. A probe still pending after 5 s may be queued behind
 long kernels, so it logs `event=device_probe_timeout` and counts as usable. A
 usable device leaves the original failure unchanged. A lost device logs
@@ -872,6 +873,13 @@ loss permanent for the process:
   and exits with status 75 (`EX_TEMPFAIL`), also when an external `SIGTERM`
   stops it after the loss. Teardown can block on the dead device, so the
   process exits with status 75 after 10 s regardless.
+
+The listener observes the sticky loss independently of response writes, so
+a blocked streaming client cannot delay arming that watchdog. Failed resident
+requests retain their state and snapshot workers until process exit, avoiding
+HIP resets, frees and transfer joins on the lost context. The watchdog is armed
+before logging or shutdown; the fatal exit bypasses model destructors and log
+flushing. The operating system reclaims those resources.
 
 Run the server under a supervisor that restarts on failure, such as systemd
 `Restart=on-failure` or a container `restart: always`/`on-failure` policy;

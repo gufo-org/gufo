@@ -316,6 +316,7 @@ struct TextGenerationScheduler::Impl {
         runner_pool->runner()
             .Descriptor()
             .capabilities.batched_multi_token_decode_max_width;
+    device_lost_requests.reserve(runner_pool->capacity());
     worker = std::jthread(
         [this](const std::stop_token& stop_token) { Run(stop_token); });
   }
@@ -491,6 +492,10 @@ struct TextGenerationScheduler::Impl {
 
   void CompleteCancelled(
       const std::shared_ptr<ScheduledRequest>& request) noexcept {
+    if (device_lost.load(std::memory_order_acquire)) {
+      CompleteFailure(request, device_lost_failure);
+      return;
+    }
     try {
       if (request->runner_request) {
         const auto retained = request->runner_request.Cancel();
@@ -509,13 +514,25 @@ struct TextGenerationScheduler::Impl {
   }
 
   void CompleteFailure(const std::shared_ptr<ScheduledRequest>& request,
-                       std::exception_ptr failure) noexcept {
+                       std::exception_ptr failure,
+                       bool classified = false) noexcept {
+    if (IsTerminal(request))
+      return;
+    if (!classified)
+      failure = ClassifyFailure(std::move(failure));
     if (request->runner_request) {
-      request->runner_request.Invalidate();
+      if (device_lost.load(std::memory_order_acquire)) {
+        // Retain the lease, snapshots and their workers until process exit.
+        // Resetting state, freeing snapshots or joining transfers on the dead
+        // context can block or crash before the supervisor can restart us.
+        device_lost_requests.push_back(request);
+      } else {
+        request->runner_request.Invalidate();
+      }
     }
     request->result.completion_tokens = request->result.tokens.size();
     LogDecodeProgress(request, true);
-    PublishTerminal(request, ClassifyFailure(std::move(failure)), true);
+    PublishTerminal(request, std::move(failure), true);
   }
 
   // A GPU reset leaves this process's device context permanently unusable,
@@ -526,6 +543,8 @@ struct TextGenerationScheduler::Impl {
       std::exception_ptr failure) noexcept {
     if (failure == nullptr)
       return failure;
+    if (device_lost.load(std::memory_order_acquire))
+      return device_lost_failure;
     try {
       std::string reason = "unknown failure";
       try {
@@ -544,8 +563,7 @@ struct TextGenerationScheduler::Impl {
         Logger::Error("scheduler",
                       "event=device_lost remedy=restart reason=" + reason);
       }
-      return std::make_exception_ptr(TextGenerationError(
-          TextGenerationErrorCode::kDeviceLost, kDeviceLostMessage));
+      return device_lost_failure;
     } catch (...) {
       return failure;
     }
@@ -560,6 +578,12 @@ struct TextGenerationScheduler::Impl {
 
   [[nodiscard]] bool CompleteIfStopped(
       const std::shared_ptr<ScheduledRequest>& request) noexcept {
+    if (IsTerminal(request))
+      return true;
+    if (device_lost.load(std::memory_order_acquire)) {
+      CompleteFailure(request, device_lost_failure);
+      return true;
+    }
     try {
       if (DeadlineExceeded(request)) {
         CompleteDeadline(request);
@@ -1031,6 +1055,11 @@ struct TextGenerationScheduler::Impl {
     if (prepared.empty()) {
       return;
     }
+    if (device_lost.load(std::memory_order_acquire)) {
+      for (const auto& item : prepared)
+        CompleteFailure(item.request, device_lost_failure);
+      return;
+    }
     if (prepared.size() == 1) {
       try {
         prepared.front().request->runner_request.Advance();
@@ -1044,6 +1073,8 @@ struct TextGenerationScheduler::Impl {
     const auto plan = runner_pool->SelectDecodePlan(prepared.size());
     if (plan.kind != TextExecutionPlanKind::kBatched) {
       for (const auto& item : prepared) {
+        if (CompleteIfStopped(item.request))
+          continue;
         try {
           item.request->runner_request.Advance();
           FinishAdvanced(item.request, item.decode_start);
@@ -1071,13 +1102,24 @@ struct TextGenerationScheduler::Impl {
       return;
     }
 
+    // Classify every failed lane before committing a successful peer: its
+    // snapshot/commit may also touch the context that just failed.
+    for (auto& failure : failures) {
+      if (failure)
+        failure = ClassifyFailure(std::move(failure));
+      if (device_lost.load(std::memory_order_acquire)) {
+        for (const auto& item : prepared)
+          CompleteFailure(item.request, device_lost_failure);
+        return;
+      }
+    }
     const std::string execution_plan =
         "batched-w" + std::to_string(plan.physical_width);
     for (std::size_t i = 0; i < prepared.size(); ++i) {
       const auto& item = prepared[i];
       if (failures[i]) {
         if (!CompleteIfStopped(item.request))
-          CompleteFailure(item.request, failures[i]);
+          CompleteFailure(item.request, failures[i], true);
         continue;
       }
       item.request->result.physical_execution_width = std::max(
@@ -1125,6 +1167,11 @@ struct TextGenerationScheduler::Impl {
     if (prepared.empty()) {
       return;
     }
+    if (device_lost.load(std::memory_order_acquire)) {
+      for (const auto& item : prepared)
+        CompleteFailure(item.request, device_lost_failure);
+      return;
+    }
     if (prepared.size() == 1) {
       StepMultiTokenDecode(prepared.front().request);
       return;
@@ -1159,12 +1206,23 @@ struct TextGenerationScheduler::Impl {
       return;
     }
 
+    for (auto& step : steps) {
+      if (step.failure)
+        step.failure = ClassifyFailure(std::move(step.failure));
+      if (device_lost.load(std::memory_order_acquire)) {
+        for (const auto& item : prepared)
+          CompleteFailure(item.request, device_lost_failure);
+        return;
+      }
+    }
     for (std::size_t index = 0; index < prepared.size(); ++index) {
       const auto& item = prepared[index];
+      if (CompleteIfStopped(item.request))
+        continue;
       const auto& step = steps[index];
       if (step.failure) {
         if (!CompleteIfStopped(item.request))
-          CompleteFailure(item.request, step.failure);
+          CompleteFailure(item.request, step.failure, true);
         continue;
       }
       if (step.execution_plan.physical_width >=
@@ -1284,6 +1342,8 @@ struct TextGenerationScheduler::Impl {
     std::deque<std::shared_ptr<ScheduledRequest>> decoding;
     std::deque<std::shared_ptr<ScheduledRequest>> capturing;
     while (!stop_token.stop_requested()) {
+      if (device_lost.load(std::memory_order_acquire))
+        break;
       ProcessQueuedCancellations();
 
       for (std::size_t count = capturing.size(); count != 0; --count) {
@@ -1299,6 +1359,8 @@ struct TextGenerationScheduler::Impl {
         }
       }
       Admit(prefilling, decoding, capturing.size(), stop_token);
+      if (device_lost.load(std::memory_order_acquire))
+        break;
       if (prefilling.empty() && decoding.empty()) {
         std::unique_lock<std::mutex> lock(queue_mutex);
         const auto wake = [&] {
@@ -1421,6 +1483,10 @@ struct TextGenerationScheduler::Impl {
   std::size_t queued_count{0};
   bool stopping{false};
   std::atomic<bool> device_lost{false};
+  const std::exception_ptr device_lost_failure =
+      std::make_exception_ptr(TextGenerationError(
+          TextGenerationErrorCode::kDeviceLost, kDeviceLostMessage));
+  std::vector<std::shared_ptr<ScheduledRequest>> device_lost_requests;
   std::size_t consecutive_active_prefill_chunks{0};
   std::atomic<std::uint64_t> next_request_id{1};
   std::jthread worker;

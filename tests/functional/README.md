@@ -3,6 +3,32 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+Device-loss process tests use a separate opt-in runner because each lost-device
+case must terminate its server. Build its CMake-owned preload helper, then run
+against a production binary and one explicitly selected model/mode:
+
+```sh
+nix develop -c cmake --preset cpu-test
+nix develop -c cmake --build --preset cpu-test --target device_loss_faults
+python3 tests/functional/device_loss.py \
+  --fault-library build/cpu-test/libdevice_loss_faults.so \
+  --output /tmp/device-loss-check -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --sessions 2 --context 4096 --think off --speculative off
+```
+
+It checks recoverable HIP errors, a pending probe's five-second timeout,
+buffered/streaming error contracts, cleanup avoidance and exit status 75. A
+blocked SSE writer must still trigger the ten-second forced-exit watchdog,
+without a health request or peer disconnect. Repeat `--case` for focused checks.
+Reports retain commands, loaded mode, actual warm-generation drafts, raw
+responses and logs, including failures. These tests inject errors only inside
+the child process; they do not establish behavior after a physical GPU reset.
+The helper is excluded from normal builds and the runner stays outside hosted
+CI and `--suite all`. The existing scheduler/HTTP CPU tests cover sticky loss,
+queued peers, skipped invalidation and listener observation during a blocked
+write without loading weights.
+
 ```sh
 nix develop -c python3 tests/functional/run.py \
   --record-baseline --output /tmp/api-baseline --sampling-preset qwen38 \

@@ -10,7 +10,6 @@
 #include <cmath>
 #include <csignal>
 #include <cstdint>
-#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -177,18 +176,21 @@ constexpr int kDeviceLostExitStatus = 75;
 // joining requests or freeing device memory may block on the dead device.
 void ShutdownAfterDeviceLoss() {
   constexpr auto kShutdownTimeout = std::chrono::seconds(10);
+  // Arm the watchdog before logging or shutdown: neither a blocked log sink
+  // nor a dead-device join may prevent the forced exit.
+  try {
+    std::thread([kShutdownTimeout] {
+      std::this_thread::sleep_for(kShutdownTimeout);
+      ::_exit(kDeviceLostExitStatus);
+    }).detach();
+  } catch (...) {
+    ::_exit(kDeviceLostExitStatus);
+  }
   server::Logger::Error(
       "server", "event=device_lost_shutdown exit_status=" +
                     std::to_string(kDeviceLostExitStatus) +
                     " timeout_s=" + std::to_string(kShutdownTimeout.count()));
   (void)std::raise(SIGTERM);
-  std::thread([kShutdownTimeout] {
-    std::this_thread::sleep_for(kShutdownTimeout);
-    static constexpr char kMessage[] =
-        "[ERROR] [server] event=device_lost_shutdown_timeout\n";
-    (void)::write(STDERR_FILENO, kMessage, sizeof(kMessage) - 1);
-    ::_exit(kDeviceLostExitStatus);
-  }).detach();
 }
 
 std::optional<ReasoningEffort> ParseReasoningEffort(std::string_view value) {
@@ -1447,7 +1449,6 @@ int RunServe(std::span<const char* const> args) {
   // after the scheduler records the loss but before a request fires the hook.
   const auto exit_if_device_lost = [&device_lost, &backend] {
     if (device_lost.load() || (backend != nullptr && backend->device_lost())) {
-      std::fflush(nullptr);
       ::_exit(kDeviceLostExitStatus);
     }
   };

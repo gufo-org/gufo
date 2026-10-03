@@ -1017,6 +1017,43 @@ void TestDeviceLoss() {
   assert(first_hook_calls == 1);
 }
 
+void TestDeviceLossWhileWriterBlocked() {
+  std::atomic<int> hook_calls{0};
+  std::binary_semaphore hook_called{0};
+  std::binary_semaphore writing{0};
+  std::atomic<bool> write_finished{false};
+  RunningServer server({.sse_heartbeat_interval = std::chrono::milliseconds(0),
+                        .on_device_lost = [&] {
+                          ++hook_calls;
+                          hook_called.release();
+                        }});
+  server.server.add("POST", "/blocked", [&](const auto&, auto&) {
+    return gufo::server::HttpResponse{
+        .headers = {{"Content-Type", "text/event-stream"}},
+        .streaming_body = [&](const auto& write) {
+          const std::string chunk(8 * 1024 * 1024, 'x');
+          writing.release();
+          (void)write(chunk);
+          write_finished = true;
+        }};
+  });
+  const int fd = server.Connect();
+  const int receive_buffer = 1024;
+  assert(::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer,
+                      sizeof(receive_buffer)) == 0);
+  const std::string request = "POST /blocked HTTP/1.1\r\n\r\n";
+  assert(::send(fd, request.data(), request.size(), MSG_NOSIGNAL) ==
+         static_cast<ssize_t>(request.size()));
+  assert(writing.try_acquire_for(std::chrono::seconds(2)));
+  // The peer never drains the response. No health request or completed write
+  // is available to trigger shutdown; the listener must observe the loss.
+  server.backend->lost = true;
+  assert(hook_called.try_acquire_for(std::chrono::seconds(2)));
+  assert(hook_calls == 1 && !write_finished);
+  ::shutdown(fd, SHUT_RDWR);
+  ::close(fd);
+}
+
 void TestInvalidBindSettings() {
   for (const int port : {-1, 65536}) {
     HttpServer server("127.0.0.1", port, nullptr);
@@ -1407,6 +1444,7 @@ int main() {
   TestModelInputModalities();
   TestRawCompletionStreaming();
   TestDeviceLoss();
+  TestDeviceLossWhileWriterBlocked();
   TestRawCompletionPromptProgress();
   TestCompatibilityStopSequences();
   TestCompatibilityThinkingDefaults();
