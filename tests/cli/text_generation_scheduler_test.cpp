@@ -144,6 +144,9 @@ struct FakeControl {
   std::optional<TextRunnerToken> throw_advance_label;
   std::atomic<bool> device_usable{true};
   std::atomic<std::size_t> device_probes{0};
+  std::atomic<std::size_t> idle_probes{0};
+  std::atomic<TextModelRunner::DeviceProbeStatus> idle_probe_status{
+      TextModelRunner::DeviceProbeStatus::kUsable};
   TextRunnerToken advance_gate_label{0};
   TextRunnerToken prefill_gate_label{0};
   bool advance_gate_entered{false};
@@ -508,6 +511,12 @@ public:
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
     return RequireFakeState(state).position;
+  }
+
+  [[nodiscard]] DeviceProbeStatus PollDevice() const override {
+    control_->idle_probes.fetch_add(1, std::memory_order_relaxed);
+    control_->condition.notify_all();
+    return control_->idle_probe_status.load(std::memory_order_relaxed);
   }
 
   [[nodiscard]] bool DeviceUsable() const override {
@@ -1769,6 +1778,45 @@ void TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement() {
   Expect(control->device_probes == 1, "successful work never probes");
 }
 
+void TestIdleDeviceProbe() {
+  using Status = TextModelRunner::DeviceProbeStatus;
+  auto control = std::make_shared<FakeControl>();
+  control->idle_probe_status = Status::kPending;
+  TextSchedulerPolicy policy{.device_probe_interval =
+                                 std::chrono::milliseconds(10)};
+  const auto before = gufo::server::detail::DeviceLostTotal().load();
+  auto scheduler = MakeScheduler(control, 1, {}, policy);
+  {
+    std::unique_lock lock(control->mutex);
+    Expect(
+        control->condition.wait_for(lock, kTestTimeout,
+                                    [&] { return control->idle_probes >= 2; }),
+        "an idle scheduler submits/polls without generation or HTTP traffic");
+  }
+  Expect(!scheduler->device_lost(), "pending probe is inconclusive");
+  Expect(gufo::server::detail::DeviceLostTotal() == before,
+         "pending probes do not count as losses");
+  control->block_prefill_label = 1;
+  auto request = scheduler->Submit({1}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  const auto probes = control->idle_probes.load();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  Expect(control->idle_probes == probes,
+         "a pending idle probe never polls during active inference");
+  control->ReleasePrefill();
+  Expect(request.Wait().tokens == ExpectedTokens(1, 2),
+         "arriving inference succeeds with an outstanding probe");
+  control->idle_probe_status = Status::kLost;
+  const auto deadline = TextGenerationScheduler::Clock::now() + kTestTimeout;
+  while (!scheduler->device_lost() &&
+         TextGenerationScheduler::Clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  Expect(scheduler->device_lost(), "idle probe loss is fatal and sticky");
+  scheduler.reset();
+  Expect(gufo::server::detail::DeviceLostTotal() == before + 1,
+         "confirmed idle loss increments the counter once");
+}
+
 void TestDeviceLossIsStickyAndReported() {
   auto control = std::make_shared<FakeControl>();
   control->throw_advance_label = 9;
@@ -2464,6 +2512,7 @@ int main() {
   TestFourResidentRequestsMakeProgress();
   TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement();
   TestDeviceLossIsStickyAndReported();
+  TestIdleDeviceProbe();
   Expect(
       gufo::server::detail::RequestsProcessing().load() == 0 &&
           gufo::server::detail::RequestsDeferred().load() == 0,

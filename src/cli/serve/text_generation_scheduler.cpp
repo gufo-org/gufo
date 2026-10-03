@@ -613,6 +613,18 @@ struct TextGenerationScheduler::Impl {
     PublishTerminal(request, std::move(failure), true);
   }
 
+  void MarkDeviceLost(std::string_view reason) noexcept {
+    if (device_lost.exchange(true, std::memory_order_acq_rel))
+      return;
+    detail::DeviceLostTotal().fetch_add(1, std::memory_order_relaxed);
+    try {
+      Logger::Error("scheduler", "event=device_lost remedy=restart reason=" +
+                                     std::string(reason));
+    } catch (...) {
+      // Loss remains observable even if logging fails.
+    }
+  }
+
   // A GPU reset leaves this process's device context permanently unusable,
   // and every later work unit then fails with a raw driver message. Probe the
   // device only after a model failure, on this thread between work units, so
@@ -637,9 +649,7 @@ struct TextGenerationScheduler::Impl {
       if (!device_lost.load(std::memory_order_acquire)) {
         if (runner_pool->runner().DeviceUsable())
           return failure;
-        device_lost.store(true, std::memory_order_release);
-        Logger::Error("scheduler",
-                      "event=device_lost remedy=restart reason=" + reason);
+        MarkDeviceLost(reason);
       }
       return device_lost_failure;
     } catch (...) {
@@ -1604,9 +1614,26 @@ struct TextGenerationScheduler::Impl {
                  (queued_count != 0 &&
                   capturing.size() + waiting.size() < runner_pool->capacity());
         };
-        if (capturing.empty() && waiting.empty())
-          queue_condition.wait(lock, wake);
-        else
+        if (capturing.empty() && waiting.empty()) {
+          // Only the idle wait has a timer. Arrival interrupts it immediately;
+          // no clock checks or device polling are added to active work units.
+          while (!wake()) {
+            if (queue_condition.wait_for(
+                    lock, scheduler_policy.device_probe_interval, wake))
+              break;
+            lock.unlock();
+            try {
+              if (runner_pool->runner().PollDevice() ==
+                  TextModelRunner::DeviceProbeStatus::kLost)
+                MarkDeviceLost("idle device probe failed");
+            } catch (...) {
+              // An inconclusive probe must not kill a usable model.
+            }
+            lock.lock();
+            if (device_lost.load(std::memory_order_acquire))
+              break;
+          }
+        } else
           queue_condition.wait_for(lock, std::chrono::milliseconds(1), wake);
         continue;
       }

@@ -335,6 +335,13 @@ public:
   /// Retain a safe executed frontier when cancellation interrupts publication
   /// of a completed speculative block. Called with cancellation checks cleared.
   virtual void PrepareCancellation(TextRunnerState&) const {}
+  enum class DeviceProbeStatus { kUsable, kPending, kLost };
+  /// Submit or poll one private device probe without waiting. Called only by
+  /// the scheduler between work units. Pending work is reused, never queued
+  /// again.
+  [[nodiscard]] virtual DeviceProbeStatus PollDevice() const {
+    return DeviceProbeStatus::kUsable;
+  }
   /// Bounded check, run only after a failed work unit, that the execution
   /// device still accepts work. False means the context is permanently lost;
   /// a probe that is still pending at its bound reports true.

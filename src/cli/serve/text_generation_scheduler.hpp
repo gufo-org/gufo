@@ -37,6 +37,8 @@ struct TextPrefillPolicy {
 };
 
 struct TextSchedulerPolicy {
+  /// Internal cadence; idle monitoring performs no work during inference.
+  std::chrono::milliseconds device_probe_interval{std::chrono::seconds(5)};
   std::size_t max_pending_requests{16};
   std::size_t max_pending_requests_per_client{4};
   std::size_t max_output_bytes_per_request{kDefaultMaxOutputBytes};
