@@ -475,6 +475,19 @@ std::optional<std::string> QwenChatTemplate::Render(
 
   std::size_t image_count = 0;
   std::optional<std::size_t> mutable_reasoning;
+  // Agent clients may end every request with a user message that the next
+  // request replaces (per-turn runtime context) rather than keeps. A
+  // checkpoint at the end of the prompt then never prefixes the next request.
+  // Such context follows a tool result or another user message, not an
+  // assistant reply, so only then keep the checkpoint before the final
+  // text-only user turn. A client that keeps the message prefills it again.
+  const bool final_user_turn =
+      last_user_index + 1 == messages.size() &&
+      messages.back().images.empty() && messages.size() >= 2 &&
+      (messages[messages.size() - 2].role == ChatRole::kTool ||
+       messages[messages.size() - 2].role == ChatRole::kUser);
+  bool seen_assistant = false;
+  std::optional<std::size_t> final_user_start;
   for (; message_index < messages.size(); ++message_index) {
     const auto& msg = messages[message_index];
     if (msg.role == ChatRole::kSystem || msg.role == ChatRole::kDeveloper) {
@@ -507,6 +520,11 @@ std::optional<std::string> QwenChatTemplate::Render(
     if (!options.preserve_thinking && msg.role == ChatRole::kAssistant &&
         message_index > last_user_index && !mutable_reasoning)
       mutable_reasoning = output.size();
+    if (msg.role == ChatRole::kAssistant)
+      seen_assistant = true;
+    else if (final_user_turn && seen_assistant &&
+             message_index == last_user_index)
+      final_user_start = output.size();
     const auto role_name = ToString(msg.role);
     output.append("<|im_start|>");
     output.append(role_name);
@@ -584,7 +602,8 @@ std::optional<std::string> QwenChatTemplate::Render(
   }
 
   if (stable_prefix_bytes != nullptr)
-    *stable_prefix_bytes = mutable_reasoning.value_or(output.size());
+    *stable_prefix_bytes = std::min(mutable_reasoning.value_or(output.size()),
+                                    final_user_start.value_or(output.size()));
   if (options.add_generation_prompt)
     output.append(GenerationPrompt(options.enable_thinking));
 

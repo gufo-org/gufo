@@ -310,7 +310,8 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
     }
   }
   append(cursor, rendered->size());
-  // The boundary starts an assistant special token, after every image.
+  // The boundary starts a special token (the assistant turn, or a final user
+  // turn an agent replaces each request), after every image.
   // Encode only the mutable suffix; never decode or resize images twice.
   const auto suffix = tokenization::QwenChatTemplate::EncodeRendered(
       tokenizer, *rendered, stable_prefix_bytes, rendered->size(),
