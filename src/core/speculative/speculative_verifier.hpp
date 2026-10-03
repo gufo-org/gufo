@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -313,6 +314,10 @@ public:
     tokenization::TokenId eos_id;
     std::uint32_t max_emitted_tokens;
     sampling::SamplerState& sampler;
+    /// Upper bound on this step's draft length, on top of the verifier's own
+    /// (possibly adaptive) length. Concurrent callers lower it so stacked
+    /// verification rows stay near one request's width.
+    std::uint32_t max_draft_tokens{std::numeric_limits<std::uint32_t>::max()};
   };
 
   [[nodiscard]] static std::vector<StepResult> VerifyBatch(

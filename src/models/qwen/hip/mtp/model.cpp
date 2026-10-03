@@ -68,6 +68,9 @@ void ReadMatrixRow(const models::QwenTensorRef& tensor, std::size_t row,
     case core::GgmlType::kQ6_K:
       quant::DequantizeQ6_K(source, output, columns);
       return;
+    case core::GgmlType::kQ8_0:
+      quant::DequantizeQ8_0(source, output, columns);
+      return;
     default:
       throw std::runtime_error("unsupported MTP matrix type");
   }
@@ -137,6 +140,25 @@ models::QwenTensorRef PackMatrixBf16(const models::QwenTensorRef& source,
   };
 }
 
+/// Copies a tensor to device memory in its stored format. MoE tensors keep
+/// their quantized encoding so the MTP layer reuses the target's decode MoE
+/// kernels (and expert matrices are too large to widen to BF16).
+models::QwenTensorRef CopyRawToDevice(const models::QwenTensorRef& source,
+                                      std::vector<void*>& allocations,
+                                      std::size_t& packed_bytes) {
+  const std::size_t bytes = source.EncodedSizeBytes();
+  if (bytes == 0) {
+    throw std::runtime_error("unsupported MTP MoE tensor type");
+  }
+  void* device = detail::AllocateDevice(bytes);
+  allocations.push_back(device);
+  CopyToDevice(device, source.data, bytes);
+  packed_bytes += bytes;
+  models::QwenTensorRef copy = source;
+  copy.data = device;
+  return copy;
+}
+
 void ReleaseAllocations(std::vector<void*>& allocations) noexcept {
   for (void* allocation : allocations) {
     if (allocation != nullptr) {
@@ -182,6 +204,15 @@ void PackPrivateWeights(speculative::QwenMtpWeights& weights,
                                     allocations, packed_bytes);
   layer.ffn_norm =
       CopyVectorF32(layer.ffn_norm, hidden, allocations, packed_bytes);
+  if (weights.config.IsMoE()) {
+    for (auto* tensor :
+         {&layer.ffn_gate_inp, &layer.ffn_gate_inp_shexp, &layer.ffn_gate_exps,
+          &layer.ffn_up_exps, &layer.ffn_down_exps, &layer.ffn_gate_shexp,
+          &layer.ffn_up_shexp, &layer.ffn_down_shexp}) {
+      *tensor = CopyRawToDevice(*tensor, allocations, packed_bytes);
+    }
+    return;
+  }
   layer.ffn_gate = PackMatrixBf16(layer.ffn_gate, intermediate, hidden,
                                   allocations, packed_bytes);
   layer.ffn_up = PackMatrixBf16(layer.ffn_up, intermediate, hidden, allocations,

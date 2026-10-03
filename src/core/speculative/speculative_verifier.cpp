@@ -446,7 +446,8 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
   prepared.max_draft_tokens =
       request.max_emitted_tokens > 1 && draft_backend_ != nullptr &&
               (!prepared.sampled || draft_backend_->SupportsSampledProposals())
-          ? std::min(current_draft_length_, request.max_emitted_tokens - 1)
+          ? std::min({current_draft_length_, request.max_emitted_tokens - 1,
+                      request.max_draft_tokens})
           : 0;
   if (prepared.max_draft_tokens == 0) {
     PrepareTargetOnlyStep(prepared, request, defer_target_only);

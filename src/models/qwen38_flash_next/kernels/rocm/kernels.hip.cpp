@@ -3795,10 +3795,15 @@ constexpr std::uint32_t kHalfMagic = 0x64646464U;  // 1024.0 high bytes
 /// fifth bit of element j of K block s), then the Q4_K nibble layout.
 constexpr std::size_t kQ5KBlockBytes = 176;
 
+/// block_q6_K: ql[128] (low four bits), qh[64] (high two bits), 16 int8
+/// scales (one per 16 elements), then the F16 superblock scale d.
+constexpr std::size_t kQ6KBlockBytes = 210;
+
 template<WeightType kType>
 __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
   return kType == WeightType::kQ4_K   ? (k / 256) * sizeof(Q4KBlock)
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
+         : kType == WeightType::kQ6_K ? (k / 256) * kQ6KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
                                       : (k / 32) * sizeof(Q8_0Block);
 }
@@ -3852,10 +3857,15 @@ __launch_bounds__(256) __global__
   constexpr bool kQ5 = kType == WeightType::kQ5_1;
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
   constexpr bool kQ8 = kType == WeightType::kQ8_0;
+  // Q6_K is staged like Q8_0: its 6-bit codes are assembled into one byte
+  // per element at fetch time, with a scale per 16-element half.
+  constexpr bool kQ6 = kType == WeightType::kQ6_K;
+  constexpr bool kByteCodes = kQ8 || kQ6;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
-  // two nibble blocks are two, Q8_0's two byte blocks are four.
-  constexpr int kChunks = kQ8 ? 2 * BK : BK;
+  // two nibble blocks are two, the two byte-code blocks of Q8_0 and Q6_K
+  // are four.
+  constexpr int kChunks = kByteCodes ? 2 * BK : BK;
 
   // LDS plan (bytes): the code plane holds BM rows x kChunks 16-byte chunks
   // with the chunks of nearby rows permuted so a fragment read (one row per
@@ -3979,6 +3989,35 @@ __launch_bounds__(256) __global__
         f_codes[u] = make_uint4(w1.x, w1.y, w2.x, w2.y);
         f_high[u] = w0.y;
         f_dm[u] = w0.x;
+      } else if constexpr (kQ6) {
+        // K block kbl of a superblock is half n = kbl / 4, quarter
+        // qd = kbl % 4: element l takes the low (qd < 2) or high nibble of
+        // ql[64 n + 32 (qd & 1) + l] and bits 2 qd of qh[32 n + l], and
+        // elements l < 16 / l >= 16 take scales[8 n + 2 qd] / [.. + 1].
+        const int kb = kb0 + f_c;
+        const int kbl = kb % 8;
+        const int n = kbl / 4;
+        const int qd = kbl % 4;
+        const auto* blk = f_ptr[u] + ((kb / 8) * kQ6KBlockBytes);
+        std::uint32_t ql[8];
+        std::uint32_t qh[8];
+        __builtin_memcpy(ql, blk + (64 * n) + (32 * (qd & 1)), 32);
+        __builtin_memcpy(qh, blk + 128 + (32 * n), 32);
+        const unsigned nib_shift = qd >= 2 ? 4U : 0U;
+        const unsigned high_shift = 2U * static_cast<unsigned>(qd);
+        std::uint32_t codes[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          codes[i] = ((ql[i] >> nib_shift) & 0x0F0F0F0FU) |
+                     (((qh[i] >> high_shift) & 0x03030303U) << 4U);
+        }
+        __builtin_memcpy(&f_codes[u], &codes[0], 16);
+        __builtin_memcpy(&f_codes_hi[u], &codes[4], 16);
+        std::uint16_t d_bits = 0;
+        __builtin_memcpy(&d_bits, blk + 208, 2);
+        const std::uint32_t sc_lo = blk[192 + (8 * n) + (2 * qd)];
+        const std::uint32_t sc_hi = blk[193 + (8 * n) + (2 * qd)];
+        f_dm[u] = d_bits | (sc_lo << 16U) | (sc_hi << 24U);
       } else if constexpr (kQ8) {
         // block_q8_0 is 34 bytes, so the code loads are 2-byte aligned.
         const auto* blk = f_ptr[u] + ((kb0 + f_c) * 34);
@@ -4042,10 +4081,12 @@ __launch_bounds__(256) __global__
     for (int u = 0; u < kWaveRowTiles; ++u) {
       const int row = (tid >> 1) + (u * 128);
       std::uint32_t scale_bias = 0;
-      if constexpr (kQ8) {
+      if constexpr (kByteCodes) {
         s_codes[swizzle(row, 2 * f_c)] = f_codes[u];
         s_codes[swizzle(row, (2 * f_c) + 1)] = f_codes_hi[u];
-        scale_bias = f_live[u] ? f_dm[u] : 0U;  // half2 (d, 0)
+        if constexpr (kQ8) {
+          scale_bias = f_live[u] ? f_dm[u] : 0U;  // half2 (d, 0)
+        }
       } else {
         s_codes[swizzle(row, f_c)] = f_codes[u];
       }
@@ -4053,6 +4094,18 @@ __launch_bounds__(256) __global__
         s_high[(f_c * BM) + row] = f_high[u];
       }
       if constexpr (kQ8) {
+      } else if constexpr (kQ6) {
+        // half2 (d * scale of elements 0-15, d * scale of 16-31); the -32
+        // code offset is taken out by the magic constant.
+        const float d = f_live[u]
+                            ? __half2float(__builtin_bit_cast(
+                                  __half, static_cast<std::uint16_t>(f_dm[u])))
+                            : 0.0F;
+        const auto sc_lo = static_cast<std::int8_t>((f_dm[u] >> 16U) & 0xFFU);
+        const auto sc_hi = static_cast<std::int8_t>(f_dm[u] >> 24U);
+        scale_bias = __builtin_bit_cast(
+            std::uint32_t, __floats2half2_rn(d * static_cast<float>(sc_lo),
+                                             d * static_cast<float>(sc_hi)));
       } else if constexpr (kQ5) {
         s_high[(f_c * BM) + row] = f_high[u];
         const __half2 dm = __builtin_bit_cast(__half2, f_dm[u]);
@@ -4100,11 +4153,13 @@ __launch_bounds__(256) __global__
     }
   }
 
-  const __half2 magic =
-      __floats2half2_rn(kQ8 ? -1152.0F : -1024.0F, kQ8 ? -1152.0F : -1024.0F);
+  // 1024 + q as F16 minus the magic: Q8_0 carries q + 128 (1152), Q6_K an
+  // unsigned code whose zero is 32 (1056), the rest are unsigned (1024).
+  constexpr float kMagic = kQ8 ? -1152.0F : kQ6 ? -1056.0F : -1024.0F;
+  const __half2 magic = __floats2half2_rn(kMagic, kMagic);
   const auto compute_stage = [&]() {
     uint4 raw[kWaveRowTiles][BK];
-    if constexpr (!kQ8) {
+    if constexpr (!kByteCodes) {
 #pragma unroll
       for (int u = 0; u < kWaveRowTiles; ++u) {
         const int row = (wave_id * 16) + (u * 128) + sub_lane;
@@ -4126,17 +4181,17 @@ __launch_bounds__(256) __global__
         const __half2 scale2 = __low2half2(sb);
         const __half2 bias2 = __high2half2(sb);
         std::uint32_t nib[8];
-        if constexpr (kQ8) {
-          // Q8_0: the block's 32 signed bytes are chunks 2 kb and 2 kb + 1;
-          // flipping the sign bit carries q + 128, which the 1152 magic
-          // takes back out.
+        if constexpr (kByteCodes) {
+          // Q8_0 / Q6_K: the block's 32 code bytes are chunks 2 kb and
+          // 2 kb + 1. Q8_0 flips the sign bit to carry q + 128, which the
+          // 1152 magic takes back out; Q6_K codes are already unsigned.
           const uint4 c0 = s_codes[swizzle(row, 2 * kb)];
           const uint4 c1 = s_codes[swizzle(row, (2 * kb) + 1)];
           const std::uint32_t words[8] = {c0.x, c0.y, c0.z, c0.w,
                                           c1.x, c1.y, c1.z, c1.w};
 #pragma unroll
           for (int i = 0; i < 8; ++i) {
-            nib[i] = words[i] ^ 0x80808080U;
+            nib[i] = kQ8 ? (words[i] ^ 0x80808080U) : words[i];
           }
         } else if constexpr (kQ5) {
           // Q5_1: K block kb's 16 bytes are chunk kb; elements 0-15 take
@@ -4172,14 +4227,21 @@ __launch_bounds__(256) __global__
         __half2 h[16];
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-          CodesToHalves(nib[i], magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
+          if constexpr (kQ6) {
+            // nib[0..3] are elements 0-15, nib[4..7] elements 16-31.
+            const __half2 half_scale = i < 4 ? scale2 : __high2half2(sb);
+            CodesToHalves(nib[i], magic, half_scale, __float2half2_rn(0.0F),
+                          h[2 * i], h[2 * i + 1]);
+          } else {
+            CodesToHalves(nib[i], magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
+          }
         }
         __builtin_memcpy(&a_lo[u], &h[0], 32);
         __builtin_memcpy(&a_hi[u], &h[8], 32);
       }
 #pragma unroll
       for (int j = 0; j < kTokTiles; ++j) {
-        if constexpr (kPair || ((kQ5 || kQ8) && BN >= 48)) {
+        if constexpr (kPair || ((kQ5 || kByteCodes) && BN >= 48)) {
           // Keep one token tile's LDS fragments live at a time. Hoisting
           // all eight tiles spills registers and defeats the wider tile's
           // reuse of each weight decode. This is a compiler barrier only.
@@ -4187,7 +4249,8 @@ __launch_bounds__(256) __global__
         }
         // A short expert bucket has no output in the remaining token
         // tiles, so omit their WMMA work.
-        if constexpr ((kPair || ((kQ5 || kQ8) && BN >= 48)) && kTokTiles > 1) {
+        if constexpr ((kPair || ((kQ5 || kByteCodes) && BN >= 48)) &&
+                      kTokTiles > 1) {
           if (j >= live_tok_tiles)
             continue;
         }
@@ -4711,6 +4774,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);
       return true;
+    case WeightType::kQ6_K:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ6_K, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
     case WeightType::kQ5_K:
       if constexpr (BN > 48) {
         return false;
@@ -4733,7 +4802,10 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream) {
   const std::size_t block_elems =
-      (type == WeightType::kQ4_K || type == WeightType::kQ5_K) ? 256 : 64;
+      (type == WeightType::kQ4_K || type == WeightType::kQ5_K ||
+       type == WeightType::kQ6_K)
+          ? 256
+          : 64;
   if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||
       (out_half == nullptr) == (out == nullptr)) {
     return false;
@@ -4777,6 +4849,18 @@ bool LaunchRoutedGatedF16(const void* gate, const void* up, WeightType type,
     case WeightType::kQ5_K:
       hipLaunchKernelGGL(
           (RoutedF16GEMMKernel<WeightType::kQ5_K, 128, BN, 2, true>), grid,
+          dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
+          rows_out, nullptr, nullptr, out, m, k, up);
+      return true;
+    case WeightType::kQ6_K:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kQ6_K, 128, BN, 2, true>), grid,
+          dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
+          rows_out, nullptr, nullptr, out, m, k, up);
+      return true;
+    case WeightType::kQ8_0:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kQ8_0, 128, BN, 2, true>), grid,
           dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
           rows_out, nullptr, nullptr, out, m, k, up);
       return true;

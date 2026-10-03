@@ -31,7 +31,8 @@ bool IsNormType(core::GgmlType type) noexcept {
 
 bool IsMatrixType(core::GgmlType type) noexcept {
   return IsNormType(type) || type == core::GgmlType::kQ3_K ||
-         type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ6_K;
+         type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ6_K ||
+         type == core::GgmlType::kQ8_0;
 }
 
 bool Validate(const models::QwenTensorRef& tensor, std::size_t elements,
@@ -97,61 +98,100 @@ std::optional<QwenMtpWeights> QwenMtpWeights::LoadFromGguf(
   if (weights.output.empty()) {
     weights.output = weights.token_embedding;
   }
-  weights.embedding_norm = TensorRef(reader, "blk.64.nextn.enorm.weight");
-  weights.hidden_norm = TensorRef(reader, "blk.64.nextn.hnorm.weight");
-  weights.fusion_projection = TensorRef(reader, "blk.64.nextn.eh_proj.weight");
+  // The MTP block follows the target's layers: blk.64 in Qwen3.8-27B,
+  // blk.40 in Qwen3.6-35B-A3B.
+  const std::string prefix =
+      "blk." + std::to_string(weights.config.num_layers) + ".";
+  const auto name = [&](std::string_view suffix) {
+    return prefix + std::string(suffix);
+  };
+  weights.embedding_norm = TensorRef(reader, name("nextn.enorm.weight"));
+  weights.hidden_norm = TensorRef(reader, name("nextn.hnorm.weight"));
+  weights.fusion_projection = TensorRef(reader, name("nextn.eh_proj.weight"));
   weights.shared_head_norm =
-      TensorRef(reader, "blk.64.nextn.shared_head_norm.weight");
+      TensorRef(reader, name("nextn.shared_head_norm.weight"));
 
   auto& layer = weights.layer;
   layer.is_full_attention = true;
-  layer.attn_norm = TensorRef(reader, "blk.64.attn_norm.weight");
-  layer.attn_q = TensorRef(reader, "blk.64.attn_q.weight");
-  layer.attn_k = TensorRef(reader, "blk.64.attn_k.weight");
-  layer.attn_v = TensorRef(reader, "blk.64.attn_v.weight");
-  layer.attn_output = TensorRef(reader, "blk.64.attn_output.weight");
-  layer.attn_q_norm = TensorRef(reader, "blk.64.attn_q_norm.weight");
-  layer.attn_k_norm = TensorRef(reader, "blk.64.attn_k_norm.weight");
-  layer.ffn_norm = TensorRef(reader, "blk.64.post_attention_norm.weight");
-  layer.ffn_gate = TensorRef(reader, "blk.64.ffn_gate.weight");
-  layer.ffn_up = TensorRef(reader, "blk.64.ffn_up.weight");
-  layer.ffn_down = TensorRef(reader, "blk.64.ffn_down.weight");
+  layer.attn_norm = TensorRef(reader, name("attn_norm.weight"));
+  layer.attn_q = TensorRef(reader, name("attn_q.weight"));
+  layer.attn_k = TensorRef(reader, name("attn_k.weight"));
+  layer.attn_v = TensorRef(reader, name("attn_v.weight"));
+  layer.attn_output = TensorRef(reader, name("attn_output.weight"));
+  layer.attn_q_norm = TensorRef(reader, name("attn_q_norm.weight"));
+  layer.attn_k_norm = TensorRef(reader, name("attn_k_norm.weight"));
+  layer.ffn_norm = TensorRef(reader, name("post_attention_norm.weight"));
+  const bool moe = weights.config.IsMoE();
+  if (moe) {
+    layer.ffn_gate_inp = TensorRef(reader, name("ffn_gate_inp.weight"));
+    layer.ffn_gate_inp_shexp =
+        TensorRef(reader, name("ffn_gate_inp_shexp.weight"));
+    layer.ffn_gate_exps = TensorRef(reader, name("ffn_gate_exps.weight"));
+    layer.ffn_up_exps = TensorRef(reader, name("ffn_up_exps.weight"));
+    layer.ffn_down_exps = TensorRef(reader, name("ffn_down_exps.weight"));
+    layer.ffn_gate_shexp = TensorRef(reader, name("ffn_gate_shexp.weight"));
+    layer.ffn_up_shexp = TensorRef(reader, name("ffn_up_shexp.weight"));
+    layer.ffn_down_shexp = TensorRef(reader, name("ffn_down_shexp.weight"));
+  } else {
+    layer.ffn_gate = TensorRef(reader, name("ffn_gate.weight"));
+    layer.ffn_up = TensorRef(reader, name("ffn_up.weight"));
+    layer.ffn_down = TensorRef(reader, name("ffn_down.weight"));
+  }
 
+  const std::size_t experts = weights.config.expert_count;
+  const std::size_t expert_ff = weights.config.expert_ff_length;
+  const std::size_t shared_ff = weights.config.expert_shared_ff_length;
   const bool valid =
       Validate(weights.token_embedding, vocab * hidden, "token_embd.weight",
                true, error_msg) &&
       Validate(weights.output, vocab * hidden, "output.weight", true,
                error_msg) &&
-      Validate(weights.embedding_norm, hidden, "blk.64.nextn.enorm.weight",
+      Validate(weights.embedding_norm, hidden, name("nextn.enorm.weight"),
                false, error_msg) &&
-      Validate(weights.hidden_norm, hidden, "blk.64.nextn.hnorm.weight", false,
+      Validate(weights.hidden_norm, hidden, name("nextn.hnorm.weight"), false,
                error_msg) &&
-      Validate(weights.fusion_projection, hidden * hidden * 2,
-               "blk.64.nextn.eh_proj.weight", true, error_msg) &&
+      Validate(weights.fusion_projection, hidden * 2 * hidden,
+               name("nextn.eh_proj.weight"), true, error_msg) &&
       Validate(weights.shared_head_norm, hidden,
-               "blk.64.nextn.shared_head_norm.weight", false, error_msg) &&
-      Validate(layer.attn_norm, hidden, "blk.64.attn_norm.weight", false,
+               name("nextn.shared_head_norm.weight"), false, error_msg) &&
+      Validate(layer.attn_norm, hidden, name("attn_norm.weight"), false,
                error_msg) &&
-      Validate(layer.attn_q, 2 * attention * hidden, "blk.64.attn_q.weight",
+      Validate(layer.attn_q, 2 * attention * hidden, name("attn_q.weight"),
                true, error_msg) &&
-      Validate(layer.attn_k, kv * hidden, "blk.64.attn_k.weight", true,
+      Validate(layer.attn_k, kv * hidden, name("attn_k.weight"), true,
                error_msg) &&
-      Validate(layer.attn_v, kv * hidden, "blk.64.attn_v.weight", true,
+      Validate(layer.attn_v, kv * hidden, name("attn_v.weight"), true,
                error_msg) &&
       Validate(layer.attn_output, hidden * attention,
-               "blk.64.attn_output.weight", true, error_msg) &&
+               name("attn_output.weight"), true, error_msg) &&
       Validate(layer.attn_q_norm, weights.config.head_dim,
-               "blk.64.attn_q_norm.weight", false, error_msg) &&
+               name("attn_q_norm.weight"), false, error_msg) &&
       Validate(layer.attn_k_norm, weights.config.head_dim,
-               "blk.64.attn_k_norm.weight", false, error_msg) &&
-      Validate(layer.ffn_norm, hidden, "blk.64.post_attention_norm.weight",
+               name("attn_k_norm.weight"), false, error_msg) &&
+      Validate(layer.ffn_norm, hidden, name("post_attention_norm.weight"),
                false, error_msg) &&
-      Validate(layer.ffn_gate, intermediate * hidden, "blk.64.ffn_gate.weight",
-               true, error_msg) &&
-      Validate(layer.ffn_up, intermediate * hidden, "blk.64.ffn_up.weight",
-               true, error_msg) &&
-      Validate(layer.ffn_down, hidden * intermediate, "blk.64.ffn_down.weight",
-               true, error_msg);
+      (moe ? (Validate(layer.ffn_gate_inp, experts * hidden,
+                       name("ffn_gate_inp.weight"), true, error_msg) &&
+              Validate(layer.ffn_gate_inp_shexp, hidden,
+                       name("ffn_gate_inp_shexp.weight"), true, error_msg) &&
+              Validate(layer.ffn_gate_exps, experts * expert_ff * hidden,
+                       name("ffn_gate_exps.weight"), true, error_msg) &&
+              Validate(layer.ffn_up_exps, experts * expert_ff * hidden,
+                       name("ffn_up_exps.weight"), true, error_msg) &&
+              Validate(layer.ffn_down_exps, experts * hidden * expert_ff,
+                       name("ffn_down_exps.weight"), true, error_msg) &&
+              Validate(layer.ffn_gate_shexp, shared_ff * hidden,
+                       name("ffn_gate_shexp.weight"), true, error_msg) &&
+              Validate(layer.ffn_up_shexp, shared_ff * hidden,
+                       name("ffn_up_shexp.weight"), true, error_msg) &&
+              Validate(layer.ffn_down_shexp, hidden * shared_ff,
+                       name("ffn_down_shexp.weight"), true, error_msg))
+           : (Validate(layer.ffn_gate, intermediate * hidden,
+                       name("ffn_gate.weight"), true, error_msg) &&
+              Validate(layer.ffn_up, intermediate * hidden,
+                       name("ffn_up.weight"), true, error_msg) &&
+              Validate(layer.ffn_down, hidden * intermediate,
+                       name("ffn_down.weight"), true, error_msg)));
   if (!valid) {
     return std::nullopt;
   }

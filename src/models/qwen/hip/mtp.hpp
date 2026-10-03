@@ -140,6 +140,9 @@ private:
   void* d_kv_cache_f16_{nullptr};
   float* d_split_k_scratch_{nullptr};
   std::uint32_t* d_out_token_{nullptr};
+  // One-token MoE FFN scratch; allocated only for MoE targets.
+  std::uint8_t* d_moe_{nullptr};
+  QwenMoeScratch moe_{};
 
   models::qwen::vision::DeviceInput* vision_input_{
       nullptr};  // owned by the target session
