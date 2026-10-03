@@ -1151,6 +1151,102 @@ std::size_t FramingFillerLength(std::string_view text, std::size_t end) {
   return 0;
 }
 
+// The client's envelope: the dialect a harness renders for the model, built
+// from bare `<invoke name="…">` and `<parameter name="…">` tags. No dialect
+// admits it as a call — the model's own dialects are `<tool_call>` and
+// `<｜DSML｜…>`, and those stay visible prose when foreign (#393) — so a block
+// written in the envelope is framing, and content must not carry the shape: a
+// client that stores it replays the markup as history on every later turn
+// (#383).
+constexpr std::array<std::string_view, 1> kEnvelopeHeads{"<invoke name="};
+constexpr std::array<std::string_view, 1> kEnvelopeParameters{
+    "<parameter name="};
+constexpr std::array<std::string_view, 2> kEnvelopeClosers{"</invoke>",
+                                                           "</parameter>"};
+// The head and the parameter tags of every call block the server parses, in
+// every dialect. A run of admitted closers ends one of these blocks, and the
+// head that opened it goes with the closers: a head and a body with their end
+// removed is the same markup, half gone.
+constexpr std::array<std::string_view, 3> kBlockHeads{
+    "<invoke name=", "<function=", "<｜DSML｜invoke name="};
+constexpr std::array<std::string_view, 3> kBlockParameters{
+    "<parameter name=", "<parameter=", "<｜DSML｜parameter name="};
+
+// The last of `tags` at or before `stop`, or npos when there is none or the
+// last one sits in quoted prose.
+template<std::size_t N>
+std::size_t LastUnquotedTag(std::string_view full, std::size_t stop,
+                            const std::array<std::string_view, N>& tags) {
+  std::size_t last = std::string_view::npos;
+  for (const auto tag : tags) {
+    const auto found = full.rfind(tag, stop);
+    if (found == std::string_view::npos) {
+      continue;
+    }
+    if (last == std::string_view::npos || found > last) {
+      last = found;
+    }
+  }
+  if (last == std::string_view::npos || IsQuotedPosition(full, last)) {
+    return std::string_view::npos;
+  }
+  return last;
+}
+
+// Where the last call-shaped block at or before `stop` opens, or npos. The
+// head of a block carries the whole block, so the head decides where the block
+// stands: a cut that began at a parameter tag would leave the head behind.
+template<std::size_t H, std::size_t M>
+std::size_t LastBlockStart(std::string_view full, std::size_t stop,
+                           const std::array<std::string_view, H>& heads,
+                           const std::array<std::string_view, M>& members) {
+  if (const auto head = LastUnquotedTag(full, stop, heads);
+      head != std::string_view::npos) {
+    return head;
+  }
+  // A parameter tag with no head above it is the same shape without the
+  // wrapper that held it.
+  return LastUnquotedTag(full, stop, members);
+}
+
+// Where the last block in the client's envelope opens, or npos.
+std::size_t LastEnvelopeOpener(std::string_view full, std::size_t stop) {
+  return LastBlockStart(full, stop, kEnvelopeHeads, kEnvelopeParameters);
+}
+
+// Where a trailing envelope block opens within [floor, stop), or npos. The
+// block counts as closed when its own closers end the region, and as truncated
+// when it carries the parameter tag of a call and no closer at all: either
+// shape is a call, so the block is framing rather than prose. Prose that names
+// an opener outside quotes is not a shape, and one that quotes it stays prose
+// under IsQuotedPosition.
+std::size_t EnvelopeBlockStart(std::string_view full, std::size_t stop,
+                               std::size_t floor, ToolCloserSet closers) {
+  const auto opening = LastEnvelopeOpener(full, stop);
+  if (opening == std::string_view::npos || opening < floor) {
+    return std::string_view::npos;
+  }
+  auto region = full.substr(opening, stop - opening);
+  while (!region.empty() &&
+         std::isspace(static_cast<unsigned char>(region.back())) != 0) {
+    region.remove_suffix(1);
+  }
+  for (const auto closer : kEnvelopeClosers) {
+    if (region.ends_with(closer)) {
+      return opening;
+    }
+  }
+  if (region.find("parameter name=") == std::string_view::npos) {
+    return std::string_view::npos;
+  }
+  for (const auto closer : closers) {
+    if (region.find(closer) != std::string_view::npos) {
+      return std::string_view::npos;
+    }
+  }
+  return opening;
+}
+
 // Where a trailing run of closing tags begins within [0, end), or npos when
 // the text does not end with one. Whitespace between the tags belongs to the
 // run. A run that starts inside quoted prose is not framing: the model is
@@ -1222,7 +1318,22 @@ std::string_view ContentBefore(std::string_view full, std::size_t begin,
     return std::string_view{};
   }
   std::string_view slice = full.substr(begin, stop - begin);
-  const auto start = TrailingFramingStart(full, stop, begin, closers);
+  std::size_t start = TrailingFramingStart(full, stop, begin, closers);
+  // The run closed a block: its head goes with its closers, whichever dialect
+  // wrote the block.
+  if (start != std::string_view::npos) {
+    if (const auto head =
+            LastBlockStart(full, start, kBlockHeads, kBlockParameters);
+        head != std::string_view::npos && head >= begin) {
+      start = head;
+    }
+  }
+  // A block in the client's envelope is framing even when nothing closed it.
+  if (const auto block = EnvelopeBlockStart(full, stop, begin, closers);
+      block != std::string_view::npos &&
+      (start == std::string_view::npos || block < start)) {
+    start = block;
+  }
   if (start == std::string_view::npos || start < begin) {
     return slice;
   }
@@ -1254,6 +1365,14 @@ std::size_t FramingHold(std::string_view full, std::size_t end,
     }
     hold = end - run;
     position = run;
+  }
+  // A block in the client's envelope never streams: from its opener the tail
+  // stays held, because the shape is a call the parser will not take here. It
+  // resolves when the block closes, when a marker takes over, or when the
+  // response ends and ContentBefore drops it.
+  if (const auto opening = LastEnvelopeOpener(full, end);
+      opening != std::string_view::npos) {
+    hold = std::max(hold, end - opening);
   }
   return hold;
 }
@@ -1761,6 +1880,12 @@ ParsedGeneration ParseGeneration(
           text_before_tools, 0, text_before_tools.size(), closers));
       parsed.hide_tool_markup = true;
     }
+  } else if (recognize_tools) {
+    // No marker: the text is content, but the framing it carries still goes.
+    // The streamed response drops it as the turn ends, and both transports
+    // must report the same content.
+    parsed.text =
+        std::string(ContentBefore(parsed.text, 0, parsed.text.size(), closers));
   }
   if (enforce_required && choice == ChatRequest::ToolChoice::kRequired &&
       parsed.tool_calls.empty())
@@ -1851,7 +1976,12 @@ ParsedGeneration ParseStructuredGeneration(
   if (enforce_required && choice == ChatRequest::ToolChoice::kRequired)
     throw TextGenerationError(TextGenerationErrorCode::kToolChoiceUnsatisfied,
                               "model did not complete a declared tool call");
-  parsed.text = std::string(raw);
+  // A constrained turn that produced no call is still reported without
+  // framing: the streamed response drops it as the turn ends, and both
+  // transports must report the same content.
+  parsed.text = tool_only
+                    ? std::string(ContentBefore(raw, 0, raw.size(), closers))
+                    : std::string(raw);
   return parsed;
 }
 

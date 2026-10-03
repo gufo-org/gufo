@@ -3262,14 +3262,31 @@ void TestToolClosingFraming() {
   // Verbatim tails captured from gufo responses in #383.
   const std::string echo = "\n\n\t\t</invoke>\n</parameter>\n</function>\n";
   const std::string pitchfork = "`" + std::string(32, ']') + "<|tool_call|>{";
+  // The turn that reopened #383 from a live client (session row 106141): a
+  // line of prose, then a call written in the client's envelope, then the
+  // model's own call — the only one that ran. The engine consumed the
+  // envelope's closers before the client saw the text, which is how a head
+  // and a body arrived with no end: the halves of this exact block.
+  const std::string live_prose =
+      "Recovering the pieces this needs — llama-swap profiles (without "
+      "dumping anything sensitive), what's loaded now, and whether the two "
+      "branches can merge cleanly:";
+  const std::string live_block = R"call(<invoke name="terminal">
+<parameter name="command">echo "=== what's loaded right now ==="
+curl -s localhost:8080/state 2>/dev/null | head -c 250; echo
+curl -s localhost:8080/engines 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print([ {k:v.get('model','?') if isinstance(v,dict) else v for k,v in (e.items() if isinstance(e,dict) else [])} for e in (d if isinstance(d,list) else [d]) ])" 2>/dev/null || curl -s localhost:8080/engines | head -c 250
+echo "=== can the two branches merge cleanly? (no worktree change) ==="
+cd ~/projects/personal/gufo
+git merge-tree --write-tree --name-only pr-299-qwen35moe fix/tool-closing-framing > /tmp/mergetree.txt 2>&1; echo "merge-tree exit=$? (0=clean, 1=conflicts)"
+head -12 /tmp/mergetree.txt)call";
   struct Case {
     std::string text;
     std::size_t calls;
     std::string argument;
     std::string content;
     std::optional<gufo::sampling::JsonConstraint::ToolFormat> format{};
-    // Whether content must carry no closing framing at all. A block written in
-    // a dialect the request did not admit is prose, so its tags stay visible.
+    // Whether content must carry no closing framing at all. The client's
+    // envelope is never a call, so a block written in it leaves whole.
     bool framing_free{true};
   };
   for (
@@ -3297,27 +3314,29 @@ void TestToolClosingFraming() {
             "tool_call>"
             "\n</parameter>\n</function>\n</tool_call>",
             1, R"({"text":"<tool_call></tool_call>"})", ""},
-       // The client's dialect under the admitted Qwen grammar: only the model's
-       // own envelope is a call, and the block stays visible content.
+       // The client's envelope is framing under every admitted grammar: the
+       // block leaves whole, its head and body with its closers, so no half
+       // block reaches content or the history built from it.
        Case{"<invoke name=\"f\">\n<parameter name=\"text\">leakme"
             "</parameter>\n</invoke>\n"
             "<tool_call><function=f><parameter=text>hello</parameter>"
             "</function></tool_call>",
-            1, R"({"text":"hello"})",
-            "<invoke name=\"f\">\n<parameter name=\"text\">leakme</parameter>\n"
-            "</invoke>",
-            gufo::sampling::JsonConstraint::ToolFormat::kQwen, false},
-       // Alone, the client's dialect is prose too: nothing was called.
+            1, R"({"text":"hello"})", "",
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen},
+       // Alone the block is framing all the same: nothing was called, and the
+       // shape of a call may not become the client's prose either.
        Case{"<invoke name=\"f\">\n<parameter name=\"text\">leakme"
             "</parameter>\n</invoke>",
-            0, "",
-            "<invoke name=\"f\">\n<parameter name=\"text\">leakme</parameter>\n"
-            "</invoke>",
-            gufo::sampling::JsonConstraint::ToolFormat::kQwen, false},
+            0, "", "", gufo::sampling::JsonConstraint::ToolFormat::kQwen},
+       // The same block where no dialect was admitted: the unconstrained path
+       // the live request took.
+       Case{"<invoke name=\"f\">\n<parameter name=\"text\">leakme"
+            "</parameter>\n</invoke>",
+            0, "", ""},
        // The captured live shape, verbatim (session row 103263): the model
-       // opens the client's dialect, is cut off before any closer, then writes
-       // a complete call of its own. The truncated attempt is prose the client
-       // may keep; the complete call survives and only it is executed.
+       // opens the client's envelope, is cut off before any closer, then
+       // writes a complete call of its own. A block left open is still the
+       // shape of a call, so it leaves with the call the parser took.
        Case{"<invoke name=\"terminal\">\n<parameter name=\"command\">cd ~/pro"
             "jects/personal/gufo && gh issue view 383 --json title,state,body"
             ",labels,comments --jq '{title, state, labels: [.labels[].name], "
@@ -3325,22 +3344,50 @@ void TestToolClosingFraming() {
             " 2>&1 | head -120\n"
             "<tool_call><function=f><parameter=text>hello</parameter>"
             "</function></tool_call>",
-            1, R"({"text":"hello"})",
-            "<invoke name=\"terminal\">\n<parameter name=\"command\">cd ~/pro"
-            "jects/personal/gufo && gh issue view 383 --json title,state,body"
-            ",labels,comments --jq '{title, state, labels: [.labels[].name], "
-            "comments: [.comments[] | {author: .author.login, body: .body}]}'"
-            " 2>&1 | head -120",
+            1, R"({"text":"hello"})", "",
             gufo::sampling::JsonConstraint::ToolFormat::kQwen},
-       // Prose before the block survives, and the block survives with it.
+       // Prose before the block survives; the block leaves.
        Case{"Found the gufo sessions. Let me peek at the session structure,"
             " then extract a summary from each.\n\n<invoke name=\"f\">\n"
             "<parameter name=\"text\">leakme</parameter>\n</invoke>",
             0, "",
             "Found the gufo sessions. Let me peek at the session structure, "
-            "then extract a summary from each.\n\n<invoke name=\"f\">\n"
-            "<parameter name=\"text\">leakme</parameter>\n</invoke>",
+            "then extract a summary from each.",
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen},
+       // The live turn itself, with the closers the model wrote: the block
+       // leaves whole, and only the model's own call is executed.
+       Case{live_prose + "\n\n\n" + live_block + "</parameter>\n</invoke>\n" +
+                call,
+            1, R"({"text":"42"})", live_prose,
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen},
+       // The same turn under the default closer set, which is the one the live
+       // request admitted: the envelope is framing there too.
+       Case{live_prose + "\n\n\n" + live_block + "</parameter>\n</invoke>\n" +
+                call,
+            1, R"({"text":"42"})", live_prose},
+       // Cut off inside the block, with no call of its own: both transports
+       // report the same content, because the attempt is the shape of a call.
+       Case{live_prose + "\n\n\n" + live_block, 0, "", live_prose},
+       // The DSML spelling is the model's own dialect, not the client's
+       // envelope: #393 keeps foreign native syntax visible, and this change
+       // holds that boundary, block closed or left open.
+       Case{"<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"text\">x"
+            "</｜DSML｜parameter>\n</｜DSML｜invoke>",
+            0, "",
+            "<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"text\">x"
+            "</｜DSML｜parameter>\n</｜DSML｜invoke>",
             gufo::sampling::JsonConstraint::ToolFormat::kQwen, false},
+       Case{"<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"text\">x",
+            0, "",
+            "<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"text\">x",
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen, false},
+       // Quoted, the same tags are prose the client keeps, top to bottom.
+       Case{"Here is how the client spells a call:\n\n```\n<invoke name=\"f\">"
+            "\n<parameter name=\"text\">x</parameter>\n</invoke>\n```",
+            0, "",
+            "Here is how the client spells a call:\n\n```\n<invoke name=\"f\">"
+            "\n<parameter name=\"text\">x</parameter>\n</invoke>\n```",
+            std::nullopt, false},
        // A client-dialect block quoted inside an argument is data: the call
        // that contains it is consumed whole and never re-scanned.
        Case{
