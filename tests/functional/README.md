@@ -76,7 +76,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata and foreign tool markers in prose |
-| `tool-reasoning` | Quoted tags, literal edits, early stops and disabled tools across Chat/Responses |
+| `tool-reasoning` | Quoted tags, literal edits, early stops, disabled tools and closing envelope fragments with no head, across Chat/Responses |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |

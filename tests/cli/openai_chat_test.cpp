@@ -3368,6 +3368,27 @@ head -12 /tmp/mergetree.txt)call";
        // Cut off inside the block, with no call of its own: both transports
        // report the same content, because the attempt is the shape of a call.
        Case{live_prose + "\n\n\n" + live_block, 0, "", live_prose},
+       // Session row 106561, verbatim: the model closed a block the parser had
+       // already taken and then wrote the call that ran. The closer arrived
+       // with no head, so a run that only looked for the admitted dialect's
+       // closers left it behind: the same markup, half gone.
+       Case{"Unload endpoint works body-style (200). Now check which profiles "
+            "use bin_gufo (filtered grep, no secrets).\n\n\n</invoke>" +
+                call,
+            1, R"({"text":"42"})",
+            "Unload endpoint works body-style (200). Now check which profiles "
+            "use bin_gufo (filtered grep, no secrets).",
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen},
+       // The same shape with nothing else on the wire. The client's envelope
+       // is framing in every dialect the server admits, closed or not, so a
+       // fragment of it is not prose under any of them.
+       Case{"\n\n</invoke>", 0, "", "",
+            gufo::sampling::JsonConstraint::ToolFormat::kQwen},
+       Case{"\n\n</invoke>", 0, "", "",
+            gufo::sampling::JsonConstraint::ToolFormat::kDeepSeek},
+       Case{"\n\n</parameter>", 0, "", "",
+            gufo::sampling::JsonConstraint::ToolFormat::kDeepSeek},
+       Case{"\n\n</invoke>", 0, "", ""},
        // The DSML spelling is the model's own dialect, not the client's
        // envelope: #393 keeps foreign native syntax visible, and this change
        // holds that boundary, block closed or left open.

@@ -81,19 +81,29 @@ ToolMarkerSet ToolMarkers(
 // Tags that close a call, per admitted dialect. Assistant content never ends
 // with the closing framing of a call: the model either consumed it in the call
 // the parser already took, or repeated it afterwards, and a client that stores
-// the repeat replays the markup as history on every later turn (#383). The
-// legacy set predates the admitted format, so it carries every dialect's echo.
-constexpr std::array<std::string_view, 3> kQwenClosers{
+// the repeat replays the markup as history on every later turn (#383).
+//
+// Recognizing an opener and recognizing its closer are one decision, so every
+// set below mirrors the markers of the grammar it belongs to. Two mirrors are
+// not the dialect's own: the client's envelope is framing under every grammar,
+// its blocks parsed whatever the request declared (#393, kEnvelopeHeads), and
+// the unconstrained fallback admits every opener, so it admits every closer.
+constexpr std::array<std::string_view, 4> kQwenClosers{
     "</parameter>",
     "</function>",
     "</tool_call>",
+    // The client's envelope, whose block rules already strip it whole.
+    "</invoke>",
 };
-constexpr std::array<std::string_view, 3> kDeepSeekClosers{
+constexpr std::array<std::string_view, 5> kDeepSeekClosers{
     "</｜DSML｜parameter>",
     "</｜DSML｜invoke>",
     "</｜DSML｜tool_calls>",
+    // The client's envelope.
+    "</invoke>",
+    "</parameter>",
 };
-constexpr std::array<std::string_view, 6> kToolClosers{
+constexpr std::array<std::string_view, 9> kToolClosers{
     // Qwen family.
     "</parameter>",
     "</function>",
@@ -103,6 +113,10 @@ constexpr std::array<std::string_view, 6> kToolClosers{
     "</invoke>",
     "</function_results>",
     "</tool_calls>",
+    // Model-native dialects, which this fallback admits like any other opener.
+    "</｜DSML｜parameter>",
+    "</｜DSML｜invoke>",
+    "</｜DSML｜tool_calls>",
 };
 using ToolCloserSet = std::span<const std::string_view>;
 
@@ -117,7 +131,9 @@ ToolCloserSet ToolClosers(
   if (!format)
     return kToolClosers;
   // Mirror ToolMarkers: stripping follows the dialect the request admitted,
-  // and another dialect's closing tags are ordinary prose like its openers.
+  // and another dialect's closing tags are ordinary prose like its openers —
+  // the client's envelope excepted, which no dialect admits and every one of
+  // them parses.
   return *format == Format::kDeepSeek ? ToolCloserSet(kDeepSeekClosers)
                                       : ToolCloserSet(kQwenClosers);
 }
@@ -940,16 +956,21 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   return std::nullopt;
 }
 
-std::string_view Trim(std::string_view value) {
-  while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.front())) != 0) {
-    value.remove_prefix(1);
-  }
+// `value` without its trailing whitespace.
+std::string_view TrimTrailing(std::string_view value) {
   while (!value.empty() &&
          std::isspace(static_cast<unsigned char>(value.back())) != 0) {
     value.remove_suffix(1);
   }
   return value;
+}
+
+std::string_view Trim(std::string_view value) {
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+    value.remove_prefix(1);
+  }
+  return TrimTrailing(value);
 }
 
 // Qwen writes a parameter as "<parameter=name>\nVALUE\n</parameter>": one
@@ -1176,10 +1197,18 @@ constexpr std::array<std::string_view, 3> kBlockParameters{
 // last one sits in quoted prose.
 template<std::size_t N>
 std::size_t LastUnquotedTag(std::string_view full, std::size_t stop,
+                            std::size_t floor,
                             const std::array<std::string_view, N>& tags) {
+  if (stop <= floor) {
+    return std::string_view::npos;
+  }
+  // Search only what the caller can use: a tag starting before `floor` is
+  // discarded there, and these tags hold no `<`, so none can straddle a marker
+  // or a closer and be missed.
+  const std::string_view window = full.substr(floor, stop - floor);
   std::size_t last = std::string_view::npos;
   for (const auto tag : tags) {
-    const auto found = full.rfind(tag, stop);
+    const auto found = window.rfind(tag);
     if (found == std::string_view::npos) {
       continue;
     }
@@ -1187,10 +1216,10 @@ std::size_t LastUnquotedTag(std::string_view full, std::size_t stop,
       last = found;
     }
   }
-  if (last == std::string_view::npos || IsQuotedPosition(full, last)) {
+  if (last == std::string_view::npos || IsQuotedPosition(full, floor + last)) {
     return std::string_view::npos;
   }
-  return last;
+  return floor + last;
 }
 
 // Where the last call-shaped block at or before `stop` opens, or npos. The
@@ -1198,20 +1227,22 @@ std::size_t LastUnquotedTag(std::string_view full, std::size_t stop,
 // stands: a cut that began at a parameter tag would leave the head behind.
 template<std::size_t H, std::size_t M>
 std::size_t LastBlockStart(std::string_view full, std::size_t stop,
+                           std::size_t floor,
                            const std::array<std::string_view, H>& heads,
                            const std::array<std::string_view, M>& members) {
-  if (const auto head = LastUnquotedTag(full, stop, heads);
+  if (const auto head = LastUnquotedTag(full, stop, floor, heads);
       head != std::string_view::npos) {
     return head;
   }
   // A parameter tag with no head above it is the same shape without the
   // wrapper that held it.
-  return LastUnquotedTag(full, stop, members);
+  return LastUnquotedTag(full, stop, floor, members);
 }
 
 // Where the last block in the client's envelope opens, or npos.
-std::size_t LastEnvelopeOpener(std::string_view full, std::size_t stop) {
-  return LastBlockStart(full, stop, kEnvelopeHeads, kEnvelopeParameters);
+std::size_t LastEnvelopeOpener(std::string_view full, std::size_t stop,
+                               std::size_t floor) {
+  return LastBlockStart(full, stop, floor, kEnvelopeHeads, kEnvelopeParameters);
 }
 
 // Where a trailing envelope block opens within [floor, stop), or npos. The
@@ -1222,21 +1253,17 @@ std::size_t LastEnvelopeOpener(std::string_view full, std::size_t stop) {
 // under IsQuotedPosition.
 std::size_t EnvelopeBlockStart(std::string_view full, std::size_t stop,
                                std::size_t floor, ToolCloserSet closers) {
-  const auto opening = LastEnvelopeOpener(full, stop);
-  if (opening == std::string_view::npos || opening < floor) {
+  const auto opening = LastEnvelopeOpener(full, stop, floor);
+  if (opening == std::string_view::npos) {
     return std::string_view::npos;
   }
-  auto region = full.substr(opening, stop - opening);
-  while (!region.empty() &&
-         std::isspace(static_cast<unsigned char>(region.back())) != 0) {
-    region.remove_suffix(1);
-  }
+  const auto region = TrimTrailing(full.substr(opening, stop - opening));
   for (const auto closer : kEnvelopeClosers) {
     if (region.ends_with(closer)) {
       return opening;
     }
   }
-  if (region.find("parameter name=") == std::string_view::npos) {
+  if (region.find(kEnvelopeParameters.front()) == std::string_view::npos) {
     return std::string_view::npos;
   }
   for (const auto closer : closers) {
@@ -1264,45 +1291,41 @@ std::size_t TrailingFramingStart(std::string_view full, std::size_t end,
     const std::size_t run = std::min(start, position);
     return run < floor ? floor : run;
   };
+  // Length of the tag ending at `position`, or 0: an admitted closer, or a
+  // full-width token the model broke apart. Both are framing.
+  const auto tag_length = [&](std::size_t position) -> std::size_t {
+    for (const auto closer : closers) {
+      if (position >= closer.size() &&
+          full.compare(position - closer.size(), closer.size(), closer) == 0) {
+        return closer.size();
+      }
+    }
+    const std::size_t window =
+        std::min(position - std::min(position, floor), kLongestPipeToken);
+    for (std::size_t length = 1; length <= window; ++length) {
+      const std::size_t index = position - length;
+      if (full[index] == '<' && PipeTokenAt(full, index) == length) {
+        return length;
+      }
+    }
+    return 0;
+  };
   while (true) {
     while (const auto filler = FramingFillerLength(full, position)) {
       position -= filler;
     }
-    bool matched = false;
-    for (const auto closer : closers) {
-      if (position >= closer.size() &&
-          full.compare(position - closer.size(), closer.size(), closer) == 0) {
-        const std::size_t index = position - closer.size();
-        // A run never reaches back past its slice, and quoted tags are prose:
-        // either way the run ends here.
-        if (index < floor || IsQuotedPosition(full, index)) {
-          return run_start();
-        }
-        position = index;
-        start = position;
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) {
-      const std::size_t window =
-          std::min(position - std::min(position, floor), kLongestPipeToken);
-      for (std::size_t length = 1; length <= window; ++length) {
-        const std::size_t index = position - length;
-        if (full[index] == '<' && PipeTokenAt(full, index) == length) {
-          if (IsQuotedPosition(full, index)) {
-            return run_start();
-          }
-          position = index;
-          start = position;
-          matched = true;
-          break;
-        }
-      }
-    }
-    if (!matched) {
+    const std::size_t length = tag_length(position);
+    if (length == 0) {
       return run_start();
     }
+    const std::size_t index = position - length;
+    // A run never reaches back past its slice, and quoted tags are prose:
+    // either way the run ends here.
+    if (index < floor || IsQuotedPosition(full, index)) {
+      return run_start();
+    }
+    position = index;
+    start = position;
   }
 }
 
@@ -1323,8 +1346,8 @@ std::string_view ContentBefore(std::string_view full, std::size_t begin,
   // wrote the block.
   if (start != std::string_view::npos) {
     if (const auto head =
-            LastBlockStart(full, start, kBlockHeads, kBlockParameters);
-        head != std::string_view::npos && head >= begin) {
+            LastBlockStart(full, start, begin, kBlockHeads, kBlockParameters);
+        head != std::string_view::npos) {
       start = head;
     }
   }
@@ -1334,15 +1357,10 @@ std::string_view ContentBefore(std::string_view full, std::size_t begin,
       (start == std::string_view::npos || block < start)) {
     start = block;
   }
-  if (start == std::string_view::npos || start < begin) {
+  if (start == std::string_view::npos) {
     return slice;
   }
-  slice = full.substr(begin, start - begin);
-  while (!slice.empty() &&
-         std::isspace(static_cast<unsigned char>(slice.back())) != 0) {
-    slice.remove_suffix(1);
-  }
-  return slice;
+  return TrimTrailing(full.substr(begin, start - begin));
 }
 
 // How much of the tail of [0, end) is still undecided: a tag still being
@@ -1350,7 +1368,7 @@ std::string_view ContentBefore(std::string_view full, std::size_t begin,
 // model writes prose after it. A run stays undecided across the split tag that
 // follows it.
 std::size_t FramingHold(std::string_view full, std::size_t end,
-                        ToolCloserSet closers) {
+                        std::size_t floor, ToolCloserSet closers) {
   std::size_t hold = 0;
   if (end > 0) {
     const auto open = full.find_last_of('<', end - 1);
@@ -1358,8 +1376,8 @@ std::size_t FramingHold(std::string_view full, std::size_t end,
       hold = end - open;
     }
   }
-  for (std::size_t position = end - hold; position > 0;) {
-    const auto run = TrailingFramingStart(full, position, 0, closers);
+  for (std::size_t position = end - hold; position > floor;) {
+    const auto run = TrailingFramingStart(full, position, floor, closers);
     if (run == std::string_view::npos) {
       break;
     }
@@ -1370,7 +1388,7 @@ std::size_t FramingHold(std::string_view full, std::size_t end,
   // stays held, because the shape is a call the parser will not take here. It
   // resolves when the block closes, when a marker takes over, or when the
   // response ends and ContentBefore drops it.
-  if (const auto opening = LastEnvelopeOpener(full, end);
+  if (const auto opening = LastEnvelopeOpener(full, end, floor);
       opening != std::string_view::npos) {
     hold = std::max(hold, end - opening);
   }
@@ -2249,9 +2267,10 @@ public:
 
       const std::size_t held =
           recognize_tools_
-              ? std::min(std::max(HeldMarkerPrefix(raw_, raw_.size(), markers_),
-                                  FramingHold(raw_, raw_.size(), closers_)),
-                         pending_.size())
+              ? std::min(
+                    std::max(HeldMarkerPrefix(raw_, raw_.size(), markers_),
+                             FramingHold(raw_, raw_.size(), offset, closers_)),
+                    pending_.size())
               : 0;
       const std::size_t ready = pending_.size() - held;
       if (ready > 0 && !emit_piece_(pending_.substr(0, ready), false)) {
@@ -2328,7 +2347,7 @@ private:
       }
       const auto held =
           std::min(std::max(HeldMarkerPrefix(raw_, raw_.size(), markers_),
-                            FramingHold(raw_, raw_.size(), closers_)),
+                            FramingHold(raw_, raw_.size(), offset, closers_)),
                    pending_.size());
       const auto ready = pending_.size() - held;
       if (ready) {
