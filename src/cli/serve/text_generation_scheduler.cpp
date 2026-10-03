@@ -1160,6 +1160,7 @@ struct TextGenerationScheduler::Impl {
           request->token_limit - request->result.tokens.size() +
           (request->preview_token.has_value() ? 1 : 0);
       const auto step = request->runner_request.DecodeStep(remaining);
+      request->result.draft_rounds += step.draft_rounds;
       request->result.draft_tokens += step.draft_tokens;
       request->result.draft_accepted_tokens += step.draft_accepted_tokens;
 
@@ -1463,6 +1464,7 @@ struct TextGenerationScheduler::Impl {
                 : (runner_pool->capacity() == 1 ? "serial-c1"
                                                 : "serial-fallback");
       }
+      item.request->result.draft_rounds += step.draft_rounds;
       item.request->result.draft_tokens += step.draft_tokens;
       item.request->result.draft_accepted_tokens += step.draft_accepted_tokens;
 

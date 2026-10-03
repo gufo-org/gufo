@@ -40,6 +40,10 @@ inline std::atomic<std::uint64_t>& MaxSequenceTokens() {
   static std::atomic<std::uint64_t> count{0};
   return count;
 }
+inline std::atomic<std::uint64_t>& TotalDraftRounds() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
 inline std::atomic<std::uint64_t>& TotalDraftTokens() {
   static std::atomic<std::uint64_t> count{0};
   return count;
@@ -98,6 +102,8 @@ inline void RecordRequestMetrics(const TextGenerationBackend::Result& result) {
          !detail::MaxSequenceTokens().compare_exchange_weak(
              max_tokens, sequence_tokens, std::memory_order_relaxed)) {
   }
+  detail::TotalDraftRounds().fetch_add(result.draft_rounds,
+                                       std::memory_order_relaxed);
   detail::TotalDraftTokens().fetch_add(result.draft_tokens,
                                        std::memory_order_relaxed);
   detail::TotalDraftAcceptedTokens().fetch_add(result.draft_accepted_tokens,
@@ -150,7 +156,8 @@ inline std::string GenerationLogDetails(
       << " batch_width=" << result.physical_execution_width
       << " plan=" << result.execution_plan
       << " draft_accepted=" << result.draft_accepted_tokens
-      << " draft_proposed=" << result.draft_tokens;
+      << " draft_proposed=" << result.draft_tokens
+      << " draft_rounds=" << result.draft_rounds;
   if (result.draft_tokens > 0)
     out << " acceptance_pct="
         << 100.0 * result.draft_accepted_tokens / result.draft_tokens;
@@ -190,6 +197,7 @@ inline json::Value GenerationTimings(
   timings["cache_restore_ms"] = result.cache_restore_ms;
   timings["cache_snapshot_ms"] = result.cache_snapshot_ms;
   timings["cache_disk_enqueue_ms"] = result.cache_disk_enqueue_ms;
+  timings["draft_rounds"] = result.draft_rounds;
   timings["draft_n"] = result.draft_tokens;
   timings["draft_n_accepted"] = result.draft_accepted_tokens;
   return timings;

@@ -2275,7 +2275,7 @@ def check_prompt_progress(client, model, checks, width, vision, allow_missing):
 def check_server_metrics(client, model, checks, width, context, speculative):
     from server_metrics import (ServerMetrics, assert_accounting, PROMPT, GENERATED,
                                 PROCESSING, DEFERRED, PROMPT_SPEED, GENERATED_SPEED,
-                                KV_USAGE, DRAFTS, ACCEPTED, assert_slots)
+                                KV_USAGE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, assert_slots)
 
     metrics = ServerMetrics(client.base_url)
     initial = metrics.idle()
@@ -2448,6 +2448,8 @@ def check_server_metrics(client, model, checks, width, context, speculative):
     proposed = final[DRAFTS] - initial[DRAFTS]
     accepted = final[ACCEPTED] - initial[ACCEPTED]
     assert 0 <= accepted <= proposed, final
+    rounds = final[DRAFT_ROUNDS] - initial[DRAFT_ROUNDS]
+    assert rounds > 0 if speculative != "off" else rounds == 0, final
     assert proposed > 0 if speculative != "off" else proposed == 0, final
 
 

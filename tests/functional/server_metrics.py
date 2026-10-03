@@ -17,12 +17,13 @@ CACHED = "llamacpp:prompt_tokens_cached_total"
 PROMPT_SECONDS = "llamacpp:prompt_seconds_total"
 GENERATED_SECONDS = "llamacpp:tokens_predicted_seconds_total"
 MAX_SEQUENCE = "llamacpp:n_tokens_max"
+DRAFT_ROUNDS = "llamacpp:spec_decode_num_drafts_total"
 DRAFTS = "llamacpp:spec_decode_num_draft_tokens_total"
 ACCEPTED = "llamacpp:spec_decode_num_accepted_tokens_total"
 KV_USAGE = "llamacpp:kv_cache_usage_ratio"
-TOKEN_COUNTERS = (PROMPT, GENERATED, CACHED, MAX_SEQUENCE, DRAFTS, ACCEPTED)
-COUNTERS = (*TOKEN_COUNTERS, PROMPT_SECONDS, GENERATED_SECONDS)
-INTEGERS = (*TOKEN_COUNTERS, PROCESSING, DEFERRED)
+INTEGER_COUNTERS = (PROMPT, GENERATED, CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED)
+COUNTERS = (*INTEGER_COUNTERS, PROMPT_SECONDS, GENERATED_SECONDS)
+INTEGERS = (*INTEGER_COUNTERS, PROCESSING, DEFERRED)
 TYPES = {name: "counter" if name in COUNTERS else "gauge"
          for name in (*COUNTERS, PROCESSING, DEFERRED, PROMPT_SPEED, GENERATED_SPEED, KV_USAGE)}
 
@@ -52,7 +53,7 @@ def parse_metrics(text):
             raise ValueError(f"invalid metric value: {name}={value}")
         if name in INTEGERS:
             if not value.is_integer():
-                raise ValueError(f"fractional token/request count: {name}")
+                raise ValueError(f"fractional integer metric: {name}")
             # Avoid rounding large process-lifetime counters through float.
             value = int(parts[1])
         values[name] = value
@@ -67,7 +68,8 @@ def assert_accounting(before, after, requests, *, include_seconds=True):
     """Completed SDK requests must contribute their actual uncached work once."""
     completed = [r for r in requests if r["http_status"] < 400]
     fields = [(PROMPT, "prefill_tokens"), (GENERATED, "completion_tokens"),
-              (CACHED, "cached_tokens"), (DRAFTS, "draft_tokens"),
+              (CACHED, "cached_tokens"), (DRAFT_ROUNDS, "draft_rounds"),
+              (DRAFTS, "draft_tokens"),
               (ACCEPTED, "draft_tokens_accepted")]
     for metric, field in fields:
         expected = 0
@@ -119,6 +121,7 @@ def validate_metrics_report(directory):
             "completion_tokens": int(fields["generated_tokens"]),
             "prompt_tokens": int(fields["prompt_tokens"]),
             "cached_tokens": int(fields["cached_tokens"]),
+            "draft_rounds": int(fields["draft_rounds"]),
             "draft_tokens": int(fields["draft_proposed"]),
             "draft_tokens_accepted": int(fields["draft_accepted"])}})
     assert_accounting(checks["metrics_chat_cold"]["before"],

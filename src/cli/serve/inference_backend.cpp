@@ -642,6 +642,7 @@ public:
   void FinishSpeculativeDecode(
       speculative::SpeculativeVerifier::StepResult verification,
       sampling::SamplerState& sampler, TextDecodeStep& result) {
+    result.draft_rounds = verification.draft_count > 0 ? 1 : 0;
     result.draft_tokens = verification.draft_count;
     result.draft_accepted_tokens = verification.accepted_count;
     result.execution_plan = {
@@ -2046,6 +2047,7 @@ public:
       });
     }
     const auto stats_after = deepseek.session().DsparkStatistics();
+    step.draft_rounds = stats_after.steps - stats_before.steps;
     step.draft_tokens =
         stats_after.support_drafted - stats_before.support_drafted;
     step.draft_accepted_tokens =
@@ -2149,6 +2151,7 @@ public:
         });
       }
       const auto stats_after = states[index]->session().DsparkStatistics();
+      step.draft_rounds = stats_after.steps - stats_before[index].steps;
       step.draft_tokens =
           stats_after.support_drafted - stats_before[index].support_drafted;
       step.draft_accepted_tokens =
@@ -2713,6 +2716,7 @@ public:
     }
     qfn.set_position(qfn.session().Position());
     const auto stats_after = qfn.session().Statistics();
+    step.draft_rounds = stats_after.cycles - stats_before.cycles;
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
     return step;
@@ -2804,6 +2808,7 @@ public:
                                    .piece = model_->TokenText(token)});
       }
       const auto stats = state.session().Statistics();
+      step.draft_rounds = stats.cycles - before[i].cycles;
       step.draft_tokens = stats.drafted - before[i].drafted;
       step.draft_accepted_tokens = stats.accepted - before[i].accepted;
     }

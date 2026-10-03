@@ -195,6 +195,8 @@ public:
     std::size_t completion_tokens{0};
     /// Generated reasoning tokens, excluding the closing template delimiter.
     std::size_t reasoning_tokens{0};
+    /// Number of speculative verification rounds actually executed.
+    std::size_t draft_rounds{0};
     std::size_t draft_tokens{0};
     std::size_t draft_accepted_tokens{0};
     std::size_t prefill_tokens{0};

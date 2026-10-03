@@ -902,6 +902,7 @@ When the scheduler finishes or cancels a request, whether or not the client
 reads the result, it adds the request's cached prompt tokens
 (`llamacpp:prompt_tokens_cached_total`), prefill and decode seconds
 (`llamacpp:prompt_seconds_total`, `llamacpp:tokens_predicted_seconds_total`),
+speculative verification rounds (`llamacpp:spec_decode_num_drafts_total`),
 proposed and accepted draft tokens
 (`llamacpp:spec_decode_num_draft_tokens_total`,
 `llamacpp:spec_decode_num_accepted_tokens_total`), and raises

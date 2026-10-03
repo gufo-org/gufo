@@ -111,6 +111,9 @@ the runner removes that disk cache when the run ends, keeping reports and logs.
 For timing controls on revisions predating progress, use `--allow-missing-progress`
 with `--record-baseline`. Candidate qualification always requires progress events.
 Model runs stay outside hosted CI; CI checks the runner and measurement logic.
+The metrics suite reconciles verification-round counts with request timings and
+terminal logs, including cancelled requests; AR must report zero rounds and
+speculative modes must execute actual rounds.
 For metrics changes, run `--suite metrics` with AR and the affected speculative
 mode. It checks all three text endpoints and reconciles cancelled work with the
 terminal logs. It also checks both slot endpoints, active request identities and

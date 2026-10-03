@@ -152,6 +152,7 @@ public:
     result.cached_prompt_tokens = 8;
     result.cache_hit = true;
     result.draft_accepted_tokens = 4;
+    result.draft_rounds = 2;
     result.draft_tokens = 8;
     result.prefill_tokens = 2;
     result.prefill_ms = 4;
@@ -572,6 +573,7 @@ void TestFallbackBackendMetrics() {
       const auto prompt_before = metrics::TotalPromptTokens().load();
       const auto generated_before = metrics::TotalGenTokens().load();
       const auto cached_before = metrics::TotalCachedPromptTokens().load();
+      const auto rounds_before = metrics::TotalDraftRounds().load();
       const auto drafts_before = metrics::TotalDraftTokens().load();
       const auto accepted_before = metrics::TotalDraftAcceptedTokens().load();
       const auto prompt_seconds_before = metrics::TotalPromptSeconds().load();
@@ -588,6 +590,9 @@ void TestFallbackBackendMetrics() {
              std::string::npos);
       assert(response.find("llamacpp:prompt_tokens_cached_total " +
                            std::to_string(cached_before + 8) + "\n") !=
+             std::string::npos);
+      assert(response.find("llamacpp:spec_decode_num_drafts_total " +
+                           std::to_string(rounds_before + 2) + "\n") !=
              std::string::npos);
       assert(response.find("llamacpp:spec_decode_num_draft_tokens_total " +
                            std::to_string(drafts_before + 8) + "\n") !=
@@ -714,7 +719,7 @@ void TestLlamaSlotsAndMetrics() {
        {"prompt_tokens_total", "prompt_tokens_cached_total",
         "prompt_seconds_total", "tokens_predicted_total",
         "tokens_predicted_seconds_total", "n_tokens_max",
-        "spec_decode_num_draft_tokens_total",
+        "spec_decode_num_drafts_total", "spec_decode_num_draft_tokens_total",
         "spec_decode_num_accepted_tokens_total"}) {
     assert(metrics.find("# HELP llamacpp:" + counter + " ") !=
            std::string::npos);

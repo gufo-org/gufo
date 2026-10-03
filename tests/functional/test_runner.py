@@ -30,7 +30,7 @@ from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
 from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
-                            CACHED, MAX_SEQUENCE, DRAFTS, ACCEPTED, PROMPT_SECONDS,
+                            CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, PROMPT_SECONDS,
                             GENERATED_SECONDS, KV_USAGE, assert_slots,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
@@ -520,6 +520,7 @@ class FunctionalRunnerTest(unittest.TestCase):
             text.replace(f"{PROCESSING} 0", f"{PROCESSING} 0.5"),
             text.replace(f"{GENERATED} 0", f"{GENERATED} nan"),
             text.replace(f"{GENERATED} 0", f"{GENERATED} inf"),
+            text.replace(f"{DRAFT_ROUNDS} 0", f"{DRAFT_ROUNDS} 0.5"),
             text.replace(f"{KV_USAGE} 0", f"{KV_USAGE} 1.1"),
         ):
             with self.subTest(text=bad), self.assertRaises(ValueError):
@@ -531,22 +532,22 @@ class FunctionalRunnerTest(unittest.TestCase):
             {"http_status": 200, "status": "complete", "metrics": {
                 "prompt_tokens": 100, "cached_tokens": 98,
                 "prefill_tokens": 2, "completion_tokens": 7,
-                "draft_tokens": 8, "draft_tokens_accepted": 5, "prefill_ms": 100, "decode_ms": 200}},
+                "draft_rounds": 3, "draft_tokens": 8, "draft_tokens_accepted": 5, "prefill_ms": 100, "decode_ms": 200}},
             {"http_status": 200, "status": "complete", "metrics": {
                 "prompt_tokens": 100, "cached_tokens": 100,
                 "prefill_tokens": 0, "completion_tokens": 3,
-                "draft_tokens": 4, "draft_tokens_accepted": 2, "prefill_ms": 0, "decode_ms": 100}},
+                "draft_rounds": 2, "draft_tokens": 4, "draft_tokens_accepted": 2, "prefill_ms": 0, "decode_ms": 100}},
             {"http_status": 400, "status": "complete", "metrics": {}},
         ]
         after = {**before, PROMPT: 12, GENERATED: 20, CACHED: 208,
-                 MAX_SEQUENCE: 107, DRAFTS: 22, ACCEPTED: 17,
+                 MAX_SEQUENCE: 107, DRAFT_ROUNDS: 15, DRAFTS: 22, ACCEPTED: 17,
                  PROMPT_SECONDS: 10.1, GENERATED_SECONDS: 10.3}
         assert_accounting(before, after, rows)
         for bad in ({PROMPT: 210, GENERATED: 20}, {PROMPT: 14, GENERATED: 30},
                     {PROMPT: 12, GENERATED: 19}):
             with self.subTest(after=bad), self.assertRaises(AssertionError):
                 assert_accounting(before, {**after, **bad}, rows)
-        for metric in (CACHED, MAX_SEQUENCE, DRAFTS, ACCEPTED, PROMPT_SECONDS, GENERATED_SECONDS):
+        for metric in (CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, PROMPT_SECONDS, GENERATED_SECONDS):
             with self.subTest(metric=metric), self.assertRaises(AssertionError):
                 assert_accounting(before, {**after, metric: after[metric] + 1}, rows)
         rows[0]["status"] = "disconnected"
@@ -564,12 +565,12 @@ class FunctionalRunnerTest(unittest.TestCase):
                 "metrics_chat_cold": {"before": {**dict.fromkeys(COUNTERS, 0), PROMPT: 100, GENERATED: 200}},
                 "metrics_live_queue_cancel": {"cancelled": [{"cancelled": True}]},
                 "metrics_after_cancel_cached": {"after": {**dict.fromkeys(COUNTERS, 0),
-                    PROMPT: 112, GENERATED: 207, CACHED: 20, MAX_SEQUENCE: 24, DRAFTS: 8, ACCEPTED: 4}}}}))
+                    PROMPT: 112, GENERATED: 207, CACHED: 20, MAX_SEQUENCE: 24, DRAFT_ROUNDS: 3, DRAFTS: 8, ACCEPTED: 4}}}}))
             log = (
                 "[http] request=r1 event=completed status=200 prefill_tokens=12 "
-                "generated_tokens=3 prompt_tokens=12 cached_tokens=0 draft_proposed=4 draft_accepted=2 finish=cancelled\n"
+                "generated_tokens=3 prompt_tokens=12 cached_tokens=0 draft_rounds=1 draft_proposed=4 draft_accepted=2 finish=cancelled\n"
                 "[http] request=r2 event=completed status=200 prefill_tokens=0 "
-                "generated_tokens=4 prompt_tokens=20 cached_tokens=20 draft_proposed=4 draft_accepted=2 finish=length\n"
+                "generated_tokens=4 prompt_tokens=20 cached_tokens=20 draft_rounds=2 draft_proposed=4 draft_accepted=2 finish=length\n"
                 "[http] request=r3 event=completed status=400\n")
             (root / "server.log").write_text(log)
             self.assertEqual(validate_metrics_report(root), {"requests": 2, "cancelled": 1})

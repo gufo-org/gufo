@@ -473,6 +473,7 @@ public:
       Advance(state, selection.token);
       step.selections.push_back(std::move(selection));
     }
+    step.draft_rounds = 1;
     step.draft_tokens = count + 1;
     step.draft_accepted_tokens = count;
     return step;
@@ -866,7 +867,8 @@ void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
   const auto first = scheduler->Submit({7}, 5, 0.0F).Wait();
   Expect(first.tokens == ExpectedTokens(7, 5),
          "multi-token decode preserves the generated trajectory");
-  Expect(first.draft_tokens == 7 && first.draft_accepted_tokens == 5,
+  Expect(first.draft_rounds == 2 && first.draft_tokens == 7 &&
+             first.draft_accepted_tokens == 5,
          "multi-token decode reports accumulated draft statistics");
   Expect(!first.cache_hit,
          "multi-token state starts without continuation reuse");
@@ -913,12 +915,14 @@ void TestRequestTotalsDoNotNeedAConsumer() {
     control->multi_token_decode = true;
     control->prefix_reuse = false;
     auto scheduler = MakeScheduler(control, 1);
+    const auto rounds_before = metrics::TotalDraftRounds().load();
     const auto drafts_before = metrics::TotalDraftTokens().load();
     const auto accepted_before = metrics::TotalDraftAcceptedTokens().load();
     auto request = scheduler->Submit({7}, 5, 0.0F);
     wait_terminal(request);
     Expect(
-        metrics::TotalDraftTokens().load() - drafts_before == 7 &&
+        metrics::TotalDraftRounds().load() - rounds_before == 2 &&
+            metrics::TotalDraftTokens().load() - drafts_before == 7 &&
             metrics::TotalDraftAcceptedTokens().load() - accepted_before == 5,
         "draft totals count at completion");
   }
@@ -945,7 +949,8 @@ void TestMultiTokenRunnerCanSwitchToBatchedExecution() {
   Expect(result_a.execution_plan == "batched-w2" &&
              result_b.execution_plan == "batched-w2",
          "speculative-capable requests can use the physical W2 plan");
-  Expect(result_a.draft_tokens == 0 && result_b.draft_tokens == 0,
+  Expect(result_a.draft_rounds == 0 && result_b.draft_rounds == 0 &&
+             result_a.draft_tokens == 0 && result_b.draft_tokens == 0,
          "target batching bypasses per-request draft steps");
   Expect(control->batch_preparations.load(std::memory_order_relaxed) >= 2,
          "both resident states are prepared before target batching");
@@ -1016,6 +1021,7 @@ void TestModelOwnedBatchMetrics() {
     namespace metrics = gufo::server::detail;
     const auto prompt_before = metrics::TotalPromptTokens().load();
     const auto generated_before = metrics::TotalGenTokens().load();
+    const auto rounds_before = metrics::TotalDraftRounds().load();
     auto control = std::make_shared<FakeControl>();
     control->multi_token_decode = true;
     control->batched_multi_token_decode = true;
@@ -1033,11 +1039,14 @@ void TestModelOwnedBatchMetrics() {
               result.execution_plan ==
                   (actual_width == 1 ? "serial-fallback" : "batched-w2"),
           "scheduler reports the runner's actual subgroup or serial execution");
+      Expect(result.draft_rounds == 4,
+             "each batched request reports its own verification rounds");
       Expect(result.token_metrics_recorded, "scheduled tokens counted live");
       gufo::server::RecordServerMetrics(result);
     }
     Expect(metrics::TotalPromptTokens().load() - prompt_before == 2 &&
-               metrics::TotalGenTokens().load() - generated_before == 24,
+               metrics::TotalGenTokens().load() - generated_before == 24 &&
+               metrics::TotalDraftRounds().load() - rounds_before == 8,
            "speculative batches and HTTP completion count each token once");
   }
 }

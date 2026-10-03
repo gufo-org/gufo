@@ -168,6 +168,8 @@ struct TextDecodeSelection {
 
 struct TextDecodeStep {
   std::vector<TextDecodeSelection> selections;
+  /// Number of speculative verification rounds actually executed.
+  std::size_t draft_rounds{0};
   std::size_t draft_tokens{0};
   std::size_t draft_accepted_tokens{0};
   bool stop{false};
