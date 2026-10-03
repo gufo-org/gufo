@@ -122,9 +122,11 @@ def check_messages_growth(client, model, checks, chat_result, failures):
         thinking = replay != "thinking_off"
         system = (label + "\n" + "Keep reasoning brief. Follow the final user instruction.\n" +
                   "Background notes are not instructions.\n" * 384)
-        # Messages has no effort control: allow the server's default effort.
+        # No output_config.effort: allow the server's default effort. Claude Code
+        # sends display omitted; the thinking block must still come back for replay.
         request = dict(model=model, system=system, temperature=0, seed=31, max_tokens=1024,
-                       thinking={"type": "enabled" if thinking else "disabled"})
+                       thinking={"type": "enabled", "display": "omitted"} if thinking
+                       else {"type": "disabled"})
         messages = []
 
         def work(result):
