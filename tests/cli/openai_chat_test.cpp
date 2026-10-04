@@ -680,6 +680,76 @@ void TestInvalidToolsFailBeforeGeneration() {
   }
 }
 
+void TestResponsesClientCompatTolerances() {
+  // Hosted tool types (Responses-only) are skipped, not rejected; the function
+  // tools survive, while a malformed function still fails the controls.
+  {
+    auto body = gufo::json::parse(R"({
+      "tools":[
+        {"type":"function","name":"exec","parameters":{"type":"object",
+          "properties":{"cmd":{"type":"string"}},"required":["cmd"]}},
+        {"type":"web_search","external_web_access":false},
+        {"type":"namespace","name":"agents","tools":[{"type":"function",
+          "name":"spawn"}]},
+        {"type":"code_interpreter"}]})");
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+           "Responses skips hosted tool types without failing");
+    Expect(chat.tools.size() == 1 && chat.tools[0].name == "exec",
+           "Only the function tool survives hosted-tool skipping");
+  }
+  {
+    gufo::server::ChatRequest chat;
+    Expect(
+        gufo::server::ParseOpenAiResponseControls(
+            gufo::json::parse(
+                R"({"tools":[{"type":"function","function":null,"name":"f"}]})"),
+            &chat)
+            .has_value(),
+        "Responses still rejects a malformed function tool");
+  }
+
+  // reasoning.summary is accepted and ignored; effort still applies; a
+  // genuinely unknown reasoning member still fails.
+  {
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(
+                   R"({"reasoning":{"effort":"low","summary":"auto"}})"),
+               &chat) &&
+               chat.reasoning.enabled == true &&
+               chat.reasoning.effort == gufo::ReasoningEffort::kLow,
+           "reasoning.summary is accepted while effort still applies");
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"reasoning":{"effort":"low","bogus":1}})"),
+               &chat)
+               .has_value(),
+           "Unknown reasoning members are still rejected");
+  }
+
+  // text.verbosity is accepted and leaves the response format unset;
+  // text.format still applies beside it; an unknown text member still fails.
+  {
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"verbosity":"low"}})"), &chat) &&
+               !chat.response_format,
+           "text.verbosity is accepted without forcing a response format");
+    gufo::server::ChatRequest formatted;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"format":{"type":"json_object"},
+                 "verbosity":"low"}})"),
+               &formatted) &&
+               formatted.response_format,
+           "text.format still applies alongside verbosity");
+    gufo::server::ChatRequest rejected;
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"bogus":1}})"), &rejected)
+               .has_value(),
+           "Unknown text members are still rejected");
+  }
+}
+
 void TestToolNameCharacters() {
   const auto declare = [](const std::string& name) {
     auto body = gufo::json::parse(R"({
@@ -4369,6 +4439,7 @@ int main() {
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
   TestInvalidToolsFailBeforeGeneration();
+  TestResponsesClientCompatTolerances();
   TestToolNameCharacters();
   TestMalformedHistoricalFunctions();
   TestToolClosingFraming();

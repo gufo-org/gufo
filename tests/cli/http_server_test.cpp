@@ -1046,6 +1046,15 @@ void TestCompatibilityRequests() {
   assert(tool_messages[2].content == "file.txt" &&
          tool_messages[3].content == "Here are the files.");
 
+  // The include leniency is Responses-only: endpoints that run the shared
+  // compatibility validator (Messages) still reject it.
+  ExpectStatus(
+      server.Post(
+          "/v1/messages",
+          R"({"messages":[{"role":"user","content":"hi"}],"max_tokens":2,
+                      "include":["x"]})"),
+      400);
+
   const auto anthropic = response_body(
       server.Post("/v1/messages",
                   R"({"system":[{"type":"text","text":"Be concise."}],
