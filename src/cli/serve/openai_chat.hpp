@@ -21,10 +21,8 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
                                 tokenization::ChatMessage* message,
                                 core::ImageReadBudget& budget,
                                 std::string* error);
-/// Messages carries effort in output_config.effort; other members are
-/// rejected.
-bool ParseMessagesOutputConfig(const json::Value& body,
-                               ReasoningOptions* options, std::string* error);
+/// Shared effort names; each API applies its own thinking and alias rules.
+std::optional<ReasoningEffort> ParseReasoningEffortName(std::string_view value);
 
 /// Reasoning and visible text of a generation without tools or schemas, split
 /// exactly as Chat Completions reports them.

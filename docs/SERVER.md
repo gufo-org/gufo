@@ -295,6 +295,10 @@ Use `--think off` or `chat_template_kwargs.enable_thinking=false` for direct
 answers. DeepSeek defaults to thinking with `high` effort. Quality comparisons
 must use the same reasoning mode and effort.
 
+On Qwen, keep `reasoning_effort` (Chat) or `output_config.effort` (Messages)
+consistent across turns while thinking is enabled: changing the rendered effort
+instruction changes the prompt prefix and can force a full conversation prefill.
+
 `POST /v1/chat/completions` accepts top-level `reasoning_effort` (`none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`) and Pi/llama.cpp-style
 `chat_template_kwargs`:

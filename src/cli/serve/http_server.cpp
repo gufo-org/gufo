@@ -1064,6 +1064,33 @@ std::optional<HttpResponse> ReadThinking(const json::Value& body,
   return {};
 }
 
+std::optional<HttpResponse> ReadMessagesOutputConfig(
+    const json::Value& body, ReasoningOptions* options) {
+  const auto* config = body.find("output_config");
+  if (config == nullptr || config->is_null())
+    return {};
+  if (!config->is_object())
+    return InvalidCompatibilityRequest("'output_config' must be an object");
+  for (const auto& [key, value] : config->members()) {
+    if (key != "effort")
+      return InvalidCompatibilityRequest("unsupported output_config member: " +
+                                         key);
+    if (value.is_null())
+      continue;
+    // Anthropic effort does not select thinking, so it never enables it;
+    // formatters apply it only while thinking is on. Anthropic has no minimal
+    // effort.
+    const auto effort = value.is_string() && value.str() != "minimal"
+                            ? ParseReasoningEffortName(value.str())
+                            : std::nullopt;
+    if (!effort.has_value())
+      return InvalidCompatibilityRequest(
+          "'output_config.effort' must be low, medium, high, xhigh, or max");
+    options->effort = effort;
+  }
+  return {};
+}
+
 HttpResponse AnthropicMessages(const HttpRequest& req,
                                TextGenerationBackend& b) try {
   json::Value body;
@@ -1079,9 +1106,8 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   if (body.is_object()) {
     if (auto error = ReadThinking(body, &chat.reasoning))
       return std::move(*error);
-    if (std::string error;
-        !ParseMessagesOutputConfig(body, &chat.reasoning, &error))
-      return InvalidCompatibilityRequest(error);
+    if (auto error = ReadMessagesOutputConfig(body, &chat.reasoning))
+      return std::move(*error);
   }
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;

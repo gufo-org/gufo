@@ -30,6 +30,30 @@
 #include "src/core/utf8.hpp"
 
 namespace gufo::server {
+
+std::optional<ReasoningEffort> ParseReasoningEffortName(
+    std::string_view value) {
+  if (value == "minimal") {
+    return ReasoningEffort::kMinimal;
+  }
+  if (value == "low") {
+    return ReasoningEffort::kLow;
+  }
+  if (value == "medium") {
+    return ReasoningEffort::kMedium;
+  }
+  if (value == "high") {
+    return ReasoningEffort::kHigh;
+  }
+  if (value == "xhigh") {
+    return ReasoningEffort::kXHigh;
+  }
+  if (value == "max") {
+    return ReasoningEffort::kMax;
+  }
+  return std::nullopt;
+}
+
 namespace {
 
 struct ParsedChatRequest {
@@ -542,29 +566,6 @@ bool ParseToolChoice(const json::Value* value, ParsedChatRequest* request,
   }
   *error = "'tool_choice' must be auto, none, required, or a declared function";
   return false;
-}
-
-std::optional<ReasoningEffort> ParseReasoningEffortName(
-    std::string_view value) {
-  if (value == "minimal") {
-    return ReasoningEffort::kMinimal;
-  }
-  if (value == "low") {
-    return ReasoningEffort::kLow;
-  }
-  if (value == "medium") {
-    return ReasoningEffort::kMedium;
-  }
-  if (value == "high") {
-    return ReasoningEffort::kHigh;
-  }
-  if (value == "xhigh") {
-    return ReasoningEffort::kXHigh;
-  }
-  if (value == "max") {
-    return ReasoningEffort::kMax;
-  }
-  return std::nullopt;
 }
 
 bool AssignReasoningEnabled(ReasoningOptions* options, bool enabled,
@@ -3046,38 +3047,6 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
     }
   }
   return {};
-}
-
-bool ParseMessagesOutputConfig(const json::Value& body,
-                               ReasoningOptions* options, std::string* error) {
-  const auto* config = body.find("output_config");
-  if (config == nullptr || config->is_null())
-    return true;
-  if (!config->is_object()) {
-    *error = "'output_config' must be an object";
-    return false;
-  }
-  for (const auto& [key, value] : config->members()) {
-    if (key != "effort") {
-      *error = "unsupported output_config member: " + key;
-      return false;
-    }
-    if (value.is_null())
-      continue;
-    // Anthropic effort does not select thinking, so it never enables it;
-    // formatters apply it only while thinking is on. Anthropic has no minimal
-    // effort.
-    const auto effort = value.is_string() && value.str() != "minimal"
-                            ? ParseReasoningEffortName(value.str())
-                            : std::nullopt;
-    if (!effort.has_value()) {
-      *error =
-          "'output_config.effort' must be low, medium, high, xhigh, or max";
-      return false;
-    }
-    options->effort = effort;
-  }
-  return true;
 }
 
 GeneratedText SplitGeneratedText(
