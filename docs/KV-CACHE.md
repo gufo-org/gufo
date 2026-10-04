@@ -51,23 +51,36 @@ same session replayed with reuse broken reprocessed 9.3x the tokens and took
 
 ```mermaid
 flowchart LR
-  REQ[Request] --> MEM{In-memory cache}
-  MEM -->|exact prefix hit| USE[Reuse live state<br/>or restore a snapshot]
-  MEM -->|miss| DISK{Disk store<br/>optional}
-  DISK -->|hit| USE
-  DISK -->|miss| COLD[No reuse]
-  USE --> SUF[Prefill only the new suffix]
-  COLD --> ALL[Prefill the whole prompt]
+  REQ[Request] --> MEM[In-memory lookup]
+  MEM --> DISK{Longer compatible<br/>disk checkpoint?}
+  DISK -->|yes| RESTORE{Disk restore succeeds?}
+  RESTORE -->|yes| SUF[Prefill only the new suffix]
+  RESTORE -->|no| RAM{Safe RAM prefix available?}
+  DISK -->|no or disk disabled| RAM
+  RAM -->|yes| SUF
+  RAM -->|no| ALL[Prefill the whole prompt]
 ```
 
 The in-memory tier is always on. The disk tier is opt-in, adds restart safety,
 and can additionally *learn* boundaries between conversations that merely share
 a prefix.
 
+When disk caching is enabled, a RAM hit sets the minimum useful disk prefix
+length. The disk index is still consulted, but equal or shorter checkpoints
+are not read or restored. A longer checkpoint must satisfy the same exact-token,
+input-identity and stable-boundary rules as a disk-only hit. A successful
+restore replaces the shorter RAM hit for this request. If a failed restore
+has invalidated the session state, the request reacquires a retained RAM
+snapshot or starts cold; it never continues using the old hit's token count
+with partially restored state.
+Disk lookup remains best-effort: a busy store can decline the attempt and leave
+the RAM hit in use.
+
 ## Finding reuse
 
-A request arrives with a token sequence. The cache looks for the longest
-retained prefix of it, in two different forms.
+A request arrives with a token sequence. The in-memory tier looks for the
+longest retained prefix of it, in two different forms. The optional disk tier
+then checks for a longer usable checkpoint.
 
 ```mermaid
 flowchart TD
@@ -380,8 +393,9 @@ once RAM evicted the conversation, a request restores the nearest stored entry
 and re-prefills up to 2048 tokens plus its own turn, instead of resuming
 exactly at the previous frontier. Greedy output is unchanged. Sampled output can
 differ from the pre-restart response, because the re-prefilled gap follows
-different chunk shapes, as with any partial hit. Plain continuation from RAM is
-unaffected.
+different chunk shapes, as with any partial hit. A RAM frontier at least as
+long as every eligible indexed disk checkpoint still wins without a disk payload
+read. A shorter RAM hit can instead be upgraded to the longer disk checkpoint.
 
 Disk entries are evicted by global LRU on last access, so one active run whose
 checkpoints are all recent will displace every other conversation in age order

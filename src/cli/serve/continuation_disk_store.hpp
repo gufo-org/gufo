@@ -90,6 +90,9 @@ public:
 
   struct RestoreResult {
     bool restored{false};
+    /// A model restore failed after it could have mutated state. The caller
+    /// must discard any existing lease's reuse metadata before continuing.
+    bool state_invalidated{false};
     std::size_t token_count{0};
     std::size_t file_bytes{0};
     std::size_t payload_bytes{0};
@@ -156,12 +159,16 @@ public:
   /// Restores the longest exact saved prefix of prompt into state. When a
   /// stable boundary is supplied, a later checkpoint requires an earlier
   /// saved prefix too, so legacy full-prompt files cannot bypass migration.
+  /// Only candidates strictly beyond minimum_prefix_tokens may be read or
+  /// restored. An unsuccessful result leaves state unchanged unless
+  /// state_invalidated is true.
   [[nodiscard]] RestoreResult RestoreLongestPrefix(
       const TextModelRunner& runner, TextRunnerState& state,
       std::span<const TextRunnerToken> prompt,
       std::span<const std::uint8_t> input_identity = {},
       std::size_t stable_prefix_tokens = 0,
-      std::span<const ContinuationInputPrefix> input_prefixes = {});
+      std::span<const ContinuationInputPrefix> input_prefixes = {},
+      std::size_t minimum_prefix_tokens = 0);
 
   /// Prefix lengths that prompt shares with stored entries but that no entry
   /// holds exactly.

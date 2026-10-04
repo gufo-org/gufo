@@ -1660,15 +1660,18 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
           : std::span<const ContinuationInputPrefix>{};
   // Reuse full checkpoints as well as branching fallbacks. Both cache tiers
   // ensure unmarked legacy entries leave room for the stable boundary.
-  auto lease = impl_->cache.Acquire(
-      prompt, is_cancelled, identity,
-      [&](ContinuationState& state) {
-        auto& text_state = dynamic_cast<TextRunnerState&>(state);
-        text_state.SetCancellationCheck(is_cancelled);
-        text_state.SetStopAtEos(stop_at_eos);
-        impl_->validated.runner->SetPromptContext(text_state, context);
-      },
-      reuse_prompt, cache_prefix_tokens, input_prefixes);
+  const auto prepare_state = [&](ContinuationState& state) {
+    auto& text_state = dynamic_cast<TextRunnerState&>(state);
+    text_state.SetCancellationCheck(is_cancelled);
+    text_state.SetStopAtEos(stop_at_eos);
+    impl_->validated.runner->SetPromptContext(text_state, context);
+  };
+  const auto acquire_ram = [&] {
+    return impl_->cache.Acquire(prompt, is_cancelled, identity, prepare_state,
+                                reuse_prompt, cache_prefix_tokens,
+                                input_prefixes);
+  };
+  auto lease = acquire_ram();
   if (!lease) {
     return {};
   }
@@ -1727,33 +1730,36 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       }
     }
   }
-  if (reuse_prompt && !lease.cache_hit() && impl_->disk_store != nullptr &&
+  if (reuse_prompt && impl_->disk_store != nullptr &&
       !(is_cancelled && is_cancelled())) {
     const auto restore_start = std::chrono::steady_clock::now();
+    bool reacquire = false;
     try {
       const auto restored = impl_->disk_store->RestoreLongestPrefix(
           *impl_->validated.runner,
           dynamic_cast<TextRunnerState&>(lease.state()), prompt, identity,
-          cache_prefix_tokens, input_prefixes);
+          cache_prefix_tokens, input_prefixes, lease.cached_tokens());
       if (restored.restored) {
-        if (context)
-          impl_->validated.runner->SetPromptContext(
-              dynamic_cast<TextRunnerState&>(lease.state()), context);
+        prepare_state(lease.state());
         lease.AdoptRestoredPrefix(
             restored.token_count, restored.file_bytes,
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - restore_start)
                 .count());
       } else {
-        auto& state = dynamic_cast<TextRunnerState&>(lease.state());
-        state.SetCancellationCheck(is_cancelled);
-        impl_->validated.runner->SetPromptContext(state, context);
+        reacquire = restored.state_invalidated;
       }
     } catch (...) {
-      lease.state().Invalidate();
-      auto& state = dynamic_cast<TextRunnerState&>(lease.state());
-      state.SetCancellationCheck(is_cancelled);
-      impl_->validated.runner->SetPromptContext(state, context);
+      reacquire = true;
+    }
+    if (reacquire) {
+      // A failed model restore may have overwritten the RAM hit. Release its
+      // state and stale metrics, then recover a retained RAM snapshot or a
+      // cold lease exactly once. Never retry disk or allocate a backup state.
+      lease.Invalidate();
+      lease = acquire_ram();
+      if (!lease)
+        return {};
     }
   }
   std::vector<std::size_t> boundaries;

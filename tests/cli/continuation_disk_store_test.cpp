@@ -500,6 +500,174 @@ void TestCorruptionBecomesDeterministicMissAndRemoval() {
          "sanitized event reports checksum removal reason");
 }
 
+void CorruptIndexedPayload(const std::filesystem::path& path) {
+  std::fstream stream(path, std::ios::binary | std::ios::in | std::ios::out);
+  stream.seekg(-1, std::ios::end);
+  char value = 0;
+  stream.read(&value, 1);
+  Expect(static_cast<bool>(stream), "indexed payload byte is readable");
+  value ^= static_cast<char>(0x5A);
+  stream.seekp(-1, std::ios::end);
+  stream.write(&value, 1);
+  stream.close();
+  Expect(!stream.fail(), "indexed payload corruption is written and closed");
+}
+
+void TestRestoreDepthFloorSkipsPayloadReads() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("depth-floor");
+  std::vector<ContinuationDiskEvent> events;
+  ContinuationDiskStore store(
+      StoreOptions(directory.path()),
+      [&](const auto& event) { events.push_back(event); });
+  const auto saved =
+      SaveTokens(store, runner, {1, 2}, *MakeSnapshot(runner, 22, 2));
+  Expect(saved.stored, "floor fixture persists one indexed checkpoint");
+  const auto files = CacheFiles(directory.path());
+  Expect(files.size() == 1, "floor fixture identifies its only payload");
+  CorruptIndexedPayload(files.front());
+  auto state = runner.CreateState();
+  auto& fake = RequireFakeState(*state);
+  fake.value = 900;
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 4};
+  for (const std::size_t floor : {std::size_t{2}, std::size_t{3}}) {
+    fake.position = floor;
+    events.clear();
+    const auto hit =
+        store.RestoreLongestPrefix(runner, *state, prompt, {}, 0, {}, floor);
+    Expect(!hit.restored && !hit.state_invalidated && fake.value == 900 &&
+               fake.position == floor,
+           "equal and shorter disk checkpoints leave the current state alone");
+    Expect(store.entry_count() == 1 &&
+               store.retained_bytes() == saved.file_bytes &&
+               CacheFiles(directory.path()) == files,
+           "skipped corrupt payload is neither validated nor removed");
+    Expect(std::ranges::none_of(
+               events,
+               [](const auto& event) {
+                 return event.action == ContinuationDiskEventAction::kRemoved ||
+                        event.reason ==
+                            ContinuationDiskEventReason::kChecksumMismatch;
+               }),
+           "depth refusal does not enter payload corruption handling");
+  }
+  const auto checked = store.RestoreLongestPrefix(runner, *state, prompt);
+  Expect(!checked.restored && !checked.state_invalidated &&
+             store.entry_count() == 0 && CacheFiles(directory.path()).empty(),
+         "removing the floor makes the same corrupt payload observably fail");
+}
+
+void TestRestoreDepthFloorAppliesAfterCorruptLongerEntry() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("depth-fallback");
+  std::vector<ContinuationDiskEvent> events;
+  ContinuationDiskStore store(
+      StoreOptions(directory.path()),
+      [&](const auto& event) { events.push_back(event); });
+  const auto short_saved =
+      SaveTokens(store, runner, {1, 2}, *MakeSnapshot(runner, 22, 2));
+  Expect(short_saved.stored, "fallback fixture persists the short entry");
+  const auto short_files = CacheFiles(directory.path());
+  Expect(short_files.size() == 1, "short payload has a unique file");
+  Expect(SaveTokens(store, runner, {1, 2, 3, 4, 5, 6},
+                    *MakeSnapshot(runner, 66, 6))
+             .stored,
+         "fallback fixture persists the longer entry");
+  const auto files = CacheFiles(directory.path());
+  const auto longer =
+      std::find_if(files.begin(), files.end(),
+                   [&](const auto& p) { return p != short_files.front(); });
+  Expect(files.size() == 2 && longer != files.end(),
+         "longer payload has a distinct file");
+  CorruptIndexedPayload(short_files.front());
+  CorruptIndexedPayload(*longer);
+  auto state = runner.CreateState();
+  auto& fake = RequireFakeState(*state);
+  fake.value = 900;
+  fake.position = 2;
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 4, 5, 6, 7};
+  events.clear();
+  const auto hit =
+      store.RestoreLongestPrefix(runner, *state, prompt, {}, 0, {}, 2);
+  Expect(!hit.restored && !hit.state_invalidated && fake.value == 900 &&
+             fake.position == 2,
+         "corrupt disk upgrade never mutates the current state");
+  Expect(store.entry_count() == 1 &&
+             store.retained_bytes() == short_saved.file_bytes &&
+             CacheFiles(directory.path()) == short_files,
+         "removing the longer entry does not read the shorter fallback");
+  Expect(std::ranges::count_if(
+             events,
+             [](const auto& event) {
+               return event.action == ContinuationDiskEventAction::kRemoved &&
+                      event.reason ==
+                          ContinuationDiskEventReason::kChecksumMismatch &&
+                      event.token_count == 6;
+             }) == 1 &&
+             std::ranges::none_of(
+                 events,
+                 [](const auto& event) {
+                   return event.reason ==
+                              ContinuationDiskEventReason::kChecksumMismatch &&
+                          event.token_count == 2;
+                 }),
+         "only the eligible longer payload is checked and removed");
+  const auto checked = store.RestoreLongestPrefix(runner, *state, prompt);
+  Expect(!checked.restored && !checked.state_invalidated &&
+             store.entry_count() == 0 && CacheFiles(directory.path()).empty(),
+         "the unread shorter payload still fails when later made eligible");
+}
+
+void TestRestoreDepthFloorPreservesIndependentAnchorEligibility() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("anchor-model");
+  const FakeRunner other_runner("different-model");
+  ContinuationDiskStore store(StoreOptions(directory.path()));
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 4, 5, 6, 7};
+  const auto tokens = std::span(prompt);
+  const std::vector<std::uint8_t> identity{10};
+  const std::vector<std::uint8_t> other_identity{20};
+  Expect(
+      store
+          .Save(runner, tokens.first(6), *MakeSnapshot(runner, 66, 6), identity)
+          .stored,
+      "anchor fixture persists only the complete checkpoint initially");
+  auto state = runner.CreateState();
+  auto& fake = RequireFakeState(*state);
+  fake.value = 900;
+  fake.position = 4;
+  const auto expect_missing_anchor = [&] {
+    const auto hit =
+        store.RestoreLongestPrefix(runner, *state, prompt, identity, 2, {}, 4);
+    Expect(!hit.restored && !hit.state_invalidated && fake.value == 900 &&
+               fake.position == 4,
+           "disk upgrade still requires its own compatible stable anchor");
+  };
+  expect_missing_anchor();
+  Expect(store
+             .Save(other_runner, tokens.first(2),
+                   *MakeSnapshot(other_runner, 12, 2), identity)
+             .stored,
+         "another model's anchor can coexist in the same disk index");
+  expect_missing_anchor();
+  Expect(store
+             .Save(runner, tokens.first(2), *MakeSnapshot(runner, 23, 2),
+                   other_identity)
+             .stored,
+         "another input's anchor can coexist in the same disk index");
+  expect_missing_anchor();
+  Expect(
+      store
+          .Save(runner, tokens.first(2), *MakeSnapshot(runner, 22, 2), identity)
+          .stored,
+      "the matching earlier anchor is persisted below the depth floor");
+  const auto hit =
+      store.RestoreLongestPrefix(runner, *state, prompt, identity, 2, {}, 4);
+  Expect(hit.restored && !hit.state_invalidated && hit.token_count == 6 &&
+             fake.value == 66 && fake.position == 6,
+         "the candidate floor never hides an eligible earlier disk anchor");
+}
+
 void TestByteAndStagingLimits() {
   TemporaryDirectory staging_directory;
   const FakeRunner runner("limits");
@@ -1168,6 +1336,9 @@ int main() {
   TestRestartRestoreAndCompatibilityIdentity();
   TestLongestPrefixAndForcedHashCollision();
   TestCorruptionBecomesDeterministicMissAndRemoval();
+  TestRestoreDepthFloorSkipsPayloadReads();
+  TestRestoreDepthFloorAppliesAfterCorruptLongerEntry();
+  TestRestoreDepthFloorPreservesIndependentAnchorEligibility();
   TestByteAndStagingLimits();
   TestAutomaticStagingAndAdmissionDiagnostics();
   TestSmallerStagingPreservesExistingFiles();

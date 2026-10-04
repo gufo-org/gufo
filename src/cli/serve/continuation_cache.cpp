@@ -226,7 +226,7 @@ void ContinuationCache::Lease::AdoptRestoredPrefix(std::size_t cached_tokens,
   if (cache_ == nullptr) {
     throw std::logic_error("continuation cache lease is empty");
   }
-  if (cache_hit_ || cached_tokens == 0 || restored_bytes == 0 ||
+  if (cached_tokens <= cached_tokens_ || restored_bytes == 0 ||
       restore_ms < 0.0) {
     throw std::invalid_argument(
         "invalid lower-tier continuation restore metrics");

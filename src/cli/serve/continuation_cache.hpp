@@ -151,7 +151,8 @@ public:
     [[nodiscard]] bool HasSnapshotFor(
         std::span<const ContinuationToken> tokens) const;
 
-    /// Records a successful restore performed by an optional lower cache tier.
+    /// Records a successful strictly longer restore from an optional lower
+    /// cache tier, preserving this lease's source and reservation bookkeeping.
     void AdoptRestoredPrefix(std::size_t cached_tokens,
                              std::size_t restored_bytes, double restore_ms);
 
