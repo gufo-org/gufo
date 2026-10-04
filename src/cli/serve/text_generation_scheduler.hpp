@@ -59,6 +59,7 @@ public:
   using CancellationCheck = TextGenerationBackend::CancellationCheck;
   using TokenCallback = TextGenerationBackend::TokenCallback;
   using ProgressCallback = TextGenerationBackend::ProgressCallback;
+  using SessionState = TextGenerationBackend::SessionState;
 
   struct RequestMetadata {
     std::string client_id{"anonymous"};
@@ -113,6 +114,11 @@ public:
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  /// Set once a failed work unit finds the runner's device unusable; later
+  /// submissions and failures report TextGenerationErrorCode::kDeviceLost.
+  [[nodiscard]] bool device_lost() const noexcept;
+  /// One entry per session; admitted requests hold one until terminal.
+  [[nodiscard]] std::vector<SessionState> SessionStates() const;
   [[nodiscard]] std::size_t buffered_output_bytes() const noexcept;
   [[nodiscard]] std::size_t max_buffered_output_bytes() const noexcept;
 

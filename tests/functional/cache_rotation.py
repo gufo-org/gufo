@@ -22,7 +22,9 @@ def check_snapshot_budget(log, available_before_load, requested_bytes, sessions)
     # Loading weights/states consumes RAM. Sampling before load gives a
     # conservative upper bound without racing allocations after the budget
     # was chosen. Model and cgroup limits may make the real budget smaller.
-    limit = min(available_before_load // 2, requested_bytes or 32 * 1024**3)
+    # Automatic sizing keeps half of it free; an explicit limit keeps 4 GiB.
+    limit = (min(requested_bytes, max(available_before_load - 4 * 1024**3, 0))
+             if requested_bytes else min(available_before_load // 2, 32 * 1024**3))
     if loaded_sessions != sessions or entries != 128 or not 0 < capacity <= limit:
         raise ValueError(f"unsafe snapshot cache configuration: sessions={loaded_sessions}, "
                          f"entries={entries}, capacity_bytes={capacity}, upper_bound_bytes={limit}")
