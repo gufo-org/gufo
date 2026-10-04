@@ -21,7 +21,7 @@ spec.loader.exec_module(functional)
 from metrics import (CaseComplete, Recorder, canonical, compare, join_server_timings,
                      qualify, summarize, validate_tool_events)
 from progress import ProgressTrace
-from tool_reasoning import ARGUMENTS, assert_edit
+from tool_reasoning import ARGUMENTS, assert_edit, assert_terminal_call, assert_no_envelope_framing
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
@@ -127,6 +127,21 @@ class FunctionalRunnerTest(unittest.TestCase):
                        {"tools": [{"function": {"name": "edit", "arguments": "{}"}}]}):
             with self.subTest(change=change), self.assertRaises(AssertionError):
                 assert_edit({**result, **change})
+
+    def test_envelope_workflow_rejects_missing_calls_and_damaged_arguments(self):
+        command = "printf '%s' '</invoke>'"
+        call = {"function": {"name": "terminal", "arguments": json.dumps({"command": command})}}
+        result = {"text": "", "finish": "tool_calls", "tools": [call]}
+        assert_terminal_call(result, command)
+        for change in ({"tools": []}, {"tools": [call, call]}, {"finish": "stop"},
+                       {"tools": [{"function": {"name": "other", "arguments": call["function"]["arguments"]}}]},
+                       {"tools": [{"function": {"name": "terminal", "arguments":
+                                   json.dumps({"command": "echo '</' + 'invoke>'"})}}]}):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_terminal_call({**result, **change}, command)
+        for text in ("</invoke>", '<invoke name="terminal">', '<parameter name="command">pwd'):
+            with self.subTest(text=text), self.assertRaises(AssertionError):
+                assert_no_envelope_framing({**result, "text": text})
 
     def test_discovery_requires_an_explicit_expectation_before_starting_a_server(self):
         for suite in ("discovery", "all"):

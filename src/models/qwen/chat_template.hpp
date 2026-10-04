@@ -53,6 +53,9 @@ struct ChatMessage {
 
   ChatRole role{ChatRole::kUser};
   std::string content;
+  /// Internal server-authored instructions following system/developer content.
+  /// These bytes are template framing, never supplied by the HTTP message API.
+  std::string framing_suffix;
   std::string name;     ///< Optional function/tool name
   std::string thought;  ///< Optional thinking/reasoning prefix
   std::string tool_call_id;
@@ -102,6 +105,14 @@ struct ChatTemplateOptions {
   bool add_vision_id{false};
   bool require_tool_call{false};
   std::size_t max_output_bytes{1024ULL * 1024ULL};  ///< 1 MiB upper bound
+};
+
+/// A byte span of the rendered prompt that came from a message. Content is
+/// tokenized as text, never as framing: a `<|im_end|>` a client sends is the
+/// character string the client wrote, not a turn end inside the prompt (#383).
+struct ContentSpan {
+  std::size_t offset{0};
+  std::size_t size{0};
 };
 
 /// Longest Qwen3.8 vocabulary entry in bytes (Flash-Next GGUF, 248,320
@@ -179,7 +190,8 @@ public:
       std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
       const ChatTemplateOptions& options = {}, std::string* error_msg = nullptr,
       std::vector<std::size_t>* image_offsets = nullptr,
-      std::size_t* stable_prefix_bytes = nullptr);
+      std::size_t* stable_prefix_bytes = nullptr,
+      std::vector<ContentSpan>* content_spans = nullptr);
 
   /// Formats messages and tokenizes the rendered prompt with the given
   /// tokenizer.
@@ -192,6 +204,17 @@ public:
       const QwenTokenizer& tokenizer, std::span<const ChatMessage> messages,
       std::span<const ChatTool> tools, const ChatTemplateOptions& options = {},
       std::string* error_msg = nullptr);
+
+  /// The rendered prompt's bytes from `begin` to `end` as tokens: message
+  /// content is read as text and everything else as framing (#383), so a
+  /// control token a client spelled stays the characters it wrote. `begin` must
+  /// fall on a token boundary. A slice that spells no vocabulary token gets the
+  /// plain framing reading, which is what ordinary prompts get.
+  [[nodiscard]] static std::vector<TokenId> EncodeRendered(
+      const QwenTokenizer& tokenizer, std::string_view rendered,
+      std::size_t begin, std::size_t end,
+      std::span<const ContentSpan> content_spans,
+      const TokenizerOptions& options);
 
 private:
   QwenChatTemplate(std::string template_str, std::string template_sha256,

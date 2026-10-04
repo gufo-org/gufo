@@ -4,6 +4,23 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.7.0](https://github.com/gufo-org/gufo/compare/v0.6.0...v0.7.0) (2026-10-04)
+
+
+### Features
+
+* **serve:** learn shared-prefix boundaries in the RAM cache ([#386](https://github.com/gufo-org/gufo/issues/386)) ([2ba3be2](https://github.com/gufo-org/gufo/commit/2ba3be24039186e00d2cecdb969f99ad695e1161))
+* **serve:** let an explicit RAM cache limit exceed the automatic budget ([#384](https://github.com/gufo-org/gufo/issues/384)) ([53c5906](https://github.com/gufo-org/gufo/commit/53c590649295edf63abcc06117231cdc890b69c7))
+* **serve:** report live sessions and llama.cpp-compatible metrics ([#389](https://github.com/gufo-org/gufo/issues/389)) ([1b4e682](https://github.com/gufo-org/gufo/commit/1b4e6825f2cf6fa2203af3b4b3596bf25e4bfa4e))
+* **server:** export speculative verification round metrics ([#403](https://github.com/gufo-org/gufo/issues/403)) ([8bdde80](https://github.com/gufo-org/gufo/commit/8bdde807e57fadfe57f4a1005707559ae6afc82f))
+
+
+### Bug Fixes
+
+* **server:** detect idle GPU loss and defer streaming success ([#406](https://github.com/gufo-org/gufo/issues/406)) ([6a9ea9f](https://github.com/gufo-org/gufo/commit/6a9ea9f263de4598a4c49954f10c5d285bcf7635))
+* **server:** parse tool output using the admitted request format ([#393](https://github.com/gufo-org/gufo/issues/393)) ([c33e050](https://github.com/gufo-org/gufo/commit/c33e050eced6389852617994fe7349367df4c900))
+* **server:** reuse replayed tool turns with union and typed arguments ([#404](https://github.com/gufo-org/gufo/issues/404)) ([ea06418](https://github.com/gufo-org/gufo/commit/ea064189976242f33f54bac92be6e0cdbd33fc48))
+
 ## [0.6.0](https://github.com/gufo-org/gufo/compare/v0.5.0...v0.6.0) (2026-10-03)
 
 

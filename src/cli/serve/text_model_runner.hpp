@@ -258,6 +258,7 @@ public:
       const {
     return sampling::JsonConstraint::ToolFormat::kJson;
   }
+  /// Reuse a compiled grammar bound to this runner's vocabulary.
   [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
       std::shared_ptr<const sampling::JsonConstraint> grammar) const;
 
@@ -522,6 +523,13 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
+
+/// Build output constraints and attach server-authored instructions as framing,
+/// preserving client message content and the model's native prompt layout.
+[[nodiscard]] std::optional<ChatRequest> ConstrainChatRequest(
+    const ChatRequest& request, const TextModelRunner& runner,
+    sampling::SamplingConfig* sampling,
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr);
 
 }  // namespace gufo::server
 

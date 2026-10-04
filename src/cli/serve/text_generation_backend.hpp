@@ -296,6 +296,9 @@ public:
   [[nodiscard]] virtual ReasoningOptions reasoning_defaults() const {
     return {};
   }
+  /// The loaded tokenizer's control tokens, or null when it owns none. The
+  /// parser treats a pipe-wrapped spelling as call framing only when this trie
+  /// knows it; every other lookalike stays literal argument data (#383).
   [[nodiscard]] virtual InitialOutputState initial_output_state(
       const ChatRequest&) const {
     return InitialOutputState::kAuto;

@@ -79,7 +79,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata, foreign tool markers in prose and parallel calls (no DeepSeek text after the call block) |
-| `tool-reasoning` | Quoted tags, literal edits, early stops and disabled tools across Chat/Responses |
+| `tool-reasoning` | Quoted tags, exact literal arguments, early stops, disabled tools, envelope framing, completed tool-result continuations and warm replay of contaminated history; Chat/Responses |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
@@ -126,9 +126,32 @@ in-flight KV ratio. Concurrent shared-prefix requests also check that parked
 followers reserve slots and keep newer arrivals queued within `--sessions`.
 Scrapes are not recorded as generation requests.
 
+Tool framing is removed when it directly echoes an accepted call or a client
+`<invoke name="X">` envelope names a declared tool. Other raw XML, standalone
+closers and spelled vocabulary tokens are literal content. A full Qwen call naming
+a declared tool inside an unfinished fence or inline backtick span uses the
+legacy fallback only if its arguments satisfy the schema. Completed fences and inline
+spans keep markers literal; inline spans can cross nonblank lines, but a closing
+backtick must arrive before the next blank line. Streaming holds a possible call
+inside an open span until the final parse resolves it. These text-only rules
+cannot distinguish literal XML naming a declared tool from a failed envelope
+attempt, or an unfinished code example from a real call. Actual EOS handling
+uses token IDs in the backend.
+
+Server-authored JSON tool and response-format instructions are template framing;
+client message content remains literal text, including spelled tool delimiters.
+With tools declared, trailing whitespace can be held until the next decoded
+piece, so a streamed delta ending in whitespace may arrive one token later.
+Cancellation fixtures that stop after a fixed number of deltas can therefore
+replay different assistant text from main. Compare those timings using matched
+interrupted histories, not a direct baseline for the divergent session; this
+also applies to later disk-spacing and cancellation requests in that history.
+
 For real coding-agent regressions, run `pi_agent.py` against a local server with
 `--base-url`, `--model`, `--pi /path/to/pi-0.87.0`, `--server-log`, and a fresh
-`--output` directory.
+`--output` directory. Repeat `--case` to select affected tasks;
+`--case literal-protocol --passes 1` exercises a real write/read/verify loop
+containing literal ChatML vocabulary spellings.
 It replays #368's five tasks, verifies the generated code independently, and
 retains Pi sessions, HTTP/SSE and per-request timings. It executes generated
 commands in disposable fixtures using isolated Pi configuration. Use `--passes 1`

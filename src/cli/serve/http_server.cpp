@@ -923,6 +923,8 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
               } catch (const std::exception& error) {
                 if (!started)
                   throw;
+                // Retain the cause in logs alongside the client's stable code.
+                Logger::Error("chat", error.what());
                 stream_log->error_code = "generation_failed";
                 json::Value detail = json::Value::object();
                 const char* message = error.what();

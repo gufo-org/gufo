@@ -1013,6 +1013,7 @@ int RunPrompt(std::span<const char* const> args) {
 #endif
 
   std::string rendered_prompt = opt.prompt_text;
+  std::vector<tokenization::ContentSpan> content_spans;
   std::vector<tokenization::ChatMessage> messages;
   if (opt.use_chat_template) {
     if (!opt.system_prompt.empty()) {
@@ -1023,8 +1024,9 @@ int RunPrompt(std::span<const char* const> args) {
         {tokenization::ChatRole::kUser, opt.prompt_text, "", ""});
     const auto reasoning = PromptReasoningOptions(opt);
     const auto rendered = tokenization::QwenChatTemplate::Render(
-        messages,
-        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id));
+        messages, {},
+        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
+        nullptr, nullptr, nullptr, &content_spans);
     if (rendered.has_value()) {
       rendered_prompt = *rendered;
     } else {
@@ -1032,6 +1034,12 @@ int RunPrompt(std::span<const char* const> args) {
       return 1;
     }
   }
+
+  const auto encode_prompt = [&](const tokenization::QwenTokenizer& tokenizer) {
+    return tokenization::QwenChatTemplate::EncodeRendered(
+        tokenizer, rendered_prompt, 0, rendered_prompt.size(), content_spans,
+        {});
+  };
 
 #if defined(ENGINE_ENABLE_HIP)
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
@@ -1055,7 +1063,7 @@ int RunPrompt(std::span<const char* const> args) {
         session->ConfigureVision(vision);
         return GenerateFlashNextResponse(opt, *model, *session, vision->tokens);
       }
-      const auto ids = model->Tokenize(rendered_prompt);
+      const auto ids = encode_prompt(model->tokenizer());
       const std::vector<tokenization::TokenId> prompt(ids.begin(), ids.end());
       return GenerateFlashNextResponse(opt, *model, *session, prompt);
     } catch (const std::exception& e) {
@@ -1069,7 +1077,7 @@ int RunPrompt(std::span<const char* const> args) {
     auto gpu_exec = gufo::hip::QwenGpuExecutor::CreateFromGguf(reader, &err);
     if (gpu_exec) {
       PrintModelLoadTime(model_load_start);
-      auto prompt_tokens = gpu_exec->GetTokenizer().Encode(rendered_prompt);
+      auto prompt_tokens = encode_prompt(gpu_exec->GetTokenizer());
       try {
         auto encoder = LoadQwenVision(opt, *reader);
         if (!opt.image_paths.empty()) {
@@ -1134,7 +1142,7 @@ int RunPrompt(std::span<const char* const> args) {
   }
   PrintModelLoadTime(model_load_start);
 
-  const auto prompt_tokens = generator->GetTokenizer().Encode(rendered_prompt);
+  const auto prompt_tokens = encode_prompt(generator->GetTokenizer());
 
   if (opt.verbose) {
     const auto& config = generator->GetConfig();
@@ -1324,15 +1332,19 @@ int RunChat(std::span<const char* const> args) {
 
     history.push_back({tokenization::ChatRole::kUser, user_input, "", ""});
     const auto reasoning = PromptReasoningOptions(opt);
+    std::vector<tokenization::ContentSpan> content_spans;
     const auto rendered_prompt = tokenization::QwenChatTemplate::Render(
-        history,
-        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id));
+        history, {},
+        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
+        nullptr, nullptr, nullptr, &content_spans);
     if (!rendered_prompt.has_value()) {
       std::cerr << "Error formatting chat template.\n";
       return 1;
     }
 
-    auto prompt_tokens = tokenizer->Encode(*rendered_prompt);
+    auto prompt_tokens = tokenization::QwenChatTemplate::EncodeRendered(
+        *tokenizer, *rendered_prompt, 0, rendered_prompt->size(), content_spans,
+        {});
 
     std::cout << "<<< Assistant: ";
     std::string assistant_reply;
