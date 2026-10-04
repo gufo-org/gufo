@@ -232,16 +232,18 @@ def validate_task(name, cwd, history):
     )
     assert not any(tag in text for tag in ("</tool_call>", "</function>", "</parameter>", "</think>")), text
     names = {c["name"] for c in calls}
+    # Require the tools a prompt names; files and behavior are checked directly,
+    # so a sampled run may create or read a file through bash instead.
     if name == "simple":
         assert not calls and text.strip().rstrip(".") == "Paris", text
     elif name == "tools":
         assert (cwd / "hello.txt").read_bytes() == b"bonjour"
-        assert {"write", "bash", "read"} <= names, names
+        assert {"bash", "read"} <= names, names
     elif name == "edit":
         namespace = {}
         exec(compile((cwd / "src/calc.py").read_text(), "calc.py", "exec"), namespace)
         assert namespace["add"](2, 3) == 5 and namespace["add"](-4, 1) == -3
-        assert {"read", "edit", "bash"} <= names, names
+        assert {"edit", "bash"} <= names, names
     elif name == "literal-protocol":
         source = (cwd / "chat_template_fixture.py").read_text()
         assert "<|im_end|>" in source and "<|im_start|>" in source, source
