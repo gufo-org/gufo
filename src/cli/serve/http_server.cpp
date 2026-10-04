@@ -639,7 +639,11 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
         body.contains(field) &&
         !(allowances.response_controls &&
           (field == "text" || field == "reasoning" || field == "tools" ||
-           field == "tool_choice" || field == "parallel_tool_calls"))) {
+           field == "tool_choice" || field == "parallel_tool_calls" ||
+           // include is a standard Responses field (for example encrypted
+           // reasoning); gufo keeps no server-side conversation, so its value
+           // is accepted and ignored.
+           field == "include"))) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }

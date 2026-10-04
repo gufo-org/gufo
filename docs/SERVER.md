@@ -540,7 +540,13 @@ Image uploads accept PNG, JPEG and WebP. Base64 data URLs also accept
 Clients supply the complete conversation, including prior Gufo `output` items
 when retaining reasoning. Replay `function_call` items with their `call_id`,
 then supply `function_call_output` items using the same ID. Function tools use
-the flat `{type:"function",name,parameters,strict}` shape.
+the flat `{type:"function",name,parameters,strict}` shape. The Responses API
+also defines hosted tool types (`web_search`, `file_search`, `code_interpreter`,
+`custom`, ...) that only OpenAI can execute; they are accepted and skipped so
+the function tools still reach the model. Standard Responses request fields with
+no native effect are accepted and ignored so conforming clients interoperate
+(for example Codex): `include`, `reasoning.summary`, `text.verbosity`,
+`client_metadata` and `prompt_cache_key`.
 `store` and `background` must be false when present; server-side conversations
 and `previous_response_id` remain unsupported.
 

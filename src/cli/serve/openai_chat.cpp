@@ -406,8 +406,8 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
 }
 
 bool ParseTools(const json::Value* tools,
-                std::vector<tokenization::ChatTool>* output,
-                std::string* error) {
+                std::vector<tokenization::ChatTool>* output, std::string* error,
+                bool allow_non_function = false) {
   if (tools == nullptr || tools->is_null()) {
     return true;
   }
@@ -425,6 +425,12 @@ bool ParseTools(const json::Value* tools,
       return false;
     }
     if (item.member_str("type") != "function") {
+      // The Responses API declares hosted tool types (web_search, file_search,
+      // code_interpreter, custom, ...) that only the provider can execute.
+      // Skip them so the request still reaches the function tools the model can
+      // call; Chat Completions declares only functions and keeps its contract.
+      if (allow_non_function)
+        continue;
       *error = "only function tools are supported";
       return false;
     }
@@ -688,9 +694,11 @@ bool ParseReasoningOptions(const json::Value& body, ReasoningOptions* options,
 
 std::optional<HttpResponse> ParseToolControls(const json::Value& body,
                                               ParsedChatRequest* output,
-                                              bool nullable_parallel = false) {
+                                              bool nullable_parallel = false,
+                                              bool allow_non_function = false) {
   std::string parse_error;
-  if (!ParseTools(body.find("tools"), &output->chat.tools, &parse_error) ||
+  if (!ParseTools(body.find("tools"), &output->chat.tools, &parse_error,
+                  allow_non_function) ||
       !ParseToolChoice(body.find("tool_choice"), output, &parse_error)) {
     return Error(400, "Bad Request", std::move(parse_error), "invalid_tools");
   }
@@ -2964,7 +2972,9 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
                                                         ChatRequest* chat) {
   ParsedChatRequest parsed;
   parsed.chat = *chat;
-  if (auto error = ParseToolControls(body, &parsed, true))
+  // Responses declares host tools (namespace/web_search) that only OpenAI can
+  // execute; skip them rather than reject the whole request.
+  if (auto error = ParseToolControls(body, &parsed, true, true))
     return error;
   // Responses attempts strict normalization when strict is omitted; Chat
   // Completions keeps its best-effort default. Explicit true/false wins.
@@ -3008,6 +3018,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
       return Error(400, "Bad Request", "'reasoning' must be an object",
                    "invalid_reasoning");
     for (const auto& [key, value] : reasoning->members()) {
+      if (key == "summary")
+        continue;  // Requests reasoning text; local reasoning is always sent.
       if (key != "effort")
         return Error(400, "Bad Request", "unsupported reasoning member: " + key,
                      "invalid_reasoning");
@@ -3032,6 +3044,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
       return Error(400, "Bad Request", "'text' must be an object",
                    "invalid_response_format");
     for (const auto& [key, value] : text->members()) {
+      if (key == "verbosity")
+        continue;  // Verbosity has no native equivalent; accept and ignore.
       if (key != "format")
         return Error(400, "Bad Request", "unsupported text member: " + key,
                      "invalid_response_format");
