@@ -198,14 +198,17 @@ def run_case(args, name):
                 record["failure"] = request(port, "POST", path, body)
                 response = record["failure"]
                 if mode == "loss":
-                    require(response["status"] == 503,
-                            "incorrect failure status")
                     require("GPU context lost; restart required" in response["body"],
                             "missing stable device-loss message")
-                    require('"code":"device_lost"' in response["body"],
-                            "missing stable error code")
-                    require("data: " not in response["body"],
-                            "early failure committed an SSE response")
+                    if stream:
+                        # Prefill failed after admission committed the stream.
+                        require(response["status"] == 200, "incorrect stream status")
+                        require("data: " in response["body"],
+                                "admitted stream did not emit a terminal SSE error")
+                    else:
+                        require(response["status"] == 503, "incorrect failure status")
+                        require('"code":"device_lost"' in response["body"],
+                                "missing stable error code")
                     require(not any(key.lower() == "retry-after" for key in response["headers"]),
                             "permanent loss advertised a retry")
                     record["exit_code"] = process.wait(timeout=max(0.1, 13 - (time.monotonic() - started)))

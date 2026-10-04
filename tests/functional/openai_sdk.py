@@ -2144,6 +2144,12 @@ def check_responses(client, model, checks, options, async_local_only, expect_rea
     checks["async_concurrent"] = asyncio.run(concurrent())
 
 
+def check_stream_start(client, model, checks, width, context):
+    from stream_start import check_stream_start as check
+
+    check(client, model, checks, width, context)
+
+
 def check_prompt_progress(client, model, checks, width, vision, allow_missing):
     from progress import ProgressTrace
     from server_metrics import ServerMetrics, assert_accounting
@@ -2456,7 +2462,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
               "tool-reasoning",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-              "long-context", "state-edges", "progress", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix")
+              "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix")
 
 
 def main():
@@ -2568,6 +2574,8 @@ def main():
             "progress": lambda: check_prompt_progress(
                 client, args.model, checks, args.concurrency, args.vision,
                 args.allow_missing_progress),
+            "stream-start": lambda: check_stream_start(
+                client, args.model, checks, args.concurrency, args.context),
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency,
                                                      args.context, args.speculative),
             "cache-edits": lambda: check_cache_edits(client, args.model, checks, chat_result),

@@ -2301,7 +2301,7 @@ HttpResponse StreamingResponse(
                   [&](std::string_view piece) {
                     return begin() && filter.Push(piece);
                   },
-                  on_progress);
+                  on_progress, begin);
               stream_log->details = GenerationLogDetails(result);
               RecordServerMetrics(result);
               if (!connected || result.cancelled) {
@@ -2619,7 +2619,7 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
                                        [&](std::string_view piece) {
                                          return begin() && filter.Push(piece);
                                        },
-                                       on_progress)
+                                       on_progress, begin)
                                  : generation->Wait();
       stream_log->details = GenerationLogDetails(result);
       RecordServerMetrics(result);

@@ -43,14 +43,15 @@ public:
         tool_format_(tool_format) {}
 
   Backend::Result Wait(const Backend::TokenCallback& on_token,
-                       const Backend::ProgressCallback& on_progress) override {
+                       const Backend::ProgressCallback& on_progress,
+                       const Backend::StartCallback& on_start) override {
     for (const auto& value : progress_) {
       if (on_progress && !on_progress(value)) {
         inner_->Cancel();
         break;
       }
     }
-    return inner_->Wait(on_token, on_progress);
+    return inner_->Wait(on_token, on_progress, on_start);
   }
   void Cancel() noexcept override { inner_->Cancel(); }
   std::optional<gufo::sampling::JsonConstraint::ToolFormat> ToolFormat()

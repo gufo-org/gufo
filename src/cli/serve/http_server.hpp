@@ -79,8 +79,9 @@ struct HttpResponse {
   };
   std::shared_ptr<StreamLog> stream_log{};
   std::function<void(WebSocket&)> websocket{};
-  /// Text streams commit headers with their first token/progress event,
-  /// allowing generation failures before that point to return a real 5xx.
+  /// Text streams commit headers when generation starts or has queued for a
+  /// bounded time, so failures before that return a real 5xx while
+  /// keepalives still cover prefill and queue waits.
   bool defer_stream_headers{false};
 };
 

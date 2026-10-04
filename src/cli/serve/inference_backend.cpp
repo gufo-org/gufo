@@ -2968,8 +2968,9 @@ struct InferenceBackend::Impl {
     }
 
     Result Wait(const TokenCallback& on_token,
-                const ProgressCallback& on_progress) override {
-      auto result = request_.Wait(on_token, on_progress);
+                const ProgressCallback& on_progress,
+                const StartCallback& on_start) override {
+      auto result = request_.Wait(on_token, on_progress, on_start);
       if (!reasoning_end_.empty()) {
         const auto end =
             std::search(result.tokens.begin(), result.tokens.end(),
@@ -3035,7 +3036,7 @@ struct InferenceBackend::Impl {
         });
     ScheduledGenerationRequest generation(std::move(current),
                                           std::move(request), initial);
-    return generation.Wait(on_token, {});
+    return generation.Wait(on_token, {}, {});
   }
 
   mutable std::mutex state_mutex;

@@ -880,7 +880,13 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                       connected = write_chunk(text, {});
                       return connected;
                     },
-                    on_progress);
+                    on_progress,
+                    [&] {
+                      // Admitted or long-queued: later failures are SSE.
+                      started = true;
+                      connected = writer({});
+                      return connected;
+                    });
                 stream_log->details = GenerationLogDetails(result);
                 RecordServerMetrics(result);
                 if (!connected || result.cancelled)

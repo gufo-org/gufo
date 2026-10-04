@@ -19,9 +19,9 @@ python3 tests/functional/device_loss.py \
 
 It checks recoverable HIP errors, a pending probe's five-second timeout,
 buffered/streaming error contracts, idle loss without any HTTP traffic, arrival
-while an idle probe stays pending, cleanup avoidance and exit status 75. Early
-stream failures return JSON 503; a failure after the first token retains HTTP
-200 and emits a terminal SSE error. A
+while an idle probe stays pending, cleanup avoidance and exit status 75.
+Buffered failures return JSON 503. Streams commit HTTP 200 at admission, so a
+failure during prefill or after the first token emits a terminal SSE error. A
 blocked SSE writer must still trigger the ten-second forced-exit watchdog,
 without a health request or peer disconnect. Repeat `--case` for focused checks.
 Reports retain commands, loaded mode, actual warm-generation drafts, raw
@@ -91,6 +91,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |
 | `batch` | Independent requests across Chat, Responses and Completions; sessions 1–8 |
 | `progress` | Opt-in progress on all text endpoints; output/sampling equality, limits, stops, images, batching and cancel/resume |
+| `stream-start` | Plain streams on all text endpoints send headers before a cold prefill completes; a stream queued behind every session sends them after the five-second bound |
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
 | `metrics` | Live slots, Prometheus cache/time/draft counters, uncached work, endpoint totals, queueing and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart; disk checkpoint spacing for a growing conversation and a branch restored after restart |

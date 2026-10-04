@@ -884,14 +884,15 @@ loss permanent for the process:
   stops it after the loss. Teardown can block on the dead device, so the
   process exits with status 75 after 10 s regardless.
 
-Text streams defer HTTP headers until the first generated output piece or
-successful termination, including a successful empty response. Chat's initial
-role and Responses lifecycle events are deferred with them. Failures before
-that point return a JSON error with an appropriate 5xx status; device loss is
-503 `device_lost`. Heartbeats begin only after headers commit. Explicit
-`return_progress: true` preserves immediate headers and live prefill progress;
-subsequent failures use terminal SSE errors even if no token has been generated
-yet. Deferred headers and the first event are sent together.
+Text streams defer HTTP headers until the scheduler admits the request and
+starts its prompt, or until the request has waited five seconds in the queue,
+whichever comes first. Chat's initial role and Responses lifecycle events are
+sent with them. Failures before that point return a JSON error with an
+appropriate 5xx status; device loss is 503 `device_lost`. Later failures, even
+before the first token, use terminal SSE errors. Heartbeats begin once headers
+commit, so long prefills and queue waits keep sending bytes. Explicit
+`return_progress: true` sends headers immediately and adds live prefill
+progress.
 
 `/metrics` exposes `gufo_device_lost_total`, incremented once per confirmed
 context loss, including idle detection. It stays unchanged for recoverable
