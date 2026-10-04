@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <csignal>
 #include <cstdlib>
@@ -401,6 +402,19 @@ HttpResponse Err(int status, const char* reason, const char* message,
   return {.status = status, .reason = reason, .body = e.dump()};
 }
 
+// Health, readiness and generation share one body once the device is lost:
+// `status` matches the health/readiness shape and `error` the API error shape.
+HttpResponse DeviceLost() {
+  json::Value error = json::Value::object();
+  error["message"] = kDeviceLostMessage;
+  error["type"] = "server_error";
+  error["code"] = "device_lost";
+  json::Value body = json::Value::object();
+  body["status"] = "device_lost";
+  body["error"] = std::move(error);
+  return {.status = 503, .reason = "Service Unavailable", .body = body.dump()};
+}
+
 HttpResponse NotImplemented(const HttpRequest&, TextGenerationBackend&) {
   return Err(501, "Not Implemented",
              "endpoint not implemented on this text model", "server_error",
@@ -420,13 +434,24 @@ tokenization::ChatRole RoleFrom(const std::string& r) {
   return tokenization::ChatRole::kUser;
 }
 
-bool ReadTextContent(const json::Value* content, std::string* out) {
+// Messages replays assistant reasoning as thinking blocks. Restore it as the
+// turn's thought so the prompt reproduces the generated tokens.
+bool ReadTextContent(const json::Value* content, std::string* out,
+                     std::string* thought = nullptr) {
   if (content == nullptr)
     return false;
   if (content->is_string()) {
     *out = content->get_str();
   } else if (content->is_array()) {
     for (const auto& part : content->items()) {
+      if (thought != nullptr && part.is_object() &&
+          part.member_str("type") == "thinking") {
+        const auto* thinking = part.find("thinking");
+        if (thinking == nullptr || !thinking->is_string())
+          return false;
+        *thought += thinking->str();
+        continue;
+      }
       const auto* text = part.find("text");
       const auto type = part.member_str("type");
       if (!part.is_object() || text == nullptr || !text->is_string() ||
@@ -505,7 +530,11 @@ bool ReadTextMessages(const json::Value* input,
           *parse_error = std::move(error);
         return false;
       }
-    } else if (!ReadTextContent(item.find("content"), &message.content))
+    } else if (!ReadTextContent(
+                   item.find("content"), &message.content,
+                   message.role == tokenization::ChatRole::kAssistant
+                       ? &message.thought
+                       : nullptr))
       return false;
     if (responses && message.role == tokenization::ChatRole::kAssistant &&
         !messages->empty() &&
@@ -533,6 +562,7 @@ struct CompatibilityAllowances {
   bool stream_options{false};
   bool ignore_eos{false};
   bool response_controls{false};
+  bool thinking{false};
 };
 
 // Validate the text subset before dispatch so a client never gets an answer
@@ -592,7 +622,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     if (field != allowances.stop_field &&
         !(field == "stream_options" && allowances.stream_options) &&
         !(field == "ignore_eos" && allowances.ignore_eos) &&
-        body.contains(field) &&
+        !(field == "thinking" && allowances.thinking) && body.contains(field) &&
         !(allowances.response_controls &&
           (field == "text" || field == "reasoning" || field == "tools" ||
            field == "tool_choice" || field == "parallel_tool_calls"))) {
@@ -869,10 +899,12 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                 stream_log->error_event_sent =
                     writer("data: " + event.dump() + "\n\n");
                 (void)writer("data: [DONE]\n\n");
-              } catch (const std::exception&) {
+              } catch (const std::exception& error) {
                 stream_log->error_code = "generation_failed";
                 json::Value detail = json::Value::object();
-                detail["message"] = "generation failed";
+                const char* message = error.what();
+                detail["message"] =
+                    message && *message ? message : "generation failed";
                 detail["type"] = "server_error";
                 detail["code"] = "generation_failed";
                 json::Value event = json::Value::object();
@@ -969,6 +1001,28 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
              "invalid_prompt");
 }
 
+// Messages selects reasoning with thinking.type. budget_tokens has no native
+// equivalent, so enabled thinking keeps the server's effort.
+std::optional<HttpResponse> ReadThinking(const json::Value& body,
+                                         ReasoningOptions* reasoning) {
+  const auto* thinking = body.find("thinking");
+  if (thinking == nullptr)
+    return {};
+  const auto* type = thinking->is_object() ? thinking->find("type") : nullptr;
+  if (type == nullptr || !type->is_string() ||
+      (type->str() != "enabled" && type->str() != "disabled"))
+    return InvalidCompatibilityRequest(
+        "'thinking.type' must be enabled or disabled");
+  if (const auto* budget = thinking->find("budget_tokens");
+      budget != nullptr &&
+      (!budget->is_number() || budget->as_double() < 1 ||
+       std::floor(budget->as_double()) != budget->as_double()))
+    return InvalidCompatibilityRequest(
+        "'thinking.budget_tokens' must be a positive integer");
+  reasoning->enabled = type->str() == "enabled";
+  return {};
+}
+
 HttpResponse AnthropicMessages(const HttpRequest& req,
                                TextGenerationBackend& b) try {
   json::Value body;
@@ -979,11 +1033,18 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
                "parse_error");
   }
 
+  ChatRequest chat;
+  chat.reasoning = b.reasoning_defaults();
+  if (body.is_object()) {
+    if (auto error = ReadThinking(body, &chat.reasoning))
+      return std::move(*error);
+  }
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(
           body, b, "max_tokens", &max_tokens, &sampling_config,
-          b.reasoning_defaults().enabled, {.stop_field = "stop_sequences"})) {
+          chat.reasoning.enabled,
+          {.stop_field = "stop_sequences", .thinking = true})) {
     return std::move(*error);
   }
 
@@ -1002,14 +1063,16 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
         "for images and tools");
   }
 
-  ChatRequest chat{std::move(messages)};
+  chat.messages = std::move(messages);
   chat.client_id = req.client_id;
-  chat.reasoning = b.reasoning_defaults();
   if (const auto error = ParseStopSequences(body.find("stop_sequences"),
                                             StopSequenceFormat::kAnthropic,
                                             &chat.stop_sequences))
     return InvalidCompatibilityRequest(*error);
+  const auto initial = b.initial_output_state(chat);
   const auto res = b.chat(chat, max_tokens, sampling_config, req.is_cancelled);
+  const auto generated =
+      SplitGeneratedText(core::Utf8Decoder{}.Push(res.text, true), initial);
 
   json::Value resp = json::Value::object();
   resp["id"] = "msg_" + RandomId();
@@ -1017,10 +1080,20 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   resp["role"] = "assistant";
   resp["model"] = b.model_id();
   json::Value content = json::Value::array();
-  json::Value txt = json::Value::object();
-  txt["type"] = "text";
-  txt["text"] = core::Utf8Decoder{}.Push(res.text, true);
-  content.push_back(std::move(txt));
+  if (!generated.reasoning.empty()) {
+    // Local reasoning is not signed; clients replay the block unchanged.
+    json::Value thinking = json::Value::object();
+    thinking["type"] = "thinking";
+    thinking["thinking"] = generated.reasoning;
+    thinking["signature"] = "";
+    content.push_back(std::move(thinking));
+  }
+  if (!generated.text.empty() || content.empty()) {
+    json::Value txt = json::Value::object();
+    txt["type"] = "text";
+    txt["text"] = generated.text;
+    content.push_back(std::move(txt));
+  }
   resp["content"] = std::move(content);
   resp["stop_reason"] =
       res.finish_reason == TextGenerationBackend::FinishReason::kLength
@@ -1120,30 +1193,108 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend&) {
   return Ok(resp);
 }
 
+/// llama-server slots, one per execution session. `task_id`, `state` and an
+/// always-empty `prompt` remain for older clients; prompt text is not exposed.
 HttpResponse LlamaSlots(const HttpRequest&, TextGenerationBackend& b) {
+  auto sessions = b.session_states();
+  if (sessions.empty()) {
+    sessions.emplace_back();
+  }
+  const std::size_t context = b.max_context();
+  const std::string model = b.model_id();
   json::Value resp = json::Value::array();
-  json::Value slot = json::Value::object();
-  slot["id"] = 0;
-  slot["task_id"] = 0;
-  slot["state"] = 0;
-  slot["prompt"] = "";
-  slot["next_token"] = json::Value();
-  slot["model"] = b.model_id();
-  resp.push_back(std::move(slot));
+  for (std::size_t index = 0; index < sessions.size(); ++index) {
+    const auto& session = sessions[index];
+    const std::int64_t task =
+        session.processing ? static_cast<std::int64_t>(session.request_id) : -1;
+    json::Value next_token = json::Value::object();
+    next_token["has_next_token"] = session.processing;
+    next_token["has_new_line"] = false;
+    next_token["n_remain"] =
+        session.processing ? static_cast<std::int64_t>(session.remaining_tokens)
+                           : std::int64_t{-1};
+    next_token["n_decoded"] = session.generated_tokens;
+    json::Value slot = json::Value::object();
+    slot["id"] = index;
+    slot["n_ctx"] = context;
+    slot["speculative"] = session.speculative;
+    slot["is_processing"] = session.processing;
+    slot["id_task"] = task;
+    slot["task_id"] = task;
+    slot["state"] = session.processing ? 1 : 0;
+    slot["n_prompt_tokens"] = session.prompt_tokens;
+    slot["n_prompt_tokens_cache"] = session.cached_prompt_tokens;
+    slot["n_prompt_tokens_processed"] = session.processed_prompt_tokens;
+    slot["prompt"] = "";
+    slot["next_token"] = json::Value::array();
+    slot["next_token"].push_back(std::move(next_token));
+    slot["model"] = model;
+    resp.push_back(std::move(slot));
+  }
   return Ok(resp);
 }
 
-HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend&) {
+/// Context held by in-flight requests across all sessions.
+double KvCacheUsageRatio(const TextGenerationBackend& b) {
+  const auto sessions = b.session_states();
+  const std::size_t capacity = sessions.size() * b.max_context();
+  if (capacity == 0) {
+    return 0.0;
+  }
+  std::size_t used = 0;
+  for (const auto& session : sessions) {
+    used += session.prompt_tokens + session.generated_tokens;
+  }
+  return static_cast<double>(used) / static_cast<double>(capacity);
+}
+
+HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
   std::ostringstream out;
+  out << std::setprecision(std::numeric_limits<double>::max_digits10);
   out << "# HELP llamacpp:prompt_tokens_total Total prompt tokens processed, "
          "excluding cache hits\n"
       << "# TYPE llamacpp:prompt_tokens_total counter\n"
       << "llamacpp:prompt_tokens_total "
       << detail::TotalPromptTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:prompt_tokens_cached_total Total prompt tokens "
+         "reused from cache\n"
+      << "# TYPE llamacpp:prompt_tokens_cached_total counter\n"
+      << "llamacpp:prompt_tokens_cached_total "
+      << detail::TotalCachedPromptTokens().load(std::memory_order_relaxed)
+      << "\n"
+      << "# HELP llamacpp:prompt_seconds_total Prompt process time\n"
+      << "# TYPE llamacpp:prompt_seconds_total counter\n"
+      << "llamacpp:prompt_seconds_total "
+      << detail::TotalPromptSeconds().load(std::memory_order_relaxed) << "\n"
       << "# HELP llamacpp:tokens_predicted_total Total tokens generated\n"
       << "# TYPE llamacpp:tokens_predicted_total counter\n"
       << "llamacpp:tokens_predicted_total "
       << detail::TotalGenTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:tokens_predicted_seconds_total Predict process "
+         "time\n"
+      << "# TYPE llamacpp:tokens_predicted_seconds_total counter\n"
+      << "llamacpp:tokens_predicted_seconds_total "
+      << detail::TotalGenSeconds().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:n_tokens_max Largest observed n_tokens.\n"
+      << "# TYPE llamacpp:n_tokens_max counter\n"
+      << "llamacpp:n_tokens_max "
+      << detail::MaxSequenceTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:spec_decode_num_drafts_total Total speculative "
+         "verification rounds\n"
+      << "# TYPE llamacpp:spec_decode_num_drafts_total counter\n"
+      << "llamacpp:spec_decode_num_drafts_total "
+      << detail::TotalDraftRounds().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:spec_decode_num_draft_tokens_total Total draft "
+         "tokens proposed\n"
+      << "# TYPE llamacpp:spec_decode_num_draft_tokens_total counter\n"
+      << "llamacpp:spec_decode_num_draft_tokens_total "
+      << detail::TotalDraftTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:spec_decode_num_accepted_tokens_total Total draft "
+         "tokens accepted\n"
+      << "# TYPE llamacpp:spec_decode_num_accepted_tokens_total counter\n"
+      << "llamacpp:spec_decode_num_accepted_tokens_total "
+      << detail::TotalDraftAcceptedTokens().load(std::memory_order_relaxed)
+      << "\n"
       << "# HELP llamacpp:prompt_tokens_seconds Prompt processing speed in "
          "tokens per second\n"
       << "# TYPE llamacpp:prompt_tokens_seconds gauge\n"
@@ -1164,9 +1315,10 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend&) {
       << "# TYPE llamacpp:requests_deferred gauge\n"
       << "llamacpp:requests_deferred "
       << detail::RequestsDeferred().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:kv_cache_usage_ratio KV cache usage ratio\n"
+      << "# HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated "
+         "tokens over sessions times context; excludes retained cache\n"
       << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
-      << "llamacpp:kv_cache_usage_ratio 0.0\n";
+      << "llamacpp:kv_cache_usage_ratio " << KvCacheUsageRatio(b) << "\n";
   return {.status = 200,
           .reason = "OK",
           .body = out.str(),
@@ -1341,13 +1493,14 @@ void HttpServer::run(bool handle_signals) {
   std::optional<ShutdownSignals> signals;
   if (handle_signals) {
     signals.emplace();
-    // A connection may disappear between poll and accept. Never let that
-    // race put the signal-aware loop back into an uninterruptible accept.
-    const int flags = ::fcntl(listen_fd_, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK) != 0)
-      throw std::system_error(errno, std::generic_category(),
-                              "configure HTTP listener");
   }
+  // Poll even without signal handling so device loss is observed while a
+  // request worker is blocked writing to a slow client. Nonblocking accept
+  // also keeps a vanished connection from wedging this observation loop.
+  const int flags = ::fcntl(listen_fd_, F_GETFL, 0);
+  if (flags < 0 || ::fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK) != 0)
+    throw std::system_error(errno, std::generic_category(),
+                            "configure HTTP listener");
   Logger::Info(
       "server",
       "event=listening address=http://" + host_ + ":" + std::to_string(port_) +
@@ -1355,6 +1508,7 @@ void HttpServer::run(bool handle_signals) {
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
   while (!stopped_.load(std::memory_order_acquire)) {
+    (void)device_lost();
     if (handle_signals) {
       const int signal = shutdown_signal.load(std::memory_order_relaxed);
       if (signal != 0) {
@@ -1363,14 +1517,14 @@ void HttpServer::run(bool handle_signals) {
         stop();
         break;
       }
-      pollfd descriptor{.fd = listen_fd_, .events = POLLIN, .revents = 0};
-      const int ready = ::poll(&descriptor, 1, 100);
-      if (ready < 0 && errno != EINTR)
-        throw std::system_error(errno, std::generic_category(),
-                                "poll HTTP listener");
-      if (ready <= 0)
-        continue;
     }
+    pollfd descriptor{.fd = listen_fd_, .events = POLLIN, .revents = 0};
+    const int ready = ::poll(&descriptor, 1, 100);
+    if (ready < 0 && errno != EINTR)
+      throw std::system_error(errno, std::generic_category(),
+                              "poll HTTP listener");
+    if (ready <= 0)
+      continue;
     const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
     if (client_fd < 0) {
       if (stopped_.load(std::memory_order_acquire)) {
@@ -1466,12 +1620,16 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   if (req.method == "GET" &&
       (req.path == "/health" || req.path == "/v1/health" ||
        req.path == "/healthz")) {
+    if (device_lost())
+      return DeviceLost();
     json::Value body = json::Value::object();
     body["status"] = "ok";
     return Ok(body);
   }
   if (req.method == "GET" && (req.path == "/ready" || req.path == "/v1/ready" ||
                               req.path == "/readyz")) {
+    if (device_lost())
+      return DeviceLost();
     const bool ready = (backend_ != nullptr && backend_->ready()) ||
                        (video_jobs_ != nullptr && video_jobs_->ready()) ||
                        (tts_ != nullptr && tts_->ready()) ||
@@ -1544,11 +1702,28 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   }
   for (const auto& entry : routes_) {
     if (entry.first.first == req.method && entry.first.second == req.path) {
+      if (req.method == "POST" && device_lost())
+        return DeviceLost();
       return entry.second(req, *backend_);
     }
   }
   return Err(404, "Not Found", "no route for this path",
              "invalid_request_error", "not_found");
+}
+
+bool HttpServer::device_lost() {
+  if (backend_ == nullptr || !backend_->device_lost())
+    return false;
+  if (options_.on_device_lost &&
+      !device_lost_reported_.exchange(true, std::memory_order_acq_rel)) {
+    try {
+      options_.on_device_lost();
+    } catch (const std::exception& error) {
+      Logger::Error("server", "event=device_lost_hook_failed reason=" +
+                                  std::string(error.what()));
+    }
+  }
+  return true;
 }
 
 void HttpServer::handle_connection(int client_fd) {
@@ -1851,6 +2026,8 @@ void HttpServer::handle_connection(int client_fd) {
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   }
+  // Act on a loss found by this request now, not at the next health probe.
+  (void)device_lost();
 }
 
 }  // namespace gufo::server

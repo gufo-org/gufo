@@ -31,7 +31,7 @@ TESTS = Path(__file__).resolve().parent
 SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
           "tool-reasoning",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-          "long-context", "state-edges", "progress", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache")
+          "long-context", "state-edges", "progress", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -49,7 +49,7 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
 def provenance():
     source = hashlib.sha256()
     for name in ("run.py", "metrics.py", "progress.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
-                 "tool_reasoning.py", "tool_agent.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_rotation.py",
+                 "tool_reasoning.py", "tool_agent.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py",
                  "cache_disk_spacing.py"):
         source.update((TESTS / name).read_bytes())
     lock = TESTS.parents[1] / "flake.lock"

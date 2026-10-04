@@ -142,6 +142,8 @@ struct FakeControl {
   std::optional<TextRunnerToken> block_advance_label;
   std::optional<TextRunnerToken> block_prefill_label;
   std::optional<TextRunnerToken> throw_advance_label;
+  std::atomic<bool> device_usable{true};
+  std::atomic<std::size_t> device_probes{0};
   TextRunnerToken advance_gate_label{0};
   TextRunnerToken prefill_gate_label{0};
   bool advance_gate_entered{false};
@@ -471,6 +473,7 @@ public:
       Advance(state, selection.token);
       step.selections.push_back(std::move(selection));
     }
+    step.draft_rounds = 1;
     step.draft_tokens = count + 1;
     step.draft_accepted_tokens = count;
     return step;
@@ -505,6 +508,11 @@ public:
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
     return RequireFakeState(state).position;
+  }
+
+  [[nodiscard]] bool DeviceUsable() const override {
+    control_->device_probes.fetch_add(1, std::memory_order_relaxed);
+    return control_->device_usable.load(std::memory_order_relaxed);
   }
 
 private:
@@ -551,6 +559,251 @@ TextRequestMetadata ClientMetadata(std::string client_id) {
       .deadline = std::nullopt,
       .request_start = TextGenerationScheduler::Clock::now(),
   };
+}
+
+std::vector<TextRunnerToken> SharedPrompt(std::size_t shared,
+                                          TextRunnerToken tail_start,
+                                          std::size_t tail) {
+  std::vector<TextRunnerToken> prompt{1};
+  for (std::size_t index = 1; index < shared; ++index)
+    prompt.push_back(1000 + static_cast<TextRunnerToken>(index));
+  for (std::size_t index = 0; index < tail; ++index)
+    prompt.push_back(tail_start + static_cast<TextRunnerToken>(index));
+  return prompt;
+}
+
+std::shared_ptr<FakeControl> SharedPrefixControl(bool snapshots) {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 4096;
+  control->prefill_capacity = 256;
+  if (snapshots)
+    control->snapshot_callback = [] {};
+  return control;
+}
+
+void TestConcurrentSharedPrefixesPrefillOnce() {
+  auto control = SharedPrefixControl(true);
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 4);
+  const auto leader_prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = scheduler->Submit(leader_prompt, 2, 0.0F);
+  control->WaitForPrefill(1);
+  // Arrivals while the leader prefills: an identical prompt, one diverging
+  // after the shared system prompt, and one sharing too little to wait for.
+  auto identical = scheduler->Submit(leader_prompt, 2, 0.0F);
+  auto diverging = scheduler->Submit(SharedPrompt(1200, 8000, 100), 2, 0.0F);
+  auto unrelated = scheduler->Submit(SharedPrompt(100, 9000, 900), 2, 0.0F);
+  control->ReleasePrefill();
+  const auto a = leader.Wait();
+  const auto b = identical.Wait();
+  const auto d = diverging.Wait();
+  const auto e = unrelated.Wait();
+  for (const auto* result : {&a, &b, &d, &e})
+    Expect(result->tokens == ExpectedTokens(1, 2),
+           "shared-prefix waiting preserves every output");
+  Expect(a.prefill_tokens == 1300 && a.shared_prefix_wait_ms == 0.0,
+         "the leader prefills its prompt without waiting");
+  Expect(b.cached_prompt_tokens == 1299 && b.prefill_tokens == 1 &&
+             b.shared_prefix_wait_ms > 0.0,
+         "an identical arrival restores the leader's last prefill position");
+  Expect(
+      d.cached_prompt_tokens == 1200 && d.prefill_tokens == 100 &&
+          d.shared_prefix_wait_ms > 0.0,
+      "a diverging arrival restores the shared prefix and prefills its tail");
+  Expect(e.cached_prompt_tokens == 0 && e.prefill_tokens == 1000 &&
+             e.shared_prefix_wait_ms == 0.0,
+         "a short shared prefix is prefilled without waiting");
+}
+
+// The leader is cancelled while the worker is still inside its first prefill
+// chunk, before the follower can be admitted, so the follower never waits.
+void TestLeaderCancelledBeforeFollowerIsAdmitted() {
+  auto control = SharedPrefixControl(true);
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 2);
+  const auto prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = scheduler->Submit(prompt, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto follower = scheduler->Submit(prompt, 2, 0.0F);
+  leader.Cancel();
+  control->ReleasePrefill();
+  const auto a = leader.Wait();
+  const auto b = follower.Wait();
+  Expect(a.cancelled, "the leader is cancelled");
+  Expect(!b.cancelled && b.tokens == ExpectedTokens(1, 2) &&
+             b.cached_prompt_tokens + b.prefill_tokens == prompt.size(),
+         "a follower admitted after its leader's cancellation prefills alone");
+}
+
+void TestParkedFollowerSurvivesLeaderCancellation() {
+  for (const bool fail_capture : {false, true}) {
+    auto control = SharedPrefixControl(true);
+    control->block_prefill_label = 1;
+    std::binary_semaphore entered(0), release(0);
+    std::atomic<unsigned> captures{0};
+    control->snapshot_callback = [&] {
+      if (captures.fetch_add(1) == 0) {
+        entered.release();
+        if (!release.try_acquire_for(kTestTimeout))
+          throw std::runtime_error("shared snapshot gate timed out");
+        if (fail_capture)
+          throw std::runtime_error("injected shared snapshot failure");
+      }
+    };
+    auto scheduler = MakeScheduler(control, 2);
+    const auto prompt = SharedPrompt(1200, 7000, 100);
+    auto leader = scheduler->Submit(prompt, 2, 0.0F);
+    control->WaitForPrefill(1);
+    auto follower = scheduler->Submit(prompt, 2, 0.0F);
+    control->ReleasePrefill();
+
+    // This fresh short prompt has no grid or fallback snapshot at 1299.
+    // Only the parked follower asks the leader to capture that boundary.
+    const bool capturing = entered.try_acquire_for(kTestTimeout);
+    const auto events = control->Events();
+    const bool at_shared_boundary =
+        !events.empty() && events.back().kind == EventKind::kPrefill &&
+        events.back().index + events.back().count == prompt.size() - 1;
+    leader.Cancel();
+    release.release();
+    Expect(capturing && at_shared_boundary,
+           "the follower is parked before its leader is cancelled");
+
+    auto completed = std::async(std::launch::async, [&] {
+      return std::pair{leader.Wait(), follower.Wait()};
+    });
+    Expect(completed.wait_for(kTestTimeout) == std::future_status::ready,
+           "a parked follower is released after leader cancellation");
+    const auto [a, b] = completed.get();
+    Expect(a.cancelled && a.tokens.empty(),
+           "the leader is cancelled before completing prefill");
+    Expect(!b.cancelled && b.tokens == ExpectedTokens(1, 2) &&
+               b.shared_prefix_wait_ms > 0.0 &&
+               b.cached_prompt_tokens + b.prefill_tokens == prompt.size(),
+           "the parked follower completes with exact prompt accounting");
+    Expect(b.cached_prompt_tokens == (fail_capture ? 0 : prompt.size() - 1),
+           "only a successfully captured shared checkpoint is reused");
+
+    auto next = std::async(std::launch::async, [&] {
+      return scheduler->Submit({2, 20, 21}, 2, 0.0F).Wait();
+    });
+    Expect(next.wait_for(kTestTimeout) == std::future_status::ready,
+           "leader cancellation leaves capacity for an independent request");
+    const auto next_result = next.get();
+    Expect(!next_result.cancelled && next_result.tokens == ExpectedTokens(2, 2),
+           "the independent request completes with its own state");
+  }
+}
+
+void TestSharedPrefixWaitRequiresSnapshots() {
+  auto control = SharedPrefixControl(false);
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 2);
+  const auto prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = scheduler->Submit(prompt, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto follower = scheduler->Submit(prompt, 2, 0.0F);
+  control->ReleasePrefill();
+  (void)leader.Wait();
+  const auto b = follower.Wait();
+  Expect(b.tokens == ExpectedTokens(1, 2) && b.shared_prefix_wait_ms == 0.0 &&
+             b.prefill_tokens == prompt.size(),
+         "runners without snapshots never park concurrent requests");
+}
+
+void TestParkedFollowersReserveVisibleSessions() {
+  namespace metrics = gufo::server::detail;
+  auto control = SharedPrefixControl(true);
+  control->block_prefill_label = 1;
+  std::binary_semaphore entered(0), release(0);
+  std::atomic<unsigned> captures{0};
+  control->snapshot_callback = [&] {
+    if (captures.fetch_add(1) == 0) {
+      entered.release();
+      if (!release.try_acquire_for(kTestTimeout))
+        throw std::runtime_error("shared snapshot gate timed out");
+    }
+  };
+  auto scheduler = MakeScheduler(control, 2);
+  const auto processing_before = metrics::RequestsProcessing().load();
+  const auto prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = scheduler->Submit(prompt, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto follower = scheduler->Submit(prompt, 2, 0.0F);
+  control->ReleasePrefill();
+  Expect(entered.try_acquire_for(kTestTimeout),
+         "shared checkpoint capture starts");
+  auto third = scheduler->Submit({2, 20}, 2, 0.0F);
+  bool exceeded_capacity = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  while (std::chrono::steady_clock::now() < deadline) {
+    exceeded_capacity |=
+        metrics::RequestsProcessing().load() - processing_before > 2;
+    std::this_thread::yield();
+  }
+  const auto states = scheduler->SessionStates();
+  const bool reserved = states.size() == 2 && states[0].processing &&
+                        states[1].processing &&
+                        states[0].request_id == leader.id() &&
+                        states[1].request_id == follower.id();
+  const bool queued = third.phase() == TextRequestPhase::kQueued;
+  release.release();
+  (void)leader.Wait();
+  const auto reused = follower.Wait();
+  const auto independent = third.Wait();
+  Expect(!exceeded_capacity && reserved && queued,
+         "parked followers reserve sessions and keep newer arrivals queued");
+  Expect(reused.cached_prompt_tokens > 0 &&
+             independent.tokens == ExpectedTokens(2, 2),
+         "reserved followers resume and then release admission capacity");
+}
+
+void TestRetainedHistoryBeatsSharedPrefixWait() {
+  auto control = SharedPrefixControl(true);
+  auto scheduler = MakeScheduler(control, 3);
+  const auto history = SharedPrompt(1200, 7000, 100);
+  (void)scheduler->Submit(history, 1, 0.0F).Wait();
+  {
+    const std::lock_guard<std::mutex> lock(control->mutex);
+    control->block_prefill_label = 1;
+  }
+  auto leader = scheduler->Submit(SharedPrompt(1200, 8000, 100), 2, 0.0F);
+  control->WaitForPrefill(1);
+  // The next turn of the retained conversation shares more with its own
+  // checkpoint than with the leader, so it must not wait for the leader.
+  auto next_turn = history;
+  next_turn.insert(next_turn.end(), {9001, 9002, 9003});
+  auto continuation = scheduler->Submit(next_turn, 2, 0.0F);
+  control->ReleasePrefill();
+  const auto c = continuation.Wait();
+  (void)leader.Wait();
+  Expect(c.shared_prefix_wait_ms == 0.0 &&
+             c.cached_prompt_tokens >= history.size(),
+         "a longer retained prefix is reused without waiting");
+}
+
+void TestAwaitedCheckpointSurvivesCachePressure() {
+  auto control = SharedPrefixControl(true);
+  auto scheduler = MakeScheduler(control, 2);
+  // Fill every checkpoint record with unrelated conversations, as on a
+  // long-running server. Optional copies can no longer be admitted.
+  for (TextRunnerToken label = 2; label < 200; ++label)
+    (void)scheduler->Submit({label, 1, 2}, 1, 0.0F).Wait();
+  {
+    const std::lock_guard<std::mutex> lock(control->mutex);
+    control->block_prefill_label = 1;
+  }
+  auto leader = scheduler->Submit(SharedPrompt(1200, 7000, 100), 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto follower = scheduler->Submit(SharedPrompt(1200, 8000, 100), 2, 0.0F);
+  control->ReleasePrefill();
+  (void)leader.Wait();
+  const auto result = follower.Wait();
+  Expect(result.shared_prefix_wait_ms > 0.0 &&
+             result.cached_prompt_tokens == 1200 &&
+             result.prefill_tokens == 100,
+         "a checkpoint peers wait for is retained under cache pressure");
 }
 
 void TestIdlePrefillUsesBulkWorkUnit() {
@@ -614,7 +867,8 @@ void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
   const auto first = scheduler->Submit({7}, 5, 0.0F).Wait();
   Expect(first.tokens == ExpectedTokens(7, 5),
          "multi-token decode preserves the generated trajectory");
-  Expect(first.draft_tokens == 7 && first.draft_accepted_tokens == 5,
+  Expect(first.draft_rounds == 2 && first.draft_tokens == 7 &&
+             first.draft_accepted_tokens == 5,
          "multi-token decode reports accumulated draft statistics");
   Expect(!first.cache_hit,
          "multi-token state starts without continuation reuse");
@@ -623,6 +877,55 @@ void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
   const auto second = scheduler->Submit({7, 70}, 2, 0.0F).Wait();
   Expect(!second.cache_hit,
          "runner-disabled prefix reuse cannot retain speculative state");
+}
+
+void TestRequestTotalsDoNotNeedAConsumer() {
+  namespace metrics = gufo::server::detail;
+  const auto wait_terminal =
+      [](const TextGenerationScheduler::Request& request) {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (request.phase() != TextRequestPhase::kTerminal) {
+          Expect(std::chrono::steady_clock::now() < deadline,
+                 "request reaches terminal without a consumer");
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      };
+  {
+    auto control = std::make_shared<FakeControl>();
+    auto scheduler = MakeScheduler(control, 1);
+    gufo::server::RecordServerMetrics(
+        scheduler->Submit({1, 10}, 1, 0.0F).Wait());
+    const auto cached_before = metrics::TotalCachedPromptTokens().load();
+    // Never waited on, like a stream whose first write fails.
+    auto abandoned = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F);
+    wait_terminal(abandoned);
+    Expect(metrics::TotalCachedPromptTokens().load() - cached_before == 3,
+           "a finished request counts before anyone reads it");
+    abandoned = {};
+    const auto consumed = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F).Wait();
+    gufo::server::RecordServerMetrics(consumed);
+    Expect(metrics::TotalCachedPromptTokens().load() - cached_before ==
+               3 + consumed.cached_prompt_tokens,
+           "reading the result does not count it again");
+  }
+  {
+    auto control = std::make_shared<FakeControl>();
+    control->incremental_prefill = false;
+    control->multi_token_decode = true;
+    control->prefix_reuse = false;
+    auto scheduler = MakeScheduler(control, 1);
+    const auto rounds_before = metrics::TotalDraftRounds().load();
+    const auto drafts_before = metrics::TotalDraftTokens().load();
+    const auto accepted_before = metrics::TotalDraftAcceptedTokens().load();
+    auto request = scheduler->Submit({7}, 5, 0.0F);
+    wait_terminal(request);
+    Expect(
+        metrics::TotalDraftRounds().load() - rounds_before == 2 &&
+            metrics::TotalDraftTokens().load() - drafts_before == 7 &&
+            metrics::TotalDraftAcceptedTokens().load() - accepted_before == 5,
+        "draft totals count at completion");
+  }
 }
 
 void TestMultiTokenRunnerCanSwitchToBatchedExecution() {
@@ -646,7 +949,8 @@ void TestMultiTokenRunnerCanSwitchToBatchedExecution() {
   Expect(result_a.execution_plan == "batched-w2" &&
              result_b.execution_plan == "batched-w2",
          "speculative-capable requests can use the physical W2 plan");
-  Expect(result_a.draft_tokens == 0 && result_b.draft_tokens == 0,
+  Expect(result_a.draft_rounds == 0 && result_b.draft_rounds == 0 &&
+             result_a.draft_tokens == 0 && result_b.draft_tokens == 0,
          "target batching bypasses per-request draft steps");
   Expect(control->batch_preparations.load(std::memory_order_relaxed) >= 2,
          "both resident states are prepared before target batching");
@@ -678,11 +982,46 @@ void TestBatchFailureIsolation() {
   }
 }
 
+void TestBatchDeviceLossFailsSuccessfulPeers() {
+  for (const bool speculative : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->multi_token_decode = speculative;
+    control->batched_multi_token_decode = speculative;
+    control->supports_batched_advance = true;
+    control->block_prefill_label = 1;
+    // A later failed lane must be classified before the earlier successful
+    // lane commits and releases its state on the same unusable context.
+    control->throw_advance_label = 2;
+    control->device_usable = false;
+    auto scheduler = MakeScheduler(control, 2);
+    // AR gives the first decoder one advance before admitting the peer;
+    // multi-token batching assembles the initial cohort before decoding.
+    const std::size_t max_tokens = speculative ? 1 : 2;
+    auto first = scheduler->Submit({1}, max_tokens, 0.0F);
+    control->WaitForPrefill(1);
+    auto second = scheduler->Submit({2}, max_tokens, 0.0F);
+    control->ReleasePrefill();
+    for (auto* request : {&first, &second}) {
+      bool lost = false;
+      try {
+        (void)request->Wait();
+      } catch (const TextGenerationError& error) {
+        lost = error.code() == TextGenerationErrorCode::kDeviceLost;
+      }
+      Expect(lost,
+             "device loss fails the entire batch before committing peers");
+    }
+    Expect(control->device_probes == 1 && scheduler->device_lost(),
+           "batch loss probes once and remains sticky");
+  }
+}
+
 void TestModelOwnedBatchMetrics() {
   for (const std::size_t actual_width : {1U, 2U}) {
     namespace metrics = gufo::server::detail;
     const auto prompt_before = metrics::TotalPromptTokens().load();
     const auto generated_before = metrics::TotalGenTokens().load();
+    const auto rounds_before = metrics::TotalDraftRounds().load();
     auto control = std::make_shared<FakeControl>();
     control->multi_token_decode = true;
     control->batched_multi_token_decode = true;
@@ -700,11 +1039,14 @@ void TestModelOwnedBatchMetrics() {
               result.execution_plan ==
                   (actual_width == 1 ? "serial-fallback" : "batched-w2"),
           "scheduler reports the runner's actual subgroup or serial execution");
+      Expect(result.draft_rounds == 4,
+             "each batched request reports its own verification rounds");
       Expect(result.token_metrics_recorded, "scheduled tokens counted live");
       gufo::server::RecordServerMetrics(result);
     }
     Expect(metrics::TotalPromptTokens().load() - prompt_before == 2 &&
-               metrics::TotalGenTokens().load() - generated_before == 24,
+               metrics::TotalGenTokens().load() - generated_before == 24 &&
+               metrics::TotalDraftRounds().load() - rounds_before == 8,
            "speculative batches and HTTP completion count each token once");
   }
 }
@@ -1017,6 +1359,7 @@ void TestSlowConsumerOutputIsBoundedAndReclaimed() {
 
 void TestGeneratedOutputLimitAppliesWithoutStreaming() {
   auto control = std::make_shared<FakeControl>();
+  control->device_usable = false;
   auto scheduler = MakeScheduler(control, 1, {},
                                  {
                                      .max_output_bytes_per_request = 4,
@@ -1031,6 +1374,8 @@ void TestGeneratedOutputLimitAppliesWithoutStreaming() {
   }
   Expect(output_limit_reported,
          "non-streaming generation obeys its output byte limit");
+  Expect(control->device_probes == 0 && !scheduler->device_lost(),
+         "a scheduler-classified failure never probes the device");
 }
 
 void TestMidGenerationAdmissionAndIsolatedTrajectories() {
@@ -1236,6 +1581,79 @@ void TestMetricsDuringCacheAdmission() {
          "failed admission releases the session for replacement work");
 }
 
+void TestSessionStatesFollowAdmittedRequests() {
+  namespace metrics = gufo::server::detail;
+  const auto processing_before = metrics::RequestsProcessing().load();
+  auto control = std::make_shared<FakeControl>();
+  control->block_advance_label = 1;
+  control->block_prefill_label = 2;
+  auto scheduler = MakeScheduler(control, 2);
+  const auto all_idle = [&] {
+    const auto states = scheduler->SessionStates();
+    return states.size() == 2 &&
+           std::none_of(states.begin(), states.end(), [](const auto& state) {
+             return state.processing || state.request_id != 0 ||
+                    state.prompt_tokens != 0 || state.generated_tokens != 0;
+           });
+  };
+  Expect(all_idle(), "every session starts idle");
+
+  auto first = scheduler->Submit({1, 10}, 8, 0.0F);
+  control->WaitForAdvance(1);
+  auto states = scheduler->SessionStates();
+  Expect(states[0].processing && states[0].request_id == first.id() &&
+             states[0].prompt_tokens == 2 &&
+             states[0].cached_prompt_tokens == 0 &&
+             states[0].processed_prompt_tokens == 2 &&
+             states[0].generated_tokens == 1 &&
+             states[0].remaining_tokens == 7 && !states[1].processing,
+         "a decoding request reports its session progress");
+  auto second = scheduler->Submit({2, 20, 21}, 1, 0.0F);
+  Expect(!scheduler->SessionStates()[1].processing,
+         "a queued request does not hold a session");
+  control->ReleaseAdvance();
+  control->WaitForPrefill(2);
+  states = scheduler->SessionStates();
+  Expect(states[0].processing && states[0].request_id == first.id() &&
+             states[1].processing && states[1].request_id == second.id() &&
+             states[1].prompt_tokens == 3 &&
+             states[1].processed_prompt_tokens == 0 &&
+             states[1].generated_tokens == 0 && states[1].remaining_tokens == 1,
+         "concurrent requests hold distinct sessions");
+  Expect(metrics::RequestsProcessing().load() - processing_before == 2,
+         "processing sessions match the processing gauge");
+  control->ReleasePrefill();
+  Expect(first.Wait().tokens.size() == 8 && second.Wait().tokens.size() == 1,
+         "both requests complete");
+  Expect(all_idle(), "completed requests release their sessions");
+
+  auto cache_control = std::make_shared<FakeControl>();
+  cache_control->snapshot_callback = [] {};
+  auto cache_scheduler = MakeScheduler(cache_control, 2);
+  (void)cache_scheduler->Submit({1, 10}, 1, 0.0F).Wait();
+  {
+    const std::lock_guard<std::mutex> lock(cache_control->mutex);
+    cache_control->block_prefill_label = 1;
+  }
+  auto continuation = cache_scheduler->Submit({1, 10, 100, 11}, 2, 0.0F);
+  cache_control->WaitForPrefill(1);
+  const auto resumed = cache_scheduler->SessionStates().front();
+  Expect(resumed.processing && resumed.request_id == continuation.id() &&
+             resumed.prompt_tokens == 4 && resumed.cached_prompt_tokens == 3 &&
+             resumed.processed_prompt_tokens == 0,
+         "a continuation reports its cached prompt tokens");
+  continuation.Cancel();
+  cache_control->ReleasePrefill();
+  Expect(continuation.Wait().cancelled, "continuation is cancelled");
+  Expect(!cache_scheduler->SessionStates().front().processing,
+         "cancelled requests release their sessions");
+
+  auto speculative = std::make_shared<FakeControl>();
+  speculative->multi_token_decode = true;
+  Expect(MakeScheduler(speculative, 1)->SessionStates().front().speculative,
+         "multi-token decoding is reported as speculative");
+}
+
 void TestQueuedAndPrefillCancellation() {
   {
     auto control = std::make_shared<FakeControl>();
@@ -1338,11 +1756,70 @@ void TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement() {
              "injected scheduler runner failure";
   }
   Expect(failed, "runner failure reaches the submitting client");
+  Expect(!scheduler->SessionStates().front().processing,
+         "a failed request releases its visible session");
+  // A probe still pending at its bound also reports a usable device.
+  Expect(control->device_probes == 1 && !scheduler->device_lost(),
+         "a failure on a usable device is probed once and stays recoverable");
 
   control->throw_advance_label.reset();
   auto replacement = scheduler->Submit({8, 80}, 2, 0.0F);
   Expect(replacement.Wait().tokens == ExpectedTokens(8, 2),
          "replacement request succeeds after runner failure");
+  Expect(control->device_probes == 1, "successful work never probes");
+}
+
+void TestDeviceLossIsStickyAndReported() {
+  auto control = std::make_shared<FakeControl>();
+  control->throw_advance_label = 9;
+  control->block_advance_label = 9;
+  control->device_usable = false;
+  auto scheduler = MakeScheduler(control, 2);
+
+  const auto expect_device_lost = [](const auto& action,
+                                     std::string_view message) {
+    bool lost = false;
+    try {
+      action();
+    } catch (const TextGenerationError& error) {
+      lost = error.code() == TextGenerationErrorCode::kDeviceLost &&
+             error.http_status() == 503 &&
+             std::string_view(error.stable_code()) == "device_lost" &&
+             std::string_view(error.what()) == gufo::server::kDeviceLostMessage;
+    }
+    Expect(lost, message);
+  };
+  auto failing = scheduler->Submit({9, 90}, 2, 0.0F);
+  control->WaitForAdvance(9);
+  const auto invalidations_before_loss = control->invalidations.load();
+  auto queued = scheduler->Submit({8, 80}, 2, 0.0F);
+  auto cancelled = scheduler->Submit({7, 70}, 2, 0.0F);
+  cancelled.Cancel();
+  control->ReleaseAdvance();
+  expect_device_lost([&] { (void)failing.Wait(); },
+                     "a failure on a lost device reports device_lost");
+  Expect(scheduler->device_lost() && control->device_probes == 1,
+         "the failing work unit probes the device once");
+  expect_device_lost([&] { (void)queued.Wait(); },
+                     "queued work fails without touching the lost device");
+  expect_device_lost([&] { (void)cancelled.Wait(); },
+                     "shutdown never resets a cancelled lost-device request");
+  Expect(control->invalidations == invalidations_before_loss,
+         "lost-device failure skips state invalidation and its HIP cleanup");
+  const auto states = scheduler->SessionStates();
+  Expect(std::none_of(states.begin(), states.end(),
+                      [](const auto& state) { return state.processing; }),
+         "device loss retires visible sessions without HIP cleanup");
+  const auto events = control->Events();
+  Expect(std::none_of(events.begin(), events.end(),
+                      [](const auto& event) { return event.label != 9; }),
+         "no peer performs model work after loss");
+
+  control->throw_advance_label.reset();
+  control->device_usable = true;
+  expect_device_lost([&] { (void)scheduler->Submit({8, 80}, 2, 0.0F); },
+                     "submissions after device loss fail before admission");
+  Expect(control->device_probes == 1, "device loss is never probed again");
 }
 
 void TestStopSequenceChunkBoundaries() {
@@ -1946,12 +2423,21 @@ int main() {
   TestSnapshotDoesNotBlockOtherRequests();
   TestFirstTokenPrecedesSnapshotAndPreservesBudget();
   TestIdlePrefillUsesBulkWorkUnit();
+  TestConcurrentSharedPrefixesPrefillOnce();
+  TestLeaderCancelledBeforeFollowerIsAdmitted();
+  TestParkedFollowerSurvivesLeaderCancellation();
+  TestSharedPrefixWaitRequiresSnapshots();
+  TestParkedFollowersReserveVisibleSessions();
+  TestRetainedHistoryBeatsSharedPrefixWait();
+  TestAwaitedCheckpointSurvivesCachePressure();
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRunnerCanReuseExactIncrementalText();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
+  TestRequestTotalsDoNotNeedAConsumer();
   TestMultiTokenRunnerCanSwitchToBatchedExecution();
   TestModelOwnedBatchMetrics();
   TestBatchFailureIsolation();
+  TestBatchDeviceLossFailsSuccessfulPeers();
   TestMultiResidentPrefillUsesBoundedWorkUnits();
   for (const bool multi_token : {false, true}) {
     for (const bool batched : {false, true}) {
@@ -1973,9 +2459,11 @@ int main() {
   TestQueuedAndPrefillCancellation();
   TestServerMetricsAreLive();
   TestMetricsDuringCacheAdmission();
+  TestSessionStatesFollowAdmittedRequests();
   TestDecodeCancellationAndStateReclamation();
   TestFourResidentRequestsMakeProgress();
   TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement();
+  TestDeviceLossIsStickyAndReported();
   Expect(
       gufo::server::detail::RequestsProcessing().load() == 0 &&
           gufo::server::detail::RequestsDeferred().load() == 0,
