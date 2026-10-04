@@ -89,6 +89,7 @@ struct ScheduledRequest {
   bool publish_token_pieces{false};
   bool publish_prompt_progress{false};
   TextGenerationScheduler::Clock::time_point request_start;
+  TextGenerationScheduler::Clock::time_point stream_start_deadline;
   std::optional<TextGenerationScheduler::Clock::time_point> deadline;
   std::size_t max_output_bytes{0};
   std::size_t max_buffered_output_bytes{0};
@@ -117,6 +118,8 @@ struct ScheduledRequest {
   std::condition_variable output_condition;
   std::deque<std::string> output_pieces;
   std::optional<TextGenerationBackend::PromptProgress> pending_progress;
+  // Set at admission for streams; the consumer reports its start at most once.
+  bool admitted{false};
   std::size_t buffered_output_bytes{0};
   // A stalled consumer trips backpressure on every token, so the debug line is
   // written once per request. Only the scheduler thread touches this.
@@ -256,6 +259,18 @@ void LogBackpressure(const std::shared_ptr<ScheduledRequest>& request,
   // the piece, which is the question an operator asks when a stream stalls.
   LogBackpressure(request, reason, buffered, piece_bytes);
   return false;
+}
+
+/// Lets a streaming consumer commit its response before prompt processing.
+void PublishAdmission(const std::shared_ptr<ScheduledRequest>& request) {
+  if (!request->publish_token_pieces) {
+    return;
+  }
+  {
+    const std::lock_guard<std::mutex> lock(request->output_mutex);
+    request->admitted = true;
+  }
+  request->output_condition.notify_one();
 }
 
 /// Replaces unread progress, so a slow consumer holds at most one update.
@@ -613,6 +628,18 @@ struct TextGenerationScheduler::Impl {
     PublishTerminal(request, std::move(failure), true);
   }
 
+  void MarkDeviceLost(std::string_view reason) noexcept {
+    if (device_lost.exchange(true, std::memory_order_acq_rel))
+      return;
+    detail::DeviceLostTotal().fetch_add(1, std::memory_order_relaxed);
+    try {
+      Logger::Error("scheduler", "event=device_lost remedy=restart reason=" +
+                                     std::string(reason));
+    } catch (...) {
+      // Loss remains observable even if logging fails.
+    }
+  }
+
   // A GPU reset leaves this process's device context permanently unusable,
   // and every later work unit then fails with a raw driver message. Probe the
   // device only after a model failure, on this thread between work units, so
@@ -637,9 +664,7 @@ struct TextGenerationScheduler::Impl {
       if (!device_lost.load(std::memory_order_acquire)) {
         if (runner_pool->runner().DeviceUsable())
           return failure;
-        device_lost.store(true, std::memory_order_release);
-        Logger::Error("scheduler",
-                      "event=device_lost remedy=restart reason=" + reason);
+        MarkDeviceLost(reason);
       }
       return device_lost_failure;
     } catch (...) {
@@ -929,6 +954,7 @@ struct TextGenerationScheduler::Impl {
                                        .count();
         request->result.resident_requests_at_admission =
             prefilling.size() + decoding.size() + capturing.size() + 1;
+        PublishAdmission(request);
         PublishPromptProgress(request);
         request->phase.store(TextRequestPhase::kAdmitted,
                              std::memory_order_release);
@@ -1604,9 +1630,26 @@ struct TextGenerationScheduler::Impl {
                  (queued_count != 0 &&
                   capturing.size() + waiting.size() < runner_pool->capacity());
         };
-        if (capturing.empty() && waiting.empty())
-          queue_condition.wait(lock, wake);
-        else
+        if (capturing.empty() && waiting.empty()) {
+          // Only the idle wait has a timer. Arrival interrupts it immediately;
+          // no clock checks or device polling are added to active work units.
+          while (!wake()) {
+            if (queue_condition.wait_for(
+                    lock, scheduler_policy.device_probe_interval, wake))
+              break;
+            lock.unlock();
+            try {
+              if (runner_pool->runner().PollDevice() ==
+                  TextModelRunner::DeviceProbeStatus::kLost)
+                MarkDeviceLost("idle device probe failed");
+            } catch (...) {
+              // An inconclusive probe must not kill a usable model.
+            }
+            lock.lock();
+            if (device_lost.load(std::memory_order_acquire))
+              break;
+          }
+        } else
           queue_condition.wait_for(lock, std::chrono::milliseconds(1), wake);
         continue;
       }
@@ -1763,7 +1806,8 @@ TextRequestPhase TextGenerationScheduler::Request::phase() const noexcept {
 }
 
 TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
-    const TokenCallback& on_token, const ProgressCallback& on_progress) {
+    const TokenCallback& on_token, const ProgressCallback& on_progress,
+    const StartCallback& on_start) {
   if (!*this) {
     throw std::logic_error("text scheduler request is empty");
   }
@@ -1773,6 +1817,8 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
   impl_->waited = true;
 
   bool deliver_pieces = true;
+  // Only streams with a start consumer use the queue deadline.
+  bool started = !on_start || !impl_->request->publish_token_pieces;
   bool consumer_cancelled = false;
   std::exception_ptr callback_failure;
   Result result;
@@ -1781,16 +1827,31 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
   while (true) {
     std::string piece;
     std::optional<TextGenerationBackend::PromptProgress> progress;
+    bool start = false;
     bool has_piece = false;
     bool terminal = false;
     {
       std::unique_lock<std::mutex> lock(impl_->request->output_mutex);
-      impl_->request->output_condition.wait(lock, [&] {
+      const auto ready = [&] {
         return impl_->request->terminal ||
+               (!started && impl_->request->admitted) ||
                impl_->request->pending_progress.has_value() ||
                !impl_->request->output_pieces.empty();
-      });
-      if (impl_->request->pending_progress.has_value()) {
+      };
+      if (started) {
+        impl_->request->output_condition.wait(lock, ready);
+      } else {
+        // A request still queued at the deadline also starts, so transport
+        // keepalives can run while it waits.
+        const bool woke = impl_->request->output_condition.wait_until(
+            lock, impl_->request->stream_start_deadline, ready);
+        // Admission precedes this request's progress and output, even when
+        // it also failed before the consumer woke.
+        start = !woke || impl_->request->admitted;
+      }
+      if (start) {
+        // Delivered below, before any progress or output.
+      } else if (impl_->request->pending_progress.has_value()) {
         progress = std::exchange(impl_->request->pending_progress, {});
       } else if (!impl_->request->output_pieces.empty()) {
         has_piece = true;
@@ -1820,6 +1881,12 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
         Cancel();
       }
     };
+    if (start) {
+      started = true;
+      if (deliver_pieces)
+        deliver([&](bool) { return on_start(); }, true);
+      continue;
+    }
     if (progress.has_value() && deliver_pieces && on_progress) {
       deliver(on_progress, *progress);
     }
@@ -1943,6 +2010,8 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->publish_prompt_progress =
       publish_token_pieces && metadata.return_progress;
   request->request_start = metadata.request_start;
+  request->stream_start_deadline =
+      request->request_start + impl_->scheduler_policy.stream_start_delay;
   request->deadline = metadata.deadline;
   if (!request->deadline.has_value() &&
       impl_->scheduler_policy.request_timeout.count() > 0) {

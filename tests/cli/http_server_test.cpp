@@ -31,29 +31,37 @@ using gufo::server::LogLevelFromName;
 using gufo::server::LogLevelName;
 using gufo::server::TextGenerationBackend;
 
-/// Reports fixed prompt progress before delegating token generation.
+/// Reports an optional admission and fixed prompt progress before delegating
+/// token generation.
 class ProgressRequest final : public TextGenerationBackend::GenerationRequest {
 public:
   ProgressRequest(std::shared_ptr<GenerationRequest> inner,
-                  std::vector<TextGenerationBackend::PromptProgress> progress)
-      : inner_(std::move(inner)), progress_(std::move(progress)) {}
+                  std::vector<TextGenerationBackend::PromptProgress> progress,
+                  bool admit = false)
+      : inner_(std::move(inner)),
+        progress_(std::move(progress)),
+        admit_(admit) {}
 
   TextGenerationBackend::Result Wait(
       const TextGenerationBackend::TokenCallback& on_token,
-      const TextGenerationBackend::ProgressCallback& on_progress) override {
+      const TextGenerationBackend::ProgressCallback& on_progress,
+      const TextGenerationBackend::StartCallback& on_start) override {
+    if (admit_ && on_start && !on_start())
+      inner_->Cancel();
     for (const auto& value : progress_) {
       if (on_progress && !on_progress(value)) {
         inner_->Cancel();
         break;
       }
     }
-    return inner_->Wait(on_token, on_progress);
+    return inner_->Wait(on_token, on_progress, on_start);
   }
   void Cancel() noexcept override { inner_->Cancel(); }
 
 private:
   std::shared_ptr<GenerationRequest> inner_;
   std::vector<TextGenerationBackend::PromptProgress> progress_;
+  bool admit_;
 };
 
 class FakeBackend final : public TextGenerationBackend {
@@ -94,7 +102,16 @@ public:
         TextGenerationBackend::start_complete(
             prompt, max_tokens, sampling, cancellation, stream, false,
             client_id, stop_sequences, return_progress),
-        progress);
+        progress, admit.load());
+  }
+  std::shared_ptr<GenerationRequest> start_chat(
+      const gufo::server::ChatRequest& request, std::size_t max_tokens,
+      const gufo::sampling::SamplingConfig& sampling,
+      const CancellationCheck& cancellation, bool stream) override {
+    return std::make_shared<ProgressRequest>(
+        TextGenerationBackend::start_chat(request, max_tokens, sampling,
+                                          cancellation, stream),
+        std::vector<PromptProgress>{}, admit.load());
   }
   SamplingDefaults sampling_defaults() const override { return defaults; }
   SamplingDefaults defaults;
@@ -164,8 +181,18 @@ public:
       result.finish_reason = FinishReason::kStopSequence;
       result.stop_sequence = forced_stop_sequence;
     }
-    if (token)
+    if (token && failure != 8) {
+      std::this_thread::sleep_for(token_delay);
       (void)token(result.text);
+    }
+    if (failure == 6)
+      throw std::runtime_error("context exceeded");
+    if (failure == 7) {
+      lost = true;
+      throw gufo::server::TextGenerationError(
+          gufo::server::TextGenerationErrorCode::kDeviceLost,
+          gufo::server::kDeviceLostMessage);
+    }
     return result;
   }
   Result chat(const gufo::server::ChatRequest& request, std::size_t limit,
@@ -183,6 +210,9 @@ public:
   std::atomic<int> calls{0};
   std::atomic<bool> last_ignore_eos{false};
   std::vector<PromptProgress> progress;
+  // Report a scheduler admission before generation, as the HIP backend does.
+  std::atomic<bool> admit{false};
+  std::chrono::milliseconds token_delay{0};
   std::atomic<int> failure{0};
   std::atomic<bool> lost{false};
   std::string forced_stop_sequence;
@@ -710,6 +740,10 @@ void TestLlamaSlotsAndMetrics() {
          token.member_size("n_decoded") == 3);
 
   const auto metrics = get("/metrics");
+  assert(metrics.find("# HELP gufo_device_lost_total ") != std::string::npos);
+  assert(metrics.find("# TYPE gufo_device_lost_total counter\n") !=
+         std::string::npos);
+  assert(metrics.find("gufo_device_lost_total 0\n") != std::string::npos);
   const std::string ratio_prefix = "llamacpp:kv_cache_usage_ratio ";
   const auto ratio_pos = metrics.find("\n" + ratio_prefix);
   assert(ratio_pos != std::string::npos);
@@ -915,7 +949,7 @@ void TestCompatibilityRequests() {
                                      : "event: response.completed") !=
            std::string::npos);
   }
-  server.backend->failure = 1;
+  server.backend->failure = 6;
   const auto failed_stream =
       server.Post("/v1/responses", R"({"input":"hi","stream":true})");
   ExpectStatus(failed_stream, 200);  // Fake backend fails after headers.
@@ -1080,10 +1114,10 @@ void TestRawCompletionStreaming() {
   assert(without_usage.find("\"timings\":") != std::string::npos);
   assert(without_usage.find("\"usage\":") == std::string::npos);
 
-  for (const int failure : {1, 5}) {
+  for (const int failure : {1, 5, 6}) {
     server.backend->failure = failure;
     const std::string message =
-        failure == 1 ? "context exceeded" : "generation failed";
+        failure == 5 ? "generation failed" : "context exceeded";
     for (
         const auto& [path, body] : {
             std::pair{
@@ -1095,9 +1129,17 @@ void TestRawCompletionStreaming() {
             std::pair{"/v1/responses", R"({"input":"hello","stream":true})"},
         }) {
       const auto failed = server.Post(path, body);
-      ExpectStatus(failed, 200);
+      ExpectStatus(failed, failure == 6 ? 200 : 500);
       assert(failed.find("\"message\":\"" + message + "\"") !=
              std::string::npos);
+      if (failure != 6) {
+        assert(failed.find("Content-Type: application/json") !=
+               std::string::npos);
+        assert(failed.find("data: ") == std::string::npos);
+        assert(failed.find("\"code\":\"server_exception\"") !=
+               std::string::npos);
+        continue;
+      }
       const bool responses = std::string_view(path) == "/v1/responses";
       assert(failed.find(responses ? "\"code\":\"server_error\""
                                    : "\"code\":\"generation_failed\"") !=
@@ -1146,7 +1188,7 @@ void TestDeviceLoss() {
   assert(hook_calls == 0);
 
   // A stream has committed its status; the terminal event names the loss.
-  server.backend->failure = 3;
+  server.backend->failure = 7;
   const auto stream =
       server.Post("/v1/completions", R"({"prompt":"hello","stream":true})");
   ExpectStatus(stream, 200);
@@ -1195,6 +1237,20 @@ void TestDeviceLoss() {
   }
   assert(first.backend->calls == 1);
   assert(first_hook_calls == 1);
+  for (
+      const auto& [path, body] :
+      {std::pair{"/v1/completions", R"({"prompt":"hello","stream":true})"},
+       std::pair{
+           "/v1/chat/completions",
+           R"({"model":"test","messages":[{"role":"user","content":"hello"}],"stream":true})"},
+       std::pair{"/v1/responses", R"({"input":"hello","stream":true})"}}) {
+    RunningServer early;
+    early.backend->failure = 3;
+    const auto response = early.Post(path, body);
+    ExpectStatus(response, 503);
+    assert(response.find("\"code\":\"device_lost\"") != std::string::npos);
+    assert(response.find("data: ") == std::string::npos);
+  }
 }
 
 void TestDeviceLossWhileWriterBlocked() {
@@ -1508,6 +1564,98 @@ void TestSseHeartbeat() {
   assert(disabled.Post("/sse-idle", "").find(": ping") == std::string::npos);
 }
 
+void TestDeferredStreamHeaders() {
+  RunningServer server(
+      {.sse_heartbeat_interval = std::chrono::milliseconds(5)});
+  server.server.add("POST", "/early-failure", [](const auto&, auto&) {
+    return gufo::server::HttpResponse{
+        .headers = {{"Content-Type", "text/event-stream"}},
+        .streaming_body =
+            [](const auto&) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(30));
+              throw std::runtime_error("early generation failure");
+            },
+        .defer_stream_headers = true};
+  });
+  const auto failed = server.Post("/early-failure", "");
+  ExpectStatus(failed, 500);
+  assert(failed.find(": ping") == std::string::npos);
+  for (
+      const auto& [path, body] :
+      {std::pair{"/v1/completions", R"({"prompt":"hello","stream":true})"},
+       std::pair{
+           "/v1/chat/completions",
+           R"({"model":"test","messages":[{"role":"user","content":"hello"}],"stream":true})"},
+       std::pair{"/v1/responses", R"({"input":"hello","stream":true})"}}) {
+    server.backend->failure =
+        8;  // Successful termination without a token callback.
+    server.backend->SetOutput("");
+    const auto empty = server.Post(path, body);
+    ExpectStatus(empty, 200);
+    assert(empty.ends_with("0\r\n\r\n"));
+  }
+  // Opt-in progress deliberately starts the stream before tokens exist.
+  server.backend->progress = {{.total = 100, .processed = 10}};
+  server.backend->failure = 4;
+  const auto progress =
+      server.Post("/v1/completions",
+                  R"({"prompt":"hello","stream":true,"return_progress":true})");
+  ExpectStatus(progress, 200);
+  assert(progress.find("prompt_progress") != std::string::npos);
+  assert(progress.find("\"code\":\"generation_failed\"") != std::string::npos);
+  server.backend->progress.clear();
+  for (
+      const auto& [path, body] :
+      {std::pair{"/v1/completions",
+                 R"({"prompt":"hello","stream":true,"return_progress":true})"},
+       std::pair{
+           "/v1/chat/completions",
+           R"({"model":"test","messages":[{"role":"user","content":"hello"}],"stream":true,"return_progress":true})"},
+       std::pair{
+           "/v1/responses",
+           R"({"input":"hello","stream":true,"return_progress":true})"}}) {
+    const auto failure = server.Post(path, body);
+    ExpectStatus(failure, 200);
+    assert(failure.find(std::string_view(path) == "/v1/responses"
+                            ? "\"code\":\"server_error\""
+                            : "\"code\":\"generation_failed\"") !=
+           std::string::npos);
+    assert(failure.ends_with("0\r\n\r\n"));
+  }
+}
+
+void TestAdmittedStreamHeaders() {
+  RunningServer server(
+      {.sse_heartbeat_interval = std::chrono::milliseconds(5)});
+  server.backend->admit = true;
+  const std::pair<const char*, const char*> requests[] = {
+      {"/v1/completions", R"({"prompt":"hello","stream":true})"},
+      {"/v1/chat/completions",
+       R"({"model":"test","messages":[{"role":"user","content":"hello"}],"stream":true})"},
+      {"/v1/responses", R"({"input":"hello","stream":true})"}};
+  // Admission commits headers, so keepalives cover prefill before a token.
+  server.backend->token_delay = std::chrono::milliseconds(40);
+  for (const auto& [path, body] : requests) {
+    const auto response = server.Post(path, body);
+    ExpectStatus(response, 200);
+    const auto ping = response.find(": ping\n\n");
+    assert(ping != std::string::npos);
+    assert(ping < response.find("ok"));
+    assert(response.ends_with("0\r\n\r\n"));
+  }
+  // After admission, failures before any token are terminal SSE errors.
+  for (const auto& [path, body] : requests) {
+    RunningServer lost;
+    lost.backend->admit = true;
+    lost.backend->failure = 3;
+    const auto failed = lost.Post(path, body);
+    ExpectStatus(failed, 200);
+    assert(failed.find(gufo::server::kDeviceLostMessage) != std::string::npos);
+    assert(failed.find("data: ") != std::string::npos);
+    assert(failed.ends_with("0\r\n\r\n"));
+  }
+}
+
 void TestSseHeartbeatShutdown() {
   // Quick completion and exceptions can request stop while the heartbeat
   // thread is entering its wait. Cleanup must not wait for this deadline:
@@ -1635,6 +1783,8 @@ int main() {
   TestStreamingFraming();
   TestSseHeartbeat();
   TestSseHeartbeatShutdown();
+  TestDeferredStreamHeaders();
+  TestAdmittedStreamHeaders();
   TestSignalShutdown();
   std::cout << "HTTP transport checks passed.\n";
 }

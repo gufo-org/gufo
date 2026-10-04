@@ -144,6 +144,9 @@ struct FakeControl {
   std::optional<TextRunnerToken> throw_advance_label;
   std::atomic<bool> device_usable{true};
   std::atomic<std::size_t> device_probes{0};
+  std::atomic<std::size_t> idle_probes{0};
+  std::atomic<TextModelRunner::DeviceProbeStatus> idle_probe_status{
+      TextModelRunner::DeviceProbeStatus::kUsable};
   TextRunnerToken advance_gate_label{0};
   TextRunnerToken prefill_gate_label{0};
   bool advance_gate_entered{false};
@@ -508,6 +511,12 @@ public:
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
     return RequireFakeState(state).position;
+  }
+
+  [[nodiscard]] DeviceProbeStatus PollDevice() const override {
+    control_->idle_probes.fetch_add(1, std::memory_order_relaxed);
+    control_->condition.notify_all();
+    return control_->idle_probe_status.load(std::memory_order_relaxed);
   }
 
   [[nodiscard]] bool DeviceUsable() const override {
@@ -1769,6 +1778,45 @@ void TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement() {
   Expect(control->device_probes == 1, "successful work never probes");
 }
 
+void TestIdleDeviceProbe() {
+  using Status = TextModelRunner::DeviceProbeStatus;
+  auto control = std::make_shared<FakeControl>();
+  control->idle_probe_status = Status::kPending;
+  TextSchedulerPolicy policy{.device_probe_interval =
+                                 std::chrono::milliseconds(10)};
+  const auto before = gufo::server::detail::DeviceLostTotal().load();
+  auto scheduler = MakeScheduler(control, 1, {}, policy);
+  {
+    std::unique_lock lock(control->mutex);
+    Expect(
+        control->condition.wait_for(lock, kTestTimeout,
+                                    [&] { return control->idle_probes >= 2; }),
+        "an idle scheduler submits/polls without generation or HTTP traffic");
+  }
+  Expect(!scheduler->device_lost(), "pending probe is inconclusive");
+  Expect(gufo::server::detail::DeviceLostTotal() == before,
+         "pending probes do not count as losses");
+  control->block_prefill_label = 1;
+  auto request = scheduler->Submit({1}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  const auto probes = control->idle_probes.load();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  Expect(control->idle_probes == probes,
+         "a pending idle probe never polls during active inference");
+  control->ReleasePrefill();
+  Expect(request.Wait().tokens == ExpectedTokens(1, 2),
+         "arriving inference succeeds with an outstanding probe");
+  control->idle_probe_status = Status::kLost;
+  const auto deadline = TextGenerationScheduler::Clock::now() + kTestTimeout;
+  while (!scheduler->device_lost() &&
+         TextGenerationScheduler::Clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  Expect(scheduler->device_lost(), "idle probe loss is fatal and sticky");
+  scheduler.reset();
+  Expect(gufo::server::detail::DeviceLostTotal() == before + 1,
+         "confirmed idle loss increments the counter once");
+}
+
 void TestDeviceLossIsStickyAndReported() {
   auto control = std::make_shared<FakeControl>();
   control->throw_advance_label = 9;
@@ -2282,6 +2330,91 @@ void TestPromptProgressPrecedesStreamedTokens() {
          "streaming alone does not enable progress publication");
 }
 
+void TestStreamStartPrecedesPrefill() {
+  using namespace std::chrono_literals;
+  const auto submit = [](TextGenerationScheduler& scheduler,
+                         std::vector<TextRunnerToken> prompt, bool stream) {
+    return scheduler.Submit(std::move(prompt), 2, 0.0F, {}, stream,
+                            TextGenerationScheduler::RequestMetadata{});
+  };
+  {
+    // Admission starts a stream while its prompt is still being processed.
+    auto control = std::make_shared<FakeControl>();
+    control->block_prefill_label = 1;
+    auto scheduler = MakeScheduler(
+        control, 1, {}, {.stream_start_delay = std::chrono::hours(1)});
+    auto request = submit(*scheduler, {1, 10, 11}, true);
+    std::binary_semaphore started(0);
+    std::atomic<int> starts{0};
+    std::atomic<int> tokens{0};
+    auto consume = std::async(std::launch::async, [&] {
+      return request.Wait(
+          [&](std::string_view) {
+            ++tokens;
+            return true;
+          },
+          {},
+          [&] {
+            Expect(tokens == 0, "stream start precedes generated tokens");
+            ++starts;
+            started.release();
+            return true;
+          });
+    });
+    control->WaitForPrefill(1);
+    Expect(started.try_acquire_for(kTestTimeout),
+           "admission starts a stream before prefill completes");
+    control->ReleasePrefill();
+    Expect(!consume.get().cancelled && tokens > 0 && starts == 1,
+           "an admitted stream starts exactly once");
+  }
+  {
+    // A stream waiting behind another request starts after the bound.
+    auto control = std::make_shared<FakeControl>();
+    control->block_advance_label = 1;
+    auto scheduler =
+        MakeScheduler(control, 1, {}, {.stream_start_delay = 20ms});
+    auto active = submit(*scheduler, {1, 10}, true);
+    control->WaitForAdvance(1);
+    auto queued = submit(*scheduler, {2, 20}, true);
+    std::atomic<int> starts{0};
+    std::binary_semaphore started(0);
+    auto consume = std::async(std::launch::async, [&] {
+      return queued.Wait({}, {}, [&] {
+        Expect(queued.phase() == gufo::server::TextRequestPhase::kQueued,
+               "a queued stream starts before admission");
+        ++starts;
+        started.release();
+        return true;
+      });
+    });
+    Expect(started.try_acquire_for(kTestTimeout),
+           "a queued stream starts after its bound");
+    control->ReleaseAdvance();
+    Expect(!active.Wait().cancelled && !consume.get().cancelled && starts == 1,
+           "admission after a queued start does not start again");
+  }
+  {
+    // Buffered requests and failures before admission never start.
+    auto control = std::make_shared<FakeControl>();
+    control->block_advance_label = 1;
+    auto scheduler = MakeScheduler(
+        control, 1, {}, {.stream_start_delay = std::chrono::hours(1)});
+    auto active = submit(*scheduler, {1, 10}, false);
+    control->WaitForAdvance(1);
+    auto queued = submit(*scheduler, {2, 20}, true);
+    queued.Cancel();
+    control->ReleaseAdvance();
+    bool started = false;
+    Expect(queued.Wait({}, {}, [&] { return started = true; }).cancelled &&
+               !started,
+           "a request cancelled while queued never starts");
+    Expect(!active.Wait({}, {}, [&] { return started = true; }).cancelled &&
+               !started,
+           "buffered requests never start");
+  }
+}
+
 void TestPromptProgressCancellation() {
   for (const bool callback_throws : {false, true}) {
     auto control = std::make_shared<FakeControl>();
@@ -2369,6 +2502,7 @@ int main() {
   TestProgressLoggingIsOptInAndBounded();
   TestAdmissionLoggingIsDebugTierOnly();
   TestPromptProgressPrecedesStreamedTokens();
+  TestStreamStartPrecedesPrefill();
   TestPromptProgressCancellation();
   TestIgnoreEosIsRequestScoped();
   TestEmptyTokenIsPublished();
@@ -2464,6 +2598,7 @@ int main() {
   TestFourResidentRequestsMakeProgress();
   TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement();
   TestDeviceLossIsStickyAndReported();
+  TestIdleDeviceProbe();
   Expect(
       gufo::server::detail::RequestsProcessing().load() == 0 &&
           gufo::server::detail::RequestsDeferred().load() == 0,

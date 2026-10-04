@@ -43,14 +43,15 @@ public:
         tool_format_(tool_format) {}
 
   Backend::Result Wait(const Backend::TokenCallback& on_token,
-                       const Backend::ProgressCallback& on_progress) override {
+                       const Backend::ProgressCallback& on_progress,
+                       const Backend::StartCallback& on_start) override {
     for (const auto& value : progress_) {
       if (on_progress && !on_progress(value)) {
         inner_->Cancel();
         break;
       }
     }
-    return inner_->Wait(on_token, on_progress);
+    return inner_->Wait(on_token, on_progress, on_start);
   }
   void Cancel() noexcept override { inner_->Cancel(); }
   std::optional<gufo::sampling::JsonConstraint::ToolFormat> ToolFormat()
@@ -721,6 +722,29 @@ void TestToolNameCharacters() {
                message.tool_calls[0].arguments[0].value == "a.txt",
            "Responses preserves the same historical names and arguments");
   }
+}
+
+// Chat templates render typed arguments with Jinja tojson, so the model
+// generates that spelling. Replayed history must render it the same way, or
+// the next turn re-prefills the call it generated.
+void TestHistoricalTypedArgumentsUseTojson() {
+  const auto item = gufo::json::parse(
+      R"({"type":"function_call","call_id":"call_1","name":"edit",
+          "arguments":"{\"path\":\"a.txt\",\"edits\":[{\"oldText\":\"a\",\"newText\":\"b\"}],\"n\":2}"})");
+  gufo::tokenization::ChatMessage message;
+  gufo::core::ImageReadBudget budget;
+  std::string error;
+  Expect(gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
+                                                  &error) &&
+             message.tool_calls.size() == 1 &&
+             message.tool_calls[0].arguments.size() == 3 &&
+             message.tool_calls[0].arguments[0].value == "a.txt" &&
+             message.tool_calls[0].arguments[0].is_string &&
+             message.tool_calls[0].arguments[1].value ==
+                 R"([{"oldText": "a", "newText": "b"}])" &&
+             !message.tool_calls[0].arguments[1].is_string &&
+             message.tool_calls[0].arguments[2].value == "2",
+         "Typed historical arguments render as the template's tojson");
 }
 
 void TestMalformedHistoricalFunctions() {
@@ -2806,6 +2830,49 @@ void TestNativeToolDialectSelection() {
       }
     }
   }
+  // DeepSeek's template writes "\n\n" before its call block. That separator
+  // is framing, as in llama.cpp's parser; returned as content, the replayed
+  // history would carry it twice and miss the generated continuation.
+  for (const std::string prose : {"", "Reading the fixture."}) {
+    for (const bool stream : {false, true}) {
+      auto body = gufo::json::parse(R"({
+      "model":"test-model","reasoning_effort":"none",
+      "messages":[{"role":"user","content":"Read fixture.xml."}],
+      "tool_choice":"auto","tools":[{"type":"function","function":{
+        "name":"read","parameters":{"type":"object",
+        "properties":{"path":{"type":"string"}},"required":["path"]}}}]})");
+      body["stream"] = stream;
+      FakeBackend backend;
+      backend.tool_format = Format::kDeepSeek;
+      for (const char byte :
+           prose + "\n\n" + native_call(Format::kDeepSeek, "fixture.xml"))
+        backend.pieces.emplace_back(1, byte);
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      std::string content;
+      std::size_t calls = 0;
+      const auto collect = [&](const Value& event) {
+        for (const auto& choice : event.find("choices")->items()) {
+          const auto* message = choice.find(stream ? "delta" : "message");
+          content += message->member_str("content");
+          if (const auto* found = message->find("tool_calls"))
+            calls += found->size();
+        }
+      };
+      if (stream) {
+        response.streaming_body([&](std::string_view chunk) {
+          const auto payload = chunk.substr(chunk.find("data: ") + 6);
+          if (!payload.starts_with("[DONE]"))
+            collect(gufo::json::parse(payload));
+          return true;
+        });
+      } else {
+        collect(gufo::json::parse(response.body));
+      }
+      Expect(response.status == 200 && calls == 1 && content == prose,
+             "the separator before a DeepSeek call block is not content");
+    }
+  }
 }
 
 void TestNativeToolTextOutsideEnvelopes() {
@@ -2853,6 +2920,12 @@ void TestNativeToolTextOutsideEnvelopes() {
        suffix,
        {"fixture.txt"}},
       {Format::kDeepSeek, first + suffix, suffix, {"fixture.txt"}},
+      // Native framing may be part of the admitted opener, not its tag name.
+      {.format = Format::kDeepSeek,
+       .raw = "\n\n" + first + suffix,
+       .text = suffix,
+       .paths = {"fixture.txt"},
+       .admitted_format = Format::kDeepSeek},
       {Format::kDeepSeek,
        "Before.\n" + envelope(invoke("fixture.txt") + invoke("second.txt")) +
            suffix,
@@ -2950,11 +3023,11 @@ void TestNativeToolTextOutsideEnvelopes() {
   for (const auto& fixture : fixtures) {
     auto parameters_schema = schema;
     if (fixture.format == Format::kJson) {
-      parameters_schema["properties"]["path"] =
-          gufo::json::parse(R"({"anyOf":[{"type":"string"},{"type":"null"}]})");
+      parameters_schema["enum"] = gufo::json::parse(
+          R"([{"path":"fixture.txt"},{"path":"example.txt"}])");
       Expect(!JsonConstraint::ToolParameters(parameters_schema, false,
                                              Format::kDeepSeek),
-             "nullable parameter exercises supported JSON fallback");
+             "finite object parameters exercise supported JSON fallback");
     }
     if (fixture.canonical) {
       const auto parameters = JsonConstraint::ToolParameters(
@@ -3143,6 +3216,53 @@ void TestNativeReferencedArgumentTypes() {
       Expect(encoded == arguments.dump(),
              "native argument types follow property and root references");
     }
+}
+
+void TestNativeUnionToolTypes() {
+  // Non-strict unions stay in Qwen's native syntax (#383). The parser tries
+  // their typed alternatives first, as llama.cpp's qwen3-coder parser does,
+  // while plain strings keep quotes and literal JSON text.
+  auto body = gufo::json::parse(R"({"model":"test-model",
+    "messages":[{"role":"user","content":"call record"}],
+    "tools":[{"type":"function","function":{"name":"record","parameters":{
+      "type":"object","properties":{
+        "content":{"type":"string"},
+        "provider":{"anyOf":[{"type":"string","const":"brave"},
+                             {"type":"string","const":"exa"}]},
+        "args":{"anyOf":[{"type":"string"},
+                         {"type":"object","additionalProperties":true}]},
+        "label":{"anyOf":[{"type":"string"},{"type":"null"}]},
+        "note":{"anyOf":[{"type":"string"},{"type":"null"}]},
+        "limit":{"anyOf":[{"type":"integer"},{"type":"null"}]}},
+      "required":["content"]}}}],
+    "tool_choice":"auto"})");
+  FakeBackend backend;
+  backend.pieces = {
+      "<tool_call>\n<function=record>\n"
+      "<parameter=content>\n#include \"a.h\"\n42\n</parameter>\n"
+      "<parameter=provider>\nexa\n</parameter>\n"
+      "<parameter=args>\n{\"key\": 1}\n</parameter>\n"
+      "<parameter=label>\nnull\n</parameter>\n"
+      "<parameter=note>\nplain text\n</parameter>\n"
+      "<parameter=limit>\n3\n</parameter>\n"
+      "</function>\n</tool_call>"};
+  const auto response =
+      gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+  Expect(response.status == 200, "native union call succeeds");
+  const auto output = gufo::json::parse(response.body);
+  const auto arguments = gufo::json::parse(output.find("choices")
+                                               ->items()[0]
+                                               .find("message")
+                                               ->find("tool_calls")
+                                               ->items()[0]
+                                               .find("function")
+                                               ->member_str("arguments"));
+  Expect(arguments.dump() ==
+             gufo::json::parse(R"({"content":"#include \"a.h\"\n42",
+               "provider":"exa","args":{"key":1},"label":null,
+               "note":"plain text","limit":3})")
+                 .dump(),
+         "native union arguments try typed alternatives before text");
 }
 
 void TestWildcardToolTypes() {
@@ -3499,6 +3619,7 @@ void TestResponsesPromptProgress() {
 }
 
 int main() {
+  TestHistoricalTypedArgumentsUseTojson();
   TestStreamingPromptProgress();
   TestResponsesPromptProgress();
   TestToolMarkersInsideConstrainedReasoning();
@@ -3516,6 +3637,7 @@ int main() {
   TestNativeToolTextOutsideEnvelopes();
   TestNativeReferencedArgumentTypes();
   TestWildcardToolTypes();
+  TestNativeUnionToolTypes();
   TestToolMetadataAndFraming();
   TestResponsesLiveAndCancellation();
   TestCachePromptOption();

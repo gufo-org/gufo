@@ -37,6 +37,11 @@ struct TextPrefillPolicy {
 };
 
 struct TextSchedulerPolicy {
+  /// Internal cadence; idle monitoring performs no work during inference.
+  std::chrono::milliseconds device_probe_interval{std::chrono::seconds(5)};
+  /// Internal bound after which a still-queued stream reports its start, so
+  /// transports can keep the connection alive while it waits.
+  std::chrono::milliseconds stream_start_delay{std::chrono::seconds(5)};
   std::size_t max_pending_requests{16};
   std::size_t max_pending_requests_per_client{4};
   std::size_t max_output_bytes_per_request{kDefaultMaxOutputBytes};
@@ -59,6 +64,7 @@ public:
   using CancellationCheck = TextGenerationBackend::CancellationCheck;
   using TokenCallback = TextGenerationBackend::TokenCallback;
   using ProgressCallback = TextGenerationBackend::ProgressCallback;
+  using StartCallback = TextGenerationBackend::StartCallback;
   using SessionState = TextGenerationBackend::SessionState;
 
   struct RequestMetadata {
@@ -90,8 +96,11 @@ public:
     /// Consumes queued output pieces on the calling thread and waits for the
     /// scheduler-owned request to become terminal. Streaming requests report
     /// only the latest prompt progress, always before their first piece.
+    /// Their start is reported once at admission, or after
+    /// `stream_start_delay` in the queue, before progress and pieces.
     Result Wait(const TokenCallback& on_token = {},
-                const ProgressCallback& on_progress = {});
+                const ProgressCallback& on_progress = {},
+                const StartCallback& on_start = {});
     void Cancel() noexcept;
 
   private:

@@ -20,6 +20,9 @@ CASES = {
     "loss-stream-completions": ("loss", "/v1/completions", True),
     "loss-stream-chat": ("loss", "/v1/chat/completions", True),
     "loss-stream-responses": ("loss", "/v1/responses", True),
+    "idle-loss": ("loss", "/v1/completions", False),
+    "idle-pending-arrival": ("timeout", "/v1/completions", False),
+    "loss-after-token-chat": ("loss", "/v1/chat/completions", True),
     "blocked-writer-watchdog": ("loss", "/v1/completions", True),
 }
 
@@ -117,7 +120,59 @@ def run_case(args, name):
                 (output / mode).touch()
             body = generation(path, stream, model)
             record["request"] = {"path": path, "body": body}
-            if name == "blocked-writer-watchdog":
+            if name.startswith("idle-"):
+                (output / "probe_only").touch()
+                started = time.monotonic()
+                (output / "armed").touch()
+                if name == "idle-loss":
+                    # No inference, health traffic or disconnect initiates exit.
+                    record["exit_code"] = process.wait(timeout=13)
+                    record["exit_after_arm_s"] = time.monotonic() - started
+                    require(record["exit_after_arm_s"] <= 12,
+                            "idle loss detection missed its bound")
+                else:
+                    await_condition(process, lambda: (output / "probed").exists(),
+                                    12, "idle probe was never submitted")
+                    # The probe remains pending while a real generation runs.
+                    # A blocking implementation would add its five-second timeout.
+                    record["arrival"] = request(port, "POST", path, {
+                        "prompt": "Name a color.", "max_tokens": 4, "temperature": 0,
+                    })
+                    require(record["arrival"]["status"] == 200,
+                            "pending idle probe blocked/poisoned arrival")
+                    require(record["arrival"]["wall_s"] < 3,
+                            "arrival waited for the pending probe timeout")
+                    record["/health"] = request(port, "GET", "/health")
+                    require(record["/health"]["status"] == 200,
+                            "pending probe marked the device lost")
+                    (output / "armed").unlink()
+                    process.terminate()
+                    record["exit_code"] = process.wait(timeout=13)
+            elif name == "loss-after-token-chat":
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+                connection.request("POST", path, json.dumps(body),
+                                   {"Content-Type": "application/json"})
+                response = connection.getresponse()
+                require(response.status == 200, "stream did not begin normally")
+                pieces = []
+                while True:
+                    line = response.readline().decode()
+                    require(line, "stream ended before content")
+                    pieces.append(line)
+                    if line.startswith("data: "):
+                        event = json.loads(line[6:])
+                        delta = event.get("choices", [{}])[0].get("delta", {})
+                        if delta.get("content") or delta.get("reasoning_content"):
+                            break
+                started = time.monotonic()
+                (output / "armed").touch()
+                pieces.append(response.read().decode())
+                connection.close()
+                record["failure"] = {"status": response.status, "body": "".join(pieces)}
+                require('"code":"device_lost"' in record["failure"]["body"],
+                        "started stream did not emit terminal loss")
+                record["exit_code"] = process.wait(timeout=13)
+            elif name == "blocked-writer-watchdog":
                 (output / "block_writer").touch()
                 peer = socket.create_connection(("127.0.0.1", port), timeout=15)
                 payload = json.dumps(body).encode()
@@ -143,15 +198,15 @@ def run_case(args, name):
                 record["failure"] = request(port, "POST", path, body)
                 response = record["failure"]
                 if mode == "loss":
-                    require(response["status"] == (200 if stream else 503),
-                            "incorrect failure status")
                     require("GPU context lost; restart required" in response["body"],
                             "missing stable device-loss message")
-                    if path == "/v1/responses":
-                        require("response.failed" in response["body"] and
-                                '"code":"server_error"' in response["body"],
-                                "incorrect Responses terminal error")
+                    if stream:
+                        # Prefill failed after admission committed the stream.
+                        require(response["status"] == 200, "incorrect stream status")
+                        require("data: " in response["body"],
+                                "admitted stream did not emit a terminal SSE error")
                     else:
+                        require(response["status"] == 503, "incorrect failure status")
                         require('"code":"device_lost"' in response["body"],
                                 "missing stable error code")
                     require(not any(key.lower() == "retry-after" for key in response["headers"]),

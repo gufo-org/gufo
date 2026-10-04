@@ -18,7 +18,10 @@ python3 tests/functional/device_loss.py \
 ```
 
 It checks recoverable HIP errors, a pending probe's five-second timeout,
-buffered/streaming error contracts, cleanup avoidance and exit status 75. A
+buffered/streaming error contracts, idle loss without any HTTP traffic, arrival
+while an idle probe stays pending, cleanup avoidance and exit status 75.
+Buffered failures return JSON 503. Streams commit HTTP 200 at admission, so a
+failure during prefill or after the first token emits a terminal SSE error. A
 blocked SSE writer must still trigger the ten-second forced-exit watchdog,
 without a health request or peer disconnect. Repeat `--case` for focused checks.
 Reports retain commands, loaded mode, actual warm-generation drafts, raw
@@ -82,13 +85,14 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
 | `tool-untyped` | Open/typed tools, refs and finite values: framing, arguments, streaming, turns, limits, stops/retry and sampled peers |
-| `tool-mixed` | JSON-only neighbors, annotated refs, extra keys, URI and nullable arguments across Chat/Responses; images, stops/retry and sampled peers |
+| `tool-mixed` | JSON-only neighbors, annotated refs, extra keys, URI and nullable arguments across Chat/Responses; images, stops/retry and sampled peers; a union neighbor keeps native calls, so a replayed reasoning/call turn is reused in full |
 | `tool-schema-edges` | Wildcard JSON types, conditional fields, impossible schemas, nested metadata and required-call timing; both APIs, cache, stops and sampled peers |
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops (including inside quoted calls), image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |
 | `batch` | Independent requests across Chat, Responses and Completions; sessions 1–8 |
 | `progress` | Opt-in progress on all text endpoints; output/sampling equality, limits, stops, images, batching and cancel/resume |
+| `stream-start` | Plain streams on all text endpoints send headers before a cold prefill completes; a stream queued behind every session sends them after the five-second bound |
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
 | `metrics` | Live slots, Prometheus cache/time/draft counters, uncached work, endpoint totals, queueing and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart; disk checkpoint spacing for a growing conversation and a branch restored after restart |
