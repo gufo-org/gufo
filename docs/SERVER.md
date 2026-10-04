@@ -178,7 +178,8 @@ between active decode rounds without changing a lone request's kernel policy.
 `--cache-ram-bytes 0` (the default) selects an automatic snapshot budget capped
 at 32 GiB and half the available host RAM after model/state allocation, respecting
 container limits. 27B also checks HIP free memory. A positive value sets a byte
-cap, still clamped to that model budget; it cannot bypass the host-memory cap.
+cap that may exceed the automatic budget, up to the available host RAM minus
+4 GiB; the startup line reports both as `automatic_bytes` and `max_bytes`.
 Disk staging and temporary disk-save buffers are separate from this RAM budget.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
@@ -359,7 +360,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/responses` | Text/images, structured output, optional SSE streaming |
 | `POST` | `/v1/chat/completions` | Main chat, streaming, image and tool API |
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
-| `GET` | `/health` | Process liveness (aliases: `/v1/health`, `/healthz`) |
+| `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`) |
 | `GET` | `/ready` | Model and backend readiness (aliases: `/v1/ready`, `/readyz`) |
 | `GET` | `/metrics` | Prometheus-format operational metrics (text LLM serving only) |
 
@@ -578,8 +579,12 @@ The other compatibility routes are deliberately limited:
 All four routes validate the loaded model, positive integer limits and shared
 sampling controls. Messages and `/completion` reject streaming; all reject
 multiple candidates. Responses and Messages honor the server's thinking defaults.
-Native Messages rejects tools, `thinking`, and `output_config`; use Chat
-Completions for tool/reasoning controls. Completions routes accept `stop`;
+Messages accepts `thinking.type` (`enabled` or `disabled`); `budget_tokens`
+has no native equivalent and keeps the server's effort. Reasoning is returned
+as a `thinking` block before the `text` block, with an empty `signature`.
+Replay assistant `thinking` blocks unchanged so later turns reuse the cached
+prompt. Messages rejects tools and `output_config`; use Chat Completions for
+tool and reasoning-effort controls. Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
 and template-aware message counting are not implemented.
@@ -796,7 +801,7 @@ Use appropriate HTTP status codes:
 - `429` admission queue full or rate limit exceeded
 - `499` internally recorded client cancellation
 - `500` internal failure
-- `503` model or backend unavailable
+- `503` model or backend unavailable, or GPU context lost (`device_lost`)
 
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
@@ -843,9 +848,47 @@ state; the prompt snapshot remains available for safe replay. Image identity,
 positions and speculative state participate in restoration and cache isolation.
 
 `GET /health` reports process liveness. `GET /ready` returns 503 until a model
-service is ready, then reports `status` and the active model. It does not expose
-a GPU health matrix. HTTP model replacement and persistent Responses
+service is ready, then reports `status` and the active model. Neither performs
+GPU work on each poll. HTTP model replacement and persistent Responses
 conversations are not implemented.
+
+A GPU reset (for example `amdgpu` recovering from a MES hang) permanently
+invalidates the process's HIP context. Loss is detected when a text generation
+fails: an idle server with a dead GPU stays healthy until its next request.
+After such a failure the scheduler runs a bounded device probe (a 4-byte
+memset on a private stream, at most 5 s), before invalidating request state.
+Only a hard HIP error from the probe
+marks the device lost. A probe still pending after 5 s may be queued behind
+long kernels, so it logs `event=device_probe_timeout` and counts as usable. A
+usable device leaves the original failure unchanged. A lost device logs
+`event=device_lost remedy=restart reason=<driver error>` once and makes the
+loss permanent for the process:
+
+- the failing request reports `device_lost`: a 503 with
+  `GPU context lost; restart required` and no `Retry-After` before the
+  response starts, or the same code in the stream's terminal error event
+  after it started. `/v1/responses` streams end with `response.failed`
+  carrying the Responses `server_error` code, since that code enum is closed;
+  the message names the device loss;
+- `/health`, `/ready` and their aliases return 503 with
+  `{"status":"device_lost","error":{...,"code":"device_lost"}}`;
+- every text-backend `POST` route, including unimplemented stubs that would
+  otherwise answer 501, returns 503 `device_lost` without reaching the device;
+- `gufo serve` logs `event=device_lost_shutdown`, runs the `SIGTERM` shutdown
+  and exits with status 75 (`EX_TEMPFAIL`), also when an external `SIGTERM`
+  stops it after the loss. Teardown can block on the dead device, so the
+  process exits with status 75 after 10 s regardless.
+
+The listener observes the sticky loss independently of response writes, so
+a blocked streaming client cannot delay arming that watchdog. Failed resident
+requests retain their state and snapshot workers until process exit, avoiding
+HIP resets, frees and transfer joins on the lost context. The watchdog is armed
+before logging or shutdown; the fatal exit bypasses model destructors and log
+flushing. The operating system reclaims those resources.
+
+Run the server under a supervisor that restarts on failure, such as systemd
+`Restart=on-failure` or a container `restart: always`/`on-failure` policy;
+a restart is the only recovery.
 
 ## Metrics
 
@@ -855,18 +898,42 @@ executes, so their rates show live throughput; prompt tokens exclude cache
 hits. `llamacpp:requests_processing` counts admitted requests, including cache
 preparation and cleanup; `llamacpp:requests_deferred` counts requests waiting
 for a session. The speed gauges retain the latest nonzero request rates.
+When the scheduler finishes or cancels a request, whether or not the client
+reads the result, it adds the request's cached prompt tokens
+(`llamacpp:prompt_tokens_cached_total`), prefill and decode seconds
+(`llamacpp:prompt_seconds_total`, `llamacpp:tokens_predicted_seconds_total`),
+speculative verification rounds (`llamacpp:spec_decode_num_drafts_total`),
+proposed and accepted draft tokens
+(`llamacpp:spec_decode_num_draft_tokens_total`,
+`llamacpp:spec_decode_num_accepted_tokens_total`), and raises
+`llamacpp:n_tokens_max` to its prompt plus generated tokens. A request counts
+even if the client disconnects before reading it; requests that fail in the
+scheduler, such as on a deadline or a runner error, add none of these.
+`llamacpp:kv_cache_usage_ratio` is the in-flight prompt and generated tokens
+over sessions times context; retained cache entries are not counted.
 `Server-Timing`, generation `timings`, and Chat Completions `usage.gufo`
-provide request-level measurements. The legacy KV-utilization
-metric and `/slots`/`/props` metadata are placeholders; do not use them for
-capacity or admission decisions.
+provide request-level measurements.
+
+`GET /slots` (alias `/v1/slots`) lists one llama-server slot per `--sessions`
+entry. A session is processing from admission, including cache preparation,
+until the request ends, so the processing slots match
+`llamacpp:requests_processing`; queued requests do not appear.
+`id_task` is the request id, or -1 when idle. `n_prompt_tokens` is the whole
+prompt, `n_prompt_tokens_cache` the tokens restored from cache, and
+`n_prompt_tokens_processed` the uncached tokens prefilled so far, as in
+`timings.prompt_n`. `next_token[0].n_decoded` counts generated tokens and
+`n_remain` the remaining token budget. Idle slots report zero counts and
+`n_remain` -1. `task_id` and `state` (0 idle, 1 processing) remain for older
+clients; `prompt` is always empty. `/props` metadata is a placeholder.
+Slots and metrics are separate snapshots; requests can advance between polls.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed
 tokens; `cache_n` counts reused tokens. llama-swap uses these fields on every
 turn. Gufo-specific details stay in `usage.gufo`.
 
-TODO: real slot/KV metrics, a validated administrative reload/drain interface,
-and automatic recovery after device reset or suspend/resume.
+TODO: retained-cache KV metrics, a validated administrative reload/drain
+interface, and in-process recovery after device reset or suspend/resume.
 
 ## Troubleshooting logs
 

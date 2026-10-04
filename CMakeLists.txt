@@ -300,6 +300,12 @@ if (BUILD_TESTING)
   add_compile_options(-UNDEBUG)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+  # Opt-in live process-failure checks, never preloaded into hosted tests or
+  # production. No HIP headers are needed for these stable C ABI hooks.
+  add_library(device_loss_faults SHARED EXCLUDE_FROM_ALL
+    tests/functional/device_loss_faults.cpp)
+  target_link_libraries(device_loss_faults PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
   gufo_qwen3_asr_register_tests()
