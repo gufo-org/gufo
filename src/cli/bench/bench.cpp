@@ -923,6 +923,14 @@ int RunQwen38FlashNextBenchmark(
     return 1;
   }
 
+  // Static YaRN, derived from the same required_context that sizes the
+  // benchmark's own request; a required context at or below the artifact's
+  // native context leaves it off.
+  const std::uint32_t qwen4exp_native_context =
+      reader->GetMetadataUint32("qwen4exp.context_length").value_or(0);
+  const auto rope_scaling = qfn::RopeScalingForContext(
+      static_cast<std::uint32_t>(required_context), qwen4exp_native_context);
+
   std::string error;
   auto model = qfn::Model::Load(
       options.model_path,
@@ -930,6 +938,7 @@ int RunQwen38FlashNextBenchmark(
           .max_context = static_cast<std::uint32_t>(required_context),
           .mtp_model_path = mtp ? options.mtp_model_path : "",
           .max_draft_tokens = std::max<std::uint32_t>(1, options.draft_tokens),
+          .rope_scaling = rope_scaling,
       },
       &error);
   if (model == nullptr) {
@@ -938,6 +947,11 @@ int RunQwen38FlashNextBenchmark(
     return 1;
   }
   PrintModelLoadTime(model_load_start);
+  if (rope_scaling) {
+    std::cout << "[YaRN]: factor=" << rope_scaling->factor
+              << " original_context=" << qwen4exp_native_context
+              << " context=" << required_context << '\n';
+  }
 
   // Repeat a fixed token pattern for reproducible timing. It uses far fewer
   // distinct PLE rows than varied requests.

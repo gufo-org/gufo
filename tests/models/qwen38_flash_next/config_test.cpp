@@ -58,6 +58,10 @@ void CheckSidecarCompatibility() {
   trunk.ple_layer = 1;
   Require(sidecar.MtpMatches(trunk),
           "trunk-only PLE incorrectly required in MTP");
+
+  // The MTP sidecar never carries rope scaling; the trunk's governs both.
+  trunk.rope_scaling = {.factor = 2.5F, .original_context = 262144};
+  Require(sidecar.MtpMatches(trunk), "YaRN trunk rejected an unscaled sidecar");
 }
 
 using Value =
@@ -239,10 +243,30 @@ void CheckMalformedMetadata() {
   assert(draft && trunk && draft->MtpMatches(*trunk));
 }
 
+void CheckScaledContext() {
+  qfn::Config c;
+  c.context_length = 262144;
+  c.compress_ratio = 4;
+  Require(c.MaxContextLength() == 262144, "scaling off must keep native");
+  Require(c.SparseMaskWords(c.context_length) == 2048,
+          "native mask row width changed");
+  c.rope_scaling = {.factor = 1.5625F, .original_context = 262144};
+  Require(c.MaxContextLength() == 409600, "YaRN 1.5625 must reach 409600");
+  Require(c.SparseMaskWords(409600) == 3200, "mask rows must cover 409600");
+  c.rope_scaling.factor = 2.5F;
+  Require(c.MaxContextLength() == 655360, "YaRN 2.5 must reach 655360");
+  Require(c.SparseMaskWords(655360) == 5120, "mask rows must cover 655360");
+  const auto parsed = Parse(ValidMetadata());
+  Require(parsed && parsed->rope_scaling == qfn::RopeScaling{},
+          "the GGUF loader must default rope scaling off (it sets no such "
+          "keys today)");
+}
+
 }  // namespace
 
 int main() {
   CheckSidecarCompatibility();
   CheckMalformedMetadata();
+  CheckScaledContext();
   std::cout << "Flash-Next metadata checks passed.\n";
 }

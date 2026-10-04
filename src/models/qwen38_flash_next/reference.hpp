@@ -84,6 +84,7 @@ private:
 
   const ModelWeights& w_;
   const Config& c_;
+  YarnRope yarn_;  ///< From c_.rope_scaling.
   Storage storage_;
   NgramTable* ngram_;
   std::uint32_t max_context_;

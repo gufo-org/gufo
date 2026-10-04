@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <span>
 
+#include "src/models/qwen38_flash_next/rope_scaling.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
 /// Scalar CPU operators for the reference model: one row at a time, every
@@ -35,9 +36,11 @@ void L2Norm(std::span<float> x, float eps);
 /// NEOX-style partial rotary embedding on the first `rotary_dim` elements of
 /// each `head_dim` head: pair (i, i + rotary_dim/2) rotates by pos * theta_i.
 /// Text-only IMRoPE has equal positions on every section, so it is exactly
-/// this rotation.
+/// this rotation. With `yarn` enabled each pair's frequency is multiplied by
+/// YarnPairMultiplier and cos/sin by yarn.mscale.
 void Rope(float* x, std::uint32_t heads, std::uint32_t head_dim,
-          std::uint32_t rotary_dim, std::uint32_t pos, float theta);
+          std::uint32_t rotary_dim, std::uint32_t pos, float theta,
+          const YarnRope& yarn = {});
 
 }  // namespace gufo::models::qwen38_flash_next::cpu
 

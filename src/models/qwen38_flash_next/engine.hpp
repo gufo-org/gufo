@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -45,6 +46,11 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  /// Static YaRN scaling, derived by the caller (serve, bench) from the
+  /// requested context via `RopeScalingForContext`. Empty leaves the
+  /// artifact's own setting, which is always off: no GGUF metadata key sets
+  /// it today.
+  std::optional<RopeScaling> rope_scaling{};
 };
 
 class Session;
@@ -195,7 +201,7 @@ public:
   }
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 16;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 17;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   /// Captures the whole context (tokens, device caches and recurrent
