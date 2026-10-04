@@ -90,14 +90,6 @@ constexpr std::array<std::string_view, 4> kQwenClosers{
     // The client's envelope, whose block rules already strip it whole.
     "</invoke>",
 };
-constexpr std::array<std::string_view, 5> kDeepSeekClosers{
-    "</｜DSML｜parameter>",
-    "</｜DSML｜invoke>",
-    "</｜DSML｜tool_calls>",
-    // The client's envelope.
-    "</invoke>",
-    "</parameter>",
-};
 constexpr std::array<std::string_view, 9> kToolClosers{
     // Qwen family.
     "</parameter>",
@@ -120,12 +112,16 @@ ToolCloserSet ToolClosers(
   using Format = sampling::JsonConstraint::ToolFormat;
   if (!format)
     return kToolClosers;
+  // As in llama.cpp, DeepSeek content is everything outside its native call
+  // block, which ends the output: there is no echo to strip, and client
+  // envelope syntax the model writes stays visible text.
+  if (*format == Format::kDeepSeek)
+    return {};
   // Mirror ToolMarkers: stripping follows the dialect the request admitted,
   // and another dialect's closing tags are ordinary prose like its openers —
   // the client's envelope excepted, which no dialect admits and every one of
   // them parses.
-  return *format == Format::kDeepSeek ? ToolCloserSet(kDeepSeekClosers)
-                                      : ToolCloserSet(kQwenClosers);
+  return kQwenClosers;
 }
 
 long long Now() {
@@ -1169,6 +1165,7 @@ std::size_t EnvelopeBlockStart(std::string_view full, std::size_t stop,
 
 // Remove framing only with request context: a closer echo directly after a
 // parsed call, or a client envelope naming a declared tool. Other XML is data.
+// A dialect without closers removes nothing.
 std::string_view ContentBefore(std::string_view full, std::size_t begin,
                                std::size_t end, ToolCloserSet closers,
                                QuoteTracker& quotes,
@@ -1177,6 +1174,8 @@ std::string_view ContentBefore(std::string_view full, std::size_t begin,
   const auto stop = std::min(end, full.size());
   if (stop <= begin)
     return {};
+  if (closers.empty())
+    return full.substr(begin, stop - begin);
   if (after_call) {
     auto cursor = begin;
     bool removed = false;
@@ -1212,6 +1211,8 @@ std::size_t FramingHold(std::string_view full, std::size_t end,
                         std::size_t floor, ToolCloserSet closers,
                         QuoteTracker& quotes,
                         std::span<const tokenization::ChatTool> tools) {
+  if (closers.empty())
+    return 0;
   std::size_t hold = 0;
   if (end > 0) {
     // Hold only a suffix that can still become admitted framing. A bare

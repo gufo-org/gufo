@@ -3741,139 +3741,156 @@ void TestToolClosingFraming() {
     std::string argument;
     std::string content;
   };
-  for (const auto& item : std::vector<Case>{
-           {"I'll update `config.py\n" + call, 1, R"({"text":"42"})",
-            "I'll update `config.py\n"},
-           {"Let`s write it.\n" + call, 1, R"({"text":"42"})",
-            "Let`s write it.\n"},
-           {"looks like `" + call + "` and no call.", 0, "",
-            "looks like `" + call + "` and no call."},
-           {"looks like ``" + call + "`` and no call.", 0, "",
-            "looks like ``" + call + "`` and no call."},
-           {"looks like `" + call, 1, R"({"text":"42"})", "looks like `"},
-           {"looks like ``" + call, 1, R"({"text":"42"})", "looks like ``"},
-           {"`example\n\n" + call, 1, R"({"text":"42"})", "`example\n\n"},
-           {"looks like `literal <think>\n" + call + "`", 0, "",
-            "looks like `literal <think>\n" + call + "`"},
-           {call + "\n</invoke>\n</parameter>\n</function>\n", 1,
-            R"({"text":"42"})", ""},
-           {call + "\n</function>\n" + call, 2, R"({"text":"42"})", ""},
-           {call + "\n" + envelope, 1, R"({"text":"42"})", ""},
-           {call + "\n</invoke>\n<|im_end|>", 1, R"({"text":"42"})",
-            "<|im_end|>"},
-           {"</invoke>\n" + call, 1, R"({"text":"42"})", "</invoke>\n"},
-           {"</invoke>", 0, "", "</invoke>"},
-           {"Text </parameter>", 0, "", "Text </parameter>"},
-           {"The token is <|im_end|>", 0, "", "The token is <|im_end|>"},
-           {"<parameter>x</parameter>", 0, "", "<parameter>x</parameter>"},
-           {raw_xml, 0, "", raw_xml},
-           {"Raw XML: " + raw_xml, 0, "", "Raw XML: " + raw_xml},
-           {envelope, 0, "", ""},
-           {"Planning.\n" + envelope, 0, "", "Planning."},
-           {"<invoke name=\"f\"><parameter name=\"text\">x", 0, "", ""},
-           {"Planning.\n<parameter=text>\nx\n</parameter>\n</function>\n</"
-            "tool_call>",
-            0, "",
-            "Planning.\n<parameter=text>\nx\n</parameter>\n</function>\n</"
-            "tool_call>"},
-           {"<function=f><parameter=text>x</parameter></function>", 0, "",
-            "<function=f><parameter=text>x</parameter></function>"},
-           {"```xml\n" + envelope + "\n```", 0, "",
-            "```xml\n" + envelope + "\n```"},
-           {"`" + envelope + "` and prose", 0, "",
-            "`" + envelope + "` and prose"},
-           {"```python\nprint(1)\n" + call, 1, R"({"text":"42"})",
-            "```python\nprint(1)\n"},
-           {"```xml\n" + call + "\n```", 0, "", "```xml\n" + call + "\n```"},
-           {"```xml\n" + call + "\n```\n" + call, 1, R"({"text":"42"})",
-            "```xml\n" + call + "\n```\n"},
-           {"`" + inline_call + "`", 0, "", "`" + inline_call + "`"},
-           {"``" + inline_call + "``", 0, "", "``" + inline_call + "``"},
-           {"```xml\n<tool_call><function=unknown></function></tool_call>", 0,
-            "", "```xml\n<tool_call><function=unknown></function></tool_call>"},
-           {"```xml\n<tool_call><function=f></function></tool_call>", 0, "",
-            "```xml\n<tool_call><function=f></function></tool_call>"},
-           {"```xml\n<tool_call><function=f><parameter=extra>x</parameter></"
-            "function></tool_call>",
-            0, "",
-            "```xml\n<tool_call><function=f><parameter=extra>x</parameter></"
-            "function></tool_call>"},
-           {"<tool_call><function=f><parameter=text>\nEOS = "
-            "\"<|im_end|>\"\n</parameter></function></tool_call>",
-            1, R"({"text":"EOS = \"<|im_end|>\""})", ""},
-           {"<tool_call><function=f><parameter=text>\n<|im_start|><|endoftext|>"
-            "<|not_a_vocab_entry|>\n</parameter></function></tool_call>",
-            1, R"({"text":"<|im_start|><|endoftext|><|not_a_vocab_entry|>"})",
-            ""},
-           {"<tool_call><function=f><parameter=text>\n</invoke>\n</parameter></"
-            "function></tool_call>",
-            1, R"({"text":"</invoke>"})", ""},
-       }) {
-    for (bool stream : {false, true}) {
-      for (bool bytewise : {false, true}) {
-        auto body = schema;
-        body["stream"] = stream;
-        body["tool_choice"] = "auto";
-        FakeBackend backend;
-        backend.tool_format = gufo::sampling::JsonConstraint::ToolFormat::kQwen;
-        if (bytewise)
-          for (const char byte : item.text)
-            backend.pieces.emplace_back(1, byte);
-        else
-          backend.pieces.push_back(item.text);
-        const auto response =
-            gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
-        Expect(response.status == 200, "framing request succeeds");
-        std::vector<Value> calls;
-        std::string content;
-        std::string finish;
-        if (!stream) {
-          const auto output = gufo::json::parse(response.body);
-          const auto& choice = output.find("choices")->items()[0];
-          const auto& message = *choice.find("message");
-          content = message.member_str("content");
-          finish = choice.member_str("finish_reason");
-          if (const auto* found = message.find("tool_calls"))
-            calls.assign(found->items().begin(), found->items().end());
-        } else {
-          response.streaming_body([&](std::string_view part) {
-            if (part == "data: [DONE]\n\n")
-              return true;
-            const auto event = gufo::json::parse(part.substr(6));
-            for (const auto& choice : event.find("choices")->items()) {
-              finish += choice.member_str("finish_reason");
-              if (const auto* delta = choice.find("delta")) {
-                content += delta->member_str("content");
-                if (const auto* found = delta->find("tool_calls"))
-                  calls.insert(calls.end(), found->items().begin(),
-                               found->items().end());
+  const std::vector<Case> qwen_cases{
+      {"I'll update `config.py\n" + call, 1, R"({"text":"42"})",
+       "I'll update `config.py\n"},
+      {"Let`s write it.\n" + call, 1, R"({"text":"42"})", "Let`s write it.\n"},
+      {"looks like `" + call + "` and no call.", 0, "",
+       "looks like `" + call + "` and no call."},
+      {"looks like ``" + call + "`` and no call.", 0, "",
+       "looks like ``" + call + "`` and no call."},
+      {"looks like `" + call, 1, R"({"text":"42"})", "looks like `"},
+      {"looks like ``" + call, 1, R"({"text":"42"})", "looks like ``"},
+      {"`example\n\n" + call, 1, R"({"text":"42"})", "`example\n\n"},
+      {"looks like `literal <think>\n" + call + "`", 0, "",
+       "looks like `literal <think>\n" + call + "`"},
+      {call + "\n</invoke>\n</parameter>\n</function>\n", 1, R"({"text":"42"})",
+       ""},
+      {call + "\n</function>\n" + call, 2, R"({"text":"42"})", ""},
+      {call + "\n" + envelope, 1, R"({"text":"42"})", ""},
+      {call + "\n</invoke>\n<|im_end|>", 1, R"({"text":"42"})", "<|im_end|>"},
+      {"</invoke>\n" + call, 1, R"({"text":"42"})", "</invoke>\n"},
+      {"</invoke>", 0, "", "</invoke>"},
+      {"Text </parameter>", 0, "", "Text </parameter>"},
+      {"The token is <|im_end|>", 0, "", "The token is <|im_end|>"},
+      {"<parameter>x</parameter>", 0, "", "<parameter>x</parameter>"},
+      {raw_xml, 0, "", raw_xml},
+      {"Raw XML: " + raw_xml, 0, "", "Raw XML: " + raw_xml},
+      {envelope, 0, "", ""},
+      {"Planning.\n" + envelope, 0, "", "Planning."},
+      {"<invoke name=\"f\"><parameter name=\"text\">x", 0, "", ""},
+      {"Planning.\n<parameter=text>\nx\n</parameter>\n</function>\n</"
+       "tool_call>",
+       0, "",
+       "Planning.\n<parameter=text>\nx\n</parameter>\n</function>\n</"
+       "tool_call>"},
+      {"<function=f><parameter=text>x</parameter></function>", 0, "",
+       "<function=f><parameter=text>x</parameter></function>"},
+      {"```xml\n" + envelope + "\n```", 0, "", "```xml\n" + envelope + "\n```"},
+      {"`" + envelope + "` and prose", 0, "", "`" + envelope + "` and prose"},
+      {"```python\nprint(1)\n" + call, 1, R"({"text":"42"})",
+       "```python\nprint(1)\n"},
+      {"```xml\n" + call + "\n```", 0, "", "```xml\n" + call + "\n```"},
+      {"```xml\n" + call + "\n```\n" + call, 1, R"({"text":"42"})",
+       "```xml\n" + call + "\n```\n"},
+      {"`" + inline_call + "`", 0, "", "`" + inline_call + "`"},
+      {"``" + inline_call + "``", 0, "", "``" + inline_call + "``"},
+      {"```xml\n<tool_call><function=unknown></function></tool_call>", 0, "",
+       "```xml\n<tool_call><function=unknown></function></tool_call>"},
+      {"```xml\n<tool_call><function=f></function></tool_call>", 0, "",
+       "```xml\n<tool_call><function=f></function></tool_call>"},
+      {"```xml\n<tool_call><function=f><parameter=extra>x</parameter></"
+       "function></tool_call>",
+       0, "",
+       "```xml\n<tool_call><function=f><parameter=extra>x</parameter></"
+       "function></tool_call>"},
+      {"<tool_call><function=f><parameter=text>\nEOS = "
+       "\"<|im_end|>\"\n</parameter></function></tool_call>",
+       1, R"({"text":"EOS = \"<|im_end|>\""})", ""},
+      {"<tool_call><function=f><parameter=text>\n<|im_start|><|endoftext|>"
+       "<|not_a_vocab_entry|>\n</parameter></function></tool_call>",
+       1, R"({"text":"<|im_start|><|endoftext|><|not_a_vocab_entry|>"})", ""},
+      {"<tool_call><function=f><parameter=text>\n</invoke>\n</parameter></"
+       "function></tool_call>",
+       1, R"({"text":"</invoke>"})", ""},
+  };
+  // As in llama.cpp, DeepSeek output is content outside its native block,
+  // which ends the output: client envelopes and closers are never removed.
+  const std::string dsml =
+      "\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n"
+      "<｜DSML｜parameter name=\"text\" string=\"true\">42"
+      "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+  const std::vector<Case> deepseek_cases{
+      {envelope, 0, "", envelope},
+      {"Planning.\n" + envelope, 0, "", "Planning.\n" + envelope},
+      {"<invoke name=\"f\"><parameter name=\"text\">x", 0, "",
+       "<invoke name=\"f\"><parameter name=\"text\">x"},
+      {"</invoke>\n</parameter>", 0, "", "</invoke>\n</parameter>"},
+      {call, 0, "", call},
+      {"</invoke>" + dsml, 1, R"({"text":"42"})", "</invoke>"},
+      {"Planning.\n" + envelope + dsml, 1, R"({"text":"42"})",
+       "Planning.\n" + envelope},
+  };
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  for (const auto& [format, cases] :
+       {std::pair{Format::kQwen, &qwen_cases},
+        std::pair{Format::kDeepSeek, &deepseek_cases}})
+    for (const auto& item : *cases) {
+      for (bool stream : {false, true}) {
+        for (bool bytewise : {false, true}) {
+          auto body = schema;
+          body["stream"] = stream;
+          body["tool_choice"] = "auto";
+          FakeBackend backend;
+          backend.tool_format = format;
+          if (bytewise)
+            for (const char byte : item.text)
+              backend.pieces.emplace_back(1, byte);
+          else
+            backend.pieces.push_back(item.text);
+          const auto response =
+              gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          Expect(response.status == 200, "framing request succeeds");
+          std::vector<Value> calls;
+          std::string content;
+          std::string finish;
+          if (!stream) {
+            const auto output = gufo::json::parse(response.body);
+            const auto& choice = output.find("choices")->items()[0];
+            const auto& message = *choice.find("message");
+            content = message.member_str("content");
+            finish = choice.member_str("finish_reason");
+            if (const auto* found = message.find("tool_calls"))
+              calls.assign(found->items().begin(), found->items().end());
+          } else {
+            response.streaming_body([&](std::string_view part) {
+              if (part == "data: [DONE]\n\n")
+                return true;
+              const auto event = gufo::json::parse(part.substr(6));
+              for (const auto& choice : event.find("choices")->items()) {
+                finish += choice.member_str("finish_reason");
+                if (const auto* delta = choice.find("delta")) {
+                  content += delta->member_str("content");
+                  if (const auto* found = delta->find("tool_calls"))
+                    calls.insert(calls.end(), found->items().begin(),
+                                 found->items().end());
+                }
               }
-            }
-            return true;
-          });
+              return true;
+            });
+          }
+          if (calls.size() != item.calls || content != item.content) {
+            std::cerr << "Framing input: " << item.text << "\nstream=" << stream
+                      << " bytewise=" << bytewise
+                      << "\nExpected content: " << item.content
+                      << "\nActual content: " << content
+                      << "\nExpected calls: " << item.calls
+                      << ", actual: " << calls.size() << '\n';
+          }
+          Expect(calls.size() == item.calls,
+                 "only complete declared calls are emitted");
+          Expect(content == item.content,
+                 "literal content and framing are distinguished using request "
+                 "context");
+          Expect(finish == (item.calls ? "tool_calls" : "stop"),
+                 "finish reason agrees with parsed calls");
+          if (!calls.empty())
+            Expect(calls.back().find("function")->member_str("arguments") ==
+                       item.argument,
+                   "literal arguments survive exactly");
         }
-        if (calls.size() != item.calls || content != item.content) {
-          std::cerr << "Framing input: " << item.text << "\nstream=" << stream
-                    << " bytewise=" << bytewise
-                    << "\nExpected content: " << item.content
-                    << "\nActual content: " << content
-                    << "\nExpected calls: " << item.calls
-                    << ", actual: " << calls.size() << '\n';
-        }
-        Expect(calls.size() == item.calls,
-               "only complete declared calls are emitted");
-        Expect(content == item.content,
-               "literal content and framing are distinguished using request "
-               "context");
-        Expect(finish == (item.calls ? "tool_calls" : "stop"),
-               "finish reason agrees with parsed calls");
-        if (!calls.empty())
-          Expect(calls.back().find("function")->member_str("arguments") ==
-                     item.argument,
-                 "literal arguments survive exactly");
       }
     }
-  }
 }
 
 void TestUnconstrainedQuoteFallbackChecksSchema() {

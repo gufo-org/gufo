@@ -2582,7 +2582,8 @@ def main():
             "auto-tools": lambda: check_auto_tools(client, args.model, checks, args.vision),
             "tool-edges": lambda: check_tool_edges(
                 client, args.model, checks, args.sampling_preset),
-            "tool-reasoning": lambda: check_tool_reasoning(client, args.model, checks, chat_result),
+            "tool-reasoning": lambda: check_tool_reasoning(
+                client, args.model, checks, chat_result, args.sampling_preset),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
