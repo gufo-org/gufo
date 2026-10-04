@@ -3,6 +3,32 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+Device-loss process tests use a separate opt-in runner because each lost-device
+case must terminate its server. Build its CMake-owned preload helper, then run
+against a production binary and one explicitly selected model/mode:
+
+```sh
+nix develop -c cmake --preset cpu-test
+nix develop -c cmake --build --preset cpu-test --target device_loss_faults
+python3 tests/functional/device_loss.py \
+  --fault-library build/cpu-test/libdevice_loss_faults.so \
+  --output /tmp/device-loss-check -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --sessions 2 --context 4096 --think off --speculative off
+```
+
+It checks recoverable HIP errors, a pending probe's five-second timeout,
+buffered/streaming error contracts, cleanup avoidance and exit status 75. A
+blocked SSE writer must still trigger the ten-second forced-exit watchdog,
+without a health request or peer disconnect. Repeat `--case` for focused checks.
+Reports retain commands, loaded mode, actual warm-generation drafts, raw
+responses and logs, including failures. These tests inject errors only inside
+the child process; they do not establish behavior after a physical GPU reset.
+The helper is excluded from normal builds and the runner stays outside hosted
+CI and `--suite all`. The existing scheduler/HTTP CPU tests cover sticky loss,
+queued peers, skipped invalidation and listener observation during a blocked
+write without loading weights.
+
 ```sh
 nix develop -c python3 tests/functional/run.py \
   --record-baseline --output /tmp/api-baseline --sampling-preset qwen38 \
@@ -49,7 +75,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `image-inputs` | PNG, JPEG and WebP uploads in Chat and Responses; URL spellings, bad uploads and recovery |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
-| `tool-edges` | Referenced argument types, literal CR, unusual keys and named Responses metadata |
+| `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata and foreign tool markers in prose |
 | `tool-reasoning` | Quoted tags, literal edits, early stops and disabled tools across Chat/Responses |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
@@ -57,17 +83,19 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `tool-untyped` | Open/typed tools, refs and finite values: framing, arguments, streaming, turns, limits, stops/retry and sampled peers |
 | `tool-mixed` | JSON-only neighbors, annotated refs, extra keys, URI and nullable arguments across Chat/Responses; images, stops/retry and sampled peers |
 | `tool-schema-edges` | Wildcard JSON types, conditional fields, impossible schemas, nested metadata and required-call timing; both APIs, cache, stops and sampled peers |
-| `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops, image retry and failed-request recovery |
+| `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops (including inside quoted calls), image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |
 | `batch` | Independent requests across Chat, Responses and Completions; sessions 1–8 |
 | `progress` | Opt-in progress on all text endpoints; output/sampling equality, limits, stops, images, batching and cancel/resume |
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
-| `metrics` | Live Prometheus counters, uncached work, endpoint totals, queueing and cancellation |
+| `metrics` | Live slots, Prometheus cache/time/draft counters, uncached work, endpoint totals, queueing and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart; disk checkpoint spacing for a growing conversation and a branch restored after restart |
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
-| `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, and compare with uncached responses |
+| `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, including Messages thinking blocks, and compare with uncached responses |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
+| `cache-shared-prefix` | New conversations under one system prompt, one after another, with long and short tasks: from the third on they restore the whole shared prefix; compare answers with uncached controls |
+| `cache-concurrency` | Concurrent identical prompts, shared-system fan-out with short and long tasks, short or no shared prefixes, a retained conversation beside a newcomer, and a cancelled leader; check waits, prefill work and uncached answers |
 
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
 the server command. Projectors can load automatically beside the weights, so
@@ -83,9 +111,16 @@ the runner removes that disk cache when the run ends, keeping reports and logs.
 For timing controls on revisions predating progress, use `--allow-missing-progress`
 with `--record-baseline`. Candidate qualification always requires progress events.
 Model runs stay outside hosted CI; CI checks the runner and measurement logic.
+The metrics suite reconciles verification-round counts with request timings and
+terminal logs, including cancelled requests; AR must report zero rounds and
+speculative modes must execute actual rounds.
 For metrics changes, run `--suite metrics` with AR and the affected speculative
 mode. It checks all three text endpoints and reconciles cancelled work with the
-terminal logs. Scrapes are not recorded as generation requests.
+terminal logs. It also checks both slot endpoints, active request identities and
+progress, queued-request exclusion, prompt privacy, idle cleanup, and the
+in-flight KV ratio. Concurrent shared-prefix requests also check that parked
+followers reserve slots and keep newer arrivals queued within `--sessions`.
+Scrapes are not recorded as generation requests.
 
 For real coding-agent regressions, run `pi_agent.py` against a local server with
 `--base-url`, `--model`, `--pi /path/to/pi-0.87.0`, `--server-log`, and a fresh
@@ -103,6 +138,10 @@ omitted, preserved and explicitly discarded reasoning, plus thinking off.
 `cache-rotation` visits four conversations and eight small side requests; use
 `--sessions 1` to verify retention is independent of execution slots. It also
 checks the startup RAM cap; byte/record pressure is covered by CPU tests.
+`cache-concurrency` sends each group at once. With `--sessions 2` or more,
+requests sharing a long prefix must wait for one prefill and then prefill only
+their own tail; groups sharing little or nothing must not wait. With
+`--sessions 1` no request may wait.
 
 Unchanged retries must reproduce the complete output with zero prefill. After a
 restart, disk restores may re-prefill less than one 2048-token disk step;

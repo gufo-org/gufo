@@ -641,7 +641,8 @@ def join_server_timings(directory):
                     if not math.isfinite(value) or value < 0:
                         raise ValueError(f"invalid {field} in {log}")
                     measured.setdefault("server_" + field if field == "duration_ms" else field, value)
-            for field, alias in (("draft_proposed", "draft_tokens"),
+            for field, alias in (("draft_rounds", "draft_rounds"),
+                                 ("draft_proposed", "draft_tokens"),
                                  ("draft_accepted", "draft_tokens_accepted")):
                 if field in fields:
                     value = int(fields[field])
