@@ -1640,7 +1640,9 @@ void TestAdmittedStreamHeaders() {
     ExpectStatus(response, 200);
     const auto ping = response.find(": ping\n\n");
     assert(ping != std::string::npos);
-    assert(ping < response.find("ok"));
+    const auto token = response.find(R"("ok")");
+    assert(token != std::string::npos);
+    assert(ping < token);
     assert(response.ends_with("0\r\n\r\n"));
   }
   // After admission, failures before any token are terminal SSE errors.
