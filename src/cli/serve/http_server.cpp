@@ -139,14 +139,25 @@ bool SendAll(int fd, std::string_view data) {
   return true;
 }
 
-bool SendChunk(int fd, std::string_view data) {
+bool SendChunk(int fd, std::string_view data, std::string_view prefix = {}) {
   if (data.empty())
-    return true;
+    return prefix.empty() || SendAll(fd, prefix);
   char header[2 * sizeof(std::size_t) + 2];
   const auto length =
       std::to_chars(header, header + sizeof(header) - 2, data.size(), 16);
   *length.ptr = '\r';
   *(length.ptr + 1) = '\n';
+  if (!prefix.empty()) {
+    // Deferred headers and the first event travel in one send, avoiding a
+    // separate small packet before the client can start parsing the stream.
+    std::string first;
+    first.reserve(prefix.size() + data.size() + sizeof(header) + 2);
+    first.append(prefix);
+    first.append(header, length.ptr + 2);
+    first.append(data);
+    first.append("\r\n");
+    return SendAll(fd, first);
+  }
   return SendAll(fd, std::string_view(header, length.ptr + 2 - header)) &&
          SendAll(fd, data) && SendAll(fd, "\r\n");
 }
@@ -563,6 +574,7 @@ struct CompatibilityAllowances {
   bool ignore_eos{false};
   bool response_controls{false};
   bool thinking{false};
+  bool output_config{false};
 };
 
 // Validate the text subset before dispatch so a client never gets an answer
@@ -622,7 +634,9 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     if (field != allowances.stop_field &&
         !(field == "stream_options" && allowances.stream_options) &&
         !(field == "ignore_eos" && allowances.ignore_eos) &&
-        !(field == "thinking" && allowances.thinking) && body.contains(field) &&
+        !(field == "thinking" && allowances.thinking) &&
+        !(field == "output_config" && allowances.output_config) &&
+        body.contains(field) &&
         !(allowances.response_controls &&
           (field == "text" || field == "reasoning" || field == "tools" ||
            field == "tool_choice" || field == "parallel_tool_calls"))) {
@@ -817,6 +831,7 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
             [generation = std::move(generation), id, created, model,
              include_usage, return_progress,
              stream_log](const HttpResponse::BodyWriter& writer) {
+              bool started = return_progress;
               const auto write_chunk =
                   [&](std::string_view piece, std::string_view finish_reason,
                       const json::Value* usage = nullptr,
@@ -846,6 +861,7 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                       chunk["timings"] = *timings;
                     if (progress != nullptr)
                       chunk["prompt_progress"] = *progress;
+                    started = true;
                     return writer("data: " + chunk.dump() + "\n\n");
                   };
               core::Utf8Decoder decoder;
@@ -867,7 +883,13 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                       connected = write_chunk(text, {});
                       return connected;
                     },
-                    on_progress);
+                    on_progress,
+                    [&] {
+                      // Admitted or long-queued: later failures are SSE.
+                      started = true;
+                      connected = writer({});
+                      return connected;
+                    });
                 stream_log->details = GenerationLogDetails(result);
                 RecordServerMetrics(result);
                 if (!connected || result.cancelled)
@@ -889,6 +911,8 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                 }
                 (void)writer("data: [DONE]\n\n");
               } catch (const TextGenerationError& error) {
+                if (!started)
+                  throw;
                 stream_log->error_code = error.stable_code();
                 json::Value detail = json::Value::object();
                 detail["message"] = error.what();
@@ -900,6 +924,10 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                     writer("data: " + event.dump() + "\n\n");
                 (void)writer("data: [DONE]\n\n");
               } catch (const std::exception& error) {
+                if (!started)
+                  throw;
+                // Retain the cause in logs alongside the client's stable code.
+                Logger::Error("chat", error.what());
                 stream_log->error_code = "generation_failed";
                 json::Value detail = json::Value::object();
                 const char* message = error.what();
@@ -915,6 +943,7 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
               }
             },
         .stream_log = std::move(stream_log),
+        .defer_stream_headers = !return_progress,
     };
   }
 
@@ -1001,8 +1030,11 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
              "invalid_prompt");
 }
 
-// Messages selects reasoning with thinking.type. budget_tokens has no native
-// equivalent, so enabled thinking keeps the server's effort.
+// Messages selects reasoning with thinking.type; adaptive leaves the choice to
+// the server's default. budget_tokens has no native equivalent, so enabled
+// thinking keeps the server's effort unless output_config.effort sets it.
+// Reasoning is returned for every display, because replayed thinking blocks
+// restore the cached thought.
 std::optional<HttpResponse> ReadThinking(const json::Value& body,
                                          ReasoningOptions* reasoning) {
   const auto* thinking = body.find("thinking");
@@ -1010,16 +1042,52 @@ std::optional<HttpResponse> ReadThinking(const json::Value& body,
     return {};
   const auto* type = thinking->is_object() ? thinking->find("type") : nullptr;
   if (type == nullptr || !type->is_string() ||
-      (type->str() != "enabled" && type->str() != "disabled"))
+      (type->str() != "enabled" && type->str() != "adaptive" &&
+       type->str() != "disabled"))
     return InvalidCompatibilityRequest(
-        "'thinking.type' must be enabled or disabled");
+        "'thinking.type' must be enabled, adaptive, or disabled");
   if (const auto* budget = thinking->find("budget_tokens");
       budget != nullptr &&
       (!budget->is_number() || budget->as_double() < 1 ||
        std::floor(budget->as_double()) != budget->as_double()))
     return InvalidCompatibilityRequest(
         "'thinking.budget_tokens' must be a positive integer");
-  reasoning->enabled = type->str() == "enabled";
+  if (const auto* display = thinking->find("display");
+      display != nullptr &&
+      (!display->is_string() ||
+       (display->str() != "summarized" && display->str() != "omitted" &&
+        display->str() != "updates")))
+    return InvalidCompatibilityRequest(
+        "'thinking.display' must be summarized, omitted, or updates");
+  if (type->str() != "adaptive")
+    reasoning->enabled = type->str() == "enabled";
+  return {};
+}
+
+std::optional<HttpResponse> ReadMessagesOutputConfig(
+    const json::Value& body, ReasoningOptions* options) {
+  const auto* config = body.find("output_config");
+  if (config == nullptr || config->is_null())
+    return {};
+  if (!config->is_object())
+    return InvalidCompatibilityRequest("'output_config' must be an object");
+  for (const auto& [key, value] : config->members()) {
+    if (key != "effort")
+      return InvalidCompatibilityRequest("unsupported output_config member: " +
+                                         key);
+    if (value.is_null())
+      continue;
+    // Anthropic effort does not select thinking, so it never enables it;
+    // formatters apply it only while thinking is on. Anthropic has no minimal
+    // effort.
+    const auto effort = value.is_string() && value.str() != "minimal"
+                            ? ParseReasoningEffortName(value.str())
+                            : std::nullopt;
+    if (!effort.has_value())
+      return InvalidCompatibilityRequest(
+          "'output_config.effort' must be low, medium, high, xhigh, or max");
+    options->effort = effort;
+  }
   return {};
 }
 
@@ -1038,13 +1106,17 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   if (body.is_object()) {
     if (auto error = ReadThinking(body, &chat.reasoning))
       return std::move(*error);
+    if (auto error = ReadMessagesOutputConfig(body, &chat.reasoning))
+      return std::move(*error);
   }
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error = ReadCompatibilityOptions(
-          body, b, "max_tokens", &max_tokens, &sampling_config,
-          chat.reasoning.enabled,
-          {.stop_field = "stop_sequences", .thinking = true})) {
+  if (auto error =
+          ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
+                                   &sampling_config, chat.reasoning.enabled,
+                                   {.stop_field = "stop_sequences",
+                                    .thinking = true,
+                                    .output_config = true})) {
     return std::move(*error);
   }
 
@@ -1251,6 +1323,10 @@ double KvCacheUsageRatio(const TextGenerationBackend& b) {
 HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
   std::ostringstream out;
   out << std::setprecision(std::numeric_limits<double>::max_digits10);
+  out << "# HELP gufo_device_lost_total Confirmed GPU context losses\n"
+      << "# TYPE gufo_device_lost_total counter\n"
+      << "gufo_device_lost_total "
+      << detail::DeviceLostTotal().load(std::memory_order_relaxed) << "\n";
   out << "# HELP llamacpp:prompt_tokens_total Total prompt tokens processed, "
          "excluding cache hits\n"
       << "# TYPE llamacpp:prompt_tokens_total counter\n"
@@ -1895,8 +1971,10 @@ void HttpServer::handle_connection(int client_fd) {
       if (chunked)
         resp.headers.emplace_back("Transfer-Encoding", "chunked");
       const auto head = BuildResponseHead(resp, std::nullopt);
-      response_started = true;
-      connected = SendAll(client_fd, head);
+      if (!resp.defer_stream_headers) {
+        response_started = true;
+        connected = SendAll(client_fd, head);
+      }
       if (connected) {
         std::mutex write_mutex;
         std::condition_variable_any write_cv;
@@ -1905,8 +1983,15 @@ void HttpServer::handle_connection(int client_fd) {
           const std::lock_guard lock(write_mutex);
           if (!connected)
             return false;
-          connected =
-              chunked ? SendChunk(client_fd, chunk) : SendAll(client_fd, chunk);
+          if (!response_started) {
+            response_started = true;
+            connected = chunked ? SendChunk(client_fd, chunk, head)
+                                : SendAll(client_fd, head + std::string(chunk));
+            write_cv.notify_all();
+          } else {
+            connected = chunked ? SendChunk(client_fd, chunk)
+                                : SendAll(client_fd, chunk);
+          }
           if (connected && !chunk.empty()) {
             last_write = std::chrono::steady_clock::now();
           }
@@ -1917,6 +2002,8 @@ void HttpServer::handle_connection(int client_fd) {
             options_.sse_heartbeat_interval.count() > 0) {
           heartbeat = std::jthread([&](std::stop_token stop) {
             std::unique_lock lock(write_mutex);
+            write_cv.wait(lock, stop,
+                          [&] { return response_started || !connected; });
             while (!stop.stop_requested() && connected) {
               const auto deadline =
                   last_write + options_.sse_heartbeat_interval;
@@ -1943,7 +2030,7 @@ void HttpServer::handle_connection(int client_fd) {
           heartbeat.join();
         // An SSE error is a complete protocol response. A failed raw PCM
         // stream must remain incomplete, or it looks like valid shorter audio.
-        if (connected && chunked &&
+        if (connected && response_started && chunked &&
             (!resp.stream_log || resp.stream_log->error_code.empty() ||
              resp.stream_log->error_event_sent))
           connected = SendAll(client_fd, "0\r\n\r\n");
@@ -2002,7 +2089,8 @@ void HttpServer::handle_connection(int client_fd) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
-    HttpResponse resp = Err(500, "Internal Server Error", e.what(),
+    HttpResponse resp = Err(500, "Internal Server Error",
+                            *e.what() ? e.what() : "generation failed",
                             "internal_error", "server_exception");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     Logger::LogRequest(req.request_id, req.method, req.path,

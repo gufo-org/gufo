@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <charconv>
 #include <cmath>
 #include <deque>
@@ -306,15 +307,56 @@ public:
            std::string_view(" \t\f\v").find(name.back()) !=
                std::string_view::npos))
         return {};
-      const auto* schema = NativeSchema(original);
-      if (!schema)
-        return {};
-      const auto* type = schema->find("type");
-      if (!type || !type->is_string() || schema->contains("anyOf"))
-        return {};
-      const bool string = type->str() == "string";
       const std::string close =
           format == Format::kQwen ? "\n</parameter>" : "</｜DSML｜parameter>";
+      const auto* schema = NativeSchema(original);
+      const auto* type = schema ? schema->find("type") : nullptr;
+      if (!type || !type->is_string() || schema->contains("anyOf")) {
+        // Strict calls need exact types, which the JSON envelope provides.
+        if (strict_)
+          return {};
+        // Agent harnesses routinely declare unions. Switching the whole
+        // request to a JSON envelope contradicts the chat template and the
+        // native calls in history; long conversations then mix both syntaxes
+        // (#383). Keep native framing as llama.cpp common/parsers/
+        // qwen3-coder.cpp does at 46ca246de: a union admitting strings is raw
+        // text, and the HTTP parser tries its typed alternatives first.
+        const auto types = ValueTypes(original, 0);
+        if (types.none())
+          return {};
+        const bool text = types[kStringType];
+        std::uint32_t typed = 0;
+        if (!text || format != Format::kQwen) {
+          bool supported = true;
+          try {
+            auto probe = JsonConstraintCompiler(schema_, strict_, true);
+            probe.ignore_unknown_keys_ = ignore_unknown_keys_;
+            (void)probe.Visit(original, 1);
+          } catch (const std::invalid_argument&) {
+            supported = false;
+          }
+          typed = supported ? Visit(original, 1) : GenericValue(kMaxDepth);
+        }
+        const auto raw = Optional(
+            Lexeme(JsonSchemaLexeme::RawString(json::Value::object(), close)));
+        std::uint32_t value;
+        if (format == Format::kQwen) {
+          value =
+              Seq({Literal("<parameter=" + name + ">\n"), text ? raw : typed});
+        } else {
+          const auto open =
+              "<｜DSML｜parameter name=\"" + name + "\" string=\"";
+          Sequence choices;
+          if (text)
+            choices.push_back(Seq({Literal(open + "true\">"), raw}));
+          if (types.count() > (text ? 1U : 0U))
+            choices.push_back(Seq({Literal(open + "false\">"), typed}));
+          value = Alt(choices);
+        }
+        members.emplace_back(name, Seq({value, Literal(close + "\n")}));
+        continue;
+      }
+      const bool string = type->str() == "string";
       std::uint32_t value;
       if (string) {
         Sequence choices;
@@ -442,6 +484,72 @@ private:
                                         GenericValue(kMaxDepth)})});
     return Seq({Literal(qwen ? "<parameter=" : "<｜DSML｜parameter name=\""),
                 name, value, Literal(close + "\n")});
+  }
+
+  // JSON value kinds a parameter admits, as llama.cpp common/json-schema.cpp
+  // value_types() computes them: unions add, untyped schemas admit all.
+  static constexpr std::size_t kStringType = 0;
+  using ValueTypeSet = std::bitset<6>;
+  ValueTypeSet ValueTypes(const json::Value& schema, std::size_t depth) const {
+    static constexpr std::array<std::string_view, 6> kNames{
+        "string", "number", "boolean", "null", "array", "object"};
+    const auto of = [&](const json::Value& value) {
+      ValueTypeSet types;
+      types.set(value.is_string()   ? 0
+                : value.is_number() ? 1
+                : value.is_bool()   ? 2
+                : value.is_null()   ? 3
+                : value.is_array()  ? 4
+                                    : 5);
+      return types;
+    };
+    if (schema.is_bool())
+      return schema.as_bool() ? ValueTypeSet().set() : ValueTypeSet();
+    if (!schema.is_object() || depth > kMaxDepth)
+      return ValueTypeSet().set();
+    if (const auto* reference = schema.find("$ref")) {
+      try {
+        if (const auto* target = Reference(*reference))
+          return ValueTypes(*target, depth + 1);
+      } catch (const std::invalid_argument&) {
+      }
+      return ValueTypeSet().set();
+    }
+    if (const auto* value = schema.find("const"))
+      return of(*value);
+    if (const auto* values = schema.find("enum");
+        values && values->is_array()) {
+      ValueTypeSet types;
+      for (const auto& value : values->items())
+        types |= of(value);
+      return types;
+    }
+    if (const auto* type = schema.find("type")) {
+      ValueTypeSet types;
+      const auto add = [&](const json::Value& name) {
+        if (!name.is_string())
+          return;
+        const auto spelling = name.str() == "integer" ? "number" : name.str();
+        for (std::size_t i = 0; i < kNames.size(); ++i)
+          types[i] = types[i] || kNames[i] == spelling;
+      };
+      if (type->is_array())
+        for (const auto& name : type->items())
+          add(name);
+      else
+        add(*type);
+      return types;
+    }
+    for (const auto* key : {"anyOf", "oneOf"}) {
+      if (const auto* choices = schema.find(key);
+          choices && choices->is_array()) {
+        ValueTypeSet types;
+        for (const auto& choice : choices->items())
+          types |= ValueTypes(choice, depth + 1);
+        return types;
+      }
+    }
+    return ValueTypeSet().set();
   }
 
   const json::Value* NativeSchema(const json::Value& original) const {
@@ -1703,12 +1811,15 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     return base;
   };
   const auto prose = plain_answer ? text(calls) : UINT32_MAX;
-  auto after = plain_answer
-                   ? (parallel ? prose : text(UINT32_MAX))
-                   : static_cast<std::uint32_t>(grammar->rules_.size());
-  if (!plain_answer) {
+  // As in llama.cpp's DeepSeek V4 parser, the call block ends the output:
+  // parallel calls share one block, and no text or block may follow it.
+  const bool ends_output = deepseek || !plain_answer;
+  auto after = ends_output ? static_cast<std::uint32_t>(grammar->rules_.size())
+               : parallel  ? prose
+                           : text(UINT32_MAX);
+  if (ends_output) {
     grammar->rules_.push_back({{}});
-    if (parallel) {
+    if (parallel && !deepseek) {
       const auto begin = literal(marker);
       grammar->rules_[after].push_back({begin, calls});
     }

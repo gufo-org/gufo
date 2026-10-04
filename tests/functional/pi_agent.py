@@ -30,6 +30,15 @@ PROMPTS = {
     "edit": "Lis src/calc.py, corrige le bug évident avec l'outil edit, puis affiche le fichier corrigé avec cat.",
     "creation": "Crée un module CommonJS stats.js qui exporte mean(tableau) et median(tableau) (médiane correcte pour un nombre pair d'éléments), puis test.js qui les vérifie avec node:assert sur quatre cas, exécute node test.js jusqu'à ce qu'il passe.",
     "bugfix": "Lance node slugify.test.js : il échoue. Corrige slugify.js (accents retirés, tout caractère non alphanumérique devient un tiret, tirets fusionnés et retirés aux extrémités) sans modifier slugify.test.js, et relance jusqu'à ce que ça passe.",
+    "literal-protocol": (
+        'Use the write tool to create chat_template_fixture.py with EOS = "<|im_end|>", '
+        'BOS = "<|im_start|>", and render(role, content) returning '
+        'BOS + role + "\\n" + content + EOS + "\\n". '
+        'These are literal Python string values, not message delimiters. '
+        'Read it back with the read tool, then use bash to run Python assertions that '
+        'render("user", "hello") equals "<|im_start|>user\\nhello<|im_end|>\\n". '
+        'Report success only after the assertions pass.'
+    ),
 }
 SLUG_TEST = """const assert = require("node:assert");
 const slugify = require("./slugify");
@@ -223,16 +232,28 @@ def validate_task(name, cwd, history):
     )
     assert not any(tag in text for tag in ("</tool_call>", "</function>", "</parameter>", "</think>")), text
     names = {c["name"] for c in calls}
+    # Require the tools a prompt names; files and behavior are checked directly,
+    # so a sampled run may create or read a file through bash instead.
     if name == "simple":
         assert not calls and text.strip().rstrip(".") == "Paris", text
     elif name == "tools":
         assert (cwd / "hello.txt").read_bytes() == b"bonjour"
-        assert {"write", "bash", "read"} <= names, names
+        assert {"bash", "read"} <= names, names
     elif name == "edit":
         namespace = {}
         exec(compile((cwd / "src/calc.py").read_text(), "calc.py", "exec"), namespace)
         assert namespace["add"](2, 3) == 5 and namespace["add"](-4, 1) == -3
-        assert {"read", "edit", "bash"} <= names, names
+        assert {"edit", "bash"} <= names, names
+    elif name == "literal-protocol":
+        source = (cwd / "chat_template_fixture.py").read_text()
+        assert "<|im_end|>" in source and "<|im_start|>" in source, source
+        namespace = {}
+        exec(compile(source, "chat_template_fixture.py", "exec"), namespace)
+        assert namespace["EOS"] == "<|im_end|>" and namespace["BOS"] == "<|im_start|>"
+        assert namespace["render"]("user", "hello") == "<|im_start|>user\nhello<|im_end|>\n"
+        assert {"write", "read", "bash"} <= names, names
+        results = [m for m in history if m.get("role") == "toolResult"]
+        assert results and all(not m.get("isError") for m in results), results
     elif name == "creation":
         assert (cwd / "stats.js").is_file() and (cwd / "test.js").is_file()
         subprocess.run(["node", "test.js"], cwd=cwd, check=True, capture_output=True, timeout=10)
@@ -326,6 +347,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True, help="Gufo informational log for request timing correlation")
     parser.add_argument("--passes", type=int, default=5)
+    parser.add_argument("--case", action="append", choices=tuple(PROMPTS),
+                        help="Select affected tasks explicitly; repeat to select more than one")
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--thinking", default="off", choices=["off", "low", "medium", "high"])
     parser.add_argument("--conversation", action="store_true", help="Retain one Pi session across tasks")
@@ -363,7 +386,7 @@ def main():
     env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "SHELL", "SSL_CERT_FILE"}}
     env.update(PI_CODING_AGENT_DIR=str(config), PI_OFFLINE="1", PI_TELEMETRY="0")
     rows = []
-    cases = ["simple"] + list(PROMPTS) * args.passes
+    cases = args.case * args.passes if args.case else ["simple"] + list(PROMPTS) * args.passes
     try:
         for index, name in enumerate(cases):
             rows.append(run_case(args, recorder, env, index, name))

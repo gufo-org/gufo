@@ -187,6 +187,12 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         hipStream_t stream);
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   std::size_t m, std::size_t k, hipStream_t stream);
+/// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
+/// F32 K16 chain per output. Token t's chain starts ((t / 32) % 4) * 128
+/// elements into K and wraps: hipBLASLt's MT32x32x64 order (BlasLt::Gemm).
+/// out is [batch][m].
+bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
+                   std::size_t m, std::size_t k, hipStream_t stream);
 
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains
@@ -390,12 +396,15 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
 /// b visible). Every block is visible when the count fits the budget.
 /// Queries retain F32 precision; pooled cache keys are F16. Scores
 /// still accumulate in FP32. `scores` holds n_tokens * max_blocks floats.
+/// `live_blocks`, when nonzero, bounds the complete blocks of the last
+/// query (eager launches only: a captured graph must cover max_blocks).
 void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
                   float* scores, std::uint32_t n_tokens,
                   const std::uint32_t* start_pos, std::uint32_t first_token,
                   std::uint32_t heads, std::uint32_t dim, std::uint32_t ratio,
                   std::uint32_t budget, std::uint32_t mask_words,
-                  std::uint32_t max_blocks, hipStream_t stream);
+                  std::uint32_t max_blocks, hipStream_t stream,
+                  std::uint32_t live_blocks = 0);
 
 /// Per-token attention (decode and narrow batches). With `partials`
 /// (n_tokens * heads * splits * (d + 2) floats) the key tiles are split

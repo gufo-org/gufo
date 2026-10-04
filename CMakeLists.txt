@@ -372,12 +372,18 @@ if (BUILD_TESTING)
 
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp
+    src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
   )
   target_link_libraries(openai_chat_test PRIVATE gufo_core)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
+
+  add_executable(quote_tracker_test tests/cli/quote_tracker_test.cpp)
+  target_link_libraries(quote_tracker_test PRIVATE gufo_core)
+  add_test(NAME quote_tracker_test COMMAND quote_tracker_test)
+  set_tests_properties(quote_tracker_test PROPERTIES LABELS "cpu;server;api")
 
   add_executable(http_server_test tests/cli/http_server_test.cpp)
   target_link_libraries(http_server_test PRIVATE gufo_http)

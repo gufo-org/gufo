@@ -15,6 +15,10 @@ namespace gufo::server {
 // Process-wide `/metrics` values. Token counters advance per prefill chunk and
 // per generated token, so scrapes see work while requests are still running.
 namespace detail {
+inline std::atomic<std::uint64_t>& DeviceLostTotal() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
 inline std::atomic<std::uint64_t>& TotalPromptTokens() {
   static std::atomic<std::uint64_t> count{0};
   return count;

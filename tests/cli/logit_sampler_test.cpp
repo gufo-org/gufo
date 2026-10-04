@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -484,6 +485,44 @@ void TestFilteredDistributionAgainstFullSort() {
   }
 }
 
+void TestBlockSkippedTopKAgainstFullSort() {
+  // Large rows exercise block skipping: ties straddling the top-k boundary,
+  // non-finite entries and penalties that lift a low token into the set.
+  std::vector<float> logits(70001);
+  for (std::size_t i = 0; i < logits.size(); ++i)
+    logits[i] = std::floor(std::sin(static_cast<float>(i) * 0.37F) * 8.0F);
+  logits[5] = std::numeric_limits<float>::quiet_NaN();
+  logits[640] = std::numeric_limits<float>::infinity();
+  logits[641] = -std::numeric_limits<float>::infinity();
+  logits[69999] = 9.0F;
+  const std::array<gufo::sampling::TokenId, 7> history{
+      3, 700, 701, 33333, 50000, 69999, 70000};
+  for (const gufo::sampling::SamplingConfig config :
+       {gufo::sampling::SamplingConfig{
+            .temperature = 1.0F, .top_k = 64, .top_p = 0.95F},
+        gufo::sampling::SamplingConfig{.temperature = 1.0F, .top_k = 1},
+        gufo::sampling::SamplingConfig{.temperature = 0.7F, .top_k = 300},
+        gufo::sampling::SamplingConfig{.temperature = 1.0F,
+                                       .top_k = 64,
+                                       .repeat_penalty = 1.3F,
+                                       .presence_penalty = -9.0F},
+        gufo::sampling::SamplingConfig{.temperature = 0.8F,
+                                       .top_k = 20,
+                                       .repeat_penalty = 0.5F,
+                                       .frequency_penalty = 2.0F}}) {
+    gufo::sampling::SamplerState sampler(config, history);
+    sampler.Accept(std::span(history).first(3));
+    const auto expected = gufo::sampling::BuildDistribution(
+        logits, config, history, std::span(history).first(3));
+    const auto actual = sampler.Distribution(logits);
+    Expect(actual.entries().size() == expected.entries().size(),
+           "block-skipped top-k keeps the reference candidate count");
+    for (const auto& entry : expected.entries())
+      Expect(std::abs(actual.probability(entry.token) - entry.value) < 1e-12,
+             "block-skipped top-k keeps the reference distribution");
+  }
+}
+
 void TestDeferredResidualReplay() {
   const std::array<float, 3> logits{100.0F, -100.0F, -100.0F};
   gufo::sampling::SamplerState sampler({.temperature = 1.0F, .seed = 7});
@@ -618,6 +657,7 @@ int main() {
   TestZeroDrawAndNonFiniteCandidates();
   TestStrategyReplayAgainstReference();
   TestFilteredDistributionAgainstFullSort();
+  TestBlockSkippedTopKAgainstFullSort();
   TestDeferredResidualReplay();
   std::cout << "All logit sampler tests passed.\n";
   return 0;

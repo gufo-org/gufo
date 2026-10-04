@@ -814,7 +814,20 @@ void TestAutomaticTools() {
         assert(!sampler.CanSelectArgmax('!', /*penalties_applied=*/true));
         assert(!sampler.CanSelectArgmax(256, /*penalties_applied=*/true));
         accept(call);
-        assert(!sampler.NeedsConstraintMask());
+        // As in llama.cpp, a DeepSeek call block ends the output; Qwen returns
+        // to ordinary text.
+        if (format == Format::kDeepSeek) {
+          assert(sampler.NeedsConstraintMask());
+          assert(!sampler.CanSelectArgmax('a', /*penalties_applied=*/true));
+          assert(!sampler.CanSelectArgmax(258, /*penalties_applied=*/true));
+          std::vector<float> after_call(259, -INFINITY);
+          after_call['a'] = 1;
+          after_call[258] = 1;
+          after_call[256] = 0;
+          assert(auto(sampler).Sample(after_call) == 256);
+        } else {
+          assert(!sampler.NeedsConstraintMask());
+        }
         sampler.Accept(257);  // Empty pieces preserve the ordinary path.
         sampler.Accept(256);  // Natural EOS is allowed without another call.
         sampler = before_call;
@@ -875,9 +888,19 @@ void TestNativeTools() {
     assert(!Accepts(*grammar, wrap("value", 6)));
     assert(!Accepts(*grammar, "ordinary text"));
     assert(!Accepts(*grammar, call + call));
-    assert(Accepts(*JsonConstraint::WithTools(nullptr, {{"f", parameters}},
-                                              true, true, format),
-                   call + call));
+    const auto parallel = JsonConstraint::WithTools(
+        nullptr, {{"f", parameters}}, true, true, format);
+    if (format == Format::kQwen) {
+      assert(Accepts(*parallel, call + call));
+    } else {
+      // As in llama.cpp, parallel DeepSeek calls share one block, which ends
+      // the output.
+      constexpr std::string_view kOpen = "<｜DSML｜tool_calls>";
+      constexpr std::string_view kClose = "\n</｜DSML｜tool_calls>";
+      assert(Accepts(*parallel, call.substr(0, call.size() - kClose.size()) +
+                                    call.substr(kOpen.size())));
+      assert(!Accepts(*parallel, call + call));
+    }
     assert(Accepts(*JsonConstraint::WithReasoning(grammar),
                    "Thinking.</think>" + call));
     // Vocabulary masks and speculative copies must agree with byte matching,
@@ -964,7 +987,13 @@ void TestOpenNativeTools() {
                       parameter("city name", " é🦉\n\\path\n</tool_call> ") +
                       end;
     assert(Accepts(*grammar, call));
-    assert(Accepts(*grammar, call + "\n" + call));
+    // DeepSeek parallel calls share one block, which ends the output.
+    assert(Accepts(*grammar, call + "\n" + call) == qwen);
+    assert(Accepts(*grammar, call + " Done.") == qwen);
+    if (!qwen)
+      assert(Accepts(*grammar, begin + parameter("value", "42") +
+                                   "</｜DSML｜invoke>" +
+                                   begin.substr(begin.find('\n')) + end));
     assert(!Accepts(*grammar, begin + parameter(" value", "x") + end));
     assert(!Accepts(*grammar, begin + parameter("value ", "x") + end));
     assert(!Accepts(*grammar, begin + parameter("", "x") + end));
@@ -1364,16 +1393,51 @@ void TestMixedBestEffortToolRoutes() {
       }
     }
   }
-  // Ambiguous raw strings must still use JSON: Qwen cannot distinguish
-  // the string "null" from null without a JSON representation.
+  // Non-strict unions keep native framing, as in llama.cpp. A JSON envelope
+  // would contradict the template and the native calls in history (#383).
+  // Qwen admits raw text for a union with strings; DeepSeek's string flag
+  // selects raw text or the typed JSON alternatives.
   for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
     const auto nullable = parse(R"({"type":"object","properties":{"a":{
       "anyOf":[{"type":"string"},{"type":"null"}]}},"required":["a"]})");
-    assert(!JsonConstraint::ToolParameters(nullable, false, format));
+    const auto parameters =
+        JsonConstraint::ToolParameters(nullable, false, format);
+    assert(parameters);
+    const auto grammar = JsonConstraint::WithTools(
+        nullptr, {{"record", parameters}}, true, false, format);
+    assert(Accepts(*grammar, call(format, "a", "null", false)));
+    assert(Accepts(*grammar, call(format, "a", "#include \"a.h\"\nx")));
+    assert(!Accepts(*grammar, call(format, "b", "x")));
+    if (format == Format::kDeepSeek)
+      assert(!Accepts(*grammar, call(format, "a", "x", false)));
+    // Strict unions still need the exact JSON representation.
+    auto closed = nullable;
+    closed["additionalProperties"] = false;
+    assert(!JsonConstraint::ToolParameters(closed, true, format));
     const auto json =
         JsonConstraint::ToolParameters(nullable, false, Format::kJson);
     assert(Accepts(*json, R"({"a":null})"));
     assert(Accepts(*json, R"({"a":"null"})"));
+    // Finite string alternatives and untyped values are text; a union
+    // without strings keeps its JSON value constraint inside the tag.
+    const auto agent = parse(R"({"type":"object","properties":{
+      "query":{"type":"string"},
+      "provider":{"anyOf":[{"type":"string","const":"brave"},
+                           {"type":"string","const":"exa"}]},
+      "args":{"anyOf":[{"type":"string"},
+                       {"type":"object","additionalProperties":true}]},
+      "extra":{"description":"anything"},
+      "limit":{"anyOf":[{"type":"integer"},{"type":"null"}]}}})");
+    const auto tools = JsonConstraint::ToolParameters(agent, false, format);
+    assert(tools);
+    const auto agent_grammar = JsonConstraint::WithTools(
+        nullptr, {{"record", tools}}, true, false, format);
+    assert(Accepts(*agent_grammar, call(format, "query", "a \"quoted\" b")));
+    assert(Accepts(*agent_grammar, call(format, "provider", "exa")));
+    assert(Accepts(*agent_grammar, call(format, "extra", "x")));
+    assert(Accepts(*agent_grammar, call(format, "limit", "3", false)));
+    assert(Accepts(*agent_grammar, call(format, "limit", "null", false)));
+    assert(!Accepts(*agent_grammar, call(format, "limit", "x", false)));
   }
   // Ignoring a numeric format annotation must retain supported bounds.
   const auto integer = parse(R"({"type":"object","properties":{"a":{

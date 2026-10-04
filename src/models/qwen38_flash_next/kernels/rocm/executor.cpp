@@ -1474,13 +1474,18 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     const auto first_query = last_only ? (n_tokens - 1) / 16 * 16 : 0U;
     for (std::uint32_t t0 = first_query; t0 < n_tokens; t0 += select_chunk_) {
       const std::uint32_t n = std::min(select_chunk_, n_tokens - t0);
+      // Batches wider than kVecBatch are never captured, so the host
+      // position bounds the scored range (a replayed graph must cover
+      // max_blocks).
+      const std::uint32_t live =
+          n_tokens > kVecBatch ? (start_pos + t0 + n) / c.compress_ratio : 0;
       SelectBlocks(s_.iq + static_cast<std::size_t>(t0) * c.indexer_heads *
                                c.indexer_head_dim,
                    s.block_k,
                    s_.mask + static_cast<std::size_t>(t0) * mask_words_,
                    s_.scores, n, pos, t0, c.indexer_heads, c.indexer_head_dim,
                    c.compress_ratio, c.indexer_top_k / c.compress_ratio,
-                   mask_words_, max_blocks, stream_);
+                   mask_words_, max_blocks, stream_, live);
     }
     mask = s_.mask;
   }

@@ -1,6 +1,7 @@
 """Fast checks for the functional runner's failure reporting and process ownership."""
 
 import contextlib
+from copy import deepcopy
 import base64
 import importlib.util
 import io
@@ -21,7 +22,7 @@ spec.loader.exec_module(functional)
 from metrics import (CaseComplete, Recorder, canonical, compare, join_server_timings,
                      qualify, summarize, validate_tool_events)
 from progress import ProgressTrace
-from tool_reasoning import ARGUMENTS, assert_edit
+from tool_reasoning import ARGUMENTS, assert_edit, assert_terminal_call, assert_no_envelope_framing
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
@@ -36,6 +37,57 @@ from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_continuation_drop_reasoning_omits_seeded_tool_thought(self):
+        import continuation
+
+        class FirstRequestCaptured(Exception):
+            pass
+
+        control = None
+        for drop_reasoning in (False, True):
+            with self.subTest(drop_reasoning=drop_reasoning), \
+                    tempfile.TemporaryDirectory() as directory:
+                captured = []
+
+                def capture(url, body, stop_field=None):
+                    captured.append((deepcopy(body), stop_field))
+                    raise FirstRequestCaptured
+
+                argv = ["continuation.py", "--url", "http://example.invalid:1",
+                        "--output", str(Path(directory) / "unused.json"), "--tools",
+                        "--case", "reasoning_content-preserve1-sampled0",
+                        "--prefix-repetitions", "1"]
+                if drop_reasoning:
+                    argv.append("--drop-reasoning")
+                with patch.object(sys, "argv", argv), \
+                        patch.object(continuation.TRACE, "path", None), \
+                        patch.object(continuation, "call", side_effect=capture) as request, \
+                        patch("http.client.HTTPConnection.request",
+                              side_effect=AssertionError("HTTP is forbidden")) as http:
+                    with self.assertRaises(FirstRequestCaptured):
+                        continuation.main()
+                    request.assert_called_once()
+                    http.assert_not_called()
+                self.assertEqual(list(Path(directory).iterdir()), [])
+                body, stop_field = captured[0]
+                self.assertEqual(stop_field, "reasoning_content")
+                messages = body["messages"]
+                self.assertEqual([m["role"] for m in messages],
+                                 ["system", "user", "assistant", "tool"])
+                self.assertEqual(messages[2]["tool_calls"], [{
+                    "id": "fixture-call", "type": "function",
+                    "function": {"name": "read_fixture", "arguments": "{}"}}])
+                self.assertEqual(messages[3], {
+                    "role": "tool", "tool_call_id": "fixture-call",
+                    "content": "The fixture is ready. Answer the user's request directly."})
+                if drop_reasoning:
+                    self.assertNotIn("reasoning_content", messages[2])
+                    del control["messages"][2]["reasoning_content"]
+                    self.assertEqual(body, control)
+                else:
+                    self.assertEqual(messages[2]["reasoning_content"], "Read the fixture.")
+                    control = body
+
     def test_pi_proxy_discovery_and_missing_content_type(self):
         import http.client
         import http.server
@@ -127,6 +179,21 @@ class FunctionalRunnerTest(unittest.TestCase):
                        {"tools": [{"function": {"name": "edit", "arguments": "{}"}}]}):
             with self.subTest(change=change), self.assertRaises(AssertionError):
                 assert_edit({**result, **change})
+
+    def test_envelope_workflow_rejects_missing_calls_and_damaged_arguments(self):
+        command = "printf '%s' '</invoke>'"
+        call = {"function": {"name": "terminal", "arguments": json.dumps({"command": command})}}
+        result = {"text": "", "finish": "tool_calls", "tools": [call]}
+        assert_terminal_call(result, command)
+        for change in ({"tools": []}, {"tools": [call, call]}, {"finish": "stop"},
+                       {"tools": [{"function": {"name": "other", "arguments": call["function"]["arguments"]}}]},
+                       {"tools": [{"function": {"name": "terminal", "arguments":
+                                   json.dumps({"command": "echo '</' + 'invoke>'"})}}]}):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_terminal_call({**result, **change}, command)
+        for text in ("</invoke>", '<invoke name="terminal">', '<parameter name="command">pwd'):
+            with self.subTest(text=text), self.assertRaises(AssertionError):
+                assert_no_envelope_framing({**result, "text": text})
 
     def test_discovery_requires_an_explicit_expectation_before_starting_a_server(self):
         for suite in ("discovery", "all"):

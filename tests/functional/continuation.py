@@ -182,10 +182,13 @@ def main():
                     messages[1:1] = [first_user,
                                      {"role": "assistant", "content": "Ready."}]
                 if args.tools:
+                    tool_assistant = {"role": "assistant", "content": "",
+                                      "tool_calls": [{"id": "fixture-call", "type": "function", "function": {
+                                          "name": "read_fixture", "arguments": "{}"}}]}
+                    if not args.drop_reasoning:
+                        tool_assistant["reasoning_content"] = "Read the fixture."
                     messages.extend([
-                        {"role": "assistant", "content": "", "reasoning_content": "Read the fixture.",
-                         "tool_calls": [{"id": "fixture-call", "type": "function", "function": {
-                             "name": "read_fixture", "arguments": "{}"}}]},
+                        tool_assistant,
                         {"role": "tool", "tool_call_id": "fixture-call",
                          "content": "The fixture is ready. Answer the user's request directly."}])
                     if args.legacy_tool_history:
