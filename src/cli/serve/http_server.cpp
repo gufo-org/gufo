@@ -508,9 +508,12 @@ bool ReadTextMessages(const json::Value* input,
     if (responses && item.member_str("type") == "reasoning") {
       const auto* summary = item.find("summary");
       const auto* encrypted = item.find("encrypted_content");
+      const auto* content = item.find("content");
+      // Codex replays null-valued content and encrypted_content echoed by
+      // OpenAI; only non-null payload carries reasoning we cannot restore.
       if (summary == nullptr || !summary->is_array() ||
           (encrypted != nullptr && !encrypted->is_null()) ||
-          item.contains("content"))
+          (content != nullptr && !content->is_null()))
         return false;
       tokenization::ChatMessage reasoning;
       reasoning.role = tokenization::ChatRole::kAssistant;

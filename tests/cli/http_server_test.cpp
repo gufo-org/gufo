@@ -987,6 +987,28 @@ void TestCompatibilityRequests() {
          replay_messages[1].thought == "Thoughts" &&
          replay_messages[1].content == "Answer");
 
+  // Codex replays reasoning items with the null content and encrypted_content
+  // fields it serialized from the response; only non-null payload is rejected.
+  const auto null_replay = response_body(
+      server.Post("/v1/responses",
+                  R"({"input":[{"role":"user","content":"First question"},
+        {"type":"reasoning","id":"rs_1","status":"completed",
+         "summary":[{"type":"summary_text","text":"Thoughts"}],
+         "content":null,"encrypted_content":null},
+        {"type":"message","role":"assistant","content":[
+          {"type":"output_text","text":"Answer","annotations":[]}]}]})"));
+  assert(null_replay.member_str("status") == "completed");
+  const auto null_replay_messages = server.backend->LastCall().chat.messages;
+  assert(null_replay_messages.size() == 2 &&
+         null_replay_messages[1].thought == "Thoughts" &&
+         null_replay_messages[1].content == "Answer");
+  const auto opaque_replay =
+      server.Post("/v1/responses",
+                  R"({"input":[{"role":"user","content":"question"},
+        {"type":"reasoning","id":"rs_1",
+         "summary":[],"encrypted_content":"gAAAA"}]})");
+  ExpectStatus(opaque_replay, 400);
+
   // The Responses API carries request-only fields with no native effect here
   // (hosted tool types, include, reasoning.summary, text.verbosity). Accept
   // them and keep only the executable function tools. Codex is one such client.
