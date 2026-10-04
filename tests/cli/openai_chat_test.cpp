@@ -3036,13 +3036,27 @@ void TestNativeToolTextOutsideEnvelopes() {
       const auto grammar =
           JsonConstraint::WithTools(nullptr, {{"read", parameters}},
                                     fixture.required, true, fixture.format);
+      // As in llama.cpp, the native DeepSeek block ends the output. Text after
+      // it is reachable only without that grammar, e.g. the JSON fallback.
+      std::string_view admitted = fixture.raw;
+      if (fixture.format == Format::kDeepSeek) {
+        constexpr std::string_view kClose = "\n</｜DSML｜tool_calls>";
+        admitted = admitted.substr(0, admitted.find(kClose) + kClose.size());
+      }
       auto state = grammar->Start();
-      for (const unsigned char byte : fixture.raw) {
+      for (const unsigned char byte : admitted) {
         state = grammar->Advance(state, byte);
         Expect(!state.empty(), "fixture is admitted by the production grammar");
       }
-      Expect(grammar->Complete(state) == fixture.complete,
+      Expect(grammar->Complete(state) ==
+                 (fixture.complete || admitted.size() < fixture.raw.size()),
              "only complete fixture may terminate normally");
+      if (admitted.size() < fixture.raw.size())
+        Expect(grammar
+                   ->Advance(state, static_cast<unsigned char>(
+                                        fixture.raw[admitted.size()]))
+                   .empty(),
+               "native DeepSeek output ends after its call block");
     }
     for (const bool responses : {false, true})
       for (const bool stream : {false, true})

@@ -814,7 +814,20 @@ void TestAutomaticTools() {
         assert(!sampler.CanSelectArgmax('!', /*penalties_applied=*/true));
         assert(!sampler.CanSelectArgmax(256, /*penalties_applied=*/true));
         accept(call);
-        assert(!sampler.NeedsConstraintMask());
+        // As in llama.cpp, a DeepSeek call block ends the output; Qwen returns
+        // to ordinary text.
+        if (format == Format::kDeepSeek) {
+          assert(sampler.NeedsConstraintMask());
+          assert(!sampler.CanSelectArgmax('a', /*penalties_applied=*/true));
+          assert(!sampler.CanSelectArgmax(258, /*penalties_applied=*/true));
+          std::vector<float> after_call(259, -INFINITY);
+          after_call['a'] = 1;
+          after_call[258] = 1;
+          after_call[256] = 0;
+          assert(auto(sampler).Sample(after_call) == 256);
+        } else {
+          assert(!sampler.NeedsConstraintMask());
+        }
         sampler.Accept(257);  // Empty pieces preserve the ordinary path.
         sampler.Accept(256);  // Natural EOS is allowed without another call.
         sampler = before_call;
@@ -875,9 +888,19 @@ void TestNativeTools() {
     assert(!Accepts(*grammar, wrap("value", 6)));
     assert(!Accepts(*grammar, "ordinary text"));
     assert(!Accepts(*grammar, call + call));
-    assert(Accepts(*JsonConstraint::WithTools(nullptr, {{"f", parameters}},
-                                              true, true, format),
-                   call + call));
+    const auto parallel = JsonConstraint::WithTools(
+        nullptr, {{"f", parameters}}, true, true, format);
+    if (format == Format::kQwen) {
+      assert(Accepts(*parallel, call + call));
+    } else {
+      // As in llama.cpp, parallel DeepSeek calls share one block, which ends
+      // the output.
+      constexpr std::string_view kOpen = "<｜DSML｜tool_calls>";
+      constexpr std::string_view kClose = "\n</｜DSML｜tool_calls>";
+      assert(Accepts(*parallel, call.substr(0, call.size() - kClose.size()) +
+                                    call.substr(kOpen.size())));
+      assert(!Accepts(*parallel, call + call));
+    }
     assert(Accepts(*JsonConstraint::WithReasoning(grammar),
                    "Thinking.</think>" + call));
     // Vocabulary masks and speculative copies must agree with byte matching,
@@ -964,7 +987,13 @@ void TestOpenNativeTools() {
                       parameter("city name", " é🦉\n\\path\n</tool_call> ") +
                       end;
     assert(Accepts(*grammar, call));
-    assert(Accepts(*grammar, call + "\n" + call));
+    // DeepSeek parallel calls share one block, which ends the output.
+    assert(Accepts(*grammar, call + "\n" + call) == qwen);
+    assert(Accepts(*grammar, call + " Done.") == qwen);
+    if (!qwen)
+      assert(Accepts(*grammar, begin + parameter("value", "42") +
+                                   "</｜DSML｜invoke>" +
+                                   begin.substr(begin.find('\n')) + end));
     assert(!Accepts(*grammar, begin + parameter(" value", "x") + end));
     assert(!Accepts(*grammar, begin + parameter("value ", "x") + end));
     assert(!Accepts(*grammar, begin + parameter("", "x") + end));

@@ -672,7 +672,9 @@ omitted controls keep their model/CLI defaults.
 
 Tool calls are emitted only for declared functions when `tool_choice` allows
 calling tools. With `auto`, ordinary text and reasoning remain allowed; once a
-call starts, decoding constrains its name and argument format. Non-strict tools
+call starts, decoding constrains its name and argument format. As in llama.cpp,
+a DeepSeek call block ends the output: parallel calls share one block, and no
+text follows it. Non-strict tools
 keep optional arguments optional. Open nested objects retain native syntax and
 declared requirements/types, including nested fields; unsupported schema
 keywords remain guidance. Unsupported property-admitting rules, including

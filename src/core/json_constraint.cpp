@@ -1811,12 +1811,15 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     return base;
   };
   const auto prose = plain_answer ? text(calls) : UINT32_MAX;
-  auto after = plain_answer
-                   ? (parallel ? prose : text(UINT32_MAX))
-                   : static_cast<std::uint32_t>(grammar->rules_.size());
-  if (!plain_answer) {
+  // As in llama.cpp's DeepSeek V4 parser, the call block ends the output:
+  // parallel calls share one block, and no text or block may follow it.
+  const bool ends_output = deepseek || !plain_answer;
+  auto after = ends_output ? static_cast<std::uint32_t>(grammar->rules_.size())
+               : parallel  ? prose
+                           : text(UINT32_MAX);
+  if (ends_output) {
     grammar->rules_.push_back({{}});
-    if (parallel) {
+    if (parallel && !deepseek) {
       const auto begin = literal(marker);
       grammar->rules_[after].push_back({begin, calls});
     }
