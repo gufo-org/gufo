@@ -317,11 +317,16 @@ def main():
             if result.returncode:
                 raise RuntimeError(f"exit {result.returncode}; see {label}.log")
             payload = json.loads((output / (label + ".json")).read_text())
-            passed = (isinstance(payload, dict) and payload.get("status") == "passed"
-                      if script == "openai_sdk.py" else
-                      isinstance(payload, list) and bool(payload)
-                      and all(isinstance(row, dict) and row.get("exact") is True
-                              for row in payload))
+            if script == "openai_sdk.py":
+                passed = isinstance(payload, dict) and payload.get("status") == "passed"
+            elif script == "continuation.py":
+                passed = (isinstance(payload, list) and bool(payload)
+                          and all(isinstance(row, dict) and row.get("status") == "passed"
+                                  for row in payload))
+            else:
+                passed = (isinstance(payload, list) and bool(payload)
+                          and all(isinstance(row, dict) and row.get("exact") is True
+                                  for row in payload))
             if not passed:
                 raise RuntimeError(f"test did not report success: {label}.json")
             measurements = json.loads((output / (label + ".requests.json")).read_text())

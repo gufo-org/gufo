@@ -177,6 +177,12 @@ histories must retain a useful earlier prefix and match their cold answer;
 free-form reasoning may vary with prefill chunk shapes. Use the recorded
 requests and phase timings to investigate failures, not a full model sweep.
 
+Continuation report rows use `status: "passed"` for successful validation.
+`exact` records whether the resumed and follow-up assistant messages both match
+their reference hashes; `exact_required` records whether that equality is
+required. A sampled disk restore with partial re-prefill can pass with
+`exact: false`; greedy and zero-prefill restores still fail on a mismatch.
+
 Every request checks its applicable response format, expected output and timings.
 Missing measurements fail. `comparison.json` reports per-request prefill, decode,
 queue, restore and wall times, plus server startup/restart. Missing cases,

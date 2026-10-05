@@ -37,6 +37,70 @@ from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_continuation_restore_reports_observed_equality(self):
+        import continuation
+
+        def result(text, prefill=37, cached=672, disk=True):
+            return {"choices": [{"message": {"role": "assistant", "content": text}}],
+                    "usage": {"cached_tokens": cached, "gufo": {
+                        "prefill_tokens": prefill, "ttft_ms": 1, "cache_disk_hit": disk}}}
+
+        cases = [
+            ({"resume_equal": False}, None),
+            ({"followup_equal": False}, None),
+            ({}, None),
+            ({"followup_equal": None}, None),
+            ({"resume_equal": False, "followup_equal": None}, None),
+            ({"temperature": 0}, None),
+            ({"prefill": 0}, None),
+            ({"followup_cached": 671}, "disk-restored third turn differs"),
+            ({"prefill": 2048}, "disk restore lost too much"),
+            ({"disk": False}, "restart did not restore disk state"),
+            ({"cached": 0}, "restart did not restore disk state"),
+        ]
+        for strict in ({"temperature": 0}, {"prefill": 0}):
+            cases += [({**strict, "resume_equal": False}, "disk restore changed seeded output"),
+                      ({**strict, "followup_equal": False}, "disk-restored third turn differs")]
+        for changes, error in cases:
+            settings = {"temperature": .8, "prefill": 37, "cached": 672, "disk": True,
+                        "resume_equal": True, "followup_equal": True, "followup_cached": 672,
+                        **changes}
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output = root / "restored.json"
+                previous = {"case": "synthetic", "request": {
+                    "temperature": settings["temperature"]}, "sha256": continuation.digest(result("7"))}
+                replies = [result("7" if settings["resume_equal"] else "8",
+                                  settings["prefill"], settings["cached"], settings["disk"])]
+                if settings["followup_equal"] is not None:
+                    previous["followup"] = {"request": {"temperature": settings["temperature"]},
+                                            "sha256": continuation.digest(result("seven"))}
+                    replies.append(result("seven" if settings["followup_equal"] else "eight",
+                                          cached=settings["followup_cached"]))
+                source = root / "previous.json"
+                source.write_text(json.dumps([previous]))
+                argv = ["continuation.py", "--restore", str(source), "--output", str(output)]
+                with patch.object(sys, "argv", argv), \
+                        patch.object(continuation.TRACE, "path", None), \
+                        patch.object(continuation, "call", side_effect=replies) as request, \
+                        patch("http.client.HTTPConnection.request",
+                              side_effect=AssertionError("HTTP is forbidden")) as http, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    if error:
+                        with self.assertRaisesRegex(RuntimeError, error):
+                            continuation.main()
+                        self.assertFalse(output.exists())
+                    else:
+                        continuation.main()
+                        self.assertEqual(request.call_count, len(replies))
+                        report, = json.loads(output.read_text())
+                        self.assertEqual(report["exact"], settings["resume_equal"]
+                                         and settings["followup_equal"] is not False)
+                        self.assertEqual(report.get("status"), "passed")
+                        self.assertEqual(report.get("exact_required"),
+                                         settings["temperature"] == 0 or settings["prefill"] == 0)
+                    http.assert_not_called()
+
     def test_continuation_drop_reasoning_omits_seeded_tool_thought(self):
         import continuation
 
@@ -1119,8 +1183,16 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
                 self.assertEqual(status, 0 if expected == "passed" else 1)
 
     def test_disk_cache_is_removed_after_restart_checks(self):
-        for exit_code in (0, 7):
-            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
+        for exit_code, continuation_report, spacing_exact, expected in (
+            (0, {"status": "passed", "exact": True}, True, "passed"),
+            (7, {"status": "passed", "exact": True}, True, "failed"),
+            (0, {"status": "passed", "exact": False}, True, "passed"),
+            (0, {"exact": True}, True, "failed"),
+            (0, {"status": "failed", "exact": True}, True, "failed"),
+            (0, {"status": "passed", "exact": True}, False, "failed"),
+        ):
+            with self.subTest(exit_code=exit_code, continuation=continuation_report,
+                              spacing_exact=spacing_exact), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 # Stands in for the server filling its runner-owned disk cache.
                 child = f'''
@@ -1129,7 +1201,9 @@ from pathlib import Path
 output = Path(sys.argv[sys.argv.index("--output") + 1])
 (output.parent / "disk").mkdir(exist_ok=True)
 (output.parent / "disk" / "entry.kvc").write_bytes(b"x")
-output.write_text(json.dumps([{{"exact": True}}]))
+payload = ({continuation_report!r} if Path(__file__).name == "continuation.py"
+           else {{"exact": {spacing_exact!r}}})
+output.write_text(json.dumps([payload]))
 output.with_suffix(".requests.json").write_text(json.dumps({{"version": 1, "requests": [{{
     "status": "complete", "wall_ms": 1, "endpoint": "/v1/chat/completions",
     "request_sha256": "fixture"}}]}}))
@@ -1155,7 +1229,12 @@ sys.exit({exit_code})
                      contextlib.redirect_stdout(io.StringIO()):
                     functional.main()
                 report = json.loads((root / "report/report.json").read_text())
-                self.assertEqual(report["status"], "failed" if exit_code else "passed", report)
+                self.assertEqual(report["status"], expected, report)
+                continuation_passed = not exit_code and continuation_report.get("status") == "passed"
+                self.assertEqual(report["suites"]["text-cancel"]["status"],
+                                 "passed" if continuation_passed else "failed")
+                self.assertEqual(report["suites"]["disk-spacing"]["status"],
+                                 "passed" if not exit_code and spacing_exact else "failed")
                 self.assertIn("--cache-disk", report["command"])
                 self.assertFalse((root / "report/disk").exists())
                 self.assertTrue((root / "report/text-cancel.json").is_file())

@@ -233,7 +233,7 @@ For a focused cancellation check, run
 `python3 tests/functional/continuation.py --output /tmp/cache-check.json`
 against a private server named `cache-test` on port 5815.
 It checks interruption during reasoning and visible output, with and without
-reasoning replay, greedy/seeded sampling, and explicit cache bypass. Use
+reasoning replay, and greedy/seeded sampling. Use
 `--tools --discard-assistant` to exercise interrupted agent tool turns; add
 `--prefix-repetitions 5500` for a roughly 50K-token prefix.
 For persistence, enable `--cache-disk` before the check, restart the same server,
@@ -243,10 +243,11 @@ Add `--append-image` to introduce the image after a cached text turn, and
 `--reasoning-effort high` to check a specific thinking effort.
 Each case continues for a third turn; repeat `--case NAME` to select only the
 cases needed for a change.
-The check requires exact snapshot and matched-history replay. It separately
-reports equality to a fresh full prefill, whose different matrix shapes and
-prefill/decode history can change rounding; that comparison is not silently
-counted as an exact cache replay.
+The check requires exact snapshot and matched-history replay in memory. After a
+restart, sampled output may vary when a disk restore re-prefills a gap; greedy
+and zero-prefill restores still require equality. The report separates successful
+validation (`status`) from observed assistant-message equality (`exact`) and its
+requirement (`exact_required`). The SDK conversation suite checks cache bypass.
 
 ### Hardware compute queues
 

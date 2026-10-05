@@ -142,15 +142,19 @@ def main():
             # other prefill chunk shapes; greedy and exact restores cannot.
             if measured["prefill"] >= DISK_CHECKPOINT_STEP:
                 raise RuntimeError(f"{item['case']}: disk restore lost too much: {measured}")
-            exact = not item["request"]["temperature"] or measured["prefill"] == 0
-            if exact and digest(result) != item["sha256"]:
+            exact_required = not item["request"]["temperature"] or measured["prefill"] == 0
+            exact = digest(result) == item["sha256"]
+            if exact_required and not exact:
                 raise RuntimeError(f"{item['case']}: disk restore changed seeded output")
             if "followup" in item:
                 followup = call(args.url, item["followup"]["request"])
+                followup_exact = digest(followup) == item["followup"]["sha256"]
                 if metrics(followup)["cached"] < measured["cached"] or (
-                        exact and digest(followup) != item["followup"]["sha256"]):
+                        exact_required and not followup_exact):
                     raise RuntimeError(f"{item['case']}: disk-restored third turn differs")
-            report = {"case": item["case"], **measured, "exact": True}
+                exact = exact and followup_exact
+            report = {"case": item["case"], **measured, "status": "passed",
+                      "exact": exact, "exact_required": exact_required}
             reports.append(report)
             print(json.dumps(report), flush=True)
     else:
@@ -275,7 +279,8 @@ def main():
                           "drop_reasoning": args.drop_reasoning,
                           "rewritten_tool_reasoning": rewritten_tool_reasoning,
                           "append_image": args.append_image,
-                          "interrupt_seconds": elapsed, **measured, "exact": True,
+                          "interrupt_seconds": elapsed, **measured, "status": "passed",
+                          "exact": True, "exact_required": True,
                           "followup": {"request": followup_body,
                                        "sha256": digest(followup), **metrics(followup)}}
                 reports.append(report)
