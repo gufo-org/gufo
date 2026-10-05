@@ -451,6 +451,13 @@ may require more prefill after edits or rewinds. This is a preference within one
 store's index, not a per-conversation quota or a guarantee of retention across
 independent store instances. Further lineage retention work is tracked in #275.
 
+Restoring from disk can avoid creating intermediate RAM checkpoints below the
+restored position. A later request with `cache_prompt=false` may then need to
+create those checkpoints if they are still absent, whereas an earlier full
+prefill may already have left them in RAM. Cache bypass disables reuse of the
+prompt state, but existing intermediate snapshots still prevent redundant
+captures.
+
 ## What invalidates reuse
 
 Anything that changes the token prefix. In practice:
