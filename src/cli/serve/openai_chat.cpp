@@ -415,10 +415,6 @@ bool ParseTools(const json::Value* tools,
     *error = "'tools' must be an array";
     return false;
   }
-  if (output->size() + tools->size() > 128) {
-    *error = "'tools' supports at most 128 functions";
-    return false;
-  }
   for (const auto& item : tools->items()) {
     if (!item.is_object()) {
       *error = "'tools' entries must be objects";
@@ -517,6 +513,12 @@ bool ParseTools(const json::Value* tools,
     definition["type"] = "function";
     definition["function"] = std::move(function_obj);
     tool.definition_json = definition.dump();
+    // Counted per flattened function, so namespace recursion cannot exceed
+    // the cap by ordering hosted-adjacent entries around a full namespace.
+    if (output->size() >= 128) {
+      *error = "'tools' supports at most 128 functions";
+      return false;
+    }
     output->push_back(std::move(tool));
   }
   return true;

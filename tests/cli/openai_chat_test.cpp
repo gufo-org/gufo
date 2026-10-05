@@ -730,6 +730,32 @@ void TestResponsesClientCompatTolerances() {
            "A namespace without a tools array is rejected");
   }
   {
+    // The shared 128-function cap counts flattened functions at append time,
+    // so both orderings around a full namespace reject the 129th function.
+    std::string nested = R"({"type":"namespace","name":"crm","tools":[)";
+    for (int i = 0; i < 128; ++i) {
+      if (i != 0)
+        nested += ",";
+      nested += R"({"type":"function","name":"f)" + std::to_string(i) + "\"}";
+    }
+    nested += "]}";
+    const std::string outside = R"({"type":"function","name":"outside"})";
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[)" + nested + "]}"), &chat) &&
+               chat.tools.size() == 128,
+           "Exactly 128 functions flattened from a namespace are accepted");
+    for (const bool outside_first : {false, true}) {
+      const auto body = outside_first
+                            ? R"({"tools":[)" + outside + "," + nested + "]}"
+                            : R"({"tools":[)" + nested + "," + outside + "]}";
+      Expect(gufo::server::ParseOpenAiResponseControls(gufo::json::parse(body),
+                                                       &chat)
+                 .has_value(),
+             "Both boundary orderings reject the 129th flattened function");
+    }
+  }
+  {
     gufo::server::ChatRequest chat;
     Expect(
         gufo::server::ParseOpenAiResponseControls(
