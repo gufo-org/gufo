@@ -508,13 +508,23 @@ def compare(baseline, candidate):
                 if not groups or groups[-1][0] != label:
                     groups.append((label, []))
                 groups[-1][1].append(row)
-            histories = {}
+            histories, ordered = {}, []
             for label, group in groups:
                 history.append([label, sorted(row.get("request_sha256", "") for row in group
                                              if isinstance(row, dict))])
                 for row in group:
                     histories[id(row)] = digest(history)
-            for row in payload["requests"]:
+                # Identical simultaneous bodies can exchange leader/follower
+                # roles. Match their cache work, never their observed timings.
+                # Different bodies and different cohorts retain exact identity.
+                peers = {}
+                for row in group:
+                    peers.setdefault(row.get("request_sha256", ""), []).append(row)
+                for requests in peers.values():
+                    ordered.extend(sorted(requests, key=lambda row: (
+                        -row.get("metrics", {}).get("prefill_tokens", 0),
+                        row.get("metrics", {}).get("cached_tokens", 0))))
+            for row in ordered:
                 if not isinstance(row, dict) or row.get("status") not in ("complete", "disconnected"):
                     raise ValueError(f"unfinished/invalid request in {path}")
                 measured = row.get("metrics", {})

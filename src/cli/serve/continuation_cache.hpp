@@ -61,6 +61,12 @@ public:
   ContinuationSnapshot& operator=(ContinuationSnapshot&&) = delete;
 
   [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
+  /// Prefer an available state that still holds this snapshot's borrowed rows.
+  /// This is an allocation hint; every state must remain able to restore it.
+  [[nodiscard]] virtual bool PrefersState(
+      const ContinuationState&) const noexcept {
+    return false;
+  }
 };
 
 enum class SnapshotEventAction : std::uint8_t {

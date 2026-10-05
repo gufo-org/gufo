@@ -36,6 +36,7 @@ from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
 from system_injection import check_system_injection
 from cache_growth import check_cache_growth
+from cache_depth import check_cache_depth
 from cache_rotation import check_cache_rotation
 
 
@@ -2523,7 +2524,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
               "tool-reasoning", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-              "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
+              "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
               "system-injection")
 
 
@@ -2655,6 +2656,8 @@ def main():
                                                      args.context, args.speculative),
             "cache-edits": lambda: check_cache_edits(client, args.model, checks, chat_result),
             "cache-growth": lambda: check_cache_growth(client, args.model, checks, chat_result),
+            "cache-depth": lambda: check_cache_depth(
+                client, args.model, checks, chat_result, args.concurrency),
             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
             "cache-concurrency": lambda: check_cache_concurrency(
                 client, args.model, checks, chat_result, args.concurrency),

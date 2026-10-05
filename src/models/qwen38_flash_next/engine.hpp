@@ -32,6 +32,7 @@ namespace rocm {
 class DeviceModel;
 class Executor;
 class Session;
+class SnapshotState;
 }  // namespace rocm
 
 struct ModelOptions {
@@ -73,6 +74,7 @@ public:
   [[nodiscard]] bool IsStopToken(std::int32_t token) const noexcept;
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
   [[nodiscard]] std::uint32_t PrefillCapacity() const noexcept;
+  [[nodiscard]] std::uint32_t PrefillThroughCapacity() const noexcept;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
@@ -126,6 +128,13 @@ public:
   /// prefix with the current tokens, reprocesses the rest.
   [[nodiscard]] bool Sync(std::span<const std::int32_t> prompt,
                           std::string* error_msg = nullptr);
+  /// Prefills through a stable text boundary in the same forward, returning
+  /// a checkpoint of that boundary while the live session reaches prompt.
+  [[nodiscard]] bool SyncThrough(std::span<const std::int32_t> prompt,
+                                 std::uint32_t boundary,
+                                 std::unique_ptr<SessionSnapshot>* checkpoint,
+                                 std::string* error_msg = nullptr,
+                                 double* capture_ms = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
   struct DecodeResult {
@@ -198,11 +207,17 @@ public:
   static constexpr std::uint32_t kSnapshotPayloadVersion = 16;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
-  /// Captures the whole context (tokens, device caches and recurrent
-  /// state, draft-block state, last logits) into host memory. The
-  /// speculative length controller is preserved for stochastic replay.
+  [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
+      std::uint32_t position) const;
+  /// Captures the whole context and speculative length controller. Mutable
+  /// state is copied immediately; append-only cache rows borrow this session
+  /// until a rewind, reset, destruction, fork or byte reader needs them.
+  enum class SnapshotMode { kBorrowed, kMaterialized };
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
-      std::string* error_msg = nullptr) const;
+      std::string* error_msg = nullptr,
+      SnapshotMode mode = SnapshotMode::kBorrowed) const;
+  [[nodiscard]] bool OwnsSnapshot(
+      const SessionSnapshot& snapshot) const noexcept;
   /// Replaces this session's context with a snapshot of the same model.
   /// Image snapshots require matching consumed images via ConfigureVision;
   /// the attached prompt may append future images. Pixels are not serialized.
@@ -217,7 +232,20 @@ private:
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
 
   bool Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
-            bool prefill = false);
+            bool prefill = false, std::uint32_t boundary = 0,
+            std::unique_ptr<SessionSnapshot>* checkpoint = nullptr,
+            double* capture_ms = nullptr);
+  bool SyncImpl(std::span<const std::int32_t> prompt, std::string* error_msg,
+                std::uint32_t boundary,
+                std::unique_ptr<SessionSnapshot>* checkpoint,
+                double* capture_ms = nullptr);
+  std::unique_ptr<SessionSnapshot> SaveSnapshotImpl(
+      const rocm::Session& state, std::span<const std::int32_t> tokens,
+      std::span<const float> logits, std::uint32_t hidden_rows,
+      std::string* error_msg, SnapshotMode mode) const;
+  bool RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
+                           const rocm::SnapshotState* deferred,
+                           std::string* error_msg);
   /// Trunk rows the draft block may still read: [hidden_base_, size).
   [[nodiscard]] std::uint32_t KeptHiddenRows() const noexcept;
   bool DraftCatchUp(std::int32_t next_token, bool propose,
@@ -258,27 +286,31 @@ private:
   [[nodiscard]] bool MtpEnabled() const noexcept;
 };
 
-/// Immutable host copy of a session context. The same bytes restore in
-/// memory and persist to disk.
+/// Immutable session checkpoint. Committed cache rows may still reside in
+/// the source session. The complete byte form restores in memory and on disk.
 class SessionSnapshot final {
 public:
-  ~SessionSnapshot() = default;
+  ~SessionSnapshot();
   SessionSnapshot(const SessionSnapshot&) = delete;
   SessionSnapshot& operator=(const SessionSnapshot&) = delete;
   SessionSnapshot(SessionSnapshot&&) = delete;
   SessionSnapshot& operator=(SessionSnapshot&&) = delete;
 
+  /// Complete payload size, including borrowed rows, for cache admission.
   [[nodiscard]] std::uint64_t SizeBytes() const noexcept { return size_; }
-  [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept {
-    return {data_.get(), size_};
-  }
+  /// Frozen device storage, counting each shared backing block once.
+  /// Borrowed live rows and allocator reservations are excluded.
+  [[nodiscard]] std::uint64_t DeviceBytes() const;
+  /// Materializes borrowed rows; may throw on a failed device transfer.
+  [[nodiscard]] std::span<const std::uint8_t> bytes() const;
   [[nodiscard]] bool CopyTo(std::span<std::uint8_t> destination) const noexcept;
 
 private:
   explicit SessionSnapshot(std::uint64_t size);
 
-  std::unique_ptr<std::uint8_t[]> data_;
+  std::shared_ptr<std::uint8_t[]> data_;
   std::uint64_t size_{0};
+  std::shared_ptr<rocm::SnapshotState> deferred_;
 
   friend class Session;
 };

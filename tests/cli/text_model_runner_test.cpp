@@ -475,6 +475,60 @@ public:
   }
 };
 
+class InPassRunner final : public SnapshotRunner {
+public:
+  using SnapshotRunner::SnapshotRunner;
+  TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = SnapshotRunner::Descriptor();
+    descriptor.capabilities.in_pass_checkpoint = true;
+    return descriptor;
+  }
+  std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState&, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::size_t boundary) const override {
+    if (boundary <= offset ||
+        boundary >= std::min(prompt.size(), offset + budget))
+      return std::nullopt;
+    return sizeof(FakeSnapshot);
+  }
+  TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary,
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint) const override {
+    ++stats_->snapshot_captures;
+    *checkpoint = std::make_unique<FakeSnapshot>(boundary, 0, 90);
+    auto step = FakeRunner::Prefill(state, prompt, offset, budget);
+    step.checkpoint_ms = 2;
+    return step;
+  }
+};
+
+void TestInPassStableCheckpoint() {
+  auto stats = std::make_shared<FakeStats>();
+  TextRunnerPool pool(std::make_shared<InPassRunner>(stats), 1);
+  auto first = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  const auto step = first.Prefill(64);
+  Expect(step.consumed_tokens == 5 && step.decode_ready,
+         "in-pass checkpoint completes framing in the same forward");
+  Expect(stats->snapshot_captures == 1 &&
+             stats->prefill_spans == std::vector<std::size_t>{5},
+         "one prefill captures the stable boundary before mutation");
+  const auto commit = first.Commit();
+  Expect(commit.snapshot_ms >= 2,
+         "in-pass capture contributes to snapshot phase timing");
+  auto second = pool.Acquire({1, 2, 3, 50, 51, 7, 40, 41}, {}, {}, {}, true, 6);
+  Expect(second.cached_prompt_tokens() == 3,
+         "rewritten framing restores the in-pass boundary");
+  Expect(second.Prefill(64).decode_ready,
+         "warm rewritten turn captures its next boundary in one pass");
+  second.Commit();
+  auto third = pool.Acquire({1, 2, 3, 50, 51, 7, 60, 61}, {}, {}, {}, true, 6);
+  Expect(third.cached_prompt_tokens() == 6,
+         "the stable checkpoint advances on warm turns");
+  third.Invalidate();
+}
+
 class PersistentSnapshotRunner final : public SnapshotRunner {
 public:
   std::function<void()> before_serialize;
@@ -2023,6 +2077,7 @@ int main() {
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.
   ::setenv("NO_COLOR", "1", 1);
+  TestInPassStableCheckpoint();
   TestNewImageGetsAStableCheckpoint();
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();

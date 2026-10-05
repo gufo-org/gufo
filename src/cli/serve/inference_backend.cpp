@@ -2378,6 +2378,13 @@ public:
     return static_cast<std::size_t>(snapshot->SizeBytes());
   }
 
+  [[nodiscard]] bool PrefersState(
+      const ContinuationState& state) const noexcept override {
+    const auto* flash =
+        dynamic_cast<const QwenFlashNextTextRunnerState*>(&state);
+    return snapshot && flash && flash->session().OwnsSnapshot(*snapshot);
+  }
+
   std::shared_ptr<QwenFlashNextModel> model;
   std::unique_ptr<models::qwen38_flash_next::SessionSnapshot> snapshot;
   std::size_t position;
@@ -2443,6 +2450,7 @@ public:
                 .batched_multi_token_decode = use_mtp_,
                 .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
                 .prefix_reuse = true,
+                .in_pass_checkpoint = true,
             },
         .persistence = persistence_,
     };
@@ -2456,7 +2464,8 @@ public:
       const auto deferred = model_->DeferredScratchBytes();
       capacity = free_bytes > deferred ? free_bytes - deferred : 0;
     }
-    // Snapshots live in host memory, not in the device state pool.
+    // Admission charges complete snapshot payloads. Flash-Next can retain
+    // mutable state and protected K/V rows in private device storage.
     return {
         .resident_weights_bytes = model_->ResidentBytes(),
         .state_capacity_bytes = capacity,
@@ -2575,6 +2584,48 @@ public:
         .consumed_tokens = consumed,
         .decode_ready = next_position == prompt.size(),
     };
+  }
+
+  [[nodiscard]] std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::size_t boundary) const override {
+    const auto& qfn = RequireQwenFlashNextState(state);
+    const auto consumed = std::min<std::size_t>(
+        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
+    if (boundary <= offset + 1 || boundary >= offset + consumed ||
+        offset + consumed - boundary > 8)
+      return std::nullopt;
+    const auto bytes = qfn.session().PrefillCheckpointBytes(
+        static_cast<std::uint32_t>(boundary));
+    return bytes ? std::optional<std::size_t>(bytes) : std::nullopt;
+  }
+
+  [[nodiscard]] TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary,
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint) const override {
+    auto& qfn = RequireQwenFlashNextState(state);
+    if (offset != qfn.position())
+      throw std::logic_error("in-pass checkpoint offset does not match state");
+    const auto consumed = std::min<std::size_t>(
+        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
+    const auto next_position = offset + consumed;
+    const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
+    std::unique_ptr<models::qwen38_flash_next::SessionSnapshot> captured;
+    std::string error;
+    double capture_ms = 0;
+    if (!qfn.session().SyncThrough(prefix, static_cast<std::uint32_t>(boundary),
+                                   &captured, &error, &capture_ms)) {
+      qfn.set_position(0);
+      throw std::runtime_error("in-pass checkpoint failed: " + error);
+    }
+    qfn.set_position(next_position);
+    *checkpoint = std::make_unique<QwenFlashNextTextRunnerSnapshot>(
+        model_, std::move(captured), boundary);
+    return {.consumed_tokens = consumed,
+            .decode_ready = next_position == prompt.size(),
+            .checkpoint_ms = capture_ms};
   }
 
   // The engine stops before committing EOS when the request enables it.
@@ -2781,9 +2832,22 @@ public:
 
   [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
       const TextRunnerState& state) const override {
+    return CaptureSnapshot(state,
+                           QwenFlashNextSession::SnapshotMode::kBorrowed);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> SnapshotForPersistence(
+      const TextRunnerState& state) const override {
+    return CaptureSnapshot(state,
+                           QwenFlashNextSession::SnapshotMode::kMaterialized);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> CaptureSnapshot(
+      const TextRunnerState& state,
+      QwenFlashNextSession::SnapshotMode mode) const {
     const auto& qfn = RequireQwenFlashNextState(state);
     std::string error;
-    auto snapshot = qfn.session().SaveSnapshot(&error);
+    auto snapshot = qfn.session().SaveSnapshot(&error, mode);
     if (snapshot == nullptr) {
       throw std::runtime_error("Qwen3.8-Flash-Next snapshot failed: " + error);
     }

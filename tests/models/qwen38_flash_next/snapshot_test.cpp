@@ -2,7 +2,9 @@
 // like the session it was captured from, in memory and through the
 // persistent byte form, at a prompt boundary and mid-decode.
 #include <chrono>
+#include <cmath>
 #include <cstring>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -68,6 +70,241 @@ double Millis(std::chrono::steady_clock::time_point start) {
       .count();
 }
 
+std::vector<std::uint8_t> Payload(const qfn::SessionSnapshot& snapshot) {
+  std::vector<std::uint8_t> result(snapshot.SizeBytes());
+  Require(snapshot.CopyTo(result), "materialize snapshot");
+  return result;
+}
+
+std::vector<std::uint8_t> Payload(qfn::Session& session) {
+  std::string error;
+  auto snapshot = session.SaveSnapshot(&error);
+  Require(snapshot != nullptr, error);
+  return Payload(*snapshot);
+}
+
+void CheckPrefillCheckpoint(const std::shared_ptr<qfn::Model>& model,
+                            std::span<const std::int32_t> prompt,
+                            gufo::core::SessionMode mode, std::size_t warm = 0,
+                            std::uint32_t suffix = 7) {
+  std::string error;
+  auto source = model->CreateSession(mode, 8192, &error);
+  auto whole = model->CreateSession(mode, 8192, &error);
+  auto split = model->CreateSession(mode, 8192, &error);
+  Require(source && whole && split, error);
+  if (warm)
+    Require(source->Sync(prompt.first(warm), &error) &&
+                whole->Sync(prompt.first(warm), &error) &&
+                split->Sync(prompt.first(warm), &error),
+            error);
+  const auto boundary = static_cast<std::uint32_t>(prompt.size() - suffix);
+  const auto claim = source->PrefillCheckpointBytes(boundary);
+  std::unique_ptr<qfn::SessionSnapshot> checkpoint;
+  double capture_ms = -1;
+  Require(
+      source->SyncThrough(prompt, boundary, &checkpoint, &error, &capture_ms),
+      error);
+  Require(std::isfinite(capture_ms) && capture_ms > 0,
+          "in-pass checkpoint capture time was not reported");
+  Require(checkpoint != nullptr, "in-pass checkpoint was not returned");
+  Require(checkpoint->SizeBytes() == claim,
+          "in-pass checkpoint differs from its admission claim");
+  Require(whole->Sync(prompt.first(boundary), &error) &&
+              whole->Sync(prompt, &error),
+          error);
+  Require(source->Logits().size() == whole->Logits().size() &&
+              std::memcmp(source->Logits().data(), whole->Logits().data(),
+                          source->Logits().size_bytes()) == 0,
+          "in-pass checkpoint changed split-pass logits");
+  const auto continued =
+      Decode(*source, 8,
+             {.temperature = 0.8F, .top_k = 20, .top_p = 0.95F, .seed = 73}, 8);
+  RequireSame(
+      continued,
+      Decode(*whole, 8,
+             {.temperature = 0.8F, .top_k = 20, .top_p = 0.95F, .seed = 73}, 8),
+      "in-pass sampled continuation");
+  Require(std::memcmp(source->Logits().data(), whole->Logits().data(),
+                      source->Logits().size_bytes()) == 0,
+          "in-pass sampled continuation changed logits");
+  Require(split->Sync(prompt.first(boundary), &error), error);
+  const auto expected = Payload(*split);
+  source->Reset();
+  const auto actual = Payload(*checkpoint);
+  Require(source->RestoreSnapshot(*checkpoint, &error), error);
+  Require(Payload(*source) == actual,
+          "in-pass checkpoint did not survive source reset");
+  Require(actual == expected,
+          "in-pass boundary differs from a pass ending there");
+  auto raw = model->CreateSession(mode, 8192, &error);
+  Require(raw && raw->RestoreSnapshot(actual, &error), error);
+  Require(source->Sync(prompt, &error), error);
+  Require(raw->Sync(prompt, &error), error);
+  Require(Payload(*source) == Payload(*raw),
+          "borrowed and serialized boundaries resumed differently");
+  Require(split->Sync(prompt, &error), error);
+  Require(Payload(*source) == Payload(*split),
+          "restored boundary did not resume exactly");
+  std::cout << "in-pass checkpoint mode=" << static_cast<int>(mode)
+            << " tokens=" << prompt.size() << " boundary=" << boundary
+            << " warm=" << warm << " restore exact\n";
+}
+
+void CheckBorrowedSnapshots(const std::shared_ptr<qfn::Model>& model,
+                            std::span<const std::int32_t> prompt,
+                            gufo::core::SessionMode mode) {
+  std::string error;
+  auto source = model->CreateSession(mode, 8192, &error);
+  Require(source != nullptr, error);
+  Require(source->Sync(prompt, &error), error);
+  const auto frontier_bytes = Payload(*source);
+  auto eager =
+      source->SaveSnapshot(&error, qfn::Session::SnapshotMode::kMaterialized);
+  Require(eager != nullptr, error);
+  Require(Payload(*eager) == frontier_bytes,
+          "export capture differs from borrowed checkpoint bytes");
+  auto frontier = source->SaveSnapshot(&error);
+  Require(frontier != nullptr, error);
+  source->Reset();
+  Require(source->RestoreSnapshot(*frontier, &error), error);
+  Require(Payload(*source) == frontier_bytes,
+          "rewind after logical reset changed checkpoint rows");
+
+  std::vector<std::int32_t> extended(prompt.begin(), prompt.end());
+  extended.insert(extended.end(), prompt.begin(), prompt.begin() + 9);
+  Require(source->Sync(extended, &error), error);
+  const auto boundary_bytes = Payload(*source);
+  auto boundary = source->SaveSnapshot(&error);
+  Require(boundary != nullptr, error);
+  extended.insert(extended.end(), prompt.begin() + 9, prompt.begin() + 16);
+  Require(source->Sync(extended, &error), error);
+
+  // Rewind without reading either borrowed payload. Preserve B's suffix,
+  // overwrite it with a different branch, then restore B over that branch.
+  Require(source->RestoreSnapshot(*frontier, &error), error);
+  std::vector<std::int32_t> branch(prompt.begin(), prompt.end());
+  branch.insert(branch.end(), prompt.begin() + 20, prompt.begin() + 36);
+  Require(source->Sync(branch, &error), error);
+  auto other_branch = source->SaveSnapshot(&error);
+  Require(other_branch != nullptr, error);
+  const auto other_bytes = Payload(*source);
+  auto fork = model->CreateSession(mode, 8192, &error);
+  Require(fork != nullptr, error);
+  Require(fork->RestoreSnapshot(*boundary, &error), error);
+  Require(Payload(*fork) == boundary_bytes,
+          "foreign fork lost its live prefix or detached tail");
+  auto fork_boundary = fork->SaveSnapshot(&error);
+  Require(fork_boundary != nullptr, error);
+  // A fresh checkpoint still has no host KV. Fork from it while the source
+  // continues above those rows; neither path may materialize its host prefix.
+  auto live_branch = source->SaveSnapshot(&error);
+  Require(live_branch != nullptr, error);
+  auto fork_reader = std::async(std::launch::async, [&] {
+    std::string fork_error;
+    Require(fork->RestoreSnapshot(*live_branch, &fork_error), fork_error);
+    return Payload(*fork);
+  });
+  auto appended = branch;
+  appended.insert(appended.end(), prompt.begin() + 36, prompt.begin() + 40);
+  Require(source->Sync(appended, &error), error);
+  Require(fork_reader.get() == other_bytes,
+          "concurrent device fork changed committed checkpoint rows");
+  // Retained shared rows still belong to the target session: resetting and
+  // overwriting that prefix must protect them even without another capture.
+  fork->Reset();
+  Require(fork->Sync(prompt.subspan(20, 32), &error), error);
+  Require(Payload(*fork_boundary) == boundary_bytes,
+          "reset after sibling fork overwrote retained checkpoint rows");
+  Require(fork->RestoreSnapshot(*fork_boundary, &error), error);
+  Require(Payload(*fork) == boundary_bytes,
+          "sibling fork checkpoint did not restore its protected suffix");
+  Require(source->RestoreSnapshot(*boundary, &error), error);
+  Require(Payload(*source) == boundary_bytes,
+          "borrowed restore differs from complete snapshot");
+  Require(source->RestoreSnapshot(*other_branch, &error), error);
+  Require(Payload(*source) == other_bytes,
+          "second branch lost its overwritten rows");
+
+  // Disk/fork readers can copy committed rows while this session appends.
+  auto reader =
+      std::async(std::launch::async, [&] { return Payload(*frontier); });
+  branch.insert(branch.end(), prompt.begin() + 36, prompt.begin() + 52);
+  Require(source->Sync(branch, &error), error);
+  Require(reader.get() == frontier_bytes,
+          "concurrent append changed borrowed snapshot");
+  source->Reset();
+  Require(Payload(*boundary) == boundary_bytes,
+          "reset discarded borrowed checkpoint rows");
+  Require(Payload(*other_branch) == other_bytes,
+          "reset discarded a detached branch");
+
+  Require(source->Sync(prompt, &error), error);
+  auto overwritten = source->SaveSnapshot(&error);
+  Require(overwritten != nullptr, error);
+  source->Reset();
+  Require(source->Sync(prompt.subspan(20, 32), &error), error);
+  Require(Payload(*overwritten) == frontier_bytes,
+          "first write after reset overwrote a borrowed checkpoint");
+  Require(source->RestoreSnapshot(*overwritten, &error), error);
+  auto at_decode = source->SaveSnapshot(&error);
+  Require(at_decode != nullptr, error);
+  const auto decode_bytes = Payload(*source);
+  auto decode_reader =
+      std::async(std::launch::async, [&] { return Payload(*at_decode); });
+  (void)Decode(*source, 16,
+               {.temperature = 0.8F, .top_k = 40, .top_p = 0.9F, .seed = 7}, 8);
+  Require(decode_reader.get() == decode_bytes,
+          "concurrent graph capture/decode changed checkpoint bytes");
+
+  auto survivor = source->SaveSnapshot(&error);
+  Require(survivor != nullptr, error);
+  const auto survivor_bytes = Payload(*source);
+  auto final_reader =
+      std::async(std::launch::async, [&] { return Payload(*survivor); });
+  source.reset();
+  Require(final_reader.get() == survivor_bytes,
+          "concurrent source destruction changed borrowed rows");
+  Require(Payload(*survivor) == survivor_bytes,
+          "source destruction discarded borrowed rows");
+  Require(fork->RestoreSnapshot(*survivor, &error), error);
+  Require(Payload(*fork) == survivor_bytes,
+          "foreign restore after source destruction lost checkpoint rows");
+  std::cout << "borrowed checkpoints: rewind, branches, reader, reset, "
+               "destruction pass\n";
+}
+
+void CheckCheckpointRetention(const std::shared_ptr<qfn::Model>& model,
+                              std::span<const std::int32_t> prompt,
+                              gufo::core::SessionMode mode) {
+  std::string error;
+  auto source = model->CreateSession(mode, 8192, &error);
+  Require(source && source->Sync(prompt.first(32), &error), error);
+  const auto expected = Payload(*source);
+  auto small = source->SaveSnapshot(&error);
+  Require(small != nullptr, error);
+  Require(source->OwnsSnapshot(*small), "checkpoint lost its source identity");
+  const auto before = small->DeviceBytes();
+  Require(source->Sync(prompt, &error), error);
+  auto large = source->SaveSnapshot(&error);
+  Require(large != nullptr, error);
+  source->Reset();
+  Require(source->Sync(prompt.first(16), &error), error);
+  Require(large->DeviceBytes() > before + (80ULL << 20),
+          "deep checkpoint did not preserve its overwritten rows");
+  large.reset();
+  // Count owned backing blocks rather than HIP's global heap cache. A short
+  // prefix may retain bounded packing slack, but never the deep-only rows.
+  const auto after = small->DeviceBytes();
+  Require(after <= before + (8ULL << 20),
+          "short checkpoint retained the discarded deep allocation");
+  Require(source->RestoreSnapshot(*small, &error), error);
+  Require(Payload(*source) == expected,
+          "discarding a deep checkpoint changed its shared short prefix");
+  std::cout << "checkpoint retention mode=" << static_cast<int>(mode)
+            << " additional_bytes=" << after - before
+            << " short prefix exact\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -95,6 +332,33 @@ int main(int argc, char** argv) {
     std::vector<std::int32_t> prompt(4095);
     for (std::size_t i = 0; i < prompt.size(); ++i)
       prompt[i] = pattern[i % pattern.size()];
+    CheckPrefillCheckpoint(model, prompt,
+                           gufo::core::SessionMode::kAutoregressive);
+    CheckPrefillCheckpoint(model, prompt,
+                           gufo::core::SessionMode::kSpeculative);
+    std::vector<std::int32_t> overflow_prompt(prompt);
+    overflow_prompt.insert(overflow_prompt.end(), prompt.begin(),
+                           prompt.begin() + 2051);
+    std::vector<std::int32_t> warm_prompt(prompt);
+    warm_prompt.insert(warm_prompt.end(), prompt.begin(), prompt.begin() + 33);
+    for (const auto mode : {gufo::core::SessionMode::kAutoregressive,
+                            gufo::core::SessionMode::kSpeculative}) {
+      CheckPrefillCheckpoint(model, warm_prompt, mode, prompt.size());
+      CheckPrefillCheckpoint(model, overflow_prompt, mode, prompt.size());
+      CheckPrefillCheckpoint(
+          model, std::span<const std::int32_t>(prompt).first(2040), mode);
+      CheckPrefillCheckpoint(model, prompt, mode, 0, 0);
+      CheckPrefillCheckpoint(
+          model, std::span<const std::int32_t>(warm_prompt).first(2055), mode);
+    }
+    CheckBorrowedSnapshots(model, prompt,
+                           gufo::core::SessionMode::kAutoregressive);
+    CheckBorrowedSnapshots(model, prompt,
+                           gufo::core::SessionMode::kSpeculative);
+    CheckCheckpointRetention(model, prompt,
+                             gufo::core::SessionMode::kAutoregressive);
+    CheckCheckpointRetention(model, prompt,
+                             gufo::core::SessionMode::kSpeculative);
     const sampling::SamplingConfig config{
         .temperature = 0.8F, .top_k = 40, .top_p = 0.9F, .seed = 7};
     constexpr std::size_t kTokens = 48;

@@ -210,6 +210,10 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     const auto& item = items.front();
     return MtpForward(*item.session, item.tokens, item.hidden_row, {}, error);
   }
+  for (const auto& item : items)
+    if (!item.session->Cancelled())
+      item.session->PreserveSnapshots(item.session->position_,
+                                      item.session->mtp_.position);
   if (!AllocateBatch(error) ||
       (batch_controls_ == nullptr &&
        !Check(hipHostMalloc(&batch_controls_,
@@ -686,6 +690,9 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   if (!AnyActive(items))
     return true;
   for (const auto& item : items) {
+    if (!item.session->Cancelled())
+      item.session->PreserveSnapshots(item.session->position_,
+                                      item.session->mtp_.position);
     if (item.speculative &&
         !EnsureRollback(*item.session, item.tokens.size() - 1, error))
       return false;

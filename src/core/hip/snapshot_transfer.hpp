@@ -25,9 +25,17 @@ public:
 
   void Copy(void* destination, const void* source, std::size_t bytes,
             hipMemcpyKind kind = hipMemcpyDeviceToHost) {
-    Check(hipMemcpyAsync(destination, source, bytes, kind, stream_));
-    Check(hipStreamSynchronize(stream_));
+    Enqueue(destination, source, bytes, kind);
+    Finish();
   }
+
+  /// Queue independent frozen regions, then Finish before publishing their
+  /// snapshot or mutating/freeing any source or destination storage.
+  void Enqueue(void* destination, const void* source, std::size_t bytes,
+               hipMemcpyKind kind = hipMemcpyDeviceToHost) {
+    Check(hipMemcpyAsync(destination, source, bytes, kind, stream_));
+  }
+  void Finish() { Check(hipStreamSynchronize(stream_)); }
 
   void Copy2D(void* destination, std::size_t destination_pitch,
               const void* source, std::size_t source_pitch, std::size_t width,

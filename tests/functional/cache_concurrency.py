@@ -1,8 +1,9 @@
 """Check concurrent requests that share a prompt prefix prefill it once.
 
 Requests arriving together wait for a resident request to publish the prefix
-they share, then restore it. Each group sends its requests at the same moment,
-checks answers and prefill work, and compares answers with uncached controls.
+they share, then restore it. Each group spaces request admissions by 20 ms so its leader and arrival order
+match across builds while the long prefills remain concurrent. It checks answers
+and prefill work, and compares answers with uncached controls.
 Groups that share too little, or nothing, must not wait at all.
 """
 
@@ -59,9 +60,10 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
             body["extra_body"] = {"cache_prompt": False}
         return body
 
-    def chat(label, body, streaming=False):
+    def chat(label, body, streaming=False, record=True):
         result = chat_result(client, body, streaming)
-        checks[label] = result
+        if record:
+            checks[label] = result
         print(f"CHECK {label}", file=sys.stderr, flush=True)
         usage = result["usage"]
         total, reused, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
@@ -77,10 +79,17 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
 
         def send(index):
             barrier.wait()
-            return chat(f"{label}_{index}", bodies[index], index in streaming)
+            time.sleep(index * .020)
+            return chat(f"{label}_{index}", bodies[index], index in streaming, record=False)
 
         with ThreadPoolExecutor(max_workers=len(bodies)) as pool:
-            return list(pool.map(send, range(len(bodies))))
+            results = list(pool.map(send, range(len(bodies))))
+        # Mark completed peers as one cohort on the owner thread. A worker
+        # marking here can assign its label to another completed request.
+        checks[label] = results
+        for index, result in enumerate(results):
+            checks[f"{label}_{index}"] = result
+        return results
 
     def answer(result, code):
         assert result["text"].strip() == code and not result["tools"] \

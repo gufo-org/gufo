@@ -535,6 +535,11 @@ std::unique_ptr<TextRunnerSnapshot> TextModelRunner::Snapshot(
   throw std::logic_error("text runner does not support snapshots");
 }
 
+std::unique_ptr<TextRunnerSnapshot> TextModelRunner::SnapshotForPersistence(
+    const TextRunnerState& state) const {
+  return Snapshot(state);
+}
+
 std::size_t TextModelRunner::SnapshotPayloadBytes(
     const TextRunnerState&) const {
   throw std::logic_error("text runner does not support snapshot sizing");
@@ -756,35 +761,39 @@ struct TextRunnerPool::Request::Impl {
     }
     if (prompt_snapshot_attempted && prefill_offset == snapshot_tokens.size() &&
         snapshot_tokens.size() < prompt.size()) {
-      // Keep both the branching fallback and the complete prompt. The latter
-      // is captured after first-token publication, as for ordinary requests.
-      // Admission may refuse it without discarding the fallback.
-      if (prompt_snapshot && retain_snapshot) {
-        try {
-          snapshot_metrics.snapshot_bytes +=
-              lease.PublishSnapshot(snapshot_tokens, std::move(prompt_snapshot),
-                                    fallback_position != 0);
-        } catch (...) {
-          lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure,
-                             snapshot_bytes, snapshot_tokens.size());
-        }
-      }
-      prompt_snapshot.reset();
-      retain_snapshot = false;
-      fallback_position = snapshot_tokens.size();
-      // Take this turn's stable boundary next, before the complete prompt.
-      // The boundary is a prefix of whatever the client sends next, while the
-      // complete prompt ends in assistant framing the client may rewrite.
-      if (stable_prefix_position > snapshot_tokens.size() &&
-          stable_prefix_position < prompt.size()) {
-        snapshot_tokens.assign(prompt.begin(),
-                               prompt.begin() + stable_prefix_position);
-        stable_prefix_position = 0;
-      } else {
-        snapshot_tokens = prompt;
-      }
-      prompt_snapshot_attempted = false;
+      AdvancePromptTarget();
     }
+  }
+
+  void AdvancePromptTarget() noexcept {
+    // Keep both the branching fallback and the complete prompt. The latter
+    // is captured after first-token publication, as for ordinary requests.
+    // Admission may refuse it without discarding the fallback.
+    if (prompt_snapshot && retain_snapshot) {
+      try {
+        snapshot_metrics.snapshot_bytes +=
+            lease.PublishSnapshot(snapshot_tokens, std::move(prompt_snapshot),
+                                  fallback_position != 0);
+      } catch (...) {
+        lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure, snapshot_bytes,
+                           snapshot_tokens.size());
+      }
+    }
+    prompt_snapshot.reset();
+    retain_snapshot = false;
+    fallback_position = snapshot_tokens.size();
+    // Take this turn's stable boundary next, before the complete prompt.
+    // The boundary is a prefix of whatever the client sends next, while the
+    // complete prompt ends in assistant framing the client may rewrite.
+    if (stable_prefix_position > snapshot_tokens.size() &&
+        stable_prefix_position < prompt.size()) {
+      snapshot_tokens.assign(prompt.begin(),
+                             prompt.begin() + stable_prefix_position);
+      stable_prefix_position = 0;
+    } else {
+      snapshot_tokens = prompt;
+    }
+    prompt_snapshot_attempted = false;
   }
 
   void StartPromptSnapshot(bool wait) noexcept {
@@ -867,9 +876,12 @@ struct TextRunnerPool::Request::Impl {
       // A warm prefill must await its fallback before mutating recurrent
       // state. Run that copy on this worker instead of starting a thread
       // only to join it. Post-token captures remain asynchronous.
-      snapshot_future = std::async(
-          wait ? std::launch::deferred : std::launch::async,
-          [owner = runner, state] { return owner->Snapshot(*state); });
+      snapshot_future =
+          std::async(wait ? std::launch::deferred : std::launch::async,
+                     [owner = runner, state, persist = bool(disk_store)] {
+                       return persist ? owner->SnapshotForPersistence(*state)
+                                      : owner->Snapshot(*state);
+                     });
     } catch (...) {
       disk_capture.reset();
       if (retain_snapshot)
@@ -996,7 +1008,8 @@ struct TextRunnerPool::Request::Impl {
       if (!reserved && !persistence)
         return;
       std::shared_ptr<const TextRunnerSnapshot> snapshot =
-          runner->Snapshot(state);
+          persistence ? runner->SnapshotForPersistence(state)
+                      : runner->Snapshot(state);
       failed = !snapshot;
       if (snapshot && reserved) {
         snapshot_metrics.snapshot_bytes += lease.PublishSnapshot(
@@ -1238,9 +1251,6 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   // Direct callers join any capture before mutating its borrowed state.
   impl_->CapturePromptSnapshot();
   const auto snapshot_position = impl_->snapshot_tokens.size();
-  if (impl_->prefill_offset < snapshot_position)
-    max_input_tokens =
-        std::min(max_input_tokens, snapshot_position - impl_->prefill_offset);
   while (!impl_->boundaries.empty() &&
          impl_->boundaries.front() <= impl_->prefill_offset) {
     impl_->boundaries.erase(impl_->boundaries.begin());
@@ -1256,11 +1266,36 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     max_input_tokens = std::min(
         max_input_tokens, impl_->checkpoints.front() - impl_->prefill_offset);
 
+  auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
+  bool in_pass = false;
+  if (!impl_->disk_store && !impl_->prompt_snapshot_attempted &&
+      impl_->prefill_offset < snapshot_position &&
+      snapshot_position < impl_->prompt.size() &&
+      impl_->runner->Descriptor().capabilities.in_pass_checkpoint) {
+    const auto bytes = impl_->runner->PrefillCheckpointBytes(
+        state, impl_->prompt, impl_->prefill_offset, max_input_tokens,
+        snapshot_position);
+    if (bytes) {
+      in_pass = impl_->lease.TryReserveSnapshot(
+          *bytes, snapshot_position,
+          impl_->retain_fallback && impl_->fallback_position == 0,
+          SnapshotPurpose::kContinuation, impl_->snapshot_tokens);
+      if (in_pass) {
+        impl_->snapshot_bytes = *bytes;
+        impl_->retain_snapshot = true;
+        impl_->prompt_snapshot_attempted = true;
+      }
+    }
+  }
+  if (!in_pass && impl_->prefill_offset < snapshot_position)
+    max_input_tokens =
+        std::min(max_input_tokens, snapshot_position - impl_->prefill_offset);
+
   const std::size_t remaining = impl_->prompt.size() - impl_->prefill_offset;
   impl_->state_reusable = false;
   // Complete the model frontier at the cache boundary, including logits and
   // draft catch-up. Its snapshot can then be restored independently.
-  auto frontier = impl_->prefill_offset < snapshot_position
+  auto frontier = !in_pass && impl_->prefill_offset < snapshot_position
                       ? snapshot_position
                       : impl_->prompt.size();
   if (!impl_->checkpoints.empty())
@@ -1269,9 +1304,13 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     frontier = std::min(frontier, impl_->boundaries.front());
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
-  auto step = impl_->runner->Prefill(
-      dynamic_cast<TextRunnerState&>(impl_->lease.state()), model_prompt,
-      impl_->prefill_offset, max_input_tokens);
+  std::unique_ptr<TextRunnerSnapshot> captured;
+  auto step =
+      in_pass ? impl_->runner->PrefillThrough(
+                    state, model_prompt, impl_->prefill_offset,
+                    max_input_tokens, snapshot_position, &captured)
+              : impl_->runner->Prefill(state, model_prompt,
+                                       impl_->prefill_offset, max_input_tokens);
   const std::size_t maximum_consumed = std::min(remaining, max_input_tokens);
   if (step.consumed_tokens == 0 || step.consumed_tokens > maximum_consumed) {
     throw std::runtime_error(
@@ -1287,6 +1326,19 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   impl_->decode_ready = reached_frontier;
   step.decode_ready = reached_frontier;
   impl_->state_reusable = true;
+  if (in_pass) {
+    impl_->snapshot_metrics.snapshot_ms += step.checkpoint_ms;
+    if (!captured || impl_->prefill_offset <= snapshot_position ||
+        captured->PayloadBytes() != impl_->snapshot_bytes) {
+      impl_->lease.SkipSnapshot(SnapshotEventReason::kReservationMismatch,
+                                captured ? captured->PayloadBytes() : 0,
+                                snapshot_position);
+      impl_->retain_snapshot = false;
+    } else {
+      impl_->prompt_snapshot = std::move(captured);
+    }
+    impl_->AdvancePromptTarget();
+  }
   if (!reached_frontier && impl_->prefill_offset == snapshot_position)
     impl_->CapturePromptSnapshot(false);
   const bool history = !impl_->checkpoints.empty() &&

@@ -1,8 +1,5 @@
 #include "src/models/qwen38_flash_next/engine.hpp"
 
-#include <sys/mman.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -10,7 +7,6 @@
 #include <cstring>
 #include <limits>
 #include <optional>
-#include <thread>
 #include <type_traits>
 
 #include "src/core/gguf_reader.hpp"
@@ -139,7 +135,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   rocm::Executor::Options exec;
-  exec.max_batch = m->PrefillCapacity();
+  exec.max_batch = m->PrefillThroughCapacity();
   exec.max_logit_rows =
       m->mtp_weights_
           ? static_cast<std::uint32_t>(std::min<std::uint64_t>(
@@ -200,6 +196,10 @@ std::uint32_t Model::VocabSize() const noexcept {
 
 std::uint32_t Model::PrefillCapacity() const noexcept {
   return std::min(kPrefillChunkTokens, options_.max_context);
+}
+
+std::uint32_t Model::PrefillThroughCapacity() const noexcept {
+  return std::min(kPrefillChunkTokens + 8, options_.max_context);
 }
 
 bool Model::HasMtp() const noexcept {
@@ -313,8 +313,15 @@ std::uint64_t Session::SnapshotBytes() const {
          model_->executor_->SnapshotBytes(*session_, KeptHiddenRows());
 }
 
+std::uint64_t Session::PrefillCheckpointBytes(std::uint32_t position) const {
+  if (!session_->VisionLayout().images.empty())
+    return 0;
+  return SessionSnapshotHostBytes(position, model_->VocabSize(), 0) +
+         model_->executor_->PrefillCheckpointBytes(*session_, position);
+}
+
 std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
-    std::string* error_msg) const {
+    std::string* error_msg, SnapshotMode mode) const {
   if (!valid_ || tokens_.empty() || tokens_.size() != session_->position() ||
       tokens_.size() > std::numeric_limits<std::uint32_t>::max()) {
     AssignError(error_msg, "snapshot needs a synced, non-empty context");
@@ -322,11 +329,18 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   }
   if (!session_->CheckCancellation(error_msg))
     return nullptr;
-  const auto token_count = static_cast<std::uint32_t>(tokens_.size());
+  return SaveSnapshotImpl(*session_, tokens_, logits_, KeptHiddenRows(),
+                          error_msg, mode);
+}
+
+std::unique_ptr<SessionSnapshot> Session::SaveSnapshotImpl(
+    const rocm::Session& state, std::span<const std::int32_t> tokens,
+    std::span<const float> logits, std::uint32_t hidden_rows,
+    std::string* error_msg, SnapshotMode mode) const {
+  const auto token_count = static_cast<std::uint32_t>(tokens.size());
   const auto identity = ImageIdentity(token_count);
-  const std::uint32_t hidden_rows = KeptHiddenRows();
   const std::uint64_t executor_bytes =
-      model_->executor_->SnapshotBytes(*session_, hidden_rows);
+      model_->executor_->SnapshotBytes(state, hidden_rows);
   const std::uint64_t host_bytes = SessionSnapshotHostBytes(
       token_count, model_->VocabSize(), identity.size());
   std::unique_ptr<SessionSnapshot> snapshot(
@@ -348,15 +362,17 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   if (!identity.empty())
     std::memcpy(out, identity.data(), identity.size());
   out += identity.size();
-  std::memcpy(out, tokens_.data(), tokens_.size() * sizeof(std::int32_t));
-  out += tokens_.size() * sizeof(std::int32_t);
-  std::memcpy(out, logits_.data(), logits_.size() * sizeof(float));
-  out += logits_.size() * sizeof(float);
+  std::memcpy(out, tokens.data(), tokens.size_bytes());
+  out += tokens.size_bytes();
+  std::memcpy(out, logits.data(), logits.size_bytes());
+  out += logits.size_bytes();
   if (!model_->executor_->SaveSnapshot(
-          *session_, hidden_rows,
+          state, hidden_rows,
           std::span<std::uint8_t>(out,
                                   static_cast<std::size_t>(executor_bytes)),
-          error_msg)) {
+          error_msg,
+          mode == SnapshotMode::kBorrowed ? &snapshot->deferred_ : nullptr,
+          snapshot->data_)) {
     return nullptr;
   }
   return snapshot;
@@ -364,11 +380,26 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
 
 bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
                               std::string* error_msg) {
-  return RestoreSnapshot(snapshot.bytes(), error_msg);
+  return RestoreSnapshotImpl({snapshot.data_.get(), snapshot.size_},
+                             snapshot.deferred_.get(), error_msg);
+}
+
+bool Session::OwnsSnapshot(const SessionSnapshot& snapshot) const noexcept {
+  return snapshot.deferred_ && session_->OwnsSnapshot(*snapshot.deferred_);
+}
+
+std::uint64_t SessionSnapshot::DeviceBytes() const {
+  return deferred_ ? deferred_->DeviceBytes() : 0;
 }
 
 bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
                               std::string* error_msg) {
+  return RestoreSnapshotImpl(payload, nullptr, error_msg);
+}
+
+bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
+                                  const rocm::SnapshotState* deferred,
+                                  std::string* error_msg) {
   SessionSnapshotHeader header{};
   if (payload.size() < sizeof(header)) {
     AssignError(error_msg, "session snapshot is truncated");
@@ -426,7 +457,7 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
           *session_,
           std::span<const std::uint8_t>(
               in, static_cast<std::size_t>(header.executor_bytes)),
-          &info, error_msg, next_drafts)) {
+          &info, error_msg, next_drafts, deferred)) {
     Reset();
     return false;
   }
@@ -448,49 +479,29 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
 
 SessionSnapshot::SessionSnapshot(std::uint64_t size)
     : data_(new std::uint8_t[size]), size_(size) {
-  // Populate before asking for huge pages: first-touching an advised buffer
-  // can synchronously compact fragmented UMA memory for seconds. Background
-  // collapse may still promote the populated pages. Restrict both hints to
-  // complete pages owned by this allocation; neither changes the payload.
-  const long page = sysconf(_SC_PAGESIZE);
-  if (page > 0) {
-    const auto address = reinterpret_cast<std::uintptr_t>(data_.get());
-    const auto skip = (page - address % page) % page;
-    if (size > skip) {
-      const auto length = (size - skip) / page * page;
-      if (length != 0) {
-        // Bound the fault workers to four, with at least 32 MiB each. This
-        // avoids replacing compaction stalls with serial base-page faults.
-        const auto workers = std::min<std::size_t>(4, length / (32ULL << 20));
-        if (workers > 1) {
-          const auto pages = length / page;
-          std::vector<std::jthread> faults;
-          for (std::size_t worker = 0; worker < workers; ++worker) {
-            const auto begin = pages * worker / workers * page;
-            const auto end = pages * (worker + 1) / workers * page;
-            faults.emplace_back([this, skip, begin, end] {
-              (void)madvise(data_.get() + skip + begin, end - begin,
-                            MADV_POPULATE_WRITE);
-            });
-          }
-          // Join before huge-page advice or any snapshot writer uses the
-          // buffer.
-        } else {
-          (void)madvise(data_.get() + skip, length, MADV_POPULATE_WRITE);
-        }
-        (void)madvise(data_.get() + skip, length, MADV_HUGEPAGE);
-      }
-    }
-  }
+  // Leave append-only sections untouched: a warm checkpoint borrows those
+  // rows from the live session, so faulting their pages here is wasted work.
+}
+
+SessionSnapshot::~SessionSnapshot() = default;
+
+std::span<const std::uint8_t> SessionSnapshot::bytes() const {
+  if (deferred_)
+    deferred_->Materialize();
+  return {data_.get(), size_};
 }
 
 bool SessionSnapshot::CopyTo(
     std::span<std::uint8_t> destination) const noexcept {
-  if (destination.size() != size_) {
+  if (destination.size() != size_)
+    return false;
+  try {
+    const auto payload = bytes();
+    std::memcpy(destination.data(), payload.data(), payload.size());
+    return true;
+  } catch (...) {
     return false;
   }
-  std::memcpy(destination.data(), data_.get(), size_);
-  return true;
 }
 
 bool Session::DraftReplay(std::int32_t next_token,
@@ -560,11 +571,16 @@ bool Session::DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
 }
 
 bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
-                   bool prefill) {
+                   bool prefill, std::uint32_t boundary,
+                   std::unique_ptr<SessionSnapshot>* checkpoint,
+                   double* capture_ms) {
   rocm::Executor& exec = *model_->executor_;
-  for (std::size_t off = 0; off < tokens.size(); off += exec.max_batch()) {
-    const std::size_t n =
-        std::min<std::size_t>(exec.max_batch(), tokens.size() - off);
+  for (std::size_t off = 0; off < tokens.size();) {
+    const auto remaining = tokens.size() - off;
+    const auto capacity = checkpoint && remaining <= exec.max_batch()
+                              ? exec.max_batch()
+                              : model_->PrefillCapacity();
+    const std::size_t n = std::min<std::size_t>(capacity, remaining);
     const auto chunk = tokens.subspan(off, n);
     if (MtpEnabled() && !tokens_.empty() &&
         !DraftCatchUp(chunk[0], false, error_msg)) {
@@ -572,18 +588,68 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     }
     const auto mode = prefill ? rocm::Executor::ForwardMode::kPrefill
                               : rocm::Executor::ForwardMode::kDecode;
-    if (!exec.Forward(*session_, chunk, 1, logits_.data(), mode, error_msg)) {
+    std::unique_ptr<rocm::PrefillCheckpoint> capture;
+    if (checkpoint && boundary > tokens_.size() &&
+        boundary <= tokens_.size() + n) {
+      capture = exec.MakePrefillCheckpoint(
+          *session_, chunk,
+          static_cast<std::uint32_t>(boundary - tokens_.size()), error_msg);
+      if (!capture)
+        return false;
+    }
+    if (!exec.Forward(*session_, chunk, 1, logits_.data(), mode, error_msg,
+                      capture.get())) {
       return false;
     }
+    const auto kept = capture && capture->tokens < n ? n - capture->tokens : n;
     hidden_base_ = static_cast<std::uint32_t>(
-        tokens_.size() + n - std::min<std::size_t>(n, exec.max_speculative()));
+        tokens_.size() + n -
+        std::min<std::size_t>(kept, exec.max_speculative()));
     tokens_.insert(tokens_.end(), chunk.begin(), chunk.end());
+    if (capture) {
+      const auto started = std::chrono::steady_clock::now();
+      *checkpoint = SaveSnapshotImpl(
+          *capture->state,
+          std::span<const std::int32_t>(tokens_).first(boundary),
+          capture->logits, capture->hidden_rows, error_msg,
+          SnapshotMode::kBorrowed);
+      if (capture_ms)
+        *capture_ms += std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - started)
+                           .count();
+      if (!*checkpoint)
+        return false;
+    }
+    off += n;
   }
   return true;
 }
 
 bool Session::Sync(std::span<const std::int32_t> prompt,
                    std::string* error_msg) {
+  return SyncImpl(prompt, error_msg, 0, nullptr);
+}
+
+bool Session::SyncThrough(std::span<const std::int32_t> prompt,
+                          std::uint32_t boundary,
+                          std::unique_ptr<SessionSnapshot>* checkpoint,
+                          std::string* error_msg, double* capture_ms) {
+  if (!checkpoint || boundary == 0 || boundary > prompt.size() ||
+      prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
+    AssignError(error_msg,
+                "checkpoint must extend the frontier in the text tail");
+    return false;
+  }
+  checkpoint->reset();
+  if (capture_ms)
+    *capture_ms = 0;
+  return SyncImpl(prompt, error_msg, boundary, checkpoint, capture_ms);
+}
+
+bool Session::SyncImpl(std::span<const std::int32_t> prompt,
+                       std::string* error_msg, std::uint32_t boundary,
+                       std::unique_ptr<SessionSnapshot>* checkpoint,
+                       double* capture_ms) {
   if (prompt.empty()) {
     AssignError(error_msg, "prompt is empty");
     return false;
@@ -609,7 +675,8 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     common = 0;
   }
   valid_ = false;
-  const bool ok = Feed(prompt.subspan(common), error_msg, true);
+  const bool ok = Feed(prompt.subspan(common), error_msg, true, boundary,
+                       checkpoint, capture_ms);
   valid_ = ok;
   return ok;
 }

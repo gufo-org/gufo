@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -27,8 +28,57 @@
 namespace gufo::models::qwen38_flash_next::rocm {
 
 class Executor;
+class SnapshotAllocator;
 struct ArgmaxCandidate;
 struct SnapshotHeader;
+struct SnapshotRegistry;
+struct SnapshotLineage;
+struct PrefillCheckpoint;
+
+struct SnapshotBlock;
+struct SnapshotChunk;
+
+/// Mutable checkpoint state is copied immediately; committed rows borrow
+/// append-only device storage until a rewind needs their shared device copy.
+/// Byte readers assemble the payload under the same lock used by writers.
+class SnapshotState {
+public:
+  void Materialize() const;
+  [[nodiscard]] std::uint64_t DeviceBytes() const;
+
+private:
+  friend class Executor;
+  friend class Session;
+  friend struct SnapshotRegistry;
+  struct Saved {
+    std::uint64_t offset;
+    std::uint64_t bytes;
+    std::shared_ptr<const SnapshotChunk> chunk;
+  };
+  struct Region {
+    void* device;
+    std::uint8_t* host;
+    std::uint64_t bytes;
+    std::uint64_t live_bytes;
+    std::uint64_t pending_bytes;
+    std::uint64_t row_bytes;
+    bool draft;
+    bool pooled;
+    std::vector<Saved> saved;
+  };
+  void Preserve(std::uint32_t position, std::uint32_t mtp_position,
+                std::uint32_t blocks, std::uint32_t mtp_blocks,
+                bool detach = true) const;
+  std::shared_ptr<SnapshotRegistry> registry_;
+  std::shared_ptr<const SnapshotLineage> lineage_;
+  std::shared_ptr<void> storage_;
+  mutable std::vector<Region> regions_;
+  std::uint8_t* payload_ = nullptr;
+  mutable std::shared_ptr<void> mutable_storage_;
+  std::uint8_t* mutable_device_ = nullptr;
+  std::uint64_t mutable_offset_ = 0;
+  std::uint64_t mutable_bytes_ = 0;
+};
 
 /// Per-sequence state on the device: recurrent SSM state, KV and indexer
 /// caches, PLE conv history, plus the host-side n-gram window. A
@@ -54,6 +104,10 @@ public:
     return mutation_epoch_;
   }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  [[nodiscard]] bool OwnsSnapshot(
+      const SnapshotState& snapshot) const noexcept {
+    return snapshots_ == snapshot.registry_;
+  }
   void ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt,
                        std::shared_ptr<qwen::vision::Encoder> encoder,
                        hipStream_t stream);
@@ -65,6 +119,7 @@ public:
 
 private:
   friend class Executor;
+  friend struct PrefillCheckpoint;
   Session() = default;
 
   struct LinearState {
@@ -131,6 +186,23 @@ private:
   std::vector<float*> rollback_allocations_;
   std::uint32_t rollback_depth_{0};
   void TrimRollback(std::uint32_t depth) noexcept;
+  mutable std::shared_ptr<SnapshotRegistry> snapshots_;
+  mutable std::shared_ptr<const SnapshotLineage> snapshot_lineage_;
+  mutable std::uint32_t snapshot_position_{0};
+  mutable std::uint32_t snapshot_mtp_position_{0};
+  void PreserveSnapshots(std::uint32_t position,
+                         std::uint32_t mtp_position) const;
+};
+
+/// A frozen mutable frontier with append-only caches owned by its live session.
+/// It is consumed before another forward can reuse the checkpoint arena.
+struct PrefillCheckpoint {
+  ~PrefillCheckpoint();
+  std::unique_ptr<Session> state;
+  Session* source = nullptr;
+  std::uint32_t tokens = 0;
+  std::uint32_t hidden_rows = 0;
+  std::vector<float> logits;
 };
 
 /// Runs the trunk graph on the GPU for one session at a time. Buffers are
@@ -165,6 +237,9 @@ public:
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
+  [[nodiscard]] std::unique_ptr<PrefillCheckpoint> MakePrefillCheckpoint(
+      Session& session, std::span<const std::int32_t> tokens,
+      std::uint32_t prefix, std::string* error_msg) const;
 
   /// Appends `tokens` (at most max_batch) to the session and returns the
   /// logits of the last `n_logits` tokens in `logits` (n_logits * vocab
@@ -176,7 +251,8 @@ public:
   [[nodiscard]] bool Forward(Session& session,
                              std::span<const std::int32_t> tokens,
                              std::uint32_t n_logits, float* logits,
-                             ForwardMode mode, std::string* error_msg) const;
+                             ForwardMode mode, std::string* error_msg,
+                             PrefillCheckpoint* checkpoint = nullptr) const;
 
   struct BatchItem {
     Session* session;
@@ -260,17 +336,20 @@ public:
   };
   [[nodiscard]] std::uint64_t SnapshotBytes(const Session& session,
                                             std::uint32_t hidden_rows) const;
-  [[nodiscard]] bool SaveSnapshot(const Session& session,
-                                  std::uint32_t hidden_rows,
-                                  std::span<std::uint8_t> payload,
-                                  std::string* error_msg) const;
+  [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
+      const Session& session, std::uint32_t position) const;
+  [[nodiscard]] bool SaveSnapshot(
+      const Session& session, std::uint32_t hidden_rows,
+      std::span<std::uint8_t> payload, std::string* error_msg,
+      std::shared_ptr<SnapshotState>* deferred = nullptr,
+      std::shared_ptr<void> storage = {}) const;
   /// Reuse at most the rollback rows needed by the restored operation;
   /// restoration never grows scratch. Callers derive this bound from the
   /// restored policy (or the concrete verifier width in a diagnostic).
-  [[nodiscard]] bool RestoreSnapshot(Session& session,
-                                     std::span<const std::uint8_t> payload,
-                                     SnapshotInfo* info, std::string* error_msg,
-                                     std::uint32_t next_drafts = 0) const;
+  [[nodiscard]] bool RestoreSnapshot(
+      Session& session, std::span<const std::uint8_t> payload,
+      SnapshotInfo* info, std::string* error_msg, std::uint32_t next_drafts = 0,
+      const SnapshotState* deferred = nullptr) const;
 
   /// Rewinds the draft block's own context.
   void MtpRewind(Session& session, std::uint32_t position) const noexcept {
@@ -366,12 +445,14 @@ private:
   bool WaitPle(std::string* error_msg) const;
   bool Ple(const DeviceLayer& l, Session& s, std::uint32_t n_tokens, float* res,
            bool speculative, std::string* error_msg,
-           bool embeddings_ready = false) const;
+           bool embeddings_ready = false,
+           PrefillCheckpoint* checkpoint = nullptr) const;
   bool LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                        const float* x, float* out, std::uint32_t n_tokens,
                        bool speculative, std::string* error_msg,
                        bool projections_ready = false,
-                       bool project_output = true) const;
+                       bool project_output = true,
+                       GdnCheckpoint checkpoint = {}) const;
   /// `pos`/`first_block` are device values; `start_pos` and `pool_grid`
   /// are their host-side counterparts for the eager-only decisions.
   bool Attention(const DeviceLayer& l, Session::AttentionState& s,
@@ -380,7 +461,8 @@ private:
                  std::uint32_t start_pos, std::uint32_t pool_grid,
                  std::uint32_t max_context, bool sparse, std::string* error_msg,
                  bool last_only = false, bool projections_ready = false,
-                 bool project_output = true) const;
+                 bool project_output = true,
+                 std::uint32_t checkpoint_tokens = 0) const;
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
            bool last_only = false) const;
@@ -397,7 +479,8 @@ private:
                    bool download_logits, bool speculative, bool sparse,
                    std::uint32_t start_pos, std::uint32_t pool_grid,
                    std::uint32_t first_layer, std::uint32_t end_layer,
-                   std::string* error_msg) const;
+                   std::string* error_msg,
+                   PrefillCheckpoint* checkpoint = nullptr) const;
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
                const float* hidden_source, MtpTrace* trace, bool kv_only) const;
@@ -411,6 +494,10 @@ private:
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
   Options options_;
+  [[nodiscard]] std::shared_ptr<SnapshotAllocator> GetSnapshotAllocator() const;
+  mutable std::once_flag snapshot_allocator_once_;
+  mutable std::shared_ptr<SnapshotAllocator> snapshot_allocator_;
+  mutable std::shared_ptr<void> checkpoint_storage_;
   hipStream_t stream_{nullptr};
   hipEvent_t counts_ready_{nullptr};
   hipblasHandle_t blas_{nullptr};

@@ -532,6 +532,11 @@ ContinuationCache::Lease ContinuationCache::Acquire(
       std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
       for (std::size_t index = 0; index < impl_->entries.size(); ++index) {
         const auto& entry = *impl_->entries[index];
+        if (entry.available && cache_hit && impl_->entries[source]->snapshot &&
+            impl_->entries[source]->snapshot->PrefersState(*entry.state)) {
+          selected = index;
+          break;
+        }
         if (entry.available && entry.state_last_used < oldest) {
           selected = index;
           oldest = entry.state_last_used;

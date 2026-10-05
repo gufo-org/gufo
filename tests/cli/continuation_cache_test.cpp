@@ -33,16 +33,53 @@ struct FakeState final : gufo::server::ContinuationState {
 
 struct FakeSnapshot final : gufo::server::ContinuationSnapshot {
   explicit FakeSnapshot(std::size_t value,
-                        std::size_t payload_bytes = sizeof(std::size_t))
-      : value(value), payload_bytes(payload_bytes) {}
+                        std::size_t payload_bytes = sizeof(std::size_t),
+                        const gufo::server::ContinuationState* owner = nullptr)
+      : value(value), payload_bytes(payload_bytes), owner(owner) {}
 
   [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
     return payload_bytes;
   }
+  [[nodiscard]] bool PrefersState(
+      const gufo::server::ContinuationState& state) const noexcept override {
+    return owner == &state;
+  }
 
   std::size_t value;
   std::size_t payload_bytes;
+  const gufo::server::ContinuationState* owner;
 };
+
+void TestBorrowedSnapshotPrefersAvailableOwner() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore =
+           [](gufo::server::ContinuationState& state,
+              const gufo::server::ContinuationSnapshot& snapshot) {
+             dynamic_cast<FakeState&>(state).value =
+                 dynamic_cast<const FakeSnapshot&>(snapshot).value;
+           },
+       .capacity_bytes = [] { return 1024; },
+       .on_event = {}});
+  auto root = cache.Acquire(Tokens{1, 2, 3});
+  auto* owner = &root.state();
+  Expect(root.TryReserveSnapshot(sizeof(std::size_t), 3), "reserve root");
+  root.Commit({1, 2, 3},
+              std::make_unique<FakeSnapshot>(7, sizeof(std::size_t), owner));
+  auto first = cache.Acquire(Tokens{1, 2, 3, 4});
+  Expect(first.cache_hit() && &first.state() == owner &&
+             dynamic_cast<FakeState&>(first.state()).value == 7,
+         "restore prefers the owner over an older unused state");
+  auto second = cache.Acquire(Tokens{1, 2, 3, 5});
+  Expect(second.cache_hit() && &second.state() != owner &&
+             dynamic_cast<FakeState&>(second.state()).value == 7,
+         "a busy owner does not block a branch into another state");
+  first.Invalidate();
+  second.Invalidate();
+}
 
 void TestColdMissThenExactExtensionHit() {
   std::vector<std::size_t> invalidations(1);
@@ -1064,6 +1101,7 @@ int main() {
   TestLongestAvailablePrefixWins();
   TestWaitingAcquireCanBeCancelled();
   TestSnapshotCanBranchIntoTwoIndependentStateSlots();
+  TestBorrowedSnapshotPrefersAvailableOwner();
   TestCachedPrefixTokensPeeksWithoutLeasing();
   TestBranchPointOutlivesOlderTurnsUnderPressure();
   TestByteCapacityEvictsBeforeSnapshotAllocation();

@@ -10,6 +10,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
 from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
+from cache_depth import check_cache_depth
 from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
                             CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, PROMPT_SECONDS,
@@ -376,6 +378,78 @@ class FunctionalRunnerTest(unittest.TestCase):
             with self.subTest(label), self.assertRaises(ValueError):
                 check_disk_spacing(grown_log, restored_log, report)
 
+    def run_cache_depth(self, lost=False, retry_work=False, contaminated=False,
+                        recorder=None, concurrency=4):
+        owner = threading.get_ident()
+
+        class Checks(dict):
+            def __setitem__(inner, label, value):
+                self.assertEqual(threading.get_ident(), owner)
+                super(Checks, inner).__setitem__(label, value)
+                if recorder:
+                    recorder.mark(label)
+
+        requests, checks, seen = [], Checks(), set()
+
+        def chat_result(client, body):
+            requests.append(deepcopy(body))
+            if recorder:
+                recorder.begin("/v1/chat/completions", body).row["status"] = "complete"
+            messages = body["messages"]
+            side = messages[0]["content"].startswith("cache_depth_side")
+            total = 64 if side else 20000 + (len(messages) - 2) * 100
+            cold = body.get("extra_body", {}).get("cache_prompt") is False
+            key = json.dumps(messages, sort_keys=True)
+            repeated = key in seen and not cold
+            cached = (0 if cold or lost else total if repeated else max(0, total - 200))
+            if repeated and retry_work:
+                cached = total - 1
+            seen.add(key)
+            code = messages[-1]["content"].rsplit("only ", 1)[-1].rstrip(".")
+            if contaminated and cached:
+                code = "WRONG"
+            return {"text": code, "reasoning": "", "tools": [], "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached}}}
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_cache_depth(None, "fixture", checks, chat_result, concurrency)
+        return requests, checks
+
+    def test_cache_depth_replays_branches_before_cold_controls(self):
+        requests, checks = self.run_cache_depth()
+        self.assertEqual(len(checks), 17)
+        self.assertEqual(len(requests), 16)
+        self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is False
+                            for body in requests[-7:]))
+        for code in ("RED", "GREEN", "BLUE"):
+            self.assertEqual(checks["depth_branch_" + code]["text"], code)
+        self.assertEqual(requests[7]["messages"], requests[8]["messages"])
+        self.assertEqual(requests[7]["messages"], requests[-1]["messages"])
+
+    def test_cache_depth_records_one_concurrent_history_group(self):
+        import metrics
+        recorder = Recorder(None)
+        requests, _ = self.run_cache_depth(recorder=recorder)
+        cohort = [row for row in recorder.rows if row.get("case") == "depth_branches"]
+        self.assertEqual(len(cohort), 3)
+        self.assertEqual({row["request_sha256"] for row in cohort},
+                         {metrics.digest({"endpoint": "/v1/chat/completions", "body": body})
+                          for body in requests[3:6]})
+
+    def test_cache_depth_single_slot_keeps_branch_admission_order(self):
+        requests, checks = self.run_cache_depth(concurrency=1)
+        self.assertEqual([body["messages"][-1]["content"] for body in requests[3:6]],
+                         ["Reply with only RED.", "Reply with only GREEN.",
+                          "Reply with only BLUE."])
+        self.assertEqual(set(checks["depth_branches"]), {"RED", "GREEN", "BLUE"})
+
+    def test_cache_depth_rejects_lost_frontiers_and_retry_work(self):
+        for options in ({"lost": True}, {"retry_work": True}, {"contaminated": True}):
+            with self.subTest(options=options), self.assertRaises(AssertionError):
+                self.run_cache_depth(**options)
+
     def run_cache_rotation(self, lost=False, contaminated=False):
         requests, checks, previous = [], {}, {}
 
@@ -544,7 +618,14 @@ class FunctionalRunnerTest(unittest.TestCase):
                               "gufo": {"prefill_tokens": total - cached,
                                        "shared_prefix_wait_ms": wait}}}
 
-        checks = {}
+        owner = threading.get_ident()
+
+        class Checks(dict):
+            def __setitem__(inner, label, value):
+                self.assertEqual(threading.get_ident(), owner)
+                super(Checks, inner).__setitem__(label, value)
+
+        checks = Checks()
         with contextlib.redirect_stderr(io.StringIO()):
             check_cache_concurrency(None, "fixture", checks, chat_result, 4,
                                     abandon=lambda client, body, delay: None)
@@ -560,6 +641,14 @@ class FunctionalRunnerTest(unittest.TestCase):
         cold = [body for body in requests
                 if body.get("extra_body", {}).get("cache_prompt") is False]
         self.assertTrue(cold and all(body["temperature"] == 0 for body in cold))
+
+    def test_cache_concurrency_admits_distinct_tasks_in_a_fixed_order(self):
+        requests, _ = self.run_cache_concurrency()
+        tasks = [body["messages"][-1]["content"] for body in requests
+                 if body["messages"][0]["content"].startswith("cache_concurrency_fanout\n")
+                 and not body.get("extra_body", {}).get("cache_prompt") is False]
+        self.assertEqual(tasks, [f"Task {index}. Reply with only the code {code}."
+                                 for index, code in enumerate(("ALPHA", "BETA", "GAMMA", "DELTA"))])
 
     def test_cache_concurrency_rejects_followers_that_prefill_everything(self):
         with self.assertRaisesRegex(AssertionError, "after restoring the shared prefix"):
@@ -1111,6 +1200,35 @@ class FunctionalRunnerTest(unittest.TestCase):
                     {"version": 1, "requests": rows[:1]}))
             with self.assertRaisesRegex(ValueError, "history"):
                 qualify([original, compare(a, b)])
+
+    def test_identical_concurrent_requests_match_cache_work_without_hiding_regressions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            a, b = Path(directory) / "a", Path(directory) / "b"
+            a.mkdir()
+            b.mkdir()
+            rows = [{"index": index, "case": "cohort", "request_sha256": "same",
+                     "status": "complete", "wall_ms": 100,
+                     "metrics": {"prefill_tokens": 100 if index == 0 else 0,
+                                 "cached_tokens": 0 if index == 0 else 100,
+                                 "decode_ms": 100}} for index in range(3)]
+
+            def write(path, items):
+                (path / "batch.requests.json").write_text(json.dumps(
+                    {"version": 1, "requests": items}))
+
+            write(a, rows)
+            swapped = json.loads(json.dumps(rows))
+            swapped[0]["metrics"], swapped[2]["metrics"] = (
+                swapped[2]["metrics"], swapped[0]["metrics"])
+            write(b, swapped)
+            self.assertEqual(compare(a, b)["status"], "passed")
+            swapped[1]["metrics"]["decode_ms"] = 125
+            write(b, swapped)
+            self.assertEqual(compare(a, b)["status"], "inconclusive")
+            swapped[1]["metrics"]["prefill_tokens"] = 100
+            swapped[1]["metrics"]["cached_tokens"] = 0
+            write(b, swapped)
+            self.assertTrue(compare(a, b)["quality_or_coverage_changes"])
 
     def test_evidence_requires_independent_runs_and_identical_builds(self):
         from compare import evidence

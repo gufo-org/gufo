@@ -31,7 +31,9 @@ void RequireExact(std::span<const float> expected,
           message);
 }
 
-void CheckSnapshotDuringGraphCapture(const std::shared_ptr<qfn::Model>& model) {
+void CheckSnapshotDuringGraphCapture(const std::shared_ptr<qfn::Model>& model,
+                                     bool warm_storage,
+                                     bool protect_rows = false) {
   std::string error;
   const auto mode = gufo::core::SessionMode::kAutoregressive;
   auto decoding = model->CreateSession(mode, 128, &error);
@@ -41,8 +43,20 @@ void CheckSnapshotDuringGraphCapture(const std::shared_ptr<qfn::Model>& model) {
   const auto prompt = model->Tokenize("Continue: red, blue, red, blue,");
   for (auto* session : {decoding.get(), reference.get(), frozen.get()})
     Require(session->Sync(prompt, &error), error);
-  const auto expected_snapshot = frozen->SaveSnapshot(&error);
+  auto expected_snapshot =
+      (warm_storage ? frozen : reference)->SaveSnapshot(&error);
   Require(expected_snapshot != nullptr, error);
+  std::unique_ptr<qfn::SessionSnapshot> prefix_checkpoint;
+  if (protect_rows) {
+    prefix_checkpoint = frozen->SaveSnapshot(&error);
+    Require(prefix_checkpoint != nullptr, error);
+    auto extended = prompt;
+    extended.push_back(prompt.front());
+    Require(frozen->Sync(extended, &error), error);
+    expected_snapshot =
+        frozen->SaveSnapshot(&error, qfn::Session::SnapshotMode::kMaterialized);
+    Require(expected_snapshot != nullptr, error);
+  }
 
   // Warm the one-token shape; its next execution records the decode graph.
   Require(decoding->Evaluate(prompt.front(), &error) &&
@@ -53,15 +67,26 @@ void CheckSnapshotDuringGraphCapture(const std::shared_ptr<qfn::Model>& model) {
   unsigned checkpoints = 0;
   decoding->SetCancellationCheck([&] {
     // Forward checks once before capture and again at its first layer.
-    if (++checkpoints == 2)
-      concurrent_snapshot = std::async(std::launch::async, [&] {
-                              return frozen->SaveSnapshot(&snapshot_error);
-                            }).get();
+    if (++checkpoints == 2) {
+      try {
+        concurrent_snapshot = std::async(std::launch::async, [&] {
+                                return frozen->SaveSnapshot(&snapshot_error);
+                              }).get();
+      } catch (const std::exception& e) {
+        snapshot_error = e.what();
+        throw;
+      }
+    }
     return false;
   });
-  Require(decoding->Evaluate(prompt.back(), &error), error);
+  const bool evaluated = decoding->Evaluate(prompt.back(), &error);
+  Require(evaluated, error + "; peer snapshot: " + snapshot_error);
   decoding->SetCancellationCheck({});
   Require(concurrent_snapshot != nullptr, snapshot_error);
+  // Restore shares the executor's stream and follows its completed forward.
+  // The captured checkpoint must preserve its suffix before the rewind.
+  if (prefix_checkpoint)
+    Require(frozen->RestoreSnapshot(*prefix_checkpoint, &error), error);
   Require(concurrent_snapshot->bytes().size() ==
                   expected_snapshot->bytes().size() &&
               std::memcmp(concurrent_snapshot->bytes().data(),
@@ -947,7 +972,9 @@ int main(int argc, char** argv) {
       CheckMtpCacheReplay(model);
       return 0;
     }
-    CheckSnapshotDuringGraphCapture(model);
+    CheckSnapshotDuringGraphCapture(model, false);
+    CheckSnapshotDuringGraphCapture(model, true);
+    CheckSnapshotDuringGraphCapture(model, true, true);
     CheckExecutionModes(model);
     if (sampling_only) {
       CheckServingEos(model);

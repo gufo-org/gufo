@@ -107,6 +107,7 @@ struct TextRunnerCapabilities {
   /// Zero means no physical-width limit.
   std::size_t batched_multi_token_decode_max_width{0};
   bool prefix_reuse{true};
+  bool in_pass_checkpoint{false};
 };
 
 /// Model-owned compatibility identity for restart-safe snapshots.
@@ -158,6 +159,7 @@ struct TextRunnerMeasuredResources {
 struct TextPrefillStep {
   std::size_t consumed_tokens{0};
   bool decode_ready{false};
+  double checkpoint_ms{0};
 };
 
 struct TextDecodeSelection {
@@ -322,6 +324,19 @@ public:
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;
+  /// Returns a claim only when this chunk can capture the boundary and keep
+  /// prefilling beyond it. Admission happens before allocating checkpoint
+  /// state.
+  [[nodiscard]] virtual std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+      std::size_t, std::size_t) const {
+    return std::nullopt;
+  }
+  [[nodiscard]] virtual TextPrefillStep PrefillThrough(
+      TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*) const {
+    throw std::logic_error("runner does not support in-pass checkpoints");
+  }
   [[nodiscard]] virtual TextDecodeSelection SelectNext(
       TextRunnerState& state, sampling::SamplerState& sampler) const = 0;
   virtual void Advance(TextRunnerState& state, TextRunnerToken token) const = 0;
@@ -358,6 +373,11 @@ public:
   /// shared execution scratch; other sessions may execute concurrently.
   [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
       const TextRunnerState& state) const;
+  /// Complete state before returning so export cannot introduce device copies
+  /// while the session resumes prefill. Defaults to the ordinary snapshot.
+  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot>
+  SnapshotForPersistence(const TextRunnerState& state) const;
+
   virtual void RestoreOrFork(TextRunnerState& state,
                              const TextRunnerSnapshot& snapshot) const;
 
