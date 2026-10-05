@@ -2126,7 +2126,7 @@ def check_responses(client, model, checks, options, async_local_only, expect_rea
     for label, override in [
         ("invalid_limit", {"max_output_tokens": 0}),
         ("unsupported_store", {"store": True}),
-        ("unsupported_tools", {"tools": [{"type": "web_search"}]}),
+        ("unsupported_tools", {"tools": [{"type": "namespace", "name": "crm"}]}),
     ]:
         try:
             client.responses.create(**{**request, **override})
@@ -2136,6 +2136,11 @@ def check_responses(client, model, checks, options, async_local_only, expect_rea
             checks[label] = {"status": error.status_code, "code": error.code}
         else:
             raise AssertionError(f"{label} was accepted")
+    # Hosted tools only OpenAI can run are skipped, as llama.cpp does.
+    hosted = client.responses.create(**{**request, "max_output_tokens": 1,
+                                        "tools": [{"type": "web_search"}]})
+    assert hosted.tools == [], hosted
+    checks["hosted_tools_skipped"] = {"status": hosted.status}
 
     with client.responses.create(
         **{**request, "input": "Count from one to one thousand."}, stream=True
