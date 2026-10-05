@@ -1804,6 +1804,25 @@ void TestServerInstructionsAreFraming() {
       gufo::sampling::JsonConstraint::ToolFormat::kJson);
   const ConstraintRunner native_runner(
       gufo::sampling::JsonConstraint::ToolFormat::kQwen);
+  for (const auto format :
+       {gufo::sampling::JsonConstraint::ToolFormat::kQwen,
+        gufo::sampling::JsonConstraint::ToolFormat::kDeepSeek}) {
+    const ConstraintRunner plain_runner(format);
+    for (const bool json : {false, true}) {
+      ChatRequest request;
+      if (json)
+        request.response_format = gufo::sampling::JsonConstraint::Compile(
+            gufo::json::parse(
+                R"({"type":"object","properties":{},"additionalProperties":false})"),
+            false);
+      gufo::sampling::SamplingConfig sampling;
+      std::optional<gufo::sampling::JsonConstraint::ToolFormat> observed;
+      const auto constrained = gufo::server::ConstrainChatRequest(
+          request, plain_runner, &sampling, &observed);
+      Expect(observed == format && constrained.has_value() == json,
+             "plain and JSON answers retain the native output dialect");
+    }
+  }
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i)
     vocab.emplace_back(1, static_cast<char>(i));

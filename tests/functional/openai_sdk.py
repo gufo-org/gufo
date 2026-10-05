@@ -24,7 +24,7 @@ import openai
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
 from openai.types import Completion, CompletionChoice
 from metrics import CaseComplete, Recorder
-from tool_reasoning import check_tool_reasoning, response_result
+from tool_reasoning import check_reasoning_separator, check_tool_reasoning, response_result
 from discovery import check_discovery
 from image_inputs import check_image_inputs
 from tool_native import check_finite_argument_types, check_native_tool_schemas
@@ -2520,7 +2520,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
 
 
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
-              "tool-reasoning",
+              "tool-reasoning", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix")
 
@@ -2611,6 +2611,8 @@ def main():
                 client, args.model, checks, args.sampling_preset),
             "tool-reasoning": lambda: check_tool_reasoning(
                 client, args.model, checks, chat_result, args.sampling_preset),
+            "reasoning-separator": lambda: check_reasoning_separator(
+                client, args.model, checks, chat_result),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),

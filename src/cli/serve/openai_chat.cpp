@@ -1002,6 +1002,17 @@ std::string_view Trim(std::string_view value) {
   return TrimTrailing(value);
 }
 
+std::string_view AfterReasoningSeparator(std::string_view value,
+                                         ToolMarkerSet markers) {
+  // Qwen's llama.cpp PEG uses `reasoning << content`: `<<` consumes space().
+  // Keep other dialects' existing line-break rule. Only the boundary after an
+  // explicit </think> is framing; answer and argument interiors are untouched.
+  const bool qwen = markers.size() == 1 && markers.front() == "<tool_call>";
+  const auto first = value.find_first_not_of(qwen ? " \t\r\n\f\v" : "\r\n");
+  return first == std::string_view::npos ? std::string_view{}
+                                         : value.substr(first);
+}
+
 // Qwen writes a parameter as "<parameter=name>\nVALUE\n</parameter>": one
 // newline on each side is framing, everything else (a file's final newline,
 // indentation, blank lines) belongs to the value.
@@ -1861,11 +1872,7 @@ ParsedGeneration ParseGeneration(
       parsed.reasoning_content =
           std::string(Trim(content.substr(0, think_end)));
       content.remove_prefix(think_end + kThinkEnd.size());
-      while (!content.empty() &&
-             (content.front() == '\n' || content.front() == '\r')) {
-        content.remove_prefix(1);
-      }
-      parsed.text = std::string(content);
+      parsed.text = std::string(AfterReasoningSeparator(content, markers));
     }
   } else if (initial_output_state ==
              TextGenerationBackend::InitialOutputState::kAuto) {
@@ -1889,9 +1896,7 @@ ParsedGeneration ParseGeneration(
             think_content_start, think_end - think_content_start)));
         std::string_view remaining =
             content.substr(think_end + kThinkEnd.size());
-        if (remaining.starts_with("\n")) {
-          remaining.remove_prefix(1);
-        }
+        remaining = AfterReasoningSeparator(remaining, markers);
         if (think_start > 0) {
           parsed.text = std::string(content.substr(0, think_start)) +
                         std::string(remaining);
@@ -2019,6 +2024,7 @@ ParsedGeneration ParseStructuredGeneration(
       if (end == std::string_view::npos)
         return parsed;
       raw.remove_prefix(end + 8);
+      raw = AfterReasoningSeparator(raw, markers);
     }
   }
   const auto content = tool_only ? raw : Trim(raw);
@@ -2266,7 +2272,8 @@ public:
       return true;
     }
     pending_.append(piece);
-    if (raw_content_ && state_ != State::kThinking)
+    if (raw_content_ && state_ != State::kThinking &&
+        !trim_reasoning_separator_)
       return StructuredContent();
 
     if (state_ == State::kInitial) {
@@ -2346,17 +2353,17 @@ public:
     }
 
     if (state_ == State::kContent) {
-      if (raw_content_) {
-        return StructuredContent();
-      }
       if (trim_reasoning_separator_) {
-        const auto first = pending_.find_first_not_of("\r\n");
-        if (first == std::string::npos) {
+        const auto content = AfterReasoningSeparator(pending_, markers_);
+        if (content.empty()) {
           pending_.clear();
           return true;
         }
-        pending_.erase(0, first);
+        pending_.erase(0, pending_.size() - content.size());
         trim_reasoning_separator_ = false;
+      }
+      if (raw_content_) {
+        return StructuredContent();
       }
       const auto offset = pending_offset();
       const auto found = recognize_tools_

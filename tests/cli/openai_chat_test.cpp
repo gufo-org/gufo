@@ -1805,6 +1805,85 @@ void TestInitialOutputPhases() {
   }
 }
 
+void TestReasoningAnswerSeparator() {
+  using gufo::json::Value;
+  for (const bool thinking : {false, true})
+    for (const bool stream : {false, true})
+      for (const bool split : {false, true})
+        for (const int mode : {0, 1, 2})
+          for (const std::string separator :
+               {"", "\n\n", "\r\n\r\n", " \t\n\n\f\v"})
+            for (const bool truncated : {false, true}) {
+              const std::string answer =
+                  truncated   ? ""
+                  : mode == 2 ? R"({"answer":9,"text":"\n\nliteral"})"
+                              : "9\n\nNext paragraph.\n    Indented line.";
+              const std::string raw =
+                  (thinking ? "Check</think>" : "") + separator + answer;
+              FakeBackend backend;
+              if (truncated)
+                backend.finish_reason = FakeBackend::FinishReason::kLength;
+              backend.tool_format =
+                  gufo::sampling::JsonConstraint::ToolFormat::kQwen;
+              if (split) {
+                for (const char byte : raw)
+                  backend.pieces.emplace_back(1, byte);
+              } else {
+                backend.pieces = {raw};
+              }
+              auto body = gufo::json::parse(R"({
+            "model":"test-model","messages":[{"role":"user","content":"4+5?"}],
+            "temperature":0})");
+              body["stream"] = stream;
+              body["reasoning_effort"] = thinking ? "low" : "none";
+              if (mode == 1) {
+                body["tools"] =
+                    gufo::json::parse(R"([{"type":"function","function":{
+              "name":"unused","parameters":{"type":"object","properties":{},
+              "additionalProperties":false}}}])");
+                body["tool_choice"] = "auto";
+              } else if (mode == 2) {
+                body["response_format"] = gufo::json::parse(R"({
+              "type":"json_schema","json_schema":{"name":"answer","strict":true,
+              "schema":{"type":"object","properties":{"answer":{"type":"integer"},
+              "text":{"type":"string"}},
+              "required":["answer","text"],"additionalProperties":false}}})");
+              }
+              const auto response =
+                  gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+              Expect(response.status == 200,
+                     "reasoning separator request succeeds");
+              std::string content;
+              if (stream) {
+                response.streaming_body([&](std::string_view piece) {
+                  const auto payload = piece.substr(piece.find("data: ") + 6);
+                  if (!payload.starts_with("[DONE]")) {
+                    const auto event = gufo::json::parse(payload);
+                    for (const auto& choice : event.find("choices")->items())
+                      if (const auto* delta = choice.find("delta"))
+                        content += delta->member_str("content");
+                  }
+                  return true;
+                });
+              } else {
+                const auto parsed = gufo::json::parse(response.body);
+                content = parsed.find("choices")
+                              ->items()[0]
+                              .find("message")
+                              ->member_str("content");
+              }
+              const auto expected = thinking ? answer : separator + answer;
+              if (content != expected)
+                std::cerr << "separator thinking=" << thinking
+                          << " stream=" << stream << " split=" << split
+                          << " mode=" << mode << " truncated=" << truncated
+                          << " content=" << Value(content).dump() << "\n";
+              Expect(content == expected,
+                     "only the reasoning separator is removed; answer "
+                     "whitespace survives");
+            }
+}
+
 void TestConflictingReasoningControlsAreRejected() {
   FakeBackend backend;
   const auto response = gufo::server::HandleOpenAiChat(Request(R"({
@@ -2605,7 +2684,9 @@ void TestToolMarkersInsideConstrainedReasoning() {
       arguments.member_str("path") + "\n</parameter>\n<parameter=edits>\n" +
       arguments["edits"].dump() + "\n</parameter>\n</function>\n</tool_call>";
   const std::string prose = "\nVerify the file, then run mypy and tests.";
-  const std::string complete = "</think>" + call + prose;
+  // The reasoning separator is framing; newlines inside the edit and the
+  // prose following its call remain data in both APIs and transports.
+  const std::string complete = "</think>\n\n" + call + prose;
   for (const bool responses : {false, true})
     for (const bool stream : {false, true})
       for (const bool bytewise : {false, true})
@@ -4893,6 +4974,7 @@ int main() {
   TestPiNativeDeepSeekThinkingObject();
   TestStreamingPromptOpenedReasoning();
   TestInitialOutputPhases();
+  TestReasoningAnswerSeparator();
   TestConflictingReasoningControlsAreRejected();
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();

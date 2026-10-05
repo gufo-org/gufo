@@ -22,6 +22,10 @@ std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling,
     std::optional<sampling::JsonConstraint::ToolFormat>* tool_format) {
+  // Output parsing needs the model's dialect even without tool constraints
+  // (for example Qwen's whitespace boundary after </think>).
+  if (tool_format)
+    *tool_format = runner.ToolFormat();
   if (!request.response_format &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))
@@ -51,8 +55,6 @@ std::optional<ChatRequest> ConstrainChatRequest(
     grammar = sampling::JsonConstraint::WithTools(
         grammar, std::move(tools), required,
         !request.response_format && request.parallel_tool_calls, format);
-    if (tool_format)
-      *tool_format = format;
     if (format == sampling::JsonConstraint::ToolFormat::kJson)
       instruction +=
           "\nIf a tool is needed, respond using the JSON tool-call form "

@@ -29,7 +29,7 @@ from metrics import compare, comparison_status, join_server_timings, timing_meas
 
 TESTS = Path(__file__).resolve().parent
 SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
-          "tool-reasoning",
+          "tool-reasoning", "reasoning-separator",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache")
 SAMPLING = {
