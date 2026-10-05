@@ -4,6 +4,13 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.8.0](https://github.com/gufo-org/gufo/compare/v0.7.1...v0.8.0) (2026-10-05)
+
+
+### Features
+
+* OpenAI Responses compatibility ([#434](https://github.com/gufo-org/gufo/issues/434)) ([d921a4b](https://github.com/gufo-org/gufo/commit/d921a4bd956424241e3e050cf981023b5b81e475))
+
 ## [0.7.1](https://github.com/gufo-org/gufo/compare/v0.7.0...v0.7.1) (2026-10-05)
 
 
