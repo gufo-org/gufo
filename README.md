@@ -112,9 +112,10 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-For Open WebUI, VS Code and OpenAI SDK clients, set the API base URL to
-`http://localhost:8080/v1`. Chat Completions supports text, images, tools and
-streaming; Responses supports text and streaming. See the [API contract](docs/SERVER.md).
+For Open WebUI, VS Code, OpenAI SDK and Responses-API clients (for example
+Codex), set the API base URL to `http://localhost:8080/v1`. Chat Completions and
+Responses support text, images, function tools, structured output and streaming.
+See the [API contract](docs/SERVER.md).
 
 The text server uses the model's native context by default and generates until
 EOS or the context is full. `--context N` sets context capacity per session;

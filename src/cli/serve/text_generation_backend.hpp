@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -106,6 +107,8 @@ struct ChatRequest {
   std::string client_id{"anonymous"};
   ToolChoice tool_choice{ToolChoice::kAuto};
   std::string forced_tool_name;
+  /// Responses namespace of each flattened function, echoed on its calls.
+  std::map<std::string, std::string> tool_namespaces;
   bool constrained_tools{false};
   bool parallel_tool_calls{true};
   ReasoningOptions reasoning;

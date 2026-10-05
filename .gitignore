@@ -109,6 +109,8 @@ __pycache__/
 # Agent helpers
 .codegraph
 context.md
+# graphify: knowledge graph, report and converted sidecars live here
+graphify-out/
 
 # Uncommitted opt-in capability suites
 tests/quality/compsec.json

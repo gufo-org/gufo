@@ -508,9 +508,12 @@ bool ReadTextMessages(const json::Value* input,
     if (responses && item.member_str("type") == "reasoning") {
       const auto* summary = item.find("summary");
       const auto* encrypted = item.find("encrypted_content");
+      const auto* content = item.find("content");
+      // Codex replays null-valued content and encrypted_content echoed by
+      // OpenAI; only non-null payload carries reasoning we cannot restore.
       if (summary == nullptr || !summary->is_array() ||
           (encrypted != nullptr && !encrypted->is_null()) ||
-          item.contains("content"))
+          (content != nullptr && !content->is_null()))
         return false;
       tokenization::ChatMessage reasoning;
       reasoning.role = tokenization::ChatRole::kAssistant;
@@ -639,7 +642,11 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
         body.contains(field) &&
         !(allowances.response_controls &&
           (field == "text" || field == "reasoning" || field == "tools" ||
-           field == "tool_choice" || field == "parallel_tool_calls"))) {
+           field == "tool_choice" || field == "parallel_tool_calls" ||
+           // include is a standard Responses field (for example encrypted
+           // reasoning); gufo keeps no server-side conversation, so its value
+           // is accepted and ignored.
+           field == "include"))) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }

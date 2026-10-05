@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -677,6 +678,185 @@ void TestInvalidToolsFailBeforeGeneration() {
                "Invalid tools fail before generation, including mixed lists");
       }
     }
+  }
+}
+
+void TestResponsesClientCompatTolerances() {
+  // Hosted tool types (Responses-only) are skipped, not rejected. Namespaces
+  // group client-executed functions and flatten to the function list, while a
+  // malformed function still fails the controls.
+  {
+    auto body = gufo::json::parse(R"({
+      "tools":[
+        {"type":"function","name":"exec","parameters":{"type":"object",
+          "properties":{"cmd":{"type":"string"}},"required":["cmd"]}},
+        {"type":"web_search","external_web_access":false},
+        {"type":"namespace","name":"agents","tools":[{"type":"function",
+          "name":"spawn"}]},
+        {"type":"code_interpreter"}]})");
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+           "Responses skips hosted tool types without failing");
+    Expect(chat.tools.size() == 2 && chat.tools[0].name == "exec" &&
+               chat.tools[1].name == "spawn",
+           "Function tools survive, including those nested in namespaces");
+  }
+  {
+    // A namespace is a client-side grouping, not a hosted tool: its functions
+    // must reach the model with their schema and strictness intact.
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[{"type":"namespace","name":"crm",
+                 "description":"Local customer tools","tools":[{"type":"function",
+                 "name":"lookup","parameters":{"type":"object","properties":{},
+                 "required":[],"additionalProperties":false},"strict":true}]}]})"),
+               &chat) &&
+               chat.tools.size() == 1 && chat.tools[0].name == "lookup" &&
+               chat.tools[0].definition_json.find("\"strict\":true") !=
+                   std::string::npos,
+           "Namespace function tools are flattened with their definitions");
+    // Rejected parses leave the request untouched, so every case parses into
+    // fresh state instead of inheriting tools from a previous parse.
+    gufo::server::ChatRequest ambiguous;
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[
+                 {"type":"function","name":"lookup"},
+                 {"type":"namespace","name":"crm","tools":[{"type":"function",
+                  "name":"lookup"}]}]})"),
+               &ambiguous)
+               .has_value(),
+           "Namespace routing is rejected when function names are ambiguous");
+    gufo::server::ChatRequest malformed;
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[{"type":"namespace",
+                 "name":"crm"}]})"),
+               &malformed)
+               .has_value(),
+           "A namespace without a tools array is rejected");
+  }
+  {
+    // The shared 128-function cap counts flattened functions at append time,
+    // so both orderings around a full namespace reject the 129th function.
+    std::string nested = R"({"type":"namespace","name":"crm","tools":[)";
+    for (int i = 0; i < 128; ++i) {
+      if (i != 0)
+        nested += ",";
+      nested += R"({"type":"function","name":"f)" + std::to_string(i) + "\"}";
+    }
+    nested += "]}";
+    const std::string outside = R"({"type":"function","name":"outside"})";
+    gufo::server::ChatRequest accepted;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[)" + nested + "]}"), &accepted) &&
+               accepted.tools.size() == 128,
+           "Exactly 128 functions flattened from a namespace are accepted");
+    for (const bool outside_first : {false, true}) {
+      const auto body = outside_first
+                            ? R"({"tools":[)" + outside + "," + nested + "]}"
+                            : R"({"tools":[)" + nested + "," + outside + "]}";
+      gufo::server::ChatRequest overflow;
+      Expect(gufo::server::ParseOpenAiResponseControls(gufo::json::parse(body),
+                                                       &overflow)
+                 .has_value(),
+             "Both boundary orderings reject the 129th flattened function");
+    }
+  }
+  {
+    gufo::server::ChatRequest chat;
+    Expect(
+        gufo::server::ParseOpenAiResponseControls(
+            gufo::json::parse(
+                R"({"tools":[{"type":"function","function":null,"name":"f"}]})"),
+            &chat)
+            .has_value(),
+        "Responses still rejects a malformed function tool");
+  }
+
+  // reasoning.summary is accepted and ignored; effort still applies; a
+  // genuinely unknown reasoning member still fails.
+  {
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(
+                   R"({"reasoning":{"effort":"low","summary":"auto"}})"),
+               &chat) &&
+               chat.reasoning.enabled == true &&
+               chat.reasoning.effort == gufo::ReasoningEffort::kLow,
+           "reasoning.summary is accepted while effort still applies");
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"reasoning":{"effort":"low","bogus":1}})"),
+               &chat)
+               .has_value(),
+           "Unknown reasoning members are still rejected");
+  }
+
+  // text.verbosity is accepted and leaves the response format unset;
+  // text.format still applies beside it; an unknown text member still fails.
+  {
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"verbosity":"low"}})"), &chat) &&
+               !chat.response_format,
+           "text.verbosity is accepted without forcing a response format");
+    gufo::server::ChatRequest formatted;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"format":{"type":"json_object"},
+                 "verbosity":"low"}})"),
+               &formatted) &&
+               formatted.response_format,
+           "text.format still applies alongside verbosity");
+    gufo::server::ChatRequest rejected;
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"bogus":1}})"), &rejected)
+               .has_value(),
+           "Unknown text members are still rejected");
+  }
+
+  // Codex routes calls by namespace and name: a flattened function call must
+  // carry its namespace, while a top-level function call carries none.
+  for (const bool stream : {false, true}) {
+    auto body = gufo::json::parse(R"({"input":"go","tools":[
+      {"type":"function","name":"exec","strict":false,
+       "parameters":{"type":"object","properties":{}}},
+      {"type":"namespace","name":"multi_agent_v1","tools":[
+        {"type":"function","name":"close_agent","strict":false,
+         "parameters":{"type":"object","properties":{}}}]}]})");
+    body["stream"] = stream;
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+           "Responses accepts a namespace beside a function");
+    FakeBackend backend;
+    backend.pieces = {
+        "<tool_call>{\"name\":\"close_agent\",\"arguments\":{}}</tool_call>"
+        "<tool_call>{\"name\":\"exec\",\"arguments\":{}}</tool_call>"};
+    auto response = gufo::server::CreateOpenAiResponse(
+        Request(body.dump()), backend, chat, 256, {}, stream);
+    Expect(response.status == 200, "namespaced tool request succeeds");
+    std::vector<gufo::json::Value> results;
+    if (stream) {
+      response.streaming_body([&](std::string_view chunk) {
+        auto pos = chunk.find("data: ");
+        if (pos != std::string_view::npos &&
+            !chunk.substr(pos + 6).starts_with("[DONE]")) {
+          auto event = gufo::json::parse(chunk.substr(pos + 6));
+          if (event.member_str("type") == "response.completed")
+            results.push_back(*event.find("response"));
+        }
+        return true;
+      });
+    } else {
+      results.push_back(gufo::json::parse(response.body));
+    }
+    std::map<std::string, std::string> namespaces;
+    for (const auto& result : results)
+      for (const auto& item : result.find("output")->items())
+        if (item.member_str("type") == "function_call")
+          namespaces[item.member_str("name")] =
+              item.contains("namespace") ? item.member_str("namespace") : "-";
+    Expect(namespaces.size() == 2 &&
+               namespaces["close_agent"] == "multi_agent_v1" &&
+               namespaces["exec"] == "-",
+           "function calls echo only their own namespace");
   }
 }
 
@@ -4369,6 +4549,7 @@ int main() {
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
   TestInvalidToolsFailBeforeGeneration();
+  TestResponsesClientCompatTolerances();
   TestToolNameCharacters();
   TestMalformedHistoricalFunctions();
   TestToolClosingFraming();
