@@ -2356,7 +2356,7 @@ bool Executor::RestoreSnapshot(Session& session,
   }
   const std::uint32_t max_blocks =
       h.compress_ratio == 0 ? 0 : h.position / h.compress_ratio;
-  if (h.image_count > 256 || h.position == 0 ||
+  if (h.image_count > h.position || h.position == 0 ||
       h.position > session.max_context_ || h.blocks > max_blocks ||
       h.mtp_position > h.position ||
       h.mtp_blocks > h.mtp_position / h.compress_ratio ||

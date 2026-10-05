@@ -1988,19 +1988,51 @@ void TestImagePartsRetainOrderAndIdentity() {
   }
 }
 
-void TestAggregateImageLimit() {
-  FakeBackend backend;
-  auto body = gufo::json::Value::object();
-  body["model"] = "test-model";
-  body["messages"] = gufo::json::Value::array();
+void TestImageCountAndByteBudget() {
   const auto message = gufo::json::parse(R"({"role":"user","content":[
     {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}]})");
-  for (unsigned i = 0; i < 17; ++i)
-    body["messages"].push_back(message);
-  const auto response =
-      gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
-  Expect(response.status == 400,
-         "image budget must cover all messages, not each separately");
+  for (const unsigned count : {17u, 257u}) {
+    for (const bool split : {false, true}) {
+      FakeBackend backend;
+      auto body = gufo::json::Value::object();
+      body["model"] = "test-model";
+      body["messages"] = gufo::json::Value::array();
+      if (split) {
+        for (unsigned i = 0; i < count; ++i)
+          body["messages"].push_back(message);
+      } else {
+        auto combined = message;
+        for (unsigned i = 1; i < count; ++i)
+          combined["content"].push_back(message.find("content")->items()[0]);
+        body["messages"].push_back(std::move(combined));
+      }
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      std::size_t observed = 0;
+      for (const auto& parsed : backend.last_request.messages)
+        observed += parsed.images.size();
+      Expect(response.status == 200 && observed == count,
+             "all image parts reach the model within the byte budget");
+    }
+  }
+  const auto response_message = gufo::json::parse(R"({
+    "role":"user","content":[{"type":"input_image",
+    "image_url":"data:image/png;base64,AQID"}]})");
+  gufo::core::ImageReadBudget budget;
+  budget.remaining_bytes = 17 * 3;
+  std::string error;
+  for (unsigned i = 0; i < 17; ++i) {
+    gufo::tokenization::ChatMessage parsed;
+    Expect(gufo::server::ParseOpenAiResponseMessage(response_message, &parsed,
+                                                    budget, &error) &&
+               parsed.images.size() == 1,
+           "Responses accepts more than sixteen images across messages");
+  }
+  gufo::tokenization::ChatMessage parsed;
+  Expect(!gufo::server::ParseOpenAiResponseMessage(response_message, &parsed,
+                                                   budget, &error) &&
+             error.find("byte") != std::string::npos,
+         "aggregate byte protection still covers every message");
 }
 
 void TestStopSequencesAndDefaultFields() {
@@ -4993,7 +5025,7 @@ int main() {
   TestClientIdentityReachesBackend();
   TestStreamingOverloadIsRejectedBeforeHeaders();
   TestImagePartsRetainOrderAndIdentity();
-  TestAggregateImageLimit();
+  TestImageCountAndByteBudget();
   std::cout << "All OpenAI chat protocol tests passed\n";
   return 0;
 }

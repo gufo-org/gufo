@@ -151,8 +151,9 @@ std::span<const std::uint8_t> Prompt::IdentityForPrefix(
 }
 
 void RopeLayout::Validate(std::uint32_t max_context) const {
-  if (images.size() > 256)
-    throw std::invalid_argument("too many image grids");
+  // Every non-overlapping image occupies at least one context position.
+  if (images.size() > max_context)
+    throw std::invalid_argument("image grids exceed model context");
   std::uint64_t previous_end = 0;
   for (const auto& image : images) {
     const std::uint64_t count = std::uint64_t{image.height} * image.width;

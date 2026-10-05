@@ -160,7 +160,8 @@ CompactSnapshotLayout ParseCompactSnapshotLayout(
   const auto version = GetLittleEndian<std::uint32_t>(payload, 8);
   const auto image_count = GetLittleEndian<std::uint32_t>(payload, 72);
   if ((version != kCompactSnapshotVersion && version != 2) ||
-      image_count > 256 || (version == 1 && image_count != 0) ||
+      image_count > GetLittleEndian<std::uint32_t>(payload, 28) ||
+      (version == 1 && image_count != 0) ||
       GetLittleEndian<std::uint32_t>(payload, 12) !=
           kCompactSnapshotHeaderBytes ||
       GetLittleEndian<std::uint32_t>(payload, 76) != 0) {

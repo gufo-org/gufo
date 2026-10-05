@@ -105,6 +105,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--restore", type=Path)
     parser.add_argument("--image", type=Path)
+    parser.add_argument("--image-count", type=int, default=1,
+                        help="Repeat --image to exercise larger image histories")
     parser.add_argument("--append-image", action="store_true",
                         help="Append --image after a cached text-only turn")
     parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh"),
@@ -125,6 +127,8 @@ def main():
     TRACE.path = args.output.with_suffix(".requests.json")
     if args.append_image and not args.image:
         parser.error("--append-image requires --image")
+    if args.image_count < 1 or (args.image_count != 1 and not args.image):
+        parser.error("--image-count requires --image and a positive count")
     if args.legacy_tool_history and not args.tools:
         parser.error("--legacy-tool-history requires --tools")
     reports = []
@@ -171,7 +175,8 @@ def main():
                 if args.image:
                     encoded = base64.b64encode(args.image.read_bytes()).decode()
                     content = [{"type": "image_url", "image_url": {
-                        "url": f"data:image/png;base64,{encoded}"}},
+                        "url": f"data:image/png;base64,{encoded}"}}
+                        for _ in range(args.image_count)] + [
                         {"type": "text", "text": content}]
                 messages = [
                     {"role": "system", "content": name + ". " +

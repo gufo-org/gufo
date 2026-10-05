@@ -871,6 +871,10 @@ as the bearer credential when it is set.
 
 ## Lifecycle and limits
 
+Qwen image inputs have no fixed image-count cap. Their expanded tokens must fit
+the model context; image-byte, pixel, request-body and read-time budgets still
+apply to the submitted history, including base64 images.
+
 The HTTP transport bounds connection count and request-body size. The scheduler
 bounds admission and output buffering and propagates client cancellation to
 model runners. An in-flight GPU operation may finish before its request retires.

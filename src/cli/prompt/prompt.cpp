@@ -63,10 +63,9 @@ static void RegisterImageOptions(ArgParser& parser, PromptOptions& opt) {
       "multiple images",
       "Prompt",
       [&opt](std::string_view, std::string_view value, std::string* error) {
-        if (value.empty() || opt.image_paths.size() >= 16) {
+        if (value.empty()) {
           if (error)
-            *error =
-                "--image requires a file path; at most 16 images are supported";
+            *error = "--image requires a file path";
           return false;
         }
         opt.image_paths.emplace_back(value);

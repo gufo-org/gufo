@@ -64,6 +64,18 @@ void TestPositionLayout() {
     rejected = true;
   }
   assert(rejected);
+  RopeLayout many;
+  for (std::uint32_t i = 0; i < 257; ++i)
+    many.images.push_back({i * 64, 8, 8});
+  many.Validate(257 * 64);
+  assert(many.PrefixLength() == 257 * 64);
+  rejected = false;
+  try {
+    many.Validate(257 * 64 - 1);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
 }
 
 void TestPreprocessing() {
@@ -189,7 +201,12 @@ void TestImageTransportLimits() {
   budget.deadline = std::chrono::steady_clock::now();
   rejects("data:image/png;base64,AQID", budget);
   budget = {};
-  budget.remaining_images = 0;
+  budget.remaining_bytes = 17 * 3;
+  for (unsigned i = 0; i < 17; ++i)
+    assert(
+        gufo::core::ReadImageUrl("data:image/png;base64,AQID", budget).size() ==
+        3);
+  assert(budget.remaining_bytes == 0);
   rejects("data:image/png;base64,AQID", budget);
 }
 

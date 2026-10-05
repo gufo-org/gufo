@@ -28,7 +28,7 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
+SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
           "tool-reasoning", "reasoning-separator",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache")
@@ -240,16 +240,17 @@ def main():
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
     if option(command, "--api-key") is not None:
         parser.error("omit --api-key for the isolated loopback test server")
-    if "image-inputs" in args.suite and option(command, "--mmproj") is None:
-        parser.error("image-inputs requires --mmproj in the server command")
+    if set(args.suite) & {"image-inputs", "image-count"} and option(command, "--mmproj") is None:
+        parser.error("image-inputs and image-count require --mmproj in the server command")
     selected = args.suite
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
         selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types")
-                    and (suite != "image-inputs" or option(command, "--mmproj") is not None)]
+                    and (suite not in ("image-inputs", "image-count")
+                         or option(command, "--mmproj") is not None)]
     selected = list(dict.fromkeys(selected))
-    disk_enabled = "cache" in selected
+    disk_enabled = bool(set(selected) & {"cache", "image-count"})
     try:
         overrides = sampling_overrides(command)
         sessions = int(option(command, "--sessions", "4"))
@@ -395,6 +396,15 @@ def main():
                 if args.allow_missing_progress:
                     sdk_args += ["--allow-missing-progress"]
                 run(suite, "openai_sdk.py", sdk_args)
+            if "image-count" in selected and not through_case:
+                label = "image-count-cancel"
+                if run(label, "continuation.py", [
+                        "--url", base_url, "--model", model,
+                        "--prefix-repetitions", "2",
+                        "--case", "content-preserve0-sampled0", "--discard-assistant",
+                        "--image", str(output / "red.png"), "--image-count", "17",
+                        "--output", str(output / (label + ".json"))]):
+                    ready_to_restore.append(label)
             if "cache" in selected:
                 for label, extra in cache_cases:
                     if run(label, "continuation.py", [

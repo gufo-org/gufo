@@ -76,6 +76,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `stops` | Text, Unicode, reasoning and tool stops; peer isolation |
 | `conversation` | Thinking/efforts, images, cancellation and RAM reuse |
 | `image-inputs` | PNG, JPEG and WebP uploads in Chat and Responses; URL spellings, bad uploads and recovery |
+| `image-count` | 17+ images in one message and across turns; Chat/Responses, sampled thinking/JSON, concurrent colors, limits, cancellation and RAM/disk replay |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata, foreign tool markers in prose and parallel calls (no DeepSeek text after the call block) |
@@ -108,8 +109,10 @@ For `discovery` (also included in `all`), pass `--expected-input-modalities text
 the server command. Projectors can load automatically beside the weights, so
 the expectation is explicit rather than inferred from `--mmproj`.
 
-For `image-inputs`, pass the model's `--mmproj` in the server command. It uses
-small fixed images and is included in `all` only when `--mmproj` is supplied.
+For `image-inputs` and `image-count`, pass the model's `--mmproj`. Both use small
+fixed images and are included in `all` only with that option. `image-count`
+restarts the server for disk replay; its first four cases are 1/16-image timing
+controls usable on older main with `--through-case image-count:image_count_control_16_True`.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`

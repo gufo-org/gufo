@@ -276,10 +276,8 @@ bool ParseContent(const json::Value* content,
       const auto* url =
           image != nullptr && image->is_object() ? image->find("url") : nullptr;
       if (message->role != tokenization::ChatRole::kUser || url == nullptr ||
-          !url->is_string() || message->images.size() >= 16) {
-        *error =
-            "image_url requires a user message and a string URL (at most 16 "
-            "images)";
+          !url->is_string()) {
+        *error = "image_url requires a user message and a string URL";
         return false;
       }
       // Resolution is model-owned; accept only the automatic policy rather

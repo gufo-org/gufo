@@ -29,7 +29,6 @@ struct Image {
 /// Shared across all messages of one HTTP request.
 struct ImageReadBudget {
   std::size_t remaining_bytes{kMaxEncodedImageBytes};
-  std::size_t remaining_images{16};
   std::chrono::steady_clock::time_point deadline{
       std::chrono::steady_clock::now() + std::chrono::seconds(15)};
 };
