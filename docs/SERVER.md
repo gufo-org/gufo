@@ -542,8 +542,12 @@ when retaining reasoning. Replay `function_call` items with their `call_id`,
 then supply `function_call_output` items using the same ID. Function tools use
 the flat `{type:"function",name,parameters,strict}` shape. The Responses API
 also defines hosted tool types (`web_search`, `file_search`, `code_interpreter`,
-`custom`, ...) that only OpenAI can execute; they are accepted and skipped so
-the function tools still reach the model. Standard Responses request fields with
+`mcp`, ...) that only OpenAI can execute; they are accepted and skipped so
+the function tools still reach the model. A `namespace` entry is not hosted:
+it groups client-executed function tools for organization only, and its
+functions are flattened into the function list and called by plain name.
+Function names that collide across namespaces or with top-level functions are
+rejected. Standard Responses request fields with
 no native effect are accepted and ignored so conforming clients interoperate
 (for example Codex): `include`, `reasoning.summary`, `text.verbosity`,
 `client_metadata` and `prompt_cache_key`.

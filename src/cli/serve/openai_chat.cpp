@@ -415,7 +415,7 @@ bool ParseTools(const json::Value* tools,
     *error = "'tools' must be an array";
     return false;
   }
-  if (tools->size() > 128) {
+  if (output->size() + tools->size() > 128) {
     *error = "'tools' supports at most 128 functions";
     return false;
   }
@@ -424,9 +424,23 @@ bool ParseTools(const json::Value* tools,
       *error = "'tools' entries must be objects";
       return false;
     }
+    if (allow_non_function && item.member_str("type") == "namespace") {
+      // A Responses namespace only groups client-executed function tools for
+      // organization; calls replay by the plain function name. Flatten the
+      // nested functions and let the uniqueness check reject ambiguous
+      // namespaces. Nested hosted tools skip like top-level hosted types.
+      const auto* nested = item.find("tools");
+      if (nested == nullptr || !nested->is_array()) {
+        *error = "namespace tools require a tools array";
+        return false;
+      }
+      if (!ParseTools(nested, output, error, allow_non_function))
+        return false;
+      continue;
+    }
     if (item.member_str("type") != "function") {
       // The Responses API declares hosted tool types (web_search, file_search,
-      // code_interpreter, custom, ...) that only the provider can execute.
+      // code_interpreter, mcp, ...) that only the provider can execute.
       // Skip them so the request still reaches the function tools the model can
       // call; Chat Completions declares only functions and keeps its contract.
       if (allow_non_function)

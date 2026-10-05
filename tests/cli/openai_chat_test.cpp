@@ -681,8 +681,9 @@ void TestInvalidToolsFailBeforeGeneration() {
 }
 
 void TestResponsesClientCompatTolerances() {
-  // Hosted tool types (Responses-only) are skipped, not rejected; the function
-  // tools survive, while a malformed function still fails the controls.
+  // Hosted tool types (Responses-only) are skipped, not rejected. Namespaces
+  // group client-executed functions and flatten to the function list, while a
+  // malformed function still fails the controls.
   {
     auto body = gufo::json::parse(R"({
       "tools":[
@@ -695,8 +696,38 @@ void TestResponsesClientCompatTolerances() {
     gufo::server::ChatRequest chat;
     Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
            "Responses skips hosted tool types without failing");
-    Expect(chat.tools.size() == 1 && chat.tools[0].name == "exec",
-           "Only the function tool survives hosted-tool skipping");
+    Expect(chat.tools.size() == 2 && chat.tools[0].name == "exec" &&
+               chat.tools[1].name == "spawn",
+           "Function tools survive, including those nested in namespaces");
+  }
+  {
+    // A namespace is a client-side grouping, not a hosted tool: its functions
+    // must reach the model with their schema and strictness intact.
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[{"type":"namespace","name":"crm",
+                 "description":"Local customer tools","tools":[{"type":"function",
+                 "name":"lookup","parameters":{"type":"object","properties":{},
+                 "required":[],"additionalProperties":false},"strict":true}]}]})"),
+               &chat) &&
+               chat.tools.size() == 1 && chat.tools[0].name == "lookup" &&
+               chat.tools[0].definition_json.find("\"strict\":true") !=
+                   std::string::npos,
+           "Namespace function tools are flattened with their definitions");
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[
+                 {"type":"function","name":"lookup"},
+                 {"type":"namespace","name":"crm","tools":[{"type":"function",
+                  "name":"lookup"}]}]})"),
+               &chat)
+               .has_value(),
+           "Namespace routing is rejected when function names are ambiguous");
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[{"type":"namespace",
+                 "name":"crm"}]})"),
+               &chat)
+               .has_value(),
+           "A namespace without a tools array is rejected");
   }
   {
     gufo::server::ChatRequest chat;

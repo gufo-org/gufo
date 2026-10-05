@@ -1011,7 +1011,8 @@ void TestCompatibilityRequests() {
 
   // The Responses API carries request-only fields with no native effect here
   // (hosted tool types, include, reasoning.summary, text.verbosity). Accept
-  // them and keep only the executable function tools. Codex is one such client.
+  // them and keep every executable function tool, flattening the client-side
+  // namespace grouping. Codex is one such client.
   const auto hosted = response_body(server.Post(
       "/v1/responses",
       R"({"model":"test","instructions":"You are a coding agent.","input":[
@@ -1035,8 +1036,9 @@ void TestCompatibilityRequests() {
           {"type":"web_search","external_web_access":false}]})"));
   assert(hosted.member_str("status") == "completed");
   const auto hosted_call = server.backend->LastCall();
-  assert(hosted_call.chat.tools.size() == 1 &&
-         hosted_call.chat.tools[0].name == "exec_command");
+  assert(hosted_call.chat.tools.size() == 2 &&
+         hosted_call.chat.tools[0].name == "exec_command" &&
+         hosted_call.chat.tools[1].name == "close_agent");
   assert(hosted_call.chat.reasoning.enabled == true &&
          hosted_call.chat.reasoning.effort == gufo::ReasoningEffort::kMedium);
   assert(hosted_call.chat.messages.size() == 3 &&
