@@ -2435,7 +2435,7 @@ class ResponsesOutput {
 public:
   ResponsesOutput(std::string model, HttpResponse::BodyWriter writer,
                   const ChatRequest& chat)
-      : writer_(std::move(writer)) {
+      : writer_(std::move(writer)), namespaces_(chat.tool_namespaces) {
     response_ = json::Value::object();
     response_["id"] = RandomId("resp_");
     response_["object"] = "response";
@@ -2523,6 +2523,8 @@ public:
     item["type"] = "function_call";
     item["call_id"] = call.id;
     item["name"] = call.name;
+    if (const auto it = namespaces_.find(call.name); it != namespaces_.end())
+      item["namespace"] = it->second;
     item["arguments"] = "";
     item["status"] = "in_progress";
     auto added = IndexedEvent("response.output_item.added");
@@ -2653,6 +2655,7 @@ private:
   }
 
   HttpResponse::BodyWriter writer_;
+  std::map<std::string, std::string> namespaces_;
   json::Value response_;
   json::Value item_;
   std::string text_;
@@ -2992,6 +2995,19 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
   // execute; skip them rather than reject the whole request.
   if (auto error = ParseToolControls(body, &parsed, true, true))
     return error;
+  // Clients route namespaced calls by namespace and name, so keep the
+  // namespace of each flattened function and echo it on its calls.
+  // ParseToolControls has validated the namespace tools arrays.
+  if (const auto* tools = body.find("tools"); tools && tools->is_array()) {
+    for (const auto& item : tools->items()) {
+      const auto name = item.member_str("name");
+      if (item.member_str("type") != "namespace" || name.empty())
+        continue;
+      for (const auto& tool : item.find("tools")->items())
+        if (tool.member_str("type") == "function")
+          parsed.chat.tool_namespaces[tool.member_str("name")] = name;
+    }
+  }
   // Responses attempts strict normalization when strict is omitted; Chat
   // Completions keeps its best-effort default. Explicit true/false wins.
   for (auto& tool : parsed.chat.tools) {

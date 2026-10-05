@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -809,6 +810,53 @@ void TestResponsesClientCompatTolerances() {
                gufo::json::parse(R"({"text":{"bogus":1}})"), &rejected)
                .has_value(),
            "Unknown text members are still rejected");
+  }
+
+  // Codex routes calls by namespace and name: a flattened function call must
+  // carry its namespace, while a top-level function call carries none.
+  for (const bool stream : {false, true}) {
+    auto body = gufo::json::parse(R"({"input":"go","tools":[
+      {"type":"function","name":"exec","strict":false,
+       "parameters":{"type":"object","properties":{}}},
+      {"type":"namespace","name":"multi_agent_v1","tools":[
+        {"type":"function","name":"close_agent","strict":false,
+         "parameters":{"type":"object","properties":{}}}]}]})");
+    body["stream"] = stream;
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+           "Responses accepts a namespace beside a function");
+    FakeBackend backend;
+    backend.pieces = {
+        "<tool_call>{\"name\":\"close_agent\",\"arguments\":{}}</tool_call>"
+        "<tool_call>{\"name\":\"exec\",\"arguments\":{}}</tool_call>"};
+    auto response = gufo::server::CreateOpenAiResponse(
+        Request(body.dump()), backend, chat, 256, {}, stream);
+    Expect(response.status == 200, "namespaced tool request succeeds");
+    std::vector<gufo::json::Value> results;
+    if (stream) {
+      response.streaming_body([&](std::string_view chunk) {
+        auto pos = chunk.find("data: ");
+        if (pos != std::string_view::npos &&
+            !chunk.substr(pos + 6).starts_with("[DONE]")) {
+          auto event = gufo::json::parse(chunk.substr(pos + 6));
+          if (event.member_str("type") == "response.completed")
+            results.push_back(*event.find("response"));
+        }
+        return true;
+      });
+    } else {
+      results.push_back(gufo::json::parse(response.body));
+    }
+    std::map<std::string, std::string> namespaces;
+    for (const auto& result : results)
+      for (const auto& item : result.find("output")->items())
+        if (item.member_str("type") == "function_call")
+          namespaces[item.member_str("name")] =
+              item.contains("namespace") ? item.member_str("namespace") : "-";
+    Expect(namespaces.size() == 2 &&
+               namespaces["close_agent"] == "multi_agent_v1" &&
+               namespaces["exec"] == "-",
+           "function calls echo only their own namespace");
   }
 }
 
