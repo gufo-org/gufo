@@ -714,18 +714,22 @@ void TestResponsesClientCompatTolerances() {
                chat.tools[0].definition_json.find("\"strict\":true") !=
                    std::string::npos,
            "Namespace function tools are flattened with their definitions");
+    // Rejected parses leave the request untouched, so every case parses into
+    // fresh state instead of inheriting tools from a previous parse.
+    gufo::server::ChatRequest ambiguous;
     Expect(gufo::server::ParseOpenAiResponseControls(
                gufo::json::parse(R"({"tools":[
                  {"type":"function","name":"lookup"},
                  {"type":"namespace","name":"crm","tools":[{"type":"function",
                   "name":"lookup"}]}]})"),
-               &chat)
+               &ambiguous)
                .has_value(),
            "Namespace routing is rejected when function names are ambiguous");
+    gufo::server::ChatRequest malformed;
     Expect(gufo::server::ParseOpenAiResponseControls(
                gufo::json::parse(R"({"tools":[{"type":"namespace",
                  "name":"crm"}]})"),
-               &chat)
+               &malformed)
                .has_value(),
            "A namespace without a tools array is rejected");
   }
@@ -740,17 +744,18 @@ void TestResponsesClientCompatTolerances() {
     }
     nested += "]}";
     const std::string outside = R"({"type":"function","name":"outside"})";
-    gufo::server::ChatRequest chat;
+    gufo::server::ChatRequest accepted;
     Expect(!gufo::server::ParseOpenAiResponseControls(
-               gufo::json::parse(R"({"tools":[)" + nested + "]}"), &chat) &&
-               chat.tools.size() == 128,
+               gufo::json::parse(R"({"tools":[)" + nested + "]}"), &accepted) &&
+               accepted.tools.size() == 128,
            "Exactly 128 functions flattened from a namespace are accepted");
     for (const bool outside_first : {false, true}) {
       const auto body = outside_first
                             ? R"({"tools":[)" + outside + "," + nested + "]}"
                             : R"({"tools":[)" + nested + "," + outside + "]}";
+      gufo::server::ChatRequest overflow;
       Expect(gufo::server::ParseOpenAiResponseControls(gufo::json::parse(body),
-                                                       &chat)
+                                                       &overflow)
                  .has_value(),
              "Both boundary orderings reject the 129th flattened function");
     }
