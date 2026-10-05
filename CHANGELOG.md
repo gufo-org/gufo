@@ -4,6 +4,31 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.7.1](https://github.com/gufo-org/gufo/compare/v0.7.0...v0.7.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* **cache:** keep the stable checkpoint before replaced trailing user context ([#407](https://github.com/gufo-org/gufo/issues/407)) ([3d73237](https://github.com/gufo-org/gufo/commit/3d732377e5ac257fa3f1a59f57a17163e65763b5))
+* **serve:** accept the reasoning fields Claude Code sends to /v1/messages ([#405](https://github.com/gufo-org/gufo/issues/405)) ([56383be](https://github.com/gufo-org/gufo/commit/56383be0718ea0ce203fc42a55581304f0bbc253))
+* **serve:** preserve active disk-cache writes during startup ([#392](https://github.com/gufo-org/gufo/issues/392)) ([207bb4e](https://github.com/gufo-org/gufo/commit/207bb4e0bf6cd0c666674794ec1f0dcf0eb49cb9))
+* **serve:** reclaim output capacity from abandoned streams ([#394](https://github.com/gufo-org/gufo/issues/394)) ([d85fb0f](https://github.com/gufo-org/gufo/commit/d85fb0fcd3fb906ea845f6e1404222d686b74e07))
+* **server:** end DeepSeek tool output after the call block ([#397](https://github.com/gufo-org/gufo/issues/397)) ([0df6ba3](https://github.com/gufo-org/gufo/commit/0df6ba3e1b5eade79782aacac559a02ea5468c2b))
+* **server:** keep DeepSeek client markup as content, as llama.cpp does ([#420](https://github.com/gufo-org/gufo/issues/420)) ([a72fc1e](https://github.com/gufo-org/gufo/commit/a72fc1e58c8d4784e7b824b4aad93a76b5a197b1))
+* **server:** keep tool-call framing out of assistant content ([#400](https://github.com/gufo-org/gufo/issues/400)) ([d910b92](https://github.com/gufo-org/gufo/commit/d910b92f9d722ee4a0ed8770c16749dea472afe2))
+* **server:** preserve literal reasoning tags when thinking is disabled ([#391](https://github.com/gufo-org/gufo/issues/391)) ([6c0d493](https://github.com/gufo-org/gufo/commit/6c0d493eb3cbcbc8571648260d952a3198fab784))
+
+
+### Performance
+
+* **qwen-flash:** faster prefill projections, attention and indexer ([#421](https://github.com/gufo-org/gufo/issues/421)) ([653a318](https://github.com/gufo-org/gufo/commit/653a31830447be5068a448a0284e43669d52f436))
+* **sampling:** skip vocabulary blocks that cannot change the selected tokens ([#415](https://github.com/gufo-org/gufo/issues/415)) ([b945d0a](https://github.com/gufo-org/gufo/commit/b945d0afdb26e4b790b8cb260762105e167ee1a3))
+
+
+### Code Refactoring
+
+* **serve:** keep Messages reasoning parsers together ([#428](https://github.com/gufo-org/gufo/issues/428)) ([c3f4a9c](https://github.com/gufo-org/gufo/commit/c3f4a9c26031b04f34b84a96f4d8cfc8f4337ad2))
+
 ## [0.7.0](https://github.com/gufo-org/gufo/compare/v0.6.0...v0.7.0) (2026-10-04)
 
 
