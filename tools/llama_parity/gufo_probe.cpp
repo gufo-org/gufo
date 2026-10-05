@@ -30,8 +30,7 @@ int main(int, char** argv) {
       p = JsonConstraint::ToolParameters(
           gufo::json::parse(cols[1]), false,
           (std::string(argv[2]) == "ds" ? JsonConstraint::ToolFormat::kDeepSeek
-                                        : JsonConstraint::ToolFormat::kQwen),
-          std::string(argv[3]) == "required");
+                                        : JsonConstraint::ToolFormat::kQwen));
     } catch (const std::exception& e) {
       std::cout << cols[0] << "\tERROR " << e.what() << "\n";
       continue;

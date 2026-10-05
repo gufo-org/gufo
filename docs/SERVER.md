@@ -717,7 +717,8 @@ wildcard fields. A value that must contain the native closing tag cannot be
 written natively. Only runners without a native syntax use the JSON envelope.
 Historical calls render typed argument values with the chat template's
 `tojson` spelling (`", "` and `": "` separators, raw UTF-8), as llama.cpp's
-Jinja runtime does, so a replayed turn reuses the tokens the model generated.
+Jinja runtime does. Cache reuse requires identical tokens; normalizing an
+assistant's formatting can require replaying that suffix.
 Constrained JSON keys follow schema order, with additional
 keys last. Impossible strict schemas are rejected before generation.
 `tool_choice: "required"` and named choices constrain decoding to a declared
@@ -758,12 +759,11 @@ Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, includi
 streaming, images and concurrent requests. Reasoning stays separate from JSON
 and counts toward the output budget. Changing the schema changes the cache prefix.
 
-For constrained tool or JSON output, only `</think>` ends the initial reasoning
-phase. Literal tool markers such as `<tool_call>` quoted during reasoning remain
-reasoning data; they do not start a call or move reasoning into visible content.
-This boundary is identical for buffered responses and SSE deltas in Chat
-Completions and Responses. Tool parsing starts after the reasoning delimiter,
-and markers inside tool argument strings remain argument data.
+`</think>` ends reasoning before constrained JSON. Native tools also accept an
+unquoted function header as the boundary when the model omits `</think>`.
+Bare marker mentions and quoted examples remain reasoning; markers inside
+arguments remain data. Buffered and streamed Chat Completions and Responses
+use the same boundaries.
 
 Parse the returned content: leading whitespace is valid JSON, and stops or token
 limits can leave it incomplete. `finish_reason: "stop"` includes matched stop

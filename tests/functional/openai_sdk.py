@@ -27,7 +27,7 @@ from metrics import CaseComplete, Recorder
 from tool_reasoning import check_tool_reasoning, response_result
 from discovery import check_discovery
 from image_inputs import check_image_inputs
-from tool_native import check_native_tool_schemas
+from tool_native import check_finite_argument_types, check_native_tool_schemas
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
                         check_untyped_agent_tools, check_mixed_tool_schemas,
                         check_tool_schema_edges)
@@ -2521,7 +2521,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
 
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
               "tool-reasoning",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix")
 
 
@@ -2622,7 +2622,11 @@ def main():
                 client, args.model, checks, chat_result, args.vision, image_content,
                 args.sampling_preset),
             "tool-native-schemas": lambda: check_native_tool_schemas(
-                client, args.model, checks, chat_result, args.sampling_preset),
+                client, args.model, checks, chat_result, args.sampling_preset,
+                image_content("red") if args.vision else None),
+            "tool-native-types": lambda: check_finite_argument_types(
+                client, args.model, checks, chat_result,
+                image_content("red") if args.vision else None),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "state-edges": lambda: check_state_edges(
@@ -2650,7 +2654,8 @@ def main():
             "cache-shared-prefix": lambda: check_cache_shared_prefix(
                 client, args.model, checks, chat_result),
         }
-        selected = ([name for name in suites if name != "image-inputs" or args.vision]
+        selected = ([name for name in suites if name != "tool-native-types"
+                     and (name != "image-inputs" or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
         for name in selected:

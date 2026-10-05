@@ -1,11 +1,13 @@
 # llama.cpp tool-grammar parity
 
 Regenerates `tests/fixtures/llama_cpp_tool_grammar.json`, which
-`json_constraint_test` replays: for 85 tool schemas and 4 candidate outputs per
+`json_constraint_test` replays: for 86 tool schemas and 4 candidate outputs per
 schema, the verdict of llama.cpp's own Qwen3-Coder and DeepSeek tool grammars
-(its GBNF engine, `tool_choice: "required"`) beside gufo's. Every disagreement
-must match a reviewed reason in `golden.py`; gufo never refuses a valid output
-llama.cpp accepts.
+(its GBNF engine, `tool_choice: "required"`) beside Gufo's. Every disagreement
+must match a reviewed reason in `golden.py`. This fixture covers its listed
+cases, not complete grammar or parser equivalence. Gufo retains string
+constraints and exact schema keys; llama.cpp permits repeated optional
+parameters and trims surrounding spaces from parsed keys.
 
 ```sh
 OUT=$(mktemp -d)

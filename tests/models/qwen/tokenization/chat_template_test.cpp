@@ -613,6 +613,53 @@ void TestToolReplayArgumentsAreContent() {
   }
 }
 
+void TestNewLiteralTokenDoesNotRetokenizeHistory() {
+  using namespace gufo::tokenization;
+  std::vector<std::string> vocab;
+  for (int i = 0; i < 256; ++i)
+    vocab.emplace_back(1, static_cast<char>(i));
+  for (const auto* token :
+       {"<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>", ".\n"})
+    vocab.emplace_back(token);
+  const std::vector<std::string> merges = {". \n"};
+  const std::unordered_map<std::string, TokenId> specials = {
+      {"<|im_start|>", 256},
+      {"<|im_end|>", 257},
+      {"<tool_call>", 258},
+      {"</tool_call>", 259}};
+  std::string error;
+  auto tokenizer =
+      QwenTokenizer::CreateFromVocabulary(vocab, merges, specials, &error);
+  Expect(tokenizer != nullptr, "Tokenizer with boundary merge: " + error);
+  ChatMessage assistant{ChatRole::kAssistant, ""};
+  assistant.tool_calls.push_back(
+      {.id = "read-1",
+       .name = "read",
+       .arguments = {{.name = "path", .value = "file"}}});
+  std::vector<ChatMessage> history{{ChatRole::kUser, "Read the file."},
+                                   assistant,
+                                   {ChatRole::kTool, "Done."}};
+  ChatTemplateOptions options;
+  options.add_generation_prompt = false;
+  options.enable_thinking = false;
+  const auto before =
+      QwenChatTemplate::RenderAndTokenize(*tokenizer, history, options);
+  Expect(before.has_value(), "History tokenizes");
+  Expect(
+      std::find(before->begin(), before->end(), 260) != before->end(),
+      "Fixture merges content punctuation with the following framing newline");
+  history.push_back({ChatRole::kUser, "The literal text <tool_call> is data."});
+  const auto after =
+      QwenChatTemplate::RenderAndTokenize(*tokenizer, history, options);
+  Expect(
+      after && after->size() > before->size() &&
+          std::equal(before->begin(), before->end(), after->begin()),
+      "A new literal control spelling leaves every historical token unchanged");
+  Expect(std::count(before->begin(), before->end(), 258) ==
+             std::count(after->begin(), after->end(), 258),
+         "Literal spelling does not add a structural tool opener");
+}
+
 /// The server prepares every request through models::qwen::vision::Prepare,
 /// text-only ones included, so the reading of message content as text (#383)
 /// has to hold there too. The synthetic vocabulary and the message are the ones
@@ -1069,6 +1116,7 @@ int main() {
   TestRenderAndTokenize();
   TestContentSpellingATokenIsNotParsedAsOne();
   TestToolReplayArgumentsAreContent();
+  TestNewLiteralTokenDoesNotRetokenizeHistory();
   TestVisionPreparationReadsContentAsText();
   TestEncodeRenderedReadsImageContentAsText();
   TestChatCorpusConformance();

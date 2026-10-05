@@ -2454,6 +2454,132 @@ void TestStopInsideToolArguments() {
   }
 }
 
+void TestNativeToolImplicitReasoningEnd() {
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const bool qwen = format == Format::kQwen;
+    const std::string call =
+        qwen ? "<tool_call>\n<function=read>\n<parameter=path>\nfile.txt\n"
+               "</parameter>\n</function>\n</tool_call>"
+             : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"read\">\n"
+               "<｜DSML｜parameter name=\"path\" string=\"true\">file.txt"
+               "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+    for (const bool responses : {false, true})
+      for (const bool stream : {false, true})
+        for (const bool quoted : {false, true})
+          for (const bool interrupted : {false, true}) {
+            const std::string thought = quoted ? "Example:\n```xml\n" + call +
+                                                     "\n```\nRead the file.\n\n"
+                                               : "Read the file.\n\n";
+            const std::string text =
+                thought + (quoted ? "</think>" : "") +
+                (interrupted ? call.substr(0, call.find("file.txt") + 4)
+                             : call);
+            // llama.cpp treats the two newlines before a DeepSeek call as
+            // TC_SEPARATOR, including when the model omitted </think>.
+            const std::string expected_thought =
+                qwen || quoted ? thought
+                               : thought.substr(0, thought.size() - 2);
+            auto body = gufo::json::parse(R"({
+              "model":"test-model","messages":[{"role":"user","content":"read the file"}],
+              "reasoning_effort":"low","tool_choice":"required","parallel_tool_calls":false,
+              "tools":[{"type":"function","function":{"name":"read","parameters":{
+                "type":"object","properties":{"path":{"type":"string"}},
+                "required":["path"],"additionalProperties":false}}}]})");
+            body["stream"] = stream;
+            FakeBackend backend;
+            backend.tool_format = format;
+            backend.finish_reason =
+                interrupted ? Finish::kLength : Finish::kStop;
+            for (const char byte : text)
+              backend.pieces.emplace_back(1, byte);
+            gufo::server::HttpResponse response;
+            if (responses) {
+              auto flat = *body["tools"].items()[0].find("function");
+              flat["type"] = "function";
+              body["tools"] = gufo::json::Value::array();
+              body["tools"].push_back(std::move(flat));
+              gufo::server::ChatRequest chat;
+              chat.reasoning.enabled = true;
+              Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+                     "implicit tool fixture has valid Responses controls");
+              response = gufo::server::CreateOpenAiResponse(
+                  Request(body.dump()), backend, chat, 512, {}, stream);
+            } else {
+              response =
+                  gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+            }
+            Expect(response.status == 200,
+                   "implicit native tool request succeeds");
+            gufo::json::Value result;
+            std::string streamed_reasoning, streamed_content;
+            bool streamed_tool = false;
+            if (!stream)
+              result = gufo::json::parse(response.body);
+            else
+              response.streaming_body([&](std::string_view piece) {
+                if (piece == "data: [DONE]\n\n")
+                  return true;
+                const auto event =
+                    gufo::json::parse(piece.substr(piece.find("data: ") + 6));
+                if (responses) {
+                  if (event.member_str("type") ==
+                      "response.reasoning_summary_text.delta")
+                    streamed_reasoning += event.member_str("delta");
+                  if (event.member_str("type") == "response.output_text.delta")
+                    streamed_content += event.member_str("delta");
+                  if (event.member_str("type") == "response.completed" ||
+                      event.member_str("type") == "response.incomplete")
+                    result = *event.find("response");
+                } else if (const auto* choices = event.find("choices")) {
+                  for (const auto& choice : choices->items())
+                    if (const auto* delta = choice.find("delta")) {
+                      streamed_reasoning +=
+                          delta->member_str("reasoning_content");
+                      streamed_content += delta->member_str("content");
+                      streamed_tool |= delta->contains("tool_calls");
+                    }
+                }
+                return true;
+              });
+            std::string reasoning, content;
+            std::size_t calls = 0;
+            if (responses) {
+              for (const auto& item : result.find("output")->items()) {
+                calls += item.member_str("type") == "function_call";
+                for (const auto* field : {"summary", "content"})
+                  if (const auto* parts = item.find(field))
+                    for (const auto& part : parts->items())
+                      (std::string_view(field) == "summary" ? reasoning
+                                                            : content) +=
+                          part.member_str("text");
+              }
+            } else if (!stream) {
+              const auto& message =
+                  *result.find("choices")->items()[0].find("message");
+              reasoning = message.member_str("reasoning_content");
+              content = message.member_str("content");
+              if (const auto* tools = message.find("tool_calls"))
+                calls = tools->size();
+            } else {
+              reasoning = streamed_reasoning;
+              content = streamed_content;
+              calls = streamed_tool;
+            }
+            Expect(calls == (interrupted ? 0u : 1u),
+                   "only a complete unquoted native call is invoked");
+            Expect(content.empty() && reasoning == expected_thought,
+                   "implicit call markup is not leaked into either output "
+                   "channel");
+            if (stream)
+              Expect(streamed_content.empty() &&
+                         streamed_reasoning == expected_thought,
+                     "implicit reasoning boundary is correct during streaming");
+          }
+  }
+}
+
 void TestToolMarkersInsideConstrainedReasoning() {
   using gufo::json::Value;
   using Finish = gufo::server::TextGenerationBackend::FinishReason;
@@ -3589,6 +3715,14 @@ void TestNativeArgumentTypingMatrix() {
        R"("forty")"},
       {R"({"allOf":[{"type":"string"},{"minLength":1}]})", "42", R"("42")"},
       {R"({"allOf":[{"type":"integer"},{"minimum":1}]})", "42", "42"},
+      {R"({"const":"42"})", "42", R"("42")"},
+      {R"({"enum":["true","false"]})", "true", R"("true")"},
+      {R"({"enum":["null","42"]})", "null", R"("null")"},
+      {R"({"anyOf":[{"const":"42"},{"type":"null"}]})", "42", R"("42")"},
+      {R"({"enum":["42",17]})", "17", "17"},
+      {R"({"type":"boolean"})", "True", "true"},
+      {R"({"minLength":1})", "42", R"("42")"},
+      {R"({"pattern":".*"})", "true", R"("true")"},
       {R"({"not":{"type":"null"}})", "plain", R"("plain")"},
       {R"({"type":["string","null"]})", "null", "null"},
       {R"({"anyOf":[{"type":"integer"},{"type":"null"}]})", "null", "null"},
@@ -3602,6 +3736,13 @@ void TestNativeArgumentTypingMatrix() {
       {R"({"$ref":"#"})", "5", "5"},
       {R"({"type":"string"})", "line 1\n<b>\"q\"</b>",
        R"("line 1\n<b>\"q\"</b>")"},
+      {R"({"type":"string"})", "line\n</parameter> is literal\nend",
+       R"("line\n</parameter> is literal\nend")"},
+      {R"({"type":"string"})",
+       "line\n</parameter> <parameter=other>literal\nend",
+       R"("line\n</parameter> <parameter=other>literal\nend")"},
+      {R"({"type":"string"})", "line\n</parameter> </function>literal\nend",
+       R"("line\n</parameter> </function>literal\nend")"},
   };
   for (const auto& item : cases) {
     for (
@@ -3629,6 +3770,10 @@ void TestNativeArgumentTypingMatrix() {
                           "\n</parameter>\n</function>\n</tool_call>"};
         const auto response =
             gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+        if (response.status != 200)
+          std::cerr << "native schema=" << item.schema << " raw=" << item.raw
+                    << " status=" << response.status
+                    << " body=" << response.body << '\n';
         Expect(response.status == 200, "native typed call succeeds");
         std::string arguments;
         std::string content;
@@ -3667,8 +3812,37 @@ void TestNativeArgumentTypingMatrix() {
       }
     }
   }
-  // As llama.cpp's parser, a declared name with surrounding spaces matches
-  // exactly; an undeclared spelling is still trimmed.
+  // Parseable JSON and Python-literal recovery must both respect a known
+  // argument type. A malformed call must not invoke a tool with another type.
+  for (const auto& [type, raw] :
+       std::vector<std::pair<std::string, std::string>>{{"integer", "true"},
+                                                        {"integer", "True"},
+                                                        {"boolean", "1"},
+                                                        {"array", "{}"},
+                                                        {"object", "null"}}) {
+    auto body = gufo::json::parse(R"({"model":"test-model",
+      "messages":[{"role":"user","content":"call record"}],
+      "tools":[{"type":"function","function":{"name":"record",
+        "parameters":{"type":"object","properties":{"v":{"type":"integer"}},
+        "required":["v"],"additionalProperties":false}}}]})");
+    auto tool = body["tools"].items()[0];
+    tool["function"]["parameters"]["properties"]["v"]["type"] = type;
+    body["tools"] = gufo::json::Value::array();
+    body["tools"].push_back(std::move(tool));
+    FakeBackend backend;
+    backend.tool_format = gufo::sampling::JsonConstraint::ToolFormat::kQwen;
+    backend.pieces = {"<tool_call>\n<function=record>\n<parameter=v>\n" + raw +
+                      "\n</parameter>\n</function>\n</tool_call>"};
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+    Expect(response.status == 200, "invalid native output is handled safely");
+    const auto output = gufo::json::parse(response.body);
+    const auto& message = *output.find("choices")->items()[0].find("message");
+    Expect(!message.find("tool_calls"),
+           "a value with the wrong declared type is not invoked");
+  }
+  // A declared name with surrounding spaces remains exact. llama.cpp's
+  // JSON mapper trims it despite matching the exact key in its PEG grammar.
   for (const bool stream : {false, true}) {
     auto body = gufo::json::parse(R"({"model":"test-model",
       "messages":[{"role":"user","content":"call record"}],
@@ -4680,6 +4854,7 @@ int main() {
   TestStreamingPromptProgress();
   TestResponsesPromptProgress();
   TestToolMarkersInsideConstrainedReasoning();
+  TestNativeToolImplicitReasoningEnd();
   TestToolMarkersWhenToolsDisabled();
   TestBracketDenseContent();
   TestStopSequencesAndDefaultFields();

@@ -752,7 +752,13 @@ class RawStringLexeme final : public JsonSchemaLexeme {
 public:
   RawStringLexeme(const json::Value& schema, std::string delimiter)
       : string_(JsonSchemaLexeme::String(schema)),
-        delimiter_(std::move(delimiter)) {}
+        delimiter_(std::move(delimiter)),
+        can_close_(delimiter_.size(), true) {
+    for (std::size_t matched = 1; matched < delimiter_.size(); ++matched) {
+      const auto suffix = delimiter_.substr(0, matched) + delimiter_;
+      can_close_[matched] = suffix.find(delimiter_) == matched;
+    }
+  }
   bool CacheTransitions() const override { return true; }
   void CanonicalMaskState(std::string& state,
                           std::size_t token_bytes) const override {
@@ -805,12 +811,131 @@ public:
     auto closing = state;
     encoded.assign(1, static_cast<char>(matched));
     encoded += state;
-    return {true, string_->Advance(closing, '"').complete};
+    // The first delimiter must begin after the value, not inside a trailing
+    // prefix. For "\n</parameter>\n", a value ending in "\n</parameter>"
+    // would otherwise admit duplicated closers and disagree with the parser.
+    return {true,
+            can_close_[matched] && string_->Advance(closing, '"').complete};
   }
 
 private:
   std::shared_ptr<const JsonSchemaLexeme> string_;
   std::string delimiter_;
+  std::vector<bool> can_close_;
+};
+
+// Native calls can start before </think>. Keep literal marker mentions and
+// Markdown code quoted; a complete native function header starts constrained
+// tool decoding. Only a small scan state belongs to each speculative branch.
+class ReasoningLexeme final : public JsonSchemaLexeme {
+public:
+  ReasoningLexeme(std::string tool_prefix, ReasoningEnd end)
+      : tool_prefix_(std::move(tool_prefix)),
+        end_(end),
+        tool_failure_(tool_prefix_.size()) {
+    for (std::size_t i = 1, matched = 0; i < tool_prefix_.size(); ++i) {
+      while (matched && tool_prefix_[i] != tool_prefix_[matched])
+        matched = tool_failure_[matched - 1];
+      if (tool_prefix_[i] == tool_prefix_[matched])
+        ++matched;
+      tool_failure_[i] = matched;
+    }
+  }
+  bool CacheTransitions() const override { return true; }
+  bool PlainReasoning(std::string_view encoded) const override {
+    Scan state{};
+    if (!encoded.empty())
+      std::memcpy(&state, encoded.data(), sizeof(state));
+    return state.explicit_prefix == 0 && state.tool_prefix == 0;
+  }
+  Match Check(std::string_view bytes) const override {
+    std::string state;
+    Match result{true, end_ == ReasoningEnd::kUnfinished};
+    for (const unsigned char byte : bytes) {
+      result = Advance(state, byte);
+      if (!result.prefix)
+        break;
+    }
+    return result;
+  }
+  Match Advance(std::string& encoded, unsigned char byte) const override {
+    Scan state{};
+    if (!encoded.empty())
+      std::memcpy(&state, encoded.data(), sizeof(state));
+    const bool line_start = !state.nonblank;
+    if (byte != ' ' && byte != '\t' && byte != '\r' && byte != '\n')
+      state.nonblank = 1;
+    if (state.run && (byte != state.run_char)) {
+      if (state.fence) {
+        if (state.run_char == state.fence_char && state.run >= state.fence &&
+            state.run_at_start)
+          state.closing_fence = 1;
+      } else if (!state.inline_quote && state.run >= 3 && state.run_at_start) {
+        state.fence = state.run;
+        state.fence_char = state.run_char;
+      } else if (state.run_char == '`') {
+        if (!state.inline_quote)
+          state.inline_quote = state.run;
+        else if (state.run == state.inline_quote)
+          state.inline_quote = 0;
+      }
+      state.run = 0;
+      state.run_char = state.run_at_start = 0;
+    }
+    if (byte == '`' || byte == '~') {
+      if (!state.run) {
+        state.run_char = byte;
+        state.run_at_start = line_start;
+      }
+      if (state.run < UINT32_MAX)
+        ++state.run;
+    } else if (byte == '\n') {
+      if (state.fence && state.closing_fence)
+        state.fence = state.fence_char = 0;
+      if (state.inline_quote && !state.nonblank)
+        state.inline_quote = 0;
+      state.closing_fence = state.nonblank = 0;
+    } else if (byte != ' ' && byte != '\t' && byte != '\r') {
+      state.closing_fence = 0;
+    }
+    const auto advance = [&](std::uint32_t prefix, std::string_view marker,
+                             const auto& failure) {
+      // Preserve overlapping marker prefixes without allocating per byte.
+      while (prefix && byte != static_cast<unsigned char>(marker[prefix]))
+        prefix = failure[prefix - 1];
+      if (byte == static_cast<unsigned char>(marker[prefix]))
+        return prefix + 1;
+      return std::uint32_t{0};
+    };
+    constexpr std::string_view explicit_end = "</think>";
+    constexpr std::array<std::uint32_t, 8> explicit_failure{};
+    state.explicit_prefix =
+        advance(state.explicit_prefix, explicit_end, explicit_failure);
+    state.tool_prefix =
+        state.inline_quote || state.fence
+            ? 0
+            : advance(state.tool_prefix, tool_prefix_, tool_failure_);
+    if (state.explicit_prefix == explicit_end.size())
+      return {false, end_ == ReasoningEnd::kExplicit};
+    if (state.tool_prefix == tool_prefix_.size())
+      return {false, end_ == ReasoningEnd::kTool};
+    const Scan empty{};
+    if (std::memcmp(&state, &empty, sizeof(state)) == 0)
+      encoded.clear();
+    else
+      encoded.assign(reinterpret_cast<const char*>(&state), sizeof(state));
+    return {true, end_ == ReasoningEnd::kUnfinished};
+  }
+
+private:
+  struct Scan {
+    std::uint32_t explicit_prefix{}, tool_prefix{}, inline_quote{}, fence{};
+    std::uint32_t run{}, run_char{}, run_at_start{}, fence_char{};
+    std::uint32_t nonblank{}, closing_fence{};
+  };
+  std::string tool_prefix_;
+  ReasoningEnd end_;
+  std::vector<std::uint32_t> tool_failure_;
 };
 
 }  // namespace
@@ -826,6 +951,10 @@ std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::RawString(
 std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Whitespace() {
   static const auto whitespace = std::make_shared<WhitespaceLexeme>();
   return whitespace;
+}
+std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Reasoning(
+    std::string tool_prefix, ReasoningEnd end) {
+  return std::make_shared<ReasoningLexeme>(std::move(tool_prefix), end);
 }
 
 json::Value JsonSchemaLexeme::IntersectMultipleOf(const json::Value& a,

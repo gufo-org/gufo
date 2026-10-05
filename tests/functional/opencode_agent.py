@@ -106,15 +106,25 @@ def serve_mcp(log):
         print(json.dumps({"jsonrpc": "2.0", "id": ident, "result": result}), flush=True)
 
 
-def sse_output(path):
+def sse_output(path, *, reasoning=None):
     """Content and tool calls a recorded streamed response returned."""
     content, calls = "", {}
     for line in path.read_text().splitlines():
         if not line.startswith("data: ") or line == "data: [DONE]":
             continue
         event = json.loads(line[6:])
+        if reasoning is not None and event.get("type") == "response.reasoning_summary_text.delta":
+            reasoning.append(event["delta"])
+        if event.get("type") == "response.output_text.delta":
+            content += event["delta"]
+        if event.get("type") == "response.output_item.done":
+            item = event.get("item", {})
+            if item.get("type") == "function_call":
+                calls[item["id"]] = {"name": item["name"], "arguments": item["arguments"]}
         for choice in event.get("choices", []):
             delta = choice.get("delta", {})
+            if reasoning is not None:
+                reasoning.append(delta.get("reasoning_content") or "")
             content += delta.get("content") or ""
             for call in delta.get("tool_calls") or []:
                 entry = calls.setdefault(call.get("index", 0), {"name": "", "arguments": ""})

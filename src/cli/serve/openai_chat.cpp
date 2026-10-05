@@ -105,6 +105,21 @@ ToolMarkerSet ToolMarkers(
                                       : ToolMarkerSet(qwen);
 }
 
+// A native function header, rather than a bare marker mentioned in prose,
+// permits the implicit reasoning boundary used by llama.cpp's native parsers.
+ToolMarkerSet ReasoningToolMarkers(ToolMarkerSet markers) {
+  static constexpr std::array<std::string_view, 1> qwen{
+      "<tool_call>\n<function="};
+  static constexpr std::array<std::string_view, 2> deepseek{
+      "\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"",
+      "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\""};
+  if (markers.size() == 1 && markers.front() == "<tool_call>")
+    return qwen;
+  if (markers.size() == 2 && markers.back() == "<｜DSML｜tool_calls>")
+    return deepseek;
+  return {};
+}
+
 // Closers eligible for removal immediately after an accepted call. Standalone
 // closers and XML remain literal; the declared-tool envelope rule is separate.
 constexpr std::array<std::string_view, 4> kQwenClosers{
@@ -1074,6 +1089,14 @@ std::size_t EarliestMarker(std::string_view full, ToolMarkerSet markers,
   return std::string_view::npos;
 }
 
+std::size_t ReasoningToolMarker(std::string_view full, ToolMarkerSet markers,
+                                QuoteTracker& quotes, std::size_t from = 0) {
+  auto found = EarliestMarker(full, markers, quotes, from);
+  while (found != std::string_view::npos && quotes.UnclosedAt(found))
+    found = EarliestMarker(full, markers, quotes, found + 1);
+  return found;
+}
+
 // Bytes at the end of [0, end) that could still open a call marker. A marker
 // that would open inside quoted prose is prose, so it is not held back.
 std::size_t HeldMarkerPrefix(std::string_view full, std::size_t end,
@@ -1301,6 +1324,11 @@ const json::Value* ResolveToolSchema(const json::Value& root,
     seen.push_back(target);
     try {
       target = sampling::JsonConstraint::ResolveReference(root, *reference);
+      // A parameter pointing to its containing tool schema is recursive.
+      // Native best-effort grammar cannot enforce that recursion; do not
+      // infer a definite scalar type from the outer parameter container.
+      if (target == &root)
+        return nullptr;
     } catch (const std::invalid_argument&) {
       return nullptr;  // Non-strict schemas may not be compilable.
     }
@@ -1314,6 +1342,20 @@ bool SchemaAccepts(const json::Value& root, const json::Value& original,
   if (!resolved || depth > 16)
     return true;  // Retain text for unknown non-strict argument types.
   const auto& schema = *resolved;
+  // Match value kinds, as llama.cpp's value_types(), rather than guessing
+  // from the lexeme. {"const":"42"} is text even without an explicit type.
+  const auto same_kind = [&](const json::Value& candidate) {
+    return (candidate.is_string() && value.is_string()) ||
+           (candidate.is_number() && value.is_number()) ||
+           (candidate.is_bool() && value.is_bool()) ||
+           (candidate.is_null() && value.is_null()) ||
+           (candidate.is_array() && value.is_array()) ||
+           (candidate.is_object() && value.is_object());
+  };
+  if (const auto* constant = schema.find("const"))
+    return same_kind(*constant);
+  if (const auto* values = schema.find("enum"); values && values->is_array())
+    return std::ranges::any_of(values->items(), same_kind);
   const auto matches = [&](std::string_view type) {
     return (type == "string" && value.is_string()) ||
            (type == "number" && value.is_number()) ||
@@ -1339,10 +1381,20 @@ bool SchemaAccepts(const json::Value& root, const json::Value& original,
         return SchemaAccepts(root, item, value, depth + 1);
       });
   }
+  if (schema.contains("properties") ||
+      (schema.contains("additionalProperties") &&
+       !(schema.find("additionalProperties")->is_bool() &&
+         schema.find("additionalProperties")->as_bool())))
+    return value.is_object();
   if (const auto* parts = schema.find("allOf"); parts && parts->is_array())
     return std::ranges::all_of(parts->items(), [&](const auto& item) {
       return SchemaAccepts(root, item, value, depth + 1);
     });
+  if (schema.contains("items") || schema.contains("prefixItems"))
+    return value.is_array();
+  if (schema.contains("pattern") || schema.contains("minLength") ||
+      schema.contains("maxLength"))
+    return value.is_string();
   return true;
 }
 
@@ -1362,6 +1414,8 @@ void ParseQwenCalls(
       continue;
     }
     const auto marker_begin = cursor;
+    const bool canonical_header =
+        text.substr(cursor).starts_with("<tool_call>\n<function=");
     const auto begin = cursor + start.size();
     cursor = begin;  // A malformed call may be followed by a valid call.
     auto body = text.substr(begin);
@@ -1394,14 +1448,16 @@ void ParseQwenCalls(
           schema ? ResolveToolSchema(*schema, *schema) : nullptr;
       const auto* properties = object ? object->find("properties") : nullptr;
       bool valid = true;
+      bool canonical_parameters = canonical_header;
       while (consume("<parameter=")) {
         const auto name_end = body.find('>');
         if (name_end == std::string_view::npos) {
           valid = false;
           break;
         }
-        // As llama.cpp's parser, a declared name matches exactly, including
-        // surrounding spaces; other names are trimmed.
+        // Preserve the schema's exact key. llama.cpp's PEG matches this
+        // spelling too, but its JSON mapper trims it; doing that here would
+        // corrupt a declared key containing surrounding spaces.
         const std::string spelled(body.substr(0, name_end));
         const std::string name = properties && properties->is_object() &&
                                          properties->contains(spelled)
@@ -1413,8 +1469,24 @@ void ParseQwenCalls(
         auto close = body.find("</parameter>");
         const bool framed_value =
             body.starts_with('\n') || body.starts_with("\r\n");
+        canonical_parameters &= framed_value;
         if (framed_value) {
-          const auto framed = body.find("\n</parameter>");
+          // The canonical Qwen delimiter includes the following newline.
+          // A line such as "</parameter> is literal" is argument data.
+          auto framed = body.find("\n</parameter>");
+          while (framed != std::string_view::npos) {
+            const auto tail =
+                body.substr(framed + std::string_view("\n</parameter>").size());
+            // Compact legacy headers also admit compact closers. A canonical
+            // header uses the complete delimiter: apparent tags on the same
+            // line remain argument data, as in llama.cpp.
+            if (tail.starts_with('\n') || tail.starts_with("\r\n") ||
+                (!canonical_parameters &&
+                 (Trim(tail).starts_with("</function>") ||
+                  Trim(tail).starts_with("<parameter="))))
+              break;
+            framed = body.find("\n</parameter>", framed + 1);
+          }
           close = framed == std::string_view::npos ? framed : framed + 1;
           // Never recover a nested example from inside an unfinished value.
           cursor = close == std::string_view::npos
@@ -1446,8 +1518,7 @@ void ParseQwenCalls(
         // A union also admitting other types tries those first, as
         // llama.cpp's qwen3-coder parser does.
         std::optional<json::Value> typed;
-        if (string_allowed && property &&
-            ResolveToolSchema(*schema, *property)) {
+        if (string_allowed && property) {
           typed = TryParseJson(Trim(value));
           if (!typed || typed->is_string() ||
               !SchemaAccepts(*schema, *property, *typed))
@@ -1457,11 +1528,13 @@ void ParseQwenCalls(
         std::string raw(is_string ? value : Trim(value));
         if (!is_string && !typed) {
           auto parsed = TryParseJson(raw);
-          if (!parsed || !SchemaAccepts(*schema, *property, *parsed)) {
+          if (parsed && !SchemaAccepts(*schema, *property, *parsed))
+            parsed.reset();
+          if (!parsed) {
             auto converted = PythonLiteralsToJson(raw);
             auto alternative = TryParseJson(converted);
             if (alternative &&
-                (!parsed || SchemaAccepts(*schema, *property, *alternative))) {
+                SchemaAccepts(*schema, *property, *alternative)) {
               raw = std::move(converted);
               parsed = std::move(alternative);
             }
@@ -1932,13 +2005,21 @@ ParsedGeneration ParseStructuredGeneration(
   if (initial == TextGenerationBackend::InitialOutputState::kReasoning) {
     if (raw.starts_with("<think>"))
       raw.remove_prefix(7);
-    // Constrained decoding leaves reasoning only at </think>. Quoted tool
-    // markers are reasoning data, not alternative phase delimiters.
     const auto end = raw.find("</think>");
-    parsed.reasoning_content = std::string(raw.substr(0, end));
-    if (end == std::string_view::npos)
-      return parsed;
-    raw.remove_prefix(end + 8);
+    quotes.Reset(raw);
+    const auto call =
+        !tools.empty() && choice != ChatRequest::ToolChoice::kNone
+            ? ReasoningToolMarker(raw, ReasoningToolMarkers(markers), quotes)
+            : std::string_view::npos;
+    if (call < end) {
+      parsed.reasoning_content = std::string(raw.substr(0, call));
+      raw.remove_prefix(call);
+    } else {
+      parsed.reasoning_content = std::string(raw.substr(0, end));
+      if (end == std::string_view::npos)
+        return parsed;
+      raw.remove_prefix(end + 8);
+    }
   }
   const auto content = tool_only ? raw : Trim(raw);
   quotes.Reset(content);
@@ -2215,9 +2296,13 @@ public:
       const std::size_t end_pos = think_found == std::string::npos
                                       ? std::string::npos
                                       : think_found - offset;
-      const auto found = raw_content_ || !recognize_tools_
-                             ? std::string::npos
-                             : EarliestMarker(raw_, markers_, quotes_, offset);
+      const auto thinking_markers =
+          raw_content_ ? ReasoningToolMarkers(markers_) : markers_;
+      const auto found =
+          !recognize_tools_ ? std::string::npos
+          : raw_content_
+              ? ReasoningToolMarker(raw_, thinking_markers, quotes_, offset)
+              : EarliestMarker(raw_, thinking_markers, quotes_, offset);
       const std::size_t marker =
           found == std::string::npos ? std::string::npos : found - offset;
       if (marker < end_pos) {
@@ -2239,10 +2324,10 @@ public:
         quotes_.Reset(raw_, offset + end_pos + kThinkEnd.size());
         trim_reasoning_separator_ = true;
       } else {
-        std::size_t held =
-            raw_content_ || !recognize_tools_
-                ? 0
-                : HeldMarkerPrefix(raw_, raw_.size(), markers_, quotes_);
+        std::size_t held = !recognize_tools_
+                               ? 0
+                               : HeldMarkerPrefix(raw_, raw_.size(),
+                                                  thinking_markers, quotes_);
         held = std::min(held, pending_.size());
         for (std::size_t len = std::min(pending_.size(), kThinkEnd.size() - 1);
              len > 0; --len) {

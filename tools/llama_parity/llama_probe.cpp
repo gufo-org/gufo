@@ -68,7 +68,8 @@ int main(int argc, char** argv) {
     for (size_t i = 2; i < cols.size(); ++i) {
       std::string text = nlohmann::json::parse(cols[i]).get<std::string>();
       try {
-        auto m = common_chat_parse(p.generation_prompt + text, false, pp);
+        // common_chat_parse adds pp.generation_prompt itself.
+        auto m = common_chat_parse(text, false, pp);
         std::string args =
             m.tool_calls.empty() ? "-" : m.tool_calls[0].arguments;
         printf("%s\tcand%zu\tcalls=%zu\targs=%s\tgrammar=%s\n", cols[0].c_str(),

@@ -39,15 +39,11 @@ public:
   // Throws invalid_argument for malformed or missing references.
   static const json::Value* ResolveReference(const json::Value& root,
                                              const json::Value& reference);
-  // Returns null when a schema cannot be represented unambiguously by native
-  // parameter tags. The caller retains the exact JSON schema in that case.
-  // Non-strict tools permit open nested objects. Unsupported keywords retain
-  // best-effort native framing without relaxing strict response schemas.
-  // Required calls keep compact JSON for extended schemas; ordinary native
-  // calls retain their existing prompt and continuation representation.
+  // Native models always retain native parameter tags. Unsupported tool
+  // schemas use best-effort arguments without relaxing response-format schemas.
+  // Tool choice changes the call envelope, not this cached argument grammar.
   static std::shared_ptr<const JsonConstraint> ToolParameters(
-      const json::Value& schema, bool strict, ToolFormat format,
-      bool required = false);
+      const json::Value& schema, bool strict, ToolFormat format);
   // Best-effort native framing for non-strict tools with no declared argument
   // types. It preserves the model's native string/DSML typed-value semantics.
   static std::shared_ptr<const JsonConstraint> OpenToolParameters(
@@ -80,6 +76,8 @@ private:
   std::string prompt_;
   bool stop_only_when_complete_{true};
   bool automatic_tools_{false};
+  std::string reasoning_tool_prefix_;
+  std::uint32_t reasoning_tool_root_{0};
 };
 
 class ConstraintVocabulary {
@@ -112,6 +110,7 @@ private:
   std::vector<Node> trie_{1};
   std::vector<Piece> pieces_;
   std::vector<std::uint32_t> next_token_;
+  std::vector<std::uint32_t> reasoning_boundary_tokens_;
   std::size_t max_token_bytes_{0};
 };
 
@@ -123,6 +122,7 @@ struct TokenConstraint {
 
 private:
   mutable std::mutex mutex_;
+  mutable JsonConstraint::State initial_state_;
   mutable std::map<JsonConstraint::State,
                    std::shared_ptr<const std::vector<std::uint8_t>>>
       masks_;

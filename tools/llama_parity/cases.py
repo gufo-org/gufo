@@ -85,6 +85,15 @@ def rows(call):
         cands = [call([("value", "alpha")]), call([("kind", "x"), ("value", "1")]),
                  call([]), call([("value", "alpha"), ("zz", "1")])]
         result.append([name, json.dumps(schema), *map(json.dumps, cands)])
+    # The delimiter must start after the raw value. A Qwen value ending in
+    # this prefix used to complete a delimiter across that boundary and admit
+    # duplicated closers, even though llama.cpp's parser rejects the call.
+    schema = {"type": "object", "properties": {"v": {"type": "string"}},
+              "required": ["v"], "additionalProperties": False}
+    overlap = "\n</parameter>" if call is qwen else "</｜DSML｜parameter>"
+    cands = [call([("v", "archive.txt\n")]), call([("v", "archive.txt" + overlap)]),
+             call([]), call([("v", "archive.txt"), ("zz", "1")])]
+    result.append(["delimiter_overlap", json.dumps(schema), *map(json.dumps, cands)])
     return result
 
 
