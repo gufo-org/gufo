@@ -813,6 +813,7 @@ bool ContinuationCache::ReserveSnapshot(
           return false;
         const auto& source = *impl_->entries[source_index];
         return source.valid && source.snapshot &&
+               priority_for(source_index) < 3 &&
                source.tokens.size() < replacement_prefix.size() &&
                std::ranges::equal(source.input_identity, input_identity) &&
                IsPrefix(source.tokens, replacement_prefix);
@@ -825,7 +826,8 @@ bool ContinuationCache::ReserveSnapshot(
               impl_->snapshot_capacity_bytes - impl_->reserved_snapshot_bytes;
       while (can_fit_after_eviction && !fits()) {
         std::size_t target = oldest_snapshot(false);
-        // Advance this family before sacrificing another family's last copy.
+        // Advance a redundant source before another family's last copy;
+        // a shared branch point is still useful to its other conversations.
         // Verify the source: another lease may have replaced its record.
         if (can_replace_source() &&
             (target == impl_->entries.size() || priority_for(target) == 3))
