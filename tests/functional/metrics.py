@@ -272,6 +272,7 @@ def summarize(parts, streaming, ended, contract=None):
     elif data:
         events = [json.loads(data)]
     usage, output, choices, timings = {}, None, {}, {}
+    message_output = None
     for event in events:
         final = event.get("response", event)
         timings.update(final.get("timings", {}))
@@ -280,6 +281,10 @@ def summarize(parts, streaming, ended, contract=None):
         if "output" in final and final.get("status") in ("completed", "incomplete"):
             output = {"output": final["output"], "status": final["status"],
                       "incomplete_details": final.get("incomplete_details")}
+        if not streaming and final.get("type") == "message" and final.get("role") == "assistant":
+            # /v1/messages currently supports buffered responses only. Keep its
+            # ordered blocks and stop metadata, excluding the generated message ID.
+            message_output = {key: final[key] for key in ("content", "stop_reason", "stop_sequence")}
         for choice in event.get("choices", []):
             index = str(choice.get("index", 0))
             target = choices.setdefault(index, {"text": "", "reasoning": "", "tools": {}})
@@ -325,13 +330,15 @@ def summarize(parts, streaming, ended, contract=None):
             if alternative in usage:
                 measured[key] = usage[alternative]
                 break
-    measured["cached_tokens"] = usage.get("cached_tokens", usage.get(
-        "prompt_tokens_details", usage.get("input_tokens_details", {})).get("cached_tokens", 0))
+    measured["cached_tokens"] = usage.get("cached_tokens", usage.get("cache_read_input_tokens",
+        usage.get("prompt_tokens_details", usage.get("input_tokens_details", {})).get("cached_tokens", 0)))
     if first_output_ms is not None:
         measured["client_ttft_ms"] = first_output_ms
     for phase, tokens in (("prefill", "prefill_tokens"), ("decode", "completion_tokens")):
         if measured.get(tokens, 0) > 0 and measured.get(phase + "_ms", 0) > 0:
             measured[phase + "_ms_per_token"] = measured[phase + "_ms"] / measured[tokens]
+    if message_output is not None:
+        return measured, digest(message_output) if usage else None
     completed = bool(usage) and (output is not None or bool(choices))
     return measured, digest(output if output is not None else choices) if completed else None
 

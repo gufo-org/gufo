@@ -827,6 +827,77 @@ class FunctionalRunnerTest(unittest.TestCase):
             self.assertEqual(measured["prefill_ms"], 2)
             self.assertIsNotNone(fingerprint)
 
+    def messages_fixture(self):
+        request = {"model": "fixture", "max_tokens": 2, "temperature": 0, "seed": 31,
+                   "stop_sequences": ["END", "HALT"],
+                   "messages": [{"role": "user", "content": "Reply BETA."}]}
+        # Buffered Messages uses input_tokens including cached work, no total_tokens,
+        # ordered content blocks, and the separate GenerationTimings object.
+        response = {"id": "msg_fixture", "type": "message", "role": "assistant",
+                    "model": "fixture", "content": [
+                        {"type": "thinking", "thinking": "The code is BETA.", "signature": ""},
+                        {"type": "text", "text": "BETA"}],
+                    "stop_reason": "end_turn", "stop_sequence": None,
+                    "usage": {"input_tokens": 10, "output_tokens": 2,
+                              "cache_creation_input_tokens": 0, "cache_read_input_tokens": 6},
+                    "timings": {"prompt_n": 4, "prompt_ms": 2, "prompt_per_token_ms": .5,
+                                "prompt_per_second": 2000, "predicted_n": 2, "predicted_ms": 3,
+                                "predicted_per_token_ms": 1.5, "predicted_per_second": 2000 / 3,
+                                "cache_n": 6, "cache_restore_ms": 1, "cache_snapshot_ms": 1,
+                                "cache_disk_enqueue_ms": 0, "draft_rounds": 1,
+                                "draft_n": 3, "draft_n_accepted": 1}}
+        return request, response
+
+    def test_buffered_messages_preserves_output_cache_and_timings(self):
+        request, response = self.messages_fixture()
+        measured, fingerprint = summarize([(5, json.dumps(response).encode())], False, True,
+                                          ("/v1/messages", request, 200))
+        expected = {"prompt_tokens": 10, "completion_tokens": 2, "cached_tokens": 6,
+                    "prefill_tokens": 4, "prefill_ms": 2, "decode_ms": 3,
+                    "prefill_ms_per_token": .5, "decode_ms_per_token": 1.5,
+                    "cache_restore_ms": 1, "cache_snapshot_ms": 1, "cache_disk_enqueue_ms": 0,
+                    "draft_rounds": 1, "draft_tokens": 3, "draft_tokens_accepted": 1}
+        for key, value in expected.items():
+            with self.subTest(metric=key):
+                self.assertEqual(measured.get(key), value)
+        self.assertIsInstance(fingerprint, str)
+        self.assertEqual(len(fingerprint), 64)
+
+    def test_buffered_messages_comparison_detects_output_changes(self):
+        request, response = self.messages_fixture()
+        text, thinking = deepcopy(response), deepcopy(response)
+        text["content"][1]["text"] = "OTHER"
+        thinking["content"][0]["thinking"] = "The code is OTHER."
+        stopped = {**response, "stop_reason": "stop_sequence", "stop_sequence": "END"}
+        cases = [
+            ("text", response, text, "failed"),
+            ("thinking", response, thinking, "failed"),
+            ("stop_reason", response, {**response, "stop_reason": "max_tokens"}, "failed"),
+            ("stop_sequence", stopped, {**stopped, "stop_sequence": "HALT"}, "failed"),
+            ("generated_id", response, {**response, "id": "msg_other"}, "passed"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, candidate = Path(directory) / "baseline", Path(directory) / "candidate"
+            baseline.mkdir()
+            candidate.mkdir()
+            for label, before, after, expected in cases:
+                with self.subTest(change=label):
+                    for root, payload in ((baseline, before), (candidate, after)):
+                        with patch("metrics.time.monotonic", return_value=1):
+                            recorder = Recorder(root / "messages.requests.json")
+                            step = recorder.begin("/v1/messages", request)
+                            step.row["http_status"] = 200
+                            step.feed(json.dumps(payload).encode())
+                            step.ended = True
+                            step.finish()
+                    result = compare(baseline, candidate)
+                    self.assertEqual(result["status"], expected)
+                    if expected == "failed":
+                        self.assertTrue(any("output_sha256 changed" in issue
+                                            for issue in result["quality_or_coverage_changes"]))
+                    else:
+                        self.assertFalse(result["quality_or_coverage_changes"])
+
     def test_missing_timings_or_logs_cannot_qualify(self):
         completed = {"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
                                   "finish_reason": "stop"}],
