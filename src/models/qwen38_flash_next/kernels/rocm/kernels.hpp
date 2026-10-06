@@ -107,8 +107,8 @@ void HcCombineF16(float* res, const float* block_out, const float* inject,
 /// MoeEpilogueVec4F16's result over `expert_out` ([tokens][used][hidden]
 /// F16 rows), `weights`, the gated shared expert; it is formed in
 /// registers and never written. Returns false (launching nothing) for a
-/// geometry the fused kernel does not cover (four 2,560-wide streams with a
-/// norm and the tiled Q8 output are required).
+/// geometry the fused kernel does not cover (four 2,560-wide streams).
+/// A null gamma updates only the residual; otherwise xn_q8 is required.
 bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
                      const float* shared_out, const float* gate,
                      std::uint32_t gate_stride, std::uint32_t used,

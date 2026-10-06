@@ -1674,7 +1674,7 @@ void Executor::Combine(float* res, const float* gamma,
     // The MoE epilogue was deferred to this combine (see Moe).
     moe_pending_ = false;
     const auto* down = reinterpret_cast<const __half*>(s_.down_e);
-    if (xn_half_ &&
+    if (wide_mixer_ && MatrixRows(n_tokens) &&
         HcCombineMoeF16(res, down, s_.weights, s_.shexp_out,
                         s_.router + c.num_experts, c.num_experts + 1,
                         c.num_experts_used, s_.inject, inject_parts_, gamma,
@@ -2640,7 +2640,9 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
         il + 1 < c.num_layers
             ? (c.IsPleLayer(il + 1) ? nullptr
                                     : layers[il + 1].hc_attn.norm.f32())
-            : model_->hc_head().norm.f32();
+            : nullptr;
+    // The output head normalizes only its requested rows. The MTP predictor
+    // consumes the residual itself, so neither needs a whole-batch head norm.
     Combine(s_.res, next_norm, n);
     normed = next_norm != nullptr;
   }
@@ -2685,9 +2687,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
   }
   if (n_logits > 0) {
     PrefillPhase head_phase(false);
-    // The head mixer norms its tail rows itself: the last combine's norm is
-    // laid out for the whole batch (and tiled on the wide route), so a row
-    // offset into it is not addressable.
+    // Only the requested tail needs the head's normalization.
     const std::size_t skip = static_cast<std::size_t>(n - n_logits);
     const DeviceMixer& head = model_->hc_head();
     if (!HcMix(head, s_.res + skip * c.HcDim(), false, s_.mixed, nullptr,

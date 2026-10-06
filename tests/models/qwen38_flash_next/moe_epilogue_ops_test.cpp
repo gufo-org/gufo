@@ -128,6 +128,48 @@ int main() {
       worst = std::max(worst, std::abs(static_cast<double>(ref[i] - vec[i])));
     }
     std::cout << "MoE epilogue vec4 worst absolute error " << worst << '\n';
+    // Omitting an unused norm must preserve the fused residual exactly.
+    // This also covers ragged token counts and all ten routed experts.
+    constexpr std::size_t kResidual = kOut * 4;
+    const auto residual = MakeValues(kResidual, 0x13579U, 1.0F);
+    const auto parts = q::HcInjectPartsVec4(kHidden);
+    HipBuffer<float> d_res_norm(kResidual);
+    HipBuffer<float> d_res_only(kResidual);
+    HipBuffer<float> d_res_separate(kResidual);
+    HipBuffer<float> d_inject(kTokens * 4 * parts);
+    HipBuffer<float> d_gamma(4 * kHidden);
+    HipBuffer<__half> d_half(kExpert);
+    HipBuffer<__half> d_norm(kResidual);
+    HipBuffer<std::uint8_t> d_q8(q::Q8TiledBytes(kTokens, 4 * kHidden));
+    Upload(&d_res_norm, residual);
+    Upload(&d_res_only, residual);
+    Upload(&d_res_separate, residual);
+    Upload(&d_inject, MakeValues(kTokens * 4 * parts, 0x24680U, 0.5F));
+    Upload(&d_gamma, MakeValues(4 * kHidden, 0x98765U, 0.5F, 1.0F));
+    q::NarrowActivations(d_expert.get(), d_half.get(), false, kExpert, nullptr);
+    for (bool normalize : {true, false}) {
+      if (!q::HcCombineMoeF16(normalize ? d_res_norm.get() : d_res_only.get(),
+                              d_half.get(), d_weights.get(), d_shared.get(),
+                              d_gate.get(), kGateStride, kSlots, d_inject.get(),
+                              parts, normalize ? d_gamma.get() : nullptr,
+                              normalize ? d_norm.get() : nullptr,
+                              normalize ? d_q8.get() : nullptr, kTokens,
+                              kHidden, 4, 1e-6F, nullptr)) {
+        throw std::runtime_error("fused MoE residual rejected");
+      }
+    }
+    if (Download(&d_res_norm, kResidual) != Download(&d_res_only, kResidual)) {
+      throw std::runtime_error("skipping unused norm changed the residual");
+    }
+    q::MoeEpilogueVec4F16(d_half.get(), d_weights.get(), d_shared.get(),
+                          d_gate.get(), kGateStride, d_vec.get(), kTokens,
+                          kSlots, kHidden, nullptr);
+    q::HcCombine(d_res_separate.get(), d_vec.get(), d_inject.get(), parts,
+                 nullptr, nullptr, kTokens, kHidden, 4, 1e-6F, nullptr);
+    if (Download(&d_res_separate, kResidual) !=
+        Download(&d_res_only, kResidual)) {
+      throw std::runtime_error("fusing the residual-only combine changed it");
+    }
     return worst == 0.0 ? 0 : 1;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

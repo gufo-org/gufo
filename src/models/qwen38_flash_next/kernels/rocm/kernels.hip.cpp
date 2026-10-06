@@ -626,6 +626,7 @@ __global__ void HcCombineVec4Kernel(float* res, const float* block_out,
 /// their weights and the gated shared expert (MoeEpilogueVec4Kernel), so the
 /// block output never round-trips memory. Threads own hidden lanes (up to
 /// three float4 each) across the four streams.
+template<bool kNormalize>
 __global__ void HcCombineMoeF16Kernel(
     float* res, const __half* expert_out, const float* weights,
     const float* shared_out, const float* gate, std::uint32_t gate_stride,
@@ -689,6 +690,8 @@ __global__ void HcCombineMoeF16Kernel(
       }
     }
   }
+  if constexpr (!kNormalize)
+    return;
   const std::uint32_t lane = threadIdx.x & 31u;
   const std::uint32_t wave = threadIdx.x >> 5u;
 #pragma unroll
@@ -4575,13 +4578,14 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
                      std::uint32_t n_tokens, std::uint32_t hidden,
                      std::uint32_t streams, float eps, hipStream_t stream) {
   if (streams != 4 || hidden % 128 != 0 || hidden > 3 * 4 * kThreads ||
-      gamma == nullptr || xn_q8 == nullptr) {
+      (gamma != nullptr && xn_q8 == nullptr)) {
     return false;
   }
-  hipLaunchKernelGGL(HcCombineMoeF16Kernel, dim3(n_tokens), dim3(kThreads), 0,
-                     stream, res, expert_out, weights, shared_out, gate,
-                     gate_stride, used, inject, inject_parts, gamma, xn, xn_q8,
-                     hidden, eps);
+  const auto combine =
+      gamma ? HcCombineMoeF16Kernel<true> : HcCombineMoeF16Kernel<false>;
+  hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
+                     expert_out, weights, shared_out, gate, gate_stride, used,
+                     inject, inject_parts, gamma, xn, xn_q8, hidden, eps);
   return true;
 }
 
