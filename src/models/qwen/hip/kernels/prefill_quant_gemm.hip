@@ -558,7 +558,11 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
       fetch_stage(kb0 + BK);
     }
 
-#pragma unroll
+    // Unroll the K blocks of a stage only if there are two. In a fully
+    // unrolled BK=4 stage, the scheduler can move the LDS operand reads of all
+    // blocks above the WMMAs of the first block. Clang 23 does this. Then the
+    // kernel needs more than 256 VGPRs and spills.
+#pragma unroll(BK <= 2 ? BK : 1)
     for (int kb = 0; kb < BK; ++kb) {
       int32x4_t a0[kWaveRowTiles];
       int32x4_t a1[kWaveRowTiles];
@@ -603,6 +607,10 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
           }
         }
       }
+      // Keep the LDS operand reads of the next K block below the WMMAs of this
+      // K block. This prevents the same spill in an unrolled BK=2 stage. The
+      // arithmetic order does not change.
+      __builtin_amdgcn_sched_barrier(0);
     }
     __syncthreads();
   }

@@ -97,4 +97,13 @@ if (ENGINE_ENABLE_HIP)
     TARGET_DIRECTORY gufo_core
     PROPERTIES COMPILE_OPTIONS
     "-mwavefrontsize64;-gline-tables-only;-Xarch_device;-mllvm=-amdgpu-sched-strategy=iterative-ilp")
+  # SLP vectorization puts the K-quant scales and offsets of the blocked
+  # prefill GEMMs into wide register tuples. With clang 23, the Q3_K and Q6_K
+  # 128x128 tiles then spill. Disable SLP for the two units on all compilers.
+  set_property(
+    SOURCE
+      ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_gemm.hip
+      ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
+    TARGET_DIRECTORY gufo_core
+    APPEND PROPERTY COMPILE_OPTIONS -fno-slp-vectorize)
 endif()

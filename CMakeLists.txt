@@ -406,6 +406,22 @@ if (BUILD_TESTING)
       $<TARGET_FILE:gufo>)
   set_tests_properties(serve_cli_test PROPERTIES LABELS "cpu;server;cli" TIMEOUT 30)
 
+  if(ENGINE_ENABLE_HIP)
+    # A compiler update can make a kernel spill with no source change. Clang 23
+    # increased the scratch of the Q8 prefill GEMM from 0 to 480 bytes. This
+    # test fails if a kernel uses more scratch than the baseline allows. It
+    # reads the code objects in the binary and does not use a GPU.
+    get_filename_component(GUFO_HIP_BIN_DIR ${CMAKE_HIP_COMPILER} DIRECTORY)
+    add_test(NAME kernel_resources_test
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-kernel-resources.py
+        $<TARGET_FILE:gufo>
+        --baseline ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/kernel-resources.json
+        --bundler ${GUFO_HIP_BIN_DIR}/clang-offload-bundler)
+    set_tests_properties(kernel_resources_test PROPERTIES
+      LABELS "cpu;kernels" TIMEOUT 120)
+  endif()
+
   add_subdirectory(tests/models/deepseek_v4_flash)
   add_subdirectory(tests/models/qwen38_flash_next)
 

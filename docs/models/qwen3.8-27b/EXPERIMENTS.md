@@ -100,6 +100,7 @@
 | Concurrent generated-reply forks | Retained: freeze the live generated checkpoint before branching, within the snapshot budget. C1 avoids the copy; Q4/Q8 greedy/seeded forks, disk restoration and cancellation pass. |
 | Visible causal attention tails | Retained: FP32 FMA over visible tail keys removes chunk-boundary drift while complete tiles keep WMMA. Q8 full logits/features match at 8K across scheduling budgets; four 32K DFlash2 continuations match isolated AR. Later packed V loads and row-first scale reuse recover PP speed without spills; large shallow chunks use the same packed route. |
 | Separate causal-tail passes, helper functions and deeper V prefetch | Rejected: exact outputs, but extra work or register pressure makes attention slower. |
+| Clang 23 prefill GEMM spills | Retained: a `sched_barrier` fence per K block in BK=2 W8A8 tiles, no K-block unroll in BK=4 tiles, SLP off for the two K-quant units. Clang 23 (ROCm 10.0) Q8 pp2048 291 → 464, pp64 112 → 308, Q4 pp64 230 → 335 (published 0.8.1 image: Q8 454/322, Q4 327). Greedy output and prefill validation are byte-identical. Clang 22: pp2048 and decode do not change, 16–64 token prefill is 1.2–1.7% slower. |
 
 Q4 C1 AR leads the pinned d0/d32K controls; Q8 C1 AR matches them.
 DFlash2 retains AR output in the focused shallow/deep and concurrent checks.

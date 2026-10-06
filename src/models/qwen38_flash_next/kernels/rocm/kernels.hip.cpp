@@ -4075,10 +4075,23 @@ __launch_bounds__(256) __global__
         const int sb32 = (kb0 % 8) + f_c;
         if constexpr (kPair) {
           const int group = sb32 / 2;
-          f_codes[u] = group == 0   ? code_cache[u][0]
-                       : group == 1 ? code_cache[u][1]
-                       : group == 2 ? code_cache[u][2]
-                                    : code_cache[u][3];
+          // Blend the four cached chunks with masks. Do not select one slot
+          // with the runtime group: the compiler can change any such selection
+          // into an address select. Clang 23 does this, and then the cache is
+          // in scratch memory, not in VGPRs.
+          const std::uint32_t m0 = 0u - static_cast<std::uint32_t>(group == 0);
+          const std::uint32_t m1 = 0u - static_cast<std::uint32_t>(group == 1);
+          const std::uint32_t m2 = 0u - static_cast<std::uint32_t>(group == 2);
+          const std::uint32_t m3 = 0u - static_cast<std::uint32_t>(group == 3);
+          const uint4& c0 = code_cache[u][0];
+          const uint4& c1 = code_cache[u][1];
+          const uint4& c2 = code_cache[u][2];
+          const uint4& c3 = code_cache[u][3];
+          f_codes[u] =
+              make_uint4((c0.x & m0) | (c1.x & m1) | (c2.x & m2) | (c3.x & m3),
+                         (c0.y & m0) | (c1.y & m1) | (c2.y & m2) | (c3.y & m3),
+                         (c0.z & m0) | (c1.z & m1) | (c2.z & m2) | (c3.z & m3),
+                         (c0.w & m0) | (c1.w & m1) | (c2.w & m2) | (c3.w & m3));
         } else {
           f_codes[u] = blk[kCodeChunk + (sb32 / 2) * 2 + f_c];
         }

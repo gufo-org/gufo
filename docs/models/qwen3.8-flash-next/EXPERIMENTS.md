@@ -74,6 +74,7 @@
 | GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
 | Prefill projection, attention and indexer kernels | Retained; bit-identical logit dumps and greedy hashes, plus a bitwise GEMM sweep against hipBLASLt for every routed n ≤ 4096. pp4096 +1.4% at d0 and +2.5–2.8% at 32K/115K (interleaved ABBA, `-r 6`, two machines); repository prompts 6.5K–102K +3.2% median; tg unchanged. The indexer projections use the own kernel only when hipBLASLt selects algorithm 4438 and otherwise stay on the library. |
 | 128 n-gram readers | Retained with 4096-token chunks, which double each gather; readers block in `pread`, so the pool sets the queue depth. Readers are woken per read, so small gathers do not wake the pool; 96 more threads. |
+| Paired routed GEMM code-cache blend | Retained: blend the four cached chunks with masks. A conditional over `uint4` lvalues becomes an address select, and clang 23 then keeps the cache in scratch (80 B, 0 spills). Clang 23 pp2048 +0.7%, pp8–pp64 +1.6–2.7%, MTP pp2048 +0.9%. Output is byte-identical. Clang 22 pp2048 is 0.7% slower. |
 
 Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
 to dense projections and 12.6% to attention/indexing. Final-tile catch-up
