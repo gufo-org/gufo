@@ -23,6 +23,9 @@ namespace {
 // gfx1151 pp4096 at depths 0/4096: the 512/1024/2048/4096 sweep favored
 // 2048; larger chunks used more scratch without improving throughput.
 constexpr std::uint32_t kPrefillChunkTokens = 2048;
+// A prompt ending this close past a chunk finishes in that chunk: a separate
+// tail pass costs about as much as this many more chunk rows.
+constexpr std::uint32_t kPrefillTailTokens = 128;
 
 void AssignError(std::string* error_msg, std::string_view message) {
   if (error_msg != nullptr) {
@@ -199,7 +202,8 @@ std::uint32_t Model::PrefillCapacity() const noexcept {
 }
 
 std::uint32_t Model::PrefillThroughCapacity() const noexcept {
-  return std::min(kPrefillChunkTokens + 8, options_.max_context);
+  return std::min(kPrefillChunkTokens + kPrefillTailTokens,
+                  options_.max_context);
 }
 
 bool Model::HasMtp() const noexcept {
@@ -577,7 +581,7 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
   rocm::Executor& exec = *model_->executor_;
   for (std::size_t off = 0; off < tokens.size();) {
     const auto remaining = tokens.size() - off;
-    const auto capacity = checkpoint && remaining <= exec.max_batch()
+    const auto capacity = remaining <= exec.max_batch()
                               ? exec.max_batch()
                               : model_->PrefillCapacity();
     const std::size_t n = std::min<std::size_t>(capacity, remaining);

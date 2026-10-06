@@ -20,9 +20,9 @@ below; none is averaged away or hidden.
 
 - Flash-Next captures a text prompt's stable boundary inside the final prefill
   pass: GDN recurrent state in both kernel routes, convolution/PLE history,
-  kept hidden rows, boundary logits and token/position metadata. A
-  through-capacity of 2,056 absorbs a short assistant suffix into a normal
-  2,048-token prefill. Attention queries keep the boundary's grouping. Other
+  kept hidden rows, boundary logits and token/position metadata. The final
+  prefill pass takes up to 128 tokens beyond the normal 2,048-token chunk,
+  which absorbs a short assistant suffix and any short prompt tail. Attention queries keep the boundary's grouping. Other
   models, image prompts, disk captures and intermediate/shared checkpoints keep
   the split path.
 - Snapshots copy mutable recurrent, convolution and PLE state (about 111 MB in

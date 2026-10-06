@@ -2570,8 +2570,12 @@ public:
       throw std::logic_error(
           "Qwen3.8-Flash-Next prefill has no remaining input");
     }
-    const std::size_t consumed = std::min<std::size_t>(
-        {max_input_tokens, prompt.size() - offset, model_->PrefillCapacity()});
+    const std::size_t remaining = prompt.size() - offset;
+    const std::size_t consumed =
+        std::min<std::size_t>({max_input_tokens, remaining,
+                               remaining <= model_->PrefillThroughCapacity()
+                                   ? model_->PrefillThroughCapacity()
+                                   : model_->PrefillCapacity()});
     const std::size_t next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
     std::string error;

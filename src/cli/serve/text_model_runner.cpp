@@ -720,7 +720,10 @@ struct TextRunnerPool::Request::Impl {
       // A reused frontier already bounds the work lost on an edit. Do not
       // split a short continuation just to copy a nearby grid checkpoint.
       // Cold long prompts still retain the last grid point for late edits.
+      // A grid point just before the prompt end saves little on an edit but
+      // would split the final prefill pass and store another snapshot.
       constexpr std::size_t interval = 2048;
+      constexpr std::size_t tail = 128;
       const auto grid_points = (prompt.size() - 1) / interval;
       const auto count =
           std::min(grid_points, TextRunnerPool::Impl::kIntermediateCheckpoints);
@@ -728,6 +731,7 @@ struct TextRunnerPool::Request::Impl {
         const auto position = grid_points * point / count * interval;
         if (position > prefill_offset &&
             position - prefill_offset >= interval &&
+            prompt.size() - position > tail &&
             position != snapshot_tokens.size() &&
             position != stable_prefix_position &&
             !lease.HasSnapshotFor(

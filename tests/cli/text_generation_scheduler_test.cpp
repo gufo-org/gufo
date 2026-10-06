@@ -2159,7 +2159,7 @@ void TestSnapshotDoesNotBlockOtherRequests() {
     };
     auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
     const std::vector<TextRunnerToken> prompt =
-        history ? std::vector<TextRunnerToken>(2049, 1)
+        history ? std::vector<TextRunnerToken>(2200, 1)
                 : std::vector<TextRunnerToken>{1, 10};
     auto first = scheduler->Submit(prompt, 7, 0.0F);
     const bool started = entered.try_acquire_for(kTestTimeout);
@@ -2256,7 +2256,7 @@ void TestCapturesAtCapacityAllowQueuedProgress() {
         // Exercise captures during prefill as well as after first-token
         // publication, including the single-slot admission deadlock.
         metadata.cache_prefix_tokens = multi && !history ? 1 : 0;
-        auto prompt = std::vector<TextRunnerToken>(history ? 2049 : 2, 10);
+        auto prompt = std::vector<TextRunnerToken>(history ? 2200 : 2, 10);
         prompt.front() = static_cast<TextRunnerToken>(i + 1);
         requests.push_back(
             scheduler->Submit(prompt, 7, 0.0F, {}, false, metadata));
@@ -2288,7 +2288,7 @@ void TestCapturesAtCapacityAllowQueuedProgress() {
              "all slots capturing must not deadlock queued admission");
       results.get();
       if (history) {
-        auto prompt = std::vector<TextRunnerToken>(2049, 10);
+        auto prompt = std::vector<TextRunnerToken>(2200, 10);
         prompt.front() = 1;
         const auto resumed = scheduler->Submit(prompt, 7, 0.0F).Wait();
         Expect(resumed.cache_hit && resumed.cached_prompt_tokens == 2048 &&

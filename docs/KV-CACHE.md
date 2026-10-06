@@ -187,7 +187,9 @@ fallback and complete prompt. Prefill stops at those positions and captures the
 whole model state before advancing. Positions lie on a 2,048-token grid spread
 across the prompt; the final grid point is within 2,048 tokens of its end.
 Warm continuations skip grid positions less than 2,048 tokens beyond the reused
-frontier. Capture runs asynchronously while that session is frozen, so other
+frontier, and every request skips grid positions within 128 tokens of its end:
+such a point would split the final prefill pass for a checkpoint next to the
+complete prompt. Capture runs asynchronously while that session is frozen, so other
 requests can continue; a single execution slot skips the extra worker. A
 request whose first token is already published decodes as soon as its capture
 finishes, before the next bounded prefill chunk of a peer.
@@ -275,7 +277,9 @@ capture a text prompt's stable boundary within the final prefill pass: its
 recurrent kernels retain the boundary state, convolution and PLE retain their
 history, and a one-row head computes the boundary logits. Attention queries
 on either side keep the grouping of separate passes. The final batch can
-include up to eight framing tokens beyond the normal 2,048-token chunk.
+include up to 128 tokens beyond the normal 2,048-token chunk, so a prompt that
+ends just past a chunk needs no separate tail pass; the stable boundary must be
+within eight tokens of that batch's end.
 The cache reserves the full payload before enabling this capture. Disk,
 image, intermediate and learned-prefix checkpoints still stop prefill at
 their boundary.

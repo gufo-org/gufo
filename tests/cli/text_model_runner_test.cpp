@@ -1218,6 +1218,22 @@ void TestHistoryEditsRestoreIntermediateCheckpoints() {
   Expect(aligned_next.cached_prompt_tokens() == 4096,
          "an aligned stable boundary remains reusable after assistant changes");
   aligned_next.Invalidate();
+
+  auto tail_stats = std::make_shared<FakeStats>();
+  TextRunnerPool tail_pool(
+      std::make_shared<LongSnapshotRunner>(tail_stats, 64, 256, 4096), 1);
+  auto near_end = tail_pool.Acquire(std::vector<TextRunnerToken>(2100, 1));
+  Expect(near_end.Prefill(32768).decode_ready &&
+             tail_stats->prefill_spans == std::vector<std::size_t>{2100},
+         "a grid point near the prompt end does not split the final prefill");
+  near_end.Invalidate();
+  tail_stats->prefill_spans.clear();
+  auto past_tail = tail_pool.Acquire(std::vector<TextRunnerToken>(2300, 2));
+  while (!past_tail.prefill_complete())
+    (void)past_tail.Prefill(32768);
+  Expect(tail_stats->prefill_spans == std::vector<std::size_t>{2048, 252},
+         "a grid point farther from the prompt end is still retained");
+  past_tail.Invalidate();
 }
 
 /// A client that rewrites the assistant turn, as one that drops reasoning
