@@ -634,10 +634,12 @@ ordinary continuation.
 
 - `model`
 - `messages`: `system` and `developer` messages may appear at any position.
-  Agent clients such as Codex re-send them mid-conversation after context
-  compaction or a queued user interjection; they are hoisted to the beginning
+  Agent clients such as Codex send them mid-conversation after context
+  compaction or when session settings change; they are hoisted to the beginning
   in their original relative order, where the model template merges them as a
-  single system turn
+  single system turn. Hoisting changes the prompt head, so the request that
+  introduces such a message is prefilled again; later requests that keep it
+  reuse the whole prompt
 - `max_tokens` or `max_completion_tokens`
 - `temperature`
 - `top_p`
