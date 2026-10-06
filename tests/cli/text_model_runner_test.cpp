@@ -478,6 +478,7 @@ public:
 class InPassRunner final : public SnapshotRunner {
 public:
   using SnapshotRunner::SnapshotRunner;
+  bool fail_after_prefill{false};
   TextRunnerDescriptor Descriptor() const override {
     auto descriptor = SnapshotRunner::Descriptor();
     descriptor.capabilities.in_pass_checkpoint = true;
@@ -499,6 +500,12 @@ public:
     ++stats_->snapshot_captures;
     *checkpoint = std::make_unique<FakeSnapshot>(boundary, 0, 90);
     auto step = FakeRunner::Prefill(state, prompt, offset, budget);
+    if (fail_after_prefill) {
+      auto& fake = RequireFakeState(state);
+      fake.decode_count = 7;
+      fake.frontier = 777;
+      throw std::runtime_error("injected in-pass failure after state mutation");
+    }
     step.checkpoint_ms = 2;
     return step;
   }
@@ -527,6 +534,57 @@ void TestInPassStableCheckpoint() {
   Expect(third.cached_prompt_tokens() == 6,
          "the stable checkpoint advances on warm turns");
   third.Invalidate();
+}
+
+void TestInPassFailureRetainsOnlyCompletedCheckpoints() {
+  auto stats = std::make_shared<FakeStats>();
+  // Both the old fallback and the next stable boundary fit, with no spare
+  // reservation. A leaked reservation would force the old fallback out.
+  auto runner =
+      std::make_shared<InPassRunner>(stats, 64, 256, 2 * sizeof(FakeSnapshot));
+  TextRunnerPool pool(runner, 1);
+  auto seed = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  Expect(seed.Prefill(64).decode_ready, "seed reaches its decode frontier");
+  seed.Cancel();  // Retain the stable checkpoint without a full-prompt copy.
+
+  auto failed = pool.Acquire({1, 2, 3, 50, 51, 7, 40, 41}, {}, {}, {}, true, 6);
+  Expect(failed.cached_prompt_tokens() == 3,
+         "rewritten framing starts from the immutable fallback");
+  runner->fail_after_prefill = true;
+  bool saw_failure = false;
+  try {
+    (void)failed.Prefill(64);
+  } catch (const std::runtime_error& error) {
+    saw_failure = std::string_view(error.what()) ==
+                  "injected in-pass failure after state mutation";
+  }
+  Expect(saw_failure, "in-pass prefill fails after changing the fake state");
+  failed.Cancel();
+  runner->fail_after_prefill = false;
+
+  auto retry = pool.Acquire({1, 2, 3, 50, 51, 7, 40, 41}, {}, {}, {}, true, 6);
+  Expect(retry.cached_prompt_tokens() == 3 &&
+             retry.cache_restore_bytes() == sizeof(FakeSnapshot),
+         "cancel restores the immutable fallback, not the failed frontier");
+  const auto step = retry.Prefill(64);
+  Expect(step.consumed_tokens == 5 && step.decode_ready,
+         "retry recomputes all work from the failed in-pass operation");
+  Expect(retry.SelectNext().token == 90,
+         "retry does not inherit the failed operation's decode state");
+  retry.Advance();
+  retry.Commit();
+
+  auto old_branch = pool.Acquire({1, 2, 3, 70, 71}, {}, {}, {}, true, 3);
+  Expect(old_branch.cached_prompt_tokens() == 3 &&
+             old_branch.cache_restore_bytes() == sizeof(FakeSnapshot),
+         "released reservation lets the old fallback survive the healthy turn");
+  old_branch.Invalidate();
+  auto new_branch =
+      pool.Acquire({1, 2, 3, 50, 51, 7, 60, 61}, {}, {}, {}, true, 6);
+  Expect(new_branch.cached_prompt_tokens() == 6 &&
+             new_branch.cache_restore_bytes() == sizeof(FakeSnapshot),
+         "healthy retry also retains its newly completed stable boundary");
+  new_branch.Invalidate();
 }
 
 class PersistentSnapshotRunner final : public SnapshotRunner {
@@ -2094,6 +2152,7 @@ int main() {
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.
   ::setenv("NO_COLOR", "1", 1);
   TestInPassStableCheckpoint();
+  TestInPassFailureRetainsOnlyCompletedCheckpoints();
   TestNewImageGetsAStableCheckpoint();
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();
