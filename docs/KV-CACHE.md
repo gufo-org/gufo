@@ -188,7 +188,9 @@ whole model state before advancing. Positions lie on a 2,048-token grid spread
 across the prompt; the final grid point is within 2,048 tokens of its end.
 Warm continuations skip grid positions less than 2,048 tokens beyond the reused
 frontier. Capture runs asynchronously while that session is frozen, so other
-requests can continue; a single execution slot skips the extra worker.
+requests can continue; a single execution slot skips the extra worker. A
+request whose first token is already published decodes as soon as its capture
+finishes, before the next bounded prefill chunk of a peer.
 Coincident RAM and disk boundaries share one copy. Admission
 remains subject to the existing byte budget, and intermediate copies preserve
 the original branching fallback. These intermediate checkpoints live in RAM;
@@ -282,8 +284,9 @@ their boundary.
 leased state in place, so a frontier another request might branch from has to
 be captured first.
 
-Flash-Next copies its mutable recurrent, convolution, PLE, indexer-ring and
-draft state into private device storage at capture. Committed K/V and pooled
+Flash-Next copies its mutable recurrent, convolution and PLE state into
+private device storage at capture; the small indexer-ring, draft-residual and
+kept-row regions go directly into the host payload. Committed K/V and pooled
 rows remain in the live session while it appends, without a K/V copy.
 A same-session rewind allocates backing blocks for only the rows it would
 overwrite and copies them once for checkpoints sharing those rows. Appending
@@ -297,8 +300,11 @@ buffers, including detached rows in the shared backing blocks. When both
 sessions branch from a shared checkpoint, restore retains their proven shared
 rows and copies only the different suffix. Equal token histories alone do not
 prove identical K/V, since prefill shapes can change rounding.
-A private HIP pool and transfer stream shared by the executor's sessions release
-snapshot storage without synchronizing peer inference streams. A retained
+A private HIP pool shared by the executor's sessions allocates and releases
+snapshot storage without synchronizing peer inference streams. Each fresh
+allocation commits device pages, about 4.5 ms per 111 MB on gfx1151, so a
+restore into a slot whose rows other checkpoints still borrow pays that cost
+for the rows it protects. A retained
 Flash-Next snapshot prefers its source execution slot when
 that slot is available, avoiding a full-prefix copy for a rewritten turn.
 A busy source never blocks a branch into another slot; other choices use LRU.
