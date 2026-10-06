@@ -4,6 +4,15 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.8.1](https://github.com/gufo-org/gufo/compare/v0.8.0...v0.8.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **server:** keep tool calls in native model syntax ([#441](https://github.com/gufo-org/gufo/issues/441)) ([21d6e64](https://github.com/gufo-org/gufo/commit/21d6e64f137f6bcbc5a8bf63f900cab648188df7))
+* **server:** remove leading answer blank lines after reasoning ([#446](https://github.com/gufo-org/gufo/issues/446)) ([4ec92f2](https://github.com/gufo-org/gufo/commit/4ec92f2d48bf594503f06917a5d96e9da2978aa7))
+* **vision:** accept image histories within model context ([#447](https://github.com/gufo-org/gufo/issues/447)) ([167bad6](https://github.com/gufo-org/gufo/commit/167bad69e8ac45f0fdf4bb376959a10caca2844c))
+
 ## [0.8.0](https://github.com/gufo-org/gufo/compare/v0.7.1...v0.8.0) (2026-10-05)
 
 
