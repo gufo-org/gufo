@@ -955,8 +955,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       (c.context_length + c.compress_ratio - 1) / c.compress_ratio;
   e->mask_words_ = (max_blocks + 31) / 32;
   s.mask = Alloc<std::uint32_t>(a, T * e->mask_words_, error_msg);
-  s.scores =
-      f32(static_cast<std::size_t>(e->select_chunk_) * e->mask_words_ * 32);
+  // Keep score/selection traffic near the device cache size. Captured
+  // verification still needs all its rows at the maximum context.
+  const std::size_t score_stride = std::size_t{e->mask_words_} * 32;
+  e->select_score_floats_ =
+      std::max(kVecBatch * score_stride,
+               std::min(std::size_t{5 * 1024 * 1024}, 512 * score_stride));
+  s.scores = f32(e->select_score_floats_);
   s.ctx = f32(T * c.AttentionQDim());
   s.attn_partials = f32(static_cast<std::size_t>(kVecBatch) * c.num_heads *
                         kAttnSplits * (c.head_dim + 2));
@@ -2068,15 +2073,21 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                       index_capacity, stream_, s.rope);
     // Align score rows to full cache lines. The selector still considers
     // only complete causal blocks, so padding cannot change the ranking.
+    // Wide prefill is never captured: compact score rows to the populated
+    // context. Graphs retain the maximum stride for replay at later positions.
+    const auto score_context =
+        n_tokens > kVecBatch ? start_pos + n_tokens : max_context;
     const std::uint32_t blocks =
-        (max_context + c.compress_ratio - 1) / c.compress_ratio;
+        (score_context + c.compress_ratio - 1) / c.compress_ratio;
     const std::uint32_t max_blocks = (blocks + 31) / 32 * 32;
+    const auto select_chunk = static_cast<std::uint32_t>(std::min(
+        std::size_t{512}, std::bit_floor(select_score_floats_ / max_blocks)));
     // Catch-up consumes only the final attention tile. Keep all its query
     // masks (sparse attention packs four queries; dense tiles hold sixteen)
     // but avoid scoring the unused prefix against the complete context.
     const auto first_query = last_only ? (n_tokens - 1) / 16 * 16 : 0U;
-    for (std::uint32_t t0 = first_query; t0 < n_tokens; t0 += select_chunk_) {
-      const std::uint32_t n = std::min(select_chunk_, n_tokens - t0);
+    for (std::uint32_t t0 = first_query; t0 < n_tokens; t0 += select_chunk) {
+      const std::uint32_t n = std::min(select_chunk, n_tokens - t0);
       // Batches wider than kVecBatch are never captured, so the host
       // position bounds the scored range (a replayed graph must cover
       // max_blocks).

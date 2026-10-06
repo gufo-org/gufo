@@ -2,6 +2,8 @@
 
 | Experiment | Decision / evidence |
 | --- | --- |
+| Bounded selector score scratch | Retained: exact deep-context logits; pp2048 gains about 1.4% AR / 1.2% MTP at 128K in single-run controls, with no measured shallow-context regression. Shared scratch falls from 128 to 20 MiB. [Evidence](artifacts/prefill-deep-context.json). |
+| Deep attention packing and skipped work | Rejected: shared selection lists and skipping masked matrix rows were slower; rescaling and fragment prefetch gave no compelling model-level gain. [Experiments](artifacts/prefill-deep-context.json). |
 | Skip unused final HC normalization | Retained: residuals and 64 full-vocabulary logit rows are exact. PP is within 0.3% of main at d0/d32K, AR and MTP; no significant speedup demonstrated. [Controls](artifacts/prefill-normalization.json). |
 | Prefill expert tiles, load scheduling and GDN stores | Rejected: mixed expert tiles slowed PP about 1.1%; smaller dense tiles and streaming loads were slower; GDN changes had no repeatable gain. [Experiments](artifacts/prefill-normalization.json). |
 | Conversation checkpoints and asynchronous capture | Retained: edits, growing histories and rotation with bounded RAM; AR/MTP cancellation, image replay and disk restart pass, including four execution sessions. Intermediate copies allow peers to continue, and coincident RAM/disk boundaries share one copy. [Functional checks](../../../tests/functional/README.md). |

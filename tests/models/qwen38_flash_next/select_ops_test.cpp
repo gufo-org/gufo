@@ -122,6 +122,26 @@ bool Run(std::uint32_t n_tokens, std::uint32_t start_pos, std::uint32_t seed,
   if (Download(d_mask, mask.size()) != mask) {
     throw std::runtime_error("selection replay changed the mask");
   }
+  // Reusing bounded score scratch must retain absolute query positions and
+  // causal masks, including a ragged chunk and a different padded stride.
+  constexpr std::uint32_t chunk = 31;
+  const auto compact_stride = ((start_pos + n_tokens) / kRatio + 31) / 32 * 32;
+  float* d_chunk_scores = nullptr;
+  CheckHip(hipMalloc(&d_chunk_scores, std::size_t{std::min(chunk, n_tokens)} *
+                                          compact_stride * sizeof(float)),
+           "chunk score allocation");
+  for (std::uint32_t first = 0; first < n_tokens; first += chunk) {
+    const auto count = std::min(chunk, n_tokens - first);
+    q::SelectBlocks(d_q + std::size_t{first} * kHeads * kDim, d_blocks,
+                    d_mask + std::size_t{first} * mask_words, d_chunk_scores,
+                    count, d_pos, first, kHeads, kDim, kRatio, kBudget,
+                    mask_words, compact_stride, nullptr,
+                    (start_pos + first + count) / kRatio);
+  }
+  if (Download(d_mask, mask.size()) != mask) {
+    throw std::runtime_error("chunked selection changed the mask");
+  }
+  CheckHip(hipFree(d_chunk_scores), "free chunk scores");
 
   double worst_score = 0.0;
   std::size_t mismatches = 0;

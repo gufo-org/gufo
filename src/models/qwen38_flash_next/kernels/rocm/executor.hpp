@@ -623,9 +623,8 @@ private:
     return selected_logits_ != nullptr ? selected_logits_ : s_.logits;
   }
   std::uint32_t mask_words_{0};
-  /// Queries per block-selection launch (its score scratch is chunk x
-  /// max_blocks floats: 128 MB at the 262k context).
-  std::uint32_t select_chunk_{512};
+  /// Bounded score scratch, shared by sequential selector chunks.
+  std::size_t select_score_floats_{0};
   std::vector<void*> allocations_;
   /// Pinned: the n-gram rows go up with hipMemcpyAsync, and a pageable
   /// source would not be ordered against the kernels behind it.
