@@ -122,6 +122,14 @@ EOS or the context is full. `--context N` sets context capacity per session;
 `--max-tokens N` sets a default response limit that clients can override.
 Reasoning tokens count toward that response limit.
 
+## Harness notes
+
+- **Qwen with Codex:** Codex sends developer messages mid-conversation, after
+  compaction or a settings change. Qwen's template accepts only one leading
+  system turn, so Gufo moves them there. The request that introduces one is
+  prefilled again; later requests reuse the cache. See the
+  [API contract](docs/SERVER.md).
+
 ## Build from source
 
 Linux x86-64 on AMD Strix Halo (`gfx1151`) is the supported target. CMake owns
