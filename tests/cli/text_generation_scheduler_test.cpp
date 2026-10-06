@@ -5,6 +5,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <iostream>
@@ -26,6 +28,7 @@
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
+#include "src/cli/serve/trace.hpp"
 
 namespace {
 
@@ -864,6 +867,87 @@ void TestRunnerCanReuseExactIncrementalText() {
          "exact incremental pieces form the final response text");
   Expect(control->decode_calls.load(std::memory_order_relaxed) == 0,
          "exact incremental text avoids duplicate final decoding");
+}
+
+// An armed `--trace` records each finished request under the HTTP request id
+// bound where it was submitted: the prompt as the runner decodes it, the
+// effective limits and sampling, the cache outcome and the raw output.
+void TestGenerationTraceRecordsPromptAndOutput() {
+  namespace fs = std::filesystem;
+  using gufo::server::Trace;
+  auto control = std::make_shared<FakeControl>();
+  control->incremental_text_is_exact = true;
+  auto scheduler = MakeScheduler(control, 1);
+  (void)scheduler->Submit({7}, 2, 0.0F).Wait();
+  Expect(control->decode_calls.load(std::memory_order_relaxed) == 0,
+         "an unarmed trace decodes no prompt");
+
+  const auto path =
+      fs::temp_directory_path() /
+      ("gufo-scheduler-trace-" + std::to_string(::getpid()) + ".jsonl");
+  fs::remove(path);
+  Expect(!Trace::Open(path.string()).has_value(), "trace file opens");
+  gufo::sampling::SamplingConfig sampling;
+  sampling.temperature = 0.7F;
+  sampling.top_k = 4;
+  sampling.seed = 9;
+  TextGenerationScheduler::Result result;
+  {
+    const Trace::RequestScope scope("r42");
+    result = scheduler->Submit({7, 8}, 2, sampling).Wait();
+  }
+  Expect(control->decode_calls.load(std::memory_order_relaxed) == 1,
+         "an armed trace decodes the prompt once");
+  control->throw_advance_label = 9;
+  bool failed = false;
+  {
+    const Trace::RequestScope scope("r43");
+    try {
+      (void)scheduler->Submit({9}, 2, sampling).Wait();
+    } catch (const std::runtime_error&) {
+      failed = true;
+    }
+  }
+  Trace::Close();
+  Expect(failed, "the injected runner failure reaches the consumer");
+
+  std::vector<gufo::json::Value> records;
+  {
+    std::ifstream input(path);
+    for (std::string line; std::getline(input, line);) {
+      records.push_back(gufo::json::parse(line));
+    }
+  }
+  fs::remove(path);
+  Expect(records.size() == 2, "one generation record per request");
+  const auto& record = records.front();
+  Expect(record.member_str("event") == "generation" &&
+             record.member_str("request") == "r42",
+         "the record names the bound HTTP request");
+  Expect(record.member_str("prompt") == "7,8",
+         "the prompt is recorded as the runner decodes it");
+  Expect(!result.text.empty() && record.member_str("output") == result.text,
+         "the output is the generated text before transport parsing");
+  Expect(record.member_size("max_tokens") == 2 &&
+             record.member_size("prompt_tokens") == 2 &&
+             record.member_size("generated_tokens") == result.tokens.size(),
+         "the record carries the effective limits and counts");
+  const auto* recorded_sampling = record.find("sampling");
+  Expect(recorded_sampling != nullptr &&
+             recorded_sampling->find("temperature")->as_double() == 0.7 &&
+             recorded_sampling->member_size("top_k") == 4 &&
+             recorded_sampling->member_size("seed") == 9 &&
+             !recorded_sampling->find("constrained")->as_bool(),
+         "the record carries the effective sampling");
+  Expect(record.member_str("cache") == "miss" &&
+             record.member_str("finish") == "length" &&
+             record.find("error") == nullptr,
+         "the record carries the cache outcome and finish");
+  const auto& failure = records.back();
+  Expect(failure.member_str("request") == "r43" &&
+             failure.member_str("prompt") == "9" &&
+             failure.member_str("error") == "injected scheduler runner failure",
+         "a failed request still records its prompt and the failure");
 }
 
 void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
@@ -2683,6 +2767,7 @@ int main() {
   TestAwaitedCheckpointSurvivesCachePressure();
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRunnerCanReuseExactIncrementalText();
+  TestGenerationTraceRecordsPromptAndOutput();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
   TestRequestTotalsDoNotNeedAConsumer();
   TestMultiTokenRunnerCanSwitchToBatchedExecution();

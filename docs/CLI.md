@@ -120,6 +120,14 @@ seed. Speed depends on acceptance and verification cost.
   buffered for one request; protects against slow clients.
 - `maxBufferedOutputTotal` — the same buffer budget across all requests.
 
+**Diagnostics**
+
+- `trace` — a file that receives every text request body, the prompt as the
+  model reads it, the raw generated text and the reply sent back, as JSON
+  Lines. In practice: turn it on to see why a client received broken output,
+  then delete the file, because it holds whole conversations. See
+  [content trace](SERVER.md#content-trace).
+
 **Hardware**
 
 - `cpu` — CPU reference execution for supported models in `prompt` and
@@ -188,8 +196,9 @@ These apply to every modality, before or after the subcommand:
   shorthand for `--log-level=debug`; passing both is a usage error. The tier is
   a threshold all the way down, and the `event=listening` startup confirmation
   is INFO-tier, so `warn` and `error` boot and stop silently. Prompt text,
-  message bodies and the API key are never logged at any level; debug admission
-  lines do name the client by the peer IP address of its connection. See
+  message bodies and the API key are never logged at any level; only the
+  separate, opt-in `trace` file records content. Debug admission lines do name
+  the client by the peer IP address of its connection. See
   [server logs](SERVER.md#troubleshooting-logs).
 
 ## Commands

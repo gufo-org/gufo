@@ -1063,7 +1063,8 @@ lines (the ROCm model-cache and managed-KV lines, DSpark attachment, the shared
 batch workspace) are suppressed by `--log-level=warn`/`error` too.
 
 Prompt text, message bodies and API keys stay unlogged at every level, and debug
-lines use the same escaping and redaction as the rest of the log. Client
+lines use the same escaping and redaction as the rest of the log. Only the
+opt-in [content trace](#content-trace), a separate file, records content. Client
 identity is the exception: scheduler admission lines name a client by the peer
 address of its socket (`client_id=127.0.0.1` on the default loopback bind), so a
 public `--host` writes client IP addresses into the debug tier.
@@ -1075,6 +1076,47 @@ speed. Speculative requests also include accepted and proposed drafts. Progress
 lines are INFO-tier: `--log-level=warn` or `--log-level=error` would discard
 them, so the server rejects that combination at startup instead of ignoring the
 flag.
+
+### Content trace
+
+Some failures only show in the content itself, such as tool-call markup leaking
+into `content` or a history that the template renders differently. For those,
+start `gufo serve llm` with `--trace <PATH>`. The server appends one JSON
+object per line to `PATH` and logs `event=trace_enabled` at WARN. A new file is
+created readable and writable by its owner only; an existing file keeps its
+permissions. A path that cannot be opened fails startup before the model loads.
+
+Each request to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
+`/v1/messages` or `/completion` writes three records. Every record has `time`,
+`event` and the `request` id shown in the `X-Request-ID` header and in the
+`request=rN` log lines:
+
+- `request`: `method`, `path` and the `body` as received.
+- `generation`, written by the scheduler shared by every text model: its
+  `generation` number (the `request=` value of scheduler debug and progress
+  lines), `max_tokens` after clamping to the context, the effective `sampling`,
+  `prompt_tokens`, `cache` (`memory`, `disk` or `miss`), `cached_tokens`, the
+  miss detail the completion log also reports, `generated_tokens`, `finish`,
+  `error` when generation failed, the `prompt` decoded from its tokens with
+  special tokens spelled out, and the raw `output` before reasoning and
+  tool-call parsing.
+- `response`: `status`, `outcome`, whether the reply was a `stream`, and the
+  `body` the client received. For a stream this is the event stream as
+  written, so a difference between streaming and non-streaming parsing shows
+  up in the trace.
+
+A request that fails before generation, for example with invalid JSON, has
+no `generation` record. Requests refused before routing (malformed HTTP or an
+oversized body), unauthenticated requests and other routes are not traced.
+Malformed UTF-8 is replaced with U+FFFD. To read one request:
+
+```sh
+jq 'select(.request == "r12")' trace.jsonl
+```
+
+The file holds prompts, tool results and generated text in full: treat it
+like the conversations themselves and delete it when done. It is never
+rotated or truncated.
 
 Text completion logs include stop/length/cancellation, queue and first-token
 latency, prefill/decode speed, execution width, memory/disk cache hits and reused

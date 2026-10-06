@@ -188,7 +188,7 @@ if(ENGINE_ENABLE_HIP)
     gufo_qwen38_flash_next)
 endif()
 
-add_library(gufo_logging STATIC src/cli/serve/logging.cpp)
+add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
 target_include_directories(gufo_logging PUBLIC ${PROJECT_SOURCE_DIR})
 target_compile_features(gufo_logging PUBLIC cxx_std_20)
 

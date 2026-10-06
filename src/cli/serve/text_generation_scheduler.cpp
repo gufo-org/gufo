@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <exception>
 #include <iomanip>
@@ -23,6 +25,7 @@
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
+#include "src/cli/serve/trace.hpp"
 
 namespace gufo::server {
 namespace {
@@ -319,6 +322,102 @@ bool DeadlineExceeded(const std::shared_ptr<ScheduledRequest>& request) {
          TextGenerationScheduler::Clock::now() >= *request->deadline;
 }
 
+/// The `--trace` generation record as known at submission: the effective
+/// limits and sampling, and the prompt as the model reads it. Captured on the
+/// submitting thread before the scheduler takes the prompt over.
+struct GenerationTrace {
+  json::Value record;
+  std::string prompt;
+};
+
+// The shortest decimal that round-trips the float, so a configured 0.7 reads
+// 0.7 rather than its widened 0.699999988.
+double TraceFloat(float value) {
+  std::array<char, 32> buffer{};
+  const auto [end, error] =
+      std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+  if (error != std::errc{}) {
+    return value;
+  }
+  return std::strtod(std::string(buffer.data(), end).c_str(), nullptr);
+}
+
+GenerationTrace StartGenerationTrace(const ScheduledRequest& request,
+                                     const TextModelRunner& runner) {
+  GenerationTrace trace{
+      .record = Trace::Record("generation", Trace::CurrentRequest()),
+      // Special tokens decode to their spelling, so this is the rendered
+      // template for every model without a per-model hook.
+      .prompt = Trace::Text(runner.Decode(request.prompt)),
+  };
+  trace.record["generation"] = request.id;
+  trace.record["max_tokens"] = request.token_limit;
+  json::Value sampling = json::Value::object();
+  sampling["temperature"] = TraceFloat(request.sampling.temperature);
+  sampling["top_k"] = request.sampling.top_k;
+  sampling["top_p"] = TraceFloat(request.sampling.top_p);
+  sampling["min_p"] = TraceFloat(request.sampling.min_p);
+  sampling["seed"] = request.sampling.seed;
+  sampling["repeat_penalty"] = TraceFloat(request.sampling.repeat_penalty);
+  sampling["repeat_last_n"] = request.sampling.repeat_last_n;
+  sampling["frequency_penalty"] =
+      TraceFloat(request.sampling.frequency_penalty);
+  sampling["presence_penalty"] = TraceFloat(request.sampling.presence_penalty);
+  sampling["constrained"] = request.sampling.constraint != nullptr;
+  trace.record["sampling"] = std::move(sampling);
+  return trace;
+}
+
+const char* FinishName(const TextGenerationScheduler::Result& result) {
+  if (result.cancelled) {
+    return "cancelled";
+  }
+  switch (result.finish_reason) {
+    case TextGenerationBackend::FinishReason::kStop:
+      return "stop";
+    case TextGenerationBackend::FinishReason::kStopSequence:
+      return "stop_sequence";
+    case TextGenerationBackend::FinishReason::kLength:
+      return "length";
+    case TextGenerationBackend::FinishReason::kCancelled:
+      return "cancelled";
+  }
+  return "stop";
+}
+
+void WriteGenerationTrace(GenerationTrace trace,
+                          const TextGenerationScheduler::Result& result,
+                          const std::exception_ptr& failure) {
+  auto& record = trace.record;
+  record["prompt_tokens"] = result.prompt_tokens;
+  record["cache"] = result.cache_disk_hit ? "disk"
+                    : result.cache_hit    ? "memory"
+                                          : "miss";
+  record["cached_tokens"] = result.cached_prompt_tokens;
+  if (!result.cache_hit && !result.cache_miss_reason.empty()) {
+    record["cache_miss_reason"] = result.cache_miss_reason;
+    record["common_prefix_tokens"] = result.cache_common_prefix_tokens;
+    record["nearest_checkpoint_tokens"] = result.cache_checkpoint_tokens;
+  }
+  record["generated_tokens"] = result.tokens.size();
+  record["finish"] = FinishName(result);
+  if (!result.stop_sequence.empty()) {
+    record["stop_sequence"] = Trace::Text(result.stop_sequence);
+  }
+  if (failure != nullptr) {
+    try {
+      std::rethrow_exception(failure);
+    } catch (const std::exception& error) {
+      record["error"] = Trace::Text(error.what());
+    } catch (...) {
+      record["error"] = "unknown";
+    }
+  }
+  record["prompt"] = std::move(trace.prompt);
+  record["output"] = Trace::Text(result.text);
+  Trace::Write(record);
+}
+
 }  // namespace
 
 struct TextGenerationScheduler::Request::Impl {
@@ -327,6 +426,8 @@ struct TextGenerationScheduler::Request::Impl {
 
   std::shared_ptr<ScheduledRequest> request;
   bool waited{false};
+  /// Present only while `--trace` is armed; touched only by the consumer.
+  std::optional<GenerationTrace> trace;
 };
 
 struct TextGenerationScheduler::Impl {
@@ -1909,15 +2010,20 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
     }
   }
 
+  if (consumer_cancelled) {
+    result.cancelled = true;
+    result.finish_reason = TextGenerationBackend::FinishReason::kCancelled;
+  }
+  if (impl_->trace.has_value()) {
+    WriteGenerationTrace(
+        *std::exchange(impl_->trace, std::nullopt), result,
+        callback_failure != nullptr ? callback_failure : scheduler_failure);
+  }
   if (callback_failure != nullptr) {
     std::rethrow_exception(callback_failure);
   }
   if (scheduler_failure != nullptr) {
     std::rethrow_exception(scheduler_failure);
-  }
-  if (consumer_cancelled) {
-    result.cancelled = true;
-    result.finish_reason = TextGenerationBackend::FinishReason::kCancelled;
   }
   return result;
 }
@@ -2036,6 +2142,12 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->output_budget = impl_->output_budget;
   request->sessions = impl_->sessions;
 
+  // Decoded before the enqueue below hands the prompt to the scheduler thread.
+  std::optional<GenerationTrace> trace;
+  if (Trace::Enabled()) {
+    trace = StartGenerationTrace(*request, impl_->runner_pool->runner());
+  }
+
   // A refusal is reported and thrown after the lock below is released.
   // Admission-line inputs are snapshotted under the queue mutex and the
   // messages are assembled after the unlock: the timestamp and stderr write
@@ -2138,7 +2250,9 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
             " prompt_tokens=" + std::to_string(admitted_prompt_tokens) +
             " max_tokens=" + std::to_string(request->token_limit));
   }
-  return Request(std::make_unique<Request::Impl>(std::move(request)));
+  auto handle = std::make_unique<Request::Impl>(std::move(request));
+  handle->trace = std::move(trace);
+  return Request(std::move(handle));
 }
 
 TextGenerationScheduler::Request TextGenerationScheduler::Submit(

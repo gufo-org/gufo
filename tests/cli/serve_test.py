@@ -1,8 +1,10 @@
 """Exercise the installed CLI parser without loading model weights."""
 
 import os
+import stat
 import subprocess
 import sys
+import tempfile
 
 
 def main():
@@ -118,6 +120,19 @@ def main():
            "--log-level=info"], 1, "Error loading model")
     check(["serve", "llm", "--model", "missing.gguf", "--log-progress", "-v"],
           1, "Error loading model")
+    # --trace records client content, so it belongs to the text server only,
+    # fails before the model opens when the file cannot be written, and the
+    # startup log says the file is armed.
+    assert "--trace" in help_text
+    check(["serve", "tts", "--trace", "trace.jsonl"], 2, "Unknown option")
+    check(load + ["--trace", "/nonexistent-gufo-dir/trace.jsonl"], 2,
+          "cannot open --trace file")
+    with tempfile.TemporaryDirectory() as directory:
+        trace = os.path.join(directory, "trace.jsonl")
+        result = run(load + ["--trace", trace])
+        assert result.returncode == 1, result.stderr
+        assert "[WARN] [trace] event=trace_enabled" in result.stderr
+        assert stat.S_IMODE(os.stat(trace).st_mode) == 0o600
     # Every help variant groups verbosity the same way: a "Logging:" section,
     # with no hand-written "Server Options:" list to drift from the parser.
     for args in (["serve", "--help"], ["serve", "llm", "--help"],

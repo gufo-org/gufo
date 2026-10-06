@@ -41,6 +41,7 @@
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
+#include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_api.hpp"
 #include "src/cli/serve/video_jobs.hpp"
@@ -294,6 +295,34 @@ bool HasHeader(const HttpResponse& response, std::string_view name) {
   return std::ranges::any_of(response.headers, [&](const auto& header) {
     return ToLower(header.first) == lowered;
   });
+}
+
+// Text generation routes, whose bodies and replies `--trace` records. Media
+// routes carry audio, image and video payloads the trace does not explain.
+bool IsTracedRoute(const HttpRequest& req) {
+  return req.method == "POST" &&
+         (req.path == "/v1/completions" || req.path == "/v1/chat/completions" ||
+          req.path == "/v1/responses" || req.path == "/v1/messages" ||
+          req.path == "/completion");
+}
+
+void TraceRequest(const HttpRequest& req) {
+  auto record = Trace::Record("request", req.request_id);
+  record["method"] = req.method;
+  record["path"] = req.path;
+  record["body"] = Trace::Text(req.body);
+  Trace::Write(record);
+}
+
+void TraceResponse(std::string_view request_id, int status,
+                   std::string_view outcome, bool stream,
+                   std::string_view body) {
+  auto record = Trace::Record("response", request_id);
+  record["status"] = status;
+  record["outcome"] = std::string(outcome);
+  record["stream"] = stream;
+  record["body"] = Trace::Text(body);
+  Trace::Write(record);
 }
 
 bool IsEventStream(const HttpResponse& response) {
@@ -1845,6 +1874,10 @@ void HttpServer::handle_connection(int client_fd) {
       ::inet_ntop(AF_INET, &peer.sin_addr, peer_address, sizeof(peer_address)))
     req.client_id = peer_address;
   req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
+  // Set for routes `--trace` records; `traced_stream` collects the body bytes
+  // a streaming reply delivered.
+  bool traced = false;
+  std::string traced_stream;
   bool response_started = false;
   bool http11 = false;
   int response_status = 0;
@@ -1853,6 +1886,17 @@ void HttpServer::handle_connection(int client_fd) {
                std::chrono::steady_clock::now() - start_time)
         .count();
   };
+  // A failure after a stream started keeps the bytes it already delivered.
+  const auto trace_failure = [&](const HttpResponse& error) {
+    if (traced)
+      TraceResponse(
+          req.request_id, response_started ? response_status : error.status,
+          response_started ? "stream_error" : "failed", response_started,
+          response_started ? traced_stream : error.body);
+  };
+  // Generation submitted on this thread, by the handler or by a stream body
+  // that defers it, names this request in its trace record.
+  const Trace::RequestScope trace_scope(req.request_id);
   try {
     bool ok = false;
     bool payload_too_large = false;
@@ -1980,6 +2024,12 @@ void HttpServer::handle_connection(int client_fd) {
     } else if (req.method == "OPTIONS") {
       resp = {.status = 204, .reason = "No Content"};
     } else {
+      // A client without the API key cannot write into the trace.
+      traced = Trace::Enabled() && IsTracedRoute(req) &&
+               IsAuthorized(req, api_key_hash_);
+      if (traced) {
+        TraceRequest(req);
+      }
       resp = handle_request(req);
     }
 
@@ -2021,6 +2071,8 @@ void HttpServer::handle_connection(int client_fd) {
           }
           if (connected && !chunk.empty()) {
             last_write = std::chrono::steady_clock::now();
+            if (traced)
+              traced_stream.append(chunk);
           }
           return connected;
         };
@@ -2089,6 +2141,11 @@ void HttpServer::handle_connection(int client_fd) {
                          elapsed_ms(), resp.log_details, outcome,
                          request_level);
     }
+    if (traced) {
+      const bool stream = static_cast<bool>(resp.streaming_body);
+      TraceResponse(req.request_id, resp.status, outcome, stream,
+                    stream ? traced_stream : resp.body);
+    }
   } catch (const TextGenerationError& exception) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
@@ -2110,6 +2167,7 @@ void HttpServer::handle_connection(int client_fd) {
                        duration_ms,
                        std::string("error_code=") + exception.stable_code(),
                        response_started ? "stream_error" : "failed");
+    trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   } catch (const std::exception& e) {
@@ -2124,6 +2182,7 @@ void HttpServer::handle_connection(int client_fd) {
                        response_started ? response_status : resp.status,
                        duration_ms, "error_code=server_exception",
                        response_started ? "stream_error" : "failed");
+    trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   } catch (...) {
@@ -2138,6 +2197,7 @@ void HttpServer::handle_connection(int client_fd) {
                        response_started ? response_status : resp.status,
                        duration_ms, "error_code=server_exception",
                        response_started ? "stream_error" : "failed");
+    trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   }

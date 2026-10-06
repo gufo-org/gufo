@@ -10,6 +10,8 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -20,8 +22,10 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/trace.hpp"
 
 namespace {
 
@@ -74,6 +78,7 @@ public:
     gufo::sampling::SamplingConfig sampling;
     std::string client_id;
     std::vector<std::string> stop_sequences;
+    std::string trace_request;
   };
   Call LastCall() {
     const std::lock_guard lock(mutex_);
@@ -168,7 +173,8 @@ public:
                .max_tokens = limit,
                .sampling = sampling,
                .client_id = std::string(client_id),
-               .stop_sequences = stop_sequences};
+               .stop_sequences = stop_sequences,
+               .trace_request = gufo::server::Trace::CurrentRequest()};
       result.text = output_;
     }
     result.prompt_tokens = 10;
@@ -473,6 +479,114 @@ void TestRequestLogging() {
   assert(debug.text.find("private-prompt") == std::string::npos);
   // Options are echoed by `gufo serve`, not by the HTTP layer itself.
   assert(debug.text.find("event=options") == std::string::npos);
+}
+
+std::string ResponseRequestId(const std::string& response) {
+  const auto header = response.find("X-Request-ID: ");
+  assert(header != std::string::npos);
+  const auto begin = header + std::string("X-Request-ID: ").size();
+  return response.substr(begin, response.find("\r\n", begin) - begin);
+}
+
+// `--trace` keeps what a text request carried in and out under the id the
+// logs name. Polls, other routes and unauthenticated requests stay out.
+void TestContentTrace() {
+  namespace fs = std::filesystem;
+  using gufo::server::Trace;
+  const auto path =
+      fs::temp_directory_path() /
+      ("gufo-trace-test-" + std::to_string(::getpid()) + ".jsonl");
+  fs::remove(path);
+  assert(!Trace::Open(path.string()).has_value());
+  std::string plain_id;
+  std::string stream_id;
+  std::string invalid_id;
+  {
+    RunningServer server({.api_key = "test-secret"});
+    server.backend->SetOutput("<tool_call>leak");
+    const auto post = [&](std::string_view route, std::string_view body,
+                          bool authorized = true) {
+      return server.Send(
+          "POST " + std::string(route) + " HTTP/1.1\r\n" +
+          (authorized ? "Authorization: Bearer test-secret\r\n" : "") +
+          "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" +
+          std::string(body));
+    };
+    const auto plain = post("/v1/completions",
+                            R"({"prompt":"private-prompt","max_tokens":8})");
+    ExpectStatus(plain, 200);
+    plain_id = ResponseRequestId(plain);
+    // The id is bound where the backend generates, so the scheduler's record
+    // can name it.
+    assert(server.backend->LastCall().trace_request == plain_id);
+    const auto streamed =
+        post("/v1/completions",
+             R"({"prompt":"streamed-prompt","max_tokens":8,"stream":true})");
+    ExpectStatus(streamed, 200);
+    stream_id = ResponseRequestId(streamed);
+    assert(server.backend->LastCall().trace_request == stream_id);
+    const auto invalid = post("/v1/completions", "{");
+    ExpectStatus(invalid, 400);
+    invalid_id = ResponseRequestId(invalid);
+    ExpectStatus(
+        post("/v1/completions", R"({"prompt":"unauthorized-prompt"})", false),
+        401);
+    ExpectStatus(post("/echo", "echo-body"), 200);
+    ExpectStatus(server.Send("GET /health HTTP/1.1\r\nAuthorization: Bearer "
+                             "test-secret\r\n\r\n"),
+                 200);
+  }
+  Trace::Close();
+
+  assert((fs::status(path).permissions() & fs::perms::all) ==
+         (fs::perms::owner_read | fs::perms::owner_write));
+  std::vector<gufo::json::Value> records;
+  {
+    std::ifstream input(path);
+    for (std::string line; std::getline(input, line);) {
+      assert(line.find("unauthorized-prompt") == std::string::npos);
+      assert(line.find("echo-body") == std::string::npos);
+      records.push_back(gufo::json::parse(line));
+    }
+  }
+  fs::remove(path);
+  assert(records.size() == 6);
+  const auto record = [&](std::string_view event,
+                          const std::string& id) -> const gufo::json::Value& {
+    for (const auto& candidate : records) {
+      if (candidate.member_str("event") == event &&
+          candidate.member_str("request") == id) {
+        assert(!candidate.member_str("time").empty());
+        return candidate;
+      }
+    }
+    std::abort();
+  };
+
+  const auto& request = record("request", plain_id);
+  assert(request.member_str("method") == "POST");
+  assert(request.member_str("path") == "/v1/completions");
+  assert(request.member_str("body") ==
+         R"({"prompt":"private-prompt","max_tokens":8})");
+  const auto& reply = record("response", plain_id);
+  assert(reply.member_size("status") == 200);
+  assert(reply.member_str("outcome") == "completed");
+  assert(!reply.find("stream")->as_bool());
+  const auto body = gufo::json::parse(reply.member_str("body"));
+  assert(body.find("choices")->items()[0].member_str("text") ==
+         "<tool_call>leak");
+
+  assert(
+      record("request", stream_id).member_str("body").find("streamed-prompt") !=
+      std::string::npos);
+  const auto& streamed = record("response", stream_id);
+  assert(streamed.find("stream")->as_bool());
+  const auto& events = streamed.member_str("body");
+  assert(events.find("<tool_call>leak") != std::string::npos);
+  assert(events.ends_with("data: [DONE]\n\n"));
+
+  assert(record("request", invalid_id).member_str("body") == "{");
+  assert(record("response", invalid_id).member_size("status") == 400);
 }
 
 // The threshold covers the lifecycle lines too: `--log-level=warn|error` boots
@@ -1983,6 +2097,7 @@ int main() {
   // tint around the level tag.
   ::setenv("NO_COLOR", "1", 1);
   TestRequestLogging();
+  TestContentTrace();
   TestQuietTiersSuppressLifecycle();
   TestLogLevelFilter();
   TestLogLevelNames();
