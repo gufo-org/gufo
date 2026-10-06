@@ -1024,6 +1024,7 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
     return InvalidCompatibilityRequest(input_error);
   }
 
+  HoistSystemMessages(&messages);
   chat.messages = std::move(messages);
   chat.client_id = req.client_id;
   return CreateOpenAiResponse(

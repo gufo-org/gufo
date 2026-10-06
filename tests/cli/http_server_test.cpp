@@ -1009,6 +1009,29 @@ void TestCompatibilityRequests() {
          "summary":[],"encrypted_content":"gAAAA"}]})");
   ExpectStatus(opaque_replay, 400);
 
+  // Codex replays developer instructions mid-conversation after context
+  // compaction or a queued interjection; system-role items hoist, in order,
+  // into the template's leading block while the rest keeps its sequence.
+  const auto hoisted =
+      response_body(server.Post("/v1/responses",
+                                R"({"instructions":"Base rules.","input":[
+        {"role":"user","content":"first"},
+        {"type":"message","role":"assistant","content":[
+          {"type":"output_text","text":"noted","annotations":[]}]},
+        {"type":"message","role":"developer","content":[
+          {"type":"input_text","text":"Compacted state"}]},
+        {"role":"user","content":"second"}]})"));
+  assert(hoisted.member_str("status") == "completed");
+  const auto hoist_messages = server.backend->LastCall().chat.messages;
+  assert(hoist_messages.size() == 5 &&
+         hoist_messages[0].role == gufo::tokenization::ChatRole::kSystem &&
+         hoist_messages[0].content == "Base rules." &&
+         hoist_messages[1].role == gufo::tokenization::ChatRole::kDeveloper &&
+         hoist_messages[1].content == "Compacted state" &&
+         hoist_messages[2].content == "first" &&
+         hoist_messages[3].content == "noted" &&
+         hoist_messages[4].content == "second");
+
   // The Responses API carries request-only fields with no native effect here
   // (hosted tool types, include, reasoning.summary, text.verbosity). Accept
   // them and keep every executable function tool, flattening the client-side

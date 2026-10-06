@@ -864,6 +864,7 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     }
     output->chat.messages.push_back(std::move(message));
   }
+  HoistSystemMessages(&output->chat.messages);
 
   if (auto error = ParseToolControls(body, output))
     return error;
@@ -3096,6 +3097,15 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
     converted["content"] = std::move(content);
   }
   return ParseMessage(converted, message, budget, error);
+}
+
+void HoistSystemMessages(std::vector<tokenization::ChatMessage>* messages) {
+  std::stable_partition(
+      messages->begin(), messages->end(),
+      [](const tokenization::ChatMessage& message) {
+        return message.role == tokenization::ChatRole::kSystem ||
+               message.role == tokenization::ChatRole::kDeveloper;
+      });
 }
 
 std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
