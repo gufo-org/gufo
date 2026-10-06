@@ -7,9 +7,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
-#include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -178,11 +176,11 @@ constexpr std::uint64_t kSnapshotReuseBytes = 8ULL << 20;
 class SnapshotAllocator
     : public std::enable_shared_from_this<SnapshotAllocator> {
 public:
-  // Every capture freezes the same mutable state size. Keep this many blocks
-  // of it committed ahead of time: ROCm commits pool pages on each allocation
-  // (about 25 GB/s here), which otherwise lands on the request path.
+  // Every capture freezes the same mutable state size. Keep this many released
+  // blocks of it committed for the next captures: ROCm commits pool pages on
+  // each allocation (about 25 GB/s here), and an allocation also stalls other
+  // HIP calls, so a background refill would land in a peer's decode instead.
   static constexpr std::size_t kSpareBlocks = 2;
-  static constexpr std::chrono::milliseconds kRefillDelay{100};
 
   SnapshotAllocator() {
     hipMemPoolProps properties{};
@@ -190,57 +188,41 @@ public:
     properties.handleTypes = hipMemHandleTypeNone;
     properties.location.type = hipMemLocationTypeDevice;
     CheckStatus(hipGetDevice(&properties.location.id), "snapshot pool device");
-    device_ = properties.location.id;
     CheckStatus(hipMemPoolCreate(&pool_, &properties), "snapshot pool");
-    for (hipStream_t* stream : {&stream_, &refill_stream_}) {
-      const auto created =
-          hipStreamCreateWithFlags(stream, hipStreamNonBlocking);
-      if (created != hipSuccess) {
-        DestroyStreams();
-        (void)hipMemPoolDestroy(pool_);
-        CheckStatus(created, "snapshot allocator stream");
-      }
+    const auto created =
+        hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking);
+    if (created != hipSuccess) {
+      (void)hipMemPoolDestroy(pool_);
+      CheckStatus(created, "snapshot allocator stream");
     }
   }
   ~SnapshotAllocator() {
-    {
-      std::lock_guard lock(mutex_);
-      stop_ = true;
-    }
-    refill_wake_.notify_all();
-    if (refill_.joinable())
-      refill_.join();
     for (void* spare : spares_)
       (void)hipFree(spare);
-    DestroyStreams();
+    (void)hipStreamSynchronize(stream_);
+    (void)hipStreamDestroy(stream_);
+    for (hipStream_t stream : free_streams_)
+      (void)hipStreamDestroy(stream);
     (void)hipMemPoolDestroy(pool_);
   }
   std::shared_ptr<void> Allocate(std::uint64_t bytes) {
     std::lock_guard lock(mutex_);
-    return Own(Commit(bytes, stream_), bytes);
+    return Own(Commit(bytes), bytes);
   }
-  /// Allocates the recurring mutable-state size from committed spares and
-  /// recommits a replacement in the background.
+  /// Allocates the recurring mutable-state size, from a released block when
+  /// one is kept.
   std::shared_ptr<void> AllocateSpare(std::uint64_t bytes) {
-    std::unique_lock lock(mutex_);
+    std::lock_guard lock(mutex_);
     if (spare_bytes_ != bytes) {
       for (void* spare : spares_)
         (void)hipFree(spare);
       spares_.clear();
       spare_bytes_ = bytes;
     }
-    if (!refill_.joinable())
-      refill_ = std::thread([this] { Refill(); });
-    void* data = nullptr;
-    if (!spares_.empty()) {
-      data = spares_.back();
-      spares_.pop_back();
-    } else {
-      data = Commit(bytes, stream_);
-    }
-    last_take_ = std::chrono::steady_clock::now();
-    lock.unlock();
-    refill_wake_.notify_one();
+    if (spares_.empty())
+      return Own(Commit(bytes), bytes);
+    void* data = spares_.back();
+    spares_.pop_back();
     return Own(data, bytes);
   }
   /// Bytes the spare blocks may hold, for scratch accounting.
@@ -275,24 +257,14 @@ private:
       throw std::runtime_error(std::string(operation) + ": " +
                                hipGetErrorString(error));
   }
-  void DestroyStreams() noexcept {
-    for (hipStream_t stream : {stream_, refill_stream_}) {
-      if (stream != nullptr) {
-        (void)hipStreamSynchronize(stream);
-        (void)hipStreamDestroy(stream);
-      }
-    }
-    for (hipStream_t stream : free_streams_)
-      (void)hipStreamDestroy(stream);
-  }
-  void* Commit(std::uint64_t bytes, hipStream_t stream) {
+  void* Commit(std::uint64_t bytes) {
     void* data = nullptr;
-    CheckStatus(hipMallocFromPoolAsync(&data, bytes, pool_, stream),
+    CheckStatus(hipMallocFromPoolAsync(&data, bytes, pool_, stream_),
                 "snapshot allocate");
-    const auto ready = hipStreamSynchronize(stream);
+    const auto ready = hipStreamSynchronize(stream_);
     if (ready != hipSuccess) {
       (void)hipFree(data);
-      (void)hipStreamSynchronize(stream);
+      (void)hipStreamSynchronize(stream_);
       CheckStatus(ready, "snapshot allocation ready");
     }
     return data;
@@ -304,7 +276,7 @@ private:
   }
   void Release(void* pointer, std::uint64_t bytes) {
     std::lock_guard lock(mutex_);
-    if (!stop_ && bytes == spare_bytes_ && spares_.size() < kSpareBlocks) {
+    if (bytes == spare_bytes_ && spares_.size() < kSpareBlocks) {
       spares_.push_back(pointer);
       return;
     }
@@ -315,53 +287,10 @@ private:
     // including when their source session has already been destroyed.
     (void)hipStreamSynchronize(stream_);
   }
-  void Refill() {
-    (void)hipSetDevice(device_);
-    std::unique_lock lock(mutex_);
-    for (;;) {
-      refill_wake_.wait(lock, [&] {
-        return stop_ || (spare_bytes_ != 0 && spares_.size() < kSpareBlocks);
-      });
-      // A pool allocation stalls other HIP calls, including the capture's own
-      // stream synchronization. Commit only after captures have gone quiet,
-      // under the long kernels of the following decode or prefill.
-      while (!stop_ &&
-             std::chrono::steady_clock::now() < last_take_ + kRefillDelay)
-        refill_wake_.wait_until(lock, last_take_ + kRefillDelay);
-      if (stop_)
-        return;
-      if (spare_bytes_ == 0 || spares_.size() >= kSpareBlocks)
-        continue;
-      const auto bytes = spare_bytes_;
-      lock.unlock();
-      void* data = nullptr;
-      try {
-        data = Commit(bytes, refill_stream_);
-      } catch (...) {
-        // Spares are an optimization; captures still allocate on demand.
-      }
-      lock.lock();
-      if (data == nullptr) {
-        // Retry on the next capture rather than spinning on failures.
-        refill_wake_.wait(lock);
-        continue;
-      }
-      if (stop_ || bytes != spare_bytes_ || spares_.size() >= kSpareBlocks)
-        (void)hipFree(data);
-      else
-        spares_.push_back(data);
-    }
-  }
   std::mutex mutex_;
-  std::condition_variable refill_wake_;
-  std::thread refill_;
   std::vector<void*> spares_;
   std::uint64_t spare_bytes_{0};
-  std::chrono::steady_clock::time_point last_take_{};
-  bool stop_{false};
-  int device_{0};
   hipStream_t stream_{nullptr};
-  hipStream_t refill_stream_{nullptr};
   std::mutex streams_mutex_;
   std::vector<hipStream_t> free_streams_;
   hipMemPool_t pool_{nullptr};
