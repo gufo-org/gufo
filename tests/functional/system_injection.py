@@ -1,9 +1,9 @@
 """Mid-conversation system/developer messages: acceptance, effect and reuse.
 
-Qwen3.8's template accepts one leading system turn, so the server hoists later
-system/developer messages into it. The injection turn therefore changes the
-prompt head and is prefilled again; its reuse is recorded, not required. The
-hoisted message then stays in place, so the following turn must reuse it all.
+Qwen3.8's template accepts one leading system turn, so Qwen hoists later
+system/developer messages into it and the injection turn is prefilled again;
+DeepSeek renders them in place. Injection-turn reuse is therefore recorded, not
+required. The message then stays put, so the following turn must reuse it all.
 """
 
 from copy import deepcopy

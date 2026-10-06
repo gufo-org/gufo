@@ -362,6 +362,21 @@ std::optional<std::string> QwenChatTemplate::Render(
     return std::nullopt;
   }
 
+  // The reference template accepts one leading system turn, but OpenAI clients
+  // such as Codex send system/developer messages mid-conversation. Hoist them,
+  // in order, into that turn; templates that allow them keep them in place.
+  const auto is_system = [](const ChatMessage& message) {
+    return message.role == ChatRole::kSystem ||
+           message.role == ChatRole::kDeveloper;
+  };
+  std::vector<ChatMessage> hoisted;
+  if (std::any_of(std::find_if_not(messages.begin(), messages.end(), is_system),
+                  messages.end(), is_system)) {
+    hoisted.assign(messages.begin(), messages.end());
+    std::stable_partition(hoisted.begin(), hoisted.end(), is_system);
+    messages = hoisted;
+  }
+
   std::string output;
 
   std::size_t estimated_len = 0;
@@ -490,11 +505,6 @@ std::optional<std::string> QwenChatTemplate::Render(
   std::optional<std::size_t> final_user_start;
   for (; message_index < messages.size(); ++message_index) {
     const auto& msg = messages[message_index];
-    if (msg.role == ChatRole::kSystem || msg.role == ChatRole::kDeveloper) {
-      if (error_msg != nullptr)
-        *error_msg = "System message must be at the beginning.";
-      return std::nullopt;
-    }
     const bool tool_result = msg.role == ChatRole::kTool;
     if (tool_result) {
       output.append("<|im_start|>user\n");

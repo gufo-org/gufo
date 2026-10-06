@@ -26,13 +26,6 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
 /// Shared effort names; each API applies its own thinking and alias rules.
 std::optional<ReasoningEffort> ParseReasoningEffortName(std::string_view value);
 
-/// Chat templates render one merged leading system block, but agent clients
-/// such as Codex re-send developer instructions mid-conversation after context
-/// compaction or a queued user interjection. Hoist every system-role message
-/// to the front, preserving relative order, so the template merges them
-/// exactly as if the client had sent them first.
-void HoistSystemMessages(std::vector<tokenization::ChatMessage>* messages);
-
 /// Reasoning and visible text of a generation without tools or schemas, split
 /// exactly as Chat Completions reports them.
 struct GeneratedText {

@@ -25,7 +25,8 @@ artifact hashes and executes the bounded C++ implementation.
 Full rendered-byte goldens cover tools before system instructions, the Unsloth
 artifact's leading developer-message extension, tool-loop reasoning retention,
 Unicode trimming around images and optional `Picture N:` numbering.
-Late system/developer messages are rejected. Tool/system cases also compare
+The reference rejects late system/developer messages; Gufo hoists them into
+the leading system turn in their original order. Tool/system cases also compare
 complete token sequences using the real GGUF tokenizer.
 
 The tokenizer applies NFC normalization and the pinned Unicode split pattern,

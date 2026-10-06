@@ -484,7 +484,16 @@ bool ReadTextMessages(const json::Value* input,
   core::ImageReadBudget image_budget;
   if (input == nullptr || !input->is_array() || input->empty())
     return false;
-  std::vector<tokenization::ChatMessage> system_messages;
+  // Responses replays one assistant turn as several reasoning, message and
+  // function_call items. A system/developer item between them would split
+  // that turn, so it waits until the next item that starts a new message.
+  std::vector<tokenization::ChatMessage> deferred;
+  const auto push = [&](tokenization::ChatMessage message) {
+    for (auto& system : deferred)
+      messages->push_back(std::move(system));
+    deferred.clear();
+    messages->push_back(std::move(message));
+  };
   for (const auto& item : input->items()) {
     if (responses && (item.member_str("type") == "function_call" ||
                       item.member_str("type") == "function_call_output")) {
@@ -502,7 +511,7 @@ bool ReadTextMessages(const json::Value* input,
         calls.insert(calls.end(), message.tool_calls.begin(),
                      message.tool_calls.end());
       } else {
-        messages->push_back(std::move(message));
+        push(std::move(message));
       }
       continue;
     }
@@ -525,7 +534,7 @@ bool ReadTextMessages(const json::Value* input,
           return false;
         reasoning.thought += text->str();
       }
-      messages->push_back(std::move(reasoning));
+      push(std::move(reasoning));
       continue;
     }
     const auto role = item.member_str("role");
@@ -551,11 +560,12 @@ bool ReadTextMessages(const json::Value* input,
                        ? &message.thought
                        : nullptr))
       return false;
-    // Responses hoists these messages after parsing. Keep them out of the
-    // adjacency checks so they cannot split a replayed assistant turn.
-    if (responses && (message.role == tokenization::ChatRole::kSystem ||
-                      message.role == tokenization::ChatRole::kDeveloper)) {
-      system_messages.push_back(std::move(message));
+    if (responses &&
+        (message.role == tokenization::ChatRole::kSystem ||
+         message.role == tokenization::ChatRole::kDeveloper) &&
+        !messages->empty() &&
+        messages->back().role == tokenization::ChatRole::kAssistant) {
+      deferred.push_back(std::move(message));
       continue;
     }
     if (responses && message.role == tokenization::ChatRole::kAssistant &&
@@ -564,11 +574,11 @@ bool ReadTextMessages(const json::Value* input,
         messages->back().content.empty() && !messages->back().thought.empty()) {
       messages->back().content = std::move(message.content);
     } else {
-      messages->push_back(std::move(message));
+      push(std::move(message));
     }
   }
-  for (auto& message : system_messages)
-    messages->push_back(std::move(message));
+  for (auto& system : deferred)
+    messages->push_back(std::move(system));
   return true;
 }
 
@@ -1034,7 +1044,6 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
     return InvalidCompatibilityRequest(input_error);
   }
 
-  HoistSystemMessages(&messages);
   chat.messages = std::move(messages);
   chat.client_id = req.client_id;
   return CreateOpenAiResponse(

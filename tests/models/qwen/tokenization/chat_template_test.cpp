@@ -406,9 +406,19 @@ void TestHuggingFaceRenderedGoldens() {
       {base[0], call, {ChatRole::kUser, "<tool_response>21 C</tool_response>"}},
       options, "tool_loop_preserve");
   for (const auto role : {ChatRole::kSystem, ChatRole::kDeveloper}) {
-    Expect(!QwenChatTemplate::Render(
-               std::vector<ChatMessage>{base[0], {role, "Late instructions"}}),
-           "Late system/developer messages are rejected");
+    const std::vector<ChatMessage> late{{ChatRole::kSystem, "Be concise."},
+                                        history[0],
+                                        history[1],
+                                        {role, "Late instructions"},
+                                        history[2]};
+    const std::vector<ChatMessage> leading{late[0], late[3], late[1], late[2],
+                                           late[4]};
+    const auto rendered = QwenChatTemplate::Render(late, tools, options);
+    Expect(rendered &&
+               rendered == QwenChatTemplate::Render(leading, tools, options) &&
+               rendered->find("Be concise.\nLate instructions<|im_end|>") !=
+                   std::string::npos,
+           "Late system/developer messages join the leading system turn");
   }
   for (const auto role : {ChatRole::kSystem, ChatRole::kDeveloper,
                           ChatRole::kAssistant, ChatRole::kTool}) {

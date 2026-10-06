@@ -555,8 +555,8 @@ functions are flattened into the function list. Their `function_call` items
 keep the plain `name` and add the owning `namespace`, so clients can route
 them. Function names that collide across namespaces or with top-level
 functions are rejected. Mid-conversation `system` and `developer` message
-items are hoisted to the beginning like in Chat Completions. Standard
-Responses request fields with
+items are accepted as in Chat Completions. Standard Responses request fields
+with
 no native effect are accepted and ignored so conforming clients interoperate
 (for example Codex): `include`, `reasoning.summary`, `text.verbosity`,
 `client_metadata` and `prompt_cache_key`.
@@ -635,11 +635,11 @@ ordinary continuation.
 - `model`
 - `messages`: `system` and `developer` messages may appear at any position.
   Agent clients such as Codex send them mid-conversation after context
-  compaction or when session settings change; they are hoisted to the beginning
-  in their original relative order, where the model template merges them as a
-  single system turn. Hoisting changes the prompt head, so the request that
-  introduces such a message is prefilled again; later requests that keep it
-  reuse the whole prompt
+  compaction or when session settings change. DeepSeek renders them in place.
+  Qwen's template accepts only one leading system turn, so Qwen models hoist
+  them into it in their original relative order. That changes the prompt head:
+  the request that introduces such a message is prefilled again, and later
+  requests that keep it reuse the whole prompt
 - `max_tokens` or `max_completion_tokens`
 - `temperature`
 - `top_p`
