@@ -19,7 +19,7 @@ constexpr std::size_t kPage = 4096;
 constexpr std::size_t kWorkers = 32;
 constexpr std::size_t kReadBatch = 8;
 constexpr std::size_t kBatchJobs = 1024;
-constexpr std::size_t kCacheBytes = 8 * 1024 * 1024;
+constexpr std::size_t kCacheBytes = 128 * 1024 * 1024;
 
 }  // namespace
 

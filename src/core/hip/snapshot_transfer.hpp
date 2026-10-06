@@ -16,9 +16,14 @@ public:
   SnapshotTransfer() {
     Check(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
   }
+  /// Borrows a caller-owned nonblocking stream. Finish then also waits for
+  /// copies other users queued on it.
+  explicit SnapshotTransfer(hipStream_t stream)
+      : stream_(stream), owned_(false) {}
   ~SnapshotTransfer() {
     (void)hipStreamSynchronize(stream_);
-    (void)hipStreamDestroy(stream_);
+    if (owned_)
+      (void)hipStreamDestroy(stream_);
   }
   SnapshotTransfer(const SnapshotTransfer&) = delete;
   SnapshotTransfer& operator=(const SnapshotTransfer&) = delete;
@@ -51,6 +56,7 @@ private:
       throw std::runtime_error(hipGetErrorString(status));
   }
   hipStream_t stream_{nullptr};
+  bool owned_{true};
 };
 
 }  // namespace gufo::hip

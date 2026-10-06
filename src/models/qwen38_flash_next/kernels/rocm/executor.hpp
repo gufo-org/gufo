@@ -78,6 +78,17 @@ private:
   std::uint8_t* mutable_device_ = nullptr;
   std::uint64_t mutable_offset_ = 0;
   std::uint64_t mutable_bytes_ = 0;
+  // The other small non-row regions (indexer ring, draft state, kept rows),
+  // also frozen on the device until a byte reader needs them. Copying them
+  // into untouched pageable payload pages cost several ms per capture.
+  struct Extra {
+    std::uint64_t offset;
+    std::uint64_t bytes;
+    std::uint8_t* device;
+  };
+  mutable std::vector<Extra> extras_;
+  mutable std::shared_ptr<void> extra_storage_;
+  std::uint64_t extra_bytes_ = 0;
 };
 
 /// Per-sequence state on the device: recurrent SSM state, KV and indexer

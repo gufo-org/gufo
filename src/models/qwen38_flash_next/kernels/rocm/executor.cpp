@@ -7,7 +7,9 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -176,39 +178,78 @@ constexpr std::uint64_t kSnapshotReuseBytes = 8ULL << 20;
 class SnapshotAllocator
     : public std::enable_shared_from_this<SnapshotAllocator> {
 public:
+  // Every capture freezes the same mutable state size. Keep this many blocks
+  // of it committed ahead of time: ROCm commits pool pages on each allocation
+  // (about 25 GB/s here), which otherwise lands on the request path.
+  static constexpr std::size_t kSpareBlocks = 2;
+  static constexpr std::chrono::milliseconds kRefillDelay{100};
+
   SnapshotAllocator() {
     hipMemPoolProps properties{};
     properties.allocType = hipMemAllocationTypePinned;
     properties.handleTypes = hipMemHandleTypeNone;
     properties.location.type = hipMemLocationTypeDevice;
     CheckStatus(hipGetDevice(&properties.location.id), "snapshot pool device");
+    device_ = properties.location.id;
     CheckStatus(hipMemPoolCreate(&pool_, &properties), "snapshot pool");
-    const auto created =
-        hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking);
-    if (created != hipSuccess) {
-      (void)hipMemPoolDestroy(pool_);
-      CheckStatus(created, "snapshot allocator stream");
+    for (hipStream_t* stream : {&stream_, &refill_stream_, &transfer_stream_}) {
+      const auto created =
+          hipStreamCreateWithFlags(stream, hipStreamNonBlocking);
+      if (created != hipSuccess) {
+        DestroyStreams();
+        (void)hipMemPoolDestroy(pool_);
+        CheckStatus(created, "snapshot allocator stream");
+      }
     }
   }
   ~SnapshotAllocator() {
-    (void)hipStreamSynchronize(stream_);
-    (void)hipStreamDestroy(stream_);
+    {
+      std::lock_guard lock(mutex_);
+      stop_ = true;
+    }
+    refill_wake_.notify_all();
+    if (refill_.joinable())
+      refill_.join();
+    for (void* spare : spares_)
+      (void)hipFree(spare);
+    DestroyStreams();
     (void)hipMemPoolDestroy(pool_);
   }
   std::shared_ptr<void> Allocate(std::uint64_t bytes) {
     std::lock_guard lock(mutex_);
-    void* data = nullptr;
-    CheckStatus(hipMallocFromPoolAsync(&data, bytes, pool_, stream_),
-                "snapshot allocate");
-    const auto ready = hipStreamSynchronize(stream_);
-    if (ready != hipSuccess) {
-      (void)hipFree(data);
-      (void)hipStreamSynchronize(stream_);
-      CheckStatus(ready, "snapshot allocation ready");
+    return Own(Commit(bytes, stream_), bytes);
+  }
+  /// Allocates the recurring mutable-state size from committed spares and
+  /// recommits a replacement in the background.
+  std::shared_ptr<void> AllocateSpare(std::uint64_t bytes) {
+    std::unique_lock lock(mutex_);
+    if (spare_bytes_ != bytes) {
+      for (void* spare : spares_)
+        (void)hipFree(spare);
+      spares_.clear();
+      spare_bytes_ = bytes;
     }
-    return {data, [owner = shared_from_this()](void* pointer) {
-              owner->Release(pointer);
-            }};
+    if (!refill_.joinable())
+      refill_ = std::thread([this] { Refill(); });
+    void* data = nullptr;
+    if (!spares_.empty()) {
+      data = spares_.back();
+      spares_.pop_back();
+    } else {
+      data = Commit(bytes, stream_);
+    }
+    last_take_ = std::chrono::steady_clock::now();
+    lock.unlock();
+    refill_wake_.notify_one();
+    return Own(data, bytes);
+  }
+  /// Bytes the spare blocks may hold, for scratch accounting.
+  [[nodiscard]] static std::uint64_t SpareBytes(std::uint64_t block) {
+    return kSpareBlocks * block;
+  }
+  /// One nonblocking stream for every snapshot copy of this executor.
+  [[nodiscard]] hipStream_t transfer_stream() const noexcept {
+    return transfer_stream_;
   }
 
 private:
@@ -217,17 +258,92 @@ private:
       throw std::runtime_error(std::string(operation) + ": " +
                                hipGetErrorString(error));
   }
-  void Release(void* pointer) {
+  void DestroyStreams() noexcept {
+    for (hipStream_t stream : {stream_, refill_stream_, transfer_stream_}) {
+      if (stream != nullptr) {
+        (void)hipStreamSynchronize(stream);
+        (void)hipStreamDestroy(stream);
+      }
+    }
+  }
+  void* Commit(std::uint64_t bytes, hipStream_t stream) {
+    void* data = nullptr;
+    CheckStatus(hipMallocFromPoolAsync(&data, bytes, pool_, stream),
+                "snapshot allocate");
+    const auto ready = hipStreamSynchronize(stream);
+    if (ready != hipSuccess) {
+      (void)hipFree(data);
+      (void)hipStreamSynchronize(stream);
+      CheckStatus(ready, "snapshot allocation ready");
+    }
+    return data;
+  }
+  std::shared_ptr<void> Own(void* data, std::uint64_t bytes) {
+    return {data, [owner = shared_from_this(), bytes](void* pointer) {
+              owner->Release(pointer, bytes);
+            }};
+  }
+  void Release(void* pointer, std::uint64_t bytes) {
     std::lock_guard lock(mutex_);
+    if (!stop_ && bytes == spare_bytes_ && spares_.size() < kSpareBlocks) {
+      spares_.push_back(pointer);
+      return;
+    }
     // In ROCm, hipFree recognizes pool allocations and bypasses SyncAllStreams.
     // Unlike hipFreeAsync, it also permits a peer blocking-stream capture.
     (void)hipFree(pointer);
-    // Keep physical memory bounded by retained checkpoints, including when
-    // their source session has already been destroyed.
+    // Keep physical memory bounded by retained checkpoints and the spares,
+    // including when their source session has already been destroyed.
     (void)hipStreamSynchronize(stream_);
   }
+  void Refill() {
+    (void)hipSetDevice(device_);
+    std::unique_lock lock(mutex_);
+    for (;;) {
+      refill_wake_.wait(lock, [&] {
+        return stop_ || (spare_bytes_ != 0 && spares_.size() < kSpareBlocks);
+      });
+      // A pool allocation stalls other HIP calls, including the capture's own
+      // stream synchronization. Commit only after captures have gone quiet,
+      // under the long kernels of the following decode or prefill.
+      while (!stop_ &&
+             std::chrono::steady_clock::now() < last_take_ + kRefillDelay)
+        refill_wake_.wait_until(lock, last_take_ + kRefillDelay);
+      if (stop_)
+        return;
+      if (spare_bytes_ == 0 || spares_.size() >= kSpareBlocks)
+        continue;
+      const auto bytes = spare_bytes_;
+      lock.unlock();
+      void* data = nullptr;
+      try {
+        data = Commit(bytes, refill_stream_);
+      } catch (...) {
+        // Spares are an optimization; captures still allocate on demand.
+      }
+      lock.lock();
+      if (data == nullptr) {
+        // Retry on the next capture rather than spinning on failures.
+        refill_wake_.wait(lock);
+        continue;
+      }
+      if (stop_ || bytes != spare_bytes_ || spares_.size() >= kSpareBlocks)
+        (void)hipFree(data);
+      else
+        spares_.push_back(data);
+    }
+  }
   std::mutex mutex_;
+  std::condition_variable refill_wake_;
+  std::thread refill_;
+  std::vector<void*> spares_;
+  std::uint64_t spare_bytes_{0};
+  std::chrono::steady_clock::time_point last_take_{};
+  bool stop_{false};
+  int device_{0};
   hipStream_t stream_{nullptr};
+  hipStream_t refill_stream_{nullptr};
+  hipStream_t transfer_stream_{nullptr};
   hipMemPool_t pool_{nullptr};
 };
 
@@ -314,7 +430,8 @@ void SnapshotState::Preserve(std::uint32_t position, std::uint32_t mtp_position,
     const auto keep = std::uint64_t{rows} * region.row_bytes;
     if (keep < region.pending_bytes) {
       if (!transfer)
-        transfer = std::make_unique<gufo::hip::SnapshotTransfer>();
+        transfer = std::make_unique<gufo::hip::SnapshotTransfer>(
+            registry_->allocator->transfer_stream());
       transfer->Copy(region.host + keep,
                      static_cast<const std::uint8_t*>(region.device) + keep,
                      region.pending_bytes - keep);
@@ -329,7 +446,7 @@ void SnapshotState::Materialize() const {
   std::lock_guard lock(registry_->mutex);
   if (registry_->failure)
     std::rethrow_exception(registry_->failure);
-  gufo::hip::SnapshotTransfer transfer;
+  gufo::hip::SnapshotTransfer transfer(registry_->allocator->transfer_stream());
   for (const auto& region : regions_) {
     PopulateSnapshotPrefix(region.host, region.bytes);
     for (const auto& saved : region.saved)
@@ -343,13 +460,21 @@ void SnapshotState::Materialize() const {
     transfer.Copy(payload_ + mutable_offset_, mutable_device_, mutable_bytes_);
     mutable_storage_.reset();
   }
+  if (extra_storage_) {
+    for (const auto& extra : extras_)
+      transfer.Enqueue(payload_ + extra.offset, extra.device, extra.bytes);
+    transfer.Finish();
+    extras_.clear();
+    extra_storage_.reset();
+  }
   for (auto& region : regions_)
     region.saved.clear();
 }
 
 std::uint64_t SnapshotState::DeviceBytes() const {
   std::lock_guard lock(registry_->mutex);
-  std::uint64_t bytes = mutable_storage_ ? mutable_bytes_ : 0;
+  std::uint64_t bytes = (mutable_storage_ ? mutable_bytes_ : 0) +
+                        (extra_storage_ ? extra_bytes_ : 0);
   std::vector<const SnapshotBlock*> blocks;
   for (const auto& region : regions_)
     for (const auto& saved : region.saved) {
@@ -493,7 +618,8 @@ void SnapshotRegistry::Preserve(std::uint32_t position,
       chunk->device =
           static_cast<std::uint8_t*>(chunk->block->storage.get()) + used;
       if (!transfer)
-        transfer = std::make_unique<gufo::hip::SnapshotTransfer>();
+        transfer = std::make_unique<gufo::hip::SnapshotTransfer>(
+            allocator->transfer_stream());
       transfer->Enqueue(chunk->device,
                         static_cast<const std::uint8_t*>(copy.device) + begin,
                         bytes, hipMemcpyDeviceToDevice);
@@ -745,19 +871,22 @@ void Session::Reset() {
   const Config& c = owner_->config();
   for (auto& l : linear_) {
     if (l.state != nullptr) {
-      (void)hipMemset(l.conv_state, 0,
-                      static_cast<std::size_t>(c.ssm_conv_kernel - 1) *
-                          c.SsmConvChannels() * sizeof(float));
-      (void)hipMemset(l.state, 0,
-                      static_cast<std::size_t>(c.ssm_num_v_heads) *
-                          c.ssm_head_dim * c.ssm_head_dim * sizeof(float));
+      (void)hipMemsetAsync(l.conv_state, 0,
+                           static_cast<std::size_t>(c.ssm_conv_kernel - 1) *
+                               c.SsmConvChannels() * sizeof(float),
+                           owner_->stream());
+      (void)hipMemsetAsync(l.state, 0,
+                           static_cast<std::size_t>(c.ssm_num_v_heads) *
+                               c.ssm_head_dim * c.ssm_head_dim * sizeof(float),
+                           owner_->stream());
     }
   }
   blocks_ = 0;
   if (ple_history_ != nullptr) {
-    (void)hipMemset(ple_history_, 0,
-                    static_cast<std::size_t>(c.PleConvHistory()) * c.HcDim() *
-                        sizeof(float));
+    (void)hipMemsetAsync(ple_history_, 0,
+                         static_cast<std::size_t>(c.PleConvHistory()) *
+                             c.HcDim() * sizeof(float),
+                         owner_->stream());
   }
 }
 
@@ -1179,19 +1308,21 @@ std::size_t Executor::DeferredScratchBytes() const {
                                 std::min(8U, options_.max_logit_rows) *
                                 c.vocab_size * sizeof(float)
                           : 0;
+  const auto linear = c.num_layers - c.num_layers / c.full_attention_interval;
+  const auto conv = std::size_t{c.ssm_conv_kernel - 1} * c.SsmConvChannels();
+  const auto state =
+      std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim * c.ssm_head_dim;
+  const auto ple =
+      c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
+  const auto mutable_bytes = (linear * (conv + state) + ple) * sizeof(float);
   if (!checkpoint_storage_) {
-    const auto linear = c.num_layers - c.num_layers / c.full_attention_interval;
-    const auto conv = std::size_t{c.ssm_conv_kernel - 1} * c.SsmConvChannels();
-    const auto state =
-        std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim * c.ssm_head_dim;
-    const auto ple =
-        c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
     bytes +=
-        (linear * (conv + state) + ple +
-         (has_mtp() ? std::size_t{options_.max_speculative} * c.HcDim() : 0)) *
-        sizeof(float);
+        mutable_bytes + (has_mtp() ? std::size_t{options_.max_speculative} *
+                                         c.HcDim() * sizeof(float)
+                                   : 0);
   }
-  return bytes;
+  // Committed spare blocks for captures, whether or not they exist yet.
+  return bytes + SnapshotAllocator::SpareBytes(mutable_bytes);
 }
 
 /// Column-tile width for the routed expert GEMMs: the tile at or above twice
@@ -2397,7 +2528,26 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   }
   if (speculative && !EnsureRollback(session, n - 1, error_msg))
     return false;
-  session.PreserveSnapshots(session.position_, session.mtp_.position);
+  // Start the disk rows before protecting checkpoint rows, which can commit
+  // device pages: layer 0 alone cannot hide the whole read.
+  const auto ngram = session.ngram_;
+  if (c.ple_layer >= 0) {
+    if (ngram_ == nullptr) {
+      AssignError(error_msg, "n-gram table is not open");
+      return false;
+    }
+    if (!PleFetch(session, tokens, speculative, error_msg)) {
+      return false;
+    }
+  }
+  try {
+    session.PreserveSnapshots(session.position_, session.mtp_.position);
+  } catch (...) {
+    // The forward never ran; leave the n-gram window where it was.
+    (void)WaitPle(nullptr);
+    session.ngram_ = ngram;
+    throw;
+  }
   ++session.mutation_epoch_;
   session.spec_base_ = start_pos;
   session.spec_tokens_ = speculative ? n : 0;
@@ -2410,15 +2560,6 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   control_host_->mtp_position = session.mtp_.position;
   control_host_->mtp_blocks = session.mtp_.blocks;
   control_host_->hidden_row = -1;
-  if (c.ple_layer >= 0) {
-    if (ngram_ == nullptr) {
-      AssignError(error_msg, "n-gram table is not open");
-      return false;
-    }
-    if (!PleFetch(session, tokens, speculative, error_msg)) {
-      return false;
-    }
-  }
   // Sparse selection only changes the result once a query can see more
   // than the token budget; every layer of this model shares one ratio.
   const bool sparse = c.compress_ratio > 0 && start_pos + n > c.indexer_top_k;
@@ -2919,7 +3060,8 @@ bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
     return false;
   }
   std::shared_ptr<SnapshotState> pending;
-  gufo::hip::SnapshotTransfer transfer;
+  gufo::hip::SnapshotTransfer transfer(
+      GetSnapshotAllocator()->transfer_stream());
   if (deferred) {
     if (!storage) {
       AssignError(error_msg, "borrowed snapshot needs owned payload storage");
@@ -2944,12 +3086,25 @@ bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
                          mutable_prefix = offset + bytes;
                          return true;
                        });
+    std::uint64_t extra_bytes = 0;
+    (void)WalkSnapshot(h, nullptr,
+                       [&](void*, std::uint64_t offset, std::uint64_t bytes,
+                           const char*, std::uint64_t row_bytes, bool, bool) {
+                         if (row_bytes == 0 && offset >= mutable_prefix)
+                           extra_bytes += bytes;
+                         return true;
+                       });
     pending->mutable_offset_ = sizeof(SnapshotHeader);
     pending->mutable_bytes_ = mutable_prefix - sizeof(SnapshotHeader);
     pending->mutable_storage_ =
-        session.snapshots_->allocator->Allocate(pending->mutable_bytes_);
+        session.snapshots_->allocator->AllocateSpare(pending->mutable_bytes_);
     pending->mutable_device_ =
         static_cast<std::uint8_t*>(pending->mutable_storage_.get());
+    if (extra_bytes != 0) {
+      pending->extra_storage_ =
+          session.snapshots_->allocator->Allocate(extra_bytes);
+      pending->extra_bytes_ = extra_bytes;
+    }
   } else {
     PopulateSnapshotPrefix(payload.data(), payload.size());
   }
@@ -2960,6 +3115,7 @@ bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
     std::memcpy(payload.data() + payload.size() - grid_bytes,
                 session.VisionLayout().images.data(), grid_bytes);
   }
+  std::uint64_t extra_used = 0;
   const bool saved =
       WalkSnapshot(
           h, &session,
@@ -2986,6 +3142,15 @@ bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
                 destination = pending->mutable_device_ + offset -
                               pending->mutable_offset_;
                 kind = hipMemcpyDeviceToDevice;
+              } else if (pending && pending->extra_storage_) {
+                if (extra_used + bytes > pending->extra_bytes_)
+                  throw std::logic_error("snapshot extra regions overflow");
+                destination =
+                    static_cast<std::uint8_t*>(pending->extra_storage_.get()) +
+                    extra_used;
+                kind = hipMemcpyDeviceToDevice;
+                pending->extras_.push_back({offset, bytes, destination});
+                extra_used += bytes;
               }
               if (pending)
                 transfer.Enqueue(destination, device, bytes, kind);
@@ -3198,7 +3363,8 @@ bool Executor::RestoreSnapshot(Session& session,
       return false;
     if (deferred) {
       if (!fork_transfer)
-        fork_transfer = std::make_unique<gufo::hip::SnapshotTransfer>();
+        fork_transfer = std::make_unique<gufo::hip::SnapshotTransfer>(
+            GetSnapshotAllocator()->transfer_stream());
       fork_transfer->Enqueue(device, source, bytes, kind);
       return true;
     }
@@ -3241,7 +3407,8 @@ bool Executor::RestoreSnapshot(Session& session,
                     return false;
                   if (!fork_transfer)
                     fork_transfer =
-                        std::make_unique<gufo::hip::SnapshotTransfer>();
+                        std::make_unique<gufo::hip::SnapshotTransfer>(
+                            GetSnapshotAllocator()->transfer_stream());
                   fork_transfer->Enqueue(
                       device,
                       static_cast<const std::uint8_t*>(region.device) + skip,
@@ -3270,7 +3437,8 @@ bool Executor::RestoreSnapshot(Session& session,
                       return false;
                     if (!fork_transfer)
                       fork_transfer =
-                          std::make_unique<gufo::hip::SnapshotTransfer>();
+                          std::make_unique<gufo::hip::SnapshotTransfer>(
+                              GetSnapshotAllocator()->transfer_stream());
                     fork_transfer->Enqueue(
                         static_cast<std::uint8_t*>(device) + begin - skip,
                         saved.chunk->device + begin - saved.offset, end - begin,
@@ -3289,6 +3457,21 @@ bool Executor::RestoreSnapshot(Session& session,
               source = deferred->mutable_device_ + offset -
                        deferred->mutable_offset_;
               kind = hipMemcpyDeviceToDevice;
+            } else if (deferred && deferred->extra_storage_ && row_bytes == 0) {
+              // The destination may split a ring region differently from the
+              // source, so copy every overlapping frozen piece.
+              auto* target = static_cast<std::uint8_t*>(device);
+              for (const auto& extra : deferred->extras_) {
+                const auto begin = std::max(offset, extra.offset);
+                const auto end =
+                    std::min(offset + bytes, extra.offset + extra.bytes);
+                if (begin < end &&
+                    !upload(target + (begin - offset),
+                            extra.device + (begin - extra.offset), end - begin,
+                            what, hipMemcpyDeviceToDevice))
+                  return false;
+              }
+              return true;
             }
             return upload(device, source, bytes, what, kind);
           }) == 0) {
