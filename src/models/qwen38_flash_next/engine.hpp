@@ -262,7 +262,7 @@ private:
 /// memory and persist to disk.
 class SessionSnapshot final {
 public:
-  ~SessionSnapshot() = default;
+  ~SessionSnapshot();
   SessionSnapshot(const SessionSnapshot&) = delete;
   SessionSnapshot& operator=(const SessionSnapshot&) = delete;
   SessionSnapshot(SessionSnapshot&&) = delete;
@@ -279,6 +279,7 @@ private:
 
   std::unique_ptr<std::uint8_t[]> data_;
   std::uint64_t size_{0};
+  std::uint64_t capacity_{0};
 
   friend class Session;
 };

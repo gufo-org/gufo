@@ -9,9 +9,12 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
@@ -19,6 +22,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/snapshot_buffer_pool.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
 namespace gufo::models::qwen38_flash_next {
@@ -446,8 +450,15 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
   return true;
 }
 
-SessionSnapshot::SessionSnapshot(std::uint64_t size)
-    : data_(new std::uint8_t[size]), size_(size) {
+SessionSnapshot::SessionSnapshot(std::uint64_t size) : size_(size) {
+  auto acquired = SnapshotBuffers().Acquire(size);
+  data_ = std::move(acquired.data);
+  capacity_ = acquired.capacity;
+  if (acquired.populated) {
+    // A recycled buffer is faulted in and already huge-page advised; the
+    // capture overwrites every byte.
+    return;
+  }
   // Populate before asking for huge pages: first-touching an advised buffer
   // can synchronously compact fragmented UMA memory for seconds. Background
   // collapse may still promote the populated pages. Restrict both hints to
@@ -481,6 +492,12 @@ SessionSnapshot::SessionSnapshot(std::uint64_t size)
         (void)madvise(data_.get() + skip, length, MADV_HUGEPAGE);
       }
     }
+  }
+}
+
+SessionSnapshot::~SessionSnapshot() {
+  if (data_) {
+    SnapshotBuffers().Release(std::move(data_), capacity_);
   }
 }
 
