@@ -1,0 +1,2 @@
+debian/gufo.env etc/gufo/
+debian/rocm.conf etc/ld.so.conf.d/

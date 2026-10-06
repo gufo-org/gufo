@@ -43,6 +43,7 @@
 build/
 Build/
 build-*/
+obj-*/
 
 # CMake generated files
 CMakeFiles/
@@ -120,3 +121,12 @@ tests/quality/compsec.json
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# debhelper build artifacts
+debian/.debhelper/
+debian/*.debhelper
+debian/*.substvars
+debian/files
+debian/debhelper-build-stamp
+debian/gufo/
+debian/gufo-rocm-repo/

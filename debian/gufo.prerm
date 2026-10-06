@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+# dh_installsystemd is invoked with --no-start, which also suppresses the
+# stop-on-removal snippet. The service is started manually by the admin
+# after configuring /etc/gufo/gufo.env, so stop it here: a remove/purge
+# must not leave the process running with a deleted unit file.
+#
+# A same-version reinstall arrives here as "remove" as well, so the unit is
+# stopped before the new binary is unpacked and nothing would start it again:
+# the host would be left with no server at all. Record that it was running (in
+# /run, which is per-boot) so postinst can bring it back. A first install never
+# reaches prerm, so an unconfigured host still stays stopped by design.
+if { [ "$1" = "remove" ] || [ "$1" = "upgrade" ]; } && [ -d /run/systemd/system ]; then
+  if command -v systemctl > /dev/null 2>&1 &&
+     systemctl is-active --quiet gufo.service 2>/dev/null; then
+    : > /run/gufo.service.was-active
+  fi
+fi
+
+if [ "$1" = "remove" ] && [ -d /run/systemd/system ]; then
+  if command -v deb-systemd-invoke > /dev/null 2>&1; then
+    deb-systemd-invoke stop gufo.service > /dev/null 2>&1 || true
+  fi
+fi
+
+#DEBHELPER#
+
+exit 0
