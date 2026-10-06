@@ -255,6 +255,8 @@ def binary_kernels(path: str, bundler: str | None) -> dict[str, dict]:
                     "vgpr_spill": int(k.get(".vgpr_spill_count", 0)),
                     "sgpr_spill": int(k.get(".sgpr_spill_count", 0)),
                 }
+    if not kernels:
+        raise SystemExit(f"{path}: no AMDGPU kernels found")
     return kernels
 
 
