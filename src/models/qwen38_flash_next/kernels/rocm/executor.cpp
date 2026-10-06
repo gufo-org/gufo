@@ -192,7 +192,7 @@ public:
     CheckStatus(hipGetDevice(&properties.location.id), "snapshot pool device");
     device_ = properties.location.id;
     CheckStatus(hipMemPoolCreate(&pool_, &properties), "snapshot pool");
-    for (hipStream_t* stream : {&stream_, &refill_stream_, &transfer_stream_}) {
+    for (hipStream_t* stream : {&stream_, &refill_stream_}) {
       const auto created =
           hipStreamCreateWithFlags(stream, hipStreamNonBlocking);
       if (created != hipSuccess) {
@@ -247,9 +247,26 @@ public:
   [[nodiscard]] static std::uint64_t SpareBytes(std::uint64_t block) {
     return kSpareBlocks * block;
   }
-  /// One nonblocking stream for every snapshot copy of this executor.
-  [[nodiscard]] hipStream_t transfer_stream() const noexcept {
-    return transfer_stream_;
+  /// A transfer on a stream of its own, reused across transfers: creating a
+  /// stream can stall for milliseconds, and a shared stream would make a
+  /// capture wait for a peer's bulk materialization.
+  [[nodiscard]] std::unique_ptr<gufo::hip::SnapshotTransfer> Transfer() {
+    hipStream_t stream = nullptr;
+    {
+      std::lock_guard lock(streams_mutex_);
+      if (!free_streams_.empty()) {
+        stream = free_streams_.back();
+        free_streams_.pop_back();
+      }
+    }
+    if (stream == nullptr)
+      CheckStatus(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking),
+                  "snapshot transfer stream");
+    return std::make_unique<gufo::hip::SnapshotTransfer>(
+        stream, [owner = shared_from_this()](hipStream_t done) {
+          std::lock_guard lock(owner->streams_mutex_);
+          owner->free_streams_.push_back(done);
+        });
   }
 
 private:
@@ -259,12 +276,14 @@ private:
                                hipGetErrorString(error));
   }
   void DestroyStreams() noexcept {
-    for (hipStream_t stream : {stream_, refill_stream_, transfer_stream_}) {
+    for (hipStream_t stream : {stream_, refill_stream_}) {
       if (stream != nullptr) {
         (void)hipStreamSynchronize(stream);
         (void)hipStreamDestroy(stream);
       }
     }
+    for (hipStream_t stream : free_streams_)
+      (void)hipStreamDestroy(stream);
   }
   void* Commit(std::uint64_t bytes, hipStream_t stream) {
     void* data = nullptr;
@@ -343,7 +362,8 @@ private:
   int device_{0};
   hipStream_t stream_{nullptr};
   hipStream_t refill_stream_{nullptr};
-  hipStream_t transfer_stream_{nullptr};
+  std::mutex streams_mutex_;
+  std::vector<hipStream_t> free_streams_;
   hipMemPool_t pool_{nullptr};
 };
 
@@ -430,8 +450,7 @@ void SnapshotState::Preserve(std::uint32_t position, std::uint32_t mtp_position,
     const auto keep = std::uint64_t{rows} * region.row_bytes;
     if (keep < region.pending_bytes) {
       if (!transfer)
-        transfer = std::make_unique<gufo::hip::SnapshotTransfer>(
-            registry_->allocator->transfer_stream());
+        transfer = registry_->allocator->Transfer();
       transfer->Copy(region.host + keep,
                      static_cast<const std::uint8_t*>(region.device) + keep,
                      region.pending_bytes - keep);
@@ -446,24 +465,24 @@ void SnapshotState::Materialize() const {
   std::lock_guard lock(registry_->mutex);
   if (registry_->failure)
     std::rethrow_exception(registry_->failure);
-  gufo::hip::SnapshotTransfer transfer(registry_->allocator->transfer_stream());
+  const auto transfer = registry_->allocator->Transfer();
   for (const auto& region : regions_) {
     PopulateSnapshotPrefix(region.host, region.bytes);
     for (const auto& saved : region.saved)
-      transfer.Enqueue(region.host + saved.offset, saved.chunk->device,
-                       saved.bytes);
+      transfer->Enqueue(region.host + saved.offset, saved.chunk->device,
+                        saved.bytes);
   }
-  transfer.Finish();
+  transfer->Finish();
   Preserve(0, 0, 0, 0, false);
   if (mutable_storage_) {
     PopulateSnapshotPrefix(payload_ + mutable_offset_, mutable_bytes_);
-    transfer.Copy(payload_ + mutable_offset_, mutable_device_, mutable_bytes_);
+    transfer->Copy(payload_ + mutable_offset_, mutable_device_, mutable_bytes_);
     mutable_storage_.reset();
   }
   if (extra_storage_) {
     for (const auto& extra : extras_)
-      transfer.Enqueue(payload_ + extra.offset, extra.device, extra.bytes);
-    transfer.Finish();
+      transfer->Enqueue(payload_ + extra.offset, extra.device, extra.bytes);
+    transfer->Finish();
     extras_.clear();
     extra_storage_.reset();
   }
@@ -618,8 +637,7 @@ void SnapshotRegistry::Preserve(std::uint32_t position,
       chunk->device =
           static_cast<std::uint8_t*>(chunk->block->storage.get()) + used;
       if (!transfer)
-        transfer = std::make_unique<gufo::hip::SnapshotTransfer>(
-            allocator->transfer_stream());
+        transfer = allocator->Transfer();
       transfer->Enqueue(chunk->device,
                         static_cast<const std::uint8_t*>(copy.device) + begin,
                         bytes, hipMemcpyDeviceToDevice);
@@ -3060,8 +3078,7 @@ bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
     return false;
   }
   std::shared_ptr<SnapshotState> pending;
-  gufo::hip::SnapshotTransfer transfer(
-      GetSnapshotAllocator()->transfer_stream());
+  const auto transfer = GetSnapshotAllocator()->Transfer();
   if (deferred) {
     if (!storage) {
       AssignError(error_msg, "borrowed snapshot needs owned payload storage");
@@ -3153,13 +3170,13 @@ bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
                 extra_used += bytes;
               }
               if (pending)
-                transfer.Enqueue(destination, device, bytes, kind);
+                transfer->Enqueue(destination, device, bytes, kind);
               else
-                transfer.Copy(destination, device, bytes);
+                transfer->Copy(destination, device, bytes);
             }
             return true;
           }) != 0;
-  transfer.Finish();
+  transfer->Finish();
   if (saved && pending) {
     std::lock_guard lock(session.snapshots_->mutex);
     std::erase_if(session.snapshots_->pending,
@@ -3363,8 +3380,7 @@ bool Executor::RestoreSnapshot(Session& session,
       return false;
     if (deferred) {
       if (!fork_transfer)
-        fork_transfer = std::make_unique<gufo::hip::SnapshotTransfer>(
-            GetSnapshotAllocator()->transfer_stream());
+        fork_transfer = GetSnapshotAllocator()->Transfer();
       fork_transfer->Enqueue(device, source, bytes, kind);
       return true;
     }
@@ -3406,9 +3422,7 @@ bool Executor::RestoreSnapshot(Session& session,
                   if (!session.CheckCancellation(error_msg))
                     return false;
                   if (!fork_transfer)
-                    fork_transfer =
-                        std::make_unique<gufo::hip::SnapshotTransfer>(
-                            GetSnapshotAllocator()->transfer_stream());
+                    fork_transfer = GetSnapshotAllocator()->Transfer();
                   fork_transfer->Enqueue(
                       device,
                       static_cast<const std::uint8_t*>(region.device) + skip,
@@ -3436,9 +3450,7 @@ bool Executor::RestoreSnapshot(Session& session,
                     if (!session.CheckCancellation(error_msg))
                       return false;
                     if (!fork_transfer)
-                      fork_transfer =
-                          std::make_unique<gufo::hip::SnapshotTransfer>(
-                              GetSnapshotAllocator()->transfer_stream());
+                      fork_transfer = GetSnapshotAllocator()->Transfer();
                     fork_transfer->Enqueue(
                         static_cast<std::uint8_t*>(device) + begin - skip,
                         saved.chunk->device + begin - saved.offset, end - begin,

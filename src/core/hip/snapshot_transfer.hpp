@@ -4,7 +4,9 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <functional>
 #include <stdexcept>
+#include <utility>
 
 namespace gufo::hip {
 
@@ -16,14 +18,16 @@ public:
   SnapshotTransfer() {
     Check(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
   }
-  /// Borrows a caller-owned nonblocking stream. Finish then also waits for
-  /// copies other users queued on it.
-  explicit SnapshotTransfer(hipStream_t stream)
-      : stream_(stream), owned_(false) {}
+  /// Borrows a nonblocking stream from a caller's pool and hands it to
+  /// `release` once every copy has finished.
+  SnapshotTransfer(hipStream_t stream, std::function<void(hipStream_t)> release)
+      : stream_(stream), owned_(false), release_(std::move(release)) {}
   ~SnapshotTransfer() {
     (void)hipStreamSynchronize(stream_);
     if (owned_)
       (void)hipStreamDestroy(stream_);
+    else if (release_)
+      release_(stream_);
   }
   SnapshotTransfer(const SnapshotTransfer&) = delete;
   SnapshotTransfer& operator=(const SnapshotTransfer&) = delete;
@@ -57,6 +61,7 @@ private:
   }
   hipStream_t stream_{nullptr};
   bool owned_{true};
+  std::function<void(hipStream_t)> release_;
 };
 
 }  // namespace gufo::hip
