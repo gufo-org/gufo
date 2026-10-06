@@ -1621,10 +1621,14 @@ struct TextGenerationScheduler::Impl {
         if (request->runner_request.SnapshotPending()) {
           capturing.push_back(std::move(request));
         } else if (!CompleteIfStopped(request)) {
-          if (request->runner_request.prefill_complete())
+          if (request->runner_request.prefill_complete()) {
+            // Its capture already waited through peer prefill. Resume it
+            // before another bounded chunk, as for any due decoder.
+            request->decode_due = true;
             decoding.push_back(std::move(request));
-          else
+          } else {
             prefilling.push_back(std::move(request));
+          }
         }
       }
       Admit(prefilling, decoding, capturing, waiting, stop_token);
