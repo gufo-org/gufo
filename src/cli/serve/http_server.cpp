@@ -484,6 +484,7 @@ bool ReadTextMessages(const json::Value* input,
   core::ImageReadBudget image_budget;
   if (input == nullptr || !input->is_array() || input->empty())
     return false;
+  std::vector<tokenization::ChatMessage> system_messages;
   for (const auto& item : input->items()) {
     if (responses && (item.member_str("type") == "function_call" ||
                       item.member_str("type") == "function_call_output")) {
@@ -550,6 +551,13 @@ bool ReadTextMessages(const json::Value* input,
                        ? &message.thought
                        : nullptr))
       return false;
+    // Responses hoists these messages after parsing. Keep them out of the
+    // adjacency checks so they cannot split a replayed assistant turn.
+    if (responses && (message.role == tokenization::ChatRole::kSystem ||
+                      message.role == tokenization::ChatRole::kDeveloper)) {
+      system_messages.push_back(std::move(message));
+      continue;
+    }
     if (responses && message.role == tokenization::ChatRole::kAssistant &&
         !messages->empty() &&
         messages->back().role == tokenization::ChatRole::kAssistant &&
@@ -559,6 +567,8 @@ bool ReadTextMessages(const json::Value* input,
       messages->push_back(std::move(message));
     }
   }
+  for (auto& message : system_messages)
+    messages->push_back(std::move(message));
   return true;
 }
 

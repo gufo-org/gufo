@@ -1032,6 +1032,50 @@ void TestCompatibilityRequests() {
          hoist_messages[3].content == "noted" &&
          hoist_messages[4].content == "second");
 
+  // Hoisting must preserve the existing reasoning/function-call grouping:
+  // placing the same developer item first or between those replay items must
+  // deliver the same single assistant turn to the backend.
+  const auto replay_items = gufo::json::parse(R"([
+      {"role":"user","content":"Check state."},
+      {"type":"reasoning","summary":[
+        {"type":"summary_text","text":"I will inspect."}]},
+      {"type":"function_call","call_id":"call_1","name":"lookup",
+       "arguments":"{\"key\":\"state\"}"},
+      {"type":"function_call_output","call_id":"call_1","output":"OK"}])");
+  const auto developer =
+      gufo::json::parse(R"({"role":"developer","content":"Follow policy."})");
+  for (const std::size_t position : {0U, 2U}) {
+    auto input = gufo::json::Value::array();
+    for (std::size_t i = 0; i <= replay_items.size(); ++i) {
+      if (i == position)
+        input.push_back(developer);
+      if (i < replay_items.size())
+        input.push_back(replay_items.items()[i]);
+    }
+    auto body = gufo::json::Value::object();
+    body["input"] = std::move(input);
+    const auto replay =
+        response_body(server.Post("/v1/responses", body.dump()));
+    assert(replay.member_str("status") == "completed");
+    const auto grouped = server.backend->LastCall().chat.messages;
+    assert(grouped.size() == 4 &&
+           "Hoisting developer items must preserve Responses replay grouping");
+    assert(grouped[0].role == gufo::tokenization::ChatRole::kDeveloper &&
+           grouped[0].content == "Follow policy." &&
+           grouped[1].role == gufo::tokenization::ChatRole::kUser &&
+           grouped[1].content == "Check state." &&
+           grouped[2].role == gufo::tokenization::ChatRole::kAssistant &&
+           grouped[2].content.empty() &&
+           grouped[2].thought == "I will inspect." &&
+           grouped[2].tool_calls.size() == 1 &&
+           grouped[3].role == gufo::tokenization::ChatRole::kTool &&
+           grouped[3].tool_call_id == "call_1" && grouped[3].content == "OK");
+    const auto& call = grouped[2].tool_calls[0];
+    assert(call.id == "call_1" && call.name == "lookup" &&
+           call.arguments.size() == 1 && call.arguments[0].name == "key" &&
+           call.arguments[0].value == "state" && call.arguments[0].is_string);
+  }
+
   // The Responses API carries request-only fields with no native effect here
   // (hosted tool types, include, reasoning.summary, text.verbosity). Accept
   // them and keep every executable function tool, flattening the client-side
