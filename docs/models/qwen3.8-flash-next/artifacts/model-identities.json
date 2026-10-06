@@ -44,5 +44,18 @@
       "build": "nix build, production gfx1151 binary"
     },
     "qualification": "attention-tiles-review.json"
+  },
+  "benchmarks-2026-10-06": {
+    "scope": "Gufo single-user AR and MTP mixed/repetitive HTTP pp2048/tg128 at 0, 4096, 8192, 12288, 16384, 32768, 65536 and 131072 cached tokens.",
+    "gufo": {
+      "revision": "4c5a00d2d609846cb73e79aa33de324624aa9c2c",
+      "binarySourceRevision": "eecb008a909ca299c13d1ef773765c7e2e24d395",
+      "binarySha256": "2ebf7a2cf22eae84b0c78bf87bc39adda3336fc59f9ecb4e3f1b7c06227571d4",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+      "build": "Existing Nix release binary, built from 5a0a0ed plus the subsequently committed final-prefill patch. Production sources match eecb008a and 4c5a00d2."
+    },
+    "measurement": "One warmed valid sample per point, no repetitions. All 24 requests generated 128 tokens and passed the documented cache/prefill count tolerances. Token-count calibration attempts are retained in raw logs and excluded from the tables.",
+    "quality": "The d0 mixed MTP completion matches the fresh AR sweep; repetitive d0 matches the retained fresh AR control. Full-vocabulary pruning and sampled snapshot replay are qualified separately in prefill-final-rows.json, including mixed text, images and 128K. Deep HTTP AR/MTP frontiers differ by one token, so their free-running completion hashes are not an exact-parity test.",
+    "retained": "Reference, concurrency, loading and memory results retain their September 22-23 measurements."
   }
 }

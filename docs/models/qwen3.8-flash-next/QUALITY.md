@@ -1,10 +1,10 @@
 # Qwen3.8 Flash-Next quality
 
-**All 63 measured tg128 requests match fresh AR completions:** 21 AR,
-21 mixed MTP and 21 repetitive MTP at C1/2/4/6/8. Unsloth UD-Q4_K_XL target,
+**Retained concurrency qualification: 63 tg128 requests match fresh AR completions:**
+21 AR, 21 mixed MTP and 21 repetitive MTP at C1/2/4/6/8. Unsloth UD-Q4_K_XL target,
 shared Q8_0 MTP; [identities](artifacts/model-identities.json).
 These are consistency checks, not original unquantized-model or GGUF-conversion
-qualification. HTTP measurements: September 20–23, 2026; attention review:
+qualification. Concurrency checks: September 20–23, 2026; attention review:
 September 27–28.
 
 | Check | Result |
@@ -69,13 +69,14 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-Gufo single-user TG refreshed September 27, 2026 (`f797b5b`); PP and other
-measurements retain September 22–23 provenance. One warmed sample per point,
-greedy, thinking off.
+Gufo single-user pp/tg refreshed October 6, 2026 (`4c5a00d2`); reference,
+concurrency, loading and memory measurements retain September 22–23 provenance.
+One warmed sample per point, greedy, thinking off, penalties disabled.
 Single-user uses pp2048/tg128; MTP pp is the maximum across mixed/repetitive
-workloads. C1/2/4/6/8 use the same d0 prompts; every session prefills before
-measured tg128, with at most four prompt-tail tokens reevaluated. Rates sum
-individual decode rates. Gufo d0/C1 agree within 0.4% with matching drafts/output.
+workloads. Gufo capacity is 133760; reference capacity is 35456 through 32K,
+68224 at 64K and 133760 at 128K. C1/2/4/6/8 use the same d0 prompts; every
+session prefills before measured tg128, with at most four prompt-tail tokens
+reevaluated. Rates sum individual decode rates.
 Depth calibration depends on the ordered sweep. Paired speed controls use
 the same depth list. Deep AR/MTP HTTP cache frontiers differ by one token;
 exact replay is checked separately with identical prefill boundaries.
