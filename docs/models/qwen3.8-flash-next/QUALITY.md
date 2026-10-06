@@ -9,6 +9,7 @@ September 27–28.
 
 | Check | Result |
 | --- | --- |
+| Unused final-layer outputs | Full-vocabulary AR/MTP target logits are byte-identical at 4K and 133,120 tokens. Mixed batching and sampled RAM/serialized snapshot replay preserve logits and RNG state. [Evidence](artifacts/prefill-final-rows.json). |
 | Bounded selector scratch | After 133,824 prompt tokens, 15,892,480 logits are byte-identical to the previous build. Ragged chunks retain exact masks and the independent FP64 score check. [Evidence](artifacts/prefill-deep-context.json). |
 | Unused normalization removal | 15,892,480 logits are byte-identical to main; ragged residual-only fusion matches normalized fusion and the separate epilogue/combine. [Evidence](artifacts/prefill-normalization.json). |
 | MTP versus scalar CPU formulas, eight text/image states | Fusion/attention relative RMS <0.0008 (limit 0.002); full-width normalization, split projections, recursive carry and full Q8 head checked |
@@ -47,8 +48,12 @@ embedding bytes but do not resolve this gap. [Evidence](artifacts/vision-parity.
 
 Tests live in [`tests/models/qwen38_flash_next`](../../../tests/models/qwen38_flash_next).
 Use `--batch-only`, `--sampling-only`, `--prefill-only` or `--cache-only` on the
-session test;
-the snapshot test covers persistent image/text state. For independent MTP checks:
+session test; the snapshot test covers persistent image/text state.
+
+`--execution-only 133120` runs the focused deep AR/MTP logit and snapshot-replay
+check without the other session suites.
+
+For independent MTP checks:
 
 ```sh
 nix develop -c cmake --build --preset gpu-test \

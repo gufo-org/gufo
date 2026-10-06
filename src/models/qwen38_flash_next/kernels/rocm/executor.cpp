@@ -2106,11 +2106,12 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // Wide batches run the fused WMMA kernel (never inside a graph: the kv
   // extent is a host value), output gate included, skipping the key tiles
   // no query of a block selected; the per-token kernel covers the rest.
-  if (last_only && !Check(hipMemsetAsync(s_.ctx, 0,
-                                         static_cast<std::size_t>(n_tokens) *
-                                             c.AttentionQDim() * sizeof(float),
-                                         stream_),
-                          "draft attention output initialization", error_msg)) {
+  if (last_only &&
+      !Check(hipMemsetAsync(s_.ctx, 0,
+                            static_cast<std::size_t>(n_tokens) *
+                                c.AttentionQDim() * sizeof(float),
+                            stream_),
+             "partial attention output initialization", error_msg)) {
     return false;
   }
   if (checkpoint_tokens != 0 && checkpoint_tokens < n_tokens) {
@@ -2622,6 +2623,11 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     if (!HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject, n, error_msg)) {
       return false;
     }
+    // The last target layer's query outputs have no later cache consumer.
+    // Preserve all K/V/indexer rows and the final query's original tile.
+    const bool last_attention = prefill_phase && !session.mtp_enabled_ &&
+                                il + 1 == c.num_layers && n >= 1024 &&
+                                n_logits == 1 && checkpoint == nullptr;
     if (l.linear) {
       const auto capture =
           checkpoint ? GdnCheckpoint{checkpoint->state->linear_[il].state,
@@ -2635,26 +2641,50 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     } else if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
                           &session.control_->position,
                           &session.control_->blocks, start_pos, pool_grid,
-                          session.max_context_, sparse, error_msg, false, false,
-                          true, checkpoint ? checkpoint->tokens : 0)) {
+                          session.max_context_, sparse, error_msg,
+                          last_attention, false, true,
+                          checkpoint ? checkpoint->tokens : 0)) {
       return false;
     }
 
-    // Each combine also norms the residual for the mixer that follows it,
-    // unless PLE rewrites the residual first.
-    Combine(s_.res, l.hc_ffn.norm.f32(), n);
-    if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, n, error_msg) ||
-        !Moe(l, s_.mixed, s_.block_out, n, error_msg)) {
-      return false;
-    }
     const float* next_norm =
         il + 1 < c.num_layers
             ? (c.IsPleLayer(il + 1) ? nullptr
                                     : layers[il + 1].hc_attn.norm.f32())
             : nullptr;
-    // The output head normalizes only its requested rows. The MTP predictor
-    // consumes the residual itself, so neither needs a whole-batch head norm.
-    Combine(s_.res, next_norm, n);
+    // Cache updates precede the FFN. Without MTP, only requested head rows
+    // and the checkpoint frontier consume the final layer's residual.
+    // Keep aligned tiles and at least 96 rows to retain the wide arithmetic.
+    const auto needed =
+        std::max({96U, n_logits, checkpoint ? n - checkpoint->tokens + 1 : 0U});
+    const auto skipped = prefill_phase && !session.mtp_enabled_ &&
+                                 il + 1 == c.num_layers && n > needed
+                             ? (n - needed) / 128 * 128
+                             : 0U;
+    const auto finish = [&](std::uint32_t rows) {
+      Combine(s_.res, l.hc_ffn.norm.f32(), rows);
+      if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows,
+                 error_msg) ||
+          !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
+        return false;
+      Combine(s_.res, next_norm, rows);
+      return true;
+    };
+    if (skipped != 0) {
+      struct RestoreScratch {
+        const Executor* executor;
+        Scratch scratch;
+        ~RestoreScratch() { executor->UseScratch(scratch); }
+      } restore{this, s_};
+      auto tail = RowScratch(s_, skipped);
+      tail.inject =
+          s_.inject + std::size_t{skipped} * c.hc_count * inject_parts_;
+      UseScratch(tail);
+      if (!finish(n - skipped))
+        return false;
+    } else if (!finish(n)) {
+      return false;
+    }
     normed = next_norm != nullptr;
   }
   if (end_layer < c.num_layers) {

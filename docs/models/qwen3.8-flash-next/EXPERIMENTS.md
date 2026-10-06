@@ -2,6 +2,8 @@
 
 | Experiment | Decision / evidence |
 | --- | --- |
+| Final-layer AR prefill pruning | Retained: pp2048 reaches 1501.84 tok/s at 128K (+1.8%) and 1713.11 at d0 (+1.2%) in matched single-run controls. Only unused output rows are skipped; target logits and cache replay remain exact. MTP needs the full hidden sequence. [Evidence](artifacts/prefill-final-rows.json). |
+| Further 128K selector/attention tuning | Rejected: FP32 key staging, lane/register scheduling, histogram aggregation and attention LDS/row tiling retained exact outputs but did not improve complete operations. [Profile](artifacts/prefill-final-rows.json). |
 | Bounded selector score scratch | Retained: exact deep-context logits; pp2048 gains about 1.4% AR / 1.2% MTP at 128K in single-run controls, with no measured shallow-context regression. Shared scratch falls from 128 to 20 MiB. [Evidence](artifacts/prefill-deep-context.json). |
 | Deep attention packing and skipped work | Rejected: shared selection lists and skipping masked matrix rows were slower; rescaling and fragment prefetch gave no compelling model-level gain. [Experiments](artifacts/prefill-deep-context.json). |
 | Skip unused final HC normalization | Retained: residuals and 64 full-vocabulary logit rows are exact. PP is within 0.3% of main at d0/d32K, AR and MTP; no significant speedup demonstrated. [Controls](artifacts/prefill-normalization.json). |

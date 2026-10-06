@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <future>
@@ -668,15 +669,22 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
   std::cout << "batch independent_state_exact=1\n" << std::flush;
 }
 
-void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model) {
+void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
+                         std::uint32_t prompt_tokens = 4096) {
   using gufo::core::SessionMode;
   std::string error;
-  auto ar = model->CreateSession(SessionMode::kAutoregressive, 128, &error);
-  auto mtp = model->CreateSession(SessionMode::kSpeculative, 128, &error);
+  auto ar = model->CreateSession(SessionMode::kAutoregressive,
+                                 prompt_tokens + 16, &error);
+  auto mtp = model->CreateSession(SessionMode::kSpeculative, prompt_tokens + 16,
+                                  &error);
   Require(ar && mtp, error);
   Require(ar->AllocatedBytes() < mtp->AllocatedBytes(),
           "AR allocated predictor state");
-  const auto prompt = model->Tokenize("Continue: red, blue, red, blue,");
+  const auto pattern = model->Tokenize("Continue: red, blue, red, blue,");
+  Require(!pattern.empty(), "empty execution-mode fixture");
+  std::vector<std::int32_t> prompt(prompt_tokens);
+  for (std::size_t i = 0; i < prompt.size(); ++i)
+    prompt[i] = pattern[i % pattern.size()];
   Require(ar->Sync(prompt, &error) && mtp->Sync(prompt, &error), error);
   RequireExact(ar->Logits(), mtp->Logits(),
                "execution mode changes target prefill logits");
@@ -693,16 +701,38 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model) {
   Require(qfn::Session::EvaluateBatch(mixed, &error), error);
   RequireExact(ar->Logits(), mtp->Logits(),
                "mixed execution modes contaminate target logits");
-  sampling::SamplerState sampler;
+  const sampling::SamplingConfig config{
+      .temperature = 0.8F, .top_k = 20, .top_p = 0.95F, .seed = 73};
+  sampling::SamplerState sampler(config);
   qfn::Session::DecodeResult step;
   Require(ar->DecodeStep(8, sampler, &step, &error, false), error);
   Require(step.tokens.size() == 1 && ar->Statistics().drafted == 0,
           "AR session with a resident sidecar executed speculative decoding");
+  const std::vector<float> expected(ar->Logits().begin(), ar->Logits().end());
+  for (bool serialized : {false, true}) {
+    if (serialized) {
+      std::vector<std::uint8_t> bytes(ar_snapshot->SizeBytes());
+      Require(ar_snapshot->CopyTo(bytes), "serialize AR frontier");
+      Require(ar->RestoreSnapshot(bytes, &error), error);
+    } else {
+      Require(ar->RestoreSnapshot(*ar_snapshot, &error), error);
+    }
+    Require(ar->Evaluate(anchor, &error), error);
+    sampling::SamplerState replay(config);
+    qfn::Session::DecodeResult resumed;
+    Require(ar->DecodeStep(8, replay, &resumed, &error, false), error);
+    Require(resumed.tokens == step.tokens &&
+                replay.rng_state() == sampler.rng_state(),
+            "AR frontier changed sampled replay");
+    RequireExact(expected, ar->Logits(),
+                 "AR frontier changed resumed target logits");
+  }
   Require(!mtp->RestoreSnapshot(*ar_snapshot, &error) &&
               !ar->RestoreSnapshot(*mtp_snapshot, &error),
           "snapshots crossed execution modes");
-  std::cout << "execution_modes=independent AR_predictor_bytes=0 "
-               "mixed_batch_exact=1\n"
+  std::cout << "execution_tokens=" << prompt_tokens
+            << " execution_modes=independent AR_predictor_bytes=0 "
+               "mixed_batch_exact=1 RAM_serialized_sampled_replay=1\n"
             << std::flush;
 }
 
@@ -939,6 +969,9 @@ void CheckServingSampling(const std::shared_ptr<qfn::Model>& model) {
 }
 
 int main(int argc, char** argv) {
+  const bool execution_only =
+      argc == 7 && std::string_view(argv[5]) == "--execution-only";
+  std::uint32_t execution_tokens = 4096;
   const bool batch_only =
       argc == 6 && std::string_view(argv[5]) == "--batch-only";
   const bool prefill_only =
@@ -949,21 +982,37 @@ int main(int argc, char** argv) {
       argc == 6 && std::string_view(argv[5]) == "--cache-only";
   const bool eos_only = argc == 6 && std::string_view(argv[5]) == "--eos-only";
   if ((argc != 5 && !batch_only && !prefill_only && !sampling_only &&
-       !cache_only && !eos_only) ||
+       !cache_only && !eos_only && !execution_only) ||
       std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
     std::cerr << "Usage: session_test --model FIRST.gguf --mtp-model MTP.gguf "
                  "[--batch-only | --prefill-only | --sampling-only | "
-                 "--cache-only | --eos-only]\n";
+                 "--cache-only | --eos-only | --execution-only TOKENS]\n";
     return 77;
+  }
+  if (execution_only) {
+    const std::string_view value(argv[6]);
+    const auto [end, ec] = std::from_chars(
+        value.data(), value.data() + value.size(), execution_tokens);
+    if (ec != std::errc{} || end != value.data() + value.size() ||
+        execution_tokens == 0 || execution_tokens > 262128) {
+      std::cerr << "--execution-only requires 1..262128 prompt tokens\n";
+      return 2;
+    }
   }
   try {
     std::string error;
     auto model = qfn::Model::Load(
         argv[2],
-        {.max_context = 6145, .mtp_model_path = argv[4], .max_draft_tokens = 7},
+        {.max_context = execution_only ? execution_tokens + 16 : 6145,
+         .mtp_model_path = argv[4],
+         .max_draft_tokens = 7},
         &error);
     Require(model != nullptr, error);
+    if (execution_only) {
+      CheckExecutionModes(model, execution_tokens);
+      return 0;
+    }
     if (eos_only) {
       CheckServingEos(model);
       return 0;
