@@ -39,7 +39,8 @@ public:
 
   /// Appends `record` as one line. Content strings go through `Text()` so
   /// every line stays valid JSON. A failure drops the record, warns once and
-  /// never reaches the caller.
+  /// never reaches the caller; a partly written record is removed, and a sink
+  /// that cannot remove it is closed.
   static void Write(const json::Value& record);
 
   /// `bytes` with malformed UTF-8 replaced by U+FFFD.

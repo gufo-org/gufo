@@ -488,6 +488,25 @@ std::string ResponseRequestId(const std::string& response) {
   return response.substr(begin, response.find("\r\n", begin) - begin);
 }
 
+// The body of a chunked HTTP/1.1 response, as the client reassembles it.
+std::string ChunkedBody(const std::string& response) {
+  std::size_t cursor = response.find("\r\n\r\n");
+  assert(cursor != std::string::npos);
+  cursor += 4;
+  std::string body;
+  for (;;) {
+    const auto line_end = response.find("\r\n", cursor);
+    assert(line_end != std::string::npos);
+    const auto size =
+        std::stoul(response.substr(cursor, line_end - cursor), nullptr, 16);
+    if (size == 0) {
+      return body;
+    }
+    body += response.substr(line_end + 2, size);
+    cursor = line_end + 2 + size + 2;
+  }
+}
+
 // `--trace` keeps what a text request carried in and out under the id the
 // logs name. Polls, other routes and unauthenticated requests stay out.
 void TestContentTrace() {
@@ -500,9 +519,12 @@ void TestContentTrace() {
   assert(!Trace::Open(path.string()).has_value());
   std::string plain_id;
   std::string stream_id;
+  std::string stream_wire;
   std::string invalid_id;
   {
-    RunningServer server({.api_key = "test-secret"});
+    RunningServer server(
+        {.api_key = "test-secret",
+         .sse_heartbeat_interval = std::chrono::milliseconds(5)});
     server.backend->SetOutput("<tool_call>leak");
     const auto post = [&](std::string_view route, std::string_view body,
                           bool authorized = true) {
@@ -519,11 +541,17 @@ void TestContentTrace() {
     // The id is bound where the backend generates, so the scheduler's record
     // can name it.
     assert(server.backend->LastCall().trace_request == plain_id);
+    // Admission commits the stream before a slow first token, so keepalives
+    // reach the client and must reach the trace too.
+    server.backend->admit = true;
+    server.backend->token_delay = std::chrono::milliseconds(40);
     const auto streamed =
         post("/v1/completions",
              R"({"prompt":"streamed-prompt","max_tokens":8,"stream":true})");
     ExpectStatus(streamed, 200);
     stream_id = ResponseRequestId(streamed);
+    stream_wire = ChunkedBody(streamed);
+    assert(stream_wire.find(": ping\n\n") != std::string::npos);
     assert(server.backend->LastCall().trace_request == stream_id);
     const auto invalid = post("/v1/completions", "{");
     ExpectStatus(invalid, 400);
@@ -581,9 +609,8 @@ void TestContentTrace() {
       std::string::npos);
   const auto& streamed = record("response", stream_id);
   assert(streamed.find("stream")->as_bool());
-  const auto& events = streamed.member_str("body");
-  assert(events.find("<tool_call>leak") != std::string::npos);
-  assert(events.ends_with("data: [DONE]\n\n"));
+  assert(streamed.member_str("body") == stream_wire);
+  assert(stream_wire.find("<tool_call>leak") != std::string::npos);
 
   assert(record("request", invalid_id).member_str("body") == "{");
   assert(record("response", invalid_id).member_size("status") == 400);

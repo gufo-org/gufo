@@ -2099,6 +2099,8 @@ void HttpServer::handle_connection(int client_fd) {
                 connected = chunked ? SendChunk(client_fd, ": ping\n\n")
                                     : SendAll(client_fd, ": ping\n\n");
                 last_write = std::chrono::steady_clock::now();
+                if (traced && connected)
+                  traced_stream.append(": ping\n\n");
               }
             }
           });

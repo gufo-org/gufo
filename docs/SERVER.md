@@ -1102,13 +1102,16 @@ Each request to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
   tool-call parsing.
 - `response`: `status`, `outcome`, whether the reply was a `stream`, and the
   `body` the client received. For a stream this is the event stream as
-  written, so a difference between streaming and non-streaming parsing shows
-  up in the trace.
+  written, `: ping` keepalives included, so a difference between streaming and
+  non-streaming parsing shows up in the trace.
 
 A request that fails before generation, for example with invalid JSON, has
 no `generation` record. Requests refused before routing (malformed HTTP or an
 oversized body), unauthenticated requests and other routes are not traced.
-Malformed UTF-8 is replaced with U+FFFD. To read one request:
+Malformed UTF-8 is replaced with U+FFFD. A record that cannot be written in
+full, for example on a full disk, is cut from the file and the first failure is
+logged as `event=trace_write_failed`; a file that cannot be cut back, such as a
+pipe, stops tracing with `event=trace_disabled`. To read one request:
 
 ```sh
 jq 'select(.request == "r12")' trace.jsonl

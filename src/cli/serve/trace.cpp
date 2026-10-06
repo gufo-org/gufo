@@ -122,13 +122,16 @@ void Trace::Write(const json::Value& record) {
   }
   text += '\n';
   // One locked write per record keeps lines whole when requests finish
-  // concurrently. A failed write drops the rest of the record rather than
-  // stalling a request on a full disk.
+  // concurrently. A failed write drops the record rather than stalling a
+  // request on a full disk.
   const std::lock_guard lock(TraceMutex());
   const int fd = TraceFd();
   if (fd < 0) {
     return;
   }
+  // Every writer holds the lock, so the record starts at the current end. A
+  // pipe or terminal cannot seek, and a torn record there cannot be undone.
+  const off_t start = ::lseek(fd, 0, SEEK_END);
   std::string_view pending = text;
   while (!pending.empty()) {
     const ssize_t written = ::write(fd, pending.data(), pending.size());
@@ -136,7 +139,20 @@ void Trace::Write(const json::Value& record) {
       continue;
     }
     if (written <= 0) {
-      ReportWriteFailure(written < 0 ? std::strerror(errno) : "short write");
+      const std::string reason =
+          written < 0 ? std::strerror(errno) : "short write";
+      // A torn prefix would join the next record into one invalid line, so it
+      // is cut back to the record's start. A sink that cannot be cut back
+      // would corrupt every later record, and is closed instead.
+      if (pending.size() == text.size() ||
+          (start >= 0 && ::ftruncate(fd, start) == 0)) {
+        ReportWriteFailure(reason);
+        return;
+      }
+      ::close(fd);
+      TraceFd() = -1;
+      TraceEnabled().store(false, std::memory_order_release);
+      Logger::Warn("trace", "event=trace_disabled reason=" + reason);
       return;
     }
     pending.remove_prefix(static_cast<std::size_t>(written));
