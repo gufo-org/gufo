@@ -121,11 +121,21 @@ public:
       std::function<void(ContinuationState&, const ContinuationSnapshot&)>;
   using SnapshotCapacity = std::function<std::size_t()>;
   using SnapshotEventSink = std::function<void(const SnapshotEvent&)>;
+  /// Hand-off for a snapshot record whose bytes are about to be released.
+  /// Exact replacements carry no new information and are not reported.
+  using SnapshotEvictSink = std::function<void(
+      std::span<const ContinuationToken> tokens,
+      std::span<const std::uint8_t> input_identity,
+      const std::shared_ptr<const ContinuationSnapshot>& snapshot)>;
 
   struct SnapshotSupport {
     SnapshotRestore restore;
     SnapshotCapacity capacity_bytes;
     SnapshotEventSink on_event;
+    /// Best-effort lower-tier hand-off before a still-valid record's payload
+    /// is dropped. Invoked OUTSIDE the cache mutex, after the record is
+    /// already removed; sinks must not block or throw.
+    SnapshotEvictSink on_evict;
   };
 
   class Lease {

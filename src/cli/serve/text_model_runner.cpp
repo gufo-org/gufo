@@ -436,7 +436,8 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
 }
 
 ContinuationCache::SnapshotSupport MakeSnapshotSupport(
-    ValidatedRunner* validated, TextRunnerRamCacheOptions options) {
+    ValidatedRunner* validated, TextRunnerRamCacheOptions options,
+    ContinuationCache::SnapshotEvictSink evict_sink = {}) {
   if (validated == nullptr || !validated->descriptor.capabilities.snapshot ||
       !validated->descriptor.capabilities.fork) {
     return {};
@@ -472,6 +473,7 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
                             validated->snapshot_max_bytes);
           },
       .on_event = EmitSnapshotEvent,
+      .on_evict = std::move(evict_sink),
   };
 }
 
@@ -582,7 +584,36 @@ struct TextRunnerPool::Impl {
               ReconcileStateBytes(validated.resources, *state);
               return state;
             },
-            MakeSnapshotSupport(&validated, ram_cache_options),
+            // The disk store is created after the RAM cache below, so the
+            // tier-down sink reads it lazily. Byte-pressure evictions only
+            // happen while serving requests, long after construction.
+            MakeSnapshotSupport(
+                &validated, ram_cache_options,
+                [this](std::span<const ContinuationToken> tokens,
+                       std::span<const std::uint8_t> identity,
+                       const std::shared_ptr<const ContinuationSnapshot>&
+                           snapshot) {
+                  if (!disk_store || tokens.empty()) {
+                    return;
+                  }
+                  auto text_snapshot =
+                      std::dynamic_pointer_cast<const TextRunnerSnapshot>(
+                          snapshot);
+                  if (!text_snapshot) {
+                    return;
+                  }
+                  try {
+                    (void)disk_store->SaveAsync(
+                        validated.runner,
+                        std::vector<TextRunnerToken>(tokens.begin(),
+                                                     tokens.end()),
+                        std::move(text_snapshot),
+                        std::vector<std::uint8_t>(identity.begin(),
+                                                   identity.end()));
+                  } catch (...) {
+                    // Best-effort tier-down; RAM admission already finished.
+                  }
+                }),
             TextRunnerRamCacheOptions::kMaxEntries) {
     // Entry and byte limits constrain retention independently of session count.
     if (validated.descriptor.capabilities.snapshot) {

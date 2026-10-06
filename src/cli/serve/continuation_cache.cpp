@@ -51,6 +51,36 @@ void EmitSnapshotEvents(const ContinuationCache::SnapshotEventSink& sink,
   }
 }
 
+/// A record whose bytes are about to be released, kept until after the cache
+/// mutex drops so a lower tier can take the payload over. Exact replacements
+/// carry no new information and are not handed off.
+struct RemovedSnapshotRecord {
+  std::vector<ContinuationToken> tokens;
+  std::vector<std::uint8_t> identity;
+  std::shared_ptr<const ContinuationSnapshot> snapshot;
+  bool tier_down{true};
+};
+
+void TierDownRemovedSnapshots(
+    const ContinuationCache::SnapshotEvictSink& sink,
+    std::span<const RemovedSnapshotRecord> removed) noexcept {
+  if (!sink) {
+    return;
+  }
+  for (const auto& record : removed) {
+    if (!record.tier_down || record.snapshot == nullptr ||
+        record.tokens.empty()) {
+      continue;
+    }
+    try {
+      sink(record.tokens, record.identity, record.snapshot);
+    } catch (...) {
+      // Tiering must never affect admission or execution.
+      continue;
+    }
+  }
+}
+
 }  // namespace
 
 struct ContinuationCache::Entry {
@@ -742,7 +772,7 @@ bool ContinuationCache::ReserveSnapshot(
     std::size_t token_count, bool preserve_source, SnapshotPurpose purpose,
     std::span<const ContinuationToken> replacement_prefix,
     std::span<const std::uint8_t> input_identity) {
-  std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
+  std::vector<RemovedSnapshotRecord> removed_snapshots;
   std::vector<SnapshotEvent> events;
   bool admitted = false;
   const int max_priority = MaxRemovalPriority(purpose);
@@ -844,8 +874,9 @@ bool ContinuationCache::ReserveSnapshot(
         auto& entry = *impl_->entries[target];
         const std::size_t removed_bytes = entry.snapshot_bytes;
         const std::size_t removed_tokens = entry.tokens.size();
-        removed_snapshots.push_back(std::move(entry.snapshot));
-        entry.tokens.clear();
+        removed_snapshots.push_back({std::move(entry.tokens),
+                                     std::move(entry.input_identity),
+                                     std::move(entry.snapshot), true});
         entry.snapshot_bytes = 0;
         entry.valid = false;
         impl_->retained_snapshot_bytes -= removed_bytes;
@@ -864,6 +895,7 @@ bool ContinuationCache::ReserveSnapshot(
       }
     }
   }
+  TierDownRemovedSnapshots(impl_->snapshot_support.on_evict, removed_snapshots);
   removed_snapshots.clear();
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
   return admitted;
@@ -930,7 +962,7 @@ std::size_t ContinuationCache::Commit(
     retained_snapshot = std::move(snapshot);
   }
 
-  std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
+  std::vector<RemovedSnapshotRecord> removed_snapshots;
   std::vector<SnapshotEvent> events;
   std::size_t retained_bytes = 0;
   {
@@ -1055,9 +1087,11 @@ std::size_t ContinuationCache::Commit(
           if (snapshot_entry.snapshot != nullptr) {
             const std::size_t removed_bytes = snapshot_entry.snapshot_bytes;
             const std::size_t removed_tokens = snapshot_entry.tokens.size();
-            removed_snapshots.push_back(std::move(snapshot_entry.snapshot));
+            removed_snapshots.push_back(
+                {std::move(snapshot_entry.tokens),
+                 std::move(snapshot_entry.input_identity),
+                 std::move(snapshot_entry.snapshot), !exact_replacement});
             impl_->retained_snapshot_bytes -= removed_bytes;
-            snapshot_entry.tokens.clear();
             snapshot_entry.snapshot_bytes = 0;
             snapshot_entry.valid = false;
             events.push_back(make_event(
@@ -1107,6 +1141,7 @@ std::size_t ContinuationCache::Commit(
       state_entry.state_last_used = ++impl_->clock;
     }
   }
+  TierDownRemovedSnapshots(impl_->snapshot_support.on_evict, removed_snapshots);
   removed_snapshots.clear();
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
   impl_->condition.notify_all();
