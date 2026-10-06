@@ -1,13 +1,12 @@
 # Prompt checkpoints
 
-Qualification of the Flash-Next prompt-checkpoint path, measured 2026-10-06
-on Strix Halo `gfx1151` against `main` at `e03bb911` (v0.8.0) and the
+Qualification of the Flash-Next prompt-checkpoint path, measured 2026-10-06 on
+Strix Halo `gfx1151` against `main` at `e03bb911` (v0.8.0) and the
 pre-regression `f797b5b` used for the September tables. Same pinned Nix
-toolchain, Unsloth UD-Q4_K_XL target and shared Q8_0 MTP sidecar.
-[Evidence](artifacts/prompt-checkpoints.json). The branch was then rebased
-onto `4ec92f2d`, whose new commits change tool-call syntax, answer whitespace
-and functional reporting only; on that build, hosted checks and MTP
-long-context, cache-edits and cache-concurrency correctness pass again.
+toolchain, Unsloth UD-Q4_K_XL target and shared Q8_0 MTP sidecar. The branch
+was then rebased onto `4ec92f2d`, whose new commits change tool-call syntax,
+answer whitespace and functional reporting only; on that build, hosted checks
+and MTP long-context, cache-edits and cache-concurrency correctness pass again.
 
 **Prefill is 1.3–30.4% faster than current `main` at every measured AR and
 MTP depth and within −2.5% to +5.9% of `f797b5b`.** AR decode is unchanged;
@@ -46,9 +45,9 @@ below; none is averaged away or hidden.
 ## Prefill and decode
 
 HTTP `model-bench`, pp2048/tg128, thinking off, three repetitions per depth.
-Values are medians of the per-request server rates; means and every sample are
-in the evidence file. Rates shift by a few percent with run order and time,
-so each table alternates the binary order and reports it.
+Values are medians of the per-request server rates. Rates shift by a few
+percent with run order and time, so each table alternates the binary order and
+reports it.
 
 Single user, AR, two passes (candidate, main, original; then reversed), six
 samples per binary and depth:
