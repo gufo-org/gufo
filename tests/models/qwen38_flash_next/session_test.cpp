@@ -670,8 +670,10 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
 }
 
 void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
-                         std::uint32_t prompt_tokens = 4096) {
+                         std::uint32_t prompt_tokens = 4096,
+                         bool with_image = false) {
   using gufo::core::SessionMode;
+  namespace vision = gufo::models::qwen::vision;
   std::string error;
   auto ar = model->CreateSession(SessionMode::kAutoregressive,
                                  prompt_tokens + 16, &error);
@@ -680,11 +682,37 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
   Require(ar && mtp, error);
   Require(ar->AllocatedBytes() < mtp->AllocatedBytes(),
           "AR allocated predictor state");
-  const auto pattern = model->Tokenize("Continue: red, blue, red, blue,");
+  const auto pattern = model->Tokenize(
+      "Review this transaction log and identify the failed request.\n"
+      "def retry(items):\n"
+      "    return [item for item in items if item['status'] != 200]\n"
+      "{\"request\":\"tools.read\",\"status\":503,\"retry_after\":2.5}\n"
+      "The train travels 60 km in 45 minutes. Explain the calculation.\n"
+      "Café, e\u0301, 日本語, العربية. Keep Unicode and literal <tags> "
+      "intact.\n");
   Require(!pattern.empty(), "empty execution-mode fixture");
   std::vector<std::int32_t> prompt(prompt_tokens);
   for (std::size_t i = 0; i < prompt.size(); ++i)
     prompt[i] = pattern[i % pattern.size()];
+  if (with_image) {
+    Require(model->VisionEncoder() != nullptr && prompt_tokens >= 4,
+            "image prefill requires its encoder and four image tokens");
+    auto image = std::make_shared<vision::Prompt>();
+    const vision::ImageGrid grid{0, 2, 2};
+    std::fill_n(prompt.begin(), 4, vision::kImageToken);
+    image->tokens.assign(prompt.begin(), prompt.end());
+    image->rope.images.push_back(grid);
+    gufo::core::Image pixels;
+    pixels.width = pixels.height = 64;
+    pixels.pixels.resize(64 * 64 * 3);
+    for (std::size_t i = 0; i < pixels.pixels.size(); ++i)
+      pixels.pixels[i] = static_cast<std::uint8_t>((i * 37 + i / 64) % 256);
+    image->images.push_back({std::move(pixels), grid});
+    image->images.back().prefix_identity.fill(3);
+    image->cache_identity.assign(32, 3);
+    ar->ConfigureVision(image);
+    mtp->ConfigureVision(image);
+  }
   Require(ar->Sync(prompt, &error) && mtp->Sync(prompt, &error), error);
   RequireExact(ar->Logits(), mtp->Logits(),
                "execution mode changes target prefill logits");
@@ -730,7 +758,7 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
   Require(!mtp->RestoreSnapshot(*ar_snapshot, &error) &&
               !ar->RestoreSnapshot(*mtp_snapshot, &error),
           "snapshots crossed execution modes");
-  std::cout << "execution_tokens=" << prompt_tokens
+  std::cout << "execution_tokens=" << prompt_tokens << " image=" << with_image
             << " execution_modes=independent AR_predictor_bytes=0 "
                "mixed_batch_exact=1 RAM_serialized_sampled_replay=1\n"
             << std::flush;
@@ -1030,8 +1058,10 @@ int main(int argc, char** argv) {
       CheckServingSampling(model);
       return 0;
     }
-    if (!batch_only)
+    if (!batch_only) {
+      CheckExecutionModes(model, 2048, true);
       CheckPrefillChunks(model);
+    }
     if (prefill_only)
       return 0;
     if (!batch_only)

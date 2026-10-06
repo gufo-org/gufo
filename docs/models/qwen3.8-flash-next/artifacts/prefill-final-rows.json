@@ -56,7 +56,8 @@
         "top_k": 20,
         "top_p": 0.95,
         "seed": 73
-      }
+      },
+      "fixture": "Repetitive text in the original retained run."
     },
     "ffn_full_logits": {
       "build": "ffn_only",
@@ -76,7 +77,20 @@
       "command": "qwen38_flash_next_snapshot_test --model TARGET --mtp-model MTP",
       "result": "Pass: in-pass checkpoints, warm/overflow boundaries, branches, retention, reset/destruction and serialized round trips. Final attention pruning remains disabled for in-pass checkpoints."
     },
-    "scope": "No new unquantized-teacher or GGUF-conversion qualification. No attention, projection, normalization or sampling arithmetic was changed."
+    "scope": "No new unquantized-teacher or GGUF-conversion qualification. No attention, projection, normalization or sampling arithmetic was changed.",
+    "mixed_text_and_image": {
+      "revision": "eecb008a909ca299c13d1ef773765c7e2e24d395",
+      "command": "qwen38_flash_next_session_test --model TARGET --mtp-model MTP --prefill-only",
+      "test_source_sha256": "0c07a0ac08a27c31dc9fda913a7303b90cd37a379a7d46cb107ea82b0a7d1689",
+      "prompt_tokens": {
+        "mixed_text": 4096,
+        "image_and_mixed_text": 2048
+      },
+      "fixture": "Code, JSON, arithmetic and Unicode text; the image case includes a nonuniform 64x64 RGB image processed by the actual encoder.",
+      "reference": "Full target execution with MTP enabled bypasses AR pruning. Both modes use the same logit-row count.",
+      "result": "Byte-identical full-vocabulary prefill and mixed-batch logits. Sampled token, RNG state and resumed logits match after borrowed and serialized AR snapshot restores.",
+      "scope": "Additional numerical regression coverage; not a new semantic vision benchmark or unquantized upstream comparison."
+    }
   },
   "baseline_profile_128k_ms": {
     "gpu_kernels": 1382.52,
