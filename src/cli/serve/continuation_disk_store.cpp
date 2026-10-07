@@ -460,6 +460,9 @@ struct ContinuationDiskStore::Impl {
     std::size_t file_bytes{0};
     std::size_t payload_bytes{0};
     std::filesystem::file_time_type last_access;
+    // Saved at a learned divergence point. The flag is not persisted, so after
+    // a restart only two retained branches protect the entry.
+    bool shared_prefix{false};
   };
 
   using EntryIterator = std::list<Entry>::iterator;
@@ -562,6 +565,9 @@ struct ContinuationDiskStore::Impl {
       const PrefixNode* node = this;
       std::size_t offset = 0;
       bool ancestor = false;
+      // The candidate's own tokens were inserted, so every edge on its path
+      // matches them; following first tokens keeps the walk proportional to
+      // the path's node count rather than its token count.
       while (offset < tokens.size()) {
         if (node->entry && !(*node->entry)->tokens.empty())
           ancestor = true;
@@ -569,9 +575,7 @@ struct ContinuationDiskStore::Impl {
         if (next == node->children.end())
           return false;
         const auto& child = *next->second;
-        if (child.edge.size() > tokens.size() - offset ||
-            !std::ranges::equal(child.edge, std::span(tokens).subspan(
-                                                offset, child.edge.size())))
+        if (child.edge.size() > tokens.size() - offset)
           return false;
         offset += child.edge.size();
         node = &child;
@@ -1032,7 +1036,9 @@ struct ContinuationDiskStore::Impl {
       bool covered = false;
       // Oversized startup files have no verified tokens and cannot establish
       // lineage. The prefix tree partitions verified entries by full identity.
-      if (!current->tokens.empty()) {
+      // A shared prefix is where a later conversation diverged; it stays a
+      // branch point even while that branch is too short to be persisted.
+      if (!current->tokens.empty() && !current->shared_prefix) {
         const auto root = prefixes.find(PrefixKey(current->persistence));
         if (root != prefixes.end()) {
           const auto compatible_incoming =
@@ -1219,6 +1225,8 @@ struct ContinuationDiskStore::Impl {
         FindExact(digest, *descriptor.persistence, checkpoint_tokens);
     if (existing != entries.end()) {
       TouchEntry(existing);
+      if (shared_prefix)
+        existing->shared_prefix = true;
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kExactReplacement, existing->file_bytes,
            existing->payload_bytes, checkpoint_tokens.size());
@@ -1303,6 +1311,7 @@ struct ContinuationDiskStore::Impl {
         .file_bytes = file_bytes,
         .payload_bytes = payload_bytes,
         .last_access = std::filesystem::file_time_type::clock::now(),
+        .shared_prefix = shared_prefix,
     });
     const EntryIterator added = std::prev(entries.end());
     index.emplace(digest, added);

@@ -912,6 +912,56 @@ void TestRepeatedEvictionReclassifiesAfterBranchRemoval() {
   }
 }
 
+void TestSharedPrefixIsNotCoveredIntermediate() {
+  TemporaryDirectory directory;
+  const auto runner = std::make_shared<FakeRunner>("12345678");
+  const std::vector<TextRunnerToken> paused{9, 9, 9, 9}, anchor{1, 2},
+      shared{1, 2, 3, 4}, extension{1, 2, 3, 4, 5, 6}, incoming{7, 7, 7, 7};
+  auto options = StoreOptions(directory.path(),
+                              ExpectedFileBytes(8, paused.size()) +
+                                  ExpectedFileBytes(8, anchor.size()) +
+                                  ExpectedFileBytes(8, shared.size()) +
+                                  ExpectedFileBytes(8, extension.size()));
+  options.min_checkpoint_step_tokens = 2;
+  std::vector<ContinuationDiskEvent> events;
+  ContinuationDiskStore store(
+      options, [&](const auto& event) { events.push_back(event); });
+  for (const auto& [tokens, value] :
+       std::array<std::pair<std::vector<TextRunnerToken>, std::uint64_t>, 3>{
+           std::pair{paused, std::uint64_t{9004}},
+           std::pair{anchor, std::uint64_t{1002}},
+           std::pair{extension, std::uint64_t{1006}}}) {
+    Expect(
+        store
+            .Save(*runner, tokens, *MakeSnapshot(*runner, value, tokens.size()))
+            .stored,
+        "shared-prefix fixture stores each checkpoint");
+  }
+  // A later conversation diverged after `shared` but has not advanced far
+  // enough to persist its own branch, so `shared` has one retained child.
+  Expect(store.SaveAsync(runner, shared, MakeSnapshot(*runner, 1004, 4), {}, {},
+                         /*shared_prefix=*/true) != 0,
+         "the learned shared prefix is queued");
+  store.Flush();
+  Expect(store.entry_count() == 4 &&
+             store.retained_bytes() == options.capacity_bytes,
+         "the shared-prefix fixture fills the budget exactly");
+
+  Expect(store.Save(*runner, incoming, *MakeSnapshot(*runner, 7004, 4)).stored,
+         "an unrelated checkpoint is stored under pressure");
+  Expect(std::ranges::none_of(events,
+                              [](const ContinuationDiskEvent& event) {
+                                return event.reason ==
+                                       ContinuationDiskEventReason::kSuperseded;
+                              }),
+         "a learned shared prefix is not removed as a covered intermediate");
+  ExpectDiskRestore(store, *runner, std::vector<TextRunnerToken>{1, 2, 3, 4, 8},
+                    shared.size(), 1004);
+  auto state = runner->CreateState();
+  Expect(!store.RestoreLongestPrefix(*runner, *state, paused).restored,
+         "ordinary LRU removes the oldest entry instead");
+}
+
 void TestFailedPublicationPreservesCoveredIntermediate() {
   TemporaryDirectory directory;
   FakeRunner runner("12345678");
@@ -1682,6 +1732,7 @@ int main() {
   TestStartupPrefersCoveredIntermediate();
   TestIncomingBranchPreservesSharedIntermediate();
   TestRepeatedEvictionReclassifiesAfterBranchRemoval();
+  TestSharedPrefixIsNotCoveredIntermediate();
   TestFailedPublicationPreservesCoveredIntermediate();
   TestIntermediateRetentionRespectsPersistencePartition();
   TestLruEvictionUsesActualFileBytes();

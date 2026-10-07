@@ -434,7 +434,9 @@ beyond its stable prompt boundary requires an earlier saved prefix too. Exact
 token prefixes and complete persistence identities establish these relationships;
 client conversation IDs and filename hashes do not. A shared branch point is
 not treated as an intermediate, including when the incoming checkpoint creates
-the second branch.
+the second branch. Neither is a checkpoint saved at a learned shared-prefix
+boundary, whose second branch may be too short to persist; that protection is
+held in memory and does not survive a restart.
 
 The new checkpoint becomes durable before any existing entry is removed to
 admit it. Eligible intermediates are removed in last-access order and logged as
@@ -492,7 +494,8 @@ still populate the cache.
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |
 | `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |
-| `event=disk_cache action=removed reason=lru` | a disk entry was evicted to stay inside `--cache-disk-bytes` |
+| `event=disk_cache action=removed reason=superseded` | a covered intermediate disk entry was evicted to stay inside `--cache-disk-bytes`; a shorter ancestor and a longer extension remain |
+| `event=disk_cache action=removed reason=lru` | a disk entry was evicted to stay inside `--cache-disk-bytes` after no covered intermediate remained |
 | `event=disk_cache action=skipped reason=staging_capacity` | a checkpoint exceeded `--cache-disk-staging-bytes` and was never written |
 | `event=disk_cache action=skipped reason=min_step` | a checkpoint was less than 2048 tokens past a stored prefix; RAM still retains it |
 
