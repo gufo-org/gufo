@@ -88,6 +88,27 @@ std::optional<ChatRequest> ConstrainChatRequest(
   return constrained;
 }
 
+std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
+  std::optional<std::uint64_t> available_kib;
+  std::uint64_t cma_free_kib = 0;
+  std::istringstream lines{std::string(meminfo)};
+  for (std::string line; std::getline(lines, line);) {
+    std::istringstream fields(line);
+    std::string key;
+    std::uint64_t kib = 0;
+    if (!(fields >> key >> kib))
+      continue;
+    if (key == "MemAvailable:")
+      available_kib = kib;
+    else if (key == "CmaFree:")
+      cma_free_kib = kib;
+  }
+  if (!available_kib)
+    return std::nullopt;
+  return (*available_kib > cma_free_kib ? *available_kib - cma_free_kib : 0) *
+         1024;
+}
+
 namespace {
 
 /// Host RAM still available, after cgroup limits. Unified-memory device
@@ -99,15 +120,10 @@ std::uint64_t HostAvailableBytes() {
     return 0;
   std::uint64_t available = std::uint64_t(pages) * page_size;
   std::ifstream meminfo("/proc/meminfo");
-  for (std::string line; std::getline(meminfo, line);) {
-    if (line.starts_with("MemAvailable:")) {
-      std::istringstream fields(line.substr(13));
-      std::uint64_t kib = 0;
-      if (fields >> kib)
-        available = kib * 1024;
-      break;
-    }
-  }
+  std::ostringstream meminfo_text;
+  meminfo_text << meminfo.rdbuf();
+  if (const auto parsed = MeminfoAvailableBytes(meminfo_text.str()))
+    available = *parsed;
   // A cgroup limit can be much smaller than the host's available memory.
   // Walk parents too: a child may say "max" beneath a limited ancestor.
   std::ifstream membership("/proc/self/cgroup");

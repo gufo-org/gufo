@@ -177,9 +177,12 @@ between active decode rounds without changing a lone request's kernel policy.
 
 `--cache-ram-bytes 0` (the default) selects an automatic snapshot budget capped
 at 32 GiB and half the available host RAM after model/state allocation, respecting
-container limits. 27B also checks HIP free memory. A positive value sets a byte
-cap that may exceed the automatic budget, up to the available host RAM minus
-4 GiB; the startup line reports both as `automatic_bytes` and `max_bytes`.
+container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
+pages, such as the kernel's KHO scratch area on Ubuntu 26.04, only hold
+movable pages, not GPU allocations. 27B also checks HIP free memory. A
+positive value sets a byte cap that may exceed the automatic budget, up to the
+available host RAM minus 4 GiB; the startup line reports both as
+`automatic_bytes` and `max_bytes`.
 Disk staging and temporary disk-save buffers are separate from this RAM budget.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.

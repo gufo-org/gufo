@@ -1848,6 +1848,25 @@ void TestSnapshotCacheCapacityIsReportedAtStartup() {
   }
 }
 
+void TestMeminfoAvailableExcludesFreeCma() {
+  using gufo::server::MeminfoAvailableBytes;
+  constexpr std::uint64_t kib = 1024;
+  // Ubuntu 26.04's KHO scratch reports free CMA pages with CmaTotal 0.
+  Expect(MeminfoAvailableBytes("MemTotal:       131072000 kB\n"
+                               "MemAvailable:   100000000 kB\n"
+                               "CmaTotal:               0 kB\n"
+                               "CmaFree:         13034628 kB\n") ==
+             (100000000 - 13034628) * kib,
+         "free CMA pages are not available for snapshots");
+  Expect(MeminfoAvailableBytes("MemAvailable:   8000000 kB\n") == 8000000 * kib,
+         "MemAvailable is used unchanged without a CmaFree line");
+  Expect(
+      MeminfoAvailableBytes("CmaFree:  9000 kB\nMemAvailable:  4000 kB\n") == 0,
+      "free CMA beyond MemAvailable saturates at zero");
+  Expect(!MeminfoAvailableBytes("MemTotal:  4000 kB\nCmaFree:  10 kB\n"),
+         "missing MemAvailable keeps the caller's fallback");
+}
+
 void TestSnapshotStartupReportsSelectedLimits() {
   class ChangingHeadroomRunner final : public SnapshotRunner {
   public:
@@ -2191,6 +2210,7 @@ int main() {
       "evicting a retained prefix for entry capacity is reported");
 
   TestSnapshotCacheCapacityIsReportedAtStartup();
+  TestMeminfoAvailableExcludesFreeCma();
   TestSnapshotStartupReportsSelectedLimits();
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
