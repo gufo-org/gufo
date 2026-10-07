@@ -282,8 +282,8 @@ def summarize(parts, streaming, ended, contract=None):
             output = {"output": final["output"], "status": final["status"],
                       "incomplete_details": final.get("incomplete_details")}
         if not streaming and final.get("type") == "message" and final.get("role") == "assistant":
-            # /v1/messages currently supports buffered responses only. Keep its
-            # ordered blocks and stop metadata, excluding the generated message ID.
+            # Buffered /v1/messages: keep its ordered blocks and stop metadata,
+            # excluding the generated message ID. Streamed events stay as events.
             message_output = {key: final[key] for key in ("content", "stop_reason", "stop_sequence")}
         for choice in event.get("choices", []):
             index = str(choice.get("index", 0))

@@ -37,6 +37,7 @@ from cache_shared_prefix import check_cache_shared_prefix
 from cache_bridge import check_cache_bridge
 from system_injection import check_system_injection
 from cache_growth import check_cache_growth
+from messages_tools import check_messages_tools
 from cache_depth import check_cache_depth
 from cache_rotation import check_cache_rotation
 from prefill_scheduling import check_prefill_scheduling
@@ -2525,7 +2526,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
 
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
               "tool-reasoning", "reasoning-separator",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
               "cache-bridge", "system-injection")
 
@@ -2630,6 +2631,8 @@ def main():
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
             "tool-history": lambda: check_tool_history(
                 client, args.model, checks, chat_result, args.vision, image_content),
+            "messages-tools": lambda: check_messages_tools(
+                client, args.model, checks, chat_result),
             "tool-untyped": lambda: check_untyped_agent_tools(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-mixed": lambda: check_mixed_tool_schemas(
