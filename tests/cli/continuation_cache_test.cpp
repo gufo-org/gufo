@@ -272,6 +272,89 @@ void TestBranchPointOutlivesOlderTurnsUnderPressure() {
   }
 }
 
+void TestLearnedBranchPointOutlivesItsOlderBranch() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  using gufo::server::SnapshotPurpose;
+  // A chat bridge replays its last user message without the metadata it sent,
+  // so each request diverges where the previous user turn starts. Its own new
+  // boundary extends the learned point; neither a warm turn advancing from it
+  // nor a cold turn publishing it may evict it before other families' copies.
+  for (const bool warm : {true, false}) {
+    std::vector<std::size_t> invalidations(1);
+    gufo::server::ContinuationCache cache(
+        1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+        {.restore =
+             [](auto& state, const auto& snapshot) {
+               dynamic_cast<FakeState&>(state).value =
+                   dynamic_cast<const FakeSnapshot&>(snapshot).value;
+             },
+         .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+         .on_event = {}},
+        8);
+    const auto retain = [&](const Tokens& tokens, std::size_t value,
+                            SnapshotPurpose purpose) {
+      auto lease = cache.Acquire(tokens);
+      Expect(lease.TryReserveSnapshot(sizeof(std::size_t), tokens.size(), true,
+                                      purpose),
+             "initial checkpoint fits without eviction");
+      lease.Commit(tokens, std::make_unique<FakeSnapshot>(value));
+    };
+    retain({9, 9, 9}, 9003, SnapshotPurpose::kContinuation);
+    retain({7, 7, 7}, 7003, SnapshotPurpose::kContinuation);
+    // The previous turn's boundary ends in the live message the next request
+    // rewrites; the turn before it already diverged at the learned point.
+    retain({1, 2, 3}, 1003, SnapshotPurpose::kBranchPoint);
+    retain({1, 2, 3, 4, 4}, 2005, SnapshotPurpose::kContinuation);
+
+    const Tokens incoming{1, 2, 3, 5, 5};
+    auto turn = cache.Acquire(incoming, {}, {}, {}, warm);
+    Expect(turn.cached_tokens() == (warm ? 3 : 0),
+           "a warm turn restores the learned branch point");
+    Expect(turn.TryReserveSnapshot(sizeof(std::size_t), incoming.size(), !warm,
+                                   SnapshotPurpose::kContinuation, incoming),
+           "the new boundary evicts another checkpoint");
+    turn.Commit(incoming, std::make_unique<FakeSnapshot>(3005));
+
+    auto next = cache.Acquire(Tokens{1, 2, 3, 6, 6});
+    Expect(next.cached_tokens() == 3 &&
+               dynamic_cast<FakeState&>(next.state()).value == 1003,
+           "the learned branch point outlives its own family's new boundary");
+    next.Invalidate();
+    Expect(cache.CachedPrefixTokens(Tokens{9, 9, 9, 1}) == 0 &&
+               cache.CachedPrefixTokens(Tokens{7, 7, 7, 1}) == 3,
+           "the oldest other family's checkpoint yields instead");
+  }
+}
+
+void TestDeeperLearnedBranchPointSupersedesShallower() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](gufo::server::ContinuationState&,
+                     const gufo::server::ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+       .on_event = {}},
+      8);
+  const auto retain = [&](const Tokens& tokens, SnapshotPurpose purpose) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(sizeof(std::size_t), tokens.size(), true,
+                                    purpose),
+           "test snapshot is admitted");
+    lease.Commit(tokens, std::make_unique<FakeSnapshot>(tokens.size()));
+  };
+  retain({9, 9, 9}, SnapshotPurpose::kContinuation);
+  retain({1, 2, 3}, SnapshotPurpose::kBranchPoint);
+  retain({1, 2, 3, 4, 5}, SnapshotPurpose::kBranchPoint);
+  retain({1, 2, 3, 4, 5, 6}, SnapshotPurpose::kContinuation);
+  retain({8, 8, 8}, SnapshotPurpose::kContinuation);  // Pressure.
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2, 3, 7}) == 0 &&
+             cache.CachedPrefixTokens(Tokens{1, 2, 3, 4, 5, 7}) == 5 &&
+             cache.CachedPrefixTokens(Tokens{9, 9, 9, 1}) == 3,
+         "only the deepest learned branch point of a family stays protected");
+}
+
 void TestSnapshotCanBranchIntoTwoIndependentStateSlots() {
   std::vector<std::size_t> invalidations(2);
   std::size_t next_id = 0;
@@ -1104,6 +1187,8 @@ int main() {
   TestBorrowedSnapshotPrefersAvailableOwner();
   TestCachedPrefixTokensPeeksWithoutLeasing();
   TestBranchPointOutlivesOlderTurnsUnderPressure();
+  TestLearnedBranchPointOutlivesItsOlderBranch();
+  TestDeeperLearnedBranchPointSupersedesShallower();
   TestByteCapacityEvictsBeforeSnapshotAllocation();
   TestConcurrentReservationsCannotOvercommitBudget();
   TestImpossibleReservationPreservesRetainedEntries();

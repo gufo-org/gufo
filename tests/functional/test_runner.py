@@ -28,6 +28,7 @@ from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
+from cache_bridge import check_cache_bridge
 from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
 from cache_depth import check_cache_depth
@@ -703,6 +704,72 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_shared_prefix_rejects_grid_only_reuse(self):
         with self.assertRaisesRegex(AssertionError, "of the shared system prompt"):
             self.run_cache_shared_prefix(regress=True)
+
+    def run_cache_bridge(self, lost=False, restore_bytes=100, capacity=1000):
+        requests = []
+
+        def chat_result(client, body):
+            requests.append(json.loads(json.dumps(body)))
+            messages = body["messages"]
+            cold = body.get("extra_body", {}).get("cache_prompt") is False
+            if messages[0]["content"].startswith("cache_bridge_side_"):
+                return {"text": "OK", "reasoning": "", "tools": [], "finish": "stop",
+                        "usage": {"prompt_tokens": 200, "cached_tokens": 0,
+                                  "completion_tokens": 1,
+                                  "gufo": {"prefill_tokens": 200,
+                                           "cache_snapshot_bytes": 300,
+                                           "cache_restore_bytes": 0}}}
+            if messages[-1]["content"] == "Z":
+                total, code = 5000, "Z"
+            else:
+                turn = (len(messages) + 1) // 2
+                total, code = 5790 + (turn - 1) * 70, f"T{turn:02d}"
+            cached = 0 if cold or lost or code == "Z" or code in ("T01", "T02") else 4990
+            return {"text": code, "reasoning": "", "tools": [], "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached,
+                                       "cache_snapshot_bytes": 200,
+                                       "cache_restore_bytes": restore_bytes if cached else 0}}}
+
+        checks = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_cache_bridge(None, "fixture", checks, chat_result, capacity)
+        return requests, checks
+
+    def test_cache_bridge_fills_budget_then_rewrites_history_and_delays_controls(self):
+        requests, checks = self.run_cache_bridge()
+        self.assertTrue(all(body["messages"][0]["content"].startswith("cache_bridge_side_")
+                            for body in requests[:5]))
+        turns = [body for body in requests if body["messages"][0]["content"].startswith(
+            "cache_bridge\n") and "extra_body" not in body]
+        self.assertEqual(len(turns), 6)
+        for index, body in enumerate(turns, 1):
+            live = body["messages"][-1]["content"]
+            self.assertIn(f"cache-bridge-{index:02d}", live)
+            self.assertTrue(live.endswith(f"Reply with only the code T{index:02d}."))
+            copies = [message["content"] for message in body["messages"][1:-1:2]]
+            self.assertTrue(all(copy.startswith("[Telegram User") for copy in copies))
+            self.assertEqual(len(copies), index - 1)
+        controls = [body for body in requests
+                    if body.get("extra_body", {}).get("cache_prompt") is False]
+        self.assertEqual(len(controls), 7)
+        self.assertEqual(requests[-7:], controls)
+        self.assertEqual(controls[0]["messages"][-1]["content"], "Z")
+        self.assertEqual([body["messages"] for body in controls[1:]],
+                         [body["messages"] for body in turns])
+        self.assertEqual([row["floor"] for row in checks["bridge_evidence"]["turns"]],
+                         [4392, 4462, 4532, 4602])
+
+    def test_cache_bridge_rejects_a_lost_divergence_point(self):
+        with self.assertRaisesRegex(AssertionError, "restored 0 tokens"):
+            self.run_cache_bridge(lost=True)
+
+    def test_cache_bridge_rejects_a_budget_without_pressure(self):
+        with self.assertRaisesRegex(AssertionError, "unqualified"):
+            self.run_cache_bridge(restore_bytes=10)
+        with self.assertRaisesRegex(AssertionError, "snapshot capacity"):
+            self.run_cache_bridge(capacity=None)
 
     def test_prompt_progress_contract_and_output_order(self):
         def event(processed, elapsed=0):

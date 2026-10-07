@@ -1362,7 +1362,7 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   if ((history || shared) && impl_->prefill_offset != snapshot_position)
     impl_->CaptureBoundarySnapshot(impl_->prefill_offset, history, shared,
                                    shared_with_peers
-                                       ? SnapshotPurpose::kContinuation
+                                       ? SnapshotPurpose::kBranchPoint
                                        : SnapshotPurpose::kHistory);
   return step;
 }

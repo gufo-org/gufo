@@ -104,6 +104,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `cache-depth` | Histories beyond 16K, concurrent branches from rewritten replies, a side conversation, resume, zero-prefill retries and exact uncached controls; use context 32768 and also check sessions 1 |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
 | `cache-shared-prefix` | New conversations under one system prompt, one after another, with long and short tasks: from the third on they restore the whole shared prefix; compare answers with uncached controls |
+| `cache-bridge` | A chat bridge sends each user message with metadata its history copy drops, under a full RAM budget with small unrelated requests between turns: from the third turn on, reuse reaches the user turn two back; compare answers with uncached controls. Not in `all` |
 | `system-injection` | System/developer messages after the conversation start, in Chat and Responses: accepted, followed by the model and equal to uncached responses; the hoisted turn's reuse is recorded and the next turn must reuse it in full |
 | `cache-concurrency` | Concurrent identical prompts, shared-system fan-out with short and long tasks, short or no shared prefixes, a retained conversation beside a newcomer, and a cancelled leader; check waits, prefill work and uncached answers |
 
@@ -195,6 +196,10 @@ omitted, preserved and explicitly discarded reasoning, plus thinking off.
 `cache-rotation` visits four conversations and eight small side requests; use
 `--sessions 1` to verify retention is independent of execution slots. It also
 checks the startup RAM cap; byte/record pressure is covered by CPU tests.
+`cache-bridge` needs RAM pressure: run it in its own invocation with a budget
+that holds at most 16 of its conversation checkpoints, such as
+`--cache-ram-bytes 2147483648` for Flash-Next at the default context.
+Background requests fill the budget first; a larger budget fails as unqualified.
 `cache-concurrency` sends each group at once. With `--sessions 2` or more,
 requests sharing a long prefix must wait for one prefill and then prefill only
 their own tail; groups sharing little or nothing must not wait. With

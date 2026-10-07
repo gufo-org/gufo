@@ -34,6 +34,7 @@ from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_hist
 from cache_edits import check_cache_edits
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
+from cache_bridge import check_cache_bridge
 from system_injection import check_system_injection
 from cache_growth import check_cache_growth
 from cache_depth import check_cache_depth
@@ -2525,7 +2526,7 @@ SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs",
               "tool-reasoning", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
-              "system-injection")
+              "cache-bridge", "system-injection")
 
 
 def main():
@@ -2555,6 +2556,8 @@ def main():
                         help="Server capacity; long-context fills roughly half, measured in usage")
     parser.add_argument("--speculative", choices=("off", "mtp", "dflash2", "dspark"),
                         default="off", help="Server mode; determines sampled replay guarantees")
+    parser.add_argument("--snapshot-capacity-bytes", type=int,
+                        help="Configured RAM checkpoint budget; required for cache-bridge")
     args = parser.parse_args()
     if args.suite in ("discovery", "all") and args.expected_input_modalities is None:
         parser.error("discovery requires --expected-input-modalities text or text,image")
@@ -2663,10 +2666,12 @@ def main():
                 client, args.model, checks, chat_result, args.concurrency),
             "cache-shared-prefix": lambda: check_cache_shared_prefix(
                 client, args.model, checks, chat_result),
+            "cache-bridge": lambda: check_cache_bridge(
+                client, args.model, checks, chat_result, args.snapshot_capacity_bytes),
             "system-injection": lambda: check_system_injection(
                 client, args.model, checks, chat_result),
         }
-        selected = ([name for name in suites if name != "tool-native-types"
+        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge")
                      and (name not in ("image-inputs", "image-count") or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
