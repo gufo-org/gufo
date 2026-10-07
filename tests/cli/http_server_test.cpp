@@ -1004,7 +1004,8 @@ void TestCompatibilityRequests() {
           "output_config", "logit_bias", "ignore_eos"}) {
       const std::string_view path(endpoint.path);
       const std::string_view name(field);
-      if ((path == "/v1/responses" || path == "/v1/completions") &&
+      if ((path == "/v1/responses" || path == "/v1/completions" ||
+           path == "/v1/messages") &&
           name == "stream")
         continue;
       if (path == "/v1/completions" && name == "ignore_eos")
@@ -1511,6 +1512,87 @@ void TestCompatibilityRequests() {
          undeclared.find("content")->items().size() == 1 &&
          undeclared.find("content")->items()[0].member_str("text") ==
              "<tool_call>leak");
+
+  // Streamed Messages use Anthropic SSE events over the same filters.
+  const auto sse_events = [](const std::string& wire) {
+    std::vector<gufo::json::Value> events;
+    for (auto data = wire.find("data: "); data != std::string::npos;
+         data = wire.find("data: ", data + 6)) {
+      const auto end = wire.find("\n\n", data);
+      events.push_back(gufo::json::parse(
+          std::string_view(wire).substr(data + 6, end - data - 6)));
+    }
+    return events;
+  };
+  server.backend->SetOutput("<think>plan</think>answer");
+  const auto streamed_text =
+      server.Post("/v1/messages", R"({"stream":true,"max_tokens":64,
+          "thinking":{"type":"enabled","budget_tokens":1024},
+          "messages":[{"role":"user","content":"hi"}]})");
+  ExpectStatus(streamed_text, 200);
+  assert(streamed_text.find("text/event-stream") != std::string::npos &&
+         streamed_text.find("event: message_start\n") != std::string::npos);
+  std::vector<std::string> types;
+  std::string thought, answer;
+  const auto text_events = sse_events(streamed_text);
+  for (const auto& event : text_events) {
+    types.push_back(event.member_str("type"));
+    if (const auto* delta = event.find("delta");
+        delta && delta->member_str("type") == "thinking_delta")
+      thought += delta->member_str("thinking");
+    else if (delta && delta->member_str("type") == "text_delta")
+      answer += delta->member_str("text");
+  }
+  assert(thought == "plan" && answer == "answer");
+  assert(types.front() == "message_start" && types.back() == "message_stop");
+  assert(text_events[1].find("content_block")->member_str("type") ==
+             "thinking" &&
+         text_events[1].member_size("index") == 0);
+  const auto& text_done = text_events[text_events.size() - 2];
+  assert(text_done.member_str("type") == "message_delta" &&
+         text_done.find("delta")->member_str("stop_reason") == "end_turn" &&
+         text_done.find("usage")->member_size("input_tokens") == 10 &&
+         text_done.find("usage")->member_size("cache_read_input_tokens") == 8);
+  assert(std::ranges::count(types, "content_block_start") == 2 &&
+         std::ranges::count(types, "content_block_stop") == 2);
+
+  server.backend->SetOutput(
+      "<tool_call>\n<function=get_weather>\n<parameter=city>\nRome\n"
+      "</parameter>\n</function>\n</tool_call>");
+  const auto streamed_tool = server.Post(
+      "/v1/messages", R"({"stream":true,"tool_choice":{"type":"any"},
+          "messages":[{"role":"user","content":"weather in Rome?"}],
+          "tools":)" + weather_tool +
+                          "}");
+  ExpectStatus(streamed_tool, 200);
+  assert(streamed_tool.find("<tool_call>") == std::string::npos);
+  bool tool_started = false;
+  std::string partial_json, stop_reason;
+  for (const auto& event : sse_events(streamed_tool)) {
+    if (const auto* block = event.find("content_block"))
+      tool_started |= block->member_str("type") == "tool_use" &&
+                      block->member_str("name") == "get_weather";
+    if (const auto* delta = event.find("delta")) {
+      if (delta->member_str("type") == "input_json_delta")
+        partial_json += delta->member_str("partial_json");
+      if (event.member_str("type") == "message_delta")
+        stop_reason = delta->member_str("stop_reason");
+    }
+  }
+  assert(tool_started && stop_reason == "tool_use" &&
+         gufo::json::parse(partial_json).member_str("city") == "Rome");
+
+  server.backend->failure = 6;
+  const auto failed_messages = server.Post(
+      "/v1/messages",
+      R"({"stream":true,"messages":[{"role":"user","content":"hi"}]})");
+  ExpectStatus(failed_messages, 200);  // Fake backend fails after headers.
+  const auto failed_events = sse_events(failed_messages);
+  assert(failed_events.back().member_str("type") == "error" &&
+         failed_events.back().find("error")->member_str("type") ==
+             "api_error" &&
+         failed_messages.find("event: message_stop") == std::string::npos);
+  server.backend->failure = 0;
   server.backend->SetOutput("ok");
 }
 

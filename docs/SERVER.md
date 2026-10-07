@@ -595,12 +595,18 @@ The other compatibility routes are deliberately limited:
 | Route | Supported request | Output limit |
 | --- | --- | --- |
 | `/v1/completions` | One prompt string, buffered or SSE completion | `max_tokens` |
-| `/v1/messages` | Text, thinking and tool blocks, optional text system instructions and custom tools | `max_tokens` |
+| `/v1/messages` | Text, thinking and tool blocks, optional text system instructions and custom tools; buffered or SSE | `max_tokens` |
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
-sampling controls. Messages and `/completion` reject streaming; all reject
-multiple candidates. Responses and Messages honor the server's thinking defaults.
+sampling controls. `/completion` rejects streaming; all reject multiple
+candidates. Streamed Messages send Anthropic SSE events: `message_start`,
+`content_block_start`/`content_block_delta`/`content_block_stop` for
+`thinking` (`thinking_delta`), `text` (`text_delta`) and `tool_use`
+(`input_json_delta`) blocks, then `message_delta` with `stop_reason` and the
+complete usage, and `message_stop`. `message_start` reports zero usage because
+prompt accounting is final only at the end. A failure after the headers sends
+an `error` event. Responses and Messages honor the server's thinking defaults.
 Messages accepts `thinking.type` (`enabled`, `adaptive` or `disabled`);
 `adaptive` keeps the server's thinking default, and `budget_tokens` has no
 native equivalent, so the effort stays the server's unless

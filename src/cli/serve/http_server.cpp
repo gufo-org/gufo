@@ -1190,6 +1190,7 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
           ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
                                    &sampling_config, chat.reasoning.enabled,
                                    {.stop_field = "stop_sequences",
+                                    .stream = true,
                                     .thinking = true,
                                     .output_config = true,
                                     .tools = true})) {
@@ -1221,64 +1222,9 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
                                             StopSequenceFormat::kAnthropic,
                                             &chat.stop_sequences))
     return InvalidCompatibilityRequest(*error);
-  const auto initial = b.initial_output_state(chat);
-  const auto generation =
-      b.start_chat(chat, max_tokens, sampling_config, req.is_cancelled);
-  const auto res = generation->Wait();
-  const auto generated = ParseAnthropicGeneration(
-      core::Utf8Decoder{}.Push(res.text, true), initial, chat,
-      generation->ToolFormat(),
-      res.finish_reason == TextGenerationBackend::FinishReason::kStop);
-
-  json::Value resp = json::Value::object();
-  resp["id"] = "msg_" + RandomId();
-  resp["type"] = "message";
-  resp["role"] = "assistant";
-  resp["model"] = b.model_id();
-  json::Value content = json::Value::array();
-  if (!generated.reasoning.empty()) {
-    // Local reasoning is not signed; clients replay the block unchanged.
-    json::Value thinking = json::Value::object();
-    thinking["type"] = "thinking";
-    thinking["thinking"] = generated.reasoning;
-    thinking["signature"] = "";
-    content.push_back(std::move(thinking));
-  }
-  if (!generated.text.empty() ||
-      (content.empty() && generated.tool_uses.empty())) {
-    json::Value txt = json::Value::object();
-    txt["type"] = "text";
-    txt["text"] = generated.text;
-    content.push_back(std::move(txt));
-  }
-  for (const auto& call : generated.tool_uses) {
-    json::Value tool_use = json::Value::object();
-    tool_use["type"] = "tool_use";
-    tool_use["id"] = call.id;
-    tool_use["name"] = call.name;
-    tool_use["input"] = call.input;
-    content.push_back(std::move(tool_use));
-  }
-  resp["content"] = std::move(content);
-  resp["stop_reason"] =
-      !generated.tool_uses.empty() ? "tool_use"
-      : res.finish_reason == TextGenerationBackend::FinishReason::kLength
-          ? "max_tokens"
-      : res.finish_reason == TextGenerationBackend::FinishReason::kStopSequence
-          ? "stop_sequence"
-          : "end_turn";
-  resp["stop_sequence"] =
-      res.finish_reason == TextGenerationBackend::FinishReason::kStopSequence
-          ? json::Value(res.stop_sequence)
-          : json::Value();
-  json::Value usage = json::Value::object();
-  usage["input_tokens"] = res.prompt_tokens;
-  usage["output_tokens"] = res.completion_tokens;
-  usage["cache_creation_input_tokens"] = 0;
-  usage["cache_read_input_tokens"] = res.cached_prompt_tokens;
-  resp["usage"] = std::move(usage);
-  resp["timings"] = GenerationTimings(res);
-  return WithTiming(Ok(resp), res);
+  return CreateAnthropicMessage(
+      req, b, chat, max_tokens, sampling_config,
+      body.find("stream") != nullptr && body.find("stream")->as_bool());
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");

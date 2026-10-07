@@ -35,22 +35,6 @@ std::optional<HttpResponse> ParseAnthropicToolControls(const json::Value& body,
 bool ParseAnthropicToolMessage(const json::Value& item,
                                std::vector<tokenization::ChatMessage>* messages,
                                std::string* error);
-/// Buffered Messages output: reasoning and visible text split exactly as
-/// Chat Completions reports them, plus parsed tool calls.
-struct GeneratedToolUse {
-  std::string id;
-  std::string name;
-  json::Value input;
-};
-struct GeneratedMessage {
-  std::string reasoning;
-  std::string text;
-  std::vector<GeneratedToolUse> tool_uses;
-};
-GeneratedMessage ParseAnthropicGeneration(
-    std::string_view text, TextGenerationBackend::InitialOutputState initial,
-    const ChatRequest& chat,
-    std::optional<sampling::JsonConstraint::ToolFormat> format, bool stopped);
 /// Responses text output uses the same reasoning/UTF-8 filter and scheduler
 /// as Chat Completions, including streaming cancellation and cache retention.
 HttpResponse CreateOpenAiResponse(const HttpRequest& request,
@@ -59,6 +43,14 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
                                   std::size_t max_tokens,
                                   const sampling::SamplingConfig& sampling,
                                   bool stream);
+/// Messages output through the same path: content blocks when buffered,
+/// Anthropic SSE events when streamed.
+HttpResponse CreateAnthropicMessage(const HttpRequest& request,
+                                    TextGenerationBackend& backend,
+                                    const ChatRequest& chat,
+                                    std::size_t max_tokens,
+                                    const sampling::SamplingConfig& sampling,
+                                    bool stream);
 
 }  // namespace gufo::server
 

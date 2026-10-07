@@ -2291,7 +2291,14 @@ public:
         }
         return true;
       }
-      state_ = State::kContent;
+      if (view.starts_with(kThinkStart)) {
+        // A buffered result arrives as one piece: the opening tag together
+        // with the reasoning after it.
+        state_ = State::kThinking;
+        pending_.erase(0, pending_.size() - view.size() + kThinkStart.size());
+      } else {
+        state_ = State::kContent;
+      }
     }
 
     if (state_ == State::kThinking) {
@@ -3367,37 +3374,194 @@ bool ParseAnthropicToolMessage(const json::Value& item,
   return true;
 }
 
-GeneratedMessage ParseAnthropicGeneration(
-    std::string_view text, TextGenerationBackend::InitialOutputState initial,
-    const ChatRequest& chat,
-    std::optional<sampling::JsonConstraint::ToolFormat> format, bool stopped) {
-  QuoteTracker quotes;
-  const auto markers = ToolMarkers(format);
-  const auto closers = ToolClosers(format);
-  const auto generated =
-      chat.constrained_tools
-          ? ParseStructuredGeneration(text, initial, chat.tools,
-                                      chat.tool_choice, stopped, true, markers,
-                                      closers, quotes)
-          : ParseGeneration(text, initial, chat.tools, chat.tool_choice,
-                            stopped, markers, closers, quotes);
-  GeneratedMessage message{.reasoning = generated.reasoning_content,
-                           .text = generated.text,
-                           .tool_uses = {}};
-  for (const auto& call : generated.tool_calls)
-    message.tool_uses.push_back(
-        {.id = call.id,
-         .name = call.name,
-         .input = json::parse(ArgumentsJson(call.arguments))});
-  return message;
-}
+namespace {
 
-HttpResponse CreateOpenAiResponse(const HttpRequest& request,
-                                  TextGenerationBackend& backend,
-                                  const ChatRequest& chat,
-                                  std::size_t max_tokens,
-                                  const sampling::SamplingConfig& sampling,
-                                  bool stream) {
+/// Messages output as Anthropic content blocks. Streamed events follow
+/// message_start, content_block_start/delta/stop and message_delta/stop.
+class AnthropicOutput {
+public:
+  AnthropicOutput(std::string model, HttpResponse::BodyWriter writer,
+                  const ChatRequest&)
+      : writer_(std::move(writer)) {
+    message_ = json::Value::object();
+    message_["id"] = RandomId("msg_");
+    message_["type"] = "message";
+    message_["role"] = "assistant";
+    message_["model"] = std::move(model);
+    message_["content"] = json::Value::array();
+    message_["stop_reason"] = json::Value();
+    message_["stop_sequence"] = json::Value();
+    // Prompt accounting is final only with the result; message_delta carries
+    // the complete usage.
+    message_["usage"] = json::Value::object();
+    message_["usage"]["input_tokens"] = 0;
+    message_["usage"]["output_tokens"] = 0;
+  }
+
+  bool Begin() {
+    auto event = Event("message_start");
+    event["message"] = message_;
+    return Emit(std::move(event));
+  }
+
+  bool Progress(const TextGenerationBackend::PromptProgress&) {
+    return connected_;
+  }
+
+  bool Append(std::string_view text, bool reasoning) {
+    if (text.empty())
+      return true;
+    if (!active_ || reasoning_ != reasoning) {
+      if (!CloseBlock())
+        return false;
+      reasoning_ = reasoning;
+      active_ = true;
+      text_.clear();
+      if (!Emit(BlockStart(Block())))
+        return false;
+    }
+    text_.append(text);
+    auto delta = json::Value::object();
+    delta["type"] = reasoning ? "thinking_delta" : "text_delta";
+    delta[reasoning ? "thinking" : "text"] = std::string(text);
+    return Emit(BlockDelta(std::move(delta)));
+  }
+
+  bool Tool(const ParsedToolCall& call) {
+    if (!CloseBlock())
+      return false;
+    auto block = json::Value::object();
+    block["type"] = "tool_use";
+    block["id"] = call.id;
+    block["name"] = call.name;
+    block["input"] = json::Value::object();
+    if (!Emit(BlockStart(block)))
+      return false;
+    const auto arguments = ArgumentsJson(call.arguments);
+    auto delta = json::Value::object();
+    delta["type"] = "input_json_delta";
+    delta["partial_json"] = arguments;
+    if (!Emit(BlockDelta(std::move(delta))))
+      return false;
+    block["input"] = json::parse(arguments);
+    message_["content"].push_back(std::move(block));
+    tool_use_ = true;
+    return BlockStop();
+  }
+
+  json::Value Complete(const TextGenerationBackend::Result& result) {
+    CloseBlock();
+    if (message_["content"].empty()) {
+      text_.clear();
+      reasoning_ = false;
+      active_ = true;
+      Emit(BlockStart(Block()));
+      CloseBlock();
+    }
+    using Finish = TextGenerationBackend::FinishReason;
+    message_["stop_reason"] =
+        tool_use_                                       ? "tool_use"
+        : result.finish_reason == Finish::kLength       ? "max_tokens"
+        : result.finish_reason == Finish::kStopSequence ? "stop_sequence"
+                                                        : "end_turn";
+    message_["stop_sequence"] = result.finish_reason == Finish::kStopSequence
+                                    ? json::Value(result.stop_sequence)
+                                    : json::Value();
+    auto usage = json::Value::object();
+    usage["input_tokens"] = result.prompt_tokens;
+    usage["output_tokens"] = result.completion_tokens;
+    usage["cache_creation_input_tokens"] = 0;
+    usage["cache_read_input_tokens"] = result.cached_prompt_tokens;
+    message_["usage"] = usage;
+    message_["timings"] = GenerationTimings(result);
+    auto delta = Event("message_delta");
+    delta["delta"]["stop_reason"] = message_["stop_reason"];
+    delta["delta"]["stop_sequence"] = message_["stop_sequence"];
+    delta["usage"] = std::move(usage);
+    if (Emit(std::move(delta)))
+      Emit(Event("message_stop"));
+    return message_;
+  }
+
+  bool Fail(std::string_view message) {
+    auto event = Event("error");
+    event["error"]["type"] = "api_error";
+    event["error"]["message"] = std::string(message);
+    return Emit(std::move(event));
+  }
+
+private:
+  static json::Value Event(std::string_view type) {
+    auto event = json::Value::object();
+    event["type"] = std::string(type);
+    return event;
+  }
+
+  json::Value Block() const {
+    auto block = json::Value::object();
+    block["type"] = reasoning_ ? "thinking" : "text";
+    block[reasoning_ ? "thinking" : "text"] = text_;
+    // Local reasoning is not signed; clients replay the block unchanged.
+    if (reasoning_)
+      block["signature"] = "";
+    return block;
+  }
+
+  json::Value BlockStart(json::Value block) const {
+    auto event = Event("content_block_start");
+    event["index"] = index_;
+    event["content_block"] = std::move(block);
+    return event;
+  }
+
+  json::Value BlockDelta(json::Value delta) const {
+    auto event = Event("content_block_delta");
+    event["index"] = index_;
+    event["delta"] = std::move(delta);
+    return event;
+  }
+
+  bool BlockStop() {
+    auto event = Event("content_block_stop");
+    event["index"] = index_++;
+    return Emit(std::move(event));
+  }
+
+  bool CloseBlock() {
+    if (!active_)
+      return connected_;
+    message_["content"].push_back(Block());
+    active_ = false;
+    return BlockStop();
+  }
+
+  bool Emit(json::Value event) {
+    if (!writer_)
+      return true;
+    if (!connected_)
+      return false;
+    connected_ =
+        writer_("event: " + event.member_str("type") + "\n" + Sse(event));
+    return connected_;
+  }
+
+  HttpResponse::BodyWriter writer_;
+  json::Value message_;
+  std::string text_;
+  std::size_t index_{0};
+  bool active_{false};
+  bool reasoning_{false};
+  bool tool_use_{false};
+  bool connected_{true};
+};
+
+/// Runs one Responses or Messages generation through the Chat reasoning,
+/// UTF-8 and tool filters, buffered or as SSE events from Output.
+template<typename Output>
+HttpResponse CreateCompatibilityResponse(
+    const HttpRequest& request, TextGenerationBackend& backend,
+    const ChatRequest& chat, std::size_t max_tokens,
+    const sampling::SamplingConfig& sampling, bool stream) {
   const auto initial = backend.initial_output_state(chat);
   auto generation = backend.start_chat(chat, max_tokens, sampling,
                                        request.is_cancelled, stream);
@@ -3409,7 +3573,7 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
   const auto run = [generation, initial, chat, markers, closers,
                     model = backend.model_id(), stream_log,
                     timing](const HttpResponse::BodyWriter& writer) {
-    ResponsesOutput output(model, writer, chat);
+    Output output(model, writer, chat);
     bool started = false;
     const auto begin = [&] {
       if (started)
@@ -3530,6 +3694,28 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
           .body = response.dump(),
           .headers = {{"Server-Timing", *timing}},
           .log_details = stream_log->details};
+}
+
+}  // namespace
+
+HttpResponse CreateOpenAiResponse(const HttpRequest& request,
+                                  TextGenerationBackend& backend,
+                                  const ChatRequest& chat,
+                                  std::size_t max_tokens,
+                                  const sampling::SamplingConfig& sampling,
+                                  bool stream) {
+  return CreateCompatibilityResponse<ResponsesOutput>(
+      request, backend, chat, max_tokens, sampling, stream);
+}
+
+HttpResponse CreateAnthropicMessage(const HttpRequest& request,
+                                    TextGenerationBackend& backend,
+                                    const ChatRequest& chat,
+                                    std::size_t max_tokens,
+                                    const sampling::SamplingConfig& sampling,
+                                    bool stream) {
+  return CreateCompatibilityResponse<AnthropicOutput>(
+      request, backend, chat, max_tokens, sampling, stream);
 }
 
 HttpResponse HandleOpenAiChat(const HttpRequest& request,
