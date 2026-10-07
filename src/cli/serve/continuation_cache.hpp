@@ -278,9 +278,11 @@ private:
   struct Entry;
 
   [[nodiscard]] ContinuationState& StateAt(std::size_t index);
+  /// Reclaiming a retained copy of the same prefix keeps its learned branch
+  /// point: purpose becomes kBranchPoint for the publication.
   [[nodiscard]] bool ReserveSnapshot(
       std::size_t source_index, std::size_t snapshot_bytes,
-      std::size_t token_count, bool preserve_source, SnapshotPurpose purpose,
+      std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
       std::span<const ContinuationToken> replacement_prefix,
       std::span<const std::uint8_t> input_identity);
   void SkipSnapshot(std::size_t reservation_bytes, SnapshotEventReason reason,

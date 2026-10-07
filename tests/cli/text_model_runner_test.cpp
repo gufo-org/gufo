@@ -1591,13 +1591,19 @@ void TestRamLearnsDivergenceBoundaries() {
 
 void TestLearnedBoundarySurvivesExactRepublication() {
   // A request for exactly the learned prefix publishes the same tokens again.
-  // Uncached, it replaces the learned checkpoint; that copy must stay a branch
-  // point, or it ranks as redundant once the older branch is gone.
-  for (const bool reuse : {true, false}) {
+  // Uncached, it replaces the learned checkpoint, in place or, with a full
+  // budget, after admission reclaims the old copy. Either way the copy must
+  // stay a branch point, or it ranks as redundant once the older branch is
+  // gone and the next new branch retires it.
+  for (const auto [full, reuse] :
+       {std::pair{false, true}, std::pair{false, false}, std::pair{true, true},
+        std::pair{true, false}}) {
     auto stats = std::make_shared<FakeStats>();
-    // Room for five snapshots, so unrelated prompts force evictions.
+    // Room for five snapshots, so unrelated prompts force evictions, or for
+    // three, so republication itself must evict.
     auto runner = std::make_shared<PersistentSnapshotRunner>(
-        stats, "republished-boundary", 5 * sizeof(FakeSnapshot), 4096);
+        stats, "republished-boundary", (full ? 3 : 5) * sizeof(FakeSnapshot),
+        4096);
     TextRunnerPool pool(runner, 1);
     const std::vector<TextRunnerToken> shared(1000, 100);
     const auto run = [&](std::vector<TextRunnerToken> prompt,
@@ -1616,11 +1622,17 @@ void TestLearnedBoundarySurvivesExactRepublication() {
     };
     (void)run(branch(10000));
     (void)run(branch(20000));  // Learns the branch point after 1000 tokens.
+    if (full)
+      (void)run({9, 9, 9});  // Fills the budget and evicts the older branch.
     (void)run(shared, reuse);
-    for (const TextRunnerToken token : {9U, 8U, 7U, 6U})
-      (void)run({token, token, token});
+    if (!full) {
+      for (const TextRunnerToken token : {9U, 8U, 7U, 6U})
+        (void)run({token, token, token});
+    }
     Expect(run(branch(30000)) == 1000,
            "republishing the learned prefix keeps it a branch point");
+    Expect(run(branch(40000)) == 1000,
+           "a new branch does not retire the republished branch point");
   }
 }
 

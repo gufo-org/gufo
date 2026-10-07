@@ -750,7 +750,7 @@ ContinuationState& ContinuationCache::StateAt(std::size_t index) {
 
 bool ContinuationCache::ReserveSnapshot(
     std::size_t source_index, std::size_t snapshot_bytes,
-    std::size_t token_count, bool preserve_source, SnapshotPurpose purpose,
+    std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
     std::span<const ContinuationToken> replacement_prefix,
     std::span<const std::uint8_t> input_identity) {
   std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
@@ -835,12 +835,46 @@ bool ContinuationCache::ReserveSnapshot(
                IsPrefix(source.tokens, replacement_prefix);
       };
 
+      // Publishing a retained prefix again replaces that copy, so reclaim it
+      // before another family's and keep a learned branch point learned.
+      std::size_t exact = impl_->entries.size();
+      if (replacement_prefix.size() == token_count) {
+        for (std::size_t candidate = impl_->state_count;
+             candidate < impl_->entries.size(); ++candidate) {
+          const auto& entry = *impl_->entries[candidate];
+          if (candidate != source_index && entry.valid && entry.snapshot &&
+              std::ranges::equal(entry.tokens, replacement_prefix) &&
+              std::ranges::equal(entry.input_identity, input_identity)) {
+            exact = candidate;
+            break;
+          }
+        }
+      }
+
       const bool can_fit_after_eviction =
           snapshot_bytes != 0 &&
           impl_->reserved_snapshot_bytes <= impl_->snapshot_capacity_bytes &&
           snapshot_bytes <=
               impl_->snapshot_capacity_bytes - impl_->reserved_snapshot_bytes;
+      const auto remove = [&](std::size_t target, SnapshotEventReason reason) {
+        auto& entry = *impl_->entries[target];
+        const std::size_t removed_bytes = entry.snapshot_bytes;
+        const std::size_t removed_tokens = entry.tokens.size();
+        removed_snapshots.push_back(std::move(entry.snapshot));
+        entry.tokens.clear();
+        entry.snapshot_bytes = 0;
+        entry.valid = false;
+        impl_->retained_snapshot_bytes -= removed_bytes;
+        events.push_back(make_event(SnapshotEventAction::kRemoved, reason,
+                                    removed_bytes, removed_tokens));
+      };
       while (can_fit_after_eviction && !fits()) {
+        if (exact < impl_->entries.size() && impl_->entries[exact]->valid) {
+          if (impl_->entries[exact]->purpose == SnapshotPurpose::kBranchPoint)
+            purpose = SnapshotPurpose::kBranchPoint;
+          remove(exact, SnapshotEventReason::kExactReplacement);
+          continue;
+        }
         std::size_t target = oldest_snapshot(false);
         // Advance this family before sacrificing another family's last copy,
         // unless the source is a branch point other prompts still diverge at.
@@ -854,17 +888,7 @@ bool ContinuationCache::ReserveSnapshot(
         if (target == impl_->entries.size()) {
           break;
         }
-        auto& entry = *impl_->entries[target];
-        const std::size_t removed_bytes = entry.snapshot_bytes;
-        const std::size_t removed_tokens = entry.tokens.size();
-        removed_snapshots.push_back(std::move(entry.snapshot));
-        entry.tokens.clear();
-        entry.snapshot_bytes = 0;
-        entry.valid = false;
-        impl_->retained_snapshot_bytes -= removed_bytes;
-        events.push_back(make_event(SnapshotEventAction::kRemoved,
-                                    SnapshotEventReason::kByteCapacity,
-                                    removed_bytes, removed_tokens));
+        remove(target, SnapshotEventReason::kByteCapacity);
       }
 
       if (fits()) {
