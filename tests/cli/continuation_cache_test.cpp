@@ -1175,6 +1175,60 @@ void TestAppendedImagesReuseOnlyCompatiblePrefixes() {
          "image mismatch diagnostics retain the actual token agreement");
 }
 
+void TestNewBranchPreservesSharedSourceUnderBytePressure() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {
+          .restore =
+              [](gufo::server::ContinuationState& state,
+                 const gufo::server::ContinuationSnapshot& snapshot) {
+                dynamic_cast<FakeState&>(state).value =
+                    dynamic_cast<const FakeSnapshot&>(snapshot).value;
+              },
+          .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+          .on_event = {},
+      },
+      8);
+  const auto retain = [&](const Tokens& tokens, std::size_t value) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(sizeof(std::size_t), tokens.size(), false,
+                                    SnapshotPurpose::kContinuation, tokens),
+           "initial checkpoint fits without eviction");
+    lease.Commit(tokens, std::make_unique<FakeSnapshot>(value));
+  };
+  const Tokens unrelated{9, 9, 9};
+  const Tokens shared{1, 2, 3};
+  retain(unrelated, 9003);
+  retain(shared, 1003);
+  retain({1, 2, 3, 4, 4}, 2005);
+  retain({1, 2, 3, 5, 5}, 3005);
+
+  const Tokens incoming{1, 2, 3, 6, 6};
+  auto branch = cache.Acquire(incoming);
+  Expect(branch.cache_hit() && branch.cached_tokens() == shared.size() &&
+             dynamic_cast<FakeState&>(branch.state()).value == 1003,
+         "the new conversation restores the shared branch point");
+  Expect(branch.TryReserveSnapshot(sizeof(std::size_t), incoming.size(), false,
+                                   SnapshotPurpose::kContinuation, incoming),
+         "the new continuation can replace an older unrelated checkpoint");
+  branch.Commit(incoming, std::make_unique<FakeSnapshot>(4005));
+  Expect(cache.retained_snapshot_bytes() == 4 * sizeof(std::size_t) &&
+             cache.reserved_snapshot_bytes() == 0,
+         "the new branch stays within the checkpoint byte budget");
+
+  const Tokens next_prompt{1, 2, 3, 7, 7};
+  auto next = cache.Acquire(next_prompt);
+  Expect(next.cache_hit() && next.cached_tokens() == shared.size() &&
+             dynamic_cast<FakeState&>(next.state()).value == 1003,
+         "a new branch must not replace the shared source needed by its peers");
+  next.Invalidate();
+  Expect(cache.CachedPrefixTokens(unrelated) == 0,
+         "the oldest unrelated continuation yields to the shared branch point");
+}
+
 int main() {
   TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
@@ -1187,6 +1241,7 @@ int main() {
   TestBorrowedSnapshotPrefersAvailableOwner();
   TestCachedPrefixTokensPeeksWithoutLeasing();
   TestBranchPointOutlivesOlderTurnsUnderPressure();
+  TestNewBranchPreservesSharedSourceUnderBytePressure();
   TestLearnedBranchPointOutlivesItsOlderBranch();
   TestDeeperLearnedBranchPointSupersedesShallower();
   TestByteCapacityEvictsBeforeSnapshotAllocation();
