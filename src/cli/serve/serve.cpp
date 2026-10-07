@@ -596,7 +596,7 @@ void PrintServeHelp(std::string_view program_name,
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
-    std::size_t max_pending_requests_per_client = 4;
+    std::size_t max_pending_requests_per_client = 0;
     std::uint64_t request_timeout_ms = 0;
     std::size_t max_output_bytes = server::kDefaultMaxOutputBytes;
     std::size_t max_buffered_output_bytes =
@@ -683,9 +683,10 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--max-pending", "N",
                      "Maximum queued generation requests (default: 16)",
                      "Scheduling", &max_pending_requests);
-    parser.AddOption("", "--max-pending-per-client", "N",
-                     "Maximum queued requests per client IP (default: 4)",
-                     "Scheduling", &max_pending_requests_per_client);
+    parser.AddOption(
+        "", "--max-pending-per-client", "N",
+        "Maximum queued requests per client IP (default: --max-pending)",
+        "Scheduling", &max_pending_requests_per_client);
     parser.AddOption(
         "", "--request-timeout-ms", "MS",
         "Queue plus generation timeout; 0 disables it (default: 0)",
@@ -1131,7 +1132,8 @@ int RunServe(std::span<const char* const> args) {
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
-    std::size_t max_pending_requests_per_client = 4;
+    // Defaults to --max-pending after parsing unless supplied.
+    std::size_t max_pending_requests_per_client = 0;
     std::uint64_t request_timeout_ms = 0;
     std::size_t max_output_bytes = server::kDefaultMaxOutputBytes;
     std::size_t max_buffered_output_bytes =
@@ -1212,9 +1214,10 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--max-pending", "N",
                          "Maximum queued generation requests (default: 16)",
                          "Scheduling", &max_pending_requests);
-    llm_parser.AddOption("", "--max-pending-per-client", "N",
-                         "Maximum queued requests per client IP (default: 4)",
-                         "Scheduling", &max_pending_requests_per_client);
+    llm_parser.AddOption(
+        "", "--max-pending-per-client", "N",
+        "Maximum queued requests per client IP (default: --max-pending)",
+        "Scheduling", &max_pending_requests_per_client);
     llm_parser.AddOption(
         "", "--request-timeout-ms", "MS",
         "Queue plus generation timeout; 0 disables it (default: 0)",
@@ -1264,6 +1267,9 @@ int RunServe(std::span<const char* const> args) {
     if (llm_parser.IsHelpRequested()) {
       PrintServeHelp("gufo", "llm");
       return 0;
+    }
+    if (!llm_parser.WasSupplied("--max-pending-per-client")) {
+      max_pending_requests_per_client = max_pending_requests;
     }
     if (!prepare_server_options()) {
       return 2;

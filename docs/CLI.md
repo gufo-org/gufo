@@ -111,8 +111,8 @@ seed. Speed depends on acceptance and verification cost.
 
 - `maxPending` — maximum requests waiting in the queue. Over the limit,
   clients wait or are refused rather than exhausting memory.
-- `maxPendingPerClient` — the same cap but per client, so one client cannot
-  hog the whole queue.
+- `maxPendingPerClient` — the same cap but per client IP. It defaults to
+  `maxPending`; set it lower so one client cannot hog the whole queue.
 - `requestTimeoutMs` — requests are killed after this many milliseconds. In
   practice: prevents stuck requests from holding GPU sessions forever.
 - `maxOutputBytes` — maximum response size per request.
