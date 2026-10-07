@@ -4,6 +4,27 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.9.0](https://github.com/gufo-org/gufo/compare/v0.8.1...v0.9.0) (2026-10-07)
+
+
+### Features
+
+* **server:** add opt-in --trace for text request content ([#458](https://github.com/gufo-org/gufo/issues/458)) ([ba97a2b](https://github.com/gufo-org/gufo/commit/ba97a2b33f3ab0ca3864b9b7b51c62dff199268f))
+
+
+### Bug Fixes
+
+* **cache:** exclude free CMA pages from the automatic RAM budget ([88d2139](https://github.com/gufo-org/gufo/commit/88d213943e4f97c292f1561ccae32bb42e2b35c3))
+* **cache:** keep learned branch points under RAM pressure ([#466](https://github.com/gufo-org/gufo/issues/466)) ([7da04cd](https://github.com/gufo-org/gufo/commit/7da04cd37f70eb1c455fae7ceb2306f0cbbf4173))
+* **serve:** default the per-client queue cap to --max-pending ([#467](https://github.com/gufo-org/gufo/issues/467)) ([04205d4](https://github.com/gufo-org/gufo/commit/04205d44611fdccca2be0ae70e685894fbd0d19a))
+* **server:** hoist mid-conversation system messages to the leading block ([#449](https://github.com/gufo-org/gufo/issues/449)) ([05688f9](https://github.com/gufo-org/gufo/commit/05688f94aec4ecae21ea9be0d9eb5c6516e18829))
+
+
+### Performance
+
+* **qwen-flash:** reduce prefill work at long context ([#463](https://github.com/gufo-org/gufo/issues/463)) ([33d1b20](https://github.com/gufo-org/gufo/commit/33d1b208a72e9664fdc1267ae1c0d465cfb9b8f9))
+* **qwen:** avoid flash-next prompt checkpoint copies ([#445](https://github.com/gufo-org/gufo/issues/445)) ([82711d8](https://github.com/gufo-org/gufo/commit/82711d8c8ceb8bda9024914b6e7ac8495ba41742))
+
 ## [0.8.1](https://github.com/gufo-org/gufo/compare/v0.8.0...v0.8.1) (2026-10-06)
 
 
