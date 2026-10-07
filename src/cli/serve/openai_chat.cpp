@@ -3203,13 +3203,193 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
   return {};
 }
 
-GeneratedText SplitGeneratedText(
-    std::string_view text, TextGenerationBackend::InitialOutputState initial) {
+std::optional<HttpResponse> ParseAnthropicToolControls(const json::Value& body,
+                                                       ChatRequest* chat) {
+  const auto* tools = body.find("tools");
+  const auto* choice = body.find("tool_choice");
+  if (tools == nullptr && choice == nullptr)
+    return {};
+  // Rewrite the Messages declarations as Chat tools so validation, schema
+  // constraints and tool framing stay on the single Chat tool path.
+  json::Value converted = json::Value::object();
+  if (tools != nullptr) {
+    if (!tools->is_array())
+      return Error(400, "Bad Request", "'tools' must be an array",
+                   "invalid_tools");
+    auto functions = json::Value::array();
+    for (const auto& tool : tools->items()) {
+      if (!tool.is_object() || tool.member_str("type", "custom") != "custom" ||
+          !tool.contains("input_schema"))
+        return Error(400, "Bad Request",
+                     "only custom tools with an input_schema are supported",
+                     "invalid_tools");
+      json::Value function = json::Value::object();
+      for (const auto* key : {"name", "description"})
+        if (const auto* value = tool.find(key))
+          function[key] = *value;
+      function["parameters"] = *tool.find("input_schema");
+      json::Value wrapped = json::Value::object();
+      wrapped["type"] = "function";
+      wrapped["function"] = std::move(function);
+      functions.push_back(std::move(wrapped));
+    }
+    converted["tools"] = std::move(functions);
+  }
+  if (choice != nullptr) {
+    const auto type = choice->is_object() ? choice->member_str("type") : "";
+    if (type == "auto" || type == "none") {
+      converted["tool_choice"] = type;
+    } else if (type == "any") {
+      converted["tool_choice"] = "required";
+    } else if (type == "tool") {
+      json::Value forced = json::Value::object();
+      forced["type"] = "function";
+      forced["function"] = json::Value::object();
+      if (const auto* name = choice->find("name"))
+        forced["function"]["name"] = *name;
+      converted["tool_choice"] = std::move(forced);
+    } else {
+      return Error(400, "Bad Request",
+                   "'tool_choice.type' must be auto, any, tool or none",
+                   "invalid_tool_choice");
+    }
+    if (const auto* single = choice->find("disable_parallel_tool_use")) {
+      if (!single->is_bool())
+        return Error(400, "Bad Request",
+                     "'disable_parallel_tool_use' must be a boolean",
+                     "invalid_tools");
+      if (type != "tool")
+        converted["parallel_tool_calls"] = !single->as_bool();
+    }
+  }
+  ParsedChatRequest parsed;
+  parsed.chat = *chat;
+  if (auto error = ParseToolControls(converted, &parsed))
+    return error;
+  *chat = std::move(parsed.chat);
+  return {};
+}
+
+bool ParseAnthropicToolMessage(const json::Value& item,
+                               std::vector<tokenization::ChatMessage>* messages,
+                               std::string* error) {
+  const auto role = item.member_str("role");
+  const auto* content = item.find("content");
+  if (!item.is_object() || (role != "user" && role != "assistant") ||
+      content == nullptr || !content->is_array()) {
+    *error = "tool blocks require a user or assistant content array";
+    return false;
+  }
+  const auto read_text = [&](const json::Value& part, std::string* out) {
+    const auto* text = part.find("text");
+    if (part.member_str("type") != "text" || text == nullptr ||
+        !text->is_string()) {
+      *error = "unsupported Messages content block";
+      return false;
+    }
+    *out += text->str();
+    return true;
+  };
+  if (role == "assistant") {
+    tokenization::ChatMessage message(tokenization::ChatRole::kAssistant, "");
+    for (const auto& part : content->items()) {
+      const auto type = part.is_object() ? part.member_str("type") : "";
+      if (type == "thinking") {
+        const auto* thinking = part.find("thinking");
+        if (thinking == nullptr || !thinking->is_string()) {
+          *error = "thinking blocks require thinking text";
+          return false;
+        }
+        message.thought += thinking->str();
+      } else if (type == "tool_use") {
+        const auto* id = part.find("id");
+        const auto* input = part.find("input");
+        if (id == nullptr || !id->is_string() || id->str().empty() ||
+            input == nullptr || !input->is_object()) {
+          *error = "tool_use blocks require a non-empty id and an object input";
+          return false;
+        }
+        json::Value function = json::Value::object();
+        if (const auto* name = part.find("name"))
+          function["name"] = *name;
+        function["arguments"] = input->dump();
+        tokenization::ChatMessage::ToolCall call;
+        call.id = id->str();
+        if (!ParseHistoricalFunction(function, &call, error))
+          return false;
+        message.tool_calls.push_back(std::move(call));
+      } else if (!read_text(part, &message.content)) {
+        return false;
+      }
+    }
+    messages->push_back(std::move(message));
+    return true;
+  }
+  // One user turn carries the results of the previous calls, then any text.
+  std::optional<tokenization::ChatMessage> text;
+  for (const auto& part : content->items()) {
+    if (!part.is_object() || part.member_str("type") != "tool_result") {
+      if (!text)
+        text.emplace(tokenization::ChatRole::kUser, "");
+      if (!read_text(part, &text->content))
+        return false;
+      continue;
+    }
+    if (text) {
+      messages->push_back(std::move(*text));
+      text.reset();
+    }
+    const auto* id = part.find("tool_use_id");
+    const auto* failed = part.find("is_error");
+    if (id == nullptr || !id->is_string() || id->str().empty() ||
+        (failed != nullptr && !failed->is_bool())) {
+      *error = "tool_result blocks require a non-empty tool_use_id";
+      return false;
+    }
+    tokenization::ChatMessage result(tokenization::ChatRole::kTool, "");
+    result.tool_call_id = id->str();
+    if (const auto* output = part.find("content")) {
+      if (output->is_string()) {
+        result.content = output->str();
+      } else if (!output->is_array()) {
+        *error = "tool_result content must be a string or text blocks";
+        return false;
+      } else {
+        for (const auto& block : output->items())
+          if (!read_text(block, &result.content))
+            return false;
+      }
+    }
+    messages->push_back(std::move(result));
+  }
+  if (text)
+    messages->push_back(std::move(*text));
+  return true;
+}
+
+GeneratedMessage ParseAnthropicGeneration(
+    std::string_view text, TextGenerationBackend::InitialOutputState initial,
+    const ChatRequest& chat,
+    std::optional<sampling::JsonConstraint::ToolFormat> format, bool stopped) {
   QuoteTracker quotes;
-  auto generated = ParseGeneration(
-      text, initial, {}, ChatRequest::ToolChoice::kNone, false, {}, {}, quotes);
-  return {.reasoning = std::move(generated.reasoning_content),
-          .text = std::move(generated.text)};
+  const auto markers = ToolMarkers(format);
+  const auto closers = ToolClosers(format);
+  const auto generated =
+      chat.constrained_tools
+          ? ParseStructuredGeneration(text, initial, chat.tools,
+                                      chat.tool_choice, stopped, true, markers,
+                                      closers, quotes)
+          : ParseGeneration(text, initial, chat.tools, chat.tool_choice,
+                            stopped, markers, closers, quotes);
+  GeneratedMessage message{.reasoning = generated.reasoning_content,
+                           .text = generated.text,
+                           .tool_uses = {}};
+  for (const auto& call : generated.tool_calls)
+    message.tool_uses.push_back(
+        {.id = call.id,
+         .name = call.name,
+         .input = json::parse(ArgumentsJson(call.arguments))});
+  return message;
 }
 
 HttpResponse CreateOpenAiResponse(const HttpRequest& request,

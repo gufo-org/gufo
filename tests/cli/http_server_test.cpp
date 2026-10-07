@@ -1389,6 +1389,128 @@ void TestCompatibilityRequests() {
   assert(server.backend->LastCall().chat.reasoning.enabled == false);
   assert(server.backend->LastCall().chat.reasoning.effort ==
          gufo::ReasoningEffort::kLow);
+
+  // Messages tools map onto the Chat tool path: declarations, tool_choice,
+  // tool_use output and replayed tool_use/tool_result history.
+  const std::string weather_tool = R"([{"name":"get_weather",
+      "description":"Get weather","input_schema":{"type":"object",
+      "properties":{"city":{"type":"string"}},"required":["city"]}}])";
+  server.backend->SetOutput(
+      "<tool_call>\n<function=get_weather>\n<parameter=city>\nRome\n"
+      "</parameter>\n</function>\n</tool_call>");
+  const auto called = response_body(server.Post(
+      "/v1/messages", R"({"max_tokens":64,"tool_choice":{"type":"any"},
+          "messages":[{"role":"user","content":"weather in Rome?"}],
+          "tools":)" + weather_tool +
+                          "}"));
+  assert(called.member_str("stop_reason") == "tool_use");
+  const auto call_blocks = called.find("content")->items();
+  assert(call_blocks.size() == 1 &&
+         call_blocks[0].member_str("type") == "tool_use" &&
+         !call_blocks[0].member_str("id").empty() &&
+         call_blocks[0].member_str("name") == "get_weather" &&
+         call_blocks[0].find("input")->member_str("city") == "Rome");
+  const auto declared = server.backend->LastCall().chat;
+  assert(declared.tools.size() == 1 &&
+         declared.tools[0].name == "get_weather" &&
+         declared.tools[0].description == "Get weather" &&
+         declared.tool_choice ==
+             gufo::server::ChatRequest::ToolChoice::kRequired &&
+         declared.constrained_tools);
+  response_body(server.Post("/v1/messages",
+                            R"({"messages":[{"role":"user","content":"hi"}],
+          "tool_choice":{"type":"tool","name":"get_weather"},
+          "tools":)" + weather_tool +
+                                "}"));
+  assert(server.backend->LastCall().chat.forced_tool_name == "get_weather" &&
+         !server.backend->LastCall().chat.parallel_tool_calls);
+  response_body(server.Post("/v1/messages",
+                            R"({"messages":[{"role":"user","content":"hi"}],
+          "tool_choice":{"type":"auto","disable_parallel_tool_use":true},
+          "tools":)" + weather_tool +
+                                "}"));
+  assert(server.backend->LastCall().chat.tool_choice ==
+             gufo::server::ChatRequest::ToolChoice::kAuto &&
+         !server.backend->LastCall().chat.parallel_tool_calls);
+  response_body(server.Post("/v1/messages",
+                            R"({"messages":[{"role":"user","content":"hi"}],
+          "tool_choice":{"type":"none"},"tools":)" +
+                                weather_tool + "}"));
+  assert(server.backend->LastCall().chat.tool_choice ==
+             gufo::server::ChatRequest::ToolChoice::kNone &&
+         !server.backend->LastCall().chat.constrained_tools);
+
+  server.backend->SetOutput("It is sunny.");
+  const auto answered = response_body(server.Post("/v1/messages", R"({
+      "tools":)" + weather_tool + R"(,"messages":[
+        {"role":"user","content":"weather in Rome?"},
+        {"role":"assistant","content":[
+          {"type":"thinking","thinking":"look it up","signature":""},
+          {"type":"text","text":"Checking."},
+          {"type":"tool_use","id":"toolu_1","name":"get_weather",
+           "input":{"city":"Rome"}}]},
+        {"role":"user","content":[
+          {"type":"tool_result","tool_use_id":"toolu_1","content":"sunny"},
+          {"type":"tool_result","tool_use_id":"toolu_2","is_error":true,
+           "content":[{"type":"text","text":"timeout"}]},
+          {"type":"text","text":"thanks"}]}]})"));
+  assert(answered.member_str("stop_reason") == "end_turn" &&
+         answered.find("content")->items()[0].member_str("text") ==
+             "It is sunny.");
+  const auto history = server.backend->LastCall().chat.messages;
+  assert(history.size() == 5);
+  assert(history[1].role == gufo::tokenization::ChatRole::kAssistant &&
+         history[1].thought == "look it up" &&
+         history[1].content == "Checking." &&
+         history[1].tool_calls.size() == 1 &&
+         history[1].tool_calls[0].id == "toolu_1" &&
+         history[1].tool_calls[0].name == "get_weather" &&
+         history[1].tool_calls[0].arguments.size() == 1 &&
+         history[1].tool_calls[0].arguments[0].name == "city" &&
+         history[1].tool_calls[0].arguments[0].value == "Rome");
+  assert(history[2].role == gufo::tokenization::ChatRole::kTool &&
+         history[2].tool_call_id == "toolu_1" && history[2].content == "sunny");
+  assert(history[3].role == gufo::tokenization::ChatRole::kTool &&
+         history[3].tool_call_id == "toolu_2" &&
+         history[3].content == "timeout");
+  assert(history[4].role == gufo::tokenization::ChatRole::kUser &&
+         history[4].content == "thanks");
+
+  const auto calls_before = server.backend->calls.load();
+  for (const auto& invalid : std::vector<std::string>{
+           R"({"messages":[{"role":"user","content":"hi"}],"tools":{}})",
+           R"({"messages":[{"role":"user","content":"hi"}],
+               "tools":[{"type":"web_search_20250305","name":"web_search"}]})",
+           R"({"messages":[{"role":"user","content":"hi"}],
+               "tools":[{"name":"f"}]})",
+           R"({"messages":[{"role":"user","content":"hi"}],
+               "tool_choice":{"type":"any"}})",
+           R"({"messages":[{"role":"user","content":"hi"}],
+               "tool_choice":"auto","tools":)" +
+               weather_tool + "}",
+           R"({"messages":[{"role":"user","content":"hi"}],
+               "tool_choice":{"type":"auto","disable_parallel_tool_use":1},
+               "tools":)" +
+               weather_tool + "}",
+           R"({"messages":[{"role":"assistant","content":[{"type":"tool_use",
+               "id":"toolu_1","name":"f","input":"{}"}]}]})",
+           R"({"messages":[{"role":"assistant","content":[{"type":"tool_use",
+               "name":"f","input":{}}]}]})",
+           R"({"messages":[{"role":"user","content":[{"type":"tool_result",
+               "content":"x"}]}]})",
+           R"({"messages":[{"role":"user","content":[{"type":"tool_result",
+               "tool_use_id":"toolu_1","content":[{"type":"image"}]}]}]})",
+       })
+    ExpectStatus(server.Post("/v1/messages", invalid), 400);
+  assert(server.backend->calls == calls_before);
+  // Without declared tools, call markup stays visible text as before.
+  server.backend->SetOutput("<tool_call>leak");
+  const auto undeclared = response_body(server.Post(
+      "/v1/messages", R"({"messages":[{"role":"user","content":"hi"}]})"));
+  assert(undeclared.member_str("stop_reason") == "end_turn" &&
+         undeclared.find("content")->items().size() == 1 &&
+         undeclared.find("content")->items()[0].member_str("text") ==
+             "<tool_call>leak");
   server.backend->SetOutput("ok");
 }
 

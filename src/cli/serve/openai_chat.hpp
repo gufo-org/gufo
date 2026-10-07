@@ -26,14 +26,31 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
 /// Shared effort names; each API applies its own thinking and alias rules.
 std::optional<ReasoningEffort> ParseReasoningEffortName(std::string_view value);
 
-/// Reasoning and visible text of a generation without tools or schemas, split
-/// exactly as Chat Completions reports them.
-struct GeneratedText {
+/// Messages tools and tool_choice, mapped onto the Chat tool declarations so
+/// framing, schema constraints and replayed tool turns match Chat.
+std::optional<HttpResponse> ParseAnthropicToolControls(const json::Value& body,
+                                                       ChatRequest* chat);
+/// One Messages turn with tool_use or tool_result blocks. Each tool_result
+/// becomes a tool message; text in the same user turn follows as user text.
+bool ParseAnthropicToolMessage(const json::Value& item,
+                               std::vector<tokenization::ChatMessage>* messages,
+                               std::string* error);
+/// Buffered Messages output: reasoning and visible text split exactly as
+/// Chat Completions reports them, plus parsed tool calls.
+struct GeneratedToolUse {
+  std::string id;
+  std::string name;
+  json::Value input;
+};
+struct GeneratedMessage {
   std::string reasoning;
   std::string text;
+  std::vector<GeneratedToolUse> tool_uses;
 };
-GeneratedText SplitGeneratedText(
-    std::string_view text, TextGenerationBackend::InitialOutputState initial);
+GeneratedMessage ParseAnthropicGeneration(
+    std::string_view text, TextGenerationBackend::InitialOutputState initial,
+    const ChatRequest& chat,
+    std::optional<sampling::JsonConstraint::ToolFormat> format, bool stopped);
 /// Responses text output uses the same reasoning/UTF-8 filter and scheduler
 /// as Chat Completions, including streaming cancellation and cache retention.
 HttpResponse CreateOpenAiResponse(const HttpRequest& request,

@@ -595,7 +595,7 @@ The other compatibility routes are deliberately limited:
 | Route | Supported request | Output limit |
 | --- | --- | --- |
 | `/v1/completions` | One prompt string, buffered or SSE completion | `max_tokens` |
-| `/v1/messages` | Text messages and optional text system instructions | `max_tokens` |
+| `/v1/messages` | Text, thinking and tool blocks, optional text system instructions and custom tools | `max_tokens` |
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
@@ -610,8 +610,13 @@ before the `text` block, with an empty `signature`, for every accepted
 `thinking` blocks unchanged so later turns reuse the cached prompt.
 `output_config.effort` (`low`, `medium`, `high`, `xhigh` or `max`) sets the
 reasoning effort used while thinking is on; it never enables thinking. Other
-`output_config` members are rejected. Messages rejects tools; use Chat
-Completions for tools. Completions routes accept `stop`;
+`output_config` members are rejected. Messages maps custom `tools`
+(`input_schema`) and `tool_choice` (`auto`, `any`, `tool`, `none`, with
+`disable_parallel_tool_use`) onto the Chat tool path, so framing, schema
+constraints and cache reuse match Chat Completions. Calls are returned as
+`tool_use` blocks with `stop_reason: "tool_use"`; replay them unchanged with
+the following `tool_result` blocks. Server tools such as `web_search` are
+rejected. Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
 and template-aware message counting are not implemented.
