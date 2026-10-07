@@ -525,8 +525,8 @@ void TestAutomaticStagingAndAdmissionDiagnostics() {
   ContinuationDiskStore defaults({.directory = default_directory.path()});
   Expect(defaults.capacity_bytes() == std::size_t{8} * 1024U * 1024U * 1024U &&
              defaults.staging_capacity_bytes() > kDiskHeaderBytes &&
-             defaults.staging_capacity_bytes() <= 1024U * 1024U * 1024U,
-         "defaults bound RAM staging to 1 GiB independently of disk retention");
+             defaults.staging_capacity_bytes() <= defaults.capacity_bytes(),
+         "defaults bound RAM staging by available RAM and disk retention");
 
   TemporaryDirectory directory;
   std::vector<ContinuationDiskEvent> events;

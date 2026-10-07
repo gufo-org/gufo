@@ -641,11 +641,10 @@ struct ContinuationDiskStore::Impl {
     }
     if (options.staging_capacity_bytes == 0) {
       // The host snapshot budget already leaves half of available RAM free.
-      // Disk staging gets a quarter of that budget and a conservative hard cap.
+      // Disk staging gets a quarter of that budget. It allocates nothing
+      // upfront, so a fixed cap would only refuse checkpoints larger than it.
       options.staging_capacity_bytes =
-          std::min({options.capacity_bytes,
-                    TextRunnerDiskCacheOptions::kAutomaticStagingMaxBytes,
-                    HostSnapshotBudgetBytes() / 4});
+          std::min(options.capacity_bytes, HostSnapshotBudgetBytes() / 4);
     }
     if (options.staging_capacity_bytes < kHeaderBytes) {
       throw std::invalid_argument(

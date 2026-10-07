@@ -217,11 +217,11 @@ its changed suffix again.
 
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
-`--cache-disk-staging-bytes 0` (the default) selects the smallest of 1 GiB,
-one eighth of available host RAM after model/session loading (including cgroup
-limits), and the disk budget. This bounds queued captures/writes and each disk
-read separately; it allocates nothing upfront. Live model state and retained
-RAM snapshots have separate budgets.
+`--cache-disk-staging-bytes 0` (the default) selects the smaller of one eighth
+of available host RAM after model/session loading (including cgroup limits) and
+the disk budget. This bounds queued captures/writes and each disk read
+separately; it allocates nothing upfront. Live model state and retained RAM
+snapshots have separate budgets.
 
 Snapshots that exceed either limit are skipped with their required size and
 available budget logged; live conversation reuse remains available. Existing

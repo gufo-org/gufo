@@ -713,10 +713,11 @@ void PrintServeHelp(std::string_view program_name,
                      "Retained disk-cache byte budget (default: " +
                          std::to_string(cache_disk_bytes) + ")",
                      "Cache", &cache_disk_bytes);
-    parser.AddOption("", "--cache-disk-staging-bytes", "N",
-                     "RAM limit for queued snapshots and each disk read "
-                     "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
-                     "Cache", &cache_disk_staging_bytes);
+    parser.AddOption(
+        "", "--cache-disk-staging-bytes", "N",
+        "RAM limit for queued snapshots and each disk read "
+        "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
+        "Cache", &cache_disk_staging_bytes);
     parser.AddFlag("", "--log-progress",
                    "Log live prefill and decode progress (needs "
                    "--log-level=info or debug)",
@@ -1249,7 +1250,7 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
         "RAM limit for queued snapshots and each disk read "
-        "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
+        "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
     llm_parser.AddFlag("", "--log-progress",
                        "Log live prefill and decode progress (needs "

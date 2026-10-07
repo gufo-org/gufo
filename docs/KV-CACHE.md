@@ -336,7 +336,7 @@ captured; RAM-retained snapshots and their captures in progress share the RAM bu
 | Retained snapshot bytes, RAM | smaller of 32 GiB and half the available host RAM; an explicit value up to the available host RAM minus 4 GiB; 27B also checks HIP free memory | `--cache-ram-bytes` |
 | RAM checkpoint records | 128, independent of `--sessions` | internal safety limit |
 | Disk bytes | 8 GiB | `--cache-disk-bytes` |
-| Disk staging bytes | smallest of 1 GiB, `MemAvailable / 8`, the disk budget | `--cache-disk-staging-bytes` |
+| Disk staging bytes | smaller of `MemAvailable / 8` and the disk budget | `--cache-disk-staging-bytes` |
 
 `--cache-ram-bytes 0` selects automatic sizing. Zero does not disable reuse.
 A positive value replaces the automatic budget and may exceed it: it trades the
@@ -388,9 +388,9 @@ See #343.
 
 Snapshot size scales with retained tokens and differs sharply between models:
 roughly 0.5 GB at 5k tokens on Flash-Next, and 3.7 GB at 24k tokens on
-Qwen3.8-27B **(measured)**. The 1 GiB disk staging default is therefore below a
-single 27B checkpoint at moderate depth, which reduces `--cache-disk` to a
-no-op unless raised. See #259.
+Qwen3.8-27B **(measured)**. Automatic disk staging therefore has no fixed cap:
+it follows available RAM and the disk budget, so `--cache-disk` keeps 27B
+checkpoints at moderate depth without an explicit limit. See #259.
 
 RAM eviction follows the checkpoint priorities above. Disk eviction remains
 global least-recently-used, without conversation or rebuild-cost awareness.
