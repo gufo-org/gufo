@@ -81,6 +81,45 @@ void TestBorrowedSnapshotPrefersAvailableOwner() {
   second.Invalidate();
 }
 
+void TestBorrowedSnapshotKeepsOwnersLiveFrontier() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore =
+           [](gufo::server::ContinuationState& state,
+              const gufo::server::ContinuationSnapshot& snapshot) {
+             dynamic_cast<FakeState&>(state).value =
+                 dynamic_cast<const FakeSnapshot&>(snapshot).value;
+           },
+       .capacity_bytes = [] { return 1024; },
+       .on_event = {}});
+  // A conversation leaves its prompt checkpoint and, in the state that owns
+  // the checkpoint's rows, its live frontier: prompt plus reply.
+  auto conversation = cache.Acquire(Tokens{1, 2, 3});
+  auto* owner = &conversation.state();
+  dynamic_cast<FakeState&>(*owner).value = 9;
+  Expect(conversation.TryReserveSnapshot(sizeof(std::size_t), 3),
+         "reserve the prompt checkpoint");
+  conversation.Commit(
+      {1, 2, 3}, std::make_unique<FakeSnapshot>(7, sizeof(std::size_t), owner),
+      {1, 2, 3, 4, 5});
+  // A branch from the checkpoint takes the other, free state.
+  auto branch = cache.Acquire(Tokens{1, 2, 3, 6});
+  Expect(branch.cache_hit() && &branch.state() != owner &&
+             dynamic_cast<FakeState&>(branch.state()).value == 7,
+         "a branch restores into a free state, not the owner's live frontier");
+  branch.Invalidate();
+  // The conversation's next turn still continues from its live frontier.
+  auto next = cache.Acquire(Tokens{1, 2, 3, 4, 5, 8});
+  Expect(next.cache_hit() && next.cached_tokens() == 5 &&
+             &next.state() == owner &&
+             dynamic_cast<FakeState&>(next.state()).value == 9,
+         "the next turn reuses the generated reply");
+  next.Invalidate();
+}
+
 void TestColdMissThenExactExtensionHit() {
   std::vector<std::size_t> invalidations(1);
   std::size_t next_id = 0;
@@ -1239,6 +1278,7 @@ int main() {
   TestWaitingAcquireCanBeCancelled();
   TestSnapshotCanBranchIntoTwoIndependentStateSlots();
   TestBorrowedSnapshotPrefersAvailableOwner();
+  TestBorrowedSnapshotKeepsOwnersLiveFrontier();
   TestCachedPrefixTokensPeeksWithoutLeasing();
   TestBranchPointOutlivesOlderTurnsUnderPressure();
   TestNewBranchPreservesSharedSourceUnderBytePressure();

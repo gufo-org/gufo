@@ -543,7 +543,10 @@ ContinuationCache::Lease ContinuationCache::Acquire(
       std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
       for (std::size_t index = 0; index < impl_->entries.size(); ++index) {
         const auto& entry = *impl_->entries[index];
-        if (entry.available && cache_hit && impl_->entries[source]->snapshot &&
+        // Borrowed rows save the restore a copy, never another
+        // conversation's live frontier, whose loss costs its whole prefill.
+        if (entry.available && entry.live_tokens.empty() && cache_hit &&
+            impl_->entries[source]->snapshot &&
             impl_->entries[source]->snapshot->PrefersState(*entry.state)) {
           selected = index;
           break;
