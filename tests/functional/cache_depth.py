@@ -4,8 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import sys
 
+from cache_growth import check_unchanged_retry, log_offset
 
-def check_cache_depth(client, model, checks, chat_result, concurrency=4):
+
+def check_cache_depth(client, model, checks, chat_result, concurrency=4, server_log=None):
     request = dict(model=model, temperature=0, seed=31,
                    max_completion_tokens=16, reasoning_effort="none")
     controls = []
@@ -14,7 +16,8 @@ def check_cache_depth(client, model, checks, chat_result, concurrency=4):
         return (result["text"], result["reasoning"], result["tools"],
                 result["finish"], result["usage"]["completion_tokens"])
 
-    def chat(label, messages, code, floor=0, cold=False, retry=None, record=True):
+    def chat(label, messages, code, floor=0, cold=False, retry=None, record=True,
+             window=None):
         body = {**request, "messages": deepcopy(messages)}
         if cold:
             body["extra_body"] = {"cache_prompt": False}
@@ -34,7 +37,9 @@ def check_cache_depth(client, model, checks, chat_result, concurrency=4):
         else:
             assert reused >= floor, (label, floor, result)
         if retry is not None:
-            assert prefilled == 0 and signature(result) == signature(retry), result
+            assert total == retry["usage"]["prompt_tokens"], result
+            check_unchanged_retry(label, result, prefilled, server_log, *window)
+            assert signature(result) == signature(retry), result
         return body, result
 
     messages = [{"role": "system", "content": "cache_depth_main\n"
@@ -81,8 +86,10 @@ def check_cache_depth(client, model, checks, chat_result, concurrency=4):
     chat("depth_side", [{"role": "system", "content": "cache_depth_side"},
                          {"role": "user", "content": "Reply with only ALPHA."}], "ALPHA")
     messages.append({"role": "user", "content": "Reply with only BETA."})
+    before_resume = log_offset(server_log)
     body, resumed = chat("depth_resume", messages, "BETA", previous - 16)
-    chat("depth_unchanged", messages, "BETA", retry=resumed)
+    chat("depth_unchanged", messages, "BETA", retry=resumed,
+         window=(before_resume, log_offset(server_log)))
     controls.append(("resume", body, resumed, "BETA"))
 
     # Controls come last: they must never supply a checkpoint missing from a

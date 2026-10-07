@@ -251,6 +251,9 @@ Under entry pressure, an edited branch can first replace its incompatible
 tail, preserving earlier shared checkpoints. Optional history/retry copies
 are skipped rather than removing another prefix family's last useful copy.
 Retry copies cannot displace earlier history or stable boundaries either.
+An unchanged retry then restores the stable boundary and prefills only the
+assistant opening, such as `<|im_start|>assistant\n<think>\n`, again; the
+server logs `event=snapshot action=skipped` with that prompt's length.
 A new stable boundary can replace its own older boundary when that avoids
 removing another family's last copy. Sources are rechecked before replacement
 because another request may have changed the record.

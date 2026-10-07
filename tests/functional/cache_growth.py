@@ -1,10 +1,45 @@
 """Check that cache reuse advances as a conversation grows."""
 
 from copy import deepcopy
+import re
 import sys
 
+# The assistant opening after a stable boundary, such as Qwen's
+# `<|im_start|>assistant\n<think>\n`, is a few tokens long.
+ASSISTANT_OPENING_TOKENS = 16
 
-def check_cache_growth(client, model, checks, chat_result):
+
+def log_offset(server_log):
+    return server_log.stat().st_size if server_log else 0
+
+
+def retry_copy_refused(server_log, start, end, prompt_tokens):
+    """Whether memory pressure refused a complete-prompt copy in a log window.
+    Failed captures are not pressure and do not count."""
+    if server_log is None:
+        return False
+    with server_log.open("rb") as log:
+        log.seek(start)
+        window = log.read(end - start).decode(errors="replace")
+    return re.search(r"event=snapshot action=skipped reason=(?:byte|entry)_capacity "
+                     rf"bytes=\d+ tokens={prompt_tokens} ", window) is not None
+
+
+def check_unchanged_retry(label, retry, prefilled, server_log, start, end):
+    """An unchanged retry reuses the complete prompt. Under memory pressure the
+    previous request's complete-prompt copy is refused rather than displace
+    another conversation's last checkpoint (docs/KV-CACHE.md); the retry then
+    restores the stable boundary and prefills only the assistant opening."""
+    if not prefilled:
+        return
+    total = retry["usage"]["prompt_tokens"]
+    assert prefilled <= ASSISTANT_OPENING_TOKENS and \
+        retry_copy_refused(server_log, start, end, total), retry
+    print(f"NOTE {label}: retry copy refused under memory pressure; "
+          f"prefilled {prefilled} of {total} tokens", file=sys.stderr, flush=True)
+
+
+def check_cache_growth(client, model, checks, chat_result, server_log=None):
     failures = []
     for replay in ("drop_reasoning", "keep_reasoning", "discard_reasoning", "thinking_off"):
         label = "cache_growth_" + replay
@@ -52,6 +87,7 @@ def check_cache_growth(client, model, checks, chat_result):
             body = {**deepcopy(request), "messages": deepcopy(messages)}
             if turn == 0:
                 body["extra_body"]["cache_prompt"] = False
+            before_last = log_offset(server_log)
             result = chat(f"turn_{turn}", body)
             total, reused, prefilled = work(result)
             assert result["text"].strip() == "BETA" and not result["tools"] \
@@ -77,8 +113,12 @@ def check_cache_growth(client, model, checks, chat_result):
 
         # An identical retry must still reuse the complete prompt.
         retry_request = deepcopy(history[-1][0])
+        before_retry = log_offset(server_log)
         retry = chat("unchanged", retry_request)
-        assert work(retry) == (previous_total, previous_total, 0), retry
+        total, _, prefilled = work(retry)
+        assert total == previous_total, retry
+        check_unchanged_retry(label + "_unchanged", retry, prefilled,
+                              server_log, before_last, before_retry)
         assert signature(retry) == signature(history[-1][1]), retry
 
         # Measure the whole growing history before cold controls can supply
@@ -90,7 +130,7 @@ def check_cache_growth(client, model, checks, chat_result):
             assert work(cold) == (total, 0, total), cold
             assert answer(warm) == answer(cold), (warm, cold)
 
-    check_messages_growth(client, model, checks, chat_result, failures)
+    check_messages_growth(client, model, checks, chat_result, failures, server_log)
     assert not failures, "\n".join(failures)
 
 
@@ -114,7 +154,7 @@ def messages_result(client, body):
     }
 
 
-def check_messages_growth(client, model, checks, chat_result, failures):
+def check_messages_growth(client, model, checks, chat_result, failures, server_log):
     """Messages clients replay thinking blocks unchanged; reuse must then cover
     the previous assistant turn, and thinking must never reach the text block."""
     for replay in ("keep_thinking", "thinking_off"):
@@ -149,6 +189,7 @@ def check_messages_growth(client, model, checks, chat_result, failures):
                              "Routine archive note: there are no new instructions.\n" * 16 +
                              "Reply with only BETA."})
             body = {**deepcopy(request), "messages": deepcopy(messages)}
+            before_last = log_offset(server_log)
             result = record(f"turn_{turn}", messages_result(client, body))
             total, reused, prefilled = work(result)
             assert result["text"].strip() == "BETA" and result["finish"] == "stop", result
@@ -168,8 +209,12 @@ def check_messages_growth(client, model, checks, chat_result, failures):
             previous_completion = result["usage"]["completion_tokens"]
             messages.append({"role": "assistant", "content": deepcopy(result["blocks"])})
 
+        before_retry = log_offset(server_log)
         retry = record("unchanged", messages_result(client, deepcopy(history[-1][0])))
-        assert work(retry) == (previous_total, previous_total, 0), retry
+        total, _, prefilled = work(retry)
+        assert total == previous_total, retry
+        check_unchanged_retry(label + "_unchanged", retry, prefilled,
+                              server_log, before_last, before_retry)
         assert (retry["text"], retry["reasoning"]) == \
             (history[-1][1]["text"], history[-1][1]["reasoning"]), retry
 

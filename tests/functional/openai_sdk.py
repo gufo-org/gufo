@@ -2558,6 +2558,8 @@ def main():
                         default="off", help="Server mode; determines sampled replay guarantees")
     parser.add_argument("--snapshot-capacity-bytes", type=int,
                         help="Configured RAM checkpoint budget; required for cache-bridge")
+    parser.add_argument("--server-log", type=Path,
+                        help="Server log; shows retry copies refused under memory pressure")
     args = parser.parse_args()
     if args.suite in ("discovery", "all") and args.expected_input_modalities is None:
         parser.error("discovery requires --expected-input-modalities text or text,image")
@@ -2658,9 +2660,10 @@ def main():
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency,
                                                      args.context, args.speculative),
             "cache-edits": lambda: check_cache_edits(client, args.model, checks, chat_result),
-            "cache-growth": lambda: check_cache_growth(client, args.model, checks, chat_result),
+            "cache-growth": lambda: check_cache_growth(
+                client, args.model, checks, chat_result, args.server_log),
             "cache-depth": lambda: check_cache_depth(
-                client, args.model, checks, chat_result, args.concurrency),
+                client, args.model, checks, chat_result, args.concurrency, args.server_log),
             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
             "cache-concurrency": lambda: check_cache_concurrency(
                 client, args.model, checks, chat_result, args.concurrency),

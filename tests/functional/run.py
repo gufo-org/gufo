@@ -387,7 +387,8 @@ def main():
                             "--sampling-preset", args.sampling_preset,
                             "--sampling-overrides", json.dumps(overrides),
                             "--concurrency", str(sessions), "--speculative", speculative,
-                            "--context", option(command, "--context")]
+                            "--context", option(command, "--context"),
+                            "--server-log", str(output / "server.log")]
                 if vision:
                     sdk_args += ["--vision"]
                 if args.expected_input_modalities is not None:
