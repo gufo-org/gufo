@@ -28,8 +28,8 @@ the same across compilers. The tool removes the version from the rocPRIM
 inline namespace, so a baseline stays valid after a ROCm update.
 
 Compressed offload bundles (CCOB) need Python zstd or zlib. If they are not
-available, the tool uses clang-offload-bundler (--bundler, or PATH, or the
-directory of $HIP_CLANG).
+available, the tool uses clang-offload-bundler (--bundler, the HIP toolchain,
+or PATH).
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import struct
@@ -203,16 +204,17 @@ def inflate_ccob(blob: bytes, bundler: str | None) -> bytes:
     if not bundler:
         raise RuntimeError("compressed offload bundle: needs Python zstd or --bundler")
     with tempfile.TemporaryDirectory() as tmp:
-        src, dst = os.path.join(tmp, "in"), os.path.join(tmp, "out")
-        open(src, "wb").write(blob)
+        src = os.path.join(tmp, "in")
+        Path(src).write_bytes(blob)
         targets = subprocess.run([bundler, "--list", "--type=o", f"--input={src}"],
                                  check=True, capture_output=True, text=True).stdout.split()
         outs = [os.path.join(tmp, f"t{i}") for i in range(len(targets))]
         subprocess.run([bundler, "--unbundle", "--type=o", f"--input={src}",
-                        "--targets=" + ",".join(targets), "--output=" + ",".join(outs)],
+                        "--targets=" + ",".join(targets),
+                        *[f"--output={path}" for path in outs]],
                        check=True, capture_output=True)
         # Make an uncompressed bundle again. Then one code path reads the two types.
-        entries = [(t, open(o, "rb").read()) for t, o in zip(targets, outs)]
+        entries = [(t, Path(o).read_bytes()) for t, o in zip(targets, outs)]
         return make_bundle(entries)
 
 
@@ -234,7 +236,7 @@ def key(mangled: str) -> str:
 
 
 def binary_kernels(path: str, bundler: str | None) -> dict[str, dict]:
-    data = open(path, "rb").read()
+    data = Path(path).read_bytes()
     sections = elf_sections(data)
     if ".hip_fatbin" not in sections:
         raise SystemExit(f"{path}: no .hip_fatbin section")
@@ -261,6 +263,25 @@ def binary_kernels(path: str, bundler: str | None) -> dict[str, dict]:
 
 
 # ---- CLI --------------------------------------------------------------------------------
+def find_bundler(explicit: str | None) -> str | None:
+    if explicit:
+        if not os.path.isfile(explicit):
+            raise SystemExit(f"offload bundler not found: {explicit}")
+        return explicit
+    if os.environ.get("HIP_CLANG"):
+        candidate = os.path.join(os.path.dirname(os.environ["HIP_CLANG"]), "clang-offload-bundler")
+        if os.path.isfile(candidate):
+            return candidate
+    hipconfig = shutil.which("hipconfig")
+    if hipconfig:
+        result = subprocess.run([hipconfig, "-l"], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            candidate = os.path.join(result.stdout.strip(), "clang-offload-bundler")
+            if os.path.isfile(candidate):
+                return candidate
+    return shutil.which("clang-offload-bundler")
+
+
 def demangle(names):
     tool = shutil.which("c++filt") or shutil.which("llvm-cxxfilt")
     if not tool or not names:
@@ -311,11 +332,7 @@ def main() -> int:
     ap.add_argument("--compare", metavar="BASE_BINARY", help="list the kernels that are worse than in BASE_BINARY")
     args = ap.parse_args()
 
-    bundler = args.bundler if args.bundler and os.path.exists(args.bundler) else None
-    bundler = bundler or shutil.which("clang-offload-bundler")
-    if not bundler and os.environ.get("HIP_CLANG"):
-        cand = os.path.join(os.path.dirname(os.environ["HIP_CLANG"]), "clang-offload-bundler")
-        bundler = cand if os.path.exists(cand) else None
+    bundler = find_bundler(args.bundler)
     kernels = binary_kernels(args.binary, bundler)
     using = {n: k for n, k in kernels.items() if k["scratch"] > 0}
 
@@ -324,8 +341,9 @@ def main() -> int:
 
     if args.write_baseline:
         allow = {n: {"max_scratch": k["scratch"]} for n, k in sorted(using.items())}
-        json.dump({"schema": "gufo.kernel-resources.v1", "note": args.note,
-                   "default_max_scratch": 0, "allow": allow}, open(args.write_baseline, "w"), indent=1)
+        Path(args.write_baseline).write_text(json.dumps(
+            {"schema": "gufo.kernel-resources.v1", "note": args.note,
+             "default_max_scratch": 0, "allow": allow}, indent=1) + "\n")
         print(f"wrote {len(allow)} allowances ({len(kernels)} kernels) to {args.write_baseline}")
         return 0
 
@@ -339,7 +357,7 @@ def main() -> int:
 
     if not args.baseline:
         ap.error("one of --baseline, --write-baseline or --report is required")
-    budget = json.load(open(args.baseline))
+    budget = json.loads(Path(args.baseline).read_text())
     default = int(budget.get("default_max_scratch", 0))
     allow = budget.get("allow", {})
     bad = [(n, k["scratch"], int(allow.get(n, {}).get("max_scratch", default)))
