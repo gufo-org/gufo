@@ -1589,6 +1589,41 @@ void TestRamLearnsDivergenceBoundaries() {
   request.Invalidate();
 }
 
+void TestLearnedBoundarySurvivesExactRepublication() {
+  // A request for exactly the learned prefix publishes the same tokens again.
+  // Uncached, it replaces the learned checkpoint; that copy must stay a branch
+  // point, or it ranks as redundant once the older branch is gone.
+  for (const bool reuse : {true, false}) {
+    auto stats = std::make_shared<FakeStats>();
+    // Room for five snapshots, so unrelated prompts force evictions.
+    auto runner = std::make_shared<PersistentSnapshotRunner>(
+        stats, "republished-boundary", 5 * sizeof(FakeSnapshot), 4096);
+    TextRunnerPool pool(runner, 1);
+    const std::vector<TextRunnerToken> shared(1000, 100);
+    const auto run = [&](std::vector<TextRunnerToken> prompt,
+                         bool reuse_prompt = true) {
+      auto request = pool.Acquire(std::move(prompt), {}, {}, {}, reuse_prompt);
+      const auto cached = request.cached_prompt_tokens();
+      while (!request.prefill_complete())
+        (void)request.Prefill(4096);
+      (void)request.Commit();
+      return cached;
+    };
+    const auto branch = [&](TextRunnerToken tail) {
+      auto prompt = shared;
+      prompt.insert(prompt.end(), 600, tail);
+      return prompt;
+    };
+    (void)run(branch(10000));
+    (void)run(branch(20000));  // Learns the branch point after 1000 tokens.
+    (void)run(shared, reuse);
+    for (const TextRunnerToken token : {9U, 8U, 7U, 6U})
+      (void)run({token, token, token});
+    Expect(run(branch(30000)) == 1000,
+           "republishing the learned prefix keeps it a branch point");
+  }
+}
+
 void TestCoincidentCacheBoundariesShareOneCopy() {
   for (const bool stable : {false, true}) {
     TemporaryDirectory directory;
@@ -2195,6 +2230,7 @@ int main() {
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
   TestRamLearnsDivergenceBoundaries();
+  TestLearnedBoundarySurvivesExactRepublication();
   TestCoincidentCacheBoundariesShareOneCopy();
   TestMeasuredStateIsReconciledWithClaim();
   TestSnapshotBudgetRefusalDoesNotFailCompletedRequest();

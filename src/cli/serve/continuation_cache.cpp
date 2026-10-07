@@ -1066,6 +1066,11 @@ std::size_t ContinuationCache::Commit(
         }
         if (target != no_entry) {
           auto& snapshot_entry = *impl_->entries[target];
+          // Republishing the same prefix, as an uncached request for exactly
+          // a learned branch point does, keeps the learned divergence.
+          const bool learned =
+              exact_replacement &&
+              snapshot_entry.purpose == SnapshotPurpose::kBranchPoint;
           if (snapshot_entry.snapshot != nullptr) {
             const std::size_t removed_bytes = snapshot_entry.snapshot_bytes;
             const std::size_t removed_tokens = snapshot_entry.tokens.size();
@@ -1092,7 +1097,8 @@ std::size_t ContinuationCache::Commit(
             snapshot_entry.snapshot = std::move(retained_snapshot);
             snapshot_entry.snapshot_bytes = snapshot_bytes;
             snapshot_entry.stable_prefix_tokens = stable_prefix_tokens;
-            snapshot_entry.purpose = purpose;
+            snapshot_entry.purpose =
+                learned ? SnapshotPurpose::kBranchPoint : purpose;
             snapshot_entry.valid = !snapshot_entry.tokens.empty();
             snapshot_entry.snapshot_last_used = ++impl_->clock;
             impl_->retained_snapshot_bytes += snapshot_bytes;
