@@ -66,7 +66,7 @@ def main():
     assert "-1 = until EOS or context full" in help_text
     assert "Path to GGUF model file (required)" in help_text
     assert "8589934592" in help_text
-    assert "0 = auto, at most 1 GiB and 1/8 available RAM" in help_text
+    assert "0 = auto, at most the disk budget and 1/8 available RAM" in help_text
     assert "--log-progress" in help_text
 
     # Verbosity must change the output, not merely parse. The config line is
