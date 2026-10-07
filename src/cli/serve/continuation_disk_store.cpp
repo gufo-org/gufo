@@ -821,6 +821,8 @@ struct ContinuationDiskStore::Impl {
       }
       break;
     }
+    // Restore uses the in-memory copy; drop the page-cache one.
+    (void)::posix_fadvise(file.get(), 0, 0, POSIX_FADV_DONTNEED);
     return true;
   }
 
@@ -1108,6 +1110,11 @@ struct ContinuationDiskStore::Impl {
       valid = false;
     }
     valid = valid && ::fsync(temporary.get()) == 0;
+    if (valid) {
+      // The image is durable now. Drop its clean pages so multi-GB snapshots
+      // don't accumulate in the page cache.
+      (void)::posix_fadvise(temporary.get(), 0, 0, POSIX_FADV_DONTNEED);
+    }
     const int raw_descriptor = temporary.release();
     if (::close(raw_descriptor) != 0) {
       valid = false;
