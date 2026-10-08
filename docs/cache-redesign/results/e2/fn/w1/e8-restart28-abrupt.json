@@ -2,8 +2,8 @@
  "model": "fn",
  "workload": "w1",
  "revision": 2,
- "restart_at": 12,
- "abrupt": false,
+ "restart_at": 28,
+ "abrupt": true,
  "ram_budget": 9202923520,
  "staging": 2300730880,
  "actual_prefill_s": 129.61,
@@ -11,58 +11,58 @@
  "actual_ram_refusals": 39,
  "variants": {
   "today": {
-   "cached": 3087899,
-   "prefill_s": 137.37,
+   "cached": 3028640,
+   "prefill_s": 185.19,
    "capture_s": 0.0,
    "disk_write_bytes": 7049701528,
-   "disk_restore_s": 1.62,
+   "disk_restore_s": 1.99,
    "disk_restores": 1,
-   "ram_refusals": 59,
+   "ram_refusals": 60,
    "disk_write_s": 16.02,
    "first_after_restart": {
-    "cached": 60560,
+    "cached": 75275,
     "source": "disk"
    }
   },
   "phase0": {
-   "cached": 3087899,
-   "prefill_s": 137.37,
+   "cached": 3072944,
+   "prefill_s": 149.49,
    "capture_s": 0.0,
-   "disk_write_bytes": 24066077778,
-   "disk_restore_s": 1.62,
+   "disk_write_bytes": 20256454940,
+   "disk_restore_s": 3.09,
    "disk_restores": 1,
-   "ram_refusals": 11,
-   "disk_write_s": 54.7,
+   "ram_refusals": 20,
+   "disk_write_s": 46.04,
    "first_after_restart": {
-    "cached": 60560,
+    "cached": 119579,
     "source": "disk"
    }
   },
   "hybrid": {
-   "cached": 3087899,
-   "prefill_s": 137.37,
+   "cached": 3087753,
+   "prefill_s": 137.49,
    "capture_s": 0.0,
    "disk_write_bytes": 5732463698,
-   "disk_restore_s": 1.83,
+   "disk_restore_s": 3.91,
    "disk_restores": 1,
-   "ram_refusals": 11,
+   "ram_refusals": 20,
    "disk_write_s": 13.03,
    "first_after_restart": {
-    "cached": 60560,
+    "cached": 134388,
     "source": "disk"
    }
   },
   "dense": {
-   "cached": 3087899,
-   "prefill_s": 137.37,
+   "cached": 3087753,
+   "prefill_s": 137.49,
    "capture_s": 0.0,
    "disk_write_bytes": 5730266898,
-   "disk_restore_s": 1.83,
+   "disk_restore_s": 3.91,
    "disk_restores": 1,
-   "ram_refusals": 20,
+   "ram_refusals": 28,
    "disk_write_s": 13.02,
    "first_after_restart": {
-    "cached": 60560,
+    "cached": 134388,
     "source": "disk"
    }
   }

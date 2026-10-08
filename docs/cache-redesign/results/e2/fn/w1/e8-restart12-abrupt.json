@@ -3,7 +3,7 @@
  "workload": "w1",
  "revision": 2,
  "restart_at": 12,
- "abrupt": false,
+ "abrupt": true,
  "ram_budget": 9202923520,
  "staging": 2300730880,
  "actual_prefill_s": 129.61,

@@ -1,7 +1,9 @@
 {
  "model": "q27",
  "workload": "w3-c4",
+ "revision": 2,
  "restart_at": null,
+ "abrupt": false,
  "ram_budget": 20210675712,
  "staging": 5052668928,
  "actual_prefill_s": 478.43,
@@ -9,48 +11,48 @@
  "actual_ram_refusals": 92,
  "variants": {
   "today": {
-   "cached": 933044,
-   "prefill_s": 565.41,
-   "capture_s": 5.81,
-   "disk_write_bytes": 36237080992,
-   "disk_restore_s": 0.96,
-   "disk_restores": 1,
-   "ram_refusals": 36,
-   "disk_write_s": 82.36,
-   "within_64_of_actual": 67
+   "cached": 957537,
+   "prefill_s": 496.62,
+   "capture_s": 4.72,
+   "disk_write_bytes": 33624348512,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 97,
+   "disk_write_s": 76.42,
+   "within_64_of_actual": 97
   },
   "phase0": {
-   "cached": 962517,
-   "prefill_s": 483.02,
-   "capture_s": 5.76,
-   "disk_write_bytes": 34982750336,
-   "disk_restore_s": 3.27,
-   "disk_restores": 3,
-   "ram_refusals": 29,
-   "disk_write_s": 79.51,
-   "within_64_of_actual": 67
+   "cached": 957537,
+   "prefill_s": 496.62,
+   "capture_s": 4.72,
+   "disk_write_bytes": 33624348512,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 97,
+   "disk_write_s": 76.42,
+   "within_64_of_actual": 97
   },
   "hybrid": {
-   "cached": 963443,
-   "prefill_s": 480.31,
-   "capture_s": 1.46,
-   "disk_write_bytes": 20059997760,
-   "disk_restore_s": 1.08,
-   "disk_restores": 1,
-   "ram_refusals": 29,
-   "disk_write_s": 45.59,
-   "within_64_of_actual": 69
+   "cached": 957544,
+   "prefill_s": 496.6,
+   "capture_s": 1.31,
+   "disk_write_bytes": 20062029376,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 94,
+   "disk_write_s": 45.6,
+   "within_64_of_actual": 97
   },
   "dense": {
-   "cached": 964416,
-   "prefill_s": 477.72,
-   "capture_s": 1.62,
-   "disk_write_bytes": 19672904992,
-   "disk_restore_s": 1.08,
-   "disk_restores": 1,
-   "ram_refusals": 106,
-   "disk_write_s": 44.71,
-   "within_64_of_actual": 68
+   "cached": 957537,
+   "prefill_s": 496.62,
+   "capture_s": 1.51,
+   "disk_write_bytes": 19981551168,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 166,
+   "disk_write_s": 45.41,
+   "within_64_of_actual": 97
   }
  }
 }

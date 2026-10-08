@@ -186,10 +186,12 @@ Subagent S shares A's first 6,000 tokens (system prompt and tools).
    chunks would be a separate lineage and would not be merged with A's.
 
 **Denser checkpoints shrink the gap.** A checkpoint costs only its fixed state,
-so gufo can afford one at every message boundary and every 1,024 tokens. A new
-conversation then prefills a few hundred tokens at most before its divergence
-point. Today each checkpoint is a full copy (2.9 GB at 100k tokens on
-Flash-Next), so only a few are kept.
+so gufo can afford many more than today, within the bounds of
+[checkpoint density](#checkpoint-density): the record limit and the budget
+decide how many message boundaries and grid points are kept, in that priority
+order. Where a boundary checkpoint survives, a new conversation prefills only
+from it to its divergence point. Today each checkpoint is a full copy (2.9 GB
+at 100k tokens on Flash-Next), so only a few are kept.
 
 In E2 W4 a subagent created after a restart reused none of its 6,634 shared
 tokens (27B: 21.6 s). No checkpoint at or below 6,634 had been persisted; disk
@@ -235,14 +237,14 @@ defaults (automatic staging 5.74 GB), checkpoints past about 75k tokens never
 reached disk: 85 writes were skipped with `reason=staging_capacity`, because a
 27B checkpoint at 64k is already 4.35 GB and two queue at once.
 
-Simulated restarts on that trace (the simulator reproduced all 36 real
-requests):
+Simulated graceful restarts on that trace (E8 revision 2, which reproduces
+all 36 real requests):
 
 | Restart at | Today restores | Hybrid restores | Extra prefill today |
 | ---: | ---: | ---: | ---: |
 | 60,622 tokens | 60,396 | 60,396 | none |
 | 104,505 tokens | 75,026 | 104,386 | ~29k tokens, ~2 min |
-| 148,523 tokens | 75,026 | 133,842 | ~59k tokens, ~4.5–5 min |
+| 148,523 tokens | 75,026 | 133,842 | ~59k tokens, ~4.3 min |
 
 Prefill at that depth ran at 196–250 tokens/s. The hybrid writes about 152 MiB
 of fixed state plus 128 MiB per 2,048 new tokens per checkpoint, so staging is

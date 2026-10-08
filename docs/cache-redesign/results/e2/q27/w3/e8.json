@@ -1,7 +1,9 @@
 {
  "model": "q27",
  "workload": "w3",
+ "revision": 2,
  "restart_at": null,
+ "abrupt": false,
  "ram_budget": 23349708800,
  "staging": 5837685248,
  "actual_prefill_s": 352.47,
@@ -9,48 +11,48 @@
  "actual_ram_refusals": 42,
  "variants": {
   "today": {
-   "cached": 857140,
-   "prefill_s": 338.78,
-   "capture_s": 4.53,
-   "disk_write_bytes": 31526394624,
-   "disk_restore_s": 1.59,
-   "disk_restores": 2,
-   "ram_refusals": 20,
+   "cached": 854237,
+   "prefill_s": 347.0,
+   "capture_s": 3.82,
+   "disk_write_bytes": 31526787840,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 48,
    "disk_write_s": 71.65,
-   "within_64_of_actual": 41
+   "within_64_of_actual": 56
   },
   "phase0": {
-   "cached": 857140,
-   "prefill_s": 338.78,
-   "capture_s": 4.53,
-   "disk_write_bytes": 31526394624,
-   "disk_restore_s": 1.59,
-   "disk_restores": 2,
-   "ram_refusals": 20,
+   "cached": 854237,
+   "prefill_s": 347.0,
+   "capture_s": 3.82,
+   "disk_write_bytes": 31526787840,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 48,
    "disk_write_s": 71.65,
-   "within_64_of_actual": 41
+   "within_64_of_actual": 56
   },
   "hybrid": {
-   "cached": 857154,
-   "prefill_s": 338.74,
-   "capture_s": 0.89,
-   "disk_write_bytes": 13466106048,
+   "cached": 854286,
+   "prefill_s": 346.86,
+   "capture_s": 0.95,
+   "disk_write_bytes": 13466499264,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 17,
-   "disk_write_s": 30.6,
-   "within_64_of_actual": 41
+   "ram_refusals": 33,
+   "disk_write_s": 30.61,
+   "within_64_of_actual": 56
   },
   "dense": {
-   "cached": 858127,
-   "prefill_s": 336.15,
-   "capture_s": 1.04,
-   "disk_write_bytes": 13119842208,
+   "cached": 854272,
+   "prefill_s": 346.9,
+   "capture_s": 1.18,
+   "disk_write_bytes": 13428488384,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 54,
-   "disk_write_s": 29.82,
-   "within_64_of_actual": 40
+   "ram_refusals": 59,
+   "disk_write_s": 30.52,
+   "within_64_of_actual": 56
   }
  }
 }

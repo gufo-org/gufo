@@ -3,7 +3,7 @@
  "workload": "w1",
  "revision": 2,
  "restart_at": 20,
- "abrupt": false,
+ "abrupt": true,
  "ram_budget": 22965028864,
  "staging": 5741257216,
  "actual_prefill_s": 588.59,
@@ -25,16 +25,16 @@
    }
   },
   "phase0": {
-   "cached": 3074809,
-   "prefill_s": 596.56,
-   "capture_s": 12.68,
-   "disk_write_bytes": 56790563936,
-   "disk_restore_s": 6.44,
+   "cached": 3060120,
+   "prefill_s": 659.05,
+   "capture_s": 13.2,
+   "disk_write_bytes": 56798035040,
+   "disk_restore_s": 5.57,
    "disk_restores": 1,
-   "ram_refusals": 63,
-   "disk_write_s": 129.07,
+   "ram_refusals": 64,
+   "disk_write_s": 129.09,
    "first_after_restart": {
-    "cached": 104386,
+    "cached": 89697,
     "source": "disk"
    }
   },

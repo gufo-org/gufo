@@ -1,48 +1,74 @@
 #!/usr/bin/env python3
-"""E8: E7 with production admission rules and asynchronous disk publication.
+"""E8 (revision 2): today vs Phase 0 vs the hybrid, replayed as concurrent events.
 
-Changes from simulate_e7.py:
-- RAM admission follows src/cli/serve/continuation_cache.cpp: an incoming
-  checkpoint may evict only entries whose removal rank is at most its own
-  ceiling (MaxRemovalPriority: history 1, continuation/branch point 3); the
-  lowest rank goes first, oldest within a rank; the entry the request
-  restored from is protected; when nothing evictable frees enough bytes the
-  checkpoint is refused (counted, to compare with the server's
-  `event=snapshot action=skipped reason=byte_capacity` lines).
-- Removal ranks follow RemovalPriority: branch points 3; entries that are a
-  strict prefix of the incoming continuation 1 (history) or 2; history
-  entries related to a retained continuation 1; continuations covered by a
-  longer continuation 2; everything else 3.
-- Disk writes go through one serial writer at the measured gufo rate
-  (0.44 GB/s) and become restorable only when published; a restart drains
-  the queue first, as the server does on shutdown.
+Modelled after the production paths in src/cli/serve/:
 
-Variants and time model are those of simulate_e7.py. Phase 0 here assumes
-bounded, streamed transfers in both directions (writes and restores), which
-today's code does not have: ReadImage loads a whole file and refuses files
-larger than staging.
+Requests (text_model_runner.cpp)
+- Each request starts when its generation started (the trace timestamp),
+  captures its checkpoints when its prefill ends (received + time to first
+  token) and finishes at received + duration, from the completion log line.
+  Requests therefore overlap as they did on the server.
+- Prompt-path captures, in order: on a cache hit, a frozen copy of the reused
+  frontier (continuation); the stable boundary (continuation); the complete
+  prompt as a retry copy (purpose retry). Grid points are history, learned
+  divergence points are branch points.
+- At the end of a request only the prompt-path snapshots are committed; the
+  prompt + output state stays as the session's live frontier and is lost
+  when another conversation takes that session.
+
+RAM admission (continuation_cache.cpp)
+- An incoming checkpoint may evict only entries whose RemovalPriority rank is
+  at most MaxRemovalPriority of its purpose (retry 0, history 1, continuation
+  and branch point 3); lowest rank first, oldest within a rank; the entry the
+  request restored from is protected; otherwise the checkpoint is refused.
+
+Disk (continuation_disk_store.cpp)
+- One serial writer at the measured 0.44 GB/s. When the writer reaches a job
+  it checks the 2,048-token spacing and staging, writes it, and only then
+  publishes the entry and evicts to make room. In-flight writes are never
+  restorable.
+- A restart is graceful by default (the queue drains, as on SIGTERM);
+  --abrupt drops queued and in-flight writes.
+
+Chunks (hybrid variants)
+- Chunk keys carry provenance: a request inherits its restore source's chunks
+  for the rows it restored and gets new chunks (its own lineage) for every row
+  it computed. Independent computations of equal tokens are not shared.
+
+Phase 0 assumes bounded, streamed transfers in both directions; today both
+writes and restores are limited by staging (ReadImage loads whole files).
 """
 import argparse
 import datetime
 import json
-import pathlib
 import re
 
 import numpy as np
 
-from simulate_e5 import GRID, IM_START, LEARN_MIN, MIN_STEP, Seq, lcp, load
+from paths import WORK as HERE
+from simulate_e5 import GRID, IM_START, LEARN_MIN, MIN_STEP, lcp, load
 from simulate_e7 import CAPTURE_S_PER_BYTE, READ_BPS, SIZE, prefill_seconds
 
-from paths import WORK as HERE
 WRITE_BPS = 0.44e9
-CEILING = {"grid": 1, "boundary": 1, "system": 1, "stable": 3, "prompt": 3,
-           "branch": 3}
-CONTINUATION = {"stable", "prompt", "branch"}
+LIVE_TOLERANCE = 64
+CEILING = {"retry": 0, "history": 1, "continuation": 3, "branch": 3}
+CONTINUATION = {"continuation", "branch"}
+
+
+class Seq:
+    """Tokens plus provenance-aware chunk keys."""
+
+    def __init__(self, tokens, chunk, lineage, inherited=()):
+        self.tokens = tokens
+        n = len(tokens) // chunk
+        inherited = list(inherited[:n])
+        self.keys = inherited + [(lineage, i) for i in range(len(inherited), n)]
 
 
 class Entry:
-    def __init__(self, seq, length, purpose, clock):
+    def __init__(self, seq, length, purpose, clock, stable=0):
         self.seq, self.length, self.purpose, self.used = seq, length, purpose, clock
+        self.stable = stable
 
     def tokens(self):
         return self.seq.tokens[:self.length]
@@ -56,7 +82,7 @@ class Store:
         self.policy, self.budget = policy, budget
         self.fixed, self.per_token, self.chunk = fixed, per_token, chunk
         self.max_entries = max_entries
-        self.entries, self.chunk_refs = [], {}
+        self.entries, self.refs = [], {}
         self.refusals = 0
 
     def full_bytes(self, length):
@@ -65,18 +91,21 @@ class Store:
     def keys(self, entry):
         return entry.seq.keys[:entry.length // self.chunk]
 
-    def cost(self, entry, new_chunks):
+    def new_chunks(self, entry):
+        return sum(1 for k in self.keys(entry) if k not in self.refs)
+
+    def cost(self, entry):
         if self.policy == "full":
             return self.full_bytes(entry.length)
         tail = entry.length - (entry.length // self.chunk) * self.chunk
-        return self.fixed + self.per_token * (tail + new_chunks * self.chunk)
+        return self.fixed + self.per_token * (tail + self.new_chunks(entry) * self.chunk)
 
     def used(self):
         if self.policy == "full":
             return sum(self.full_bytes(e.length) for e in self.entries)
         tails = sum(e.length - (e.length // self.chunk) * self.chunk for e in self.entries)
         return len(self.entries) * self.fixed + self.per_token * (
-            tails + len(self.chunk_refs) * self.chunk)
+            tails + len(self.refs) * self.chunk)
 
     def lookup(self, tokens, limit=None):
         best = None
@@ -89,19 +118,22 @@ class Store:
 
     def rank(self, entry, incoming):
         peers = [p for p in self.entries if p is not entry and p.purpose in CONTINUATION]
-        nexts = {int(p.seq.tokens[entry.length]) for p in peers
-                 if p.length > entry.length and entry.prefix_of(p.tokens())}
-        if entry.purpose in CONTINUATION and len(nexts) > 1:
-            return 3
-        if entry.purpose == "branch" and not any(
-                p.purpose == "branch" and p.length > entry.length and
-                entry.prefix_of(p.tokens()) for p in peers):
-            return 3
-        if incoming is not None and entry.length < len(incoming) and \
-                entry.prefix_of(incoming):
-            return 1 if entry.purpose not in CONTINUATION else 2
+        if entry.purpose in CONTINUATION:
+            nexts = {int(p.seq.tokens[entry.length]) for p in peers
+                     if p.length > entry.length and entry.prefix_of(p.tokens())}
+            if len(nexts) > 1:
+                return 3
+            if entry.purpose == "branch" and not any(
+                    p.purpose == "branch" and p.length > entry.length and
+                    entry.prefix_of(p.tokens()) for p in peers):
+                return 3
+        if incoming is not None and entry.length < len(incoming) and entry.prefix_of(incoming):
+            return {"retry": 0, "history": 1}.get(entry.purpose, 2)
         for p in peers:
-            if entry.purpose not in CONTINUATION and (
+            if entry.purpose == "retry" and p.length <= entry.stable and \
+                    p.prefix_of(entry.tokens()):
+                return 0
+            if entry.purpose == "history" and (
                     entry.prefix_of(p.tokens()) or p.prefix_of(entry.tokens())):
                 return 1
             if entry.purpose in CONTINUATION and p.length > entry.length and \
@@ -109,36 +141,37 @@ class Store:
                 return 2
         return 3
 
+    def _add(self, entry):
+        self.entries.append(entry)
+        if self.policy == "chunked":
+            for key in self.keys(entry):
+                self.refs[key] = self.refs.get(key, 0) + 1
+
     def remove(self, entry):
         self.entries.remove(entry)
         if self.policy == "chunked":
             for key in self.keys(entry):
-                self.chunk_refs[key] -= 1
-                if not self.chunk_refs[key]:
-                    del self.chunk_refs[key]
+                self.refs[key] -= 1
+                if not self.refs[key]:
+                    del self.refs[key]
 
-    def admit(self, entry, ranked=True, source=None):
+    def admit(self, entry, ranked=True, protected=()):
         for other in self.entries:
             if other.length == entry.length and other.prefix_of(entry.seq.tokens):
                 other.used = entry.used
-                return False
-        new = sum(1 for k in self.keys(entry) if k not in self.chunk_refs) \
-            if self.policy == "chunked" else 0
-        cost = self.cost(entry, new)
+                return 0
+        cost = self.cost(entry)
         if cost > self.budget:
             self.refusals += 1
-            return False
-        self.entries.append(entry)
-        if self.policy == "chunked":
-            for key in self.keys(entry):
-                self.chunk_refs[key] = self.chunk_refs.get(key, 0) + 1
+            return 0
+        self._add(entry)
         ceiling = CEILING[entry.purpose] if ranked else 3
         incoming = entry.tokens() if entry.purpose in CONTINUATION else None
         while self.used() > self.budget or (
                 self.max_entries and len(self.entries) > self.max_entries):
             candidates = []
             for e in self.entries:
-                if e is entry or e is source:
+                if e is entry or any(e is p for p in protected):
                     continue
                 r = self.rank(e, incoming) if ranked else 0
                 if r <= ceiling:
@@ -146,17 +179,68 @@ class Store:
             if not candidates:
                 self.remove(entry)
                 self.refusals += 1
-                return False
+                return 0
             self.remove(min(candidates, key=lambda c: (c[0], c[1]))[2])
         return cost
 
 
-def parse_time(text):
+def stamp(text):
     return datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S.%f").timestamp()
 
 
-def simulate(requests, variant, model, ram_budget, disk_budget, staging,
-             sessions, coef, chunk=2048):
+def timings(log):
+    """request id -> (duration_s, queue_s, ttft_s) from completion lines."""
+    out = {}
+    for rid, rest in re.findall(r"request=(\S+) event=completed (.*)", log):
+        fields = dict(f.split("=", 1) for f in rest.split() if "=" in f)
+        if "duration_ms" in fields:
+            out[rid] = (float(fields["duration_ms"]) / 1e3,
+                        float(fields.get("queue_ms", 0)) / 1e3,
+                        float(fields.get("ttft_ms", fields["duration_ms"])) / 1e3)
+    return out
+
+
+class Writer:
+    """Serial disk writer: jobs become restorable only when their write ends."""
+
+    def __init__(self, disk, stage_limit, totals):
+        self.disk, self.stage_limit, self.totals = disk, stage_limit, totals
+        self.queue, self.inflight, self.free = [], None, 0.0
+
+    def enqueue(self, at, entry, prompt):
+        self.queue.append((at, entry, prompt))
+
+    def run(self, until):
+        while True:
+            if self.inflight and self.inflight[0] <= until:
+                done, entry, staged = self.inflight
+                if self.disk.admit(entry, ranked=False):
+                    self.totals["disk_write_bytes"] += staged
+                self.free, self.inflight = done, None
+                continue
+            if self.inflight is None and self.queue and \
+                    max(self.free, self.queue[0][0]) <= until:
+                at, entry, prompt = self.queue.pop(0)
+                start = max(self.free, at)
+                if entry.purpose != "branch":
+                    near = self.disk.lookup(prompt, limit=entry.length)
+                    if near and entry.length - near.length < MIN_STEP:
+                        continue
+                staged = self.disk.cost(entry)
+                if self.stage_limit is not None and staged > self.stage_limit:
+                    continue
+                self.inflight = (start + staged / WRITE_BPS, entry, staged)
+                continue
+            return
+
+    def stop(self, graceful):
+        if graceful:
+            self.run(float("inf"))
+        self.queue, self.inflight = [], None
+
+
+def simulate(requests, log, variant, model, ram_budget, disk_budget, staging,
+             sessions, coef, abrupt=False, chunk=2048):
     fixed, per_token = SIZE[model]
     ram_policy = {"today": "full", "phase0": "chunked" if model == "fn" else "full",
                   "hybrid": "chunked", "dense": "chunked"}[variant]
@@ -164,105 +248,116 @@ def simulate(requests, variant, model, ram_budget, disk_budget, staging,
     disk_fix = variant != "today"
     stage_limit = staging if variant == "today" else None
     dense = variant == "dense"
-    ram = Store(ram_policy, ram_budget, fixed, per_token, chunk, max_entries=128)
-    disk = Store(disk_policy, disk_budget, fixed, per_token, chunk)
-    queue, writer_free = [], 0.0
-    live, clock, lifetime = [], 0, None
     totals = {"cached": 0, "prefill_s": 0.0, "capture_s": 0.0,
               "disk_write_bytes": 0, "disk_restore_s": 0.0, "disk_restores": 0}
-    rows = []
-
-    def publish(until):
-        """Run the serial writer up to `until`: each job is checked for
-        spacing and staging when the writer reaches it, as Save() does."""
-        nonlocal queue, writer_free
-        while queue and max(writer_free, queue[0][0]) <= until:
-            enqueued, entry, prompt_tokens = queue.pop(0)
-            start = max(writer_free, enqueued)
-            if entry.purpose not in ("branch", "system"):
-                near = disk.lookup(prompt_tokens, limit=entry.length)
-                if near and entry.length - near.length < MIN_STEP:
-                    continue
-            if disk_policy == "chunked":
-                new = sum(1 for k in disk.keys(entry) if k not in disk.chunk_refs)
-                staged = disk.cost(entry, new)
-            else:
-                staged = disk.full_bytes(entry.length)
-            if stage_limit is not None and staged > stage_limit:
-                continue
-            if disk.admit(entry, ranked=False):
-                totals["disk_write_bytes"] += staged
-                writer_free = start + staged / WRITE_BPS
-
-    for request in requests:
-        clock += 1
-        now = parse_time(request["time"])
-        if request["server_lifetime"] != lifetime:
-            publish(float("inf"))
-            writer_free = 0.0
+    ram = Store(ram_policy, ram_budget, fixed, per_token, chunk, max_entries=128)
+    disk = Store(disk_policy, disk_budget, fixed, per_token, chunk)
+    writer = Writer(disk, stage_limit, totals)
+    times = timings(log)
+    events = []
+    for i, r in enumerate(requests):
+        # The trace stamps a generation record when generation starts, after
+        # queueing; the completion line gives duration and time to first token
+        # measured from when the request was received.
+        start = stamp(r["time"])
+        duration, queue, ttft = times.get(r["request"], (0.0, 0.0, 0.0))
+        received = start - queue
+        end = max(start, received + duration)
+        capture = min(end, max(start, received + ttft))
+        events += [(start, 0, i, "start"), (capture, 1, i, "capture"), (end, 2, i, "end")]
+    events.sort()
+    live = [None] * sessions      # (Seq, length) live frontier per session
+    busy = [None] * sessions
+    last_used = [0.0] * sessions
+    ctx, rows, lifetime, clock = {}, [None] * len(requests), None, 0
+    for t, _, i, kind in events:
+        request = requests[i]
+        if kind == "start" and request["server_lifetime"] != lifetime:
+            if lifetime is not None:
+                writer.stop(graceful=not abrupt)
             lifetime = request["server_lifetime"]
             ram.entries.clear()
-            ram.chunk_refs.clear()
-            live.clear()
-        publish(now)
+            ram.refs.clear()
+            live, busy = [None] * sessions, [None] * sessions
+        writer.run(t)
+        clock += 1
         prompt = request["prompt"]
-        seq = Seq(prompt, chunk)
-        starts = np.nonzero(prompt == IM_START)[0]
-        stable = int(starts[-1]) if len(starts) else len(prompt)
-        cached, source, source_entry = 0, "none", None
-        for state, length in live:
-            if lcp(state.tokens[:length], prompt) >= length and length > cached:
-                cached, source = length, "live"
-        hit = ram.lookup(prompt)
-        if hit and hit.length > cached:
-            cached, source, source_entry = hit.length, "memory", hit
-            hit.used = clock
-        if source == "none" or disk_fix:
-            hit = disk.lookup(prompt)
-            if hit and hit.length > cached and (
-                    stage_limit is None or disk.full_bytes(hit.length) <= stage_limit):
-                cached, source = hit.length, "disk"
+        if kind == "start":
+            cached, source, source_entry, source_keys, slot = 0, "none", None, (), None
+            for s in range(sessions):
+                state = live[s]
+                if busy[s] is None and state:
+                    # The output was re-tokenized from text separately, so it
+                    # can differ by a few tokens from the next prompt's
+                    # rendering; the server compares its own tokens exactly.
+                    common = lcp(state[0].tokens[:state[1]], prompt)
+                    if common >= state[1] - LIVE_TOLERANCE and common > cached:
+                        cached, source, slot, source_keys = common, "live", s, state[0].keys
+            hit = ram.lookup(prompt)
+            if hit and hit.length > cached:
+                cached, source, source_entry, source_keys = hit.length, "memory", hit, hit.seq.keys
+                slot = None
                 hit.used = clock
-                read = disk.full_bytes(hit.length) * (1.13 if disk_policy == "chunked" else 1.0)
-                totals["disk_restore_s"] += read / READ_BPS
-                totals["disk_restores"] += 1
-        cached = min(cached, len(prompt))
-        scale = request["prompt_tokens"] / max(1, request["tokenized_prompt"])
-        totals["prefill_s"] += prefill_seconds(
-            coef, request["prompt_tokens"] - round(cached * scale), round(cached * scale))
-        totals["cached"] += round(cached * scale)
-        captures = []
-        grid = [g for g in range(GRID, len(prompt) - 128 + 1, GRID) if g >= cached + GRID]
-        if len(grid) > 4:
-            step = len(grid) / 4
-            grid = [grid[min(len(grid) - 1, int(round((k + 1) * step)) - 1)] for k in range(4)]
-        captures += [(g, "grid") for g in grid]
-        if dense:
-            captures += [(int(s), "boundary" if i > 1 else "system")
-                         for i, s in enumerate(starts) if cached < s < stable]
-        others = [e.tokens() for e in ram.entries] + [s.tokens[:n] for s, n in live]
-        learned = max((lcp(prompt, o) for o in others), default=0)
-        if learned >= cached + LEARN_MIN and learned < stable - 64:
-            captures.append((learned, "branch"))
-        captures.append((stable, "stable"))
-        captures.append((len(prompt), "prompt"))
-        for position, purpose in captures:
-            if position > cached or purpose in ("stable", "prompt"):
-                admitted = ram.admit(Entry(seq, position, purpose, clock), source=source_entry)
-                if admitted and CAPTURE_S_PER_BYTE[model]:
+            if source == "none" or disk_fix:
+                hit = disk.lookup(prompt)
+                if hit and hit.length > cached and (
+                        stage_limit is None or disk.full_bytes(hit.length) <= stage_limit):
+                    cached, source, source_entry, source_keys = hit.length, "disk", hit, hit.seq.keys
+                    slot = None
+                    hit.used = clock
+                    totals["disk_restore_s"] += disk.full_bytes(hit.length) * (
+                        1.13 if disk_policy == "chunked" else 1.0) / READ_BPS
+                    totals["disk_restores"] += 1
+            cached = min(cached, len(prompt))
+            if slot is None:
+                free = [s for s in range(sessions) if busy[s] is None] or list(range(sessions))
+                slot = min(free, key=lambda s: last_used[s])
+                live[slot] = None   # another conversation's frontier is overwritten
+            busy[slot], last_used[slot] = i, t
+            seq = Seq(prompt, chunk, (lifetime, i), source_keys[:cached // chunk])
+            ctx[i] = (seq, cached, source_entry, slot)
+            scale = request["prompt_tokens"] / max(1, request["tokenized_prompt"])
+            totals["prefill_s"] += prefill_seconds(
+                coef, request["prompt_tokens"] - round(cached * scale), round(cached * scale))
+            totals["cached"] += round(cached * scale)
+            rows[i] = {"cached": round(cached * scale), "source": source}
+        elif kind == "capture":
+            seq, cached, source_entry, slot = ctx[i]
+            starts = np.nonzero(prompt == IM_START)[0]
+            stable = int(starts[-1]) if len(starts) else len(prompt)
+            captures = []
+            if cached and cached < stable:
+                captures.append((cached, "continuation", False))   # frozen frontier
+            grid = [g for g in range(GRID, len(prompt) - 128 + 1, GRID) if g >= cached + GRID]
+            if len(grid) > 4:
+                step = len(grid) / 4
+                grid = [grid[min(len(grid) - 1, int(round((k + 1) * step)) - 1)] for k in range(4)]
+            captures += [(g, "history", False) for g in grid]
+            if dense:
+                captures += [(int(s), "history", n == 1)
+                             for n, s in enumerate(starts) if cached < s < stable]
+            others = [e.tokens() for e in ram.entries] + [s[0].tokens[:s[1]] for s in live if s]
+            learned = max((lcp(prompt, o) for o in others), default=0)
+            if learned >= cached + LEARN_MIN and learned < stable - 64:
+                captures.append((learned, "branch", True))
+            if stable < len(prompt):
+                captures.append((stable, "continuation", True))
+            captures.append((len(prompt), "retry", True))
+            for position, purpose, persist in captures:
+                entry = Entry(seq, position, purpose, clock, stable=stable)
+                if ram.admit(entry, protected=(source_entry,)) and CAPTURE_S_PER_BYTE[model]:
                     copied = ram.full_bytes(position) if ram_policy == "full" else fixed
                     totals["capture_s"] += copied * CAPTURE_S_PER_BYTE[model]
-        for position, purpose in captures:
-            if purpose in ("stable", "prompt", "branch", "system"):
-                queue.append((now, Entry(seq, position, purpose, clock), prompt))
-        full = np.concatenate([prompt, request["output"]])
-        # The server also retains the finished state (prompt + output) as a
-        # continuation snapshot, which competes for the same RAM budget.
-        ram.admit(Entry(Seq(full, chunk), len(full), "prompt", clock),
-                  source=source_entry)
-        live.append((Seq(full, chunk), len(full)))
-        live = live[-sessions:]
-        rows.append({"cached": round(cached * scale), "source": source})
+                if persist:
+                    disk_purpose = "branch" if purpose in ("branch", "history") else purpose
+                    writer.enqueue(t, Entry(seq, position, disk_purpose, clock, stable=stable),
+                                   prompt)
+        else:
+            seq, cached, source_entry, slot = ctx.pop(i)
+            full = np.concatenate([prompt, request["output"]])
+            live[slot] = (Seq(full, chunk, (lifetime, i), seq.keys), len(full))
+            busy[slot] = None
+    writer.stop(graceful=True)
     totals["ram_refusals"] = ram.refusals
     totals["disk_write_s"] = totals["disk_write_bytes"] / WRITE_BPS
     return totals, rows
@@ -273,6 +368,8 @@ def main():
     parser.add_argument("model")
     parser.add_argument("workload")
     parser.add_argument("--restart-at", type=int, default=None)
+    parser.add_argument("--abrupt", action="store_true",
+                        help="the simulated restart drops queued and in-flight writes")
     parser.add_argument("--sessions", type=int, default=2)
     parser.add_argument("--disk-budget", type=int, default=16 << 30)
     args = parser.parse_args()
@@ -285,21 +382,20 @@ def main():
     actual_prefill = sum(int(n) / float(t) for n, t in re.findall(
         r"event=completed .*?prefill_tokens=(\d+).*?prefill_tps=([\d.]+)", log)
         if int(n) > 0 and float(t) > 0)
-    actual_refusals = len(re.findall(
-        r"event=snapshot action=skipped reason=byte_capacity", log))
+    actual_refusals = len(re.findall(r"event=snapshot action=skipped reason=byte_capacity", log))
     requests = load(args.model, args.workload)
     if args.restart_at is not None:
         for index, request in enumerate(requests):
             request["server_lifetime"] = int(index >= args.restart_at)
     actual = [r["cached_tokens"] or 0 for r in requests]
-    report = {"model": args.model, "workload": args.workload,
-              "restart_at": args.restart_at, "ram_budget": ram_budget,
-              "staging": staging, "actual_prefill_s": round(actual_prefill, 2),
-              "actual_cached": sum(actual), "actual_ram_refusals": actual_refusals,
-              "variants": {}}
+    report = {"model": args.model, "workload": args.workload, "revision": 2,
+              "restart_at": args.restart_at, "abrupt": args.abrupt,
+              "ram_budget": ram_budget, "staging": staging,
+              "actual_prefill_s": round(actual_prefill, 2), "actual_cached": sum(actual),
+              "actual_ram_refusals": actual_refusals, "variants": {}}
     for variant in ("today", "phase0", "hybrid", "dense"):
-        totals, rows = simulate(requests, variant, args.model, ram_budget,
-                                args.disk_budget, staging, args.sessions, coef)
+        totals, rows = simulate(requests, log, variant, args.model, ram_budget,
+                                args.disk_budget, staging, args.sessions, coef, args.abrupt)
         result = {k: round(v, 2) if isinstance(v, float) else v for k, v in totals.items()}
         if args.restart_at is None:
             result["within_64_of_actual"] = sum(
@@ -307,7 +403,8 @@ def main():
         else:
             result["first_after_restart"] = rows[args.restart_at]
         report["variants"][variant] = result
-    tag = f"-restart{args.restart_at}" if args.restart_at is not None else ""
+    tag = (f"-restart{args.restart_at}" if args.restart_at is not None else "") + \
+          ("-abrupt" if args.abrupt else "")
     (base / f"e8{tag}.json").write_text(json.dumps(report, indent=1))
     print(json.dumps(report))
 

@@ -24,19 +24,25 @@ sessions to 149k tokens, subagents, multi-user chat and restarts:
 | A full RAM cache refuses checkpoints | 19–42 refusals per run, because a new checkpoint may evict only lower-ranked entries |
 | 27B captures copy everything | 14 ms at 1.8k tokens up to 235 ms at 149k (10 GB). Flash-Next already captures only fixed state: 2–5 ms at any depth |
 | In-session reuse is near ideal otherwise | Actual vs ideal reuse within 0.3–1.2 points except W2 and the restarts |
-| The simulators track reality | E7 reproduces actual reuse within 0.5% and prefill time within 0–8% on every run; E8 (production admission) within 0.5% except one run at −2.7% |
-| Concurrency 4 changes little | Reuse within 0.1–0.6 points of ideal; more sessions hide the W2 defect; the 27B disk writer is busy half the time; the hybrid writes 40–70% less |
+| The simulators track reality | E8 revision 2 reproduces actual reuse within 0.4% on 11 of 12 runs (27B W4 −1.3%), prefill time within 0–7%, disk writes within ~15%, and RAM refusals on 10 of 12 runs |
+| Concurrency 4 changes little | Reuse within 0.1–0.6 points of ideal; more sessions hide the W2 defect; most 27B disk-write time was one unexplained 782 s write; the hybrid writes 40–70% less |
 
-## Options compared (simulated with E7/E8, plus the cost model)
+## Options compared (simulated with E8 revision 2, plus the cost model)
+
+E8 revision 2 replays the traces as concurrent events, with production
+admission, retry copies, asynchronous disk publication and lineage-aware
+chunks. It reproduces actual reuse within 0.4% on 11 of 12 runs and prefill
+time within 0–7%.
 
 | | Today | Phase 0 (fixes, same format) | Hybrid (Phases 1–2) |
 | --- | --- | --- | --- |
-| W2 miss after forks | 22.6k tokens re-prefilled | Fixed | Fixed |
-| Restart at 105k / 149k, Flash-Next | +24 s / +48 s prefill | Fixed, if writes **and** restores are streamed | Fixed |
-| Restart at 105k / 149k, 27B | +2.0 / +4.3 min prefill | Fixed, same condition | Fixed |
-| 27B W4: restart with mixed conversations, 16 GiB disk | 399 s prefill | 399 s | 363 s (more checkpoints fit) |
-| Subagent created after a restart | System prompt re-prefilled | Same | Recovered with dense checkpoints (−5 s Flash-Next, −18 s 27B) |
-| Disk written, agent runs | 7–17 GB (deep writes skipped) | 24–57 GB | 6–13 GB |
+| W2 miss after forks | Flash-Next 88 s, 27B 293 s prefill | 72 s / 236 s | 72 s / 236 s |
+| Graceful restart at 105k / 149k, Flash-Next | 161 s / 185 s prefill | 137 s / 137 s, if writes **and** restores are streamed | 137 s / 137 s |
+| Graceful restart at 105k / 149k, 27B | 718 s / 855 s | 597 s / 597 s, same condition | 597 s / 597 s |
+| Abrupt restart (queued writes lost), Flash-Next 149k / 27B 149k | 185 s / 855 s | 149 s / 667 s | 137 s / 597 s |
+| 27B W4: restart with mixed conversations, 16 GiB disk | 430 s | 430 s | 394 s (more checkpoints fit) |
+| Subagent created after a restart | System prompt re-prefilled | Same | Recovered with dense checkpoints (27B W4 376 s, Flash-Next W4 95 s vs 100 s) |
+| Disk written, agent runs (W1) | 7.0 / 16.5 GB (deep writes skipped) | 24.1 / 56.8 GB | 5.7 / 13.2 GB |
 | Disk time per checkpoint at 100k | 6.5 s Flash-Next, 15 s 27B (if staged) | Same, streamed | 0.4 s / 0.9 s |
 | 27B capture per checkpoint at 100k / 149k | 181 / 236 ms | Same | ~14 ms |
 | Checkpoints of one 100k conversation in RAM | 3 | 3 (27B), more for Flash-Next | 43–52 |
@@ -44,8 +50,14 @@ sessions to 149k tokens, subagents, multi-user chat and restarts:
 | Effort | — | Small: lookup rule, streamed writes, accounting | Large: model interface split for each model, chunk pool, new disk format |
 | Risk | Known defects | Low | Medium: new store, format, eviction rules |
 
-At concurrency 2 and 4 alike, the hybrid adds efficiency, not reuse that
-Phase 0 cannot reach.
+Phase 0 and the hybrid recover the same reuse in most runs, at concurrency 2
+and 4. The hybrid also recovers reuse that Phase 0 cannot:
+- after abrupt restarts, because its small writes are rarely still queued;
+- on 27B W4, where more checkpoints fit the disk budget;
+- with dense checkpoints, the shared system prompt after a restart.
+
+Beyond that its gains are efficiency: disk writes, 27B capture time and RAM
+capacity.
 
 ## Recommendation
 
@@ -93,11 +105,11 @@ Phase 0 cannot reach.
 - **Measured:** checkpoint sizes, budgets, refusals, staging skips, capture
   and restore times, disk rates, actual reuse and prefill time, the
   micro-benchmarks.
-- **Simulated:** everything for Phase 0 and the hybrid. Two simulators (E7,
-  and E8 with production admission and asynchronous disk) agree on every
-  conclusion, but refusals are under-reproduced (server 19–92 per run, E8
-  0–36), and on 27B W3 at concurrency 4 E8 overestimates today's prefill by
-  18%.
+- **Simulated:** everything for Phase 0 and the hybrid. E8 revision 2 is the
+  reference. On the W1 agent runs it over-counts refusals (64 vs 39), and it
+  cannot verify which checkpoints the server keeps, because the server logs
+  removals only when the entry limit forces them. Logging every removal
+  would allow exact calibration.
 - **Unexplained:** one 1.67 GB disk write took 782 s at concurrency 4.
 
 ## Features to agree on

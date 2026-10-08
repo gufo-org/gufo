@@ -103,7 +103,7 @@ It reads and writes the KV bytes once, at 1.1 GB/s and 0.59 GB/s:
 | Flash-Next at 149k tokens | 4.1 GB | ~11 s, in the background |
 | 27B at 149k tokens | 9.8 GB | ~25 s, in the background |
 
-**Disk writes per long agent session** (the W1 runs to 149k tokens, from E7; compaction not included):
+**Disk writes per long agent session** (the W1 runs to 149k tokens, from E8 revision 2; compaction not included):
 
 | Model | Today | Phase 0 | Hybrid |
 | --- | ---: | ---: | ---: |

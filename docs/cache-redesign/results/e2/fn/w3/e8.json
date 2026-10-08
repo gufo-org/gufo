@@ -1,7 +1,9 @@
 {
  "model": "fn",
  "workload": "w3",
+ "revision": 2,
  "restart_at": null,
+ "abrupt": false,
  "ram_budget": 9113747456,
  "staging": 2278436864,
  "actual_prefill_s": 108.44,
@@ -9,48 +11,48 @@
  "actual_ram_refusals": 41,
  "variants": {
   "today": {
-   "cached": 746543,
-   "prefill_s": 105.87,
+   "cached": 744491,
+   "prefill_s": 107.5,
    "capture_s": 0.0,
    "disk_write_bytes": 13525924894,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 19,
+   "ram_refusals": 47,
    "disk_write_s": 30.74,
-   "within_64_of_actual": 47
+   "within_64_of_actual": 58
   },
   "phase0": {
-   "cached": 746543,
-   "prefill_s": 105.87,
+   "cached": 744540,
+   "prefill_s": 107.46,
    "capture_s": 0.0,
    "disk_write_bytes": 13525924894,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 20,
+   "ram_refusals": 42,
    "disk_write_s": 30.74,
-   "within_64_of_actual": 47
+   "within_64_of_actual": 58
   },
   "hybrid": {
-   "cached": 746543,
-   "prefill_s": 105.87,
+   "cached": 744540,
+   "prefill_s": 107.46,
    "capture_s": 0.0,
    "disk_write_bytes": 6327450654,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 20,
+   "ram_refusals": 42,
    "disk_write_s": 14.38,
-   "within_64_of_actual": 47
+   "within_64_of_actual": 58
   },
   "dense": {
-   "cached": 747516,
-   "prefill_s": 105.1,
+   "cached": 744498,
+   "prefill_s": 107.49,
    "capture_s": 0.0,
-   "disk_write_bytes": 6165147396,
+   "disk_write_bytes": 6311688614,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 62,
-   "disk_write_s": 14.01,
-   "within_64_of_actual": 48
+   "ram_refusals": 76,
+   "disk_write_s": 14.34,
+   "within_64_of_actual": 58
   }
  }
 }

@@ -132,13 +132,17 @@ A review of these documents raised points that are now addressed:
 - **Compaction** is excluded from write volumes, so start without it.
   **Checkpoint density** is bounded by the record limit and the budget.
 - **The model interface** lists each state component and its valid position.
-- **E8 simulator** with production admission, the end-of-request snapshot and
-  asynchronous disk publication. Same conclusions; refusals are still
-  under-reproduced.
-- **Phase 0 does not fix everything:** 27B W4 and the subagent created after
-  a restart still favour the hybrid.
+- **E8 simulator.** Revision 2, after a second review, replays requests
+  concurrently with production's capture sequence and admission. Disk entries
+  become restorable only when their write completes, restarts are graceful
+  or abrupt, and chunks follow lineage. It reproduces actual reuse within
+  0.4% on 11 of 12 runs. It shows the hybrid ahead of Phase 0 after abrupt
+  restarts, on 27B W4 and with dense checkpoints.
+- **Phase 0 does not fix everything:** abrupt restarts, 27B W4 and the
+  subagent created after a restart favour the hybrid.
 - **A 782 s disk-write stall** found at concurrency 4; cause unknown.
 - **Reproducibility:** configurable script paths, committed token arrays and
-  logs, run metadata, and measured vs simulated labels.
+  server logs (force-added: the repository ignores `*.log`), run metadata,
+  and measured vs simulated labels.
 
 **Next.** Discuss the required features, then choose.

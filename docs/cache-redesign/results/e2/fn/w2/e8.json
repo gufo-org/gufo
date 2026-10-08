@@ -1,7 +1,9 @@
 {
  "model": "fn",
  "workload": "w2",
+ "revision": 2,
  "restart_at": null,
+ "abrupt": false,
  "ram_budget": 9230553088,
  "staging": 2307610112,
  "actual_prefill_s": 84.99,
@@ -9,48 +11,48 @@
  "actual_ram_refusals": 22,
  "variants": {
   "today": {
-   "cached": 554406,
-   "prefill_s": 86.57,
+   "cached": 553035,
+   "prefill_s": 87.66,
    "capture_s": 0.0,
-   "disk_write_bytes": 15149155072,
+   "disk_write_bytes": 16561754248,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 4,
-   "disk_write_s": 34.43,
-   "within_64_of_actual": 29
+   "ram_refusals": 26,
+   "disk_write_s": 37.64,
+   "within_64_of_actual": 35
   },
   "phase0": {
-   "cached": 574354,
-   "prefill_s": 70.74,
+   "cached": 573067,
+   "prefill_s": 71.76,
    "capture_s": 0.0,
-   "disk_write_bytes": 14352718034,
+   "disk_write_bytes": 15765317210,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 0,
-   "disk_write_s": 32.62,
-   "within_64_of_actual": 28
+   "ram_refusals": 2,
+   "disk_write_s": 35.83,
+   "within_64_of_actual": 34
   },
   "hybrid": {
-   "cached": 574354,
-   "prefill_s": 70.74,
+   "cached": 573067,
+   "prefill_s": 71.76,
    "capture_s": 0.0,
-   "disk_write_bytes": 4960958674,
+   "disk_write_bytes": 5305034330,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 0,
-   "disk_write_s": 11.27,
-   "within_64_of_actual": 28
+   "ram_refusals": 2,
+   "disk_write_s": 12.06,
+   "within_64_of_actual": 34
   },
   "dense": {
-   "cached": 574902,
-   "prefill_s": 70.31,
+   "cached": 574225,
+   "prefill_s": 70.85,
    "capture_s": 0.0,
-   "disk_write_bytes": 5535740448,
+   "disk_write_bytes": 5745137606,
    "disk_restore_s": 0.0,
    "disk_restores": 0,
-   "ram_refusals": 15,
-   "disk_write_s": 12.58,
-   "within_64_of_actual": 29
+   "ram_refusals": 10,
+   "disk_write_s": 13.06,
+   "within_64_of_actual": 34
   }
  }
 }
