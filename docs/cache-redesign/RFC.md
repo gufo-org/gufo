@@ -83,8 +83,8 @@ Non-goals for the initial implementation:
 
 - Distributed caching or multiple server processes sharing one cache directory.
 - Reading or migrating files from the old cache format.
-- Replacing inference scheduling, sampling or model kernels as part of package
-  extraction.
+- Replacing inference scheduling, sampling or model kernels as part of building
+  the new cache package.
 - Guaranteeing identical sampled output between a fresh computation and a
   restored prefix computed with a different floating-point execution shape.
 - Forcing image/video denoising into an autoregressive continuation interface.
@@ -219,7 +219,7 @@ model modules supply coherent state and device operations.
 | Checkpoint | Exact boundary, compatibility/input identity, private state, chunk references and partial tails | Immutable after capture completes; eligible for lookup only while all required components can be supplied. |
 
 A conversation does not own a slot permanently. Eight execution slots can
-serve many more than eight conversations over time. Conversely, adding more
+serve many more logical conversations over time, within the model's feasible slot count. Conversely, adding more
 checkpoint records does not create more execution capacity. The initial
 checkpoint limit remains bounded; slot count and retention limits are separate.
 
@@ -359,10 +359,53 @@ overall resource ledger. An allocation must have one physical charge even if
 many checkpoints reference it.
 
 Borrowed rows cannot count as free. If a slot lends 6 GiB of rows to several
-checkpoints, resetting it may require 6 GiB of preservation. The cache must
-reserve that capacity before accepting the retention obligation. When rows
-materialize, the reservation becomes an allocation charge rather than adding
-a second charge for the same obligation.
+checkpoints, resetting it may require 6 GiB of preservation. A spill reservation
+must have physical backing with pages already committed, rather than only a
+promise to allocate later. Reserve that backing before accepting the retention
+obligation. The ledger distinguishes free committed backing, assigned spill
+reservations and materialized chunks, while charging each physical allocation
+once. Assigning a reservation to its chunk does not allocate or double-charge it.
+
+The review's ROCm 7.2 allocation measurements report about 25 GB/s of page
+commit throughput, around 4.5 ms per 111 MB, while the allocation blocks other
+HIP calls. Committing 6 GiB on reassignment could therefore cost approximately
+258 ms before copying any rows. This estimate exposes a latency hazard; it is
+not a measured reassignment result. The copy adds its own cost.
+
+Create and commit backing within the feasible memory envelope during model
+initialization or an explicit inference-quiescent period. Reuse released backing.
+Do not refill a pool opportunistically while peers execute: [PR #445](https://github.com/gufo-org/gufo/pull/445)
+records an approximately 8 ms decode stall from background spare-block refill.
+If committed capacity is insufficient, retire eligible retention or decline the
+capture rather than silently introducing a request-path page-commit allocation.
+
+#### Idle spill and independent transfer streams
+
+While a slot is idle, background preservation materializes referenced borrowed
+rows into the committed backing. Prefer a slot whose outstanding preservation
+has completed when assigning an unrelated request. Record the residual spill
+wait when reassignment arrives earlier; idle time cannot be assumed available.
+
+An idle-spill worker pins the source ranges and their slot generation, transfers
+bounded pieces and publishes completed backing under the same mutation guard.
+The scheduler and cache coordinate that guard before a slot becomes executable
+again. Cancellation or a request arriving mid-spill must not overwrite a pinned
+source or publish a partially copied chunk. Already preserved ranges remain
+usable; required remaining ranges are completed or their eligible retention is
+retired before mutation. A slot becoming idle must not force an unbounded eager
+copy of every possible checkpoint.
+
+Every in-flight transfer leases its own pooled stream and completion event;
+concurrent transfers must not queue behind an unrelated bulk copy on one shared
+stream. PR #445 records a 1,656-token prefill delayed about 24% by that pattern.
+Streams return to the pool only after completion. This prevents avoidable FIFO
+serialization, but does not eliminate device bandwidth contention.
+
+Qualify idle spill, zero-idle reassignment and reassignment during a copy. The
+replacement conversation B's end-to-end TTFT and already decoding peers'
+per-token latency must pass the existing per-request/phase 5% and 3 ms gates
+against matched baseline controls. Report page-commit, residual-spill and stream
+wait separately; an average throughput improvement cannot hide those regressions.
 
 Before mutation:
 
@@ -419,6 +462,26 @@ boundaries, learned shared prefixes, useful message/edit boundaries and recent
 grid points. Persisting every possible boundary is unnecessary and can itself
 increase response latency, fixed-state memory and writes.
 
+A recurrent checkpoint requires stopping execution at its exact boundary.
+Message boundaries, learned prefixes and grid points can split a prefill pass,
+shrink kernel batches and add capture/transfer synchronization. The density
+cost includes those effects alongside private bytes and expected reuse.
+Prefer candidates aligned with planned prefill passes; coalesce nearby optional
+boundaries. Do not change an exact required boundary by rounding its tokens.
+
+The current baseline skips grid points within 128 tokens of the prompt end
+because they split the final pass beside an already planned complete-prompt
+checkpoint. The new policy must retain the measured benefit of avoiding such
+redundant splits, with adapter-specific pass alignment rather than assuming
+that a 2,048-token storage chunk is always an efficient compute boundary.
+
+For the 6,000-token subagent example, capturing exact private state can require
+a pass ending at 6,000. It is worthwhile only if predicted/observed follower
+reuse pays for the extra split and synchronization. Otherwise the subagent
+continues from the earlier coherent checkpoint and the optional learned capture
+is skipped. Instrument pass count, pass sizes, synchronization and marginal
+capture cost, and test both aligned and unaligned candidates.
+
 Retention value depends on future saved work and actual resource cost. A useful
 initial policy favors shared branch points and last useful continuations,
 while dropping retries and covered history according to existing ranks.
@@ -453,7 +516,7 @@ including peers already decoding.
 
 The initial version gives one server process exclusive ownership of a cache
 directory. A process lock enforces that rule; eight concurrent requests within
-that process remain supported. A second process receives a clear directory
+that process follow the feasible model/mode capacity matrix. A second process receives a clear directory
 ownership error or uses another directory.
 
 Publication order is:
@@ -467,9 +530,27 @@ Publication order is:
 
 A queued or in-flight write is not durable. Graceful shutdown can drain the
 bounded queue; abrupt termination preserves only published checkpoints.
-Startup validates manifests and dependencies. Corrupt or incomplete entries
-are excluded; orphan files can be reclaimed after accounting for active work.
-Readers pin dependencies so concurrent eviction cannot remove a file in use.
+Startup reads and validates bounded manifests, identities and declared lengths,
+then checks referenced file existence and sizes. It does not scan/checksum the
+complete payload of every chunk. The current `IndexExistingFiles` path reads
+and verifies entire images; carrying that behavior into the new store could
+spend tens of seconds scanning tens of GB before accepting a request.
+
+Index entries discovered this way are structurally available but have unverified
+payloads. During bounded streaming restore, verify each dependency's checksum
+and private-state/tail payload. Bytes may be copied into an invalid destination
+incrementally, but that slot becomes executable only after every required
+checksum and component-position check passes. A failed check invalidates the
+destination and affected dependency references before any fallback executes.
+Once-verified immutable dependencies may cache verification for their protected
+file identity; replacement or mutation invalidates that result.
+
+Corrupt/incomplete entries are excluded when detected. Orphan reclamation follows
+complete manifest-reference discovery and runs outside the serving-critical
+startup path. Readers pin dependencies so concurrent eviction cannot remove a
+file in use. Gate time to readiness separately from first restored-request TTFT,
+and assert that startup payload reads stay bounded by metadata, not total cache
+payload size; a restart benefit cannot be claimed by ignoring index-build time.
 
 Old-format compatibility is not required. The store recognizes its format
 version and rebuilds incompatible legacy cache entries as requests arrive.
@@ -587,7 +668,7 @@ remain useful for the old branch, subject to budget. There is no permission
 to splice the old recurrent state into the edited branch merely because some
 later text happens to be identical.
 
-**7. All eight slots are active.**
+**7. Eight slots are active within a feasible model/context envelope.**
 
 | Slot | Workload | Cache requirement |
 | --- | --- | --- |
@@ -604,7 +685,8 @@ Slow disk I/O for G must not hold a global metadata lock across the transfer.
 Shared device-copy bandwidth can still affect peers, so bounded transfer size
 alone is insufficient evidence of good concurrency latency.
 
-Qualification must include this mixed workload alongside homogeneous chats
+For admitted C=8 configurations, qualification includes this mixed workload
+alongside homogeneous chats
 and long-agent runs. Aggregate throughput must not conceal one starving user
 or a parent that loses all useful continuation points.
 
@@ -810,32 +892,18 @@ Upstream documentation evolves. The research's specific model/block-size
 examples are not universal constraints. This RFC evaluates the architectural
 pattern rather than promising compatibility with a particular upstream backend.
 
-### Keep the current design, with focused fixes
+### Keep the current design
 
-Retain opaque complete snapshots and independent disk files. Fix RAM/disk
-candidate discovery, stream transfers in both directions and improve accounting
-where physical sharing already exists. Preserve current model interfaces,
-then adjust admission or eviction in separately measured changes.
+Keep the existing opaque snapshots and independent disk files unchanged.
+This alternative requires no redesign implementation and preserves today's
+model-specific capture/restore paths and per-file corruption isolation.
 
-Advantages:
-
-- Lowest implementation scope and simplest per-file ownership and corruption
-  isolation.
-- Preserves existing model-specific capture/restore paths.
-- The research simulation suggests that focused fixes recover much of the
-  missed prefix reuse in existing C=2/C=4 traces.
-- Delivers useful improvements before the larger storage redesign.
-
-Disadvantages:
-
-- Full-copy models still incur history-sized capture cost per retained boundary.
-- Independent disk snapshots repeatedly write and store the same prefix.
-- Dense useful checkpoints remain expensive, especially for long histories.
-- It does not reduce separate live-slot allocations either.
-
-These fixes are recommended as product phases even if the hybrid implementation
-proceeds. Their immediate benefit must not be attributed exclusively to shared
-chunks, and they provide a stronger comparison baseline for later PRs.
+Its costs and defects remain: full-copy layouts retain/copy large prefixes
+per boundary, disk payloads repeat shared history, whole-payload staging limits
+deep persistence/restores, and shorter RAM hits can hide deeper disk entries.
+Useful dense boundaries remain expensive and separate live-slot allocations
+still limit concurrency. This option provides the comparison baseline; work to
+improve the current cache is outside this RFC's implementation scope.
 
 ### Other approaches considered in the research
 
@@ -853,7 +921,7 @@ larger extents without introducing GPU-generated full-copy keyframes.
 **Chunked KV with paged live execution.** This is the more ambitious direction
 represented by the SGLang/vLLM-like options. It addresses live duplication as
 well as retained storage. It remains a separately qualified extension rather
-than a prerequisite for extracting the common package.
+than a prerequisite for building the new common package.
 
 **External stores such as LMCache, and local engines such as ds4.** They are
 additional integration references, rather than a sixth complete Gufo design.
@@ -871,7 +939,7 @@ means conditional support, additional work or a tradeoff; red means the scoped
 approach leaves a material requirement unresolved. Colors express design
 assessment, not implementation qualification. Short reasons accompany each.
 
-| Feature / decision point | Hybrid, recommended | llama.cpp-like | SGLang-like | vLLM-like | Current + fixes |
+| Feature / decision point | Hybrid, recommended | llama.cpp-like | SGLang-like | vLLM-like | Current |
 | --- | --- | --- | --- | --- | --- |
 | Same-slot long continuation | 🟢 Preserve live frontier | 🟢 Natural slot reuse | 🟢 Reuse live path | 🟢 Reuse live blocks | 🟢 Existing fast path |
 | Cheap additional retained boundaries | 🟢 Copy private state, share rows | 🟢 Cheap in-slot checkpoints | 🟢 Shared rows + checkpoints | 🟡 Hybrid state policy/alignment matters | 🟡 Flash shares; 27B still copies |
@@ -880,11 +948,11 @@ assessment, not implementation qualification. Short reasons accompany each.
 | Live memory across eight related requests | 🟡 Separate live slot copies initially | 🟡 Depends on live allocator adaptation | 🟢 Shared live prefix design | 🟢 Shared live block design | 🟡 Separate slot allocations |
 | Cross-slot restore without full-prefix copying | 🔴 Initial contiguous restore copies rows | 🟡 Depends on live allocator adaptation | 🟢 With shared paged execution | 🟢 With block-managed execution | 🔴 Full restore path |
 | Automatic restart retention with shared disk payload | 🟢 Specified manifest store | 🔴 Additional automatic disk design needed | 🟡 Storage backend and state support required | 🟡 Additional persistence integration required | 🔴 Persistence exists, but payload duplicated |
-| Bounded deep writes and restores | 🟢 Required in both directions | 🟡 Must add bounded persistence | 🟡 Depends on tier/backend integration | 🟡 Depends on storage integration | 🟢 Focused streaming fix |
+| Bounded deep writes and restores | 🟢 Required in both directions | 🟡 Must add bounded persistence | 🟡 Depends on tier/backend integration | 🟡 Depends on storage integration | 🔴 Current whole-payload staging limit |
 | Exact recurrent boundary restoration | 🟢 Explicit component contract | 🟢 Exact saved checkpoints | 🟢 Required component boundary | 🟡 Model/mode capability verified | 🟢 Existing coherent snapshots |
-| Incremental delivery through Gufo PRs | 🟢 Package, fixes, RAM, disk, adapters | 🟢 Smaller execution changes | 🟡 Wider allocator/execution changes | 🟡 Wider allocator/kernel changes | 🟢 Smallest immediate scope |
+| Incremental delivery through Gufo PRs | 🟢 Package, backing, RAM, disk, adapters | 🟢 Smaller execution changes | 🟡 Wider allocator/execution changes | 🟡 Wider allocator/kernel changes | 🟢 Existing implementation |
 | Disk corruption isolation | 🟡 Shared dependency affects many entries | 🟡 Depends on added disk design | 🟡 Shared-tier dependency handling | 🟡 Shared-store dependency handling | 🟢 Independent complete files |
-| Evidence for Gufo's exact C=8 workload | 🟡 Qualification required | 🟡 Qualification required | 🟡 Qualification required | 🟡 Qualification required | 🟡 C=8 matched baseline required |
+| Evidence for admitted per-model concurrency workloads | 🟡 Qualification required | 🟡 Qualification required | 🟡 Qualification required | 🟡 Qualification required | 🟡 Capacity matrix and matched controls required |
 
 The hybrid is recommended because it addresses repeated retained payload and
 deep persistence while preserving current execution paths for incremental
@@ -907,17 +975,62 @@ latency improvement against the RAM they retain.
 | Correctness | Exact coherent restored state; compatible inputs only; correct target/draft positions; existing numerical-quality checks pass. |
 | Reuse | Expected prefill and restored-token work is asserted per request, including edits, forks, rotation and restart. |
 | Latency | Matched request/phase timings, including TTFT, capture, restore and affected decoding; preserve repository gates of 5% and 3 ms. |
-| Peer progress | A long prefill, spill or disk operation does not create unbounded stalls for unrelated requests. |
+| Reassignment / peer progress | Replacement B's TTFT and decoding peers' per-token latency pass matched 5% and 3 ms gates for idle, zero-idle and mid-spill reassignment; allocation and copy waits are attributed separately. |
 | RAM | Peak total physical allocation and retained unique bytes/reservations stay bounded; distinguish live state, weights and scratch. |
-| Disk | Referenced, temporary and orphan bytes are accounted for; reads/writes and publication lag are measured. |
+| Disk / restart | Referenced, temporary and orphan bytes are accounted for; readiness time and first-restored-request TTFT are gated separately; startup reads metadata only and restore validates payloads before execution. |
 | Failure handling | Cancellation, allocation/transfer failure, corrupted data and crashes release resources and prevent partial-state execution. |
-| Model coverage | Every current family is inventoried; each supported continuation mode has an adapter and qualification record. |
+| Model coverage | Every family/mode has capabilities, a frozen feasible capacity row and a qualification record; infeasible C/context combinations are excluded explicitly. |
 
-Use C=1, 2, 4 and 8. Cover one long coding agent, parent/subagent forks,
-independent chats, mixed short/long arrivals, more histories than slots, edits,
-tight budgets and restarts at deep context. Include histories around 100k–150k
-where supported, plus representative shorter contexts. Larger configured
-contexts need capacity planning rather than assumed extrapolation.
+Use C=1, 2, 4 and 8 only where the per-model capacity matrix admits that
+configuration. Cover one long coding agent, parent/subagent forks, independent
+chats, mixed short/long arrivals, more histories than slots, edits, tight budgets
+and deep restarts. Include histories around 100k–150k where feasible and shorter
+contexts at higher concurrency. Model support does not imply eight simultaneous
+long histories fit that model on this machine.
+
+### Per-model capacity matrix — prerequisite to Phase 0
+
+Before Phase 0 starts, freeze the planning matrix per model artifact, precision,
+draft mode, configured context, active request depth and concurrency. Measure or
+validate weights/sidecars, live-state allocation, scratch, committed backing,
+private checkpoints, staging and headroom together. Admission must stay inside
+the resulting envelope. An unknown row is an unmet planning prerequisite,
+rather than an implicit promise to run every C/context combination.
+
+The current evidence supplies starting points, not new-cache qualification:
+
+| Model / mode | Observed starting envelope | C=8 / long-context constraint | Required planning result before Phase 0 |
+| --- | --- | --- | --- |
+| Flash-Next UD-Q4_K_XL + Q8_0 MTP | Historical C=2 server configured at 260k context; one history reached about 149k. C=4 traces used a 131,072-token configured context. | Approximately 114 GB of weights on 125 GiB visible memory leaves a narrow working margin. Eight long live histories are excluded; retained sharing cannot make them fit. | Freeze C=1/2 long-horizon and feasible higher-C short/mixed depths with committed spill backing included. Configured context alone does not prove all slots can reach it together. |
+| Flash-Next AR | Payload probes exist; speculative state differs from MTP. | MTP's concurrency envelope cannot be copied unchanged; long C=8 remains unqualified. | Measure a separate AR live/scratch/backing envelope and state the admitted C/depth combinations. |
+| Qwen 27B UD-Q8_K_XL + Q8_0 DFlash2 | Historical C=2 server configured at 256k; one history reached about 149k. C=4 traces used 131,072 configured context. | Eight 100k histories need about 48.83 GiB of attention KV alone; weights, draft state, committed backing and scratch are additional. | Freeze feasible C/depth/budget combinations; C=8 is admitted only after the full memory sum and matched workload fit. |
+| Qwen 27B Q8 AR and Q4 AR/DFlash2 | AR size probes exist; Q4 and draft combinations are separate functional profiles. | Precision/mode changes weights and resource claims; no universal C=8 allowance. | Establish artifact-specific envelopes; do not infer qualification from the Q8 DFlash trace. |
+| DeepSeek V4 Flash AR/DSpark | No matched continuation-capacity campaign in this research. | Unqualified; compressed KV alone does not prove feasibility. | Inventory and measure each supported mode; freeze its supported C/context matrix. |
+| Qwen ASR and TTS | Separate execution/capability contracts; no continuation-capacity result here. | Do not apply the text C=8 gate blindly. | Declare applicable continuation operations, concurrent capacity and workload-specific input/history limits. |
+| Qwen Image and MiniMax H3 | Image/video generation uses different execution state. | Autoregressive continuation gates apply only to capabilities actually exposed. | Record supported/unsupported continuation capabilities and their own feasible execution envelopes. |
+
+Unqualified cells stay blocked until the pre-phase planning result exists.
+Long-horizon and concurrent personas get separate admitted rows; a short C=8
+result cannot replace the long-agent requirement, and infeasible long C=8 is
+documented rather than treated as a failing cache optimization. Changes to model
+artifacts, allocation policy or committed capacity require revalidating the row.
+
+### Client history transformations
+
+Qualification includes thinking-on conversations whose clients omit
+`reasoning_content` from later history, beside clients such as Pi that replay
+reasoning. It also includes a bridge that rewrites the last user message when
+copying it into history, with unrelated short requests filling RAM between turns.
+These shapes exercise stable-boundary checkpoints and frozen generated
+frontiers, not merely append-only exact prompt growth.
+
+Use `cache-growth` for omitted/replayed reasoning and select `cache-bridge`
+explicitly: it is not included in `all`. Reproduce the shapes from
+[#336](https://github.com/gufo-org/gufo/issues/336) and
+[#462](https://github.com/gufo-org/gufo/issues/462), asserting compatible restored
+boundaries, suffix work, uncached-control correctness and per-request latency.
+Run them with new-cache slot rotation, memory pressure, branches and restart.
+No fixes to the current cache are proposed as part of those scenarios.
 
 Compare equivalent retained boundaries and workload histories for resource
 claims. Also run fixed-budget comparisons to measure how improved capacity
@@ -938,9 +1051,10 @@ keep inconclusive evidence visibly unqualified and do not widen tolerances.
   durable publication and computation lineage. Simulated current reuse matched
   recorded reuse within approximately 0.4% in 11 of 12 runs; one 27B workload
   differed by about 1.3%.
-- Simulations at C=2/C=4 suggest focused lookup/streaming fixes recover much of
-  the missed reuse. Hybrid gains additionally concern capture cost, retained
-  capacity, write volume and denser useful boundaries.
+- Simulations at C=2/C=4 attribute some reuse gains to deeper candidate lookup
+  and bounded persistence. Other hybrid gains concern capture cost, retained
+  capacity, write volume and denser useful boundaries. No legacy-cache repair
+  work is included in the delivery plan.
 - Simulator admission/removal behavior is imperfect, and elapsed-time estimates
   are not performance qualification. One recorded 1.67 GB disk write stalled
   for 782 seconds; its cause remains unexplained.
@@ -962,7 +1076,7 @@ complete, without changing the meaning of historical evidence.
 | Background copies contend with inference | Higher TTFT or inter-token latency at C>1 | Bound/coalesce optional work; measure active-request interference; prioritize latency. |
 | Dense checkpoints retain large private state | RAM growth erases sharing gains | Bound density and records; measure marginal latency value against private bytes. |
 | Too few checkpoints survive | Earlier edits and subagents re-prefill large gaps | Protect useful shared boundaries; test fixed-budget histories and report checkpoint gaps. |
-| Separate live KV prevents eight long requests fitting | Retained savings fail the intended capacity target | Measure combined memory at C=8; consider separately scoped paged live KV if required. |
+| Separate live KV prevents a requested C/context combination fitting | OOM or an impossible qualification gate | Freeze per-model envelopes before Phase 0; qualify admitted rows and exclude infeasible rows; separately evaluate live paging if needed. |
 | Shared disk dependency is corrupt | Multiple checkpoints become unusable | Checksums, dependency validation, reverse dependency invalidation and earlier-boundary fallback. |
 | Manifest publication is incorrectly ordered | Crash exposes entries with missing dependencies | Dependency durability before manifest publication; crash injection at every stage. |
 | Version upgrade or rollback mishandles cache files | Startup failure or stale-state reuse | Explicit versions, managed-file cleanup, cold rebuild and rollback tests. |
@@ -990,14 +1104,14 @@ prompt text or turning on expensive payload inspection.
 | --- | --- |
 | Lookup | Live/RAM/disk candidates, deepest compatible boundary, selected boundary, identity rejection and selection reason. |
 | Request work | Prompt tokens, restored tokens, executed prefill tokens, checkpoint gap, source/destination slot and actual model/speculative mode. |
-| Capture | Boundary type, component bytes, borrowed/owned/private bytes, reservation, completion time and admission/skip reason. |
-| Spill | Mutation reason, affected rows, unique bytes preserved, copies avoided and wait/copy time. |
+| Capture / density | Boundary type, component bytes, committed backing/reservation, pass sizes/count, forced splits, synchronization and admission/skip reason. |
+| Spill | Idle versus foreground work, source generation, affected rows, committed backing, residual reassignment wait, unique bytes and copy time. |
 | Restore | Pin/lease wait, disk bytes read, device bytes copied, component loading time, failure/cancellation and cold fallback. |
-| Memory | Unique retained allocations, spill reservations, private state/tails, staging, queued pinned bytes, live allocations and peak physical total. |
+| Memory / allocation | Free/in-use committed pool pages, assigned reservations, private state/tails, staging, queued pins, live allocations, commit/HIP-call blocking time and peak physical total. |
 | Persistence | Jobs admitted/coalesced/skipped, queue age/depth, physical bytes written, fsync/publication time and time from capture to durability. |
 | Eviction / GC | Checkpoint ID, rank/reason, references removed, unique bytes actually freed, protected pins and orphan cleanup. |
-| Concurrency | Slot wait, metadata-lock wait, transfer interference, peer TTFT and inter-token latency while optional work runs. |
-| Recovery | Discovered usable manifests, corrupt/missing dependencies, obsolete-format entries and fallback outcomes. |
+| Concurrency | Slot/lock/stream wait, independent stream leases, transfer interference, B's reassignment TTFT and each peer's token latency during spill/copy work. |
+| Recovery | Metadata-only index bytes/time to readiness, unverified/verified dependencies, streaming checksum time, corruption, first-restore TTFT and fallback. |
 
 Assign bounded internal identifiers to checkpoints, chunks, slots and lineages
 for trace correlation. Use bounded aggregate metric labels; arbitrary lineage
@@ -1038,6 +1152,7 @@ Required functional scenarios include:
 | --- | --- |
 | Continue one conversation and retry unchanged input | Reuse the correct live/saved boundary and expected suffix work. |
 | Freeze a generated frontier before a branch | Children inherit actual executed state rather than an unrelated prefill reconstruction. |
+| Drop reasoning or rewrite the final user message in history | Stable-boundary and frozen-frontier reuse stays correct under rotation, pressure and restart; compare suffix work and uncached controls. |
 | Edit/shorten history before a recurrent checkpoint | Restore an earlier coherent boundary; never truncate private recurrent state. |
 | Rotate more histories than slots | Preserve borrowed rows before overwrite and restore into another slot correctly. |
 | Share inherited prefixes; cold-prefill identical tokens separately | Share inherited chunks; preserve distinct independent provenance. |
@@ -1047,11 +1162,14 @@ Required functional scenarios include:
 | Restore while another request evicts | Pins protect dependencies until completion. |
 | Cancel during slot wait, spill, capture, write or restore | Release reservations/leases/pins and invalidate partial execution state. |
 | Fail allocation or transfer before mutation | Published checkpoints stay valid; no overwrite before preservation. |
+| Reassign a slot before/during/after idle spill | Use precommitted backing, guard source generation and give each transfer an independent stream; gate B's TTFT and each decoding peer's token latency. |
+| Add an unaligned optional checkpoint near the prefill tail | Measure extra passes/synchronization; skip capture when its reuse benefit does not justify the pass split. |
 | Crash before/after dependency and manifest durability | Restart exposes only complete durable checkpoints. |
 | Missing/corrupt shared file | Reject affected checkpoints and use a valid fallback. |
+| Restart with a large payload corpus | Startup reads bounded metadata and sizes; readiness and first-restore TTFT are measured separately; checksum failure prevents execution. |
 | Old-format cache directory | Rebuild safely without migration or deleting unrelated files. |
 | Changed image or other supplemental input | Reuse only boundaries whose complete input identity matches. |
-| Mixed eight-request workload | Keep peers progressing and preserve long-horizon reuse with measured latency. |
+| Mixed workload at each admitted concurrency | Keep peers progressing and preserve separate long-horizon cases; run eight requests only where the frozen model/mode envelope admits them. |
 
 ### Two-layer code structure
 
@@ -1091,10 +1209,15 @@ model-local tests/
 
 Common code must not depend on HTTP, `TextModelRunner`, model names or model
 headers. Reusable device transfer primitives can stay in `src/core/hip/`.
-Model-specific tensors and mutation rules stay with the model. Evolve the
-existing cache/runner seams rather than maintaining two competing caches.
+Model-specific tensors and mutation rules stay with the model. Use explicit serving/adapter seams for the new package; keep the current
+cache unchanged as a baseline until the qualified replacement is integrated.
+The delivered product has one active continuation cache, not competing policies.
 
 ### Product phases and reviewable PRs
+
+These phases implement the new cache only. No PR in this plan patches the
+current cache. Existing cache behavior supplies context and matched controls;
+its old improvement proposals remain historical research, not delivery tasks.
 
 All continuation-capable models are in scope. Model/mode implementation can
 land incrementally, but the redesign is not complete with only the two models
@@ -1103,12 +1226,12 @@ set and preserve behavior for models not yet converted.
 
 | Phase | User-visible result | Suggested PR boundaries | Exit gate |
 | --- | --- | --- | --- |
-| 0: contracts, functional baseline and instrumentation | A reproducible view of current reuse, costs and model coverage | Behavioral scenarios; capability inventory; event/ledger additions | Tests demonstrate existing behavior and relevant failures; matched baseline recorded. |
-| 1: common package extraction | Existing cache behavior through a clean shared interface | Public lifecycle contracts; legacy adapter integration; serving/disk dependency removal | Existing supported modes preserve behavior, reuse and timing gates. |
-| 2: immediate reuse and transfer fixes | Deeper disk candidates become visible; deep checkpoints can transfer within staging limits | Lookup selection; bounded writes; bounded restores; accounting changes separately | New request scenarios pass; no peer latency regression; checkpoint beyond staging survives restart. |
-| 3: shared retained RAM | More useful boundaries fit; full-copy captures avoid repeated prefix copies where adapted | Ownership/pins/reservations; chunk pool; one model-family adapter per focused PR | Exact state/provenance tests and real-model long-context/concurrency gates pass for each migrated mode. |
-| 4: shared persistent storage | Restart reuse with less repeated disk payload | Versioned manifest/dependency store; publication/GC; bounded transfer integration; upgrade behavior | Crash, corruption, eviction, cancellation and deep restore scenarios pass; measured latency/resource results retained. |
-| 5: complete model coverage and C=8 qualification | All supported continuation modes use the applicable contracts; intended workloads qualified | Remaining family/mode adapters; mixed-workload qualification; measured density/policy refinements | Model inventory has no unexplained gaps; all required correctness and affected latency gates pass. |
+| 0: new-cache contracts, baseline and instrumentation | Reproducible requirements and feasible model/resource envelopes | Functional specifications; baseline/candidate characterization; event schema | Pre-phase capacity matrix frozen; contracts and focused allocator/stream/persistence evidence recorded. |
+| 1: new common package | An isolated, testable cache core | Public contracts; fake adapter; ownership/ledger primitives | Package has no serving/model dependencies; TDD lifecycle and failure cases pass. |
+| 2: committed backing and preservation lifecycle | New-cache slot reuse avoids request-path allocation and unnecessary spill waits | Committed backing pool; idle spill; independent transfer streams; pins/cancellation | Reassignment TTFT and peer token-latency gates pass within each feasible envelope. |
+| 3: new shared RAM and model adapters | Useful coherent boundaries share retained rows | Chunk/provenance pool; density/pass-alignment policy; one family/mode adapter per PR | Exact state/numerical tests, bounded memory and measured split/capture costs pass. |
+| 4: new persistent store and unified index | Deep restart reuse with shared disk payload and bounded readiness time | Versioned manifests/dependencies; lazy validation; streaming restore; GC/upgrade contracts | Crash/corruption/deep-restore tests pass; readiness and first-restored-request latency measured. |
+| 5: integration, full model coverage and feasible concurrency qualification | All supported modes delivered within explicit capacity envelopes | Serving integration; remaining adapters; client replay/bridge workloads; rollout | Every model/mode has a justified capacity result and required correctness/latency passes; C=8 applies where feasible. |
 | Later, if justified: paged live KV / compaction | Lower live duplication or lower restore I/O overhead | Separate allocator/kernel project; separate disk-compaction project | Measured gain justifies added complexity, writes and blast radius. |
 
 Phases express product outcomes, not mandatory single PRs. Independent model
@@ -1129,6 +1252,8 @@ are planned; none represents completed cache implementation.
 
 **Phase 0 — contracts and baseline:**
 
+- [ ] Freeze the per-model feasible capacity matrix before this phase begins;
+  include committed backing and separately admitted long/concurrent personas.
 - [ ] Record a reproducible implementation base and matched benchmark environment.
 - [ ] Inventory every current family/mode and its supported continuation,
   snapshot, fork and persistence capabilities.
@@ -1136,26 +1261,35 @@ are planned; none represents completed cache implementation.
   including cancellation, shutdown and allocation/transfer failure.
 - [ ] Write functional contracts and fake-adapter failure scenarios first.
 - [ ] Establish instrumentation sufficient to replay every admission/removal.
+- [ ] Characterize page commits, independent-stream copies and proposed-store
+  persistence using isolated probes under the admitted concurrent workloads.
+  Investigate whether the
+  historical 782 s write-stall mechanism can recur in the proposed allocation,
+  transfer or writer paths. Record allocator/global-HIP wait, stream wait,
+  serialization, metadata-lock wait, filesystem and fsync time separately.
+  Resolve reproducible candidate stalls or keep the affected qualification
+  blocked; an unexplained baseline outlier is not evidence that the new path
+  provides bounded peer progress. This task does not patch the current cache.
 
-**Phase 1 — package extraction:**
+**Phase 1 — new common package:**
 
-- [ ] Create the common CMake library and public lifecycle contracts.
-- [ ] Remove the disk store's direct dependency on serving's runner interface.
-- [ ] Wrap existing snapshots with legacy adapters, preserving existing lookup,
-  charging, disk semantics, slot preferences and live continuation behavior.
-- [ ] Preserve all advertised model capabilities through extraction.
-- [ ] Qualify dependency boundaries, common lifecycle tests and affected modes.
+- [ ] Build the independent CMake package with the agreed public contracts.
+- [ ] Implement fake-adapter scenarios before lifecycle/policy behavior.
+- [ ] Enforce no HTTP, serving-runner or model-header dependencies.
+- [ ] Define serving/adapter integration seams without changing current-cache policy.
+- [ ] Qualify cancellation, completion, failure and resource-ledger contracts.
 
-**Phase 2 — immediate product fixes:**
+**Phase 2 — committed backing and safe preservation:**
 
-- [ ] Expose longer disk candidates beside shorter RAM hits, preserving stable
-  boundary and supplemental identity requirements.
-- [ ] Stream both writes and restores; account for queued sources, active
-  transfers and scratch without whole-payload materialization.
-- [ ] Replace full logical charging where physical sharing already exists with
-  unique-byte charges and exact spill reservations.
-- [ ] Test deep checkpoints exceeding staging, transfer failure and cancellation.
-- [ ] Keep changes to eviction/admission ceilings separately specified and tested.
+- [ ] Back admitted spill obligations with pages committed during initialization
+  or verified inference-quiescent periods; reuse released allocations.
+- [ ] Implement bounded idle-slot spill, source-generation guards and safe
+  handling of a new request arriving mid-copy.
+- [ ] Lease one independent pooled stream per in-flight transfer.
+- [ ] Gate B's TTFT and peers' per-token latency for idle, zero-idle and mid-spill
+  reassignment; record allocation/page-commit, copy and synchronization waits.
+- [ ] Decline retention or retire eligible references safely when committed
+  capacity is unavailable; never allocate bulk spill backing secretly on admission.
 
 **Phase 3 — shared retained RAM and adapters:**
 
@@ -1169,7 +1303,9 @@ are planned; none represents completed cache implementation.
   reset/rewind/restore/reassignment/destruction.
 - [ ] Publish only coherent captures; restore all required components together
   and invalidate partial destinations before reuse.
-- [ ] Implement bounded density and preserve cheap live continuation paths.
+- [ ] Implement density with measured pass-split/synchronization costs; prefer
+  aligned candidates, skip redundant near-tail grid splits and preserve exact
+  boundaries where their reuse benefit justifies the additional pass.
 - [ ] Qualify numerical/component round trips and measured savings for equivalent
   retained histories on each migrated mode.
 
@@ -1178,6 +1314,9 @@ are planned; none represents completed cache implementation.
 - [ ] Version manifests, component layouts and format namespaces; rebuild
   recognized incompatible legacy contents without parsing them as new state.
 - [ ] Track component availability through one compatible-prefix index.
+- [ ] Build the startup index from bounded manifests and dependency sizes;
+  verify payload checksums lazily during streaming restore before execution.
+  Gate readiness time and the first restored request separately.
 - [ ] Persist missing chunks, private state and tails with dependency durability
   before manifest publication, including directory durability.
 - [ ] Protect writers/readers with pins; bound queues, staging and cleanup.
@@ -1193,7 +1332,10 @@ are planned; none represents completed cache implementation.
 
 - [ ] Deliver every supported continuation layout through the applicable
   contract; explain explicitly any unsupported capability.
-- [ ] Qualify C=1/2/4/8 long-agent, independent and mixed workloads.
+- [ ] Qualify all admitted model-specific C/depth rows; use C=8 where feasible
+  and retain separate long-agent and concurrent/mixed acceptance cases.
+- [ ] Run thinking-on reasoning-dropping/replaying clients and `cache-bridge`
+  explicitly with pressure, rotation and restart on affected profiles.
 - [ ] Replay affected agent sessions, inspecting actual tool results and drafts.
 - [ ] Retain numerical-quality and standard speed results plus matched affected
   per-request/phase timing controls; fix confirmed regressions.
@@ -1205,6 +1347,7 @@ Existing suite mappings make these outcomes concrete:
 | Workflow | Existing suites / necessary extensions |
 | --- | --- |
 | Live continuation / retry | `cache-growth`, `cache-depth`, `long-context`. |
+| Dropped reasoning / rewritten history | `cache-growth`, explicitly selected `cache-bridge` (outside `all`), frozen-frontier/stable-boundary scenarios. |
 | Edits / shortened histories | `cache-edits`, `cache-depth`. |
 | Shared-prefix children / independent provenance | `cache-shared-prefix`, `cache-concurrency`, component ownership tests. |
 | More histories than slots / pressure | `cache-rotation`, `cache-depth`, reservation/failure tests. |
@@ -1233,7 +1376,7 @@ keep noisy evidence visibly inconclusive until resolved.
 
 ## Compatibility and rollout
 
-Ship the common extraction with legacy behavior first. Introduce each model
+Build and qualify the new common package independently first. Introduce each model
 adapter only after its state and functional contracts pass. Preserve the live
 fast path throughout rollout. Cache admission failures are recoverable misses
 when execution remains valid; partially restored state never executes.
@@ -1257,7 +1400,7 @@ steps whose final behavior becomes the default after qualification.
 | --- | --- |
 | Model scope | All model families accounted for; all supported continuation modes delivered. |
 | Delivery | Multiple independently testable PRs grouped into useful product phases. |
-| Workloads | Long-horizon coding/agent histories and C>1 independent/mixed workloads, targeting eight concurrent requests. |
+| Workloads | Long-horizon coding/agent histories and C>1 independent/mixed workloads; up to eight requests within per-model feasible capacity envelopes. |
 | Optimization order | Latency first, RAM second, disk capacity and write volume third. |
 | Correctness | Exact coherent saved-state restoration plus existing numerical-quality requirements. |
 | Old disk files | No migration or backward compatibility required; safe managed-file rebuild. |
@@ -1267,19 +1410,20 @@ steps whose final behavior becomes the default after qualification.
 ### Engineering decisions to resolve before dependent implementation
 
 - Complete component inventories and valid positions for every supported mode.
-  Resolve before its adapter implementation; do not block unrelated extraction.
+  Resolve before its adapter implementation; do not block unrelated common-package work.
 - Concrete adapter API, completion signals and mutation guards. Resolve before
   common ownership behavior is implemented.
 - Chunk geometry for nonstandard/pool-compressed layouts, and tail accounting.
   Start from 2,048-token examples, then validate each descriptor.
-- Initial density and admission policy at C=8. Choose from measured marginal
-  latency value and resource cost while preserving long-horizon cases.
+- Initial density and admission policy within each feasible matrix row. Include
+  prefill pass efficiency, synchronization and committed backing in the marginal
+  cost while preserving long-horizon cases.
 - Whether a cost-aware shorter restore should override the deepest available
   checkpoint. Define measured thresholds and observable fallback behavior
   before enabling such a policy.
-- Resource configurations for the acceptance workloads. Establish combined
-  live/retained/staging capacity on the target machine; avoid promising context
-  lengths that cannot fit at eight simultaneous requests.
+- The per-model capacity matrix is a pre-Phase-0 prerequisite, not a deferred
+  resource question. Resolve unqualified rows before starting dependent work;
+  revise frozen envelopes only with recorded resource evidence.
 - Whether measured live-memory/cross-slot copying costs make paged KV necessary
   to achieve the intended product workload.
 - Whether chunk-file overhead warrants compaction, including its extra writes,
@@ -1329,18 +1473,18 @@ The following representative E8 revision 2 values are total prefill time across
 each trace. The existing-system measurement is separate from every simulated
 column. They are neither measured hybrid timings nor complete request latency.
 
-| Trace | Measured existing prefill | Simulated existing | Simulated focused fixes | Simulated hybrid | Simulated hybrid + dense boundaries |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Flash-Next W1 | 130 s | 137 s | 137 s | 137 s | 137 s |
-| Flash-Next W2 | 85 s | 88 s | 72 s | 72 s | 71 s |
-| Flash-Next W3 C=4 | 159 s | 157 s | 157 s | 157 s | 157 s |
-| 27B W1 | 589 s | 596 s | 596 s | 596 s | 596 s |
-| 27B W2 | 293 s | 293 s | 236 s | 236 s | 233 s |
-| 27B W4 | 403 s | 430 s | 430 s | 394 s | 376 s |
-| 27B W3 C=4 | 478 s | 497 s | 497 s | 497 s | 497 s |
+| Trace | Measured existing prefill | Simulated existing | Simulated hybrid | Simulated hybrid + dense boundaries |
+| --- | ---: | ---: | ---: | ---: |
+| Flash-Next W1 | 130 s | 137 s | 137 s | 137 s |
+| Flash-Next W2 | 85 s | 88 s | 72 s | 71 s |
+| Flash-Next W3 C=4 | 159 s | 157 s | 157 s | 157 s |
+| 27B W1 | 589 s | 596 s | 596 s | 596 s |
+| 27B W2 | 293 s | 293 s | 236 s | 233 s |
+| 27B W4 | 403 s | 430 s | 394 s | 376 s |
+| 27B W3 C=4 | 478 s | 497 s | 497 s | 497 s |
 
-These values explain why reuse fixes deserve independent delivery: most
-prefill improvements in W2 come from exposing the deeper disk candidate.
+These values show that candidate selection contributes much of the predicted
+W2 benefit: the new index exposes a deeper usable disk checkpoint.
 Shared storage can still reduce capture/write costs when prefill totals do
 not change. W1's efficient live continuation already reuses most history;
 its expected benefit is not a promise to eliminate more prefill.
@@ -1579,52 +1723,54 @@ Two reviews pointed out where E5/E7 departed from production.
   only for the rows it restored; rows it computed form new chunks.
   Independent computations of equal tokens are never deduplicated.
 
-[summarize_e8.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/summarize_e8.py) produces the tables:
+[summarize_e8.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/summarize_e8.py) produces the source tables. The RFC retains current-versus-hybrid
+columns; the archived legacy-improvement variant is outside the new design's
+implementation scope and is omitted here.
 
-| Run | Measured prefill | Today | Phase 0 | Hybrid | Hybrid + dense | Reuse, simulated today vs actual | Requests within 64 tokens | Refusals: server / simulated |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Flash-Next W1 | 130 s | 137 s | 137 s | 137 s | 137 s | +0.0% | 36/36 | 39 / 64 |
-| Flash-Next W2 | 85 s | 88 s | 72 s | 72 s | 71 s | -0.1% | 35/36 | 22 / 26 |
-| Flash-Next W3 | 108 s | 108 s | 107 s | 107 s | 107 s | -0.1% | 58/60 | 41 / 47 |
-| Flash-Next W4 | 108 s | 100 s | 100 s | 100 s | 95 s | +0.4% | 28/33 | 27 / 26 |
-| Flash-Next W2-C4 | 72 s | 72 s | 72 s | 72 s | 70 s | -0.2% | 34/36 | 27 / 24 |
-| Flash-Next W3-C4 | 159 s | 157 s | 157 s | 157 s | 157 s | -0.1% | 99/100 | 77 / 81 |
-| 27B W1 | 589 s | 596 s | 596 s | 596 s | 596 s | +0.0% | 36/36 | 39 / 64 |
-| 27B W2 | 293 s | 293 s | 236 s | 236 s | 233 s | -0.0% | 32/36 | 19 / 21 |
-| 27B W3 | 352 s | 347 s | 347 s | 347 s | 347 s | +0.1% | 56/60 | 42 / 48 |
-| 27B W4 | 403 s | 430 s | 430 s | 394 s | 376 s | -1.3% | 27/33 | 31 / 26 |
-| 27B W2-C4 | 230 s | 231 s | 231 s | 231 s | 227 s | -0.2% | 28/36 | 22 / 25 |
-| 27B W3-C4 | 478 s | 497 s | 497 s | 497 s | 497 s | -0.1% | 97/100 | 92 / 97 |
+| Run | Measured prefill | Today | Hybrid | Hybrid + dense | Reuse, simulated today vs actual | Requests within 64 tokens | Refusals: server / simulated |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Flash-Next W1 | 130 s | 137 s | 137 s | 137 s | +0.0% | 36/36 | 39 / 64 |
+| Flash-Next W2 | 85 s | 88 s | 72 s | 71 s | -0.1% | 35/36 | 22 / 26 |
+| Flash-Next W3 | 108 s | 108 s | 107 s | 107 s | -0.1% | 58/60 | 41 / 47 |
+| Flash-Next W4 | 108 s | 100 s | 100 s | 95 s | +0.4% | 28/33 | 27 / 26 |
+| Flash-Next W2-C4 | 72 s | 72 s | 72 s | 70 s | -0.2% | 34/36 | 27 / 24 |
+| Flash-Next W3-C4 | 159 s | 157 s | 157 s | 157 s | -0.1% | 99/100 | 77 / 81 |
+| 27B W1 | 589 s | 596 s | 596 s | 596 s | +0.0% | 36/36 | 39 / 64 |
+| 27B W2 | 293 s | 293 s | 236 s | 233 s | -0.0% | 32/36 | 19 / 21 |
+| 27B W3 | 352 s | 347 s | 347 s | 347 s | +0.1% | 56/60 | 42 / 48 |
+| 27B W4 | 403 s | 430 s | 394 s | 376 s | -1.3% | 27/33 | 31 / 26 |
+| 27B W2-C4 | 230 s | 231 s | 231 s | 227 s | -0.2% | 28/36 | 22 / 25 |
+| 27B W3-C4 | 478 s | 497 s | 497 s | 497 s | -0.1% | 97/100 | 92 / 97 |
 
-| Model | Restart before request | Shutdown | Today | Phase 0 | Hybrid | Restored after restart: today / Phase 0 / hybrid |
-| --- | ---: | --- | ---: | ---: | ---: | --- |
-| Flash-Next | 12 | graceful | 137 s | 137 s | 137 s | 60,560 / 60,560 / 60,560 |
-| Flash-Next | 12 | abrupt | 137 s | 137 s | 137 s | 60,560 / 60,560 / 60,560 |
-| Flash-Next | 20 | graceful | 161 s | 137 s | 137 s | 75,275 / 104,810 / 104,810 |
-| Flash-Next | 20 | abrupt | 161 s | 149 s | 137 s | 75,275 / 90,034 / 104,810 |
-| Flash-Next | 28 | graceful | 185 s | 137 s | 137 s | 75,275 / 134,388 / 134,388 |
-| Flash-Next | 28 | abrupt | 185 s | 149 s | 137 s | 75,275 / 119,579 / 134,388 |
-| 27B | 12 | graceful | 597 s | 597 s | 597 s | 60,396 / 60,396 / 60,396 |
-| 27B | 12 | abrupt | 649 s | 649 s | 597 s | 45,676 / 45,676 / 60,396 |
-| 27B | 20 | graceful | 718 s | 597 s | 597 s | 75,026 / 104,386 / 104,386 |
-| 27B | 20 | abrupt | 718 s | 659 s | 597 s | 75,026 / 89,697 / 104,386 |
-| 27B | 28 | graceful | 855 s | 597 s | 597 s | 75,026 / 133,842 / 133,842 |
-| 27B | 28 | abrupt | 855 s | 667 s | 597 s | 75,026 / 119,098 / 133,842 |
+| Model | Restart before request | Shutdown | Today | Hybrid | Restored after restart: today / hybrid |
+| --- | ---: | --- | ---: | ---: | --- |
+| Flash-Next | 12 | graceful | 137 s | 137 s | 60,560 / 60,560 |
+| Flash-Next | 12 | abrupt | 137 s | 137 s | 60,560 / 60,560 |
+| Flash-Next | 20 | graceful | 161 s | 137 s | 75,275 / 104,810 |
+| Flash-Next | 20 | abrupt | 161 s | 137 s | 75,275 / 104,810 |
+| Flash-Next | 28 | graceful | 185 s | 137 s | 75,275 / 134,388 |
+| Flash-Next | 28 | abrupt | 185 s | 137 s | 75,275 / 134,388 |
+| 27B | 12 | graceful | 597 s | 597 s | 60,396 / 60,396 |
+| 27B | 12 | abrupt | 649 s | 597 s | 45,676 / 60,396 |
+| 27B | 20 | graceful | 718 s | 597 s | 75,026 / 104,386 |
+| 27B | 20 | abrupt | 718 s | 597 s | 75,026 / 104,386 |
+| 27B | 28 | graceful | 855 s | 597 s | 75,026 / 133,842 |
+| 27B | 28 | abrupt | 855 s | 597 s | 75,026 / 133,842 |
 
-| Run | Disk written: server | Today (sim) | Phase 0 | Hybrid | Hybrid + dense |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Flash-Next W1 | 7.1 GB | 7.0 GB | 24.1 GB | 5.7 GB | 5.7 GB |
-| Flash-Next W2 | 16.3 GB | 16.6 GB | 15.8 GB | 5.3 GB | 5.7 GB |
-| Flash-Next W3 | 13.7 GB | 13.5 GB | 13.5 GB | 6.3 GB | 6.3 GB |
-| Flash-Next W4 | 23.2 GB | 26.7 GB | 29.0 GB | 7.1 GB | 6.8 GB |
-| Flash-Next W2-C4 | 14.5 GB | 15.6 GB | 15.6 GB | 5.4 GB | 5.8 GB |
-| Flash-Next W3-C4 | 16.2 GB | 15.9 GB | 15.9 GB | 8.7 GB | 8.7 GB |
-| 27B W1 | 16.5 GB | 16.5 GB | 56.8 GB | 13.2 GB | 13.2 GB |
-| 27B W2 | 37.9 GB | 38.4 GB | 36.5 GB | 12.0 GB | 13.0 GB |
-| 27B W3 | 31.7 GB | 31.5 GB | 31.5 GB | 13.5 GB | 13.4 GB |
-| 27B W4 | 70.9 GB | 71.4 GB | 71.4 GB | 17.2 GB | 16.0 GB |
-| 27B W2-C4 | 36.1 GB | 36.6 GB | 36.6 GB | 11.6 GB | 12.6 GB |
-| 27B W3-C4 | 33.7 GB | 33.6 GB | 33.6 GB | 20.1 GB | 20.0 GB |
+| Run | Disk written: server | Today (sim) | Hybrid | Hybrid + dense |
+| --- | ---: | ---: | ---: | ---: |
+| Flash-Next W1 | 7.1 GB | 7.0 GB | 5.7 GB | 5.7 GB |
+| Flash-Next W2 | 16.3 GB | 16.6 GB | 5.3 GB | 5.7 GB |
+| Flash-Next W3 | 13.7 GB | 13.5 GB | 6.3 GB | 6.3 GB |
+| Flash-Next W4 | 23.2 GB | 26.7 GB | 7.1 GB | 6.8 GB |
+| Flash-Next W2-C4 | 14.5 GB | 15.6 GB | 5.4 GB | 5.8 GB |
+| Flash-Next W3-C4 | 16.2 GB | 15.9 GB | 8.7 GB | 8.7 GB |
+| 27B W1 | 16.5 GB | 16.5 GB | 13.2 GB | 13.2 GB |
+| 27B W2 | 37.9 GB | 38.4 GB | 12.0 GB | 13.0 GB |
+| 27B W3 | 31.7 GB | 31.5 GB | 13.5 GB | 13.4 GB |
+| 27B W4 | 70.9 GB | 71.4 GB | 17.2 GB | 16.0 GB |
+| 27B W2-C4 | 36.1 GB | 36.6 GB | 11.6 GB | 12.6 GB |
+| 27B W3-C4 | 33.7 GB | 33.6 GB | 20.1 GB | 20.0 GB |
 
 Reading E8:
 
@@ -1635,20 +1781,15 @@ Reading E8:
   - RAM refusals match on 10 of 12 runs; the W1 runs over-count (64 vs 39).
   - The set of retained checkpoints cannot be verified, because the server
     logs removals only when the entry limit forces them.
-- **Phase 0 and the hybrid recover the same reuse** in most runs: the W2 miss
-  (Flash-Next 88 → 72 s, 27B 293 → 236 s) and graceful restarts at depth.
-- **The hybrid does better than Phase 0 in three cases:**
-  - *Abrupt restarts:* Phase 0 loses queued full-file writes. Flash-Next at
-    149k: 149 s vs 137 s. 27B: 649–667 s vs 597 s.
-  - *27B W4:* 394 s vs 430 s, because more checkpoints fit the 16 GiB disk
-    budget.
-  - *Dense checkpoints:* 27B W4 376 s, Flash-Next W4 95 s instead of 100 s.
-- **Disk writes:**
-  - the hybrid, with lineage chunks, writes 1.7–4.2× less than today on the
-    multi-conversation runs, and 1.2× less on W1, where today skips its deep
-    writes;
-  - Phase 0 writes 3.4× more than today on the agent runs.
-
+- **The new design's modeled benefit** includes the deeper W2 restore,
+  durable checkpoints at depth, more retained branch points and reduced writes.
+  Dense boundaries also improved modeled W4 prefill to 376 s on 27B and 95 s
+  on Flash-Next. These estimates omit the newly explicit allocation/idle-spill,
+  prefill-pass-split and startup contracts, which require implementation evidence.
+- **Disk writes:** the hybrid simulation writes approximately 1.7–4.2 times less
+  than the existing cache in multi-conversation traces. Existing W1 writes are
+  already low because deep writes were skipped, so write totals must be read
+  together with the durable frontier and retained boundaries.
 
 ### Detailed historical cost model
 
@@ -1759,15 +1900,10 @@ It reads and writes the KV bytes once, at 1.1 GB/s and 0.59 GB/s:
 
 **Disk writes per long agent session** (the W1 runs to 149k tokens, from E8 revision 2; compaction not included):
 
-| Model | Today | Phase 0 | Hybrid |
-| --- | ---: | ---: | ---: |
-| Flash-Next | 7.0 GB, with deep writes skipped | 24.1 GB | 5.7 GB |
-| 27B | 16.5 GB, with deep writes skipped | 56.8 GB | 13.2 GB |
-
-An illustration only, under an assumed endurance rating: at ten such 27B
-sessions a day, Phase 0 writes about 570 GB/day and the hybrid about
-130 GB/day. A drive rated for 600 TB written would last roughly 2.9 years
-versus 12.6 years.
+| Model | Today | Hybrid |
+| --- | ---: | ---: |
+| Flash-Next | 7.0 GB, with deep writes skipped | 5.7 GB |
+| 27B | 16.5 GB, with deep writes skipped | 13.2 GB |
 
 ### Reading the tables
 
@@ -1784,9 +1920,6 @@ versus 12.6 years.
    - today the budget holds 2–3 checkpoints of one long conversation;
    - the hybrid holds 34–52, which is what makes dense checkpoints
      (message boundaries, a shared system prompt) affordable.
-5. **Phase 0 can stream full checkpoints to disk** instead of staging them in
-   RAM. That restores persistence, at 6–23 s of disk time and 3–10 GB per deep
-   checkpoint, so a disk budget holds only a few of them.
 
 
 ## Archived evidence and reproducibility
@@ -1800,8 +1933,15 @@ data are preserved together through two pinned snapshots:
 | `a32fc43bcb9ec66264f166b5162d93a9223557d5` | All 133 original result files: token arrays, per-request metadata, server logs, measured fits and generated outputs | [Browse results](https://github.com/gufo-org/gufo/tree/a32fc43bcb9ec66264f166b5162d93a9223557d5/docs/cache-redesign/results), [download](https://github.com/gufo-org/gufo/archive/a32fc43bcb9ec66264f166b5162d93a9223557d5.tar.gz). |
 
 Keeping scripts/data out of the active tree does not rewrite these published
-commits. The archives provide provenance for historical measurements; they
-are not matching performance controls for later cache implementations.
+commits. Both commits are retained by the published non-release tag
+[`research/cache-redesign-2026-10-08`](https://github.com/gufo-org/gufo/tree/research/cache-redesign-2026-10-08),
+which points to `b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33`;
+`a32fc43bcb9ec66264f166b5162d93a9223557d5` is its ancestor. This reachable
+ref keeps the SHA-pinned browse/download/API links independent of squash
+merging or deleting `fedeizzo/cache-redesign`. Preserve this research tag; do
+not move or delete it without migrating the evidence and updating this RFC.
+The archives provide provenance for historical measurements; they are not
+matching performance controls for later cache implementations.
 
 ### Recover and verify the research outside the checkout
 
@@ -1814,6 +1954,8 @@ export GUFO_REPO=$(git rev-parse --show-toplevel)
 export CACHE_EXP_DIR=$(mktemp -d)
 
 gh auth status
+gh api repos/gufo-org/gufo/git/ref/tags/research/cache-redesign-2026-10-08 \
+  --jq .object.sha
 gh api repos/gufo-org/gufo/tarball/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33 \
   > "$CACHE_EXP_DIR/research-tools.tar.gz"
 gh api repos/gufo-org/gufo/tarball/a32fc43bcb9ec66264f166b5162d93a9223557d5 \
@@ -1849,6 +1991,10 @@ These three commands were successfully replayed during consolidation. The E8
 summary exactly matched archived `results/e8_summary.md`. This verifies archival
 retrieval and summary reproduction, not a new hybrid implementation or a fresh
 simulation of every trace.
+
+The archived summary includes an older legacy-improvement variant. Its values
+remain available as history; this RFC's tables project the existing/hybrid
+columns and the implementation plan does not propose that legacy work.
 
 Re-running token analysis, fitting and simulation requires the recorded Python
 3.13 environment with NumPy (the research used 2.4.4). W1's functional driver
@@ -1925,7 +2071,7 @@ and actual artifact fingerprints for matching controls.
 | `experiments.md` | Recorded E1–E4 and C=4 measurements, microbenchmarks and full E8 reference tables are incorporated; superseded E5/E7 tables remain archived. |
 | `cost-model.md` | Full constants, per-operation estimates and background costs are incorporated with prediction caveats. |
 | `options.md`, `external-engines.md` | All architectural alternatives and central tradeoffs are incorporated; version-specific historical tuning/defaults remain archived. |
-| `decision-brief.md` | Findings, focused-fix rationale and hybrid recommendation are incorporated; earlier unresolved choices are superseded by agreed decisions here. |
+| `decision-brief.md` | Findings and hybrid recommendation are incorporated; earlier legacy-fix proposals remain archived and are excluded from implementation scope. |
 | `README.md` | Important discussion history is summarized below; the complete dated log remains archived. |
 | `scripts/`, `results/` | Exact archived tools, inputs, outputs, checksums and recovery/replay instructions remain available through the two snapshots above. |
 
