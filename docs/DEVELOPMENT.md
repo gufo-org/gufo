@@ -43,6 +43,10 @@ nix develop                            # GPU development, profilers, reference t
 The same CMake commands work without Nix once the documented dependencies are
 installed; `nix develop -c <command>` runs them inside the pinned environment.
 
+Alongside the pinned compiler, `nix develop` carries the tools the loop needs:
+`gdb` for the assertion-enabled test presets, `git` and `jj` for the repository,
+`ripgrep` for searching, `radeontop` for live GPU load, and `ccache` for rebuilds.
+
 ```sh
 cmake --preset release
 cmake --build --preset release --parallel 4
