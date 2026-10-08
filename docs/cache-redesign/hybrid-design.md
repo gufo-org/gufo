@@ -98,6 +98,13 @@ state, and copies all of it today.
 
 Flash-Next already borrows rows and preserves them once on overwrite (#445).
 
+**Package boundary.** Implement the shared policy and storage as a dedicated
+CMake library under `src/cache/`, with state adapters under each model's own
+directory. The [cache package plan](cache-package.md) defines ownership,
+component and lifecycle contracts, capability declarations and migration from
+the existing continuation cache. Serving retains inference scheduling; the
+common cache leases slots and manages retained state through the adapters.
+
 ## Bounded transfers
 
 Neither persisting nor restoring may stage a whole checkpoint in RAM:

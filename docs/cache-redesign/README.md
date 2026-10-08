@@ -15,6 +15,7 @@ far should it go?
 | [Other engines](external-engines.md) | llama.cpp, vLLM, SGLang, LMCache and ds4, with links |
 | [Options](options.md) | Candidate designs, pros and cons, diffs and keyframes, and the features still to decide |
 | [Hybrid design](hybrid-design.md) | Option E in detail, with worked examples |
+| [Cache package](cache-package.md) | Shared library ownership, model adapters, lifecycle contracts and migration |
 | [Cost model](cost-model.md) | Per-operation costs, today vs hybrid, from measured constants |
 | [Experiments](experiments.md) | Measurements needed to decide, and their results |
 
@@ -132,6 +133,10 @@ A review of these documents raised points that are now addressed:
 - **Compaction** is excluded from write volumes, so start without it.
   **Checkpoint density** is bounded by the record limit and the budget.
 - **The model interface** lists each state component and its valid position.
+- **Package architecture.** A dedicated common cache library owns slot
+  leasing, shared chunks, budgets and disk persistence. Model-family adapters
+  own state layouts and device operations, with explicit preservation,
+  capture and restore contracts; see [Cache package](cache-package.md).
 - **E8 simulator.** Revision 2, after a second review, replays requests
   concurrently with production's capture sequence and admission. Disk entries
   become restorable only when their write completes, restarts are graceful
