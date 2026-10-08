@@ -785,6 +785,27 @@ struct TextRunnerPool::Request::Impl {
     }
   }
 
+  // The in-pass capture is the boundary the stop-and-copy path would have
+  // written. Like a retained RAM snapshot there, hand it to the store, which
+  // applies the checkpoint-step policy itself.
+  void PersistInPassSnapshot() noexcept {
+    if (!disk_store || !prompt_snapshot)
+      return;
+    const auto started = std::chrono::steady_clock::now();
+    try {
+      const auto identity = InputIdentity(snapshot_tokens.size());
+      snapshot_metrics.disk_queued_bytes +=
+          disk_store->SaveAsync(runner, snapshot_tokens, prompt_snapshot,
+                                {identity.begin(), identity.end()});
+    } catch (...) {
+      // Earlier checkpoints may already be queued.
+    }
+    snapshot_metrics.disk_enqueue_ms +=
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started)
+            .count();
+  }
+
   void AdvancePromptTarget() noexcept {
     // Keep both the branching fallback and the complete prompt. The latter
     // is captured after first-token publication, as for ordinary requests.
@@ -1288,7 +1309,7 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
 
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
   bool in_pass = false;
-  if (!impl_->disk_store && !impl_->prompt_snapshot_attempted &&
+  if (!impl_->prompt_snapshot_attempted &&
       impl_->prefill_offset < snapshot_position &&
       snapshot_position < impl_->prompt.size() &&
       impl_->runner->Descriptor().capabilities.in_pass_checkpoint) {
@@ -1356,6 +1377,7 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
       impl_->retain_snapshot = false;
     } else {
       impl_->prompt_snapshot = std::move(captured);
+      impl_->PersistInPassSnapshot();
     }
     impl_->AdvancePromptTarget();
   }

@@ -591,7 +591,7 @@ void TestInPassFailureRetainsOnlyCompletedCheckpoints() {
   new_branch.Invalidate();
 }
 
-class PersistentSnapshotRunner final : public SnapshotRunner {
+class PersistentSnapshotRunner : public SnapshotRunner {
 public:
   std::function<void()> before_serialize;
   PersistentSnapshotRunner(std::shared_ptr<FakeStats> stats,
@@ -972,6 +972,59 @@ void TestCancellationRetainsOnlyCompletedWork() {
           continuation.cache_restore_bytes() > 0,
       "a failed operation restores the immutable prompt, never mutated state");
   continuation.Invalidate();
+}
+
+class InPassPersistentRunner final : public PersistentSnapshotRunner {
+public:
+  using PersistentSnapshotRunner::PersistentSnapshotRunner;
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = PersistentSnapshotRunner::Descriptor();
+    descriptor.capabilities.in_pass_checkpoint = true;
+    return descriptor;
+  }
+  [[nodiscard]] std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState&, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::size_t boundary) const override {
+    if (boundary <= offset ||
+        boundary >= std::min(prompt.size(), offset + budget))
+      return std::nullopt;
+    return sizeof(FakeSnapshot);
+  }
+  [[nodiscard]] TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary,
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint) const override {
+    ++stats_->snapshot_captures;
+    *checkpoint = std::make_unique<FakeSnapshot>(boundary, 0, 90);
+    return FakeRunner::Prefill(state, prompt, offset, budget);
+  }
+};
+
+void TestInPassCheckpointPersistsToDisk() {
+  TemporaryDirectory directory;
+  const TextRunnerDiskCacheOptions disk{.directory = directory.path(),
+                                        .capacity_bytes = 4096,
+                                        .staging_capacity_bytes = 4096,
+                                        .min_checkpoint_step_tokens = 0};
+  {
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(
+        std::make_shared<InPassPersistentRunner>(stats, "artifact-A"), 1, disk);
+    auto first = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+    Expect(first.Prefill(64).decode_ready && stats->prefill_spans.size() == 1,
+           "in-pass capture is used with the disk cache enabled");
+    const auto commit = first.Commit();
+    Expect(commit.disk_queued_bytes > 0,
+           "the in-pass boundary is queued for the disk store");
+  }
+  auto stats = std::make_shared<FakeStats>();
+  TextRunnerPool restarted(
+      std::make_shared<InPassPersistentRunner>(stats, "artifact-A"), 1, disk);
+  auto second = restarted.Acquire({1, 2, 3, 50, 51}, {}, {}, {}, true, 3);
+  Expect(second.cache_disk_hit() && second.cached_prompt_tokens() == 3,
+         "a restart restores the in-pass boundary from disk");
+  second.Invalidate();
 }
 
 void TestPersistentSnapshotRestoresAcrossPools() {
@@ -2223,6 +2276,7 @@ int main() {
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.
   ::setenv("NO_COLOR", "1", 1);
   TestInPassStableCheckpoint();
+  TestInPassCheckpointPersistsToDisk();
   TestInPassFailureRetainsOnlyCompletedCheckpoints();
   TestNewImageGetsAStableCheckpoint();
   TestGeneratedFrontierForksBeforeMutation();
