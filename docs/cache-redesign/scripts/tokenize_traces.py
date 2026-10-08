@@ -15,13 +15,9 @@ import tempfile
 
 import numpy as np
 
-HERE = pathlib.Path(__file__).resolve().parent
-TOKENIZE = "/nix/store/26d5y7z8vj2qc6qi0x6dlhcs17ixz1k2-llama-cpp-11382/bin/llama-tokenize"
-VOCAB = {
-    "fn": "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
-    "q27": ("/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/"
-            "4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf"),
-}
+from paths import FN_MODEL, Q27_VOCAB, TOKENIZE, WORK as HERE
+
+VOCAB = {"fn": FN_MODEL, "q27": Q27_VOCAB}
 
 
 def tokenize(model, text):

@@ -1,0 +1,56 @@
+{
+ "model": "fn",
+ "workload": "w2-c4",
+ "restart_at": null,
+ "ram_budget": 8991500288,
+ "staging": 2247939584,
+ "actual_prefill_s": 72.23,
+ "actual_cached": 568972,
+ "actual_ram_refusals": 27,
+ "variants": {
+  "today": {
+   "cached": 569081,
+   "prefill_s": 70.6,
+   "capture_s": 0.0,
+   "disk_write_bytes": 14249331134,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 1,
+   "disk_write_s": 32.38,
+   "within_64_of_actual": 34
+  },
+  "phase0": {
+   "cached": 569081,
+   "prefill_s": 70.6,
+   "capture_s": 0.0,
+   "disk_write_bytes": 14249331134,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 1,
+   "disk_write_s": 32.38,
+   "within_64_of_actual": 34
+  },
+  "hybrid": {
+   "cached": 569081,
+   "prefill_s": 70.6,
+   "capture_s": 0.0,
+   "disk_write_bytes": 5082524094,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 1,
+   "disk_write_s": 11.55,
+   "within_64_of_actual": 34
+  },
+  "dense": {
+   "cached": 569629,
+   "prefill_s": 70.17,
+   "capture_s": 0.0,
+   "disk_write_bytes": 5650880228,
+   "disk_restore_s": 0.0,
+   "disk_restores": 0,
+   "ram_refusals": 18,
+   "disk_write_s": 12.84,
+   "within_64_of_actual": 35
+  }
+ }
+}

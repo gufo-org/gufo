@@ -13,13 +13,13 @@ unless stated otherwise:
 | Thing | Holds | Lives in | Size |
 | --- | --- | --- | --- |
 | **Session** (at most 8) | A running conversation: KV for positions 0..p, contiguous, plus recurrent state at p | GPU memory, as today | Grows with the conversation |
-| **Chunk** | KV rows for 2,048 tokens. Immutable, identified by every token up to its end, so equal prefixes give equal chunks. Reference-counted | Shared pool: RAM, disk, or both | 2,048 × 27.46 KB ≈ 56 MB (Flash-Next), 128 MiB (27B) |
+| **Chunk** | KV rows for 2,048 tokens. Immutable and reference-counted. Identified by its token prefix *and* the computation that produced it (see [chunk identity](#chunk-identity-and-provenance)) | Shared pool: RAM, disk, or both | 2,048 × 27.46 KB ≈ 56 MB (Flash-Next), 128 MiB (27B) |
 | **Checkpoint** | A restorable position p: recurrent and other fixed state at p, the chunks covering 0..p, and a tail of fewer than 2,048 rows that do not fill a chunk | Pool | Fixed state + tail |
 
 Why the split:
 
 - **KV rows never change once written,** so every checkpoint and conversation
-  with the same prefix can share them.
+  that descends from the same computation of a prefix can share them.
 - **Recurrent state is different at every position** and cannot be rebuilt
   from KV rows (see [example 7](#example-7-why-kv-rows-cannot-rebuild-recurrent-state)).
   Each checkpoint therefore keeps its own full copy. This is what llama.cpp's
@@ -30,11 +30,46 @@ Why the split:
 | Operation | What happens | Cost |
 | --- | --- | --- |
 | **Capture** | Copy the fixed state at p. KV rows stay borrowed from the live session | 114–232 MiB, a few ms |
-| **Spill** | Before a session overwrites rows (rewind, reset, reuse by another conversation), copy rows that no pool chunk holds yet into new chunks, once. Checkpoints that borrowed them now reference the chunks | Only rows not yet in the pool |
+| **Spill** | Before a session overwrites rows (rewind, reset, reuse by another conversation), copy rows that no pool chunk holds yet into new chunks, once, into space already reserved. Checkpoints that borrowed them now reference the chunks | Only rows not yet in the pool |
 | **Restore** | Find the longest checkpoint whose tokens are a prefix of the prompt. Copy its chunks and tail into the session's KV, load its fixed state, prefill the rest | Same bytes as restoring a full snapshot today |
 | **Evict** | Drop checkpoints by today's ranks (covered intermediates first, as in #409). Free a chunk when nothing references it | — |
-| **Persist** | Write behind: the fixed state, chunks not yet on disk, and the tail | ~170 MB per 2,048 new tokens (Flash-Next), ~280–360 MB (27B) |
+| **Persist** | Write behind, streamed in bounded pieces: the fixed state, chunks not yet on disk, and the tail | ~170 MB per 2,048 new tokens (Flash-Next), ~280–360 MB (27B) |
 | **Compact** | Merge one lineage's chunk files on disk into larger files (keyframes), without the GPU | Background I/O |
+
+## Chunk identity and provenance
+
+Equal tokens do not guarantee equal KV bytes. Prefill chunk shapes and batch
+composition change floating-point results; gufo already notes that a partial
+hit can change sampled output for this reason. A checkpoint's recurrent state
+was computed together with specific KV bytes, and pairing it with KV produced
+by a different computation of the same tokens would create a state that never
+existed.
+
+Rules:
+- **A chunk records its lineage.** Two checkpoints share a chunk only if both
+  descend from the same computation of those rows. That happens when one
+  restored the chunk and prefilled onward from it (examples 2 and 3), or both
+  were captured in the same session lifetime.
+- **No sharing by token prefix alone.** Two independent cold prefills of the
+  same system prompt produce two different chunk sets. Deduplicating them
+  requires byte-identical payloads, for example by comparing a content hash of
+  the bytes.
+- **The learned shared-prefix boundary routes new conversations to restore
+  instead of prefilling,** which keeps them in one lineage.
+
+## Memory accounting for borrowed rows
+
+Rows borrowed from a live session are cheap only until the session overwrites
+them; then they must be spilled. If borrowed rows were counted as free, a
+session reset could require a large allocation the budget never reserved.
+
+- Each borrowed row that some checkpoint still needs counts as a **reserved
+  spill** against the RAM budget, together with transfer buffers.
+- Before a session overwrites borrowed rows, the cache either has the
+  reservation or evicts checkpoints until it does.
+- Today's Flash-Next accounting (full size for every checkpoint) is the safe
+  upper bound. Accounting for unique bytes has to replace it with exact
+  reservations, not with zero.
 
 **One index for both tiers.** One token prefix tree holds every checkpoint, and
 each chunk records whether it is in RAM, on disk, or both. A restore takes the
@@ -42,16 +77,64 @@ longest matching checkpoint wherever its pieces live; missing chunks are read
 from disk.
 
 **Budget.** RAM and disk budgets count each chunk once, plus each checkpoint's
-fixed state and tail. Rows still owned by a live session are not counted until
-they are spilled.
+fixed state and tail. Rows still owned by a live session count as reserved
+spill (see [above](#memory-accounting-for-borrowed-rows)).
 
-**Model interface.** A model exposes two operations instead of one opaque
-blob:
-- save and load its fixed state;
-- read and write KV rows for a token range.
+**Model interface.** A model describes its state as a list of components,
+each with its own valid position and kind:
+
+| Component (Flash-Next example) | Kind | Valid up to |
+| --- | --- | --- |
+| Target attention KV | Append-only rows | Trunk position |
+| MTP draft KV | Append-only rows | Draft position (`mtp_position`), which differs from the trunk |
+| Pooled indexer rows | Append-only rows | Indexer blocks pooled so far |
+| Raw indexer ring | Ring history (mutable) | Last `index_capacity` rows |
+| Recurrent (GDN) state, kept hidden row, wide residual, sampling state | Mutable | Exactly the checkpoint position |
+
+(`src/models/qwen38_flash_next/kernels/rocm/executor.hpp:58–176`.) Append-only
+components can be chunked and shared; everything else is copied whole into the
+checkpoint. 27B has target KV, DeltaNet and convolution state, and DFlash2
+state, and copies all of it today.
 
 Flash-Next already borrows rows and preserves them once on overwrite (#445).
-27B copies its whole state today and would need the split.
+
+## Bounded transfers
+
+Neither persisting nor restoring may stage a whole checkpoint in RAM:
+- **Writes** stream borrowed rows to disk in bounded pieces. Today
+  `SessionSnapshot::bytes()` materializes the full payload on the host.
+- **Restores** stream chunks into the session. Today `ReadImage` loads the
+  whole file and refuses files larger than staging
+  (`src/cli/serve/continuation_disk_store.cpp:777`).
+- **Queued snapshots** waiting for the writer count against the staging
+  budget.
+
+This also applies to Phase 0: streaming writes alone would persist deep
+checkpoints that still could not be restored.
+
+## Crash consistency and garbage collection
+
+- **Publish order:** chunk files are written and fsynced first; the
+  checkpoint manifest, which lists its chunks, is then published atomically
+  with a rename. A crash leaves at worst orphan chunks, never a manifest
+  pointing at missing data.
+- **Readers pin chunks** during a restore, so a concurrent eviction cannot
+  delete a chunk being read.
+- **Orphan recovery:** at startup, chunks referenced by no manifest are
+  deleted after a grace period, which protects writers in other processes.
+- **One writer per directory in the first version,** enforced by a lock file.
+  Several processes sharing one directory needs cross-process reference
+  counts; postpone it until required.
+
+## Checkpoint density
+
+Cheap checkpoints are still bounded by the record limit (128 today) and the
+budget. Priority order when they compete:
+1. stable boundaries;
+2. learned shared prefixes;
+3. the end of the system prompt;
+4. recent message boundaries (edit points);
+5. grid points.
 
 ## Example 1: one conversation, one session
 
@@ -92,12 +175,15 @@ Subagent S shares A's first 6,000 tokens (system prompt and tools).
    grid checkpoint at 4,096) and prefills only the 1,904-token gap. During that
    prefill it captures a checkpoint at 6,000:
    - fixed state at 6,000;
-   - references to A's chunks 0–1 (rows 0–4,095: same tokens, so same chunks);
+   - references to A's chunks 0–1 (rows 0–4,095). S restored them before
+     prefilling, so its state descends from exactly those bytes;
    - its own tail of rows 4,096–5,999. A's chunk 2 also holds A-only tokens
      past 6,000, so S cannot share it. At most one chunk is duplicated per
      divergence.
 2. **Every later subagent** restores the checkpoint at 6,000 directly. The
    shared 6,000 tokens of KV exist once, whichever session runs each subagent.
+   If a second subagent had instead prefilled the prompt cold in parallel, its
+   chunks would be a separate lineage and would not be merged with A's.
 
 **Denser checkpoints shrink the gap.** A checkpoint costs only its fixed state,
 so gufo can afford one at every message boundary and every 1,024 tokens. A new
@@ -201,12 +287,16 @@ Consequences:
 
 | Phase | Scope | Addresses |
 | --- | --- | --- |
-| 0 | On today's design: consult disk when it holds a longer prefix than RAM; size staging by need or stream writes; count Flash-Next RAM checkpoints by unique bytes | Example 4; deep checkpoints reaching disk; part of example 5 |
-| 1 | Model interface split (fixed state vs KV ranges); RAM chunk pool; small checkpoints; denser checkpoints | Examples 1, 2, 3, 5; capture cost on 27B |
-| 2 | Disk tier on the same chunks; one index for RAM and disk; background compaction | Example 6; write volume; restart value |
+| 0 | On today's design: consult disk when it holds a longer prefix than RAM; bounded, streamed writes **and** restores (both are limited by staging today); exact reservations so Flash-Next RAM checkpoints can be counted by unique bytes | Example 4; deep checkpoints reaching and coming back from disk; part of example 5 |
+| 1 | Model component interface (example above); RAM chunk pool with lineage and reserved spills; small checkpoints; bounded density | Examples 1, 2, 3, 5; capture cost on 27B |
+| 2 | Disk tier on the same chunks: manifests published after chunks, pinning, orphan recovery, one writer per directory; one index for RAM and disk. Compaction off at first, enabled only if measured restores need it | Example 6; write volume; restart value |
 | 3 (optional) | Paged KV in the attention kernels: zero-copy restore, live sessions physically sharing prefix KV, no full-context preallocation per session | Memory per session at high concurrency |
 
 ## Open questions
+
+- **Compaction policy and cost.** Each compaction rewrites a lineage's KV
+  bytes once, adding to write volume and needing temporary disk space. The
+  write volumes in [E7/E8](experiments.md) exclude it.
 
 - **Chunk size.** 2,048 matches today's grid and disk spacing. Smaller chunks
   duplicate less at a divergence but need more metadata.

@@ -3,7 +3,7 @@
 import json
 import pathlib
 
-HERE = pathlib.Path(__file__).resolve().parent
+from paths import WORK as HERE
 
 rows = []
 for path in sorted(p for p in (HERE / "results" / "e1").glob("*.json") if p.name != "fit.json"):

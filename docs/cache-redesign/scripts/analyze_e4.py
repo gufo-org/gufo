@@ -10,7 +10,7 @@ import pathlib
 import re
 import sys
 
-HERE = pathlib.Path(__file__).resolve().parent
+from paths import WORK as HERE
 LIVE = re.compile(r"live_checkpoint tokens=(\d+) bytes=(\d+) capture_ms=([\d.]+)")
 STORED = re.compile(r"disk_cache action=stored .*?file_bytes=(\d+) .*?tokens=(\d+)"
                     r".*?write_ms=([\d.]+)")

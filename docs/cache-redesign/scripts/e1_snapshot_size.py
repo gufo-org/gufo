@@ -17,9 +17,7 @@ import sys
 import time
 import urllib.request
 
-HERE = pathlib.Path(__file__).resolve().parent
-BIN = HERE / "bin" / "gufo"
-REPO = pathlib.Path("/home/mixer/gufo")
+from paths import BIN, REPO, WORK as HERE
 
 
 def corpus() -> str:

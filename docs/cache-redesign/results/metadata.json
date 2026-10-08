@@ -1,0 +1,20 @@
+{
+  "date": "2026-10-07",
+  "hardware": "AMD Strix Halo (gfx1151), 125 GiB visible unified memory, 931 GB NVMe under dm-crypt",
+  "gufo": {
+    "source": "main b39c530e (tree-identical to 7f6ea6e1)",
+    "build": "cmake --preset release (RelWithDebInfo), GCC wrapper 15.3.0, nix hipClang",
+    "binary_sha256": "152383473e166d13271e61a38125925f3a8ce2b385b3c4ec82658e452cff7e73"
+  },
+  "models": {
+    "flash_next": "unsloth/Qwen3.8-Flash-Next-GGUF UD-Q4_K_XL (4 shards) + mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+    "qwen27b": "unsloth/Qwen3.8-27B-GGUF snapshot 4ca720788d1e01f1bff70c033e0d0028fd02e502 UD-Q8_K_XL + Qwen3.8-27B-DFlash2-Q8_0.gguf"
+  },
+  "tools": {
+    "llama_tokenize": "llama.cpp build 11382 (nix store llama-cpp-11382), vocabulary from the model GGUFs",
+    "pi": "0.99.2",
+    "python": "3.13 with numpy 2.4.4 and jsonschema"
+  },
+  "server_settings": "see scripts/serverctl.py (mirrors the llama-swap production entries plus --cache-disk with a 16 GiB budget)",
+  "not_retained": "content traces (85 MB; prompts are recoverable from requests.npz with the model vocabulary)"
+}

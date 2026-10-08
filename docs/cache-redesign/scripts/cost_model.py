@@ -4,7 +4,7 @@ constants. Prints Markdown tables for docs/cache-redesign/cost-model.md."""
 import json
 import pathlib
 
-HERE = pathlib.Path(__file__).resolve().parent
+from paths import WORK as HERE
 FIT = json.loads((HERE / "results" / "prefill_fit.json").read_text())
 
 MODELS = {

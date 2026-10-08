@@ -24,7 +24,7 @@ import numpy as np
 from simulate_e5 import (GRID, IM_START, LEARN_MIN, MIN_STEP, Entry, Seq,
                          Store, lcp, load)
 
-HERE = pathlib.Path(__file__).resolve().parent
+from paths import WORK as HERE
 SIZE = {"fn": (119328358, 27460), "q27": (243700000, 65536)}
 CAPTURE_S_PER_BYTE = {"fn": None, "q27": 28e-3 / 1e9}
 WRITE_BPS, READ_BPS = 0.59e9, 1.1e9

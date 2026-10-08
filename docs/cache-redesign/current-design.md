@@ -102,6 +102,8 @@ Details in [Experiments](experiments.md#e3-missed-reuse):
 3. **Automatic budgets are small for long contexts.** With two sessions:
    - RAM 9.2 GB (Flash-Next) or 23 GB (27B): three checkpoints at 100k tokens;
    - staging 2.3 GB or 5.8 GB, so no checkpoint past about 75k tokens reaches
-     disk.
+     disk. Restores have the same limit: `ReadImage` loads the whole file and
+     refuses files larger than staging
+     (`src/cli/serve/continuation_disk_store.cpp:777`).
 4. **27B captures copy the whole state:** 235–265 ms per checkpoint at 149k
    tokens, up to 635 ms observed.

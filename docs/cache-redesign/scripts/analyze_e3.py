@@ -14,7 +14,7 @@ import sys
 
 import numpy as np
 
-HERE = pathlib.Path(__file__).resolve().parent
+from paths import WORK as HERE
 COMPLETED = re.compile(r"request=(\S+) event=completed .*?prefill_tokens=(\d+)"
                        r".*?prefill_tps=([\d.]+)")
 

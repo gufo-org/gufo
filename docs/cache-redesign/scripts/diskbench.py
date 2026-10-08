@@ -11,7 +11,7 @@ import os
 import pathlib
 import time
 
-HERE = pathlib.Path(__file__).resolve().parent
+from paths import WORK as HERE
 DIR = HERE / "cache" / "diskbench"
 BLOCK = 8 << 20
 PAYLOAD = os.urandom(BLOCK)

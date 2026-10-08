@@ -110,7 +110,35 @@ ahead, chunk reference counting would replace its policy.
   disk. It would be phased: cheap fixes on today's design first (Phase 0),
   then the RAM pool, then disk, with paged KV optional.
 
-**Next.** Back the hybrid design's theoretical costs with micro-benchmarks
-(copy bandwidth, chunk and full-file I/O), simulate Phase 0 and the hybrid on
-the traces, run today's system at concurrency 4, then discuss the required
-features.
+**Overnight.** The [decision brief](decision-brief.md) covers:
+- micro-benchmarks (copy bandwidth, chunk copies, disk);
+- the [cost model](cost-model.md);
+- E7, which simulates Phase 0 and the hybrid on every trace;
+- E6, today's system at concurrency 4.
+
+### 2026-10-08
+
+A review of these documents raised points that are now addressed:
+
+- **KV provenance.** Equal tokens can produce different KV bytes, so chunks
+  are shared only within one lineage, never by token prefix alone
+  ([hybrid design](hybrid-design.md#chunk-identity-and-provenance)).
+- **Borrowed rows** need reserved spill capacity, not zero accounting.
+- **Bounded transfers in both directions.** Today restores are limited by
+  staging too: `ReadImage` loads the whole file. Phase 0 is corrected
+  accordingly.
+- **Crash consistency, pinning, orphan recovery and one writer per
+  directory,** for the disk tier.
+- **Compaction** is excluded from write volumes, so start without it.
+  **Checkpoint density** is bounded by the record limit and the budget.
+- **The model interface** lists each state component and its valid position.
+- **E8 simulator** with production admission, the end-of-request snapshot and
+  asynchronous disk publication. Same conclusions; refusals are still
+  under-reproduced.
+- **Phase 0 does not fix everything:** 27B W4 and the subagent created after
+  a restart still favour the hybrid.
+- **A 782 s disk-write stall** found at concurrency 4; cause unknown.
+- **Reproducibility:** configurable script paths, committed token arrays and
+  logs, run metadata, and measured vs simulated labels.
+
+**Next.** Discuss the required features, then choose.

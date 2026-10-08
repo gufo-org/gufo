@@ -3,10 +3,10 @@
 # server is on the GPU, and stops if free disk space drops below 30 GB.
 set -u
 cd "$(dirname "$0")"
-FN=/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
-MTP=/persist/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
-Q27=/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf
-DF=/persist/models/Qwen3.8-27B-DFlash2-Q8_0.gguf
+FN=${FN_MODEL:-/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf}
+MTP=${FN_MTP:-/persist/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf}
+Q27=${Q27_MODEL:-/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf}
+DF=${Q27_DFLASH:-/persist/models/Qwen3.8-27B-DFlash2-Q8_0.gguf}
 
 run() {
   local name=$1; shift

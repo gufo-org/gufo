@@ -18,7 +18,7 @@ against something the production server already does. The tables come from
 | Capture, 27B full copy | 14 ms at 0.36 GB, 235 ms at 10 GB (≈ 67 ms + 17 ms/GB, r² 0.51) | E2 W1 `live_checkpoint`, one agent, no concurrency | Its fixed state is 0.24 GB, so a fixed-state-only 27B capture is ~10–15 ms, matching the 1.8k-token captures |
 | RAM held by checkpoints | Flash-Next: physical well below accounted; 27B: physical ≈ accounted | E2 W1 logs: `retained_bytes` vs `host_available_mib` | Flash-Next accounted 7.1–8.9 GB while available memory fell only 4–6 GB including the live session; 27B accounted 16.5–22.3 GB for a 14–20 GB fall. Counting unique bytes matches what the hardware holds |
 | Disk write + fsync, raw | 0.58–0.60 GB/s at every size | [diskbench.py](scripts/diskbench.py) | — |
-| Disk write in gufo | 0.44 GB/s (serialize + checksum + write + fsync) | E2 `write_ms` against `file_bytes`, about 170 writes | — |
+| Disk write in gufo | 0.44 GB/s (serialize + checksum + write + fsync) | E2 `write_ms` against `file_bytes`, about 170 writes | Per-write medians 0.36 GB/s (27B) and 0.52 GB/s (Flash-Next). One unexplained outlier at concurrency 4: 1.67 GB in 782 s |
 | Disk cold read | 1.1 GB/s; 1.4–1.5 GB/s when partly cached | diskbench.py; E2 disk restores | Real restores: 55.5k-token 27B file in 2.5 s |
 | Assembling a session from chunks in memory | 106 GB/s for 4 MiB pieces, 88 GB/s for 1 MiB, vs 103 GB/s for one copy | [chunkcopy.hip](scripts/chunkcopy.hip), 8 GiB as many device copies | Per-layer pieces of a 2,048-token chunk are an estimated 1–4 MiB |
 | Chunk files instead of one file | +13% write time, +13% cold-read time (72 × 56 MiB vs 4 GiB) | diskbench.py | Compaction removes it |
@@ -103,7 +103,7 @@ It reads and writes the KV bytes once, at 1.1 GB/s and 0.59 GB/s:
 | Flash-Next at 149k tokens | 4.1 GB | ~11 s, in the background |
 | 27B at 149k tokens | 9.8 GB | ~25 s, in the background |
 
-**Disk writes per long agent session** (the W1 runs to 149k tokens, from E7):
+**Disk writes per long agent session** (the W1 runs to 149k tokens, from E7; compaction not included):
 
 | Model | Today | Phase 0 | Hybrid |
 | --- | ---: | ---: | ---: |

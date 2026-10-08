@@ -37,8 +37,11 @@ keyframe plus the following diffs. It fits gufo with three refinements:
 
 Branches (edits, forks, subagents) turn the diff chain into a tree. Finding a
 diff's parent by token prefix, with the existing prefix tree, handles that.
-Content-addressed chunks (option C) deduplicate prefixes across conversations
-automatically; parent pointers deduplicate only through a shared checkpoint.
+Chunks (option C) deduplicate a prefix across the conversations that restored
+it; parent pointers deduplicate only through a shared checkpoint. Neither may
+share KV between independent computations of the same tokens, because equal
+tokens can produce different KV bytes (see
+[chunk identity](hybrid-design.md#chunk-identity-and-provenance)).
 Option E combines both: chunks for KV, checkpoints for state.
 
 ## Gain depends on context length
@@ -58,7 +61,7 @@ from KV only. Flash-Next figures, using the derived size model in
 | --- | --- | --- | --- |
 | Bytes written per checkpoint | Whole context, ~4 GB at 145k | New KV + fixed state, ~170 MB | Chunked |
 | Space per long conversation | One full copy per retained checkpoint | KV once + ~112 MiB per checkpoint | Chunked |
-| Prefix shared by many conversations | Repeated in every file | Stored once | Chunked |
+| Prefix shared by many conversations | Repeated in every file | Stored once per lineage (conversations that restored it, not independent cold prefills) | Chunked |
 | Retention policy (#275, #409) | Needs rules to evict redundant copies | Redundancy mostly gone; shared chunks protected while referenced | Chunked |
 | Restore | Read one file | Read a chain of chunks, same total bytes | Current, slightly |
 | Corrupt or missing data | Loses one entry | Loses every checkpoint that uses that chunk | Current |

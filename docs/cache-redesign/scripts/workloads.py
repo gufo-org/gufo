@@ -21,7 +21,7 @@ import urllib.request
 
 import serverctl
 
-REPO = pathlib.Path("/home/mixer/gufo")
+from paths import REPO
 
 
 def load_text(patterns):

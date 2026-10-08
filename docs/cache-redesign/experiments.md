@@ -2,9 +2,9 @@
 
 Measurements that decide between [option A and option C](options.md). All of
 them run on unmodified main binaries. The drivers and analysis scripts are in
-[scripts/](scripts/), and small result files in [results/](results/). The
-scripts expect the gufo binary at `bin/gufo` next to them and write `results/`
-and `cache/` there.
+[scripts/](scripts/README.md), together with how to replay the analyses from
+the committed token arrays and logs in [results/](results/), and how to rerun
+the measurements.
 
 ## Scope (agreed 2026-10-07)
 
@@ -306,7 +306,7 @@ These back the [cost model](cost-model.md) **(measured)**:
   - 27B accounted 16.5–22.3 GB for a 14–20 GB fall, consistent with real full
     copies.
 
-### E7. Today, Phase 0 and the hybrid, in seconds
+### E7. Today, Phase 0 and the hybrid, in seconds (simulated)
 
 [simulate_e7.py](scripts/simulate_e7.py) replays every trace through four
 variants, with the budgets each server actually chose:
@@ -314,7 +314,7 @@ variants, with the budgets each server actually chose:
 | Variant | Changes from today |
 | --- | --- |
 | Today | — |
-| Phase 0 | Disk consulted whenever it holds a longer prefix; writes streamed, so no staging limit; Flash-Next RAM counted by unique bytes |
+| Phase 0 | Disk consulted whenever it holds a longer prefix; bounded, streamed writes **and** restores, so no staging limit in either direction; Flash-Next RAM counted by unique bytes. Today both directions are limited by staging (`ReadImage` loads whole files), so streaming writes alone is not enough |
 | Hybrid | Shared KV chunks in RAM and on disk, small checkpoints, one index |
 | Hybrid + dense | Also a RAM checkpoint at every message boundary, and the end of the system prompt persisted |
 
@@ -391,19 +391,63 @@ E7 on the concurrency-4 traces (four sessions):
   More sessions hide the defect rather than fix it.
 - **Reuse stays near ideal.** As at concurrency 2, the hybrid's gain is in
   bytes written and capture time, not reuse.
-- **The disk writer is the bottleneck at concurrency 4.** In W3 it spent 903 s
-  writing 33.7 GB during a ~29-minute run, about half the wall time. The
-  hybrid would write 40% less.
+- **One disk write stalled for 782 s.** In 27B W3, a 1.67 GB checkpoint
+  (21,694 tokens) took 782 s to write, finishing at 22:52:29; another took
+  38 s. Together they account for most of the 903 s total. Excluding them,
+  27B writes ran at 0.27–0.43 GB/s (median 0.36), in line with the
+  0.44 GB/s model. The cause is not yet known. Candidates: serializing from
+  the device while four sessions keep the GPU busy, or lock contention in the
+  writer. It is worth its own investigation.
+- **The hybrid writes 40–70% less** at concurrency 4, which also shortens
+  the time the writer competes with inference.
+
+### E8. Simulator with production admission and asynchronous disk (simulated)
+
+A review pointed out three ways E5/E7 departed from production.
+[simulate_e8.py](scripts/simulate_e8.py) adds them:
+- **RAM admission:** a new checkpoint may evict only entries at or below its
+  rank ceiling (`MaxRemovalPriority`: history 1, continuation and branch
+  point 3), lowest rank first; the entry being restored from is protected; a
+  checkpoint is refused when nothing evictable frees enough space.
+- **End-of-request snapshot:** the finished state (prompt + output) is kept as
+  a continuation snapshot, as the server does.
+- **Disk:** one serial writer at the measured 0.44 GB/s. The 2,048-token
+  spacing and staging checks run when the writer reaches a job, as in
+  `ContinuationDiskStore::Save`. Entries become restorable only when
+  published, and a restart drains the queue first.
+
+
+
+Fidelity, compared with E7:
+- **Disk writes:** both simulators match the server within about 13% on every
+  run (E8: 7.0–65.4 GB against 7.1–70.9 GB measured).
+- **Reuse:** E8 totals stay within 0.5% of actual, except 27B W3 at
+  concurrency 4 (−2.7%), where stricter admission makes simulated "today"
+  pessimistic: 565 s against 478 s measured. Per-request agreement within 64
+  tokens drops on a few runs (27B W2: 19 of 36), mostly by up to a few hundred
+  tokens of reused output.
+- **Why E8 still matters:** it follows production's rules more closely and
+  reaches the same conclusions, so they don't depend on E7's
+  simplifications.
+- **Refusals are still under-reproduced:** the server refused 19–92
+  checkpoints per run, E8 0–36. The server also reserves budget for captures
+  in flight (`reserved_bytes`), and the simulator does not model those
+  reservations.
+- **No conclusion changes.** Phase 0 and the hybrid recover the same reuse;
+  the hybrid is ahead only on 27B W4 and with dense checkpoints, and writes
+  2.5–4.5× less.
 
 ### Summary so far
+
+All numbers in this section are simulated (E7/E8) unless marked measured.
 
 1. **Reuse within a running server** is not the problem at concurrency 2.
    The one large in-session miss comes from a defect (a RAM hit hides a longer
    disk hit) that Phase 0 fixes.
 2. **Restarts are where today's design fails at depth.** The disk tier stops
-   at ~75k tokens; a deeper restart costs ~25–50 s on Flash-Next and ~2–4 min
-   on 27B. Phase 0 (streamed writes) and the hybrid both fix it. Phase 0 writes
-   2–4× more and fits fewer checkpoints on disk.
+   at ~75k tokens (measured); a deeper restart costs ~25–50 s on Flash-Next
+   and ~2–4 min on 27B. Phase 0 fixes it only if both writes and restores are
+   streamed. Phase 0 writes 2–4× more and fits fewer checkpoints on disk.
 3. **Cost per turn:** the hybrid cuts 27B captures from 100–240 ms to ~14 ms
    per checkpoint, disk writes 2.5–4.5×, and multiplies the checkpoints a RAM
    budget holds by 10–20× at long context.
@@ -411,6 +455,12 @@ E7 on the concurrency-4 traces (four sessions):
    0.1–0.6 points of ideal, and more sessions hide the W2 defect rather than
    fix it. The disk writer becomes the bottleneck: busy half the time on 27B
    W3. The hybrid writes 40–70% less.
-5. **Phase 0 first.** It captures every measured reuse gain with small
-   changes. The hybrid adds efficiency (disk writes, 27B capture time, RAM
-   capacity, dense checkpoints) rather than reuse that Phase 0 cannot reach.
+5. **Phase 0 first.** It recovers most of the measured reuse losses: the W2
+   miss and the deep restarts. Two losses it does not recover:
+   - 27B W4 (restart with mixed conversations): the hybrid fits more
+     checkpoints in the 16 GiB disk budget, 363 s against 399 s of prefill;
+   - the subagent created after a restart: only dense hybrid checkpoints
+     persist the system-prompt boundary (−5 s Flash-Next, −18 s 27B).
+
+   The hybrid adds efficiency (disk writes, 27B capture time, RAM capacity,
+   dense checkpoints) plus those two cases.

@@ -2,13 +2,14 @@
 """E2 W1: a real Pi coding-agent session grown past 105k tokens through tool
 results (tests/functional/agent_long.py), on a production-like server."""
 import argparse
+import os
 import shutil
 import subprocess
 import sys
 
 import serverctl
 
-REPO = "/home/mixer/gufo"
+from paths import REPO
 
 
 def main():
@@ -27,7 +28,7 @@ def main():
     try:
         server.start()
         result = subprocess.run(
-            [str(serverctl.HERE / "py"), f"{REPO}/tests/functional/agent_long.py",
+            [os.environ.get("PYTHON", sys.executable), f"{REPO}/tests/functional/agent_long.py",
              "--agent", "pi", "--executable", shutil.which("pi"),
              "--base-url", f"http://127.0.0.1:{args.port}",
              "--model", server.model_id, "--output", str(out / "agent"),

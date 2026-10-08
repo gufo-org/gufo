@@ -19,7 +19,7 @@ import pathlib
 
 import numpy as np
 
-HERE = pathlib.Path(__file__).resolve().parent
+from paths import WORK as HERE
 IM_START = 248045
 GRID = 2048
 MIN_STEP = 2048

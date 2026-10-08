@@ -13,7 +13,7 @@ import re
 
 import numpy as np
 
-HERE = pathlib.Path(__file__).resolve().parent
+from paths import WORK as HERE
 LINE = re.compile(r"event=completed .*?prompt_tokens=(\d+) prefill_tokens=(\d+)"
                   r".*?cached_tokens=(\d+).*?prefill_tps=([\d.]+)")
 
