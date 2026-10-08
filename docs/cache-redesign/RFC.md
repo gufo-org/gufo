@@ -15,7 +15,9 @@ Contents:
 - [Evaluated solutions](#evaluated-solutions), including the detailed hybrid
   proposal, conversation examples and comparison table.
 - [Success criteria](#success-criteria-and-evaluation) and [risks](#risks).
-- [Instrumentation](#instrumentation) and [implementation plan](#implementation-plan).
+- [Delivery roadmap](#delivery-roadmap), followed by the detailed
+  [implementation plan](#implementation-plan).
+- [Instrumentation](#instrumentation).
 - [Rollout](#compatibility-and-rollout) and [decisions](#open-questions).
 - [Evidence appendix](#evidence-appendix) and [references](#references).
 - [Archived evidence and replay instructions](#archived-evidence-and-reproducibility).
@@ -988,10 +990,11 @@ and deep restarts. Include histories around 100k–150k where feasible and short
 contexts at higher concurrency. Model support does not imply eight simultaneous
 long histories fit that model on this machine.
 
-### Per-model capacity matrix — prerequisite to Phase 0
+### Per-model capacity matrix — required before implementation
 
-Before Phase 0 starts, freeze the planning matrix per model artifact, precision,
-draft mode, configured context, active request depth and concurrency. Measure or
+During preparation, freeze the planning matrix for each model artifact,
+precision, draft mode, configured context, active request depth and concurrency
+before implementation. Measure or
 validate weights/sidecars, live-state allocation, scratch, committed backing,
 private checkpoints, staging and headroom together. Admission must stay inside
 the resulting envelope. An unknown row is an unmet planning prerequisite,
@@ -999,7 +1002,7 @@ rather than an implicit promise to run every C/context combination.
 
 The current evidence supplies starting points, not new-cache qualification:
 
-| Model / mode | Observed starting envelope | C=8 / long-context constraint | Required planning result before Phase 0 |
+| Model / mode | Observed starting envelope | C=8 / long-context constraint | Required planning result before implementation |
 | --- | --- | --- | --- |
 | Flash-Next UD-Q4_K_XL + Q8_0 MTP | Historical C=2 server configured at 260k context; one history reached about 149k. C=4 traces used a 131,072-token configured context. | Approximately 114 GB of weights on 125 GiB visible memory leaves a narrow working margin. Eight long live histories are excluded; retained sharing cannot make them fit. | Freeze C=1/2 long-horizon and feasible higher-C short/mixed depths with committed spill backing included. Configured context alone does not prove all slots can reach it together. |
 | Flash-Next AR | Payload probes exist; speculative state differs from MTP. | MTP's concurrency envelope cannot be copied unchanged; long C=8 remains unqualified. | Measure a separate AR live/scratch/backing envelope and state the admitted C/depth combinations. |
@@ -1009,7 +1012,7 @@ The current evidence supplies starting points, not new-cache qualification:
 | Qwen ASR and TTS | Separate execution/capability contracts; no continuation-capacity result here. | Do not apply the text C=8 gate blindly. | Declare applicable continuation operations, concurrent capacity and workload-specific input/history limits. |
 | Qwen Image and MiniMax H3 | Image/video generation uses different execution state. | Autoregressive continuation gates apply only to capabilities actually exposed. | Record supported/unsupported continuation capabilities and their own feasible execution envelopes. |
 
-Unqualified cells stay blocked until the pre-phase planning result exists.
+An unqualified capacity row cannot be admitted until its planning result exists.
 Long-horizon and concurrent personas get separate admitted rows; a short C=8
 result cannot replace the long-agent requirement, and infeasible long C=8 is
 documented rather than treated as a failing cache optimization. Changes to model
@@ -1061,7 +1064,7 @@ keep inconclusive evidence visibly unqualified and do not widen tolerances.
 - There is no implemented-hybrid or matched C=8 qualification result yet.
 
 These limits belong in the final standalone RFC. Predicted savings should
-be replaced or complemented by retained implementation measurements as phases
+be replaced or complemented by retained implementation measurements as deliveries
 complete, without changing the meaning of historical evidence.
 
 ## Risks
@@ -1076,13 +1079,13 @@ complete, without changing the meaning of historical evidence.
 | Background copies contend with inference | Higher TTFT or inter-token latency at C>1 | Bound/coalesce optional work; measure active-request interference; prioritize latency. |
 | Dense checkpoints retain large private state | RAM growth erases sharing gains | Bound density and records; measure marginal latency value against private bytes. |
 | Too few checkpoints survive | Earlier edits and subagents re-prefill large gaps | Protect useful shared boundaries; test fixed-budget histories and report checkpoint gaps. |
-| Separate live KV prevents a requested C/context combination fitting | OOM or an impossible qualification gate | Freeze per-model envelopes before Phase 0; qualify admitted rows and exclude infeasible rows; separately evaluate live paging if needed. |
+| Separate live KV prevents a requested C/context combination fitting | OOM or an impossible qualification gate | Freeze per-model envelopes before implementation; qualify admitted rows and exclude infeasible rows; separately evaluate live paging if needed. |
 | Shared disk dependency is corrupt | Multiple checkpoints become unusable | Checksums, dependency validation, reverse dependency invalidation and earlier-boundary fallback. |
 | Manifest publication is incorrectly ordered | Crash exposes entries with missing dependencies | Dependency durability before manifest publication; crash injection at every stage. |
 | Version upgrade or rollback mishandles cache files | Startup failure or stale-state reuse | Explicit versions, managed-file cleanup, cold rebuild and rollback tests. |
 | Model-specific exceptions creep into common policy | Review complexity and fragile ownership | Dependency boundary checks; opaque descriptors and model-local transfer/layout code. |
 | New eviction policy is bundled with storage changes | Unclear cause of latency/reuse differences | Separate policy PRs and retained per-request evidence. |
-| Simulated benefits are treated as measured gains | Premature release or misleading claims | Label evidence; gate each phase on actual candidate qualification. |
+| Simulated benefits are treated as measured gains | Premature release or misleading claims | Label evidence; gate each delivery on actual candidate qualification. |
 
 Cached state may contain information derived from prompts. Retain the current
 owner-only file permissions, avoid logging prompt contents, and respect any
@@ -1095,8 +1098,8 @@ limit concurrent requests within the owning server.
 
 ## Instrumentation
 
-Instrumentation is part of the design from the first phase. It should explain
-why a request performed work, what resources remained pinned, and which
+Instrumentation is part of the design from the first implementation PR. It
+should explain why a request performed work, what resources remained pinned, and which
 background operation interfered with a peer. It must not require logging
 prompt text or turning on expensive payload inspection.
 
@@ -1126,6 +1129,121 @@ Instrumentation overhead itself is qualified. Expensive detailed traces can
 be diagnostic, while normal counters and phase timings remain affordable.
 
 ## Implementation plan
+
+### Delivery roadmap
+
+We are implementing the cache shown on the website: conversations use execution
+slots, related checkpoints share immutable prefix chunks, each checkpoint keeps
+its own model-specific state, and reusable history can live in RAM or on disk.
+The delivery plan builds that behavior in three usable increments, after
+preparation. It does not include improvements to the current cache.
+
+The sequence is: **agree on tests and capacity → reuse conversations in RAM →
+reuse them after restart → complete and qualify all models**. These are delivery
+milestones, not four PRs. Each milestone can contain several small PRs; the
+checklists below describe their technical work.
+
+#### Preparation: agree on what we will test and what fits
+
+**What we produce:** functional tests describing the expected cache behavior,
+a reproducible baseline, and a table of supported model/concurrency/context
+combinations. There is no new user-facing cache behavior in this step.
+
+For example, specify a test in which conversation A grows, a subagent branches
+from A, and conversation B takes A's execution slot. The test says which tokens
+must be reused when A returns, what memory can be shared, and how much work the
+other requests may wait for. Write these expectations before implementing them.
+Also specify restart, cancellation, edited-history and corrupted-file outcomes;
+those tests become executable as the corresponding components arrive.
+
+Measure today's cache as a comparison baseline, without changing it. Record
+the model artifacts, toolchain, settings and workload history so later latency
+and resource comparisons are meaningful. Freeze feasible capacity rows before
+implementation: eight requests with shorter histories may fit where eight long
+histories do not. Preserve a separate long-agent workload.
+
+Use isolated allocator, transfer and persistence probes to investigate known
+stall risks, including the historical 782-second write. Record unresolved causes
+and the checks the new path must pass; remeasure the implemented path before
+qualifying it. This investigation is not a prerequisite to designing every
+storage detail, nor a project to repair the existing cache.
+
+**Ready to proceed when:** expected reuse and failure outcomes are specified,
+the capacity matrix and comparison environment are recorded, and the latency,
+memory and disk checks are explicit. A missing implementation is an expected
+reason for a new behavioral test to fail; it is not a passing qualification.
+
+#### RAM delivery: resume conversations across execution slots
+
+**What users gain:** A can leave its execution slot, B can use that slot, and A
+can later resume from retained RAM state. A parent and its subagents can reuse
+their inherited prefix without storing a complete copy for every checkpoint.
+This is the first usable increment of the proposed cache.
+
+Build the common package and plug in a real model adapter. The common package
+owns slots, shared chunks, checkpoint lookup, memory budgets and transfer
+lifetimes; the adapter knows the model's exact state. Include precommitted spill
+backing, preservation while a slot is idle, independent transfer streams and
+safe handling of requests arriving during a copy. Choose checkpoint boundaries
+using measured reuse benefit, private-state cost and prefill pass overhead.
+
+Start with one representative model/mode and integrate it into serving within
+this delivery, so success is demonstrated by real requests. Other adapters can
+progress independently once the contracts stabilize. Convert each mode only
+after its tests pass; models awaiting conversion retain their existing behavior.
+Persistence through the new disk format arrives in the next delivery. Within
+converted modes, retained reuse in this increment is limited to RAM and the
+current server lifetime.
+
+**Ready to ship for a converted mode when:** continuation, edits, forks,
+more-conversations-than-slots, cancellation and tight-budget tests pass through
+the real server; restored state passes numerical checks; shared memory stays
+bounded; and replacing A with B passes B's response-start and other sessions'
+token-latency checks. A fake-adapter unit test alone cannot satisfy this gate.
+
+#### Disk delivery: resume retained conversations after restart
+
+**What users gain:** useful checkpoints can survive RAM eviction and server
+restart. If A has a short checkpoint in RAM and a longer usable one on disk,
+lookup considers both. Shared prefixes are also stored once on disk.
+
+Add the versioned disk store to the same package and lookup index. Write missing
+shared chunks plus private state, publish a checkpoint only after its dependencies
+are durable, and restore through bounded buffers. At startup, read manifests and
+file sizes; verify payload checksums during restore before the slot can execute.
+Rebuild incompatible old cache files rather than migrating them.
+
+**Ready to ship when:** real restart and deeper-disk-reuse scenarios pass, a
+100k+ checkpoint larger than the transfer buffer round-trips where capacity
+permits, and crash/corruption/cancellation tests never expose partial state.
+Measure startup readiness, the first restored request, disk bytes, write volume
+and interference with active sessions separately.
+
+#### Full rollout: deliver every supported model and workload
+
+**What users gain:** the redesign is available for every supported continuation
+mode, with explicit limits for each model. Both long coding-agent sessions and
+concurrent independent or mixed sessions are qualified. Eight concurrent requests
+are supported in the model/context combinations that fit.
+
+Finish the remaining model adapters and run the complete affected qualification
+matrix. Include clients that omit reasoning from later history, clients that
+replay it, bridges that rewrite the final user message, and actual agent/tool
+workflows. Publish measured latency and resource results and document cold cache
+rebuilds after upgrade. Each model can roll out once its own checks pass; this
+milestone closes the all-model scope rather than delaying all integration until
+the end.
+
+**Complete when:** every model/mode has a capability record, a justified capacity
+envelope and the required correctness, reuse, latency and resource evidence.
+Unsupported operations and infeasible capacity combinations are explicit. The
+qualified replacement becomes the default; no permanent alternate cache policy
+is required.
+
+Live-KV paging and disk compaction remain separate follow-up decisions. Bring
+paging forward if measurements show it is necessary for an agreed workload;
+neither feature is required merely to reproduce the website's retained-cache
+design.
 
 ### TDD and behavioral contracts first
 
@@ -1213,32 +1331,21 @@ Model-specific tensors and mutation rules stay with the model. Use explicit serv
 cache unchanged as a baseline until the qualified replacement is integrated.
 The delivered product has one active continuation cache, not competing policies.
 
-### Product phases and reviewable PRs
+### Reviewable PR boundaries
 
-These phases implement the new cache only. No PR in this plan patches the
-current cache. Existing cache behavior supplies context and matched controls;
-its old improvement proposals remain historical research, not delivery tasks.
+Separate the common package, model adapters, serving integration and disk store
+into small, testable PRs. Within the RAM delivery, build the independent package
+first, add preservation and shared state, then integrate a qualified adapter into
+serving. Avoid combining a new storage format, kernel paging and an eviction
+policy in one review. Model adapters can progress in parallel once their common
+contracts stabilize.
 
-All continuation-capable models are in scope. Model/mode implementation can
-land incrementally, but the redesign is not complete with only the two models
-used in the initial research. Every phase must describe its active capability
-set and preserve behavior for models not yet converted.
-
-| Phase | User-visible result | Suggested PR boundaries | Exit gate |
-| --- | --- | --- | --- |
-| 0: new-cache contracts, baseline and instrumentation | Reproducible requirements and feasible model/resource envelopes | Functional specifications; baseline/candidate characterization; event schema | Pre-phase capacity matrix frozen; contracts and focused allocator/stream/persistence evidence recorded. |
-| 1: new common package | An isolated, testable cache core | Public contracts; fake adapter; ownership/ledger primitives | Package has no serving/model dependencies; TDD lifecycle and failure cases pass. |
-| 2: committed backing and preservation lifecycle | New-cache slot reuse avoids request-path allocation and unnecessary spill waits | Committed backing pool; idle spill; independent transfer streams; pins/cancellation | Reassignment TTFT and peer token-latency gates pass within each feasible envelope. |
-| 3: new shared RAM and model adapters | Useful coherent boundaries share retained rows | Chunk/provenance pool; density/pass-alignment policy; one family/mode adapter per PR | Exact state/numerical tests, bounded memory and measured split/capture costs pass. |
-| 4: new persistent store and unified index | Deep restart reuse with shared disk payload and bounded readiness time | Versioned manifests/dependencies; lazy validation; streaming restore; GC/upgrade contracts | Crash/corruption/deep-restore tests pass; readiness and first-restored-request latency measured. |
-| 5: integration, full model coverage and feasible concurrency qualification | All supported modes delivered within explicit capacity envelopes | Serving integration; remaining adapters; client replay/bridge workloads; rollout | Every model/mode has a justified capacity result and required correctness/latency passes; C=8 applies where feasible. |
-| Later, if justified: paged live KV / compaction | Lower live duplication or lower restore I/O overhead | Separate allocator/kernel project; separate disk-compaction project | Measured gain justifies added complexity, writes and blast radius. |
-
-Phases express product outcomes, not mandatory single PRs. Independent model
-adapters can progress after common contracts stabilize. A PR should avoid
-mixing a new storage format, kernel paging and an eviction-policy change.
-Tests for new behavior belong in the PR that introduces it or an immediately
-preceding contract PR; they are not postponed to the final qualification phase.
+Every PR names the behavior it adds and the models/modes it affects. Tests arrive
+with that behavior or in an immediately preceding contract PR. A package that
+passes fake-adapter tests is useful engineering progress; a delivery is ready
+only when its real-request checks pass. The existing cache remains a comparison
+baseline and the implementation for modes awaiting conversion; this plan does
+not change its policy.
 
 ### Baseline, checks and completion records
 
@@ -1247,12 +1354,14 @@ model/mode, harness revision, context/resource settings and prior cache history.
 Audit every supported component and mutation path against that base. Historical
 research revision numbers do not substitute for a current baseline.
 
-The following detailed checklist refines the product phases above. All items
+The following engineering checklists support the delivery roadmap above. They
+retain the detailed tasks for implementers; readers can assess the plan from
+the roadmap without following every allocation or storage detail. All items
 are planned; none represents completed cache implementation.
 
-**Phase 0 — contracts and baseline:**
+#### Preparation checklist
 
-- [ ] Freeze the per-model feasible capacity matrix before this phase begins;
+- [ ] Freeze the per-model feasible capacity matrix before implementation;
   include committed backing and separately admitted long/concurrent personas.
 - [ ] Record a reproducible implementation base and matched benchmark environment.
 - [ ] Inventory every current family/mode and its supported continuation,
@@ -1271,7 +1380,9 @@ are planned; none represents completed cache implementation.
   blocked; an unexplained baseline outlier is not evidence that the new path
   provides bounded peer progress. This task does not patch the current cache.
 
-**Phase 1 — new common package:**
+#### RAM delivery checklist
+
+**Common package:**
 
 - [ ] Build the independent CMake package with the agreed public contracts.
 - [ ] Implement fake-adapter scenarios before lifecycle/policy behavior.
@@ -1279,7 +1390,7 @@ are planned; none represents completed cache implementation.
 - [ ] Define serving/adapter integration seams without changing current-cache policy.
 - [ ] Qualify cancellation, completion, failure and resource-ledger contracts.
 
-**Phase 2 — committed backing and safe preservation:**
+**Preserving state before a slot is reused:**
 
 - [ ] Back admitted spill obligations with pages committed during initialization
   or verified inference-quiescent periods; reuse released allocations.
@@ -1291,7 +1402,7 @@ are planned; none represents completed cache implementation.
 - [ ] Decline retention or retire eligible references safely when committed
   capacity is unavailable; never allocate bulk spill backing secretly on admission.
 
-**Phase 3 — shared retained RAM and adapters:**
+**Shared checkpoints and model adapters:**
 
 - [ ] Inventory shape/precision, valid ranges, backing owners and every mutation
   path for each family/mode before adapting it.
@@ -1308,8 +1419,13 @@ are planned; none represents completed cache implementation.
   boundaries where their reuse benefit justifies the additional pass.
 - [ ] Qualify numerical/component round trips and measured savings for equivalent
   retained histories on each migrated mode.
+- [ ] Integrate at least one qualified real model/mode into serving and run
+  continuation, edited-history, fork, rotation, pressure and cancellation
+  scenarios through HTTP before declaring the RAM delivery usable.
+- [ ] State the RAM-only lifetime limit and the active converted model/mode set;
+  preserve existing behavior for modes awaiting conversion.
 
-**Phase 4 — persistent shared storage:**
+#### Disk delivery checklist
 
 - [ ] Version manifests, component layouts and format namespaces; rebuild
   recognized incompatible legacy contents without parsing them as new state.
@@ -1328,7 +1444,7 @@ are planned; none represents completed cache implementation.
   staging, durable frontier, physical bytes, writes and restore latency.
 - [ ] Keep compaction off pending a separately measured proposal.
 
-**Phase 5 — complete scope and qualification:**
+#### Full rollout checklist
 
 - [ ] Deliver every supported continuation layout through the applicable
   contract; explain explicitly any unsupported capability.
@@ -1370,9 +1486,9 @@ drafting itself does not require GPU model runs.
 
 Each PR records the concrete behavior change, invariants affected, commands,
 environment, artifact locations, per-request outcomes and known limitations.
-A phase completes only when its gate passes. Simulations and partial suites
-do not mark implementation complete. Fix confirmed regressions before release;
-keep noisy evidence visibly inconclusive until resolved.
+A delivery completes only when its real-request acceptance checks pass.
+Simulations and partial suites do not mark implementation complete. Fix confirmed
+regressions before release; keep noisy evidence visibly inconclusive until resolved.
 
 ## Compatibility and rollout
 
@@ -1399,7 +1515,7 @@ steps whose final behavior becomes the default after qualification.
 | Decision | Agreed direction |
 | --- | --- |
 | Model scope | All model families accounted for; all supported continuation modes delivered. |
-| Delivery | Multiple independently testable PRs grouped into useful product phases. |
+| Delivery | Small, testable PRs delivering RAM reuse, disk/restart reuse and full model coverage. |
 | Workloads | Long-horizon coding/agent histories and C>1 independent/mixed workloads; up to eight requests within per-model feasible capacity envelopes. |
 | Optimization order | Latency first, RAM second, disk capacity and write volume third. |
 | Correctness | Exact coherent saved-state restoration plus existing numerical-quality requirements. |
@@ -1421,8 +1537,8 @@ steps whose final behavior becomes the default after qualification.
 - Whether a cost-aware shorter restore should override the deepest available
   checkpoint. Define measured thresholds and observable fallback behavior
   before enabling such a policy.
-- The per-model capacity matrix is a pre-Phase-0 prerequisite, not a deferred
-  resource question. Resolve unqualified rows before starting dependent work;
+- Freeze the per-model capacity matrix during preparation, before
+  implementation begins. Resolve unqualified rows before starting dependent work;
   revise frozen envelopes only with recorded resource evidence.
 - Whether measured live-memory/cross-slot copying costs make paged KV necessary
   to achieve the intended product workload.
@@ -2067,7 +2183,7 @@ and actual artifact fingerprints for matching controls.
 | `current-design.md` | Current-system mechanics, limitations and source baseline are in the RFC; precise historical source locations remain archived. |
 | `hybrid-design.md` | Ownership, components, transfers, publication and worked examples are incorporated; earlier approximate examples remain archived. |
 | `cache-package.md` | Common/model boundary, lifecycle contracts, capabilities and migration are incorporated. |
-| `implementation-PLAN.MD` | Detailed phase tasks, acceptance gates and existing suite mappings are incorporated with the expanded all-model scope. |
+| `implementation-PLAN.MD` | Detailed delivery tasks, acceptance gates and existing suite mappings are incorporated with the expanded all-model scope. |
 | `experiments.md` | Recorded E1–E4 and C=4 measurements, microbenchmarks and full E8 reference tables are incorporated; superseded E5/E7 tables remain archived. |
 | `cost-model.md` | Full constants, per-operation estimates and background costs are incorporated with prediction caveats. |
 | `options.md`, `external-engines.md` | All architectural alternatives and central tradeoffs are incorporated; version-specific historical tuning/defaults remain archived. |
