@@ -1,0 +1,34 @@
+{
+  "sha256": {
+    "Target QAT UD-Q4_K_XL (Q4_0)": "00b5a7c497f0c8934033088c10a7fa9a4c015e46ee6d89e9c6890650ba5d0e71",
+    "MTP gemma4-assistant QAT Q4_0": "3a5e99fd8d0b23afb1fccd1ee0c9ebd1f571d00399c2dae2292d217feeec0f6b",
+    "Vision mmproj-BF16": "d904b3579a9fbfbd50bc9bf40cb7384909edbd69fa9276db5ddc853e80f0edca"
+  },
+  "sources": {
+    "target": "unsloth/gemma-4-31B-it-qat-GGUF, revision 43cc1aeb31adf47ec06a854507ce552cd9862e6f, gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+    "mtp": "unsloth/gemma-4-31B-it-qat-GGUF, same revision, mtp-gemma-4-31B-it.gguf (= MTP/mtp-gemma-4-31B-it-Q4_0.gguf)",
+    "mmproj": "unsloth/gemma-4-31B-it-qat-GGUF, same revision, mmproj-BF16.gguf",
+    "chatTemplate": "GGUF tokenizer.chat_template, SHA-256 845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b (same as the standard 31B)"
+  },
+  "scope": "Current retained benchmark and qualification evidence; per-artifact source revisions and commands are authoritative.",
+  "benchmarks-2026-09-29": {
+    "gufo": {
+      "revision": "c7e3ad7",
+      "build": "nix build",
+      "binarySha256Prefix": "7edba3755e723bd3",
+      "tables": "every Gufo table, remeasured 2026-09-29 (sampled MTP at depth 0 only)"
+    },
+    "reference": "llama.cpp b11069 from flake.nix (commit 68d9053a), ROCm gfx1151; measured 2026-09-28 and not rerun (same pinned build)",
+    "measurement": "One warmed sample per point, greedy, thinking off; MTP drafts up to seven (Gufo) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
+  },
+  "benchmarks-2026-10-07": {
+    "gufo": {
+      "revision": "2a24b0c",
+      "build": "nix build",
+      "binarySha256Prefix": "d1eb64e09180774b",
+      "tables": "every Gufo table (QAT UD-Q4_K_XL), remeasured 2026-10-07 after the server-path changes (device snapshots, generation prompt in the last prefill forward, tokenizer, shared snapshot blocks)"
+    },
+    "reference": "llama.cpp columns unchanged (pinned b11069, ROCm gfx1151; dates in BENCHMARKS.md)",
+    "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to 15 (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
+  }
+}

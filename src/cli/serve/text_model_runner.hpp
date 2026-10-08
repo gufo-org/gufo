@@ -33,6 +33,14 @@ struct TextPromptContext {
       std::size_t token_count) const {
     return PrefixInputIdentity(cache_identity, cache_prefixes, token_count);
   }
+  /// The nearest position at or before `position` (`up`: at or after) where
+  /// prefill may stop. A model can need an input whole, such as an image
+  /// whose rows attend each other; a step starting at such an input then
+  /// consumes it entirely, even beyond its token budget.
+  [[nodiscard]] virtual std::size_t PrefillStop(std::size_t position,
+                                                bool /*up*/) const {
+    return position;
+  }
 };
 
 struct TextPreparedPrompt {
@@ -296,6 +304,10 @@ public:
   InitialOutputState(const ChatRequest&) const {
     return TextGenerationBackend::InitialOutputState::kAuto;
   }
+  /// Reasoning delimiters and tool-call syntax of generated text.
+  [[nodiscard]] virtual TextGenerationBackend::OutputMarkup Markup() const {
+    return {};
+  }
   [[nodiscard]] virtual std::string Decode(
       std::span<const TextRunnerToken> tokens) const = 0;
 
@@ -321,6 +333,16 @@ public:
   /// the batched path cannot consume.
   virtual void PrepareBatchExecution(TextRunnerState& state) const {
     (void)state;
+  }
+  /// The prompt tokens after the next Prefill's frontier, set before every
+  /// prefill step (empty when the frontier ends the prompt). A step that
+  /// stops at a snapshot boundary must still leave the state exactly at that
+  /// boundary; a runner may compute these tokens alongside and adopt the
+  /// result if the following step asks for exactly them.
+  virtual void SetPromptLookahead(
+      TextRunnerState& state, std::span<const TextRunnerToken> tokens) const {
+    (void)state;
+    (void)tokens;
   }
   /// Processes at most max_input_tokens, yielding after one model-owned
   /// chunk even when the scheduler grants the whole remaining prompt.

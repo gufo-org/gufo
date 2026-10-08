@@ -18,12 +18,14 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/prompt/gemma4_prompt.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/gemma4/engine.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/testing/compare/logit_comparator.hpp"
 
@@ -196,8 +198,14 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
                    &opt.dflash_model_path);
   parser.AddOption(
       "", "--draft-policy", "POLICY",
-      "DFlash2 block length: fixed or adaptive (default: adaptive)",
+      "Draft length: DFlash2 fixed or adaptive (default: adaptive); Gemma 4 "
+      "MTP calibrated, confidence or fixed (default: calibrated)",
       "Speculative", &opt.draft_policy);
+  parser.AddOption(
+      "", "--draft-calibration", "SCOPE",
+      "Gemma 4 calibrated drafting: shared (learned across requests) or "
+      "request (reset per request; exact seeded replay) (default: shared)",
+      "Speculative", &opt.draft_calibration);
   parser.AddOption("", "--dspark-model", "PATH",
                    "DeepSeek V4 Flash DSpark support GGUF", "Speculative",
                    &opt.dspark_model_path);
@@ -206,7 +214,8 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
                    "Speculative", &opt.mtp_model_path);
   parser.AddCustomOption(
       "", "--draft-tokens", "N",
-      "Maximum speculative draft tokens per verification step (default: 7)",
+      "Maximum speculative draft tokens per verification step (default: 7; "
+      "Gemma 4: 15)",
       "Speculative",
       [&opt](std::string_view, std::string_view value,
              std::string* error) -> bool {
@@ -221,6 +230,7 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
           return false;
         }
         opt.draft_tokens = count;
+        opt.draft_tokens_given = true;
         return true;
       });
 
@@ -914,8 +924,10 @@ int RunQwen38FlashNextBenchmark(
                  "benchmark for concurrent requests\n";
     return 1;
   }
-  if (mtp && options.min_draft_tokens != 1) {
-    std::cerr << "Error: Flash-Next MTP requires --min-draft-tokens 1\n";
+  if (mtp && (options.min_draft_tokens != 1 || !options.draft_policy.empty() ||
+              !options.draft_calibration.empty())) {
+    std::cerr << "Error: Flash-Next MTP requires --min-draft-tokens 1 and no "
+                 "--draft-policy\n";
     return 1;
   }
   if (required_context > std::numeric_limits<std::uint32_t>::max()) {
@@ -1211,11 +1223,15 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       *error_msg = error.what();
     return std::nullopt;
   }
-  if (!opt.draft_policy.empty() &&
-      ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       opt.speculative_backend != "dflash2")) {
+  // MTP models validate their own policy names.
+  if ((!opt.draft_policy.empty() && opt.speculative_backend != "mtp" &&
+       (opt.speculative_backend != "dflash2" ||
+        (opt.draft_policy != "fixed" && opt.draft_policy != "adaptive"))) ||
+      (!opt.draft_calibration.empty() && opt.speculative_backend != "mtp")) {
     if (error_msg != nullptr)
-      *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
+      *error_msg =
+          "--draft-policy requires DFlash2 (fixed or adaptive) or MTP; "
+          "--draft-calibration requires MTP";
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
@@ -1228,6 +1244,181 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
 
   return opt;
 }
+
+#if defined(ENGINE_ENABLE_HIP)
+/// llama-bench style pp/tg for Gemma 4: prefill of `n_prompts` tokens after
+/// `n_depths` cached tokens, and autoregressive generation of `n_gens` tokens.
+int RunGemma4Benchmark(const BenchOptions& options,
+                       const std::shared_ptr<const core::GgufReader>& reader,
+                       std::chrono::steady_clock::time_point model_load_start) {
+  namespace g4 = models::gemma4;
+  const bool mtp = options.speculative_backend == "mtp";
+  if (!options.speculative_backend.empty() && !mtp) {
+    std::cerr << "Error: Gemma 4 supports only --speculative mtp or off\n";
+    return 1;
+  }
+  if (mtp && options.mtp_model_path.empty()) {
+    std::cerr << "Error: --speculative mtp requires --mtp-model\n";
+    return 1;
+  }
+  if (options.concurrency != std::vector<std::size_t>{1}) {
+    std::cerr << "Error: Gemma 4 bench supports C1; use the serving benchmark "
+                 "for concurrent requests\n";
+    return 1;
+  }
+  const auto max_or_zero = [](const std::vector<std::size_t>& values) {
+    return values.empty() ? std::size_t{0}
+                          : *std::max_element(values.begin(), values.end());
+  };
+  const std::size_t max_depth = max_or_zero(options.n_depths);
+  const std::size_t required_context = std::max(
+      {std::size_t{4096}, max_depth + max_or_zero(options.n_prompts) + 1,
+       std::max<std::size_t>(max_depth, 16) + max_or_zero(options.n_gens) + 1});
+  if (required_context > std::numeric_limits<std::uint32_t>::max()) {
+    std::cerr << "Error: Gemma 4 benchmark context is out of range\n";
+    return 1;
+  }
+  g4::ModelOptions model_options{
+      .max_context = static_cast<std::uint32_t>(required_context),
+      .mtp_model_path = mtp ? options.mtp_model_path : "",
+      .draft_tokens = options.draft_tokens_given ? options.draft_tokens
+                                                 : g4::kDefaultDraftTokens,
+      .min_draft_tokens = options.min_draft_tokens};
+  try {
+    model_options.draft_policy = g4::ParseDraftPolicy(options.draft_policy);
+    model_options.draft_calibration =
+        g4::ParseDraftCalibrationScope(options.draft_calibration);
+  } catch (const std::invalid_argument& e) {
+    std::cerr << "Error: " << e.what() << '\n';
+    return 1;
+  }
+  std::string error;
+  auto model = g4::Model::Load(options.model_path, model_options, &error);
+  if (model == nullptr) {
+    std::cerr << "Error creating Gemma 4 model: " << error << '\n';
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
+  PrintModelLoadTime(model_load_start);
+
+  std::vector<g4::TokenId> tokens;
+  {
+    const auto pattern = model->Tokenize(
+        "The quick brown fox jumps over the lazy dog. "
+        "Strix Halo executes this deterministic benchmark sequence. ");
+    tokens.resize(required_context);
+    tokens[0] = model->tokenizer().BosToken();
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+      tokens[i] = pattern[(i - 1) % pattern.size()];
+    }
+  }
+
+  const double size_gib =
+      static_cast<double>(reader->GetSize()) / (1024.0 * 1024.0 * 1024.0);
+  const auto model_name = model->ModelName();
+  std::cout << "| " << std::left << std::setw(32) << "model"
+            << " | " << std::right << std::setw(10) << "size"
+            << " | " << std::left << std::setw(10) << "backend"
+            << " | " << std::right << std::setw(18) << "test"
+            << " | " << std::right << std::setw(21) << "t/s"
+            << " |\n"
+            << "| " << std::string(32, '-') << " | " << std::string(10, '-')
+            << " | " << std::string(10, '-') << " | " << std::string(18, '-')
+            << " | " << std::string(21, '-') << " |\n";
+  std::ostringstream size_text;
+  size_text << std::fixed << std::setprecision(2) << size_gib << " GiB";
+  const auto print_result = [&](std::string_view test_name,
+                                const BenchStats& stats) {
+    std::ostringstream throughput;
+    throughput << std::fixed << std::setprecision(2) << stats.mean << " ± "
+               << stats.stddev;
+    std::cout << "| " << std::left << std::setw(32) << model_name << " | "
+              << std::right << std::setw(10) << size_text.str() << " | "
+              << std::left << std::setw(10) << "ROCm (HIP)"
+              << " | " << std::right << std::setw(18) << test_name << " | "
+              << std::right << std::setw(21) << throughput.str() << " |\n"
+              << std::flush;
+  };
+  const auto context = static_cast<std::uint32_t>(required_context);
+  for (const std::size_t depth : options.n_depths) {
+    for (const std::size_t prompt_length : options.n_prompts) {
+      std::vector<double> runs;
+      // The first repetition is an untimed warm-up of the chunk shapes.
+      for (std::size_t repetition = 0; repetition <= options.repetitions;
+           ++repetition) {
+        auto session = model->CreateSession(context, &error);
+        if (!session ||
+            (depth > 0 &&
+             !session->Sync(std::span(tokens).first(depth), &error))) {
+          std::cerr << "Error preparing depth: " << error << '\n';
+          return 1;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        if (!session->Sync(std::span(tokens).first(depth + prompt_length),
+                           &error)) {
+          std::cerr << "Error running prefill: " << error << '\n';
+          return 1;
+        }
+        const double seconds = std::chrono::duration<double>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count();
+        if (repetition > 0) {
+          runs.push_back(static_cast<double>(prompt_length) / seconds);
+        }
+      }
+      print_result(MakeTestName("pp", prompt_length, depth),
+                   ComputeStats(runs));
+    }
+    for (const std::size_t generation_length : options.n_gens) {
+      const std::size_t prefix_length = depth > 0 ? depth : 16;
+      std::vector<double> runs;
+      for (std::size_t repetition = 0; repetition < options.repetitions;
+           ++repetition) {
+        auto session = model->CreateSession(context, &error);
+        if (!session ||
+            !session->Sync(std::span(tokens).first(prefix_length), &error)) {
+          std::cerr << "Error preparing generation: " << error << '\n';
+          return 1;
+        }
+        const std::vector<sampling::TokenId> history(
+            tokens.begin(), tokens.begin() + prefix_length);
+        sampling::SamplerState sampler(options.sampling, history);
+        std::vector<g4::TokenId> generated;
+        const auto start = std::chrono::steady_clock::now();
+        while (generated.size() < generation_length) {
+          g4::Session::DecodeResult step;
+          if (!session->DecodeStep(generation_length - generated.size(),
+                                   sampler, &step, &error, false) ||
+              step.tokens.empty()) {
+            std::cerr << "Error running Gemma 4 decode: " << error << '\n';
+            return 1;
+          }
+          generated.insert(generated.end(), step.tokens.begin(),
+                           step.tokens.end());
+        }
+        const double seconds = std::chrono::duration<double>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count();
+        runs.push_back(static_cast<double>(generation_length) / seconds);
+        if (options.verbose) {
+          const auto& stats = session->Statistics();
+          std::cerr << "Gemma 4 tg depth=" << depth
+                    << " cycles=" << stats.cycles
+                    << " drafted=" << stats.drafted
+                    << " accepted=" << stats.accepted << " text="
+                    << model->Decode(std::span(generated).first(
+                           std::min<std::size_t>(generated.size(), 48)))
+                    << '\n';
+        }
+      }
+      print_result(MakeTestName("tg", generation_length, depth),
+                   ComputeStats(runs));
+    }
+  }
+  std::cout << '\n';
+  return 0;
+}
+#endif
 
 int RunBench(std::span<const char* const> args) {
   std::string parse_err;
@@ -1266,6 +1457,9 @@ int RunBench(std::span<const char* const> args) {
   }
   if (IsQwen38FlashNext(*reader)) {
     return RunQwen38FlashNextBenchmark(opt, reader, model_load_start);
+  }
+  if (IsGemma4(*reader)) {
+    return RunGemma4Benchmark(opt, reader, model_load_start);
   }
 
   if (opt.concurrency != std::vector<std::size_t>{1}) {

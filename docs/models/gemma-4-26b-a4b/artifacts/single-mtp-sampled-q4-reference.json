@@ -1,0 +1,138 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.7-200.fc44.x86_64",
+      "memoryTotalBytes": 133610651648,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "daef66fd95bad8dddd2baaad4893b28692eff13447c073eaae38eff2dd3bbfa4",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-04",
+  "mode": "mtp",
+  "model": {
+    "id": "Gemma-4-26B-A4B-It",
+    "variant": "q4"
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.145 tokens/word, template overhead 13 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "acceptance": 34.75,
+      "acceptance_sd": 4.73,
+      "accepted_per_step": 1.35,
+      "accepted_per_step_sd": 0.18,
+      "command": "llama-server -m gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 47493 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-26B-A4B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 1,
+          "completion_sha256": "5a3520408b5205ddb5c2d516c1a5b91c0affb800252e1b77afe9df57a02f7712",
+          "draft_n": 228,
+          "draft_n_accepted": 69,
+          "predicted_n": 128,
+          "prompt_n": 2037
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "26e2265545441622be3cfe34b5490ad12ca8032dd27e22e74d9b0e0fd8c4c2ff",
+          "draft_n": 215,
+          "draft_n_accepted": 73,
+          "predicted_n": 128,
+          "prompt_n": 2037
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "83f8efb305c22cdf0f5d89a1c5e5f1acbba61787c793ed9f7e8cd264ab456e23",
+          "draft_n": 225,
+          "draft_n_accepted": 70,
+          "predicted_n": 128,
+          "prompt_n": 2050
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "adaed35613638c4506cd992c870f27b04fb011490d111281dd5d390be5c5ae8b",
+          "draft_n": 206,
+          "draft_n_accepted": 75,
+          "predicted_n": 128,
+          "prompt_n": 2034
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "887e7593c987b4acde675b4b60a25330c87ec2d0559fa03e3f183ae692233c00",
+          "draft_n": 188,
+          "draft_n_accepted": 79,
+          "predicted_n": 128,
+          "prompt_n": 2038
+        }
+      ],
+      "pp": 1580.72,
+      "pp_sd": 16.34,
+      "samples": 5,
+      "tg": 51.02,
+      "tg_sd": 3.74,
+      "workload": "story"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf",
+      "-c",
+      "133760",
+      "-np",
+      "1",
+      "--port",
+      "47493",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-mtp",
+      "--spec-draft-model",
+      "mtp-gemma-4-26B-A4B-it.gguf",
+      "--spec-draft-ngl",
+      "999",
+      "--spec-draft-n-max",
+      "4"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "7b88d9439002c608cfcf69b63323e012f9c2b5d7"
+  },
+  "table": "single-mtp-sampled-q4",
+  "target": "reference"
+}

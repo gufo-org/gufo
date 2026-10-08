@@ -1,0 +1,227 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.7-200.fc44.x86_64",
+      "memoryTotalBytes": 133616873472,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-28",
+  "mode": null,
+  "model": {
+    "id": "Gemma-4-31B-It-QAT",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.137 tokens/word, template overhead 13 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 52643 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 1,
+          "completion_sha256": "bed57874721f0cb6aaa3e249b0986c5fab4e247170c0d595bcabec54a02115c3",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2037
+        }
+      ],
+      "pp": 329.96,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 10.52,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 52643 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 12259,
+          "completion_sha256": "ec95175a175ccef853096b2babc99b9794a8df92332e10fd58e52faeea8d0f87",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2063
+        }
+      ],
+      "pp": 231.95,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 9.91,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 52643 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 131279,
+          "completion_sha256": "c4a23b8f22dd4b7ad19445c7c849ca31a3d1b42acf57aaf8f92e6ed2ee0834ab",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2073
+        }
+      ],
+      "pp": 65.93,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 6.39,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 52643 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 16387,
+          "completion_sha256": "97f7ef6726bc1f4e86ba8b5a1bdf1a8ed599fd76735f2aae0e6af38c18c165cf",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2049
+        }
+      ],
+      "pp": 213.47,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 9.73,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 52643 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 32804,
+          "completion_sha256": "934bb01ffa9398587cfe0082a4c01039c933a0d0eb955fc839699cdc797e02c4",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2048
+        }
+      ],
+      "pp": 160.99,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 9.06,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 52643 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 4076,
+          "completion_sha256": "c5b4129f9f838613da60a7c2a848103814262263e62f18906a1d74a1c81dae58",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2052
+        }
+      ],
+      "pp": 290.26,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 10.31,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 52643 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 65645,
+          "completion_sha256": "9226e33a35da4901007252ecdbd5ed6f4c5f05cab20ad2ebfd62c87bd2d1aa73",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2075
+        }
+      ],
+      "pp": 107.53,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 7.95,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "8192": {
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 52643 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 8179,
+          "completion_sha256": "80b46c89be062ee7c2ed1d9a979dfb4147cc5a671b25c7709cdb53e11d2e159e",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2059
+        }
+      ],
+      "pp": 263.49,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 10.11,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+      "-c",
+      "133760",
+      "-np",
+      "1",
+      "--port",
+      "52643",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "153b45e286436f31cc4fe93e32a37349bbdbf1b1"
+  },
+  "table": "single-ar",
+  "target": "reference"
+}

@@ -103,6 +103,16 @@ struct Q3KBlock {
 };
 static_assert(sizeof(Q3KBlock) == 110, "block_q3_K must be 110 bytes");
 
+// block_q4_0 layout ({half d; uint8 qs[16];}, 18 bytes, QK=32). Linear 4-bit
+// values d * (q - 8) with IQ4_NL's nibble order.
+constexpr std::size_t kQ4_0BlockSize = 32;
+
+struct Q4_0Block {
+  __half d;
+  std::uint8_t qs[16];
+};
+static_assert(sizeof(Q4_0Block) == 18, "block_q4_0 must be 18 bytes");
+
 // block_iq4_nl layout ({half d; uint8 qs[16];}, 18 bytes, QK=32). Non-linear
 // 4-bit codebook, one scale per 32 elements.
 constexpr std::size_t kIQ4NLBlockSize = 32;
@@ -161,6 +171,8 @@ __device__ inline std::size_t QuantBlockBytes(core::GgmlType t) {
       return sizeof(Q4KBlock);
     case core::GgmlType::kQ3_K:
       return sizeof(Q3KBlock);
+    case core::GgmlType::kQ4_0:
+      return sizeof(Q4_0Block);
     case core::GgmlType::kIQ4_NL:
       return sizeof(IQ4NLBlock);
     case core::GgmlType::kIQ4_XS:
@@ -186,6 +198,8 @@ __device__ inline std::size_t QuantBlockQK(core::GgmlType t) {
       return kQ4KBlockSize;
     case core::GgmlType::kQ3_K:
       return kQ3KBlockSize;
+    case core::GgmlType::kQ4_0:
+      return kQ4_0BlockSize;
     case core::GgmlType::kIQ4_NL:
       return kIQ4NLBlockSize;
     case core::GgmlType::kIQ4_XS:
@@ -605,6 +619,19 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
                   static_cast<float>(GetQ3KScale(scale_index, blk.scales));
       return;
     }
+    case core::GgmlType::kQ4_0: {
+      const auto& blk = static_cast<const Q4_0Block*>(row)[sub16 / 2];
+      const unsigned shift = 4U * static_cast<unsigned>(sub16 % 2);
+      std::uint32_t packed[4];
+      LoadQuantWords16(blk.qs, packed);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        // Each byte is 0..15 here, so the biased subtract lands in [-8, 7].
+        out.w[i] = SubBytes((packed[i] >> shift) & 0x0F0F0F0FU, 0x08080808U);
+      }
+      out.scale = __half2float(blk.d);
+      return;
+    }
     case core::GgmlType::kIQ4_NL: {
       const auto& blk = static_cast<const IQ4NLBlock*>(row)[sub16 / 2];
       const unsigned shift = 4U * static_cast<unsigned>(sub16 % 2);
@@ -695,8 +722,8 @@ __device__ inline float QuantBlockElement(core::GgmlType type,
 __device__ inline bool IsSub16DecodedQuant(core::GgmlType t) noexcept {
   return t == core::GgmlType::kQ4_K || t == core::GgmlType::kQ5_K ||
          t == core::GgmlType::kQ6_K || t == core::GgmlType::kQ3_K ||
-         t == core::GgmlType::kIQ4_NL || t == core::GgmlType::kIQ4_XS ||
-         t == core::GgmlType::kIQ3_S;
+         t == core::GgmlType::kQ4_0 || t == core::GgmlType::kIQ4_NL ||
+         t == core::GgmlType::kIQ4_XS || t == core::GgmlType::kIQ3_S;
 }
 
 // opt-r7-decode-parallel: warp-parallel quant row-dot, templated on the input

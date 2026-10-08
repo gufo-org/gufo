@@ -658,6 +658,12 @@ void TestReasoningConstraint() {
   assert(Accepts(*grammar, "</think>{\"x\":\"</think>\"}"));
   assert(!Accepts(*grammar, "thinking only"));
   assert(!Accepts(*grammar, "</think>not JSON"));
+  // Another model's close marker (Gemma 4's thought channel).
+  const auto channel = JsonConstraint::WithReasoning(plain, "<channel|>");
+  assert(channel != grammar &&
+         channel == JsonConstraint::WithReasoning(plain, "<channel|>"));
+  assert(Accepts(*channel, "thought </think> <channel|>{\"x\":1}"));
+  assert(!Accepts(*channel, "</think>{\"x\":1}"));
   const std::vector<std::string> pieces{
       "thinking", "</thi", "nk>{\"x\":", "true}", "nk>INVALID", ""};
   auto binding = std::make_shared<TokenConstraint>();

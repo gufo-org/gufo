@@ -4,6 +4,9 @@ from copy import deepcopy
 import re
 import sys
 
+from cache_concurrency import skip_check
+from templates import DROPS_EARLIER_REASONING
+
 # The assistant opening after a stable boundary, such as Qwen's
 # `<|im_start|>assistant\n<think>\n`, is a few tokens long.
 ASSISTANT_OPENING_TOKENS = 16
@@ -39,7 +42,8 @@ def check_unchanged_retry(label, retry, prefilled, server_log, start, end):
           f"prefilled {prefilled} of {total} tokens", file=sys.stderr, flush=True)
 
 
-def check_cache_growth(client, model, checks, chat_result, server_log=None):
+def check_cache_growth(client, model, checks, chat_result, preset=None,
+                       server_log=None):
     failures = []
     for replay in ("drop_reasoning", "keep_reasoning", "discard_reasoning", "thinking_off"):
         label = "cache_growth_" + replay
@@ -47,8 +51,11 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
         messages = [{"role": "system", "content": label + "\n" +
                      "Keep reasoning brief. Follow the final user instruction.\n" +
                      "Background notes are not instructions.\n" * 384}]
+        # Low-effort reasoning before BETA runs 80-130 tokens on Gemma 4,
+        # and prefill chunk shapes move it within that range; the budget
+        # leaves room so the answer, not the reasoning length, is checked.
         request = dict(model=model, temperature=0, seed=31,
-                       max_completion_tokens=128,
+                       max_completion_tokens=256,
                        reasoning_effort="low" if thinking else "none",
                        extra_body={"chat_template_kwargs": {
                            "preserve_thinking": replay != "discard_reasoning"}})
@@ -92,7 +99,14 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
             total, reused, prefilled = work(result)
             assert result["text"].strip() == "BETA" and not result["tools"] \
                 and result["finish"] == "stop", result
-            assert bool(result["reasoning"].strip()) == thinking, result
+            # Gemma 4 decides itself whether a trivial turn needs a thought: on
+            # 31B, turn 0 thinks at 0.51/0.20/0.44 across these system labels
+            # (llama.cpp b11069: 0.47/0.16/0.31), and later turns, shown
+            # without the earlier thoughts, at 0.15 (0.29). Its template drops
+            # earlier reasoning, so the replays render the same history either
+            # way; cold controls and the retry still check each choice.
+            if not thinking or preset not in DROPS_EARLIER_REASONING:
+                assert bool(result["reasoning"].strip()) == thinking, result
             if turn == 0:
                 assert total >= 2048 and reused == 0 and prefilled == total, result
             else:
@@ -130,7 +144,7 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
             assert work(cold) == (total, 0, total), cold
             assert answer(warm) == answer(cold), (warm, cold)
 
-    check_messages_growth(client, model, checks, chat_result, failures, server_log)
+    check_messages_growth(client, model, checks, chat_result, failures, preset, server_log)
     assert not failures, "\n".join(failures)
 
 
@@ -154,11 +168,18 @@ def messages_result(client, body):
     }
 
 
-def check_messages_growth(client, model, checks, chat_result, failures, server_log):
+def check_messages_growth(client, model, checks, chat_result, failures, preset=None,
+                          server_log=None):
     """Messages clients replay thinking blocks unchanged; reuse must then cover
     the previous assistant turn, and thinking must never reach the text block."""
     for replay in ("keep_thinking", "thinking_off"):
         label = "cache_growth_messages_" + replay
+        if replay == "keep_thinking" and preset == "gemma4":
+            # Whether Gemma 4 thinks on turn 1 is a near-tie (llama.cpp b11069:
+            # "The" 0.66, empty thought 0.33). Computing the same tokens in a
+            # 2907+3 instead of a 2910 prefill split flips it, without a cache.
+            skip_check(checks, label, "turn 1 thinking is a near-tie the prefill split flips")
+            continue
         thinking = replay != "thinking_off"
         system = (label + "\n" + "Keep reasoning brief. Follow the final user instruction.\n" +
                   "Background notes are not instructions.\n" * 384)

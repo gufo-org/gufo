@@ -1,0 +1,110 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.7-200.fc44.x86_64",
+      "memoryTotalBytes": 133616881664,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "c86da8c5c4d44fad94450e1ce48b284978d59b3e7c30d7abb1c6fffdf7c5348a",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-07",
+  "mode": "mtp",
+  "model": {
+    "id": "Gemma-4-26B-A4B-It",
+    "variant": "q6"
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.145 tokens/word, template overhead 13 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "acceptance": 53.01,
+      "acceptance_sd": 9.9,
+      "accepted_per_step": 1.0,
+      "accepted_per_step_sd": 0.21,
+      "command": "gufo serve --port 35611 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "2b771a78105a666193b1af8aab47f0fd791faf99954d546615074ce6e3566daf",
+          "draft_n": 142,
+          "draft_n_accepted": 60,
+          "predicted_n": 128,
+          "prompt_n": 2038
+        },
+        {
+          "cache_n": 0,
+          "completion_sha256": "2748bce92cea210c6f2220181b7ca8dbb00b83cc18944d94852924827ecc4599",
+          "draft_n": 115,
+          "draft_n_accepted": 71,
+          "predicted_n": 128,
+          "prompt_n": 2038
+        },
+        {
+          "cache_n": 0,
+          "completion_sha256": "56eee29abc12a5be5daa662949c3cfc8a68711e7cac4539aa6fb71d98b3e251f",
+          "draft_n": 109,
+          "draft_n_accepted": 60,
+          "predicted_n": 128,
+          "prompt_n": 2051
+        }
+      ],
+      "pp": 3695.17,
+      "pp_sd": 163.47,
+      "samples": 3,
+      "tg": 63.76,
+      "tg_sd": 6.04,
+      "workload": "story"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "35611",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--speculative",
+      "mtp",
+      "--mtp-model",
+      "mtp-gemma-4-26B-A4B-it.gguf"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": false,
+    "revision": "2a24b0c7e9bf7729677e51cb14c1cd52cb232383"
+  },
+  "table": "single-mtp-sampled-q6",
+  "target": "gufo"
+}

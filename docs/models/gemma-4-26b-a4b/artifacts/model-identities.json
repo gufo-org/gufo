@@ -1,0 +1,47 @@
+{
+  "sha256": {
+    "Target UD-Q4_K_XL": "ef728c8e0c337fd1067b947af006e38a9ef2419e56feced4fd29b4bf0636e30c",
+    "Target UD-Q6_K_XL": "b01ee10a1423c17f9c4384f1fc569726b8782c5403557ff138ceb9468ca49d6b",
+    "Target UD-Q8_K_XL": "d4bf9791d727d7b88aeea89aba309c68086a4d51cf337047c4e51dde7e243058",
+    "MTP gemma4-assistant Q8_0": "6326fb9f5e487aa8dcdd313a091e3c67724cb2a666ec3b7d2895b5b26d93ed1b",
+    "Vision sidecar mmproj-BF16": "41926ed5f1403cf5add23b0684992805ea6f97253096132e769e65646b8cef9d"
+  },
+  "sources": {
+    "target": "unsloth/gemma-4-26B-A4B-it-GGUF, revision c099eb48e663fd284577b04978a94ffccb261841, gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf, gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf and gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf",
+    "mtp": "unsloth/gemma-4-26B-A4B-it-GGUF, same revision, mtp-gemma-4-26B-A4B-it.gguf",
+    "vision": "unsloth/gemma-4-26B-A4B-it-GGUF, same revision, mmproj-BF16.gguf (1,194,828,256 bytes)",
+    "chatTemplate": "GGUF tokenizer.chat_template, SHA-256 845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b (same as the 31B)"
+  },
+  "scope": "Current retained benchmark and qualification evidence; per-artifact source revisions and commands are authoritative.",
+  "benchmarks-2026-09-29": {
+    "gufo": {
+      "revision": "c7e3ad7",
+      "build": "nix build",
+      "binarySha256Prefix": "7edba3755e723bd3",
+      "tables": "every Gufo table, remeasured 2026-09-29 (sampled MTP at depth 0 only)"
+    },
+    "reference": "llama.cpp b11069 from flake.nix (commit 68d9053a), ROCm gfx1151; measured 2026-09-28 and not rerun (same pinned build)",
+    "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to seven (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch.",
+    "images": "image requests 2026-09-29, UD-Q4_K_XL, Gufo c7e3ad7 and llama.cpp b11069 (tools/gemma4/image_bench.py)"
+  },
+  "benchmarks-2026-09-30-q8": {
+    "gufo": {
+      "revision": "beeb28a",
+      "build": "nix build",
+      "binarySha256Prefix": "b69774722d0a30d1",
+      "tables": "UD-Q8_K_XL reduced grid: single-user depths 0/4096/16384/32768, sampled MTP d0, C1-C2, memory, loading"
+    },
+    "reference": "llama.cpp b11069 from flake.nix, ROCm gfx1151, measured 2026-09-30 on the same grid",
+    "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to seven (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
+  },
+  "benchmarks-2026-10-07": {
+    "gufo": {
+      "revision": "2a24b0c",
+      "build": "nix build",
+      "binarySha256Prefix": "d1eb64e09180774b",
+      "tables": "every Gufo table (UD-Q4_K_XL, UD-Q6_K_XL and UD-Q8_K_XL), remeasured 2026-10-07 after the server-path changes (device snapshots, generation prompt in the last prefill forward, tokenizer, shared snapshot blocks)"
+    },
+    "reference": "llama.cpp columns unchanged (pinned b11069, ROCm gfx1151; dates in BENCHMARKS.md)",
+    "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to 15 (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
+  }
+}

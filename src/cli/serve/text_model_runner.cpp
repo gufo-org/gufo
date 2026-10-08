@@ -81,9 +81,15 @@ std::optional<ChatRequest> ConstrainChatRequest(
     constrained.messages.insert(constrained.messages.begin(),
                                 std::move(message));
   }
-  if (runner.InitialOutputState(request) ==
-      TextGenerationBackend::InitialOutputState::kReasoning)
-    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  const auto initial = runner.InitialOutputState(request);
+  if (initial == TextGenerationBackend::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end);
+  else if (initial == TextGenerationBackend::InitialOutputState::kAuto)
+    // Output that may open reasoning itself keeps that choice.
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end,
+        runner.Markup().reasoning_start);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }
@@ -696,6 +702,12 @@ struct TextRunnerPool::Request::Impl {
         context(std::move(prompt_context)),
         retain_fallback(cache_prefix_tokens != 0),
         overlap_snapshots(overlap_snapshots) {
+    if (context) {
+      for (auto& boundary : boundaries)
+        boundary = context->PrefillStop(boundary, false);
+      boundaries.erase(std::ranges::unique(boundaries).begin(),
+                       boundaries.end());
+    }
     // On a warm continuation the reused frontier is already a safe fallback.
     // Freeze it before prefill, then retain this turn's own stable boundary
     // before mutable assistant framing.
@@ -744,8 +756,11 @@ struct TextRunnerPool::Request::Impl {
       const auto count =
           std::min(grid_points, TextRunnerPool::Impl::kIntermediateCheckpoints);
       for (std::size_t point = 1; point <= count; ++point) {
-        const auto position = grid_points * point / count * interval;
+        auto position = grid_points * point / count * interval;
+        if (context)
+          position = context->PrefillStop(position, false);
         if (position > prefill_offset &&
+            (checkpoints.empty() || position > checkpoints.back()) &&
             position - prefill_offset >= interval &&
             prompt.size() - position > tail &&
             position != snapshot_tokens.size() &&
@@ -1209,7 +1224,9 @@ std::size_t TextRunnerPool::Request::ShareCheckpoint(
     return 0;
   // The complete prompt is retained only after decoding starts; share the
   // last prefill position instead so peers can start sooner.
-  const auto target = std::min(common_tokens, impl_->prompt.size() - 1);
+  auto target = std::min(common_tokens, impl_->prompt.size() - 1);
+  if (impl_->context)
+    target = impl_->context->PrefillStop(target, false);
   const auto offset = impl_->prefill_offset;
   if (target <= offset)
     return 0;
@@ -1322,8 +1339,20 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     frontier = std::min(frontier, impl_->checkpoints.front());
   if (!impl_->boundaries.empty())
     frontier = std::min(frontier, impl_->boundaries.front());
+  // Never stop inside an indivisible input; one starting here completes in
+  // this step even beyond the budget. The frontier is itself a stop.
+  if (impl_->context) {
+    const auto offset = impl_->prefill_offset;
+    auto stop = impl_->context->PrefillStop(
+        offset + std::min(max_input_tokens, frontier - offset), false);
+    if (stop <= offset)
+      stop = std::min(impl_->context->PrefillStop(offset + 1, true), frontier);
+    max_input_tokens = stop - offset;
+  }
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
+  impl_->runner->SetPromptLookahead(
+      state, std::span<const TextRunnerToken>(impl_->prompt).subspan(frontier));
   std::unique_ptr<TextRunnerSnapshot> captured;
   auto step =
       in_pass ? impl_->runner->PrefillThrough(

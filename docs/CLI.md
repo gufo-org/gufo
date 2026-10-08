@@ -68,7 +68,7 @@ The supported modalities are LLM, image, video, and audio (TTS, ASR).
 - `think` (`"on"` / `"off"` / `"auto"`) — whether the model produces its
   visible thinking before answering. In practice: off for quick chats, on
   for hard problems. Auto uses the model default: enabled for Qwen3.8 and
-  DeepSeek V4 Flash.
+  DeepSeek V4 Flash, disabled for Gemma 4.
 - `reasoningEffort` (`"auto"`, `"minimal"`, `"low"`, `"medium"`, `"high"`,
   `"xhigh"`, `"max"`) — model instructions controlling reasoning depth,
   not a token limit. Auto selects Qwen `xhigh` or DeepSeek `high`; more effort
@@ -95,8 +95,9 @@ distribution, but need not match an autoregressive run's sequence for the same
 seed. Speed depends on acceptance and verification cost.
 
 - `speculative` — `dflash2` for Qwen3.8-27B, `dspark` for DeepSeek V4 Flash,
-  `mtp` for models with a supported MTP head, or `off`. HTTP serving
-  supports `dflash2`, `dspark`, and Flash-Next `mtp`.
+  `mtp` for models with a supported MTP head or drafter (Flash-Next, Gemma 4
+  31B and 26B-A4B), or `off`. HTTP serving supports `dflash2`, `dspark`, and Flash-Next
+  and Gemma 4 `mtp`.
 - `dflashModel` — path to the DFlash2 companion draft.
 - `dsparkModel` — path to the DSpark support GGUF.
 - `mtpModel` — path to the MTP draft model.
@@ -105,7 +106,9 @@ seed. Speed depends on acceptance and verification cost.
 - `draftPolicy` (`"fixed"` / `"adaptive"`) — DFlash2 block-length policy;
   defaults to adaptive.
 - `minDraftTokens` — minimum draft length where supported. DFlash2, DSpark,
-  and Flash-Next MTP require the default of one.
+  and Flash-Next MTP require the default of one. Gemma 4 drafts up to
+  `draftTokens` (at most 7) and its draft policy chooses how many a cycle
+  verifies; see the [Gemma 4 model card](models/gemma-4-31b/README.md).
 
 **Server limits (protecting the machine from clients)**
 

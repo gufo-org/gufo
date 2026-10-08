@@ -13,6 +13,8 @@ from copy import deepcopy
 import json
 import sys
 
+from templates import (SHOWS_STRING_CONST_AS_ENUM, THINKING_OFF_OPENING_TOKENS,
+                       TYPED_NATIVE_CALLS)
 from tool_reasoning import response_result
 
 SCHEMA = "https://json-schema.org/draft/2020-12/schema"
@@ -104,6 +106,20 @@ def renamed(value):
     return value
 
 
+def const_as_enum(value):
+    """A renamed string `const` shown as the `enum` that Gemma 4's template
+    shows for `const` (templates.py)."""
+    if isinstance(value, dict):
+        shown = {key: const_as_enum(item) for key, item in value.items()}
+        if (isinstance(value.get("x-const"), str) and value.get("type") == "string"
+                and "enum" not in value):
+            shown["enum"] = [value["x-const"]]
+        return shown
+    if isinstance(value, list):
+        return [const_as_enum(item) for item in value]
+    return value
+
+
 def triggers(value):
     if isinstance(value, dict):
         return sum((key in TRIGGERS) + triggers(item) for key, item in value.items())
@@ -166,6 +182,13 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
         print(f"CHECK {label}", file=sys.stderr, flush=True)
         return result
 
+    def reuse_floor(first):
+        # A template whose history drops the thinking-off opening reuses the
+        # stable boundary before it instead of the call (templates.py).
+        opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset)
+        prompt_tokens = first["usage"]["prompt_tokens"]
+        return prompt_tokens + 1 if opening is None else prompt_tokens - opening
+
     def assert_bash(result, label):
         assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, (label, result)
         function = result["tools"][0]["function"]
@@ -191,7 +214,10 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
             # No instruction is added: the prompt matches the control within
             # the spelling of the renamed keyword. The JSON instruction alone
             # was about 45 tokens.
-            control = {**request, "tools": [*opencode_tools(), neighbor(name, True)],
+            renamed_neighbor = neighbor(name, True)
+            if sampling_preset in SHOWS_STRING_CONST_AS_ENUM:
+                renamed_neighbor = const_as_enum(renamed_neighbor)
+            control = {**request, "tools": [*opencode_tools(), renamed_neighbor],
                        "max_completion_tokens": 1}
             baseline = record(label + "_control", chat_result(client, control))
             delta = first["usage"]["prompt_tokens"] - baseline["usage"]["prompt_tokens"]
@@ -212,7 +238,7 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
                 {"role": "user", "content": "Reply with the single word DONE."}]}
             done = record(label + "_continued", chat_result(client, continued, not stream))
             assert done["finish"] == "stop" and not done["tools"], (label, done)
-            assert cached(done["usage"]) > first["usage"]["prompt_tokens"], (
+            assert cached(done["usage"]) >= reuse_floor(first), (
                 label, "the generated call was not reused on the next turn",
                 first["usage"], done["usage"])
             assert_native(done, label + "_continued")
@@ -265,12 +291,13 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
             {"role": "user", "content": "Reply with the single word DONE."}]}
         done = record(label + "_continued", chat_result(client, continued, choice != "auto"))
         assert done["finish"] == "stop" and not done["tools"], (label, done)
-        assert cached(done["usage"]) > first["usage"]["prompt_tokens"], (
+        assert cached(done["usage"]) >= reuse_floor(first), (
             label, "the generated call was not reused on the next turn",
             first["usage"], done["usage"])
 
-    check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
-    check_finite_argument_types(client, model, checks, chat_result, image)
+    check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek,
+                           sampling_preset in TYPED_NATIVE_CALLS)
+    check_finite_argument_types(client, model, checks, chat_result, image, sampling_preset)
 
     # A strict union stays native too; llama.cpp has no strict mode. (Strict
     # validation still rejects keywords such as oneOf before generation.)
@@ -297,7 +324,8 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
     print(f"CHECK native_schemas_complete deepseek={deepseek}", file=sys.stderr, flush=True)
 
 
-def check_finite_argument_types(client, model, checks, chat_result, image=None):
+def check_finite_argument_types(client, model, checks, chat_result, image=None,
+                                sampling_preset="qwen38"):
     """const/enum without type still have a type, including through unions."""
     check_read_arguments(client, model, checks, chat_result)
     literal = ("line\n</parameter> is literal\n"
@@ -338,7 +366,7 @@ def check_finite_argument_types(client, model, checks, chat_result, image=None):
                 assert actual == {"v": value} and type(actual["v"]) is type(value), (label, actual)
                 assert_native(result, label)
                 print(f"CHECK {label}", file=sys.stderr, flush=True)
-    check_literal_history(client, model, checks, chat_result, image)
+    check_literal_history(client, model, checks, chat_result, image, sampling_preset)
 
 
 def check_read_arguments(client, model, checks, chat_result):
@@ -377,7 +405,8 @@ def check_read_arguments(client, model, checks, chat_result):
             print(f"CHECK {label}", file=sys.stderr, flush=True)
 
 
-def check_literal_history(client, model, checks, chat_result, image=None):
+def check_literal_history(client, model, checks, chat_result, image=None,
+                          sampling_preset="qwen38"):
     """New literal control-token text must not retokenize unchanged history."""
     function = {"name": "read", "description": "Read a file.",
                 "parameters": {"type": "object", "properties": {
@@ -440,10 +469,38 @@ def check_literal_history(client, model, checks, chat_result, image=None):
                 done = response_result(client, request, True)
             checks[label + "_continued"] = done
             assert done["text"].strip() == "DONE" and not done["tools"], done
-            details = done["usage"].get("input_tokens_details",
-                                       done["usage"].get("prompt_tokens_details"))
-            assert details["cached_tokens"] == first["usage"]["total_tokens"], (
-                label, "literal tool data invalidated unchanged history", first, done)
+
+            def reused(result):
+                usage = result["usage"]
+                return usage.get("input_tokens_details",
+                                 usage.get("prompt_tokens_details"))["cached_tokens"]
+
+            if sampling_preset in THINKING_OFF_OPENING_TOKENS:
+                # History drops the call's thinking-off opening (templates.py),
+                # so reuse stops at a stable boundary. The literal must reuse
+                # exactly what the same continuation without it reuses.
+                plain = deepcopy(request)
+                if endpoint == "chat":
+                    plain["messages"][-1]["content"] = "File data: example."
+                    control = chat_result(client, plain, True)
+                else:
+                    plain["input"][-1]["output"] = "File data: example."
+                    control = response_result(client, plain, True)
+                checks[label + "_plain"] = control
+
+                def complete(result):
+                    usage = result["usage"]
+                    return reused(result) == usage.get("prompt_tokens",
+                                                       usage.get("input_tokens"))
+
+                # Both may reuse everything when an earlier endpoint served
+                # the same prompts.
+                assert reused(done) == reused(control) or (
+                    complete(done) and complete(control)), (
+                    label, "literal tool data invalidated unchanged history", done, control)
+            else:
+                assert reused(done) == first["usage"]["total_tokens"], (
+                    label, "literal tool data invalidated unchanged history", first, done)
             print(f"CHECK {label}", file=sys.stderr, flush=True)
 
 
@@ -467,7 +524,8 @@ def streamed_call_order(client, request):
     return before, after, calls, finish
 
 
-def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek):
+def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek,
+                           typed=False):
     """Behaviors llama.cpp's Qwen3-Coder/DeepSeek grammars define (#438)."""
     def record(label, result):
         checks[label] = result
@@ -504,8 +562,11 @@ def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
         assert function["name"] == "mcp_lookup", (label, result)
         # DeepSeek's typed string flag lets gufo's open-tool route carry named
         # arguments where llama.cpp declares none (tests/fixtures records it).
+        # A typed call syntax enforces the root const instead (templates.py).
         assert arguments == {} or (deepseek and name != "root_const"
-                                   and arguments == {"key": "alpha"}), (label, result)
+                                   and arguments == {"key": "alpha"}) or (
+            typed and name == "root_const" and arguments == {"key": "alpha"}), (
+            label, result)
         assert_native(result, label)
 
     # Keep the exact schema key. llama.cpp's PEG matches these spaces but its

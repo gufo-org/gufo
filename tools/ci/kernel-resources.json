@@ -471,6 +471,45 @@
   "_ZN4gufo3hip41Wave32FusedSSMInputProjectionsKernel_1RowILj4EEEvPKvNS_4core8GgmlTypeES3_S5_S3_S5_S3_S5_PKfPfS8_S8_S8_mmmm": {
    "max_scratch": 8
   },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_111GeGluKernelEPKfS5_Pfm": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_117GeGluPackedKernelEPKfPfjmP6__half": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_119GeGluQuantizeKernelEPKfS5_Pvjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE3ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE5ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE6ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_121GeGluPackedHalfKernelEPK6__halfPS4_jm": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE1ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE1ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
   "_ZN4gufo6models9qwen3_asr3hip12_GLOBAL__N_120TextQkNormRoPEKernelILj128EEEvPfS5_S5_PKfS7_mjjjjffS5_S5_jj": {
    "max_scratch": 8
   },

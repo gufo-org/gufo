@@ -20,8 +20,8 @@ namespace gufo::quant {
 
 /// Dequantize one logical row of `k` elements from packed `src` into `dst`.
 /// F32 is byte-copied; F16/BF16 are converted to float; Q3_K/Q4_K/Q5_K/Q6_K/
-/// Q8_K/Q8_0 route to the canonical DequantizeQ* routines. Unsupported types
-/// assert (loud fail) instead of returning 0.0F.
+/// Q8_K/Q8_0/Q4_0/Q5_1 route to the canonical DequantizeQ* routines.
+/// Unsupported types assert (loud fail) instead of returning 0.0F.
 void Dequantize(core::GgmlType type, const void* src, float* dst,
                 std::size_t k);
 

@@ -9,6 +9,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/core/json.hpp"
@@ -22,7 +23,7 @@ namespace gufo::sampling {
 // verification.
 class JsonConstraint {
 public:
-  enum class ToolFormat { kJson, kQwen, kDeepSeek };
+  enum class ToolFormat { kJson, kQwen, kDeepSeek, kGemma4 };
   struct Stack {
     std::vector<std::uint32_t> symbols;
     std::string lexeme;
@@ -48,8 +49,12 @@ public:
   // types. It preserves the model's native string/DSML typed-value semantics.
   static std::shared_ptr<const JsonConstraint> OpenToolParameters(
       ToolFormat format);
+  /// Any text up to and including `end` (the model's reasoning close), then
+  /// `answer`. A nonempty `start` makes the reasoning optional: `answer`
+  /// directly, or `start` followed by the reasoning above.
   static std::shared_ptr<const JsonConstraint> WithReasoning(
-      std::shared_ptr<const JsonConstraint> answer);
+      std::shared_ptr<const JsonConstraint> answer,
+      std::string_view end = "</think>", std::string_view start = {});
   using Tool = std::pair<std::string, std::shared_ptr<const JsonConstraint>>;
   static std::shared_ptr<const JsonConstraint> WithTools(
       std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,

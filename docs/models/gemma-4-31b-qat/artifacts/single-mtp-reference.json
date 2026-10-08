@@ -1,0 +1,267 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.7-200.fc44.x86_64",
+      "memoryTotalBytes": 133616873472,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-28",
+  "mode": "mtp",
+  "model": {
+    "id": "Gemma-4-31B-It-QAT",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.137 tokens/word, template overhead 13 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "acceptance": 33.95,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.33,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 33163 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 1,
+          "completion_sha256": "d8838756d8645fbba6b313a9813603b79e69a172e51a08ea3cdb70be192279bd",
+          "draft_n": 215,
+          "draft_n_accepted": 73,
+          "predicted_n": 128,
+          "prompt_n": 2037
+        }
+      ],
+      "pp": 316.79,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 21.22,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "acceptance": 38.0,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.46,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 33163 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 12259,
+          "completion_sha256": "cd80c18ba5542a507c31406c0eb44cd525f3934a1947e49f5dfb6f23629b7bb2",
+          "draft_n": 200,
+          "draft_n_accepted": 76,
+          "predicted_n": 128,
+          "prompt_n": 2063
+        }
+      ],
+      "pp": 224.57,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.46,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "acceptance": 33.18,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.29,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 33163 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 131279,
+          "completion_sha256": "8ed387a6e4cbe178dc64273f65c12e97bf338bf4a88ee025b165ea3c7f7554aa",
+          "draft_n": 217,
+          "draft_n_accepted": 72,
+          "predicted_n": 128,
+          "prompt_n": 2073
+        }
+      ],
+      "pp": 64.9,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 6.69,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "acceptance": 47.16,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.84,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 33163 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 16387,
+          "completion_sha256": "8dcaeab28d00fa6deac763aaa733623c1787715321244057721fbf834c02acf8",
+          "draft_n": 176,
+          "draft_n_accepted": 83,
+          "predicted_n": 128,
+          "prompt_n": 2049
+        }
+      ],
+      "pp": 207.5,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 20.13,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "acceptance": 39.29,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.51,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 33163 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 32804,
+          "completion_sha256": "672894d5dc3b6969827a268d08a4d28956c8c2e26080f9e79786c3c4a5dd702c",
+          "draft_n": 196,
+          "draft_n_accepted": 77,
+          "predicted_n": 128,
+          "prompt_n": 2048
+        }
+      ],
+      "pp": 156.96,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 14.76,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "acceptance": 43.24,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.67,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 33163 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 4076,
+          "completion_sha256": "c5b4129f9f838613da60a7c2a848103814262263e62f18906a1d74a1c81dae58",
+          "draft_n": 185,
+          "draft_n_accepted": 80,
+          "predicted_n": 128,
+          "prompt_n": 2052
+        }
+      ],
+      "pp": 274.16,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 22.52,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "acceptance": 37.62,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.46,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 33163 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 65645,
+          "completion_sha256": "2b600034209e112244df59b52a29bc2aa5aedd5cf7b37c68db56d7d00fdd3eab",
+          "draft_n": 202,
+          "draft_n_accepted": 76,
+          "predicted_n": 128,
+          "prompt_n": 2075
+        }
+      ],
+      "pp": 106.01,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 10.94,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "8192": {
+      "acceptance": 44.2,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.67,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 33163 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 8179,
+          "completion_sha256": "664ea18cf997440ce609628460c4f65df1d418b4a06fb33f37be2c6997a1a75d",
+          "draft_n": 181,
+          "draft_n_accepted": 80,
+          "predicted_n": 128,
+          "prompt_n": 2059
+        }
+      ],
+      "pp": 246.37,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 21.39,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+      "-c",
+      "133760",
+      "-np",
+      "1",
+      "--port",
+      "33163",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-mtp",
+      "--spec-draft-model",
+      "mtp-gemma-4-31B-it.gguf",
+      "--spec-draft-ngl",
+      "999",
+      "--spec-draft-n-max",
+      "4"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "153b45e286436f31cc4fe93e32a37349bbdbf1b1"
+  },
+  "table": "single-mtp",
+  "target": "reference"
+}

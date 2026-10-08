@@ -100,6 +100,7 @@ setting independently, including when changing thinking mode.
 | DeepSeek V4 Flash 0731 (agentic) | 1.0 | 0.95 | 0 | 0 |
 | Qwen3.8 27B / Flash-Next, thinking | 1.0 | 0.95 | 20 | 0 |
 | Qwen3.8 27B / Flash-Next, thinking off | 0.7 | 0.8 | 20 | 1.5 |
+| Gemma 4 31B / 26B-A4B, thinking on or off | 1.0 | 0.95 | 64 | 0 |
 
 Min-p and frequency penalty default to zero; repetition penalty is 1.0.
 AR and DFlash2/MTP/DSpark use the same target defaults.
@@ -111,12 +112,15 @@ DeepSeek maps `minimal`/`low` to `low`, `medium`/`high`/`xhigh` to `high`,
 and `max` to `max`.
 The [functional suite](../tests/functional/README.md) with
 `--suite sampling-defaults --sampling-preset qwen38` (or
-`deepseek4`) compares omitted and explicit settings, including C2 replay.
+`deepseek4`, `gemma4`) compares omitted and explicit settings, including C2
+replay.
 
 Sources: [Qwen27B](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
 [Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices),
 [DeepSeek 0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/7872f01b1d1fe23eabc4c98b48bffcef5a386062/README.md),
-[DeepSeek thinking defaults](https://api-docs.deepseek.com/guides/thinking_mode).
+[DeepSeek thinking defaults](https://api-docs.deepseek.com/guides/thinking_mode),
+[Gemma 4](https://huggingface.co/google/gemma-4-31B-it/blob/main/generation_config.json)
+(also the GGUFs' `general.sampling.*`).
 DeepSeek's 0.95 top-p is its agentic recommendation; neutral penalties and
 disabled unspecified filters are Gufo defaults.
 
@@ -172,6 +176,19 @@ correction; greedy verification follows target argmax. Draft and verification
 work can batch across ready requests. See the
 [Flash-Next benchmark and quality contract](models/qwen3.8-flash-next/BENCHMARKS.md).
 
+Gemma 4 31B and 26B-A4B decode up to eight sessions in one forward. Its snapshots hold
+every global-layer row plus the live sliding-window rows, so RAM and
+`--cache-disk` reuse work as above; a changed history re-prefills from the
+latest retained checkpoint before the change. With `--speculative mtp`, the
+`gemma4-assistant` drafter reads the target's KV and drafts up to
+`--draft-tokens`; `--draft-policy` (`calibrated` by default, `confidence` or
+`fixed`) and `--draft-calibration` choose how many a cycle verifies (see the
+[model card](models/gemma-4-31b/README.md)). Greedy
+output equals the same server's single-token decoding, but not necessarily an
+AR-only server's (different FP32 projection summation order). Reasoning appears as `reasoning_content` and Gemma
+tool calls as OpenAI `tool_calls`. See the
+[Gemma 4 benchmark and quality contract](models/gemma-4-31b/BENCHMARKS.md).
+
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 
@@ -206,7 +223,8 @@ and newly processed tokens separately; resuming from the checkpoint processes
 the short suffix. System instructions, tool definitions and image identities
 must match the retained prefix.
 
-Qwen image identity is checked only for images consumed before each checkpoint.
+Qwen and Gemma 4 image identity is checked only for images consumed before
+each checkpoint.
 Appending an image reuses the preceding text/image state in RAM or on disk;
 changing, removing or moving an earlier image invalidates checkpoints after it.
 New images get a checkpoint before assistant framing so later turns do not
@@ -676,7 +694,9 @@ ordinary continuation.
   including Unicode and names absent from the current tools. This does not
   authorize new calls to them. History still requires a non-empty string name and
   JSON-object arguments; embedded NUL names are unsupported. Malformed history
-  and invalid declarations return 400 before generation.
+  and invalid declarations return 400 before generation. Gemma 4 also rejects
+  `{`, which ends a name in its call syntax, in declared and historical names
+  with 400 `invalid_prompt`.
 - shared top-k, min-p, repeat, frequency and presence sampling controls
 
 Streaming objects use `chat.completion.chunk` and end with the compatibility
@@ -744,6 +764,14 @@ Jinja runtime does. Cache reuse requires identical tokens; normalizing an
 assistant's formatting can require replaying that suffix.
 Constrained JSON keys follow schema order, with additional
 keys last. Impossible strict schemas are rejected before generation.
+Gemma 4 calls are constrained in its own `call:NAME{key:value}` syntax at
+every depth: `<|"|>`-delimited strings and bare keys in sorted order, as its
+template renders them. A key Gemma 4 cannot read bare (one containing
+`:{}[],`, starting with `<` or with surrounding whitespace) is `<|"|>`-quoted.
+Such a key containing `<|"|>`, or a fixed string value containing it, leaves
+non-strict arguments open and rejects a strict schema; there is no JSON
+fallback. With thinking on, constrained output may open the thought channel
+before a call or JSON answer.
 `tool_choice: "required"` and named choices constrain decoding to a declared
 call, with the same argument syntax as `auto`. Where
 the backend cannot constrain sampling, an unmet `required` choice still returns
@@ -782,11 +810,11 @@ Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, includi
 streaming, images and concurrent requests. Reasoning stays separate from JSON
 and counts toward the output budget. Changing the schema changes the cache prefix.
 
-`</think>` ends reasoning before constrained JSON. Native tools also accept an
-unquoted function header as the boundary when the model omits `</think>`.
-Bare marker mentions and quoted examples remain reasoning; markers inside
-arguments remain data. Buffered and streamed Chat Completions and Responses
-use the same boundaries.
+`</think>` (Gemma 4: `<channel|>`) ends reasoning before constrained JSON.
+Native tools also accept an unquoted function header as the boundary when the
+model omits `</think>`. Bare marker mentions and quoted examples remain
+reasoning; markers inside arguments remain data. Buffered and streamed Chat
+Completions and Responses use the same boundaries.
 
 Parse the returned content: leading whitespace is valid JSON, and stops or token
 limits can leave it incomplete. `finish_reason: "stop"` includes matched stop
@@ -825,6 +853,8 @@ and [llama.cpp grammar sampling](https://github.com/ggml-org/llama.cpp/blob/68d9
 Verify with `tests/functional/openai_sdk.py --suite tools`,
 `--suite structured` or `--suite structured-limits`
 (add `--vision` for an image-capable server).
+Its seeded replay checks need a Gemma 4 MTP server started with
+`--draft-calibration request`.
 
 ## Model Discovery
 

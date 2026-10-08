@@ -3954,6 +3954,10 @@ __launch_bounds__(256) __global__
   const int t_local = (tile >> 16) * BN;
   const int bucket_begin = pad_bounds[expert];
   const int bucket_rows = pad_bounds[expert + 1] - bucket_begin;
+  // A map built on the device pads its tail with tiles past every bucket.
+  if (t_local >= bucket_rows) {
+    return;
+  }
   const int live_tok_tiles =
       std::min(kTokTiles, (bucket_rows - t_local + 15) / 16);
   const int num_kb = static_cast<int>(k / 32);
@@ -5585,7 +5589,8 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
 }
 
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
-                  std::size_t m, std::size_t k, hipStream_t stream) {
+                  std::size_t m, std::size_t k, hipStream_t stream,
+                  DenseF16Plan plan) {
   if (m == 0 || k == 0 || batch == 0 || k % 32 != 0) {
     return false;
   }
@@ -5606,7 +5611,14 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
     constexpr int kBN = 128;
     const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
                     static_cast<unsigned int>((m + kWideBM - 1) / kWideBM));
-    if (m == 10240 && k == 320 && batch >= 1024) {
+    const bool planned = plan != DenseF16Plan::kAuto && batch >= 1024;
+    if (planned && plan == DenseF16Plan::kStagedRowGroups8) {
+      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1>), grid,
+                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else if (planned) {
+      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 8, 1>), grid,
+                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else if (m == 10240 && k == 320 && batch >= 1024) {
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2, 8>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
     } else if (batch >= 1024 && m == 2560 && k == 6144) {

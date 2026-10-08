@@ -1430,6 +1430,74 @@ void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
   old.Invalidate();
 }
 
+/// An input whose tokens must be evaluated together, as Gemma 4 images are.
+struct IndivisibleSpanContext final : gufo::server::TextPromptContext {
+  std::size_t first{0};
+  std::size_t end{0};
+  [[nodiscard]] std::size_t PrefillStop(std::size_t position,
+                                        bool up) const override {
+    return position > first && position < end ? (up ? end : first) : position;
+  }
+};
+
+void TestIndivisibleInputsAreNotSplit() {
+  class ContextRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = SnapshotRunner::Descriptor();
+      descriptor.max_context = 32768;
+      return descriptor;
+    }
+    void SetPromptContext(
+        TextRunnerState&,
+        std::shared_ptr<const gufo::server::TextPromptContext>) const override {
+    }
+  };
+  const auto stops = [](const FakeStats& stats) {
+    std::vector<std::size_t> positions;
+    std::size_t position = 0;
+    for (const auto span : stats.prefill_spans)
+      positions.push_back(position += span);
+    return positions;
+  };
+  {
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(std::make_shared<ContextRunner>(stats), 1);
+    auto span = std::make_shared<IndivisibleSpanContext>();
+    span->first = 4;
+    span->end = 14;
+    auto request =
+        pool.Acquire(std::vector<TextRunnerToken>(20, 1), {}, {}, span);
+    while (!request.prefill_complete())
+      (void)request.Prefill(3);
+    Expect(stops(*stats) == std::vector<std::size_t>{3, 4, 14, 17, 20},
+           "a budget stops before an indivisible input, and a step starting "
+           "at one takes it whole");
+    request.Cancel();
+  }
+  {
+    // The 4096-token grid checkpoint falls inside the input.
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(std::make_shared<ContextRunner>(stats, 64, 256, 4096),
+                        1);
+    auto span = std::make_shared<IndivisibleSpanContext>();
+    span->first = 4000;
+    span->end = 4200;
+    auto request = pool.Acquire(std::vector<TextRunnerToken>(5000, 1), {}, {},
+                                span, true, 4990);
+    while (!request.prefill_complete())
+      (void)request.Prefill(32768);
+    const auto positions = stops(*stats);
+    Expect(
+        std::ranges::find(positions, 4000) != positions.end() &&
+            std::ranges::none_of(
+                positions, [](std::size_t p) { return p > 4000 && p < 4200; }),
+        "checkpoints move before an indivisible input");
+    request.Cancel();
+  }
+}
+
 void TestNewImageGetsAStableCheckpoint() {
   class ContextRunner final : public SnapshotRunner {
   public:
@@ -2225,6 +2293,7 @@ int main() {
   TestInPassStableCheckpoint();
   TestInPassFailureRetainsOnlyCompletedCheckpoints();
   TestNewImageGetsAStableCheckpoint();
+  TestIndivisibleInputsAreNotSplit();
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();
   TestCancellationRetainsOnlyCompletedWork();

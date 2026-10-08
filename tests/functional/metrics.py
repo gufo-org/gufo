@@ -635,9 +635,12 @@ def qualify(comparisons, controls=()):
 def join_server_timings(directory):
     """Join after shutdown, when cancelled work and disk restoration have drained."""
     root = Path(directory)
+    report = root / "report.json"
+    logs = json.loads(report.read_text()).get("server_logs", {}) if report.is_file() else {}
     for path in root.glob("*.requests.json"):
-        log = root / ("server-restarted.log" if path.name.endswith("-disk.requests.json")
-                      else "server.log")
+        label = path.name.removesuffix(".requests.json")
+        log = root / logs.get(label, "server-restarted.log" if label.endswith("-disk")
+                              else "server.log")
         completed = {}
         for line in log.read_text().splitlines():
             if "event=completed " in line:

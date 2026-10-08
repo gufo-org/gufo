@@ -61,6 +61,9 @@ endif()
 # Qwen3.8-Flash-Next — model-private CPU reference plus ROCm runtime.
 add_subdirectory(src/models/qwen38_flash_next)
 
+# Gemma 4 dense text models — model-private CPU reference plus ROCm runtime.
+add_subdirectory(src/models/gemma4)
+
 # Qwen3-TTS — CPU reference + HIP kernels (CustomVoice 12Hz).
 add_subdirectory(src/models/qwen3_tts)
 
@@ -184,8 +187,9 @@ add_library(gufo_llm_cli STATIC
   src/cli/prompt/prompt.cpp)
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core)
 if(ENGINE_ENABLE_HIP)
+  target_sources(gufo_llm_cli PRIVATE src/cli/prompt/gemma4_prompt.cpp)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash
-    gufo_qwen38_flash_next)
+    gufo_qwen38_flash_next gufo_gemma4)
 endif()
 
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
@@ -213,7 +217,7 @@ add_library(gufo_http STATIC
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_gemma4 gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21)
 
 add_executable(gufo
   src/cli/main.cpp
@@ -377,7 +381,7 @@ if (BUILD_TESTING)
     src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
   )
-  target_link_libraries(openai_chat_test PRIVATE gufo_core)
+  target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_gemma4)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
@@ -430,6 +434,7 @@ if (BUILD_TESTING)
 
   add_subdirectory(tests/models/deepseek_v4_flash)
   add_subdirectory(tests/models/qwen38_flash_next)
+  add_subdirectory(tests/models/gemma4)
 
   if(ENGINE_ENABLE_HIP)
     add_executable(chat_template_hf_token_golden_test

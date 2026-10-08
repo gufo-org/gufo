@@ -1,0 +1,78 @@
+[
+  {
+    "image": "chart-624x960.png",
+    "server": "gufo-280",
+    "runs": [
+      {
+        "prompt_tokens": 313,
+        "cold_ttft_s": 0.359892401000252,
+        "cold_prompt_ms": 320.16992600000003,
+        "decode_tok_s": 53.10507259636846,
+        "follow_ttft_s": 0.10347274199011736,
+        "follow_cached_tokens": 306,
+        "answer": "A vertical, full-shot, high-angle, eye-level, studio-lit, color image shows a collection of test images and color charts. The top half of the image is titled \"Test Images\" in a bold, black, sans-serif"
+      },
+      {
+        "prompt_tokens": 312,
+        "cold_ttft_s": 0.35368396301055327,
+        "cold_prompt_ms": 320.13930500000004,
+        "decode_tok_s": 53.09006769719428,
+        "follow_ttft_s": 0.10412640499998815,
+        "follow_cached_tokens": 305,
+        "answer": "A vertical image with a white background contains several sections of text and images.\n\nAt the top, the text \"Test Images\" is written in a bold, black, sans-serif font. Below this text is a grid of 24"
+      },
+      {
+        "prompt_tokens": 310,
+        "cold_ttft_s": 0.3598405589873437,
+        "cold_prompt_ms": 320.092382,
+        "decode_tok_s": 53.11570487872973,
+        "follow_ttft_s": 0.10307524100062437,
+        "follow_cached_tokens": 303,
+        "answer": "This image is a composite graphic used for testing image processing or color science algorithms. It is divided into two main sections: \"Test Images\" at the top and color reference charts at the bottom"
+      }
+    ],
+    "cold_ttft_s": 0.3598405589873437,
+    "cold_prompt_ms": 320.13930500000004,
+    "decode_tok_s": 53.10507259636846,
+    "follow_ttft_s": 0.10347274199011736,
+    "prompt_tokens": 313
+  },
+  {
+    "image": "logo-768x768.png",
+    "server": "gufo-280",
+    "runs": [
+      {
+        "prompt_tokens": 310,
+        "cold_ttft_s": 0.3539802980085369,
+        "cold_prompt_ms": 314.49124600000005,
+        "decode_tok_s": 53.1178528839614,
+        "follow_ttft_s": 0.10244835997582413,
+        "follow_cached_tokens": 303,
+        "answer": "A detailed pixel art illustration of an owl's head, centered against a dark green, textured background. The owl is depicted in a frontal view, looking directly at the viewer.\n\n**The Owl:**\n* **Eyes:**"
+      },
+      {
+        "prompt_tokens": 309,
+        "cold_ttft_s": 0.35572345700347796,
+        "cold_prompt_ms": 315.16185,
+        "decode_tok_s": 53.12059486832556,
+        "follow_ttft_s": 0.1015860449988395,
+        "follow_cached_tokens": 302,
+        "answer": "A detailed pixel art illustration of an owl's head, centered against a dark green, textured background. The owl is depicted in a frontal view, looking directly at the viewer.\n\n**The Owl:**\n* **Eyes:**"
+      },
+      {
+        "prompt_tokens": 306,
+        "cold_ttft_s": 0.35921249698731117,
+        "cold_prompt_ms": 315.136418,
+        "decode_tok_s": 53.09432894611082,
+        "follow_ttft_s": 0.10063467599684373,
+        "follow_cached_tokens": 299,
+        "answer": "A detailed pixel art illustration of an owl's head, centered against a dark green, textured background. The owl is depicted in a frontal view, looking directly at the viewer.\n\n**The Owl:**\n* **Eyes:**"
+      }
+    ],
+    "cold_ttft_s": 0.35572345700347796,
+    "cold_prompt_ms": 315.136418,
+    "decode_tok_s": 53.1178528839614,
+    "follow_ttft_s": 0.1015860449988395,
+    "prompt_tokens": 310
+  }
+]

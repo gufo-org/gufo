@@ -1095,6 +1095,30 @@ class FunctionalRunnerTest(unittest.TestCase):
                 {"startup_ms": 100, "suites": {"text-cancel-disk": {}}},
                 {"startup_ms": 100, "suites": {"text-cancel-disk": {}}})
 
+    def test_fresh_server_suites_use_their_own_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loaded = "[loader] event=load_completed kind=text speculative=mtp\n"
+            (root / "server.log").write_text(loaded)
+            (root / "server-cache-edits.log").write_text(
+                loaded + "[INFO] request=r1 event=completed duration_ms=9 queue_ms=2\n")
+            (root / "report.json").write_text(json.dumps(
+                {"server_logs": {"cache-edits": "server-cache-edits.log"}}))
+            path = root / "cache-edits.requests.json"
+            path.write_text(json.dumps({"version": 1, "requests": [{
+                "index": 0, "endpoint": "/v1/chat/completions", "request_id": "r1",
+                "metrics": {"completion_tokens": 1, "draft_tokens": 2,
+                            "draft_tokens_accepted": 1}}]}))
+            join_server_timings(root)
+            self.assertEqual(json.loads(path.read_text())["requests"][0]["metrics"]["queue_ms"], 2)
+            self.assertTrue(functional.execution_coverage(root, "mtp")["draft_execution_observed"])
+            (root / "server-cache-edits.log").write_text(
+                "[loader] event=load_completed kind=text speculative=off\n")
+            with self.assertRaisesRegex(ValueError, "server-cache-edits"):
+                functional.execution_coverage(root, "mtp")
+        self.assertTrue({"sampling-defaults", "progress", "cache-edits", "cache-growth"}
+                        <= set(functional.FRESH_SERVER_SUITES) <= set(functional.SUITES))
+
     def test_nullable_parallel_responses_keeps_default(self):
         response = {"status": "completed", "output": [
             {"type": "function_call", "name": "f", "call_id": f"call_{i}",

@@ -185,8 +185,18 @@ bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
                         hipStream_t stream);
+/// Wide-batch tile plans a caller may choose for DenseF16Gemm; kAuto keeps
+/// the Flash-Next dispatch. The others apply from 1024 rows: eight row groups
+/// (each weight fragment reused across the token tiles), optionally with the
+/// two-block stage for long K.
+enum class DenseF16Plan : std::uint8_t {
+  kAuto,
+  kRowGroups8,
+  kStagedRowGroups8,
+};
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
-                  std::size_t m, std::size_t k, hipStream_t stream);
+                  std::size_t m, std::size_t k, hipStream_t stream,
+                  DenseF16Plan plan = DenseF16Plan::kAuto);
 /// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
 /// F32 K16 chain per output. Token t's chain starts ((t / 32) % 4) * 128
 /// elements into K and wraps: hipBLASLt's MT32x32x64 order (BlasLt::Gemm).

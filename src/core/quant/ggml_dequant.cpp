@@ -169,7 +169,7 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     // GGML storage layouts also used by the DeepSeek runtime. Storage support
     // here does not imply that every model has a compute kernel for the type.
     case core::GgmlType::kQ4_0:
-      block_bytes = 18;
+      block_bytes = sizeof(block_q4_0);
       break;
     case core::GgmlType::kQ4_1:
       block_bytes = 20;
@@ -178,7 +178,7 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
       block_bytes = 22;
       break;
     case core::GgmlType::kQ5_1:
-      block_bytes = 24;
+      block_bytes = sizeof(block_q5_1);
       break;
     case core::GgmlType::kQ8_1:
       block_bytes = 36;
@@ -402,6 +402,68 @@ void DequantizeQ8_0(const void* src, float* dst, std::size_t k) {
       dst[(b * 32) + i] = d * static_cast<float>(blocks[b].qs[i]);
     }
   }
+}
+
+void DequantizeQ4_0(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q4_0*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    for (std::size_t i = 0; i < 16; ++i) {
+      const std::uint8_t packed = blocks[b].qs[i];
+      dst[(b * 32) + i] = d * static_cast<float>((packed & 0x0F) - 8);
+      dst[(b * 32) + i + 16] = d * static_cast<float>((packed >> 4U) - 8);
+    }
+  }
+}
+
+void DequantizeQ5_1(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q5_1*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    const float m = Fp16ToFloat(blocks[b].m);
+    std::uint32_t qh = 0;
+    std::memcpy(&qh, blocks[b].qh, sizeof(qh));
+    for (std::size_t i = 0; i < 16; ++i) {
+      const std::uint8_t packed = blocks[b].qs[i];
+      const std::uint32_t lo = (packed & 0x0FU) | (((qh >> i) & 1U) << 4U);
+      const std::uint32_t hi = (packed >> 4U) | (((qh >> (i + 16)) & 1U) << 4U);
+      dst[(b * 32) + i] = (d * static_cast<float>(lo)) + m;
+      dst[(b * 32) + i + 16] = (d * static_cast<float>(hi)) + m;
+    }
+  }
+}
+
+float DotProductQ5_1(const void* row_data, std::span<const float> vec,
+                     std::size_t k) {
+  float values[32];
+  const auto* blocks = static_cast<const block_q5_1*>(row_data);
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < k / 32; ++b) {
+    DequantizeQ5_1(&blocks[b], values, 32);
+    for (std::size_t i = 0; i < 32; ++i) {
+      sum += values[i] * vec[(b * 32) + i];
+    }
+  }
+  return sum;
+}
+
+float DotProductQ4_0(const void* row_data, std::span<const float> vec,
+                     std::size_t k) {
+  const auto* blocks = static_cast<const block_q4_0*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    const float* v = vec.data() + (b * 32);
+    for (std::size_t i = 0; i < 16; ++i) {
+      const std::uint8_t packed = blocks[b].qs[i];
+      sum += d * static_cast<float>((packed & 0x0F) - 8) * v[i];
+      sum += d * static_cast<float>((packed >> 4U) - 8) * v[i + 16];
+    }
+  }
+  return sum;
 }
 
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,

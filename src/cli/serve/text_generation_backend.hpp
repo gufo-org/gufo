@@ -166,6 +166,15 @@ public:
     kCancelled,
   };
 
+  /// Model-specific markup of generated text: the reasoning delimiters and
+  /// the tool-call syntax the HTTP adapters parse.
+  struct OutputMarkup {
+    enum class ToolSyntax : std::uint8_t { kQwenOrDsml, kGemma4 };
+    std::string_view reasoning_start{"<think>"};
+    std::string_view reasoning_end{"</think>"};
+    ToolSyntax tool_syntax{ToolSyntax::kQwenOrDsml};
+  };
+
   enum class InitialOutputState : std::uint8_t {
     kAuto,
     kReasoning,
@@ -306,6 +315,7 @@ public:
       const ChatRequest&) const {
     return InitialOutputState::kAuto;
   }
+  [[nodiscard]] virtual OutputMarkup output_markup() const { return {}; }
 
   virtual Result complete(
       std::string_view prompt, std::size_t max_tokens,

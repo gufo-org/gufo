@@ -588,9 +588,11 @@ void PrintServeHelp(std::string_view program_name,
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
+    std::string draft_calibration;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
+    std::uint32_t image_tokens = 0;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
     std::size_t prefill_chunk_tokens =
@@ -619,8 +621,13 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("-m", "--model", "PATH",
                      "Path to GGUF model file (required)", "Model", &model);
     parser.AddOption("", "--mmproj", "PATH",
-                     "Qwen BF16 vision sidecar (auto-discovered beside model)",
+                     "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
+                     "(auto-discovered beside model)",
                      "Model", &vision_model_path);
+    parser.AddOption("", "--image-tokens", "N",
+                     "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
+                     "1120 (default: 280)",
+                     "Model", &image_tokens);
     parser.AddOption("", "--served-model-name", "ID",
                      "Model identifier exposed by the OpenAI API", "Model",
                      &served_model_name);
@@ -659,8 +666,14 @@ void PrintServeHelp(std::string_view program_name,
                      &dflash_model_path);
     parser.AddOption(
         "", "--draft-policy", "POLICY",
-        "DFlash2 block length: fixed or adaptive (default: adaptive)",
+        "Draft length: DFlash2 fixed or adaptive (default: adaptive); Gemma 4 "
+        "MTP calibrated, confidence or fixed (default: calibrated)",
         "Speculative", &draft_policy);
+    parser.AddOption(
+        "", "--draft-calibration", "SCOPE",
+        "Gemma 4 calibrated drafting: shared (learned across requests) or "
+        "request (reset per request; exact seeded replay) (default: shared)",
+        "Speculative", &draft_calibration);
     parser.AddOption("", "--dspark-model", "PATH",
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
@@ -670,7 +683,8 @@ void PrintServeHelp(std::string_view program_name,
                      "Speculative", &mtp_model_path);
     parser.AddOption(
         "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
+        "Maximum speculative draft tokens evaluated per step (default: 7; "
+        "Gemma 4: 15)",
         "Speculative", &draft_tokens);
 
     parser.AddOption("", "--min-draft-tokens", "N",
@@ -1125,10 +1139,14 @@ int RunServe(std::span<const char* const> args) {
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
+    std::string draft_calibration;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
+    std::uint32_t image_tokens = 0;
     std::size_t draft_tokens = 7;
+    // Without --draft-tokens each model picks its own default (Gemma 4: 15).
+    bool draft_tokens_given = false;
     std::size_t min_draft_tokens = 1;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
@@ -1154,10 +1172,14 @@ int RunServe(std::span<const char* const> args) {
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
     llm_parser.AddOption("-m", "--model", "PATH",
                          "Path to GGUF model file (required)", "Model", &model);
-    llm_parser.AddOption(
-        "", "--mmproj", "PATH",
-        "Qwen BF16 vision sidecar (auto-discovered beside model)", "Model",
-        &vision_model_path);
+    llm_parser.AddOption("", "--mmproj", "PATH",
+                         "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
+                         "(auto-discovered beside model)",
+                         "Model", &vision_model_path);
+    llm_parser.AddOption("", "--image-tokens", "N",
+                         "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
+                         "1120 (default: 280)",
+                         "Model", &image_tokens);
     llm_parser.AddOption("", "--served-model-name", "ID",
                          "Model identifier exposed by the OpenAI API", "Model",
                          &served_model_name);
@@ -1190,8 +1212,14 @@ int RunServe(std::span<const char* const> args) {
                          &dflash_model_path);
     llm_parser.AddOption(
         "", "--draft-policy", "POLICY",
-        "DFlash2 block length: fixed or adaptive (default: adaptive)",
+        "Draft length: DFlash2 fixed or adaptive (default: adaptive); Gemma 4 "
+        "MTP calibrated, confidence or fixed (default: calibrated)",
         "Speculative", &draft_policy);
+    llm_parser.AddOption(
+        "", "--draft-calibration", "SCOPE",
+        "Gemma 4 calibrated drafting: shared (learned across requests) or "
+        "request (reset per request; exact seeded replay) (default: shared)",
+        "Speculative", &draft_calibration);
     llm_parser.AddOption("", "--dspark-model", "PATH",
                          "Path to DeepSeek V4 Flash DSpark support GGUF file",
                          "Speculative", &dspark_model_path);
@@ -1200,10 +1228,24 @@ int RunServe(std::span<const char* const> args) {
         "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
         "mtp-...-shared-*.gguf sidecar)",
         "Speculative", &mtp_model_path);
-    llm_parser.AddOption(
+    llm_parser.AddCustomOption(
         "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
-        "Speculative", &draft_tokens);
+        "Maximum speculative draft tokens evaluated per step (default: 7; "
+        "Gemma 4: 15)",
+        "Speculative",
+        [&](std::string_view flag, std::string_view value, std::string* error) {
+          std::size_t count = 0;
+          const auto [ptr, ec] =
+              std::from_chars(value.data(), value.data() + value.size(), count);
+          if (ec != std::errc{} || ptr != value.data() + value.size() ||
+              count == 0) {
+            *error = std::string(flag) + " must be a positive integer";
+            return false;
+          }
+          draft_tokens = count;
+          draft_tokens_given = true;
+          return true;
+        });
 
     llm_parser.AddOption("", "--min-draft-tokens", "N",
                          "Adaptive draft floor (default: 1)", "Speculative",
@@ -1312,8 +1354,7 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: sampling and scheduling limits are invalid\n";
       return 2;
     }
-    if (draft_tokens == 0 || min_draft_tokens == 0 ||
-        min_draft_tokens > draft_tokens ||
+    if (min_draft_tokens == 0 || min_draft_tokens > draft_tokens ||
         draft_tokens > std::numeric_limits<std::uint32_t>::max()) {
       std::cerr << "Error: speculative draft limits are invalid\n";
       return 2;
@@ -1343,11 +1384,23 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     try {
-      if (!draft_policy.empty() &&
-          speculative_config.backend != server::TextSpeculativeBackend::kDFlash)
-        throw std::invalid_argument("--draft-policy requires DFlash2");
-      speculative_config.dflash_policy =
-          speculative::ParseDFlashDraftPolicy(draft_policy);
+      const bool mtp =
+          speculative_config.backend == server::TextSpeculativeBackend::kMtp;
+      if ((!draft_policy.empty() && !mtp &&
+           speculative_config.backend !=
+               server::TextSpeculativeBackend::kDFlash) ||
+          (!draft_calibration.empty() && !mtp))
+        throw std::invalid_argument(
+            "--draft-policy requires DFlash2 or MTP; --draft-calibration "
+            "requires MTP");
+      if (mtp) {
+        // The MTP model validates its own policy names at load.
+        speculative_config.mtp_draft_policy = draft_policy;
+        speculative_config.mtp_draft_calibration = draft_calibration;
+      } else {
+        speculative_config.dflash_policy =
+            speculative::ParseDFlashDraftPolicy(draft_policy);
+      }
     } catch (const std::invalid_argument& exception) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;
@@ -1366,6 +1419,7 @@ int RunServe(std::span<const char* const> args) {
             : dflash_model_path;
     speculative_config.max_draft_tokens =
         static_cast<std::uint32_t>(draft_tokens);
+    speculative_config.max_draft_tokens_given = draft_tokens_given;
     speculative_config.min_draft_tokens =
         static_cast<std::uint32_t>(min_draft_tokens);
     if (model.empty()) {
@@ -1401,7 +1455,7 @@ int RunServe(std::span<const char* const> args) {
                            .staging_capacity_bytes = cache_disk_staging_bytes,
                            .model_artifact_fingerprint = {},
                        },
-                       vision_model_path,
+                       vision_model_path, image_tokens,
                        server::TextRunnerRamCacheOptions{
                            .capacity_bytes = cache_ram_bytes})) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
@@ -1448,9 +1502,12 @@ int RunServe(std::span<const char* const> args) {
             : "off";
     load_log.Complete(
         "model=" + backend->model_id() +
-        " sessions=" + std::to_string(session_count) + " context_tokens=" +
-        std::to_string(backend->max_context()) + " speculative=" + speculation +
-        " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
+        " sessions=" + std::to_string(session_count) +
+        " context_tokens=" + std::to_string(backend->max_context()) +
+        " speculative=" + speculation + " draft_limit=" +
+        (speculative_config.max_draft_tokens_given
+             ? std::to_string(speculative_config.max_draft_tokens)
+             : std::string("model")) +
         " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled"));
   }
 

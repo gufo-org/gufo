@@ -101,8 +101,10 @@ def validate_metrics_report(directory):
     """Account for cancelled work too, after terminal server logs have drained."""
     checks = json.loads((directory / "metrics.json").read_text())["checks"]
     requests = json.loads((directory / "metrics.requests.json").read_text())["requests"]
+    logs = json.loads((directory / "report.json").read_text()).get("server_logs", {}) \
+        if (directory / "report.json").is_file() else {}
     completed = {}
-    for line in (directory / "server.log").read_text().splitlines():
+    for line in (directory / logs.get("metrics", "server.log")).read_text().splitlines():
         if "event=completed " in line:
             fields = dict(re.findall(r"(?:^|\s)(\w+)=([^\s]+)", line))
             if "request" in fields:

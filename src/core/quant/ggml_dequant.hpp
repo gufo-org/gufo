@@ -60,6 +60,23 @@ struct block_q8_0 {
   std::int8_t qs[32];
 };
 
+// Q4_0: fp16 scale + 32 4-bit values (QK=32), value = d * (q - 8). Low
+// nibbles give the first 16 elements, high nibbles the second 16.
+struct block_q4_0 {
+  std::uint16_t d;
+  std::uint8_t qs[16];
+};
+
+// Q5_1: fp16 scale and minimum, 32 fifth bits, 32 low nibbles (QK=32),
+// value = d * q + m. Low nibbles give the first 16 elements (fifth bits
+// 0-15), high nibbles the second 16 (bits 16-31).
+struct block_q5_1 {
+  std::uint16_t d;
+  std::uint16_t m;
+  std::uint8_t qh[4];
+  std::uint8_t qs[16];
+};
+
 // IQ4_NL: fp16 scale + 32 non-linear 4-bit codebook indices (QK=32). The
 // codebook is kValuesIq4Nl; the index nibble order matches Q4_0 (low nibbles
 // give the first 16 elements, high nibbles the second 16).
@@ -96,6 +113,8 @@ static_assert(sizeof(block_q6_K) == 210, "block_q6_K must be 210 bytes");
 static_assert(sizeof(block_q3_K) == 110, "block_q3_K must be 110 bytes");
 static_assert(sizeof(block_q8_K) == 292, "block_q8_K must be 292 bytes");
 static_assert(sizeof(block_q8_0) == 34, "block_q8_0 must be 34 bytes");
+static_assert(sizeof(block_q4_0) == 18, "block_q4_0 must be 18 bytes");
+static_assert(sizeof(block_q5_1) == 24, "block_q5_1 must be 24 bytes");
 static_assert(sizeof(block_iq4_nl) == 18, "block_iq4_nl must be 18 bytes");
 static_assert(sizeof(block_iq4_xs) == 136, "block_iq4_xs must be 136 bytes");
 static_assert(sizeof(block_iq3_s) == 110, "block_iq3_s must be 110 bytes");
@@ -175,6 +194,18 @@ float DotProductQ8_K(const void* row_data, std::span<const float> vec,
 
 // Dequantize row of Q8_0 to float
 void DequantizeQ8_0(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of Q4_0 to float
+void DequantizeQ4_0(const void* src, float* dst, std::size_t k);
+// Compute dot product of Q4_0 quantized row with FP32 vector
+float DotProductQ4_0(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+
+// Dequantize row of Q5_1 to float
+void DequantizeQ5_1(const void* src, float* dst, std::size_t k);
+// Compute dot product of Q5_1 quantized row with FP32 vector
+float DotProductQ5_1(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
 
 // Dequantize row of IQ4_NL to float
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k);

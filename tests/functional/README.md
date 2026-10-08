@@ -48,7 +48,7 @@ only affected suites. Reuse matching baseline evidence; do not repeat the whole
 correctness matrix on main. A baseline must match the revision, harness,
 toolchain, weights, settings and preceding cache history.
 
-Use `deepseek4` for DeepSeek. Pass the model's normal speculative options for
+Use `deepseek4` for DeepSeek and `gemma4` for Gemma 4. Pass the model's normal speculative options for
 DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
 `--mmproj` enables image cases. Keep informational server logging enabled.
 
@@ -62,8 +62,11 @@ once per row/mode below; no full benchmark sweep is needed.
 | Qwen27B Q8_K_XL | `off`, `dflash2` | `--dflash-model` |
 | Flash-Next Q4_K_XL | `off`, `mtp` | `--mtp-model` |
 | DeepSeek Flash 0731 | `off`, `dspark` | `--dspark-model` |
+| Gemma 4 31B UD-Q4_K_XL | `off`, `mtp` | `--mtp-model` |
+| Gemma 4 26B-A4B UD-Q4_K_XL | `off`, `mtp` | `--mtp-model` |
 
 Keep the sidecar path in the `off` command to test the explicit override.
+Gemma 4 `mtp` needs `--draft-calibration request` for seeded replay checks.
 `report.json` checks the loaded mode and records observed draft counts; `off`
 must perform zero drafts. `state-edges` requires actual draft execution when
 enabled, so a loaded-but-unused sidecar cannot qualify that mode. Use the normal
@@ -211,7 +214,12 @@ requests sharing a long prefix must wait for one prefill and then prefill only
 their own tail; groups sharing little or nothing must not wait. With
 `--sessions 1` no request may wait.
 
-Unchanged retries must reproduce the complete output with zero prefill. After a
+Unchanged retries must reproduce the complete output with zero prefill. Once
+the RAM cache's 128 snapshot records are full, the cache deliberately keeps
+other conversations' last checkpoints instead of new exact-retry copies. The
+runner therefore restarts the server before a suite after its cache logged that
+pressure, and before `sampling-defaults`, `progress`, `cache-edits` and
+`cache-growth`. `report.json` maps each suite to its server log in `server_logs`. After a
 restart, disk restores may re-prefill less than one 2048-token disk step;
 greedy and zero-prefill restores must still reproduce their output. Edited
 histories must retain a useful earlier prefix and match their cold answer;

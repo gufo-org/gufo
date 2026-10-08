@@ -1156,6 +1156,7 @@ def run_corpus_benchmark(
     prefill_first: bool = False,
     pin_slots: bool = False,
     preparation_tokens: int = 1,
+    replay_tokens: int = 4,
 ) -> dict[str, Any]:
     if not model:
         raise ValueError("model must not be empty")
@@ -1255,8 +1256,10 @@ def run_corpus_benchmark(
                     for sample in rounds[-1].samples:
                         # llama.cpp's recurrent checkpoints end four tokens
                         # before the prompt frontier (server-context.cpp,
-                        # checkpoint_offsets). Reject longer prompt replays.
-                        if sample.cached_prompt_tokens < sample.prompt_tokens - 4 or sample.prefill_tokens > 4:
+                        # checkpoint_offsets); a model's stable chat prefix may
+                        # end earlier (replay_tokens). Reject longer replays.
+                        if (sample.cached_prompt_tokens < sample.prompt_tokens - replay_tokens
+                                or sample.prefill_tokens > replay_tokens):
                             raise RuntimeError(
                                 f"C={concurrency}: prepared session was not reused "
                                 f"(cached={sample.cached_prompt_tokens}, "
@@ -1331,6 +1334,7 @@ def run_corpus_benchmark(
             "endpointProfile": endpoint_profile,
             "cachePrompt": cache_prompt,
             "prefillFirst": prefill_first,
+            "replayTokens": replay_tokens,
             "pinnedReferenceSlots": pin_slots,
         },
         "notes": list(notes or []),

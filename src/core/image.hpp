@@ -24,6 +24,10 @@ struct Image {
 
 /// PNG, JPEG and WebP. Decoding checks dimensions before allocating pixels.
 [[nodiscard]] Image DecodeImage(std::span<const std::uint8_t> bytes);
+/// Antialiased bicubic RGB8 resize, bit-exact with PyTorch/torchvision uint8
+/// `resize(..., BICUBIC, antialias=True)` (separable, horizontal first).
+[[nodiscard]] Image ResizeBicubic(const Image& image, std::uint32_t width,
+                                  std::uint32_t height);
 [[nodiscard]] std::vector<std::uint8_t> ReadImageFile(
     const std::filesystem::path& path);
 /// Shared across all messages of one HTTP request.

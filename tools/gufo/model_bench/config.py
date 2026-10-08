@@ -11,6 +11,12 @@ SCHEMA = "gufo-model-bench/1"
 TARGETS = ("gufo", "reference")
 
 
+def table_id(base: str, variant: str | None) -> str:
+    """Per-variant tables carry the variant id; the `default` variant's keep
+    the bare base id, so a card can add a variant beside its original one."""
+    return base if variant in (None, "default") else f"{base}-{variant}"
+
+
 @dataclass(frozen=True)
 class TableSpec:
     id: str
@@ -36,8 +42,8 @@ class TableSpec:
             return []
         common = {k: v for k, v in self.spec.items() if k != "workloads"}
         return [
-            TableSpec(f"{base}-{self.variant}" if self.variant else base, base,
-                      self.variant, {**common, **workload})
+            TableSpec(table_id(base, self.variant), base, self.variant,
+                      {**common, **workload})
             for base, workload in self.spec.get("workloads", {}).items()
         ]
 
@@ -90,6 +96,22 @@ class BenchConfig:
             return list(reference["args"])
         return None
 
+    @property
+    def speculative_self_reference(self) -> bool:
+        """Multi-user speculative completions are checked against the same
+        mode's C1 instead of the AR artifact: set for engines whose greedy
+        speculation equals single-token decode with the drafter loaded but
+        not an AR-only server (Gemma 4, see its QUALITY.md)."""
+        return self.data.get("speculative", {}).get("exactness_reference") == "self"
+
+    @property
+    def ar_exactness_reported(self) -> bool:
+        """Multi-user AR completions that differ from the isolated C1 are
+        recorded instead of failing the table: set for engines whose batched
+        AR rounds differently from one session's faster GEMV, so a greedy
+        near-tie can depend on concurrency (Gemma 4, see its QUALITY.md)."""
+        return self.data.get("gufo", {}).get("ar_exactness") == "reported"
+
     def substitute(self, args: list[str], variant: str | None) -> list[str]:
         """Replace `{role}` placeholders with the variant's file paths."""
         out = []
@@ -100,11 +122,18 @@ class BenchConfig:
         return out
 
     def tables(self) -> list[TableSpec]:
+        """A variant with a `tables` map gets only the per-variant tables it
+        names, each spec updated with that entry (a reduced depth or
+        concurrency grid, for example)."""
         result: list[TableSpec] = []
         for base, spec in self.data["tables"].items():
             if spec.get("per_variant"):
-                for variant in self.variants:
-                    result.append(TableSpec(f"{base}-{variant}", base, variant, spec))
+                for variant, entry in self.variants.items():
+                    own = entry.get("tables")
+                    if own is not None and base not in own:
+                        continue
+                    merged = {**spec, **(own or {}).get(base, {})}
+                    result.append(TableSpec(table_id(base, variant), base, variant, merged))
             else:
                 result.append(TableSpec(base, base, None, spec))
         return result

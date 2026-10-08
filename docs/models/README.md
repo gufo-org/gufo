@@ -7,6 +7,9 @@ are downloaded separately and are not part of the runtime package.
 | Model | Weights / supported inputs | Guide |
 | --- | --- | --- |
 | DeepSeek V4 Flash | Flash 0731 mixed IQ2/Q2/Q8 GGUF; text | [Usage and modes](deepseek-v4-flash/README.md) |
+| Gemma 4 26B-A4B | UD-Q4_K_XL / UD-Q6_K_XL GGUF (mixture of experts) with MTP drafter; text/images | [Usage](gemma-4-26b-a4b/README.md) |
+| Gemma 4 31B | UD-Q4_K_XL GGUF with MTP drafter; text/images | [Usage and modes](gemma-4-31b/README.md) |
+| Gemma 4 31B QAT | Q4_0 QAT GGUF with MTP drafter; text/images | [Usage](gemma-4-31b-qat/README.md) |
 | Qwen3.8 27B | Q4/Q8 GGUF; text/images | [Usage and modes](qwen3.8-27b/README.md) |
 | Qwen3.8 Flash-Next | Sharded Q4 GGUF; text/images | [Usage and modes](qwen3.8-flash-next/README.md) |
 | Qwen3-ASR 1.7B | BF16 safetensors; audio to text | [Usage](qwen3-asr/README.md) |

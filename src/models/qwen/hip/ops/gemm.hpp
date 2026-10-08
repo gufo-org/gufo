@@ -158,6 +158,7 @@ namespace detail {
     case core::GgmlType::kQ5_K:
     case core::GgmlType::kQ6_K:
     case core::GgmlType::kQ3_K:
+    case core::GgmlType::kQ4_0:
     case core::GgmlType::kIQ4_NL:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ3_S:
@@ -199,6 +200,27 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
                                 const float* fp32_x, float* y,
                                 std::size_t batch, std::size_t m, std::size_t k,
                                 hipStream_t stream = nullptr);
+
+/// Q8_0 at 9..16 rows in one weight pass with the exact small-batch
+/// arithmetic (every row equals LaunchGEMV bit for bit), at any shape;
+/// LaunchBatchedQuantGEMMFp32 takes this route only for measured Qwen
+/// projections and otherwise reads the weights in eight-row passes. Returns
+/// false without launching for other widths.
+[[nodiscard]] bool LaunchQ8_0SmallBatchWide(const void* w, const float* fp32_x,
+                                            float* y, std::size_t batch,
+                                            std::size_t m, std::size_t k,
+                                            hipStream_t stream = nullptr);
+
+/// The K-quant (Q4_K/Q5_K/Q6_K) and Q4_0 small-batch kernel with 16 waves,
+/// three rows per wave and two activation tiles per stage for 1..8 rows (one
+/// past eight, up to 16). Like every exact small-batch configuration each row
+/// equals LaunchGEMV bit for bit; this one suits long K and shapes outside the
+/// Qwen-tuned dispatch. Returns false without launching for other types, widths
+/// or index ranges.
+[[nodiscard]] bool LaunchKQuantSmallBatchDoubleStage(
+    core::GgmlType type, const void* w, const float* fp32_x, float* y,
+    std::size_t batch, std::size_t m, std::size_t k,
+    hipStream_t stream = nullptr);
 
 /// Quantizes BF16 activation tensor X[B, K] to block_q8_1 activation blocks
 void LaunchQuantizeActivationQ8_1(const void* bf16_x, void* q8_1_out,

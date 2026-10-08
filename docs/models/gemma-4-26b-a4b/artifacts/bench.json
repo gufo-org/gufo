@@ -1,0 +1,306 @@
+{
+  "schema": "gufo-model-bench/1",
+  "category": "llm",
+  "model": {
+    "id": "Gemma-4-26B-A4B-It",
+    "docs": "gemma-4-26b-a4b",
+    "label": "Gemma 4 26B-A4B"
+  },
+  "files": {
+    "gguf": "target GGUF (gemma-4-26B-A4B-it-UD-Q4_K_XL / UD-Q6_K_XL / UD-Q8_K_XL)",
+    "mtp": "mtp-gemma-4-26B-A4B-it.gguf (Unsloth gemma4-assistant drafter, Q8_0)"
+  },
+  "variants": {
+    "q4": {
+      "label": "UD-Q4_K_XL",
+      "requires": [
+        "gguf"
+      ]
+    },
+    "q6": {
+      "label": "UD-Q6_K_XL",
+      "requires": [
+        "gguf"
+      ]
+    },
+    "q8": {
+      "label": "UD-Q8_K_XL",
+      "requires": [
+        "gguf"
+      ],
+      "tables": {
+        "single-ar": {
+          "depths": [
+            0,
+            4096,
+            16384,
+            32768
+          ]
+        },
+        "single-mtp": {
+          "depths": [
+            0,
+            4096,
+            16384,
+            32768
+          ]
+        },
+        "single-mtp-sampled": {},
+        "multi-ar": {
+          "concurrency": [
+            1,
+            2
+          ]
+        },
+        "multi-mtp": {
+          "concurrency": [
+            1,
+            2
+          ]
+        },
+        "memory": {}
+      }
+    }
+  },
+  "sampling": {
+    "temperature": 0,
+    "seed": 1
+  },
+  "speculative": {
+    "mode": "mtp",
+    "exactness_reference": "self",
+    "label": "MTP",
+    "gufo_args": [
+      "--speculative",
+      "mtp",
+      "--mtp-model",
+      "{mtp}"
+    ],
+    "reference": {
+      "args": [
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-model",
+        "{mtp}",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-draft-n-max",
+        "4"
+      ]
+    }
+  },
+  "tables": {
+    "single-ar": {
+      "title": "Single user, autoregressive",
+      "per_variant": true,
+      "prompt_tokens": 2048,
+      "output_tokens": 128,
+      "depths": [
+        0,
+        4096,
+        8192,
+        12288,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "context": 133760,
+      "depth_tolerance": 0.005,
+      "prefix": {
+        "generator": "synthetic-paragraphs",
+        "seed": 1
+      },
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher"
+    },
+    "single-mtp": {
+      "title": "Single user, MTP",
+      "per_variant": true,
+      "speculative": true,
+      "prompt_tokens": 2048,
+      "output_tokens": 128,
+      "depths": [
+        0,
+        4096,
+        8192,
+        12288,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "context": 133760,
+      "depth_tolerance": 0.005,
+      "prefix": {
+        "generator": "synthetic-paragraphs",
+        "seed": 1
+      },
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "workloads": {
+        "single-mtp": {
+          "label": "mixed",
+          "workload": "prose"
+        },
+        "single-mtp-repetition": {
+          "label": "repetitive",
+          "workload": "repetition"
+        }
+      }
+    },
+    "single-mtp-sampled": {
+      "title": "Single user, sampled MTP",
+      "per_variant": true,
+      "speculative": true,
+      "prompt_tokens": 2048,
+      "output_tokens": 128,
+      "depths": [
+        0
+      ],
+      "context": 133760,
+      "depth_tolerance": 0.005,
+      "prefix": {
+        "generator": "synthetic-paragraphs",
+        "seed": 1
+      },
+      "repetitions": 3,
+      "metric": "tok/s",
+      "better": "higher",
+      "workload": "story",
+      "sampling": {
+        "temperature": 1.0,
+        "top_k": 64,
+        "top_p": 0.95,
+        "repeat_penalty": 1.05,
+        "seed": 1
+      }
+    },
+    "multi-ar": {
+      "title": "Multiple users, autoregressive",
+      "per_variant": true,
+      "modes": [
+        "ar"
+      ],
+      "corpus_layout": "homogeneous",
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "context": 4096,
+      "output_tokens": 128,
+      "cache_prompt": true,
+      "warmup": 1,
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "prompt_tokens": 2048,
+      "workload": "prose",
+      "prefill_first": true,
+      "replay_tokens": 8
+    },
+    "multi-mtp": {
+      "title": "Multiple users, MTP",
+      "per_variant": true,
+      "modes": [
+        "mtp"
+      ],
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "context": 4096,
+      "output_tokens": 128,
+      "cache_prompt": true,
+      "warmup": 1,
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "workloads": {
+        "multi-mixed": {
+          "label": "mixed",
+          "corpus_layout": "homogeneous",
+          "workload": "prose"
+        },
+        "multi-repetition": {
+          "label": "repetitive",
+          "corpus_layout": "homogeneous",
+          "workload": "repetition"
+        }
+      },
+      "prompt_tokens": 2048,
+      "prefill_first": true,
+      "replay_tokens": 8
+    },
+    "loading": {
+      "title": "Loading time",
+      "per_variant": false,
+      "context": 262144,
+      "sessions": 1,
+      "repetitions": 1,
+      "metric": "seconds",
+      "better": "lower",
+      "rows": "variants"
+    },
+    "memory": {
+      "title": "Memory occupation",
+      "per_variant": true,
+      "context": 133121,
+      "workloads": [
+        {
+          "id": "pp2048 + tg128",
+          "depth": 0,
+          "prompt_tokens": 2048,
+          "output_tokens": 128
+        },
+        {
+          "id": "16K prefix, pp4096 + tg128",
+          "depth": 16384,
+          "prompt_tokens": 4096,
+          "output_tokens": 128
+        }
+      ],
+      "metric": "GiB",
+      "better": "lower",
+      "mode": "ar"
+    }
+  },
+  "gufo": {
+    "serve": [],
+    "llm": [
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8"
+    ],
+    "readiness": "/ready",
+    "ar_exactness": "reported"
+  },
+  "reference": {
+    "name": "llama.cpp",
+    "server": "llama-server",
+    "args": [
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0"
+    ],
+    "endpoint_profile": "openai",
+    "readiness": "/health"
+  }
+}

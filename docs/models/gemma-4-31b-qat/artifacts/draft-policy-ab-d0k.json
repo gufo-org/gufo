@@ -1,0 +1,394 @@
+{
+ "meta": {
+  "tool": "tools/gemma4/draft_policy_bench.py",
+  "model": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+  "mtp": "mtp-gemma-4-31B-it.gguf",
+  "depth": 0,
+  "gufo": "build/gpu-test/gufo (gpu-test preset, RelWithDebInfo)",
+  "revision": "84c76b0 (measured on its working tree before formatting)",
+  "date": "2026-09-28",
+  "note": "ABBA order: confidence, calibrated, calibrated2, confidence2; one server per run"
+ },
+ "runs": {
+  "confidence": {
+   "server_args": [
+    "--draft-policy",
+    "confidence"
+   ],
+   "workloads": {
+    "repetitive": {
+     "tok_s": 67.3962219942042,
+     "tokens": 256,
+     "drafts_per_cycle": 6.5588235294117645,
+     "accepted_per_cycle": 6.529411764705882,
+     "hashes": [
+      "6b0aeaa2"
+     ]
+    },
+    "code-write": {
+     "tok_s": 42.35690350595519,
+     "tokens": 384,
+     "drafts_per_cycle": 5.9743589743589745,
+     "accepted_per_cycle": 3.923076923076923,
+     "hashes": [
+      "1606f592"
+     ]
+    },
+    "code-edit": {
+     "tok_s": 63.10886163211348,
+     "tokens": 384,
+     "drafts_per_cycle": 6.769230769230769,
+     "accepted_per_cycle": 6.384615384615385,
+     "hashes": [
+      "7ebdb5d2"
+     ]
+    },
+    "story": {
+     "tok_s": 22.331440416821454,
+     "tokens": 1536,
+     "drafts_per_cycle": 2.590563165905632,
+     "accepted_per_cycle": 1.3378995433789955,
+     "hashes": [
+      "eed8f22f",
+      "d80f5fb7",
+      "acaba6bb",
+      "aab7576b",
+      "5419e6db",
+      "48bb73e5",
+      "9a245448",
+      "38e87acf",
+      "b09571ca",
+      "5d161ffd",
+      "6e2a3265",
+      "0e8f3cfd"
+     ]
+    },
+    "prose": {
+     "tok_s": 25.27141667392601,
+     "tokens": 3072,
+     "drafts_per_cycle": 3.7173333333333334,
+     "accepted_per_cycle": 1.7306666666666666,
+     "hashes": [
+      "4d82ad0f",
+      "cb8fdc12",
+      "eae6bed6",
+      "b9e100ac",
+      "acd090ae",
+      "7058b4d5",
+      "af51d56f",
+      "b339450c",
+      "90b4a462",
+      "5c27d1f1",
+      "32843b36",
+      "24566d53"
+     ]
+    },
+    "code-sampled": {
+     "tok_s": 30.801034542394294,
+     "tokens": 2304,
+     "drafts_per_cycle": 3.7504,
+     "accepted_per_cycle": 2.6864,
+     "hashes": [
+      "096d7931",
+      "b2b586ad",
+      "4e92ee80",
+      "eb994d6a",
+      "f7d7dbc1",
+      "8e013bf0",
+      "560a2a59",
+      "0a6e0717",
+      "e799b0b3",
+      "40dd7e89",
+      "70656e3a",
+      "9862b9c1"
+     ]
+    }
+   }
+  },
+  "calibrated": {
+   "server_args": [
+    "--draft-policy",
+    "calibrated"
+   ],
+   "workloads": {
+    "repetitive": {
+     "tok_s": 66.49164407119133,
+     "tokens": 256,
+     "drafts_per_cycle": 6.617647058823529,
+     "accepted_per_cycle": 6.529411764705882,
+     "hashes": [
+      "6b0aeaa2"
+     ]
+    },
+    "code-write": {
+     "tok_s": 43.02966993937372,
+     "tokens": 384,
+     "drafts_per_cycle": 5.961038961038961,
+     "accepted_per_cycle": 3.987012987012987,
+     "hashes": [
+      "1606f592"
+     ]
+    },
+    "code-edit": {
+     "tok_s": 62.51183133065223,
+     "tokens": 384,
+     "drafts_per_cycle": 6.75,
+     "accepted_per_cycle": 6.384615384615385,
+     "hashes": [
+      "7ebdb5d2"
+     ]
+    },
+    "story": {
+     "tok_s": 22.480340269560802,
+     "tokens": 1536,
+     "drafts_per_cycle": 3.4327868852459016,
+     "accepted_per_cycle": 1.518032786885246,
+     "hashes": [
+      "518851ac",
+      "7843319c",
+      "cd0a495d",
+      "67f255cc",
+      "b73f4a35",
+      "9347799d",
+      "e0a43fcc",
+      "9aaf8f0f",
+      "88860e39",
+      "96bcb27f",
+      "d51e57e9",
+      "97e89c34"
+     ]
+    },
+    "prose": {
+     "tok_s": 25.975774945188117,
+     "tokens": 3072,
+     "drafts_per_cycle": 3.817194570135747,
+     "accepted_per_cycle": 1.7800904977375565,
+     "hashes": [
+      "4d82ad0f",
+      "cb8fdc12",
+      "eae6bed6",
+      "b9e100ac",
+      "acd090ae",
+      "7058b4d5",
+      "af51d56f",
+      "b339450c",
+      "90b4a462",
+      "5c27d1f1",
+      "32843b36",
+      "24566d53"
+     ]
+    },
+    "code-sampled": {
+     "tok_s": 32.345383960967894,
+     "tokens": 2304,
+     "drafts_per_cycle": 5.258426966292135,
+     "accepted_per_cycle": 3.3146067415730336,
+     "hashes": [
+      "98ee5ac4",
+      "c09b2db0",
+      "5e000024",
+      "ba626305",
+      "41576ff5",
+      "56c942a4",
+      "a9221391",
+      "4a1fc684",
+      "4a652bf1",
+      "ad00dbf1",
+      "26af99f3",
+      "aed66f59"
+     ]
+    }
+   }
+  },
+  "calibrated2": {
+   "server_args": [
+    "--draft-policy",
+    "calibrated"
+   ],
+   "workloads": {
+    "repetitive": {
+     "tok_s": 62.70757030952639,
+     "tokens": 256,
+     "drafts_per_cycle": 6.617647058823529,
+     "accepted_per_cycle": 6.529411764705882,
+     "hashes": [
+      "6b0aeaa2"
+     ]
+    },
+    "code-write": {
+     "tok_s": 42.954429534405776,
+     "tokens": 384,
+     "drafts_per_cycle": 5.961038961038961,
+     "accepted_per_cycle": 3.987012987012987,
+     "hashes": [
+      "1606f592"
+     ]
+    },
+    "code-edit": {
+     "tok_s": 62.638171865218034,
+     "tokens": 384,
+     "drafts_per_cycle": 6.75,
+     "accepted_per_cycle": 6.384615384615385,
+     "hashes": [
+      "7ebdb5d2"
+     ]
+    },
+    "story": {
+     "tok_s": 22.480960098925877,
+     "tokens": 1536,
+     "drafts_per_cycle": 3.4327868852459016,
+     "accepted_per_cycle": 1.518032786885246,
+     "hashes": [
+      "518851ac",
+      "7843319c",
+      "cd0a495d",
+      "67f255cc",
+      "b73f4a35",
+      "9347799d",
+      "e0a43fcc",
+      "9aaf8f0f",
+      "88860e39",
+      "96bcb27f",
+      "d51e57e9",
+      "97e89c34"
+     ]
+    },
+    "prose": {
+     "tok_s": 25.98904076481523,
+     "tokens": 3072,
+     "drafts_per_cycle": 3.817194570135747,
+     "accepted_per_cycle": 1.7800904977375565,
+     "hashes": [
+      "4d82ad0f",
+      "cb8fdc12",
+      "eae6bed6",
+      "b9e100ac",
+      "acd090ae",
+      "7058b4d5",
+      "af51d56f",
+      "b339450c",
+      "90b4a462",
+      "5c27d1f1",
+      "32843b36",
+      "24566d53"
+     ]
+    },
+    "code-sampled": {
+     "tok_s": 32.36483761757767,
+     "tokens": 2304,
+     "drafts_per_cycle": 5.258426966292135,
+     "accepted_per_cycle": 3.3146067415730336,
+     "hashes": [
+      "98ee5ac4",
+      "c09b2db0",
+      "5e000024",
+      "ba626305",
+      "41576ff5",
+      "56c942a4",
+      "a9221391",
+      "4a1fc684",
+      "4a652bf1",
+      "ad00dbf1",
+      "26af99f3",
+      "aed66f59"
+     ]
+    }
+   }
+  },
+  "confidence2": {
+   "server_args": [
+    "--draft-policy",
+    "confidence"
+   ],
+   "workloads": {
+    "repetitive": {
+     "tok_s": 66.24259417177214,
+     "tokens": 256,
+     "drafts_per_cycle": 6.5588235294117645,
+     "accepted_per_cycle": 6.529411764705882,
+     "hashes": [
+      "6b0aeaa2"
+     ]
+    },
+    "code-write": {
+     "tok_s": 41.978373774237134,
+     "tokens": 384,
+     "drafts_per_cycle": 5.9743589743589745,
+     "accepted_per_cycle": 3.923076923076923,
+     "hashes": [
+      "1606f592"
+     ]
+    },
+    "code-edit": {
+     "tok_s": 62.46230323751686,
+     "tokens": 384,
+     "drafts_per_cycle": 6.769230769230769,
+     "accepted_per_cycle": 6.384615384615385,
+     "hashes": [
+      "7ebdb5d2"
+     ]
+    },
+    "story": {
+     "tok_s": 21.88928903369043,
+     "tokens": 1536,
+     "drafts_per_cycle": 2.590563165905632,
+     "accepted_per_cycle": 1.3378995433789955,
+     "hashes": [
+      "eed8f22f",
+      "d80f5fb7",
+      "acaba6bb",
+      "aab7576b",
+      "5419e6db",
+      "48bb73e5",
+      "9a245448",
+      "38e87acf",
+      "b09571ca",
+      "5d161ffd",
+      "6e2a3265",
+      "0e8f3cfd"
+     ]
+    },
+    "prose": {
+     "tok_s": 25.249169253433898,
+     "tokens": 3072,
+     "drafts_per_cycle": 3.7173333333333334,
+     "accepted_per_cycle": 1.7306666666666666,
+     "hashes": [
+      "4d82ad0f",
+      "cb8fdc12",
+      "eae6bed6",
+      "b9e100ac",
+      "acd090ae",
+      "7058b4d5",
+      "af51d56f",
+      "b339450c",
+      "90b4a462",
+      "5c27d1f1",
+      "32843b36",
+      "24566d53"
+     ]
+    },
+    "code-sampled": {
+     "tok_s": 30.82922399735937,
+     "tokens": 2304,
+     "drafts_per_cycle": 3.7504,
+     "accepted_per_cycle": 2.6864,
+     "hashes": [
+      "096d7931",
+      "b2b586ad",
+      "4e92ee80",
+      "eb994d6a",
+      "f7d7dbc1",
+      "8e013bf0",
+      "560a2a59",
+      "0a6e0717",
+      "e799b0b3",
+      "40dd7e89",
+      "70656e3a",
+      "9862b9c1"
+     ]
+    }
+   }
+  }
+ }
+}

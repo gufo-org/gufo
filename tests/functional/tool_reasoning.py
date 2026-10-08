@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from gufo.control_tokens import kEndOfText, kImEnd, kImStart  # noqa: E402
 
 from metrics import validate_tool_events
+from templates import DROPS_EARLIER_REASONING
 
 
 OLD_TEXT = '    """Fixture notes."""}}]}}</tool_call>\n\n<tool_call>(\'tool\', \'{\''
@@ -58,7 +59,7 @@ def response_result(client, request, streaming):
                 finish="tool_calls" if calls else "stop", usage=response.usage.to_dict())
 
 
-def check_reasoning_separator(client, model, checks, chat_result):
+def check_reasoning_separator(client, model, checks, chat_result, sampling_preset="qwen38"):
     """Reasoning framing is not visible text, with or without constraints (#439)."""
     function = {"name": "unused", "description": "Not needed for arithmetic.",
                 "parameters": {"type": "object", "properties": {},
@@ -128,8 +129,12 @@ def check_reasoning_separator(client, model, checks, chat_result):
                 next_ = save("reasoning_separator_continuation",
                             chat_result(client, followup, True))
                 assert next_["text"] == "10" and not next_["tools"], next_
+                # A template that renders only later reasoning reuses the
+                # previous prompt, not the turn generated after it.
+                reused = result["usage"]["prompt_tokens" if sampling_preset in
+                                         DROPS_EARLIER_REASONING else "total_tokens"]
                 assert next_["usage"]["prompt_tokens_details"]["cached_tokens"] == (
-                    result["usage"]["total_tokens"]), (result, next_)
+                    reused), (result, next_)
                 # Thinking off still preserves paragraph breaks inside content.
                 plain = {**request, "reasoning_effort": "none", "messages": [
                     {"role": "user", "content":
@@ -368,7 +373,14 @@ def check_unfinished_lookalike(client, model, checks, chat_result):
             "shape with a unit case, do not read this as a product failure", result)
 
 
-def check_tail_lookalike_content(client, model, checks, chat_result):
+# Gemma 4's low-effort reasoning on these prompts runs 108-1286 tokens and
+# varies with tiny prompt and rounding changes (llama.cpp b11069: 119-488 for
+# the same requests), so 512 can end it before any answer. The checks are the
+# same with room to finish.
+TAIL_LOOKALIKE_BUDGET = {"gemma4": 2048}
+
+
+def check_tail_lookalike_content(client, model, checks, chat_result, preset=None):
     """Literal lookalikes survive at the tail of the response.
 
     The parser admits a pipe-wrapped spelling as framing only when the loaded
@@ -390,7 +402,8 @@ def check_tail_lookalike_content(client, model, checks, chat_result):
                            messages=[{"role": "system", "content": TAIL_LOOKALIKE_SYSTEM},
                                      {"role": "user", "content": prompt}],
                            tools=tools, temperature=0, seed=41,
-                           reasoning_effort="low", max_completion_tokens=512,
+                           reasoning_effort="low",
+                           max_completion_tokens=TAIL_LOOKALIKE_BUDGET.get(preset, 512),
                            extra_body={"cache_prompt": False})
             result = chat_result(client, request, streaming)
             checks[label] = result
@@ -436,12 +449,19 @@ def tool_history(request, result, output):
         {"role": "tool", "tool_call_id": call["id"], "content": output}]
 
 
-def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=False):
+# Told by the system prompt to call tools with the client's envelope, Gemma 4
+# writes that envelope as text instead of a native call, so these cases have no
+# call to check; llama.cpp b11069 does the same. Its other shapes still run.
+ENVELOPE_CALLERS = {"gemma4"}
+
+
+def check_envelope_closer_framing(client, model, checks, chat_result, preset=None):
     """A closing tag of the client's envelope never reaches visible text.
 
     DeepSeek follows llama.cpp instead: only its native block is a call, and
     client envelope syntax it writes in place of one stays visible content.
     """
+    deepseek = preset == "deepseek4"
     commands = {"closer_before_call": "pwd", "framing_between_calls": "pwd",
                 "closer_in_arguments": "printf '%s' '</invoke>'",
                 "vocab_token_in_arguments": f"printf '%s' 'EOS = \"{kImEnd}\"'",
@@ -450,6 +470,11 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
         # A shape may override the documented call format: the model can only
         # name the markup it was handed, so testing a family means handing it.
         system = SHAPE_SYSTEM.get(name, ENVELOPE_SYSTEM)
+        if name in commands and system == ENVELOPE_SYSTEM and preset in ENVELOPE_CALLERS:
+            reason = "model writes the system prompt's envelope instead of a native call"
+            checks[f"envelope_closer_{name}"] = {"skipped": reason}
+            print(f"SKIP envelope_closer_{name}: {reason}", file=sys.stderr, flush=True)
+            continue
         for streaming in (False, True):
             mode = "stream" if streaming else "buffered"
             label = f"envelope_closer_{name}_{mode}"
@@ -707,7 +732,7 @@ def without_fenced_blocks(text):
     return "\n".join(kept)
 
 
-def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=False):
+def check_quoted_then_real_call(client, model, checks, chat_result, preset=None):
     """A documented envelope stays prose while the call after it is parsed.
 
     The prompt hands the markup over and asks for both acts; the case reads the
@@ -715,9 +740,15 @@ def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=Fal
     the documented copy lands in the call's arguments and content stays empty --
     a different, correct outcome that tests nothing here.
     """
+    deepseek = preset == "deepseek4"
     function = {"name": "terminal", "parameters": {"type": "object", "properties": {
         "command": {"type": "string"}}, "required": ["command"]}}
     for name, (system, prompt, opener) in QUOTED_THEN_CALL_CASES.items():
+        if opener.startswith("<invoke") and preset in ENVELOPE_CALLERS:
+            reason = "model calls through the documented envelope, not a native call"
+            checks[f"quoted_then_call_{name}"] = {"skipped": reason}
+            print(f"SKIP quoted_then_call_{name}: {reason}", file=sys.stderr, flush=True)
+            continue
         documented = 0
         for streaming in (False, True):
             mode = "stream" if streaming else "buffered"
@@ -761,17 +792,25 @@ def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=Fal
             "prompt instead of reading it as a regression", checks)
 
 
-def check_unfinished_inline_then_call(client, model, checks, chat_result):
+# The call format each model's template declares; models copy the one they are
+# handed, so the prompt must name the model's own.
+NATIVE_WIRE_FORMAT = {
+    "gemma4": "<|tool_call>call:terminal{command:<|\"|>pwd<|\"|>}<tool_call|>\n",
+}
+QWEN_WIRE_FORMAT = ("<tool_call>\n<function=terminal>\n<parameter=command>\npwd\n"
+                    "</parameter>\n</function>\n</tool_call>\n")
+
+
+def check_unfinished_inline_then_call(client, model, checks, chat_result, preset=None):
     """A stray backtick followed by one newline must not swallow a real call."""
+    wire_format = NATIVE_WIRE_FORMAT.get(preset, QWEN_WIRE_FORMAT)
     for name, prefix in (("filename", "I'll update `config.py"),
                          ("apostrophe", "Let`s write it.")):
         for streaming in (False, True):
             mode = "stream" if streaming else "buffered"
             label = f"unfinished_inline_then_call_{name}_{mode}"
             request = dict(model=model, messages=[{"role": "system", "content":
-                "To call terminal, emit its native wire format:\n"
-                "<tool_call>\n<function=terminal>\n<parameter=command>\npwd\n"
-                "</parameter>\n</function>\n</tool_call>\n"
+                "To call terminal, emit its native wire format:\n" + wire_format +
                 "The requested prose precedes this call."}, {"role": "user", "content":
                 "First write exactly this line, including its single stray backtick, "
                 "without closing it or adding another backtick:\n" + prefix +
@@ -789,13 +828,20 @@ def check_unfinished_inline_then_call(client, model, checks, chat_result):
             assert_no_envelope_framing(result)
 
 
+# Gemma 4 strings are <|"|>-delimited and unescaped. This fixture's oldText
+# holds }}]}}</tool_call> markup, which in Gemma's declaration and call syntax
+# reads as the end of the value; asked to quote it, Gemma's greedy reasoning
+# loops until the 1024-token limit. The disabled marker checks below still run.
+UNDELIMITED_FIXTURE = {"gemma4"}
+
+
 # A bracket-dense answer has no functional case: asked to repeat a literal line,
 # the model runs away into a repetition loop (1024 tokens, finish=length, ~47s)
 # instead of stopping, so the case reports a model runaway rather than a framing
 # failure. The property it was meant to prove is pinned deterministically instead:
 # quote_tracker_test scans a 12000 byte bracket-dense line in one pass, and
 # openai_chat_test streams bracket-dense content through the parser.
-def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=None):
+def check_tool_reasoning(client, model, checks, chat_result, preset=None):
     schema = {"type": "object", "properties": {
         "path": {"type": "string", "const": ARGUMENTS["path"]},
         "edits": {"type": "array", "minItems": 1, "maxItems": 1,
@@ -814,7 +860,7 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
         if "gufo" in usage:
             assert usage["gufo"]["prefill_tokens"] == tokens, usage
 
-    for strict in (True, False):
+    for strict in (() if preset in UNDELIMITED_FIXTURE else (True, False)):
         parameters = deepcopy(schema)
         if not strict:
             # Ordinary agent schemas leave nested objects open. Their nested
@@ -860,12 +906,15 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
             record(f"tool_reasoning_stopped_{mode}_{label}", result)
             assert result["reasoning"].strip() == thought[:cut].strip(), result
             assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
+    if preset in UNDELIMITED_FIXTURE:
+        checks["tool_reasoning_edit"] = {"skipped": "fixture markup ends Gemma 4 strings"}
+        print("SKIP tool_reasoning_edit: fixture markup ends Gemma 4 strings",
+              file=sys.stderr, flush=True)
     check_disabled_tool_markers(client, model, checks, chat_result)
-    deepseek = sampling_preset == "deepseek4"
-    check_envelope_closer_framing(client, model, checks, chat_result, deepseek)
-    check_tail_lookalike_content(client, model, checks, chat_result)
+    check_envelope_closer_framing(client, model, checks, chat_result, preset)
+    check_tail_lookalike_content(client, model, checks, chat_result, preset)
     check_unfinished_lookalike(client, model, checks, chat_result)
     check_literal_protocol_data(client, model, checks, chat_result)
     check_html_content(client, model, checks, chat_result)
-    check_quoted_then_real_call(client, model, checks, chat_result, deepseek)
-    check_unfinished_inline_then_call(client, model, checks, chat_result)
+    check_quoted_then_real_call(client, model, checks, chat_result, preset)
+    check_unfinished_inline_then_call(client, model, checks, chat_result, preset)

@@ -1,0 +1,243 @@
+{
+  "schema": "gufo.gemma4-template-cases.v1",
+  "tools": {
+    "weather": {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string", "description": "City, country"},
+            "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+            "days": {"type": "integer", "description": "Forecast days", "nullable": true}
+          },
+          "required": ["location"]
+        }
+      }
+    },
+    "search": {
+      "type": "function",
+      "function": {
+        "name": "search_notes",
+        "description": "Search saved notes.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {"type": "string"},
+            "Tags": {
+              "type": "array",
+              "description": "Tag filters",
+              "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "weight": {"type": "number"}},
+                "required": ["name"]
+              }
+            },
+            "filter": {
+              "type": "object",
+              "properties": {"after": {"type": "string", "description": "ISO date"}},
+              "required": ["after"]
+            },
+            "options": {"type": "object", "limit": {"type": "integer"}},
+            "ids": {"type": "array", "items": {"type": ["string", "integer"]}},
+            "Ärger": {"type": "boolean"},
+            "zeta": {"type": "string"},
+            "éclair": {"type": "string"}
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    "bare": {
+      "type": "function",
+      "function": {"name": "ping", "description": "No parameters."}
+    },
+    "untyped": {
+      "type": "function",
+      "function": {
+        "name": "echo",
+        "description": "Parameters without a type.",
+        "parameters": {"properties": {"text": {"type": "string"}}}
+      }
+    }
+  },
+  "cases": {
+    "chat": {
+      "messages": [{"role": "user", "content": "Hello there!"}]
+    },
+    "system_chat": {
+      "messages": [
+        {"role": "system", "content": "  You are terse.\n"},
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello."},
+        {"role": "user", "content": " How are you? "}
+      ]
+    },
+    "thinking_on": {
+      "enable_thinking": true,
+      "messages": [
+        {"role": "system", "content": "Think first."},
+        {"role": "user", "content": "What is 2+2?"}
+      ]
+    },
+    "thinking_only_system": {
+      "enable_thinking": true,
+      "messages": [{"role": "user", "content": "Plan a trip."}]
+    },
+    "reasoning_history": {
+      "enable_thinking": true,
+      "messages": [
+        {"role": "user", "content": "First?"},
+        {"role": "assistant", "content": "One.", "reasoning_content": "old reasoning"},
+        {"role": "user", "content": "Second?"},
+        {"role": "assistant", "content": "Two.", "reasoning_content": "new reasoning"}
+      ]
+    },
+    "strip_thinking": {
+      "messages": [
+        {"role": "user", "content": "Q"},
+        {"role": "assistant", "content": "<|channel>thought\nhidden<channel|>  Visible answer. "},
+        {"role": "user", "content": "Next"}
+      ]
+    },
+    "tools": {
+      "tools": ["weather", "search", "bare", "untyped"],
+      "messages": [
+        {"role": "system", "content": "Use tools when helpful."},
+        {"role": "user", "content": "Weather in Paris?"}
+      ]
+    },
+    "tools_no_system": {
+      "tools": ["weather"],
+      "messages": [{"role": "user", "content": "Weather in Rome?"}]
+    },
+    "tool_loop": {
+      "tools": ["weather"],
+      "messages": [
+        {"role": "user", "content": "Weather in Paris and Oslo?"},
+        {"role": "assistant", "content": "", "tool_calls": [
+          {"id": "call_1", "name": "get_weather", "arguments": {"location": "Paris, FR", "unit": "celsius", "days": 2}},
+          {"id": "call_2", "name": "get_weather", "arguments": {"location": "Oslo", "flags": {"B": true, "a": null}, "ratios": [0.0001, 1e-7, 1e16, 3.5, -2]}}
+        ]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp\": 18}"},
+        {"role": "tool", "tool_call_id": "call_2", "content": "snow"}
+      ]
+    },
+    "tool_loop_thinking": {
+      "enable_thinking": true,
+      "tools": ["weather"],
+      "messages": [
+        {"role": "user", "content": "Weather in Paris?"},
+        {"role": "assistant", "content": "", "reasoning_content": "Need the tool.", "tool_calls": [
+          {"id": "call_1", "name": "get_weather", "arguments": {"location": "Paris"}}
+        ]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+      ]
+    },
+    "tool_then_answer": {
+      "tools": ["weather"],
+      "messages": [
+        {"role": "user", "content": "Weather in Paris?"},
+        {"role": "assistant", "content": "Checking.", "tool_calls": [
+          {"id": "c1", "name": "get_weather", "arguments": {"location": "Paris"}}
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": "sunny"},
+        {"role": "assistant", "content": "It is sunny."},
+        {"role": "user", "content": "Thanks"}
+      ]
+    },
+    "tool_unmatched_id": {
+      "tools": ["weather"],
+      "messages": [
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "content": "", "tool_calls": [
+          {"id": "a", "name": "get_weather", "arguments": {}}
+        ]},
+        {"role": "tool", "tool_call_id": "zzz", "name": "custom_name", "content": "x"},
+        {"role": "tool", "tool_call_id": "yyy", "content": "y"}
+      ]
+    },
+    "pending_tool_call": {
+      "add_generation_prompt": false,
+      "tools": ["weather"],
+      "messages": [
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "content": "", "tool_calls": [
+          {"id": "c1", "name": "get_weather", "arguments": {"location": "Nice"}}
+        ]}
+      ]
+    },
+    "preserve_thinking_tools": {
+      "enable_thinking": true,
+      "preserve_thinking": true,
+      "tools": ["weather"],
+      "messages": [
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "content": "", "reasoning_content": "Call it.", "tool_calls": [
+          {"id": "c1", "name": "get_weather", "arguments": {"location": "Nice"}}
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": "warm"},
+        {"role": "assistant", "content": "Warm.", "reasoning_content": "Answer now."},
+        {"role": "user", "content": "And tomorrow?"}
+      ]
+    },
+    "consecutive_assistant": {
+      "messages": [
+        {"role": "user", "content": "Tell me a story."},
+        {"role": "assistant", "content": "Once upon a time"},
+        {"role": "assistant", "content": "there was a fox."},
+        {"role": "user", "content": "More"}
+      ]
+    },
+    "developer_and_late_system": {
+      "messages": [
+        {"role": "developer", "content": "Developer rules."},
+        {"role": "user", "content": "Hi"},
+        {"role": "system", "content": "Late system note."},
+        {"role": "user", "content": "Hi again"}
+      ]
+    },
+    "unicode_whitespace": {
+      "messages": [
+        {"role": "system", "content": "　  Rules "},
+        {"role": "user", "content": "\t Ciao, come stai? ​\n"}
+      ]
+    },
+    "no_generation_prompt": {
+      "add_generation_prompt": false,
+      "messages": [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"}
+      ]
+    },
+    "special_text": {
+      "messages": [
+        {"role": "user", "content": "Literal <|turn> and <|\"|> markers."}
+      ]
+    },
+    "image_only": {
+      "messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}
+      ]
+    },
+    "image_text": {
+      "messages": [
+        {"role": "system", "content": "You describe pictures."},
+        {"role": "user", "content": [
+          {"type": "text", "text": "  Compare these two. "}, {"type": "image_url", "image_url": {"url": "data:,"}},
+          {"type": "text", "text": "\n and \n"}, {"type": "image_url", "image_url": {"url": "data:,"}},
+          {"type": "text", "text": " Which is brighter?  "}]}
+      ]
+    },
+    "image_history": {
+      "enable_thinking": true,
+      "messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}, {"type": "text", "text": "What is shown?"}]},
+        {"role": "assistant", "content": "A red square."},
+        {"role": "user", "content": "And its size?"}
+      ]
+    }
+  }
+}

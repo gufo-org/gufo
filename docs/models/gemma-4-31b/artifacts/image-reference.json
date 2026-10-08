@@ -1,0 +1,154 @@
+[
+  {
+    "image": "chart-624x960.png",
+    "server": "llama.cpp-ub2048",
+    "runs": [
+      {
+        "prompt_tokens": 312,
+        "cold_ttft_s": 1.8735050530085573,
+        "cold_prompt_ms": 1844.436,
+        "decode_tok_s": 10.19941309662924,
+        "follow_ttft_s": 0.6903599369979929,
+        "follow_cached_tokens": 307,
+        "answer": "This image is a composite layout divided into two main sections: \"Test Images\" at the top and a set of color reference charts at the bottom.\n\n### Test Images Section\nThe top half consists of a 6x4 gri"
+      },
+      {
+        "prompt_tokens": 311,
+        "cold_ttft_s": 1.9222006799973315,
+        "cold_prompt_ms": 1891.348,
+        "decode_tok_s": 9.900216814748243,
+        "follow_ttft_s": 0.6972359569917899,
+        "follow_cached_tokens": 306,
+        "answer": "This image is a composite layout divided into two main sections: \"Test Images\" and a reference guide containing \"Grayscales\" and \"Primary Colors.\"\n\n### Test Images Section\nThe top half of the image co"
+      },
+      {
+        "prompt_tokens": 312,
+        "cold_ttft_s": 1.9737621329986723,
+        "cold_prompt_ms": 1935.598,
+        "decode_tok_s": 9.531085711692223,
+        "follow_ttft_s": 0.7028621029894566,
+        "follow_cached_tokens": 307,
+        "answer": "This image is a composite layout divided into two main sections: \"Test Images\" at the top and a set of color reference charts at the bottom.\n\n### Test Images Section\nThe top half consists of a 6x4 gri"
+      }
+    ],
+    "cold_ttft_s": 1.9222006799973315,
+    "cold_prompt_ms": 1891.348,
+    "decode_tok_s": 9.900216814748243,
+    "follow_ttft_s": 0.6972359569917899,
+    "prompt_tokens": 312
+  },
+  {
+    "image": "logo-768x768.png",
+    "server": "llama.cpp-ub2048",
+    "runs": [
+      {
+        "prompt_tokens": 306,
+        "cold_ttft_s": 1.8582083249930292,
+        "cold_prompt_ms": 1822.661,
+        "decode_tok_s": 9.533905518996308,
+        "follow_ttft_s": 0.7163675000047078,
+        "follow_cached_tokens": 301,
+        "answer": "A high-resolution pixel art illustration of an owl's head, centered against a textured green background. The owl is depicted in a symmetrical, front-facing view.\n\n**The Owl:**\n*   **Feathers:** The pl"
+      },
+      {
+        "prompt_tokens": 311,
+        "cold_ttft_s": 1.8453863820031984,
+        "cold_prompt_ms": 1810.515,
+        "decode_tok_s": 9.539859273447346,
+        "follow_ttft_s": 0.7206233179895207,
+        "follow_cached_tokens": 306,
+        "answer": "A detailed pixel art illustration of an owl's head, centered against a textured green background. The owl is depicted in a symmetrical, front-facing view.\n\n**The Owl:**\n*   **Feathers:** The plumage i"
+      },
+      {
+        "prompt_tokens": 307,
+        "cold_ttft_s": 1.843833994003944,
+        "cold_prompt_ms": 1807.138,
+        "decode_tok_s": 9.54186911584738,
+        "follow_ttft_s": 0.7084096160106128,
+        "follow_cached_tokens": 302,
+        "answer": "A detailed pixel art illustration of an owl's head, centered against a textured green background. The owl is depicted with a high level of detail, featuring intricate brown and tan plumage that create"
+      }
+    ],
+    "cold_ttft_s": 1.8453863820031984,
+    "cold_prompt_ms": 1810.515,
+    "decode_tok_s": 9.539859273447346,
+    "follow_ttft_s": 0.7163675000047078,
+    "prompt_tokens": 306
+  },
+  {
+    "image": "chart-1296x1968.png",
+    "server": "llama.cpp-ub2048",
+    "runs": [
+      {
+        "prompt_tokens": 1158,
+        "cold_ttft_s": 8.078557457003626,
+        "cold_prompt_ms": 7971.911,
+        "decode_tok_s": 8.761104700207515,
+        "follow_ttft_s": 1.0293251700059045,
+        "follow_cached_tokens": 1154,
+        "answer": "This image is a technical test sheet used for evaluating image quality, color reproduction, and grayscale accuracy in printing or digital displays. It is divided into two main sections: a gallery of \""
+      },
+      {
+        "prompt_tokens": 1159,
+        "cold_ttft_s": 8.342969546996756,
+        "cold_prompt_ms": 8233.229,
+        "decode_tok_s": 8.269220622018652,
+        "follow_ttft_s": 1.0415496719942894,
+        "follow_cached_tokens": 1155,
+        "answer": "This image is a technical test sheet used for calibrating color, contrast, and grayscale reproduction in printing or digital imaging. It is divided into two main sections: a gallery of \"Test Images\" a"
+      },
+      {
+        "prompt_tokens": 1159,
+        "cold_ttft_s": 8.574815550004132,
+        "cold_prompt_ms": 8468.582,
+        "decode_tok_s": 7.957362682444643,
+        "follow_ttft_s": 1.0698478620033711,
+        "follow_cached_tokens": 1155,
+        "answer": "This image is a technical test sheet used for calibrating color, contrast, and grayscale reproduction in printing or digital imaging. It is divided into two main sections: a gallery of \"Test Images\" a"
+      }
+    ],
+    "cold_ttft_s": 8.342969546996756,
+    "cold_prompt_ms": 8233.229,
+    "decode_tok_s": 8.269220622018652,
+    "follow_ttft_s": 1.0415496719942894,
+    "prompt_tokens": 1158
+  },
+  {
+    "image": "logo-1584x1584.png",
+    "server": "llama.cpp-ub2048",
+    "runs": [
+      {
+        "prompt_tokens": 1143,
+        "cold_ttft_s": 8.109738972998457,
+        "cold_prompt_ms": 7984.286,
+        "decode_tok_s": 7.961878022512146,
+        "follow_ttft_s": 1.0976184040046064,
+        "follow_cached_tokens": 1139,
+        "answer": "A high-detail pixel art illustration of an owl's head, centered against a textured green background. The image is perfectly symmetrical.\n\n**The Owl:**\n*   **Eyes:** The most striking feature is the pa"
+      },
+      {
+        "prompt_tokens": 1139,
+        "cold_ttft_s": 8.353709382994566,
+        "cold_prompt_ms": 8228.178,
+        "decode_tok_s": 7.9552475654101285,
+        "follow_ttft_s": 1.1091008090006653,
+        "follow_cached_tokens": 1135,
+        "answer": "A high-detail pixel art illustration of an owl's head, centered against a textured green background.\n\n**Subject and Composition:**\nThe image is a symmetrical, front-facing portrait of an owl. The comp"
+      },
+      {
+        "prompt_tokens": 1144,
+        "cold_ttft_s": 8.441480558001786,
+        "cold_prompt_ms": 8317.01,
+        "decode_tok_s": 8.069742041088821,
+        "follow_ttft_s": 1.0922677119961008,
+        "follow_cached_tokens": 1140,
+        "answer": "A detailed pixel art illustration of an owl's head, centered against a textured green background. The owl is depicted in a symmetrical, front-facing view.\n\n**The Owl:**\n*   **Eyes:** The most striking"
+      }
+    ],
+    "cold_ttft_s": 8.353709382994566,
+    "cold_prompt_ms": 8228.178,
+    "decode_tok_s": 7.961878022512146,
+    "follow_ttft_s": 1.0976184040046064,
+    "prompt_tokens": 1143
+  }
+]
