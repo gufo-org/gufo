@@ -425,6 +425,70 @@ void TestDeeperLearnedBranchPointSupersedesShallower() {
          "only the deepest learned branch point of a family stays protected");
 }
 
+void TestRestoredSharedPrefixOutlivesFrozenFrontiers() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  using gufo::server::SnapshotPurpose;
+  // Conversations share a system prompt whose grid checkpoint is history.
+  // Once a second conversation restores it and diverges, it is a branch point:
+  // freezing a continued frontier under byte pressure must evict an older
+  // turn's checkpoint, not the prefix every new conversation restores.
+  for (const bool restored : {false, true}) {
+    std::vector<std::size_t> invalidations(2);
+    std::size_t next_id = 0;
+    gufo::server::ContinuationCache cache(
+        2,
+        [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+        {.restore = [](gufo::server::ContinuationState&,
+                       const gufo::server::ContinuationSnapshot&) {},
+         .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+         .on_event = {}},
+        8);
+    const Tokens unrelated{9, 9, 9};
+    auto other = cache.Acquire(unrelated);
+    Expect(other.TryReserveSnapshot(sizeof(std::size_t), unrelated.size()),
+           "the unrelated checkpoint fits");
+    other.Commit(unrelated, std::make_unique<FakeSnapshot>(9));
+
+    const Tokens shared{1, 2, 3};
+    const Tokens first{1, 2, 3, 4, 4};
+    auto a = cache.Acquire(first);
+    Expect(a.TryReserveSnapshot(sizeof(std::size_t), shared.size(), true,
+                                SnapshotPurpose::kHistory),
+           "the shared grid checkpoint fits");
+    a.PublishSnapshot(shared, std::make_unique<FakeSnapshot>(3), true);
+    Expect(a.TryReserveSnapshot(sizeof(std::size_t), first.size(), false,
+                                SnapshotPurpose::kContinuation, first),
+           "the first prompt checkpoint fits");
+    a.Commit(first, std::make_unique<FakeSnapshot>(5), {1, 2, 3, 4, 4, 8, 8});
+
+    const Tokens second{1, 2, 3, 5, 5};
+    auto b = cache.Acquire(second, {}, {}, {}, restored);
+    Expect(b.cached_tokens() == (restored ? shared.size() : 0),
+           "the second conversation restores the shared prefix when allowed");
+    Expect(b.TryReserveSnapshot(sizeof(std::size_t), second.size(), false,
+                                SnapshotPurpose::kContinuation, second),
+           "the second prompt checkpoint fits");
+    b.Commit(second, std::make_unique<FakeSnapshot>(6), {1, 2, 3, 5, 5, 8});
+
+    // The first conversation continues from its live frontier and freezes it.
+    const Tokens next{1, 2, 3, 4, 4, 8, 8, 6};
+    auto turn = cache.Acquire(next);
+    Expect(turn.cached_tokens() == 7, "the next turn continues the frontier");
+    Expect(turn.TryReserveSnapshot(sizeof(std::size_t), next.size(), false,
+                                   SnapshotPurpose::kContinuation, next),
+           "the frozen frontier evicts one checkpoint");
+    turn.Commit(next, std::make_unique<FakeSnapshot>(8));
+
+    Expect(
+        cache.CachedPrefixTokens(Tokens{1, 2, 3, 7, 7}) ==
+            (restored ? shared.size() : 0),
+        "a restored shared prefix outlives a frozen frontier under pressure");
+    Expect(cache.CachedPrefixTokens(first) ==
+               (restored ? shared.size() : first.size()),
+           "the continued conversation's older checkpoint yields instead");
+  }
+}
+
 void TestSnapshotCanBranchIntoTwoIndependentStateSlots() {
   std::vector<std::size_t> invalidations(2);
   std::size_t next_id = 0;
@@ -1316,6 +1380,7 @@ int main() {
   TestNewBranchPreservesSharedSourceUnderBytePressure();
   TestLearnedBranchPointOutlivesItsOlderBranch();
   TestDeeperLearnedBranchPointSupersedesShallower();
+  TestRestoredSharedPrefixOutlivesFrozenFrontiers();
   TestByteCapacityEvictsBeforeSnapshotAllocation();
   TestConcurrentReservationsCannotOvercommitBudget();
   TestImpossibleReservationPreservesRetainedEntries();
