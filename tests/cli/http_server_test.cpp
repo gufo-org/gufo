@@ -1555,6 +1555,30 @@ void TestCompatibilityRequests() {
       answer += delta->member_str("text");
   }
   assert(thought == "plan" && answer == "answer");
+  // Thinking blocks keep the trimmed reasoning Messages reported before
+  // streaming, buffered and streamed alike.
+  server.backend->SetOutput("<think>\nplan\n\nmore\n</think>\n\nanswer");
+  for (const bool stream : {false, true}) {
+    const auto framed =
+        server.Post("/v1/messages",
+                    std::string(R"({"max_tokens":64,"stream":)") +
+                        (stream ? "true" : "false") +
+                        R"(,"thinking":{"type":"enabled","budget_tokens":1024},
+            "messages":[{"role":"user","content":"hi"}]})");
+    ExpectStatus(framed, 200);
+    std::string framed_thought;
+    if (stream) {
+      for (const auto& event : sse_events(framed))
+        if (const auto* delta = event.find("delta");
+            delta && delta->member_str("type") == "thinking_delta")
+          framed_thought += delta->member_str("thinking");
+    } else {
+      framed_thought =
+          response_body(framed).find("content")->items()[0].member_str(
+              "thinking");
+    }
+    assert(framed_thought == "plan\n\nmore");
+  }
   assert(types.front() == "message_start" && types.back() == "message_stop");
   assert(text_events[1].find("content_block")->member_str("type") ==
              "thinking" &&

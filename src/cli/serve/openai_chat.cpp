@@ -3409,6 +3409,23 @@ public:
   }
 
   bool Append(std::string_view text, bool reasoning) {
+    std::string piece;
+    if (reasoning) {
+      // Thinking blocks carry the reasoning trimmed as Chat reports it: drop
+      // leading whitespace and hold trailing whitespace until more follows.
+      if (!active_ || !reasoning_)
+        while (!text.empty() &&
+               std::isspace(static_cast<unsigned char>(text.front())) != 0)
+          text.remove_prefix(1);
+      const auto body = TrimTrailing(text);
+      if (body.empty()) {
+        held_.append(text);
+        return true;
+      }
+      piece = std::exchange(held_, std::string(text.substr(body.size())));
+      piece.append(body);
+      text = piece;
+    }
     if (text.empty())
       return true;
     if (!active_ || reasoning_ != reasoning) {
@@ -3530,6 +3547,7 @@ private:
   }
 
   bool CloseBlock() {
+    held_.clear();
     if (!active_)
       return connected_;
     message_["content"].push_back(Block());
@@ -3550,6 +3568,8 @@ private:
   HttpResponse::BodyWriter writer_;
   json::Value message_;
   std::string text_;
+  /// Trailing reasoning whitespace, emitted only if more reasoning follows.
+  std::string held_;
   std::size_t index_{0};
   bool active_{false};
   bool reasoning_{false};
