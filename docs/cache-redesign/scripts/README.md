@@ -5,22 +5,41 @@ Every number in [experiments.md](../experiments.md) and
 (binary hash, source revision, models, tool versions) is in
 [results/metadata.json](../results/metadata.json).
 
-## Replaying the analysis from committed data
+## Replaying the analysis from archived data
 
-`results/e2/<model>/<workload>/` keeps, for every run, the token arrays
-(`requests.npz`), per-request metadata (`requests.json`) and the server log
-(`server.log`). The repository ignores `*.log`, so the logs are committed with
-an explicit force-add. The simulations and analyses run from those alone; no GPU,
-model or server is needed:
+The original research snapshot keeps, for every run, the token arrays
+(`requests.npz`), per-request metadata (`requests.json`) and server log
+(`server.log`). They are archived rather than tracked in the current tree;
+see [results/README.md](../results/README.md). The simulations and analyses use
+those files and the measured constants; no GPU, model or server is needed.
+
+Download the immutable snapshot and recover its results into a fresh external
+directory. The following commands use the authenticated GitHub CLI and GNU tar:
 
 ```sh
-cd docs/cache-redesign
-export CACHE_EXP_DIR=$PWD           # read and write results/ here
+export GUFO_REPO=$(git rev-parse --show-toplevel)
+export CACHE_EXP_DIR=$(mktemp -d)
+gh api repos/gufo-org/gufo/tarball/a32fc43bcb9ec66264f166b5162d93a9223557d5 \
+  > "$CACHE_EXP_DIR/research.tar.gz"
+tar -xzf "$CACHE_EXP_DIR/research.tar.gz" -C "$CACHE_EXP_DIR" \
+  --strip-components=3 --wildcards '*/docs/cache-redesign/results/*'
+cd "$CACHE_EXP_DIR"
+sha256sum --quiet --check "$GUFO_REPO/docs/cache-redesign/results/archive.sha256"
+cd "$GUFO_REPO/docs/cache-redesign"
+```
+
+The checksum check covers all original result files before regeneration.
+Recovered inputs live in `$CACHE_EXP_DIR/results/`; scripts write new outputs
+there too. Run the focused analysis, or regenerate the reference summaries:
+
+```sh
 python3 scripts/analyze_e3.py fn w2                # missed reuse
 python3 scripts/simulate_e8.py fn w2               # today / Phase 0 / hybrid
 python3 scripts/simulate_e8.py q27 w1 --restart-at 20 --abrupt
+python3 scripts/analyze_e4.py                      # measured totals for summaries
+python3 scripts/fit_prefill.py                     # fitted timing constants
 PYTHON=python3 scripts/run_e8.sh && python3 scripts/summarize_e8.py
-python3 scripts/fit_prefill.py && python3 scripts/cost_model.py
+python3 scripts/cost_model.py
 ```
 
 Python 3.13 with `numpy` is required, plus `jsonschema` for W1. Workload
@@ -63,5 +82,6 @@ directory can reach the disk budget (16 GiB) during a run.
 - **Model:** the [cost model](../cost-model.md) tables, built from measured
   constants.
 
-The token arrays are research data. If these documents are merged into
-`main`, leave `results/e2` out.
+The token arrays and logs are research data. Keep recovered datasets and
+generated per-run results outside the checkout; retain their archive reference
+and checksums alongside the small measurement inputs.

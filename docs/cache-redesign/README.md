@@ -147,8 +147,15 @@ A review of these documents raised points that are now addressed:
 - **Phase 0 does not fix everything:** abrupt restarts, 27B W4 and the
   subagent created after a restart favour the hybrid.
 - **A 782 s disk-write stall** found at concurrency 4; cause unknown.
-- **Reproducibility:** configurable script paths, committed token arrays and
-  server logs (force-added: the repository ignores `*.log`), run metadata,
-  and measured vs simulated labels.
+- **Reproducibility:** configurable script paths, retained token arrays and
+  server logs (originally force-added because the repository ignores `*.log`),
+  run metadata, and measured vs simulated labels. The retained data is now
+  available through the archive described below.
+
+**Research data cleanup.** Small measurement inputs remain in `results/`.
+Bulk traces, logs, generated outputs and working notes are preserved in the
+immutable snapshot documented in [results/README.md](results/README.md), with
+checksums and external replay instructions. Maintained findings stay in the
+main research documents.
 
 **Next.** Discuss the required features, then choose.

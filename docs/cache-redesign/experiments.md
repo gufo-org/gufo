@@ -3,8 +3,8 @@
 Measurements that decide between [option A and option C](options.md). All of
 them run on unmodified main binaries. The drivers and analysis scripts are in
 [scripts/](scripts/README.md), together with how to replay the analyses from
-the committed token arrays and logs in [results/](results/), and how to rerun
-the measurements.
+the archived token arrays and logs described in
+[results/README.md](results/README.md), and how to rerun the measurements.
 
 ## Scope (agreed 2026-10-07)
 
