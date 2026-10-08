@@ -15,6 +15,9 @@
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_f16_decode.hip.hpp"
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_hc.hip.hpp"
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_iq2_gate.hip.hpp"
+// The backend translation unit defines MASK_T before the MoE kernels.
+#define MASK_T uint64_t
+#include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_moe.hip.hpp"
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_norm.hip.hpp"
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_q8_decode.hip.hpp"
 
@@ -248,7 +251,8 @@ void iq2_gate(unsigned tokens, unsigned blocks, std::mt19937& random) {
       weights[pair] = scale(random) * 100;
     }
   }
-  std::vector<unsigned> pairs, offsets, counts, tile_experts, starts;
+  std::vector<unsigned> pairs, offsets, counts, tile_experts, starts,
+      tile8_experts, tile8_starts;
   for (unsigned expert = 0; expert < experts; ++expert) {
     offsets.push_back(pairs.size());
     counts.push_back(assignments[expert].size());
@@ -258,13 +262,17 @@ void iq2_gate(unsigned tokens, unsigned blocks, std::mt19937& random) {
       tile_experts.push_back(expert);
       starts.push_back(first);
     }
+    for (unsigned first = 0; first < assignments[expert].size(); first += 8) {
+      tile8_experts.push_back(expert);
+      tile8_starts.push_back(first);
+    }
   }
-  const unsigned tiles = tile_experts.size();
+  const unsigned tiles = tile_experts.size(), tiles8 = tile8_experts.size();
   Device<hip_block_iq2_xxs> g(gate.size()), u(up.size());
   Device<hip_block_q8_K> x(input.size());
   Device<int32_t> selection(selected.size());
   Device<unsigned> p(pairs.size()), o(offsets.size()), c(counts.size()),
-      te(tiles), ts(tiles), total(1);
+      te(tiles), ts(tiles), total(1), te8(tiles8), ts8(tiles8), total8(1);
   Device<float> w(weights.size());
   const auto upload = [](auto* destination, const auto& values) {
     check(hipMemcpy(destination, values.data(),
@@ -280,8 +288,11 @@ void iq2_gate(unsigned tokens, unsigned blocks, std::mt19937& random) {
   upload(c.data, counts);
   upload(te.data, tile_experts);
   upload(ts.data, starts);
+  upload(te8.data, tile8_experts);
+  upload(ts8.data, tile8_starts);
   upload(w.data, weights);
   check(hipMemcpy(total.data, &tiles, sizeof(tiles), hipMemcpyHostToDevice));
+  check(hipMemcpy(total8.data, &tiles8, sizeof(tiles8), hipMemcpyHostToDevice));
   const size_t size = tokens * selected_count * rows;
   std::array<uint64_t, 256> grid{};
   check(hipMemcpyFromSymbol(grid.data(), HIP_SYMBOL(hip_iq2xxs_grid),
@@ -335,13 +346,22 @@ void iq2_gate(unsigned tokens, unsigned blocks, std::mt19937& random) {
       reinterpret_cast<const char*>(g.data),
       reinterpret_cast<const char*>(u.data), x.data, selection.data, w.data,
       rows * row_bytes, row_bytes, blocks, rows, selected_count, 1, 10.F);
-  {
-    moe_gate_up_mid_expert_tile4_row32_kernel<<<dim3(rows / 32, tiles), 256>>>(
+  // Each tile kernel must give the bits of the scalar kernel. The outputs
+  // start as NaN, so an output that a kernel does not write also fails.
+  using Kernel = decltype(&moe_gate_up_mid_expert_tile4_row32_kernel);
+  const auto tiled = [&](const char* name, Kernel kernel, unsigned row_span,
+                         unsigned tile_count,
+                         const Device<unsigned>& tile_total,
+                         const Device<unsigned>& tile_expert,
+                         const Device<unsigned>& tile_start) {
+    for (float* output : {actual_gate.data, actual_up.data, actual_mid.data})
+      check(hipMemset(output, 0xff, size * sizeof(float)));
+    kernel<<<dim3((rows + row_span - 1) / row_span, tile_count), 256>>>(
         actual_gate.data, actual_up.data, actual_mid.data,
         reinterpret_cast<const char*>(g.data),
         reinterpret_cast<const char*>(u.data), x.data, p.data, o.data, c.data,
-        total.data, te.data, ts.data, w.data, rows * row_bytes, row_bytes,
-        blocks, rows, selected_count, 0, 1, 10.F);
+        tile_total.data, tile_expert.data, tile_start.data, w.data,
+        rows * row_bytes, row_bytes, blocks, rows, selected_count, 0, 1, 10.F);
     check(hipGetLastError());
     std::vector<float> expected(size), actual(size);
     unsigned kind = 0;
@@ -353,22 +373,38 @@ void iq2_gate(unsigned tokens, unsigned blocks, std::mt19937& random) {
                       hipMemcpyDeviceToHost));
       check(hipMemcpy(actual.data(), candidate, size * sizeof(float),
                       hipMemcpyDeviceToHost));
-      equal("IQ2 gate/up/activation", expected.data(), actual.data(), size);
+      equal(name, expected.data(), actual.data(), size);
       for (const auto& [index, values] : samples) {
         if (std::abs(actual[index] - values[kind]) >
             2e-5 * std::max(1., std::abs(values[kind]))) {
           std::fprintf(stderr,
-                       "independent IQ2 formula failed at %zu kind=%u: "
+                       "%s: independent IQ2 formula failed at %zu kind=%u: "
                        "%.9g != %.9g\n",
-                       index, kind, actual[index], values[kind]);
+                       name, index, kind, actual[index], values[kind]);
           std::exit(6);
         }
       }
       ++kind;
     }
-  }
+  };
+  tiled("IQ2 tile4 row32", moe_gate_up_mid_expert_tile4_row32_kernel, 32, tiles,
+        total, te, ts);
+  // The 8-row kernels unroll the pair loop. Without the explicit FMA in
+  // dev_dot_iq2_xxs_q8_K_block8_deq_lut, -ffast-math can then round the
+  // scale product in a different order.
+  tiled("IQ2 tile8 row32", moe_gate_up_mid_expert_tile8_row32_kernel, 32,
+        tiles8, total8, te8, ts8);
+  tiled("IQ2 tile8 rowspan<512>",
+        moe_gate_up_mid_expert_tile8_rowspan_kernel<512>, 512, tiles8, total8,
+        te8, ts8);
+  tiled("IQ2 tile8 rowspan<1024>",
+        moe_gate_up_mid_expert_tile8_rowspan_kernel<1024>, 1024, tiles8, total8,
+        te8, ts8);
+  tiled("IQ2 tile8 row2048", moe_gate_up_mid_expert_tile8_row2048_kernel, 2048,
+        tiles8, total8, te8, ts8);
   std::printf(
-      "IQ2 blocks=%u tokens=%u: exact scalar/batch gate/up/activation\n",
+      "IQ2 blocks=%u tokens=%u: exact scalar/tile4/tile8 "
+      "gate/up/activation\n",
       blocks, tokens);
 }
 
@@ -693,8 +729,10 @@ int main() {
     run<32>(dim, random);
   }
   iq2_signs();
+  // These token counts give the 8-row tiles 1 to 8 pairs, and experts with
+  // more than one tile. Prefill sends 2 to 31 tokens to these tiles.
   for (unsigned blocks : {8U, 16U, 32U})
-    for (unsigned tokens : {1U, 2U, 3U, 4U, 8U})
+    for (unsigned tokens : {1U, 2U, 3U, 4U, 8U, 12U, 16U, 24U, 31U})
       iq2_gate(tokens, blocks, random);
   for (const auto [dim, rows] :
        {std::pair{16384U, 24U}, std::pair{4096U, 256U}}) {
