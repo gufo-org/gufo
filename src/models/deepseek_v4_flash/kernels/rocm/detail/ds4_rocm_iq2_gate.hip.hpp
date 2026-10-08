@@ -160,7 +160,10 @@ __device__ static void dev_dot_iq2_xxs_q8_K_block8_deq_lut(
                      &w[4], &w[5]);
     dev_iq2_i8x8_lut(grid, (uint8_t)((aux0 >> 24) & 0xffu), (aux1 >> 21) & 127u,
                      &w[6], &w[7]);
-    for (uint32_t p = 0; p < n; p++) {
+    // Constant indices keep q8, bsum and acc in registers; see the callers.
+#pragma unroll
+    for (uint32_t p = 0; p < 8u; p++) {
+      if (p >= n) break;
       const int8_t* q = q8[p] + ib32 * 32;
       int32_t sumi = 0;
       sumi = __dp4a(w[0], *(const int32_t*)(q + 0), sumi);
@@ -175,8 +178,12 @@ __device__ static void dev_dot_iq2_xxs_q8_K_block8_deq_lut(
     }
   }
   const hip_block_q8_K* ys[8] = {y0, y1, y2, y3, y4, y5, y6, y7};
-  for (uint32_t p = 0; p < n; p++)
-    acc[p] += 0.125f * xd * ys[p]->d * (float)bsum[p];
+#pragma unroll
+  for (uint32_t p = 0; p < 8u; p++) {
+    if (p >= n) break;
+    // Preserve the scalar LUT kernel's scale-product rounding before FMA.
+    acc[p] = fmaf(__fmul_rn(0.125f * xd, ys[p]->d), (float)bsum[p], acc[p]);
+  }
 }
 
 template<uint32_t N>

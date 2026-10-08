@@ -33,18 +33,6 @@
   "_ZL37moe_down_expert_tile16_rowspan_kernelILj512EEvPfPKcPK14hip_block_q8_KPKjS7_S7_S7_S7_S7_mmjjjj": {
    "max_scratch": 80
   },
-  "_ZL41moe_gate_up_mid_expert_tile8_row32_kernelPfS_S_PKcS1_PK14hip_block_q8_KPKjS6_S6_S6_S6_S6_PKfmmjjjjjf": {
-   "max_scratch": 176
-  },
-  "_ZL43moe_gate_up_mid_expert_tile8_row2048_kernelPfS_S_PKcS1_PK14hip_block_q8_KPKjS6_S6_S6_S6_S6_PKfmmjjjjjf": {
-   "max_scratch": 176
-  },
-  "_ZL43moe_gate_up_mid_expert_tile8_rowspan_kernelILj1024EEvPfS0_S0_PKcS2_PK14hip_block_q8_KPKjS7_S7_S7_S7_S7_PKfmmjjjjjf": {
-   "max_scratch": 176
-  },
-  "_ZL43moe_gate_up_mid_expert_tile8_rowspan_kernelILj512EEvPfS0_S0_PKcS2_PK14hip_block_q8_KPKjS7_S7_S7_S7_S7_PKfmmjjjjjf": {
-   "max_scratch": 176
-  },
   "_ZL45moe_gate_up_mid_q4K_expert_tile8_row32_kernelPfS_S_PKcS1_PK14hip_block_q8_KPKjS6_S6_S6_S6_S6_PKfmmjjjjjf": {
    "max_scratch": 112
   },

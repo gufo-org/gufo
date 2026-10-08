@@ -10,11 +10,12 @@
  * square and once to scale. At `n == blockDim.x * PER_THREAD` each thread can
  * keep its own strided slice, so the second read disappears and a 4,096-wide
  * row costs 16 VGPRs. The accumulation order and the reduction tree are
- * unchanged, so the output is bit-identical. */
+ * unchanged, so the output is bit-identical. The launch bound is the real
+ * block size: without it the register limit is set for 1,024 threads, and the
+ * 64 values of a row can spill. */
 template<uint32_t PER_THREAD>
-__global__ static void rms_norm_plain_regs_kernel(float* out, const float* x,
-                                                  uint32_t n, uint32_t rows,
-                                                  float eps) {
+__global__ __launch_bounds__(256) static void rms_norm_plain_regs_kernel(
+    float* out, const float* x, uint32_t n, uint32_t rows, float eps) {
   const uint32_t row = blockIdx.x;
   if (row >= rows)
     return;

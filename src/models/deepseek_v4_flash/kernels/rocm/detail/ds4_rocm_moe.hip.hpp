@@ -604,22 +604,32 @@ __global__ static void moe_gate_up_mid_expert_tile8_row32_kernel(
     uint32_t tok[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     uint32_t slot[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     const hip_block_q8_K *xqb[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+    // Every per-pair array index below is a compile-time constant. A runtime
+    // index places these arrays in scratch memory.
     uint32_t np = 0;
-    for (; np < 8u; np++) {
-        uint32_t local_pair = local_start + np;
+#pragma unroll
+    for (uint32_t p = 0; p < 8u; p++) {
+        uint32_t local_pair = local_start + p;
         if (local_pair >= count) break;
-        pair[np] = sorted_pairs[offsets[expert] + local_pair];
-        tok[np] = pair[np] / n_expert;
-        slot[np] = pair[np] - tok[np] * n_expert;
-        xqb[np] = xq + (uint64_t)tok[np] * xq_blocks;
+        pair[p] = sorted_pairs[offsets[expert] + local_pair];
+        tok[p] = pair[p] / n_expert;
+        slot[p] = pair[p] - tok[p] * n_expert;
+        xqb[p] = xq + (uint64_t)tok[p] * xq_blocks;
+        np = p + 1u;
     }
     if (xq_blocks <= 16u) {
         for (uint32_t i = threadIdx.x; i < np * xq_blocks; i += blockDim.x) {
             uint32_t p = i / xq_blocks;
             uint32_t b = i - p * xq_blocks;
-            sxq[p][b] = xqb[p][b];
+            const hip_block_q8_K *src = xqb[0];
+#pragma unroll
+            for (uint32_t q = 1; q < 8u; q++)
+                if (p == q) src = xqb[q];
+            sxq[p][b] = src[b];
         }
-        for (uint32_t p = 0; p < np; p++) xqb[p] = sxq[p];
+#pragma unroll
+        for (uint32_t p = 0; p < 8u; p++)
+            if (p < np) xqb[p] = sxq[p];
     }
     for (uint32_t i = threadIdx.x; i < 256u; i += blockDim.x)
       s_iq2_grid[i] = hip_iq2xxs_grid[i];
@@ -643,7 +653,9 @@ __global__ static void moe_gate_up_mid_expert_tile8_row32_kernel(
           xqb[6] ? xqb[6] + b : NULL, xqb[7] ? xqb[7] + b : NULL, np, up,
           s_iq2_grid);
     }
-    for (uint32_t p = 0; p < np; p++) {
+#pragma unroll
+    for (uint32_t p = 0; p < 8u; p++) {
+        if (p >= np) break;
         gate[p] = quarter_warp_sum_f32(gate[p], lane);
         up[p] = quarter_warp_sum_f32(up[p], lane);
         if (lane == 0) {
@@ -698,22 +710,32 @@ __global__ static void moe_gate_up_mid_expert_tile8_row2048_kernel(
     uint32_t tok[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     uint32_t slot[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     const hip_block_q8_K *xqb[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+    // Every per-pair array index below is a compile-time constant. A runtime
+    // index places these arrays in scratch memory.
     uint32_t np = 0;
-    for (; np < 8u; np++) {
-        uint32_t local_pair = local_start + np;
+#pragma unroll
+    for (uint32_t p = 0; p < 8u; p++) {
+        uint32_t local_pair = local_start + p;
         if (local_pair >= count) break;
-        pair[np] = sorted_pairs[offsets[expert] + local_pair];
-        tok[np] = pair[np] / n_expert;
-        slot[np] = pair[np] - tok[np] * n_expert;
-        xqb[np] = xq + (uint64_t)tok[np] * xq_blocks;
+        pair[p] = sorted_pairs[offsets[expert] + local_pair];
+        tok[p] = pair[p] / n_expert;
+        slot[p] = pair[p] - tok[p] * n_expert;
+        xqb[p] = xq + (uint64_t)tok[p] * xq_blocks;
+        np = p + 1u;
     }
     if (xq_blocks <= 16u) {
         for (uint32_t i = threadIdx.x; i < np * xq_blocks; i += blockDim.x) {
             uint32_t p = i / xq_blocks;
             uint32_t b = i - p * xq_blocks;
-            sxq[p][b] = xqb[p][b];
+            const hip_block_q8_K *src = xqb[0];
+#pragma unroll
+            for (uint32_t q = 1; q < 8u; q++)
+                if (p == q) src = xqb[q];
+            sxq[p][b] = src[b];
         }
-        for (uint32_t p = 0; p < np; p++) xqb[p] = sxq[p];
+#pragma unroll
+        for (uint32_t p = 0; p < 8u; p++)
+            if (p < np) xqb[p] = sxq[p];
     }
     for (uint32_t i = threadIdx.x; i < 256u; i += blockDim.x)
       s_iq2_grid[i] = hip_iq2xxs_grid[i];
@@ -739,7 +761,9 @@ __global__ static void moe_gate_up_mid_expert_tile8_row2048_kernel(
               xqb[6] ? xqb[6] + b : NULL, xqb[7] ? xqb[7] + b : NULL, np, up,
               s_iq2_grid);
         }
-        for (uint32_t p = 0; p < np; p++) {
+#pragma unroll
+        for (uint32_t p = 0; p < 8u; p++) {
+            if (p >= np) break;
             gate[p] = quarter_warp_sum_f32(gate[p], lane);
             up[p] = quarter_warp_sum_f32(up[p], lane);
             if (lane == 0) {
@@ -796,22 +820,32 @@ __global__ static void moe_gate_up_mid_expert_tile8_rowspan_kernel(
     uint32_t tok[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     uint32_t slot[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     const hip_block_q8_K *xqb[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+    // Every per-pair array index below is a compile-time constant. A runtime
+    // index places these arrays in scratch memory.
     uint32_t np = 0;
-    for (; np < 8u; np++) {
-        uint32_t local_pair = local_start + np;
+#pragma unroll
+    for (uint32_t p = 0; p < 8u; p++) {
+        uint32_t local_pair = local_start + p;
         if (local_pair >= count) break;
-        pair[np] = sorted_pairs[offsets[expert] + local_pair];
-        tok[np] = pair[np] / n_expert;
-        slot[np] = pair[np] - tok[np] * n_expert;
-        xqb[np] = xq + (uint64_t)tok[np] * xq_blocks;
+        pair[p] = sorted_pairs[offsets[expert] + local_pair];
+        tok[p] = pair[p] / n_expert;
+        slot[p] = pair[p] - tok[p] * n_expert;
+        xqb[p] = xq + (uint64_t)tok[p] * xq_blocks;
+        np = p + 1u;
     }
     if (xq_blocks <= 16u) {
         for (uint32_t i = threadIdx.x; i < np * xq_blocks; i += blockDim.x) {
             uint32_t p = i / xq_blocks;
             uint32_t b = i - p * xq_blocks;
-            sxq[p][b] = xqb[p][b];
+            const hip_block_q8_K *src = xqb[0];
+#pragma unroll
+            for (uint32_t q = 1; q < 8u; q++)
+                if (p == q) src = xqb[q];
+            sxq[p][b] = src[b];
         }
-        for (uint32_t p = 0; p < np; p++) xqb[p] = sxq[p];
+#pragma unroll
+        for (uint32_t p = 0; p < 8u; p++)
+            if (p < np) xqb[p] = sxq[p];
     }
     for (uint32_t i = threadIdx.x; i < 256u; i += blockDim.x)
       s_iq2_grid[i] = hip_iq2xxs_grid[i];
@@ -837,7 +871,9 @@ __global__ static void moe_gate_up_mid_expert_tile8_rowspan_kernel(
               xqb[6] ? xqb[6] + b : NULL, xqb[7] ? xqb[7] + b : NULL, np, up,
               s_iq2_grid);
         }
-        for (uint32_t p = 0; p < np; p++) {
+#pragma unroll
+        for (uint32_t p = 0; p < 8u; p++) {
+            if (p >= np) break;
             gate[p] = quarter_warp_sum_f32(gate[p], lane);
             up[p] = quarter_warp_sum_f32(up[p], lane);
             if (lane == 0) {
