@@ -4,6 +4,24 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.9.1](https://github.com/gufo-org/gufo/compare/v0.9.0...v0.9.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **cache:** drop the fixed 1 GiB cap on automatic disk staging ([#473](https://github.com/gufo-org/gufo/issues/473)) ([b39c530](https://github.com/gufo-org/gufo/commit/b39c530e70e87f4340e2230a155fd16d066d19f3))
+
+
+### Performance
+
+* **hip:** keep prefill GEMMs spill-free on clang 23 ([#459](https://github.com/gufo-org/gufo/issues/459)) ([f17e37b](https://github.com/gufo-org/gufo/commit/f17e37b8bb7df5fb83ea7ce6d4dc4ef6d6677253))
+* **qwen-flash:** 4096-token prefill chunks with an overlapped n-gram gather ([#470](https://github.com/gufo-org/gufo/issues/470)) ([47b6391](https://github.com/gufo-org/gufo/commit/47b639159315fcdba17e6a144d67e273de9ead6e))
+
+
+### Code Refactoring
+
+* **qwen:** centralize control-token literals in one header ([#464](https://github.com/gufo-org/gufo/issues/464)) ([7701ba7](https://github.com/gufo-org/gufo/commit/7701ba769f454a580ffcbaa29538d65e7f33b38c))
+
 ## [0.9.0](https://github.com/gufo-org/gufo/compare/v0.8.1...v0.9.0) (2026-10-07)
 
 
