@@ -6,6 +6,7 @@
 | Fused QK, online softmax and FP32 value product | Retained for 128-wide attention; 128 queries per block, bounded LDS, no quadratic allocation or probability narrowing. |
 | Separate causal prefix from fully visible image queries | Retained; avoids mask work on image rows. |
 | Two-way QK unrolling and selective ILP scheduling | Retained; bounded register pressure and exact output. |
+| Unroll the two value halves of fused attention | Retained; clang 23 kept the loop and indexed the staged values at run time: `FusedAttention<false>` 12.3% slower than clang 22, 3.3% after. Same clang 22 kernel code and image bytes. |
 | Packed BF16 projections with direct WMMA loads | Retained; FP32 accumulation, exact byte permutation, no duplicate persistent weights. |
 | Fuse gate/up projections, SiLU and the following projection's input packing | Retained; preserves each BF16 boundary; operator and independent model checks pass. |
 | Branchless BF16 conversion and native exponential for BF16 SiLU | Retained; conversion boundary tests and all 65,536 BF16 activation inputs match. |
