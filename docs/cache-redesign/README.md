@@ -16,6 +16,7 @@ far should it go?
 | [Options](options.md) | Candidate designs, pros and cons, diffs and keyframes, and the features still to decide |
 | [Hybrid design](hybrid-design.md) | Option E in detail, with worked examples |
 | [Cache package](cache-package.md) | Shared library ownership, model adapters, lifecycle contracts and migration |
+| [Implementation plan](implementation-PLAN.MD) | Phased tasks, pending decisions, validation gates and review sequence |
 | [Cost model](cost-model.md) | Per-operation costs, today vs hybrid, from measured constants |
 | [Experiments](experiments.md) | Measurements needed to decide, and their results |
 

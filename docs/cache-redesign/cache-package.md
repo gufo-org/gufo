@@ -7,6 +7,9 @@ state and performs the operations needed to capture or restore it. This is an
 implementation plan for the [hybrid design](hybrid-design.md), not an
 implemented API.
 
+The [implementation plan](implementation-PLAN.MD) tracks the phased tasks,
+decisions required before each milestone and acceptance gates.
+
 ## Ownership boundary
 
 | Common cache package | Model adapter |
