@@ -120,6 +120,37 @@ void TestBorrowedSnapshotKeepsOwnersLiveFrontier() {
   next.Invalidate();
 }
 
+void TestBorrowedSnapshotRetryReplacesOwnersReply() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore =
+           [](gufo::server::ContinuationState& state,
+              const gufo::server::ContinuationSnapshot& snapshot) {
+             dynamic_cast<FakeState&>(state).value =
+                 dynamic_cast<const FakeSnapshot&>(snapshot).value;
+           },
+       .capacity_bytes = [] { return 1024; },
+       .on_event = {}});
+  auto conversation = cache.Acquire(Tokens{1, 2, 3});
+  auto* owner = &conversation.state();
+  dynamic_cast<FakeState&>(*owner).value = 9;
+  Expect(conversation.TryReserveSnapshot(sizeof(std::size_t), 3),
+         "reserve the prompt checkpoint");
+  conversation.Commit(
+      {1, 2, 3}, std::make_unique<FakeSnapshot>(7, sizeof(std::size_t), owner),
+      {1, 2, 3, 4, 5});
+  // Retrying the prompt replaces the reply, so the owner's rows are reused
+  // and the other state, which may hold another conversation, is kept.
+  auto retry = cache.Acquire(Tokens{1, 2, 3});
+  Expect(retry.cache_hit() && &retry.state() == owner &&
+             dynamic_cast<FakeState&>(retry.state()).value == 7,
+         "a retry restores into the owner whose reply it replaces");
+  retry.Invalidate();
+}
+
 void TestColdMissThenExactExtensionHit() {
   std::vector<std::size_t> invalidations(1);
   std::size_t next_id = 0;
@@ -1279,6 +1310,7 @@ int main() {
   TestSnapshotCanBranchIntoTwoIndependentStateSlots();
   TestBorrowedSnapshotPrefersAvailableOwner();
   TestBorrowedSnapshotKeepsOwnersLiveFrontier();
+  TestBorrowedSnapshotRetryReplacesOwnersReply();
   TestCachedPrefixTokensPeeksWithoutLeasing();
   TestBranchPointOutlivesOlderTurnsUnderPressure();
   TestNewBranchPreservesSharedSourceUnderBytePressure();

@@ -545,8 +545,12 @@ ContinuationCache::Lease ContinuationCache::Acquire(
         const auto& entry = *impl_->entries[index];
         // Borrowed rows save the restore a copy, never another
         // conversation's live frontier, whose loss costs its whole prefill.
-        if (entry.available && entry.live_tokens.empty() && cache_hit &&
-            impl_->entries[source]->snapshot &&
+        // A prompt inside the frontier retries that conversation and
+        // replaces the reply the frontier holds.
+        if (entry.available &&
+            (entry.live_tokens.empty() ||
+             IsPrefix(prompt, entry.live_tokens)) &&
+            cache_hit && impl_->entries[source]->snapshot &&
             impl_->entries[source]->snapshot->PrefersState(*entry.state)) {
           selected = index;
           break;
