@@ -3458,12 +3458,14 @@ public:
       Emit(BlockStart(Block()));
       CloseBlock();
     }
+    // Same precedence as Chat finish_reason: a truncated or stopped turn is
+    // reported as such even when complete calls precede the cut.
     using Finish = TextGenerationBackend::FinishReason;
     message_["stop_reason"] =
-        tool_use_                                       ? "tool_use"
-        : result.finish_reason == Finish::kLength       ? "max_tokens"
-        : result.finish_reason == Finish::kStopSequence ? "stop_sequence"
-                                                        : "end_turn";
+        result.finish_reason == Finish::kStopSequence ? "stop_sequence"
+        : result.finish_reason == Finish::kLength     ? "max_tokens"
+        : tool_use_                                   ? "tool_use"
+                                                      : "end_turn";
     message_["stop_sequence"] = result.finish_reason == Finish::kStopSequence
                                     ? json::Value(result.stop_sequence)
                                     : json::Value();

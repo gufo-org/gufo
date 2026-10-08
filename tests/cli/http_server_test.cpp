@@ -1504,6 +1504,17 @@ void TestCompatibilityRequests() {
        })
     ExpectStatus(server.Post("/v1/messages", invalid), 400);
   assert(server.backend->calls == calls_before);
+  // A turn cut by max_tokens reports the cut, as Chat finish_reason does,
+  // even when a complete call precedes it.
+  server.backend->SetOutput(
+      "<tool_call>\n<function=get_weather>\n<parameter=city>\nRome\n"
+      "</parameter>\n</function>\n</tool_call>");
+  const auto truncated = response_body(server.Post(
+      "/v1/messages", R"({"max_tokens":1,"tool_choice":{"type":"auto"},
+          "messages":[{"role":"user","content":"weather in Rome?"}],
+          "tools":)" + weather_tool +
+                          "}"));
+  assert(truncated.member_str("stop_reason") == "max_tokens");
   // Without declared tools, call markup stays visible text as before.
   server.backend->SetOutput("<tool_call>leak");
   const auto undeclared = response_body(server.Post(
