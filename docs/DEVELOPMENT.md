@@ -52,6 +52,11 @@ cmake --preset release
 cmake --build --preset release --parallel 4
 ```
 
+CMake compiles C and C++ through `ccache` when it is on `PATH`, so reconfigured
+builds and header changes reuse cached objects; the configure log reports either
+`gufo: compiling C and CXX through ...` or `gufo: ccache not found`. HIP kernels
+are not launched through the cache.
+
 ### Presets
 
 | Configure preset | Build type | Contents |
