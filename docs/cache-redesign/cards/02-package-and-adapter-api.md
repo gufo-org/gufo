@@ -1,8 +1,8 @@
 # 02 · `src/cache/` package, adapter API and fake adapter
 
-**Milestone:** Common package · **Depends on:** — · **Size:** M ·
+**Milestone:** Common package · **Depends on:** — · **Size:** L (contracts and fake adapter) ·
 **Affects:** nothing at runtime (new library, not linked into serving yet) ·
-**Status:** agreed
+**Status:** in progress
 
 ## Goal
 
@@ -121,10 +121,74 @@ round trip through the adapter directly, injected failure surfaces as an error.
 
 None: this card adds contracts only, no executable behavior worth measuring.
 
+### Implementation record
+
+`src/cache/` now builds as the independent static library `gufo_cache` in the
+CPU and gfx1151 release presets. Public headers define typed component/slot
+identifiers, descriptors, independent component positions, capabilities,
+compatibility and supplemental input identity, slots, mutation guards,
+bounded transfers, completions, streams and events. It has no link to serving.
+
+The concrete API retains the sketch's guard direction: the cache supplies a
+guard, and model-owned slots call it before changing or releasing append rows.
+Guard refusal may throw before ordinary mutation. Invalidation and destruction
+require nonthrowing preservation/retirement; the guard outlives its slots.
+Real preservation, pins and leases still belong to card 06.
+
+`Completion` owns one signal, is move-only and drains outstanding work on
+destruction or replacement. `Wait` settles all buffer accesses even on failure
+and retains the result. Callers retain slots, streams and immutable source
+buffers until completion. Loads invalidate execution immediately; successful
+`Validate` requires every component at its own recorded position. All slot
+transfers must settle before validation, invalidation or destruction.
+
+Supplemental input identities preserve the current cache's inclusive boundary
+semantics: before an appended image, earlier checkpoints keep their original
+identity. `InputIdentity` owns and checks ordered boundaries. Token-prefix
+matching remains separate and arrives with card 05.
+
+The fake adapter is test-only in `tests/cache/`. Its target and draft row arrays
+advance independently, and its private hash-chain state detects mismatched
+target or draft rows. It injects slot allocation and transfer failures.
+`FakeStream` supplies FIFO ordering and manually delayed completion without
+threads, clocks or device dependencies.
+
+Validation on Linux x86-64, based on `bf4f811f`, with the flake.lock-pinned GCC
+15.3.0, CMake 4.3.4 and Python 3.14.6. That base's source tree is identical to
+merged main `94a4fa8d` (card 01, PR #490), on which this PR is based:
+
+```sh
+cmake --preset cpu-test
+cmake --build --preset cpu-test --target cache_adapter_test --parallel 4
+ctest --preset cpu-test -R '^cache_(adapter|boundary)_test$' --output-on-failure
+cmake --preset release
+cmake --build --preset release --target gufo_cache --parallel 4
+cmake --build --preset pr --parallel 4
+```
+
+The focused adapter contracts cover independent positions, bounded and delayed
+round trips, continued execution after restore, corrupted target/draft rows,
+missing/duplicate components, pending or failed loads, preservation refusal,
+allocation/transfer failure, completion lifetime/moves and image boundaries.
+The boundary check rejects serving/model includes, including nested paths and
+continued preprocessor lines, and tests its own rejection cases. Both new tests
+are registered in the hosted `pr` target.
+
+Both focused tests and all 43 hosted PR tests passed; the release library
+build passed. The shared formatting check, focused static analysis, documentation
+link check and diff whitespace check passed. Nix shells used the flake's pinned
+inputs: a CPU-only dependency shell for hosted checks and `inputsFrom` the
+production package for release configuration, without building reference tools.
+
+The test-first compilation failed on the missing cache headers before their
+implementation. No GPU numerics, model workload or performance qualification
+is claimed by these CPU fixtures; those remain with the adapter and switch-over
+cards. Build artifacts stay in the ignored `build/` directories.
+
 ## Done when
 
-- [ ] `gufo_cache` builds in the `cpu-test` and `release` presets.
-- [ ] The boundary check runs in the `pr` preset.
+- [x] `gufo_cache` builds in the `cpu-test` and `release` presets.
+- [x] The boundary check runs in the `pr` preset.
 
 ## Review focus
 
@@ -155,4 +219,3 @@ required (see the README).
 [Two-layer code structure](../RFC.md#two-layer-code-structure)
 
 ## Review notes
-

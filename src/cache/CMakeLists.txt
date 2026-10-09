@@ -1,0 +1,6 @@
+add_library(gufo_cache STATIC completion.cpp identity.cpp)
+target_include_directories(gufo_cache PUBLIC ${PROJECT_SOURCE_DIR})
+target_compile_features(gufo_cache PUBLIC cxx_std_20)
+if(BUILD_TESTING)
+  target_compile_options(gufo_cache PRIVATE -UNDEBUG)
+endif()

@@ -82,6 +82,8 @@ if (GUFO_ENABLE_SANITIZERS)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
+add_subdirectory(src/cache)
+
 add_library(gufo_diagnostics STATIC
   src/core/diagnostics/gpu_queues.cpp
   src/core/diagnostics/linux_sysfs.cpp
@@ -299,6 +301,8 @@ include(CTest)
 if (BUILD_TESTING)
   add_compile_options(-UNDEBUG)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+  add_subdirectory(tests/cache)
 
   # Opt-in live process-failure checks, never preloaded into hosted tests or
   # production. No HIP headers are needed for these stable C ABI hooks.

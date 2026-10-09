@@ -1,6 +1,7 @@
 # Hosted CPU regression suite. Other tests remain available through CTest and
 # explicit targets; adding a model oracle must not make every PR expensive.
 set(gufo_pr_targets
+  cache_adapter_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
   logit_sampler_test ggml_dequant_test
   quote_tracker_test
@@ -24,6 +25,7 @@ list(APPEND gufo_pr_tests
   "ds4\\.sampling" "ds4\\.template" "ds4\\.cli"
   gufo_version gufo_help serve_cli_test eval_http_test functional_runner_test
   cache_workloads_test cache_disk_faults_test
+  cache_boundary_test
   kernel_resources_parser_test)
 list(JOIN gufo_pr_tests "|" gufo_pr_pattern)
 add_custom_target(check-pr
