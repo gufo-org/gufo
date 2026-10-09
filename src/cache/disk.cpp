@@ -638,10 +638,13 @@ struct DiskStore::Impl {
   void RequireRecovered() const {
     if (recovery_required)
       throw std::runtime_error(
-          "cache manifest outcome uncertain; run orphan recovery before "
+          "cache durability outcome uncertain; run orphan recovery before "
           "publication or retirement");
   }
   void Reclaim() {
+    // Any incomplete cleanup must establish deletion durability before its
+    // released byte capacity can fund another publication.
+    recovery_required = true;
     // Even invalid manifests are removed and that removal made durable before
     // dependencies: a crash must never resurrect a manifest with deleted bytes.
     Scan(manifests.Get(), [&](const auto& name, const auto&) {
@@ -1055,24 +1058,25 @@ bool DiskStore::Retire(CheckpointId id) {
   try {
     impl_->Remove(impl_->manifests.Get(), DiskFileName(retired.file_));
     impl_->Sync(impl_->manifests.Get());
+    for (const auto& c : retired.manifest_.components) {
+      for (const auto& p : c.chunks)
+        if (!impl_->Referenced(impl_->chunks.Get(), p.file))
+          impl_->Remove(impl_->chunks.Get(), DiskFileName(p.file));
+      for (auto p : {c.tail, c.private_state})
+        if (p && !impl_->Referenced(impl_->private_files.Get(), p->file))
+          impl_->Remove(impl_->private_files.Get(), DiskFileName(p->file));
+    }
+    impl_->Sync(impl_->chunks.Get());
+    impl_->Sync(impl_->private_files.Get());
+    return true;
   } catch (...) {
-    // An uncertain unlink can resurrect the old checkpoint identity after a
-    // power loss. Do not let another publication reuse it before recovery.
+    // Both checkpoint identities and freed payload capacity remain uncertain
+    // until every deletion has crossed its directory durability barrier.
     impl_->recovery_required = true;
     throw;
   }
-  for (const auto& c : retired.manifest_.components) {
-    for (const auto& p : c.chunks)
-      if (!impl_->Referenced(impl_->chunks.Get(), p.file))
-        impl_->Remove(impl_->chunks.Get(), DiskFileName(p.file));
-    for (auto p : {c.tail, c.private_state})
-      if (p && !impl_->Referenced(impl_->private_files.Get(), p->file))
-        impl_->Remove(impl_->private_files.Get(), DiskFileName(p->file));
-  }
-  impl_->Sync(impl_->chunks.Get());
-  impl_->Sync(impl_->private_files.Get());
-  return true;
 }
+
 void DiskStore::ReclaimOrphans() {
   // Scheduling/joining are caller-ordered, independent of worker store locking.
   WaitForReclamation();

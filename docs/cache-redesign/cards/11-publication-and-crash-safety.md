@@ -204,3 +204,13 @@ succeeds; failed operations leave them for background recovery. A linker wrapper
 models both an error before unlink and an applied unlink followed by EIO, checking
 that neither exposes the old entry, recovery reconciles every byte, and a new
 publication succeeds. The applied-unlink case failed against the prior revision.
+
+The final audit found a disk-budget variant after payload-directory sync failure:
+released bytes could fund another partial publication before the old deletions
+were durable, and a power-loss replay could resurrect orphans above budget.
+Every retirement failure now sets the recovery barrier, and reclamation sets it
+before any cleanup and clears it only after all directory syncs and accounting
+reconciliation succeed. Regressions inject all three retirement sync failures
+and all four reclamation sync failures, checking fresh-ID writes stay blocked
+until successful recovery. The audit used a modeled crash namespace, not a
+physical power-loss test.

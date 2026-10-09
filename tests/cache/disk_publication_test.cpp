@@ -296,36 +296,36 @@ void UncertainManifestBarrier() {
   CheckPublished(reopened, dir.path);
 }
 void RetirementFailure() {
-  Directory dir;
-  Fixture f;
-  DiskStore store(ledger, dir.path, 100000);
-  store.Publish(Id(100), f.manifest, f.buffers);
-  auto bytes = store.Stats().managed_bytes;
-  fail_sync = 0;
-  Reject([&] { (void)store.Retire({1}); });
-  fail_sync = -1;
-  assert(store.Entries().empty());
-  assert(Managed(dir.path) == 28);
-  assert(store.Stats().managed_bytes ==
-         bytes - EncodeManifest(f.manifest).size());
-  Fixture retry;
-  retry.manifest.components[0].chunks[0].file = Id(51);
-  retry.manifest.components[0].tail->file = Id(52);
-  retry.manifest.components[1].private_state->file = Id(53);
-  retry.buffers[0].file = Id(51);
-  retry.buffers[1].file = Id(52);
-  retry.buffers[2].file = Id(53);
-  Reject([&] { store.Publish(Id(101), retry.manifest, retry.buffers); });
-  fail_sync = 0;
-  store.ReclaimOrphans();
-  Reject([&] { store.WaitForReclamation(); });
-  fail_sync = -1;
-  Reject([&] { store.Publish(Id(101), retry.manifest, retry.buffers); });
-  store.ReclaimOrphans();
-  store.WaitForReclamation();
-  assert(Managed(dir.path) == 0);
-  store.Publish(Id(101), retry.manifest, retry.buffers);
-  CheckPublished(store, dir.path);
+  for (int sync : {0, 1, 2}) {
+    Directory dir;
+    Fixture f;
+    DiskStore store(ledger, dir.path, 100000);
+    store.Publish(Id(100), f.manifest, f.buffers);
+    fail_sync = sync;
+    Reject([&] { (void)store.Retire({1}); });
+    fail_sync = -1;
+    assert(store.Entries().empty());
+    assert(Managed(dir.path) == (sync == 0 ? 28 : 0));
+    assert(store.Stats().managed_bytes == Managed(dir.path));
+    Fixture retry;
+    retry.manifest.components[0].chunks[0].file = Id(51);
+    retry.manifest.components[0].tail->file = Id(52);
+    retry.manifest.components[1].private_state->file = Id(53);
+    retry.buffers[0].file = Id(51);
+    retry.buffers[1].file = Id(52);
+    retry.buffers[2].file = Id(53);
+    Reject([&] { store.Publish(Id(101), retry.manifest, retry.buffers); });
+    fail_sync = 0;
+    store.ReclaimOrphans();
+    Reject([&] { store.WaitForReclamation(); });
+    fail_sync = -1;
+    Reject([&] { store.Publish(Id(101), retry.manifest, retry.buffers); });
+    store.ReclaimOrphans();
+    store.WaitForReclamation();
+    assert(Managed(dir.path) == 0);
+    store.Publish(Id(101), retry.manifest, retry.buffers);
+    CheckPublished(store, dir.path);
+  }
 }
 void RetirementUnlinkFailure() {
   for (bool applied : {true, false}) {
@@ -345,6 +345,31 @@ void RetirementUnlinkFailure() {
     store.WaitForReclamation();
     assert(Managed(dir.path) == 0 && store.Stats().managed_bytes == 0);
     store.Publish(Id(101), b.manifest, b.buffers);
+    CheckPublished(store, dir.path);
+  }
+}
+void ReclamationSyncFailures() {
+  for (int sync : {0, 1, 2, 3}) {
+    Directory dir;
+    DiskStore store(ledger, dir.path, 100000);
+    Fixture a, fresh(2);
+    short_writes = true;
+    fail_write = 1;
+    Reject([&] { store.Publish(Id(100), a.manifest, a.buffers); });
+    short_writes = false;
+    fail_write = -1;
+    fresh.manifest.components[0].chunks[0].file = Id(51);
+    fresh.buffers[0].file = Id(51);
+    fail_sync = sync;
+    store.ReclaimOrphans();
+    Reject([&] { store.WaitForReclamation(); });
+    fail_sync = -1;
+    // Fresh IDs avoid incidental name collisions with the partial write.
+    Reject([&] { store.Publish(Id(101), fresh.manifest, fresh.buffers); });
+    store.ReclaimOrphans();
+    store.WaitForReclamation();
+    assert(Managed(dir.path) == 0 && store.Stats().managed_bytes == 0);
+    store.Publish(Id(101), fresh.manifest, fresh.buffers);
     CheckPublished(store, dir.path);
   }
 }
@@ -522,6 +547,7 @@ int main() {
   Failures();
   RetirementFailure();
   RetirementUnlinkFailure();
+  ReclamationSyncFailures();
   UncertainManifestBarrier();
   RejectedStartupBarrier();
   RecoveryAndUnknowns();
