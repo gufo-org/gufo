@@ -195,3 +195,12 @@ now sets the recovery barrier on manifest unlink or sync errors. Regressions
 cover both errors, a failed recovery sync, blocked publication until recovery,
 and successful publication afterward. The review's replay probe models the old
 unlink returning after a crash; it is not a physical power-loss simulation.
+
+Round 4 identified an uncertain unlink that takes effect but returns an error:
+the old entry remained indexed, so recovery treated its missing manifest as
+retained and cleared the barrier. Retirement now removes the index claim before
+attempting unlink. Dependencies stay protected until the manifest-directory sync
+succeeds; failed operations leave them for background recovery. A linker wrapper
+models both an error before unlink and an applied unlink followed by EIO, checking
+that neither exposes the old entry, recovery reconciles every byte, and a new
+publication succeeds. The applied-unlink case failed against the prior revision.

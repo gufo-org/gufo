@@ -1047,13 +1047,13 @@ bool DiskStore::Retire(CheckpointId id) {
   });
   if (it == entries.end() || it->pin_.use_count() > 1)
     return false;
-  DurableEntry retired;
+  // Remove the index claim before attempting unlink: an I/O error can report
+  // an uncertain outcome even when the directory entry has disappeared. Keep
+  // dependencies untouched until the manifest-directory barrier succeeds.
+  auto retired = std::move(*it);
+  entries.erase(it);
   try {
-    impl_->Remove(impl_->manifests.Get(), DiskFileName(it->file_));
-    // Once unlinked, stop exposing the checkpoint even if directory sync fails.
-    // In that case dependencies remain orphans until a later durable barrier.
-    retired = std::move(*it);
-    entries.erase(it);
+    impl_->Remove(impl_->manifests.Get(), DiskFileName(retired.file_));
     impl_->Sync(impl_->manifests.Get());
   } catch (...) {
     // An uncertain unlink can resurrect the old checkpoint identity after a

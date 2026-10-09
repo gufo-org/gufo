@@ -17,7 +17,8 @@ using namespace gufo::cache;
 namespace fs = std::filesystem;
 namespace {
 std::atomic<int> fail_sync{-1}, fail_write{-1};
-std::atomic<bool> interrupt_sync{}, short_writes{}, record_io{}, fail_unlink{};
+std::atomic<bool> interrupt_sync{}, short_writes{}, record_io{}, fail_unlink{},
+    unlink_effect_error{};
 std::vector<std::string> events;
 std::string FdPath(int fd) {
   char path[4096];
@@ -327,18 +328,25 @@ void RetirementFailure() {
   CheckPublished(store, dir.path);
 }
 void RetirementUnlinkFailure() {
-  Directory dir;
-  Fixture a, b(2);
-  DiskStore store(ledger, dir.path, 100000);
-  store.Publish(Id(100), a.manifest, a.buffers);
-  fail_unlink = true;
-  Reject([&] { (void)store.Retire({1}); });
-  assert(store.Entries().size() == 1);
-  Reject([&] { store.Publish(Id(101), b.manifest, b.buffers); });
-  store.ReclaimOrphans();
-  store.WaitForReclamation();
-  store.Publish(Id(101), b.manifest, b.buffers);
-  CheckPublished(store, dir.path);
+  for (bool applied : {true, false}) {
+    Directory dir;
+    Fixture a, b(2);
+    DiskStore store(ledger, dir.path, 100000);
+    store.Publish(Id(100), a.manifest, a.buffers);
+    if (applied)
+      unlink_effect_error = true;
+    else
+      fail_unlink = true;
+    Reject([&] { (void)store.Retire({1}); });
+    assert(store.Entries().empty());
+    assert(!store.Pin({1}));
+    Reject([&] { store.Publish(Id(101), b.manifest, b.buffers); });
+    store.ReclaimOrphans();
+    store.WaitForReclamation();
+    assert(Managed(dir.path) == 0 && store.Stats().managed_bytes == 0);
+    store.Publish(Id(101), b.manifest, b.buffers);
+    CheckPublished(store, dir.path);
+  }
 }
 void RecoveryAndUnknowns() {
   Directory dir;
@@ -498,7 +506,12 @@ extern "C" int __wrap_unlinkat(int fd, const char* name, int flags) {
   }
   if (record_io)
     events.push_back("unlink:" + FdPath(fd) + "/" + name);
-  return __real_unlinkat(fd, name, flags);
+  auto result = __real_unlinkat(fd, name, flags);
+  if (unlink_effect_error.exchange(false) && result == 0) {
+    errno = EIO;
+    return -1;
+  }
+  return result;
 }
 int main() {
   const rlimit no_core{0, 0};
