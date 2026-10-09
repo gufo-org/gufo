@@ -69,6 +69,17 @@ must perform zero drafts. `state-edges` requires actual draft execution when
 enabled, so a loaded-but-unused sidecar cannot qualify that mode. Use the normal
 draft limit for this suite. Audio and image/video generation have separate tests.
 
+Card 01's new cache workloads stay outside routine functional runs until the
+new cache lands in card 19. Both `run.py --suite all` and
+`openai_sdk.py --suite all` exclude `cache-compaction`, `cache-transforms`,
+`cache-pressure` and `cache-messages-loop`. The disk lifecycle runner is
+standalone and is never invoked by `all`. Existing functional suites and the
+passing CPU workload/gate checks remain active. Explicitly selecting a new
+workload still runs its strict assertions and may fail on the legacy cache;
+use that selection only to record a baseline or develop the new cache.
+Card 19 enables these workloads in routine qualification with their required
+RAM, disk and restart settings once their contracts pass.
+
 | Suite | Checks |
 | --- | --- |
 | `discovery` | Health, readiness, model ID/context and advertised text/image inputs; no generation |

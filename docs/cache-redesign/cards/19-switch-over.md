@@ -73,6 +73,10 @@ card 01 scenarios with their `main` results. All of this feeds card 20.
 
 ## Done when
 
+- [ ] Enable card 01's opt-in model workloads in routine functional
+  qualification after they pass on the new cache, using the required separate
+  RAM-pressure and disk/restart settings. Until then, keep them outside
+  `--suite all`; the CPU harness/gate checks stay active.
 - [ ] Correctness passes for every mode; restored state passes the numerical
   checks; no partial state executes after a crash, corruption or cancellation.
 - [ ] Per-request 5% / 3 ms timing gates against matched `main` controls hold,

@@ -55,6 +55,17 @@ kinds are useful.
 - Compare answers with uncached controls, as the existing suites do.
 - Suites that need disk or restarts are selected explicitly, not part of `all`.
 
+## Activation
+
+The new model workloads remain opt-in until card 19. Both functional runners
+exclude `cache-compaction`, `cache-transforms`, `cache-pressure` and
+`cache-messages-loop` from `--suite all`; the disk lifecycle runner is separate.
+Their known legacy-cache failures cannot fail routine functional runs. The
+passing CPU harness/gate checks remain enabled. Explicit baseline/development
+runs retain strict failures. Card 19 enables the model workloads in routine
+qualification after the new cache satisfies their contracts, with separate
+settings for RAM pressure and disk/restart cases.
+
 ## Not in this PR
 
 Changes to the current cache to make failing scenarios pass.
