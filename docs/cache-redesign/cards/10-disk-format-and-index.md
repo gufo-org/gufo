@@ -65,7 +65,12 @@ for card 11. Names outside this convention are unknown. Startup counts the
 logical sizes of every recognized regular v2 file, including invalid manifests,
 orphan payloads and temporary files, once per directory entry. Filesystem block
 allocation and directory/lock inode overhead are outside this payload budget.
-No payload or orphan reclamation runs at startup.
+No payload or orphan reclamation runs at startup. `DiskStore` receives the
+common `ResourceLedger`: index capacity, decoded token/input/component/chunk
+vectors, raw manifest read buffers and validation working capacity are admitted
+as metadata before allocation. Insufficient RAM admission fails startup and
+releases every charge and the directory lock. Reservations include conservative
+working capacity; accounting excludes allocator/control-block bookkeeping.
 
 The binary manifest has this ordered encoding. Every integer is unsigned
 little-endian, without padding; component layout versions remain separate from
@@ -111,6 +116,15 @@ can occur. A preexisting over-budget legacy store may therefore shrink to fit;
 the constructor cannot retroactively bound bytes written by the old store.
 Card 11 adds publication reservations and reclamation.
 
+### Review follow-up
+
+Round 1 found three edge cases, now covered by regressions: startup metadata
+must use RAM admission, legacy magic reads must retry `EINTR` and short reads,
+and a root symlink with `/` or `/.` must not bypass `O_NOFOLLOW`. Root path
+normalization strips terminal separators/dot components without resolving
+symlinks. Exact RAM peak boundaries and every reserve/convert failure point
+verify complete rollback, lock release and removal of rejected-entry charges.
+
 ### Validation and step baseline
 
 The focused `cache_disk_test` covers two owners in one process and a forked
@@ -142,10 +156,16 @@ Step baseline on Linux 7.2.9, AMD Ryzen AI MAX+ 395, flake.lock-pinned GCC
 | Measurement | Result |
 | --- | ---: |
 | Manifest size at exactly 100,000 tokens | 401,779 bytes |
-| Startup, 100 manifests | 85.257 ms; 40,177,900 manifest bytes read; 5,000 dependency stats |
-| Startup, 1,000 manifests | 849.831 ms; 401,779,000 manifest bytes read; 50,000 dependency stats |
+| Initial startup, 100 manifests | 85.257 ms; 40,177,900 manifest bytes read; 5,000 dependency stats |
+| Initial startup, 1,000 manifests | 849.831 ms; 401,779,000 manifest bytes read; 50,000 dependency stats |
 
-One warm-cache run per size, immediately after writing fixtures on `/tmp`.
+After round 1's metadata admission fixes, a retained repeat recorded 85.155 ms
+for 100 manifests and 842.178 ms for 1,000; manifest bytes and dependency stats
+were identical to the initial measurements. These are separate observations,
+not an averaged timing or a claim of a performance improvement.
+
+One warm-cache run per size for each revision, immediately after writing fixtures
+on `/tmp`.
 Every checkpoint has 100k tokens, one row component (4 bytes/row, 2,048
 rows/chunk) and a 16-byte private component. Full chunks are shared in one
 lineage; each checkpoint has its own tail and private state. Sparse payloads

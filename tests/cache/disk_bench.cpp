@@ -48,6 +48,7 @@ DiskManifest Manifest(std::size_t tokens, std::uint64_t checkpoint) {
 }
 }  // namespace
 int main() {
+  ResourceLedger ledger{{1ULL << 32, 1ULL << 32, 0, 0}};
   std::cout << "100k_token_manifest_bytes="
             << EncodeManifest(Manifest(100000, 1)).size() << '\n';
   for (unsigned count : {100, 1000}) {
@@ -55,7 +56,7 @@ int main() {
     fs::path root = mkdtemp(name);
     try {
       {
-        DiskStore init(root, UINT64_MAX);
+        DiskStore init(ledger, root, UINT64_MAX);
       }
       std::size_t expected{};
       for (unsigned i = 1; i <= count; ++i) {
@@ -81,7 +82,7 @@ int main() {
         }
       }
       auto begin = std::chrono::steady_clock::now();
-      DiskStore store(root, UINT64_MAX);
+      DiskStore store(ledger, root, UINT64_MAX);
       auto elapsed = std::chrono::duration<double, std::milli>(
                          std::chrono::steady_clock::now() - begin)
                          .count();

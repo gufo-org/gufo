@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -13,6 +14,7 @@ using namespace gufo::cache;
 namespace fs = std::filesystem;
 namespace {
 std::atomic<std::uint64_t> actual_manifest_bytes{}, actual_payload_bytes{};
+std::atomic<bool> interrupt_next_read{}, shorten_reads{};
 void CountRead(int fd, ssize_t bytes) {
   if (bytes <= 0)
     return;
@@ -31,6 +33,12 @@ void CountRead(int fd, ssize_t bytes) {
 }  // namespace
 extern "C" ssize_t __real_read(int, void*, size_t);
 extern "C" ssize_t __wrap_read(int fd, void* buffer, size_t size) {
+  if (interrupt_next_read.exchange(false)) {
+    errno = EINTR;
+    return -1;
+  }
+  if (shorten_reads && size > 1)
+    size = 1;
   auto n = __real_read(fd, buffer, size);
   CountRead(fd, n);
   return n;
@@ -43,6 +51,7 @@ extern "C" ssize_t __wrap_pread(int fd, void* buffer, size_t size,
   return n;
 }
 namespace {
+ResourceLedger ledger{{1ULL << 32, 1ULL << 32, 0, 0}};
 struct Directory {
   fs::path path;
   Directory() {
@@ -158,13 +167,13 @@ void Format() {
 void Ownership() {
   Directory d;
   {
-    DiskStore first(d.path, 100000);
-    Reject([&] { DiskStore second(d.path, 100000); });
+    DiskStore first(ledger, d.path, 100000);
+    Reject([&] { DiskStore second(ledger, d.path, 100000); });
     pid_t child = fork();
     assert(child >= 0);
     if (child == 0) {
       try {
-        DiskStore second(d.path, 100000);
+        DiskStore second(ledger, d.path, 100000);
       } catch (const std::exception& e) {
         _exit(std::string(e.what()).find(d.path.string()) != std::string::npos
                   ? 0
@@ -176,12 +185,12 @@ void Ownership() {
     assert(waitpid(child, &status, 0) == child);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
   }
-  DiskStore reopened(d.path, 100000);
+  DiskStore reopened(ledger, d.path, 100000);
 }
 void Index() {
   Directory d;
   {
-    DiskStore init(d.path, UINT64_MAX);
+    DiskStore init(ledger, d.path, UINT64_MAX);
   }
   auto m = Manifest();
   Payloads(d.path, m);
@@ -190,9 +199,10 @@ void Index() {
   actual_manifest_bytes = 0;
   actual_payload_bytes = 0;
   {
-    DiskStore store(d.path, UINT64_MAX);
+    DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().size() == 1);
-    assert(store.Entries()[0].durable && !store.Entries()[0].payload_verified);
+    assert(store.Entries()[0].Durable() &&
+           !store.Entries()[0].PayloadVerified());
     assert(store.Stats().manifest_bytes_read == encoded_size);
     assert(store.Stats().dependency_stats == 3);
     assert(actual_manifest_bytes == encoded_size && actual_payload_bytes == 0);
@@ -205,7 +215,7 @@ void Index() {
   Payloads(d.path, m);
   Put(d.path, m);
   {
-    DiskStore store(d.path, UINT64_MAX);
+    DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().size() == 1);
     assert(store.Stats().manifest_bytes_read == encoded_size);
   }
@@ -213,7 +223,7 @@ void Index() {
          actual_payload_bytes == 0);
   fs::resize_file(d.path / "v2/chunks" / DiskFileName(Id(1)), 7);
   {
-    DiskStore store(d.path, UINT64_MAX);
+    DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().empty() && store.Stats().rejected_manifests == 1);
   }
   Payloads(d.path, m);
@@ -221,7 +231,7 @@ void Index() {
   fs::remove(dependency);
   fs::create_symlink("/dev/zero", dependency);
   {
-    DiskStore store(d.path, UINT64_MAX);
+    DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().empty());
   }
   fs::remove(dependency);
@@ -233,7 +243,7 @@ void Index() {
   fs::resize_file(d.path / "v2/manifests" / DiskFileName(Id(9)),
                   kMaxManifestBytes + 1);
   {
-    DiskStore store(d.path, UINT64_MAX);
+    DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().size() == 1 &&
            store.Stats().rejected_manifests == 2);
     assert(store.Stats().manifest_bytes_read == encoded_size * 2);
@@ -242,7 +252,7 @@ void Index() {
 void Conflicts() {
   Directory d;
   {
-    DiskStore init(d.path, UINT64_MAX);
+    DiskStore init(ledger, d.path, UINT64_MAX);
   }
   auto a = Manifest(), b = a;
   b.checkpoint = {8};
@@ -253,26 +263,26 @@ void Conflicts() {
   Put(d.path, a, 7);
   Put(d.path, b, 8);
   {
-    DiskStore store(d.path, UINT64_MAX);
+    DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().size() == 2);
   }
   b.components[0].chunks[0].checksum++;
   Put(d.path, b, 8);
   {
-    DiskStore store(d.path, UINT64_MAX);
+    DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().empty() && store.Stats().rejected_manifests == 2);
   }
   b = a;
   b.checkpoint = {8};
   Put(d.path, b, 8);
   {
-    DiskStore store(d.path, UINT64_MAX);
+    DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().empty());
   }
   fs::remove(d.path / "v2/manifests" / DiskFileName(Id(8)));
   Put(d.path, a, 9);
   {
-    DiskStore store(d.path, UINT64_MAX);
+    DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().empty());
   }
 }
@@ -290,7 +300,7 @@ void Cleanup() {
   Write(unrelated.path / "old.kvc", legacy);
   fs::create_directory_symlink(unrelated.path, d.path / "other");
   fs::create_symlink(unrelated.path / "old.kvc", d.path / "link.kvc");
-  DiskStore store(d.path, 0);
+  DiskStore store(ledger, d.path, 0);
   assert(!fs::exists(d.path / "old.kvc") && !fs::exists(d.path / ".tmp-owned"));
   assert(store.Stats().removed_legacy_bytes == 1000008);
   assert(store.Stats().managed_bytes == 0);
@@ -298,23 +308,108 @@ void Cleanup() {
                         "other/old.kvc", "link.kvc"})
     assert(fs::exists(d.path / p));
 }
+void InterruptedCleanup() {
+  Directory d;
+  const std::array<std::uint8_t, 4> legacy{'G', 'U', 'F', 'O'};
+  Write(d.path / "old.kvc", legacy);
+  fs::resize_file(d.path / "old.kvc", 1000000);
+  interrupt_next_read = true;
+  shorten_reads = true;
+  {
+    DiskStore store(ledger, d.path, 0);
+    assert(!fs::exists(d.path / "old.kvc"));
+    assert(store.Stats().removed_legacy_bytes == 1000000);
+    assert(store.Stats().legacy_probe_bytes_read == 4);
+  }
+  shorten_reads = false;
+}
+void RootSymlinks() {
+  Directory d, target;
+  Write(target.path / "old.kvc",
+        std::array<std::uint8_t, 4>{'G', 'U', 'F', 'O'});
+  auto link = d.path / "alias";
+  fs::create_directory_symlink(target.path, link);
+  for (const auto& suffix : {"", "/", "/.", "/./"}) {
+    Reject([&] { DiskStore store(ledger, link.string() + suffix, 0); });
+    assert(fs::exists(target.path / "old.kvc"));
+    assert(!fs::exists(target.path / "LOCK"));
+  }
+}
+void MetadataAdmission() {
+  Directory d;
+  {
+    DiskStore init(ledger, d.path, UINT64_MAX);
+  }
+  auto m = Manifest();
+  Payloads(d.path, m);
+  Put(d.path, m);
+  std::size_t peak{}, retained{};
+  {
+    DiskStore store(ledger, d.path, UINT64_MAX);
+    auto snap = ledger.Snapshot();
+    peak = snap.peak_ram_bytes;
+    retained = snap.ram_bytes;
+    assert(retained >= m.tokens.size() * sizeof(Token));
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+  ResourceLedger exact{{peak, peak, 0, 0}};
+  {
+    DiskStore store(exact, d.path, UINT64_MAX);
+    assert(store.Entries().size() == 1);
+  }
+  assert(exact.Snapshot().total_bytes == 0);
+  // Discover the exact peak for this fixture rather than an earlier test.
+  peak = exact.Snapshot().peak_ram_bytes;
+  ResourceLedger short_budget{{peak - 1, peak - 1, 0, 0}};
+  Reject([&] { DiskStore store(short_budget, d.path, UINT64_MAX); });
+  assert(short_budget.Snapshot().total_bytes == 0);
+  for (auto step : {LedgerStep::kReserve, LedgerStep::kConvert}) {
+    bool succeeded = false;
+    for (std::size_t n = 0; n < 32; ++n) {
+      ResourceLedger faults{{1 << 20, 1 << 20, 0, 0}};
+      faults.FailAfter(step, n);
+      try {
+        DiskStore store(faults, d.path, UINT64_MAX);
+        assert(store.Entries().size() == 1);
+        succeeded = true;
+      } catch (const std::bad_alloc&) {
+      }
+      assert(faults.Snapshot().total_bytes == 0);
+      // Failed constructors also relinquish ownership.
+      {
+        DiskStore reopened(ledger, d.path, UINT64_MAX);
+      }
+      if (succeeded)
+        break;
+    }
+    assert(succeeded);
+  }
+  // Structurally rejected entries retain no decoded-vector charge.
+  fs::resize_file(d.path / "v2/chunks" / DiskFileName(Id(1)), 7);
+  {
+    DiskStore rejected(ledger, d.path, UINT64_MAX);
+    assert(rejected.Entries().empty());
+    assert(ledger.Snapshot().ram_bytes < retained);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
 void BudgetAndDirectories() {
   Directory d, unrelated;
   {
-    DiskStore init(d.path, 1000);
+    DiskStore init(ledger, d.path, 1000);
   }
   auto m = Manifest();
   Payloads(d.path, m);
   Put(d.path, m);
   auto size = EncodeManifest(m).size() + 28;
-  Reject([&] { DiskStore store(d.path, size - 1); });
+  Reject([&] { DiskStore store(ledger, d.path, size - 1); });
   {
-    DiskStore store(d.path, size);
+    DiskStore store(ledger, d.path, size);
     assert(store.Entries().size() == 1);
   }
   fs::remove_all(d.path / "v2/private");
   fs::create_directory_symlink(unrelated.path, d.path / "v2/private");
-  Reject([&] { DiskStore store(d.path, UINT64_MAX); });
+  Reject([&] { DiskStore store(ledger, d.path, UINT64_MAX); });
   assert(fs::is_empty(unrelated.path));
 }
 }  // namespace
@@ -325,5 +420,9 @@ int main() {
   Conflicts();
   Cleanup();
   BudgetAndDirectories();
+  InterruptedCleanup();
+  RootSymlinks();
+  MetadataAdmission();
+  assert(ledger.Snapshot().total_bytes == 0);
   std::cout << "disk format, ownership and metadata index passed\n";
 }
