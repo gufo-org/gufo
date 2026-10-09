@@ -77,6 +77,9 @@ struct TextRunnerDiskCacheOptions {
 /// Nullopt when MemAvailable is missing.
 [[nodiscard]] std::optional<std::uint64_t> MeminfoAvailableBytes(
     std::string_view meminfo);
+/// Host RAM still available, after cgroup limits, excluding free CMA pages.
+/// Unified-memory allocations draw from this RAM.
+[[nodiscard]] std::uint64_t HostAvailableBytes();
 /// Automatic snapshot budget: half the host RAM available after loading
 /// (excluding free CMA pages), after cgroup limits.
 [[nodiscard]] std::size_t HostSnapshotBudgetBytes();
@@ -86,6 +89,10 @@ inline constexpr std::uint64_t kHostSnapshotHeadroomBytes = std::uint64_t{4}
 /// Most an explicit --cache-ram-bytes may claim: available host RAM minus
 /// kHostSnapshotHeadroomBytes.
 [[nodiscard]] std::size_t HostSnapshotCeilingBytes();
+/// Session-state bytes that fit in host_available_bytes. Deferred scratch is
+/// not allocated yet, and kHostSnapshotHeadroomBytes stays with the OS.
+[[nodiscard]] std::size_t HostStateCapacityBytes(
+    std::uint64_t host_available_bytes, std::size_t deferred_scratch_bytes);
 
 enum class TextExecutionPlanKind : std::uint8_t {
   kSerial,
