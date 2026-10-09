@@ -399,6 +399,7 @@ if (BUILD_TESTING)
     tests/cli/openai_chat_test.cpp
     src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
+    src/models/deepseek_v4_flash/chat_template.cpp
   )
   target_link_libraries(openai_chat_test PRIVATE gufo_core)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
