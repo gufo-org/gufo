@@ -17,11 +17,12 @@ using Samples = std::array<std::vector<std::uint64_t>, 3>;
 std::uint64_t Ns(Clock::duration elapsed) {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
 }
-void Run(unsigned count, bool spill, bool lock_timing) {
+void Run(unsigned count, ResourceCategory category, bool lock_timing) {
+  const bool pooled = category != ResourceCategory::kMetadata;
   constexpr unsigned iterations = 20000;
   ResourceLedger ledger({1 << 20, 1 << 20, 0, 0}, lock_timing);
   std::vector<ResourceCharge> pools;
-  if (spill)
+  if (pooled)
     for (unsigned i = 0; i != count; ++i)
       pools.push_back(
           ledger.Reserve(ResourceCategory::kBackingFree, 64).Convert());
@@ -38,8 +39,8 @@ void Run(unsigned count, bool spill, bool lock_timing) {
       for (unsigned i = 0; i != iterations; ++i) {
         const auto begin = Clock::now();
         auto reservation =
-            spill ? pools[t].ReserveSpill()
-                  : ledger.Reserve(ResourceCategory::kMetadata, 64);
+            pooled ? pools[t].ReserveBacking(category)
+                   : ledger.Reserve(ResourceCategory::kMetadata, 64);
         const auto reserved = Clock::now();
         auto charge = reservation.Convert();
         const auto converted = Clock::now();
@@ -56,10 +57,16 @@ void Run(unsigned count, bool spill, bool lock_timing) {
     thread.join();
   const auto elapsed = Ns(Clock::now() - begin);
   const auto costs = ledger.LockCosts();
+  const char* kind = "metadata_allocation";
+  if (category == ResourceCategory::kBackingAssigned)
+    kind = "spill_block";
+  else if (category == ResourceCategory::kPrivateState)
+    kind = "private_state_block";
+  else if (category == ResourceCategory::kPrivateTail)
+    kind = "private_tail_block";
   std::cout << "{\"threads\":" << count
             << ",\"iterations_per_thread\":" << iterations << ",\"kind\":\""
-            << (spill ? "spill_block" : "metadata_allocation")
-            << "\",\"lock_timing\":" << (lock_timing ? "true" : "false")
+            << kind << "\",\"lock_timing\":" << (lock_timing ? "true" : "false")
             << ",\"wall_ns\":" << elapsed << ",\"operations\":{";
   constexpr std::array names{"reserve", "convert", "release"};
   constexpr std::array steps{LedgerStep::kReserve, LedgerStep::kConvert,
@@ -94,7 +101,9 @@ void Run(unsigned count, bool spill, bool lock_timing) {
 }  // namespace
 int main() {
   for (bool lock_timing : {false, true})
-    for (bool spill : {false, true})
+    for (auto category :
+         {ResourceCategory::kMetadata, ResourceCategory::kBackingAssigned,
+          ResourceCategory::kPrivateState, ResourceCategory::kPrivateTail})
       for (unsigned threads : {1U, 8U})
-        Run(threads, spill, lock_timing);
+        Run(threads, category, lock_timing);
 }

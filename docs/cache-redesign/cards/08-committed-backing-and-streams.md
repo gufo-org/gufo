@@ -15,6 +15,15 @@ pages are committed before requests run, and one stream per in-flight transfer.
   - fixed block size;
   - released blocks are reused;
   - never refilled while peers execute.
+  - checkpoint-private state and private tails use the same precommitted pool:
+    card 03's `ReserveBacking` moves the entire block's charge from free backing
+    into private state/tail (including capacity padding), then `Convert` marks
+    successful capture. The categories partition physical bytes; do not add
+    private pool bytes again to the original backing charge. Reserve separate
+    metadata headroom within D4's RAM budget before sizing the pool.
+  - block assignment may race: `bad_alloc` from `ReserveBacking` means retry
+    another committed block or decline capture. No request-time private-state,
+    tail or spill page commitment is allowed when the pool is exhausted.
 - **Stream and event pool:** each in-flight transfer leases its own stream and
   completion event, and returns it only after completion.
 - **Bounded piece copy helper:** device to host and back, in pieces of a
@@ -64,4 +73,3 @@ required (see the README).
 [Idle spill and independent transfer streams](../RFC.md#idle-spill-and-independent-transfer-streams)
 
 ## Review notes
-

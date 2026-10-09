@@ -10,14 +10,16 @@ namespace gufo::cache {
 
 enum class ResourceCategory : std::uint8_t {
   kBackingFree,
-  kBackingReserved,
+  kBackingAssigned,
   kBackingMaterialized,
   kPrivateState,
   kPrivateTail,
   kMetadata,
   kTransferStaging,
+  kCount,
 };
-inline constexpr std::size_t kResourceCategoryCount = 7;
+inline constexpr std::size_t kResourceCategoryCount =
+    static_cast<std::size_t>(ResourceCategory::kCount);
 
 struct ResourceLimits {
   std::size_t total_bytes;
@@ -39,7 +41,15 @@ struct ResourceSnapshot {
   std::size_t peak_persistence_pinned_bytes{};
   bool operator==(const ResourceSnapshot&) const = default;
 };
-enum class LedgerStep : std::uint8_t { kReserve, kConvert, kPin, kRelease };
+enum class LedgerStep : std::uint8_t {
+  kReserve,
+  kConvert,
+  kPin,
+  kRelease,
+  kCount
+};
+inline constexpr std::size_t kLedgerStepCount =
+    static_cast<std::size_t>(LedgerStep::kCount);
 struct LedgerLockCost {
   std::uint64_t calls{}, wait_ns{}, hold_ns{}, max_hold_ns{};
 };
@@ -63,9 +73,10 @@ public:
   ResourceReservation(const ResourceReservation&) = delete;
   ResourceReservation& operator=(const ResourceReservation&) = delete;
   [[nodiscard]] ResourceCharge Convert();
-  // Queued jobs may pin an assigned, already committed spill block before its
-  // rows materialize. Pending new allocations cannot be pinned. Cancellation
-  // returns backing to free only after every queued pin has released it.
+  // Queued jobs may pin assigned spill or borrowed-tail backing before its
+  // rows materialize. Pending new allocations/private captures cannot be
+  // pinned. Cancellation returns backing to free only after every queued pin
+  // has released it.
   [[nodiscard]] PersistencePin PinPersistence() const;
   explicit operator bool() const noexcept { return bool(token_); }
 
@@ -94,13 +105,17 @@ private:
 class ResourceCharge {
 public:
   ResourceCharge() = default;
-  // Only a converted free backing block can admit a borrower. The whole block
-  // moves free -> reserved -> materialized; it returns to free when its last
-  // borrower/chunk/pin disappears. The pool retains the original free handle.
-  // Copies of that handle cannot assign the same block twice. Card 08 supplies
-  // already committed fixed-size blocks; borrowed live rows get no extra
-  // charge.
-  [[nodiscard]] ResourceReservation ReserveSpill() const;
+  // Reclassify one already committed pool block as kBackingAssigned (spill),
+  // kPrivateState or kPrivateTail without another admission/physical charge.
+  // Convert after capture/copy completes; spill then becomes materialized.
+  // Cancellation or final owner/pin release returns the entire block to free.
+  // Callers may race to assign a block; bad_alloc means another borrower holds
+  // it and the pool should try another block or decline capture. Invalid pool
+  // handles throw logic_error. No request-path page commitment is required.
+  [[nodiscard]] ResourceReservation ReserveBacking(ResourceCategory) const;
+  // Only retained payload (assigned spill, chunks, private state/tails) counts
+  // as persistence-pinned bytes. Staging and metadata use their own admission
+  // categories; retain their charges directly for queued-job lifetimes.
   [[nodiscard]] PersistencePin PinPersistence() const;
   explicit operator bool() const noexcept { return bool(token_); }
 
@@ -123,9 +138,16 @@ public:
   ResourceLedger& operator=(const ResourceLedger&) = delete;
   ResourceLedger(ResourceLedger&&) = delete;
   ResourceLedger& operator=(ResourceLedger&&) = delete;
+  // Admit physical payload allocation at initialization/quiescence, or host
+  // metadata/staging capacity. Request-time private capture and borrowed tails
+  // use ReserveBacking on existing committed blocks instead of allocating.
   [[nodiscard]] ResourceReservation Reserve(ResourceCategory, std::size_t);
   [[nodiscard]] ResourceSnapshot Snapshot() const;
-  [[nodiscard]] std::array<LedgerLockCost, 4> LockCosts() const;
+  // Atomic end/start of a global reporting window. The returned snapshot keeps
+  // the ending peaks; next-window peaks start at the current charges/pins.
+  // Overlapping request-local attribution belongs to card 19, not this reset.
+  [[nodiscard]] ResourceSnapshot SnapshotAndResetPeaks();
+  [[nodiscard]] std::array<LedgerLockCost, kLedgerStepCount> LockCosts() const;
   // One-shot deterministic failure after n valid attempts at the given step.
   // bad_alloc also indicates budget/pool exhaustion. Invalid arguments throw
   // invalid_argument; invalid/empty handles throw logic_error. Failures leave

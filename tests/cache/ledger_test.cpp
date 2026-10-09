@@ -16,7 +16,7 @@ using namespace gufo::cache;
 
 namespace {
 constexpr auto Free = ResourceCategory::kBackingFree;
-constexpr auto Spill = ResourceCategory::kBackingReserved;
+constexpr auto Spill = ResourceCategory::kBackingAssigned;
 constexpr auto Chunk = ResourceCategory::kBackingMaterialized;
 constexpr auto Private = ResourceCategory::kPrivateState;
 constexpr auto Tail = ResourceCategory::kPrivateTail;
@@ -50,10 +50,14 @@ void BackingAndPins() {
   auto reservation = ledger.Reserve(Free, 64);
   assert(ledger.Snapshot().reserved_bytes[Index(Free)] == 64);
   auto pool = reservation.Convert();  // caller has committed physical pages
-  auto spill = pool.ReserveSpill();   // borrower admission, whole pool block
+  auto spill = pool.ReserveBacking(
+      ResourceCategory::kBackingAssigned);  // borrower admission, whole pool
+                                            // block
   assert(ledger.Snapshot().bytes[Index(Free)] == 0);
   assert(ledger.Snapshot().bytes[Index(Spill)] == 64);
-  Throws<std::bad_alloc>([&] { auto duplicate = pool.ReserveSpill(); });
+  Throws<std::bad_alloc>([&] {
+    auto duplicate = pool.ReserveBacking(ResourceCategory::kBackingAssigned);
+  });
   auto chunk = spill.Convert();  // caller has completed preservation
   auto child = chunk;
   auto pin = chunk.PinPersistence();
@@ -73,11 +77,12 @@ void BackingAndPins() {
 
   auto block = ledger.Reserve(Free, 64).Convert();
   {
-    auto cancelled = block.ReserveSpill();
+    auto cancelled = block.ReserveBacking(ResourceCategory::kBackingAssigned);
   }
   assert(ledger.Snapshot().bytes[Index(Free)] == 64);
   {
-    auto materialized = block.ReserveSpill().Convert();
+    auto materialized =
+        block.ReserveBacking(ResourceCategory::kBackingAssigned).Convert();
   }
   assert(ledger.Snapshot().bytes[Index(Free)] == 64);
   Throws<std::logic_error>([&] { auto pin_free = block.PinPersistence(); });
@@ -85,15 +90,17 @@ void BackingAndPins() {
   Empty(ledger);
 
   block = ledger.Reserve(Free, 64).Convert();
-  auto borrowed = block.ReserveSpill();
+  auto borrowed = block.ReserveBacking(ResourceCategory::kBackingAssigned);
   auto queued = borrowed.PinPersistence();
   assert(ledger.Snapshot().persistence_pinned_bytes == 64);
   borrowed = {};
   assert(ledger.Snapshot().bytes[Index(Spill)] == 64);
-  Throws<std::bad_alloc>([&] { auto reuse = block.ReserveSpill(); });
+  Throws<std::bad_alloc>([&] {
+    auto reuse = block.ReserveBacking(ResourceCategory::kBackingAssigned);
+  });
   queued = {};
   assert(ledger.Snapshot().bytes[Index(Free)] == 64);
-  borrowed = block.ReserveSpill();
+  borrowed = block.ReserveBacking(ResourceCategory::kBackingAssigned);
   queued = borrowed.PinPersistence();
   auto preserved = borrowed.Convert();
   assert(ledger.Snapshot().bytes[Index(Chunk)] == 64);
@@ -130,9 +137,11 @@ void LimitsAndFaults() {
   auto pool = ledger.Reserve(Free, 20).Convert();
   ledger.FailAfter(LedgerStep::kReserve, 0);
   unchanged = ledger.Snapshot();
-  Throws<std::bad_alloc>([&] { auto r = pool.ReserveSpill(); });
+  Throws<std::bad_alloc>([&] {
+    auto r = pool.ReserveBacking(ResourceCategory::kBackingAssigned);
+  });
   assert(ledger.Snapshot() == unchanged);
-  auto spill = pool.ReserveSpill();
+  auto spill = pool.ReserveBacking(ResourceCategory::kBackingAssigned);
   ledger.FailAfter(LedgerStep::kConvert, 0);
   unchanged = ledger.Snapshot();
   Throws<std::bad_alloc>([&] { auto c = spill.Convert(); });
@@ -197,9 +206,14 @@ void LimitsAndFaults() {
   auto other = ledger.Reserve(Tail, 1).Convert();
   charge = std::move(other);  // releases replaced ownership
   assert(ledger.Snapshot().bytes[Index(Metadata)] == 1);
-  Throws<std::logic_error>([&] { auto r = ResourceCharge{}.ReserveSpill(); });
+  Throws<std::logic_error>([&] {
+    auto r =
+        ResourceCharge{}.ReserveBacking(ResourceCategory::kBackingAssigned);
+  });
   Throws<std::logic_error>([&] { auto p = ResourceCharge{}.PinPersistence(); });
-  Throws<std::logic_error>([&] { auto r = charge.ReserveSpill(); });
+  Throws<std::logic_error>([&] {
+    auto r = charge.ReserveBacking(ResourceCategory::kBackingAssigned);
+  });
   Throws<std::invalid_argument>(
       [&] { ledger.FailAfter(LedgerStep::kRelease, 0); });
 }
@@ -277,14 +291,20 @@ void RandomSequences() {
           } else if (operation == 1 && r.category == Free && !r.reserved) {
             if (random() % 4 == 0)
               ledger.FailAfter(LedgerStep::kReserve, 0);
-            r.reservation = r.pool.ReserveSpill();
-            r.category = Spill;
+            const std::array destinations{Spill, Private, Tail};
+            const auto destination =
+                destinations[random() % destinations.size()];
+            r.reservation = r.pool.ReserveBacking(destination);
+            r.category = destination;
             r.reserved = true;
           } else if (operation == 2 && !r.owners.empty()) {
             r.owners.push_back(r.owners.front());
           } else if (operation == 3 &&
-                     (!r.owners.empty() ||
-                      (r.category == Spill && r.reservation))) {
+                     ((!r.owners.empty() && r.category != Metadata &&
+                       r.category != Staging) ||
+                      ((r.category == Spill ||
+                        (r.category == Tail && r.pool)) &&
+                       r.reservation))) {
             if (random() % 4 == 0)
               ledger.FailAfter(LedgerStep::kPin, 0);
             r.pins.push_back(r.reservation ? r.reservation.PinPersistence()
@@ -354,6 +374,102 @@ void ContentionAndLifetime() {
   }
   survivor = {};  // shared ledger state outlives its public facade
 }
+void PrivateBackingAndPinCategories() {
+  ResourceLedger ledger({128, 128, 0, 128});
+  auto pool = ledger.Reserve(Free, 128).Convert();
+  Throws<std::bad_alloc>([&] { auto extra = ledger.Reserve(Private, 1); });
+  for (auto category : {Private, Tail}) {
+    ledger.FailAfter(LedgerStep::kReserve, 0);
+    auto before = ledger.Snapshot();
+    Throws<std::bad_alloc>([&] { auto r = pool.ReserveBacking(category); });
+    assert(ledger.Snapshot() == before);
+    auto reservation = pool.ReserveBacking(category);
+    assert(ledger.Snapshot().bytes[Index(Free)] == 0);
+    assert(ledger.Snapshot().bytes[Index(category)] == 128);
+    assert(ledger.Snapshot().reserved_bytes[Index(category)] == 128);
+    assert(ledger.Snapshot().total_bytes == 128);
+    Throws<std::bad_alloc>([&] { auto r = pool.ReserveBacking(Spill); });
+    Throws<std::logic_error>([&] { auto p = pool.PinPersistence(); });
+    PersistencePin queued;
+    if (category == Private)
+      Throws<std::logic_error>([&] { auto p = reservation.PinPersistence(); });
+    else
+      queued = reservation.PinPersistence();
+    ledger.FailAfter(LedgerStep::kConvert, 0);
+    before = ledger.Snapshot();
+    Throws<std::bad_alloc>([&] { auto c = reservation.Convert(); });
+    assert(ledger.Snapshot() == before);
+    auto captured = reservation.Convert();
+    assert(ledger.Snapshot().reserved_bytes[Index(category)] == 0);
+    assert(ledger.Snapshot().bytes[Index(category)] == 128);
+    Throws<std::logic_error>([&] { auto p = pool.PinPersistence(); });
+    Throws<std::logic_error>([&] { auto r = captured.ReserveBacking(Spill); });
+    auto shared = captured;
+    auto pin = captured.PinPersistence();
+    captured = {};
+    shared = {};
+    assert(ledger.Snapshot().bytes[Index(category)] == 128);
+    pin = {};
+    queued = {};
+    assert(ledger.Snapshot().bytes[Index(Free)] == 128);
+    {
+      auto cancelled = pool.ReserveBacking(category);
+    }
+    assert(ledger.Snapshot().bytes[Index(Free)] == 128);
+    {
+      auto retry = pool.ReserveBacking(category).Convert();
+    }
+    assert(ledger.Snapshot().bytes[Index(Free)] == 128);
+  }
+  for (auto invalid :
+       {Free, Chunk, Metadata, Staging, ResourceCategory::kCount})
+    Throws<std::invalid_argument>(
+        [&] { auto r = pool.ReserveBacking(invalid); });
+  pool = {};
+  Empty(ledger);
+
+  ResourceLedger jobs({128, 64, 64, 0});
+  auto metadata = jobs.Reserve(Metadata, 64).Convert();
+  auto staging = jobs.Reserve(Staging, 64).Convert();
+  const auto before = jobs.Snapshot();
+  Throws<std::logic_error>([&] { auto p = metadata.PinPersistence(); });
+  Throws<std::logic_error>([&] { auto p = staging.PinPersistence(); });
+  assert(jobs.Snapshot() == before);
+}
+void PeakWindows() {
+  ResourceLedger ledger({128, 128, 0, 128});
+  auto pool = ledger.Reserve(Free, 64).Convert();
+  {
+    auto temporary = ledger.Reserve(Private, 64).Convert().PinPersistence();
+  }
+  const auto previous = ledger.Snapshot();
+  assert(previous.peak_total_bytes == 128);
+  assert(previous.peak_persistence_pinned_bytes == 64);
+  assert(ledger.SnapshotAndResetPeaks() == previous);
+  auto window = ledger.Snapshot();
+  assert(window.peak_bytes == window.bytes);
+  assert(window.peak_total_bytes == 64 && window.peak_ram_bytes == 64);
+  assert(window.peak_persistence_pinned_bytes == 0);
+  auto assigned = pool.ReserveBacking(Tail);
+  auto tail = assigned.Convert();
+  auto pin = tail.PinPersistence();
+  const auto pinned = ledger.SnapshotAndResetPeaks();
+  assert(pinned.peak_total_bytes == 64);
+  assert(pinned.peak_bytes[Index(Free)] == 64);
+  assert(pinned.peak_bytes[Index(Tail)] == 64);
+  window = ledger.Snapshot();
+  assert(window.peak_bytes[Index(Free)] == 0);
+  assert(window.peak_bytes[Index(Tail)] == 64);
+  assert(window.peak_persistence_pinned_bytes == 64);
+  pin = {};
+  tail = {};
+  pool = {};
+  Empty(ledger);
+  const auto completed = ledger.SnapshotAndResetPeaks();
+  assert(completed.peak_total_bytes == 64);
+  assert(ledger.Snapshot().peak_total_bytes == 0);
+  assert(ledger.Snapshot().peak_persistence_pinned_bytes == 0);
+}
 void AdmissionRace() {
   for (bool spill : {false, true}) {
     ResourceLedger ledger({64, 64, 0, 0});
@@ -369,7 +485,8 @@ void AdmissionRace() {
         ResourceReservation reservation;
         try {
           reservation =
-              spill ? pool.ReserveSpill() : ledger.Reserve(Private, 64);
+              spill ? pool.ReserveBacking(ResourceCategory::kBackingAssigned)
+                    : ledger.Reserve(Private, 64);
           ++successes;
         } catch (const std::bad_alloc&) {
         }
@@ -396,4 +513,6 @@ int main() {
   RandomSequences();
   ContentionAndLifetime();
   AdmissionRace();
+  PrivateBackingAndPinCategories();
+  PeakWindows();
 }

@@ -20,7 +20,7 @@ allocation exactly once, with reservations that either commit or roll back.
 - Reservation lifecycle: reserve, then convert (reservation becomes owned
   backing without a second charge) or release. Failure leaves the ledger
   unchanged.
-- Peak tracking and a snapshot of all categories for the per-request
+- Peak tracking, reporting windows and a snapshot of all categories for the per-request
   reporting added in card 19.
 - One short lock. No I/O and no device waits while holding it.
 - Fault injection at every reserve and convert step.
@@ -65,24 +65,42 @@ live slots, weights and execution scratch remain outside the retained-cache
 ledger, as specified in the RFC.
 
 The pool first reserves and converts a free backing allocation after committing
-its pages. A borrower then calls `ResourceCharge::ReserveSpill` on that block,
-and the preservation owner converts the result after the copy completes.
-Whole blocks move **free → assigned → materialized**, with unchanged total RAM
-charge. A duplicate assignment fails. The last reservation/chunk/pin returns
-the block to free while the pool retains its original charge. Without that
-pool reference, the final reference releases the physical charge. The fixed
-block geometry matches card 08; allocation and physical page commitment remain
-that card's responsibility. Borrowed rows cannot enter through an unbacked
-byte promise.
+its pages. `ResourceCharge::ReserveBacking` reclassifies an entire free block
+as `kBackingAssigned` for borrowed spill rows, `kPrivateState`, or `kPrivateTail`.
+The owner converts after capture/preservation succeeds: spill becomes
+materialized; private state/tails stay in their respective categories. No
+transition increases total or RAM bytes. Private captures and tails therefore
+work even when committed blocks fill the RAM budget, with no request-path page
+commitment and no second charge for carved-out private bytes. Card 08 supplies
+physical blocks and reserves metadata headroom before sizing its pool.
+
+The pool may race/retry candidates: `bad_alloc` on an already assigned block
+means try another committed block or decline capture. Invalid handles instead
+throw `logic_error`. The last reservation/owner/pin returns the whole block to
+free while the pool retains its original charge. Without that pool reference,
+the final reference releases the physical charge. Assignment and admission are
+distinct: `kBackingAssigned` is borrowed backing's physical category, whereas
+`reserved_bytes` is the not-yet-converted subset in any admission category.
 
 Charges and pins can be shared without duplicating accounting. Persistence
 pins report unique pinned bytes as an independently bounded overlay, rather
-than adding them to the physical total. Queued jobs may pin an assigned spill
-reservation before materialization; cancellation cannot recycle its backing
-until all pins release it. New allocation reservations cannot be pinned before
-conversion. Tokens account for lifetimes; their owners must also retain the
+than adding them to the physical total. Only retained payload is eligible:
+assigned spill, materialized chunks and private state/tails. Staging and metadata
+retain their charges directly for job lifetimes and stay bounded by their own
+admission categories; they do not consume the retained-payload pin limit.
+Queued jobs may pin assigned spill or borrowed-tail backing before
+materialization; cancellation cannot recycle that backing until all pins
+release it. New allocation reservations and incomplete private-state captures
+cannot be pinned before conversion. Tokens account for lifetimes; their owners must also retain the
 actual buffers and finish accesses before releasing them. Shared ledger state
 survives destruction of the public ledger object until the final token ends.
+
+`SnapshotAndResetPeaks` atomically reports the completed global window and
+starts the next window's peaks at current charges/pins. Carried-over allocations
+are therefore present in the new peak. Overlapping request attribution remains
+card 19's responsibility; resetting this global window alone does not attribute
+physical bytes to one request. Category and step counts derive from enum
+sentinels.
 
 `cache_ledger_test` is included in the hosted `check-pr` target. Its independent
 operation model covers 64 deterministic seeds × 2,000 operations, including
@@ -104,11 +122,11 @@ cmake --preset cpu-sanitizer
 cmake --build --preset cpu-sanitizer --target cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test --parallel 4
 ctest --preset cpu-sanitizer -R '^cache_(ledger|adapter(_lifecycle)?|boundary)_test$' --output-on-failure
 cmake --preset gpu-test
-cmake --build --preset gpu-test --target cache_ledger_test cache_ledger_bench --parallel 4
+cmake --build --preset gpu-test --target cache_ledger_test --parallel 4
 ctest --preset gpu-full -R '^cache_(ledger|boundary)_test$' --output-on-failure
-cmake --preset release
-cmake --build --preset release --target gufo_cache --parallel 4
-build/gpu-test/tests/cache/cache_ledger_bench
+cmake --preset release -DGUFO_BUILD_TOOLS=ON
+cmake --build --preset release --target gufo_cache cache_ledger_bench --parallel 4
+build/release/src/cache/cache_ledger_bench
 ```
 
 The four focused cache tests passed in CPU and ASan/UBSan builds; the ledger
@@ -120,7 +138,8 @@ production package plus clang-tools and Python; the GPU/tools configuration
 also required the pinned rocprofiler-sdk. The initial test-first compile failed
 on the missing ledger header. No model or device-transfer quality claim is made.
 
-The [retained baseline](../measurements/03-resource-ledger.json) has source and
+The [initial baseline](../measurements/03-resource-ledger.json), before the review
+follow-up below, has source and
 binary hashes, machine/build details and every measured result. One unpinned
 run measured 20,000 cycles per thread, with 64-byte charges. External operation
 timers include host bookkeeping and mutex contention. The library uses release
@@ -140,6 +159,40 @@ from 52.85 to 82.36 ms. Those instrumented operation timings are retained but
 are not the uninstrumented baseline. Single-thread results and maximum hold
 times are also retained. These are step measurements, without an inference
 timing gate or a comparable RFC microbenchmark.
+
+### Review follow-up
+
+The committed-private-memory path, assignment contention, pin scope, assertion
+builds, naming/counts and peak-window findings are addressed above and in card
+08. New focused tests cover private/tail assignment when committed backing
+fills the entire RAM budget, reserve/convert rollback in each category,
+pending borrowed-tail pins, rejection of staging/metadata pins, and resetting
+peaks with live allocations and pins. The independent random model now assigns
+blocks to all three destinations.
+
+The four cache tests pass in CPU and ASan/UBSan presets; ledger and boundary
+tests pass in `gpu-test`. Compile commands confirm the ledger itself receives
+`-UNDEBUG` in all three test presets, after `-DNDEBUG` where present. Release
+retains `-DNDEBUG` without `-UNDEBUG`. Formatting, focused static analysis,
+documentation links and whitespace checks pass.
+
+The [review baseline](../measurements/03-resource-ledger-review.json) uses the
+release library and benchmark, built with the same pinned toolchain and
+20,000-cycle methodology. The original run is retained separately. These
+single-run CPU measurements describe the revised implementation; they are not
+a matched performance-gain comparison.
+
+| Allocation/category | Eight-thread mean reserve / convert / release (ns) | Instrumented mean lock hold for each operation (ns) |
+| --- | --- | --- |
+| Metadata admission | 905 / 730 / 739 | 56 / 48 / 44 |
+| Spill block assignment | 782 / 742 / 707 | 40 / 37 / 36 |
+| Private-state block assignment | 943 / 863 / 871 | 43 / 38 / 37 |
+| Private-tail block assignment | 877 / 810 / 814 | 47 / 41 / 40 |
+
+Raw records include single-thread cases, percentiles, lock wait/max hold and
+instrumentation overhead. Eight-thread metadata wall time was 48.43 ms without
+internal clocks versus 113.39 ms with them; spill was 45.91 versus 80.27 ms,
+private state 54.77 versus 81.56 ms, and tails 50.89 versus 90.77 ms.
 
 ## Done when
 
