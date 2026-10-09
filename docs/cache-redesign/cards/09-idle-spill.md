@@ -221,3 +221,22 @@ source-reader waits, checking that the original live frontier can be reacquired.
 
 The finding and response are recorded in
 [PR #505](https://github.com/gufo-org/gufo/pull/505).
+
+The fixed standalone cancellation reproducer returns promptly after stop,
+returns no cancelled lease, and confirms the original live frontier survives.
+The expanded slot/idle-spill checks pass in CPU, ASan/UBSan and ThreadSanitizer;
+GPU backing, formatting and docs checks pass too.
+
+Remeasured the same release benchmark on `3c3c3e3b`, with the same device,
+toolchain, sizes, piece/block configuration, histories and five samples after
+one warmup. Every byte passes verification. Results in milliseconds:
+
+| Borrowed rows | Idle total ms | Residual after idle ms | Zero-idle residual ms | Half-spilled residual ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 GiB | 17.647 | 0.002 | 17.025 | 7.610 |
+| 6 GiB | 95.427 | 0.007 | 93.696 | 45.955 |
+
+Raw samples are retained in
+[`09-review1-gfx1151.csv`](../measurements/09-review1-gfx1151.csv), alongside
+the original baseline. This confirms the successful copy/reassignment paths
+after the cancellation fix; it is not a matched model latency comparison.
