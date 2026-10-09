@@ -80,7 +80,9 @@ Layout creation syncs `v2/`, the root and its ancestors. Startup also syncs
 becomes durable before its entry is exposed. Neither operation reads payloads
 or reclaims orphans. Retirement unlinks and syncs the manifest directory before
 removing dependencies no remaining entry references. If that sync fails, the
-entry stops being exposed and dependencies remain for later recovery.
+entry stops being exposed and dependencies remain for later recovery. Uncertain
+manifest unlink/sync outcomes also block publication and retirement until
+successful background recovery.
 
 `ReclaimOrphans()` explicitly launches a worker after full discovery;
 `WaitForReclamation()` delivers errors, and destruction joins before releasing
@@ -185,3 +187,11 @@ created a second manifest for the same checkpoint. The next restart rejected
 both. Startup now sets the same recovery barrier whenever it rejects a managed
 manifest. The regression proves publication is blocked until background recovery,
 then verifies a successful publication survives reopening with one entry.
+
+Round 3 modeled an allowed power-loss state after retirement's manifest-directory
+sync failed: a retry could publish a new manifest while the old unlink remained
+nondurable, allowing both checkpoint identities to appear at restart. Retirement
+now sets the recovery barrier on manifest unlink or sync errors. Regressions
+cover both errors, a failed recovery sync, blocked publication until recovery,
+and successful publication afterward. The review's replay probe models the old
+unlink returning after a crash; it is not a physical power-loss simulation.

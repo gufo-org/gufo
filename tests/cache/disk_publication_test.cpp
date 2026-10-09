@@ -17,7 +17,7 @@ using namespace gufo::cache;
 namespace fs = std::filesystem;
 namespace {
 std::atomic<int> fail_sync{-1}, fail_write{-1};
-std::atomic<bool> interrupt_sync{}, short_writes{}, record_io{};
+std::atomic<bool> interrupt_sync{}, short_writes{}, record_io{}, fail_unlink{};
 std::vector<std::string> events;
 std::string FdPath(int fd) {
   char path[4096];
@@ -307,9 +307,38 @@ void RetirementFailure() {
   assert(Managed(dir.path) == 28);
   assert(store.Stats().managed_bytes ==
          bytes - EncodeManifest(f.manifest).size());
+  Fixture retry;
+  retry.manifest.components[0].chunks[0].file = Id(51);
+  retry.manifest.components[0].tail->file = Id(52);
+  retry.manifest.components[1].private_state->file = Id(53);
+  retry.buffers[0].file = Id(51);
+  retry.buffers[1].file = Id(52);
+  retry.buffers[2].file = Id(53);
+  Reject([&] { store.Publish(Id(101), retry.manifest, retry.buffers); });
+  fail_sync = 0;
+  store.ReclaimOrphans();
+  Reject([&] { store.WaitForReclamation(); });
+  fail_sync = -1;
+  Reject([&] { store.Publish(Id(101), retry.manifest, retry.buffers); });
   store.ReclaimOrphans();
   store.WaitForReclamation();
   assert(Managed(dir.path) == 0);
+  store.Publish(Id(101), retry.manifest, retry.buffers);
+  CheckPublished(store, dir.path);
+}
+void RetirementUnlinkFailure() {
+  Directory dir;
+  Fixture a, b(2);
+  DiskStore store(ledger, dir.path, 100000);
+  store.Publish(Id(100), a.manifest, a.buffers);
+  fail_unlink = true;
+  Reject([&] { (void)store.Retire({1}); });
+  assert(store.Entries().size() == 1);
+  Reject([&] { store.Publish(Id(101), b.manifest, b.buffers); });
+  store.ReclaimOrphans();
+  store.WaitForReclamation();
+  store.Publish(Id(101), b.manifest, b.buffers);
+  CheckPublished(store, dir.path);
 }
 void RecoveryAndUnknowns() {
   Directory dir;
@@ -463,6 +492,10 @@ extern "C" ssize_t __wrap_write(int fd, const void* buffer, size_t bytes) {
 }
 extern "C" int __real_unlinkat(int, const char*, int);
 extern "C" int __wrap_unlinkat(int fd, const char* name, int flags) {
+  if (fail_unlink.exchange(false)) {
+    errno = EIO;
+    return -1;
+  }
   if (record_io)
     events.push_back("unlink:" + FdPath(fd) + "/" + name);
   return __real_unlinkat(fd, name, flags);
@@ -475,6 +508,7 @@ int main() {
   WriterEviction();
   Failures();
   RetirementFailure();
+  RetirementUnlinkFailure();
   UncertainManifestBarrier();
   RejectedStartupBarrier();
   RecoveryAndUnknowns();

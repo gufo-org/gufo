@@ -638,7 +638,7 @@ struct DiskStore::Impl {
   void RequireRecovered() const {
     if (recovery_required)
       throw std::runtime_error(
-          "cache publication outcome uncertain; run orphan recovery before "
+          "cache manifest outcome uncertain; run orphan recovery before "
           "publication or retirement");
   }
   void Reclaim() {
@@ -658,6 +658,16 @@ struct DiskStore::Impl {
       });
       Sync(directory);
     }
+    // A failed unlink syscall can leave its outcome uncertain. Reconcile the
+    // conservative charge with the actual namespace after successful cleanup.
+    std::uint64_t managed{};
+    for (int directory :
+         {manifests.Get(), chunks.Get(), private_files.Get(), temporary.Get()})
+      Scan(directory, [&](const auto& name, const auto& st) {
+        if (ParseName(name))
+          managed = Add(managed, st.st_size);
+      });
+    stats.managed_bytes = managed;
     recovery_required = false;
   }
   void Rename(int target, const std::string& name) {
@@ -1037,12 +1047,20 @@ bool DiskStore::Retire(CheckpointId id) {
   });
   if (it == entries.end() || it->pin_.use_count() > 1)
     return false;
-  impl_->Remove(impl_->manifests.Get(), DiskFileName(it->file_));
-  // Once unlinked, stop exposing the checkpoint even if directory sync fails.
-  // In that case dependencies remain orphans until a later durable barrier.
-  auto retired = std::move(*it);
-  entries.erase(it);
-  impl_->Sync(impl_->manifests.Get());
+  DurableEntry retired;
+  try {
+    impl_->Remove(impl_->manifests.Get(), DiskFileName(it->file_));
+    // Once unlinked, stop exposing the checkpoint even if directory sync fails.
+    // In that case dependencies remain orphans until a later durable barrier.
+    retired = std::move(*it);
+    entries.erase(it);
+    impl_->Sync(impl_->manifests.Get());
+  } catch (...) {
+    // An uncertain unlink can resurrect the old checkpoint identity after a
+    // power loss. Do not let another publication reuse it before recovery.
+    impl_->recovery_required = true;
+    throw;
+  }
   for (const auto& c : retired.manifest_.components) {
     for (const auto& p : c.chunks)
       if (!impl_->Referenced(impl_->chunks.Get(), p.file))
