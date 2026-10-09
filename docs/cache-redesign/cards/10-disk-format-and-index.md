@@ -124,6 +124,10 @@ and a root symlink with `/` or `/.` must not bypass `O_NOFOLLOW`. Root path
 normalization strips terminal separators/dot components without resolving
 symlinks. Exact RAM peak boundaries and every reserve/convert failure point
 verify complete rollback, lock release and removal of rejected-entry charges.
+Round 2 caught lexical normalization of `..` across a symlink redirecting
+ownership and cleanup away from the configured directory. Terminal-only stripping
+now preserves the kernel's `..` resolution; a regression checks both the lock
+location and which directory's legacy file is removed.
 
 ### Validation and step baseline
 

@@ -527,9 +527,14 @@ struct DiskStore::Impl {
     });
   }
   static Fd OpenRoot(const std::filesystem::path& path) {
-    auto root_path = path.lexically_normal();
-    while (root_path.has_relative_path() && root_path.filename().empty())
+    // Do not collapse '..': an earlier component may be a symlink and the
+    // kernel's configured-directory resolution must remain authoritative.
+    auto root_path = path;
+    while (root_path.has_relative_path() &&
+           (root_path.filename().empty() || root_path.filename() == "."))
       root_path = root_path.parent_path();
+    if (root_path.empty())
+      root_path = ".";
     std::filesystem::create_directories(root_path);
     const int fd = open(root_path.c_str(),
                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);

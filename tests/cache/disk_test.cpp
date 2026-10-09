@@ -335,6 +335,21 @@ void RootSymlinks() {
     assert(!fs::exists(target.path / "LOCK"));
   }
 }
+void ParentPathResolution() {
+  Directory base, target;
+  fs::create_directory(target.path / "sub");
+  fs::create_directory_symlink(target.path / "sub", base.path / "alias");
+  const std::array<std::uint8_t, 4> legacy{'G', 'U', 'F', 'O'};
+  Write(base.path / "old.kvc", legacy);
+  Write(target.path / "old.kvc", legacy);
+  {
+    DiskStore store(ledger, base.path / "alias/..", 0);
+    assert(!fs::exists(target.path / "old.kvc"));
+    assert(fs::exists(target.path / "LOCK"));
+    assert(fs::exists(base.path / "old.kvc"));
+    assert(!fs::exists(base.path / "LOCK"));
+  }
+}
 void MetadataAdmission() {
   Directory d;
   {
@@ -422,6 +437,7 @@ int main() {
   BudgetAndDirectories();
   InterruptedCleanup();
   RootSymlinks();
+  ParentPathResolution();
   MetadataAdmission();
   assert(ledger.Snapshot().total_bytes == 0);
   std::cout << "disk format, ownership and metadata index passed\n";
