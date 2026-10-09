@@ -84,6 +84,20 @@ endif()
 
 add_subdirectory(src/cache)
 
+if (ENGINE_ENABLE_HIP)
+  add_library(gufo_cache_hip STATIC
+    src/core/hip/committed_backing.cpp
+    src/core/hip/transfer_pool.cpp)
+  target_link_libraries(gufo_cache_hip PUBLIC gufo_cache hip::host)
+  if (BUILD_TESTING)
+    target_compile_options(gufo_cache_hip PRIVATE -UNDEBUG)
+  endif()
+  if (GUFO_BUILD_TOOLS)
+    add_executable(cache_backing_bench tests/cache/backing_bench.cpp)
+    target_link_libraries(cache_backing_bench PRIVATE gufo_cache_hip)
+  endif()
+endif()
+
 add_library(gufo_diagnostics STATIC
   src/core/diagnostics/gpu_queues.cpp
   src/core/diagnostics/linux_sysfs.cpp

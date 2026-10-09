@@ -1,4 +1,18 @@
 add_library(gufo_cache_fake STATIC fake_adapter.cpp)
+if (ENGINE_ENABLE_HIP)
+  add_executable(cache_backing_test backing_test.cpp)
+  target_link_libraries(cache_backing_test PRIVATE gufo_cache_hip)
+  target_compile_options(cache_backing_test PRIVATE -UNDEBUG)
+  target_link_options(cache_backing_test PRIVATE
+    -Wl,--wrap=hipHostMalloc -Wl,--wrap=hipMalloc
+    -Wl,--wrap=hipHostRegister -Wl,--wrap=hipMallocManaged
+    -Wl,--wrap=hipStreamCreateWithFlags -Wl,--wrap=hipEventCreateWithFlags
+    -Wl,--wrap=hipMemcpyAsync -Wl,--wrap=hipEventRecord
+    -Wl,--wrap=hipEventQuery -Wl,--wrap=hipEventSynchronize)
+  add_test(NAME cache_backing_test COMMAND cache_backing_test)
+  set_tests_properties(cache_backing_test PROPERTIES
+    LABELS "hip;gpu;gfx1151;cache" TIMEOUT 60)
+endif()
 target_link_libraries(gufo_cache_fake PUBLIC gufo_cache)
 add_executable(cache_adapter_test adapter_test.cpp)
 target_link_libraries(cache_adapter_test PRIVATE gufo_cache_fake)

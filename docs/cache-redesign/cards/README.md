@@ -52,7 +52,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [05](05-prefix-index-and-lookup.md) | Prefix index and lookup | Common package | 04 | M | done |
 | [06](06-slot-leases-and-mutation.md) | Slot leases and the mutation guard | Common package | 03, 04 | L | done |
 | [07](07-retention-policy.md) | Retention policy port | Common package | 05, 06 | M | agreed |
-| [08](08-committed-backing-and-streams.md) | Committed backing pool and transfer streams | Common package | 03, D4 | M | agreed |
+| [08](08-committed-backing-and-streams.md) | Committed backing pool and transfer streams | Common package | 03, D4 | M | done |
 | [09](09-idle-spill.md) | Idle spill and reassignment | Common package | 06, 08 | M | agreed |
 | [10](10-disk-format-and-index.md) | Disk format, directory lock and startup index | Disk store | 04, D4 | M | agreed |
 | [11](11-publication-and-crash-safety.md) | Crash-safe publication and orphan recovery | Disk store | 10 | M | agreed |
