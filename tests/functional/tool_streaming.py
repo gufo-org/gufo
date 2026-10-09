@@ -98,7 +98,8 @@ def analyze(api, events, arrivals):
             assert index in identifiers and finish is None, event
             arguments[index] += text
             if text:
-                fragments.append({"event": number, "ms": arrivals[number], "bytes": len(text)})
+                fragments.append({"event": number, "ms": arrivals[number],
+                                  "bytes": len(text.encode("utf-8"))})
 
         if api == "chat":
             usage = event.get("usage") or usage

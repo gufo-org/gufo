@@ -216,8 +216,15 @@ Use `--resume PREVIOUS_OUTPUT` to continue either client's retained session,
 including after a server restart. To test cancellation, add `--interrupt tool`
 or `--interrupt thinking` to a resumed run. The harness sends SIGINT only after
 observing that phase in a live stream and records the interruption separately.
-Then resume that output directory without `--interrupt` and require successful
-tool execution and state/digest checks. An interrupted run alone is not a pass.
+Then resume that output directory without `--interrupt`. The harness preserves
+the unfinished task and its files, and requires successful tool execution and
+state/digest checks without repeating committed changes. An interrupted run
+alone is not a pass. Resume prompts distinguish completed calls for this task
+from earlier transactions; the checks still require the file read and catalog
+query, even when the model could infer their contents from earlier tasks.
+Use `--interrupt-after-tools 5` with `--complex-tools --interrupt tool` to
+interrupt the receipt after the transaction has committed. Resuming must
+preserve the committed revision and finish the receipt without another apply.
 
 `opencode_agent.py` runs real opencode (`--opencode PATH`, default on `PATH`)
 against a local server with `--base-url`, `--model` and a fresh `--output`.

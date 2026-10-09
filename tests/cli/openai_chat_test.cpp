@@ -5434,6 +5434,27 @@ void TestToolTagBoundaries() {
   };
   for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
     const bool qwen = format == Format::kQwen;
+    for (const auto initial : {Initial::kReasoning, Initial::kAuto})
+      for (const auto finish : {Finish::kLength, Finish::kStopSequence}) {
+        const std::string phase = "<think>Check.</think>\n";
+        for (const int api : {0, 1, 2})
+          for (std::size_t cut = 0; cut <= phase.size(); ++cut) {
+            const auto raw = phase.substr(0, cut);
+            const auto buffered =
+                ToolBoundaryRequest({raw}, format, api, false, initial, finish);
+            const auto streamed = ToolBoundaryRequest(
+                bytewise(raw), format, api, true, initial, finish);
+            Expect(
+                !streamed.failed && !buffered.failed &&
+                    streamed.arguments.empty() &&
+                    streamed.content == buffered.content &&
+                    streamed.reasoning == buffered.reasoning &&
+                    streamed.reasoning.find("<think>") == std::string::npos &&
+                    streamed.reasoning.find("</think>") == std::string::npos,
+                "interruption within a thinking tag preserves the admitted "
+                "phase without opening a tool");
+          }
+      }
     for (const std::string frame : {"\n", "\r\n"}) {
       if (!qwen && frame == "\r\n")
         continue;
@@ -5635,10 +5656,12 @@ void TestStreamingQuotedAndMalformedTools() {
         for (const bool stream : {false, true}) {
           const auto output = ToolBoundaryRequest(pieces, format, api, stream);
           Expect(
-              !output.failed && output.arguments ==
-                                    std::vector<std::string>{
-                                        R"({"text":"unmatched ` in data"})",
-                                        R"({"text":"later ` in data"})"},
+              !output.failed && Trimmed(output.content).empty() &&
+                  output.reasoning.empty() &&
+                  output.arguments ==
+                      std::vector<std::string>{
+                          R"({"text":"unmatched ` in data"})",
+                          R"({"text":"later ` in data"})"},
               "backticks inside arguments cannot quote a subsequent tool call");
         }
       }
