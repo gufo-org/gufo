@@ -87,6 +87,7 @@ RAM, disk and restart settings once their contracts pass.
 | `stops` | Text, Unicode, reasoning and tool stops; peer isolation |
 | `conversation` | Thinking/efforts, images, cancellation and RAM reuse |
 | `image-inputs` | PNG, JPEG and WebP uploads in Chat and Responses; URL spellings, bad uploads and recovery |
+| `tool-images` | Chat/Responses function and custom-call image outputs; text/image order, image-only output, actual colors, streamed retries, changed pixels, continuation reuse, role/URL errors and unchanged text-only controls |
 | `image-count` | 17+ images in one message and across turns; Chat/Responses, sampled thinking/JSON, concurrent colors, limits, cancellation and RAM/disk replay |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
@@ -133,6 +134,12 @@ For `image-inputs` and `image-count`, pass the model's `--mmproj`. Both use smal
 fixed images and are included in `all` only with that option. `image-count`
 restarts the server for disk replay; its first four cases are 1/16-image timing
 controls usable on older main with `--through-case image-count:image_count_control_16_True`.
+
+`tool-images` also requires `--mmproj`. For matched existing-behavior timing
+controls on main, stop at
+`--through-case tool-images:tool_images_control_complete`; full candidate runs
+continue into the newly supported image-bearing tool outputs. A text-only
+model must not qualify the image suite by skipping its assertions.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
@@ -183,6 +190,13 @@ retains Pi sessions, HTTP/SSE and per-request timings. It executes generated
 commands in disposable fixtures using isolated Pi configuration. Use `--passes 1`
 for a focused check; the default five passes matches the reported debug workload.
 `--conversation --context-file FILE` additionally tests retained long history.
+
+For image tool results, explicitly select `--case image-read --passes 1` with
+a vision-capable model. The task opens a fixture through Pi's real `read`
+tool and checks both the returned image pixels and the model's color answer.
+Run with `--api openai-responses` and `--api openai-completions` to check both
+client transports; retain the wire requests to inspect the image placement.
+This image task is excluded from the default text-task list.
 
 For a conversation that **actually grows past 200K tokens through tool results**,
 run `agent_long.py --agent pi|opencode --executable PATH --base-url URL

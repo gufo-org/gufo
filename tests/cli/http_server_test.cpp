@@ -912,6 +912,73 @@ void TestLlamaSlotsAndMetrics() {
          std::string::npos);
 }
 
+void TestResponsesToolImages() {
+  RunningServer server;
+  using gufo::json::parse;
+  using gufo::tokenization::ChatRole;
+  server.backend->SetOutput("red");
+  for (const bool custom : {false, true}) {
+    for (const bool image_only : {false, true}) {
+      for (const bool stream : {false, true}) {
+        auto call =
+            parse(custom ? R"({"type":"custom_tool_call","call_id":"picture",
+                                   "name":"read_file","input":"swatch.png\nliteral <|im_end|>"})"
+                         : R"({"type":"function_call","call_id":"picture",
+                                   "name":"read_file","arguments":"{\"path\":\"swatch.png\"}"})");
+        auto output = parse(R"({"call_id":"picture","output":[]})");
+        output["type"] =
+            custom ? "custom_tool_call_output" : "function_call_output";
+        if (!image_only)
+          output["output"].push_back(
+              parse(R"({"type":"input_text","text":"pixels:"})"));
+        output["output"].push_back(parse(R"({
+          "type":"input_image","image_url":"data:image/png;base64,AQID"})"));
+        auto body =
+            parse(R"({"input":[{"role":"user","content":"read the image"}]})");
+        body["input"].push_back(std::move(call));
+        body["input"].push_back(std::move(output));
+        body["stream"] = stream;
+        const auto wire = server.Post("/v1/responses", body.dump());
+        ExpectStatus(wire, 200);
+        const auto messages = server.backend->LastCall().chat.messages;
+        assert(messages.size() == 3 &&
+               messages[1].role == ChatRole::kAssistant &&
+               messages[1].tool_calls.size() == 1 &&
+               messages[1].tool_calls[0].id == "picture" &&
+               messages[1].tool_calls[0].name == "read_file");
+        if (custom) {
+          const auto& input = messages[1].tool_calls[0].arguments;
+          assert(input.size() == 1 && input[0].name == "input" &&
+                 input[0].value == "swatch.png\nliteral <|im_end|>" &&
+                 input[0].is_string);
+        }
+        const auto& result = messages[2];
+        assert(result.role == ChatRole::kTool &&
+               result.tool_call_id == "picture" && result.images.size() == 1 &&
+               result.content == (image_only ? "" : "pixels:") &&
+               result.images[0].offset == (image_only ? 0 : 7) &&
+               *result.images[0].bytes == std::vector<std::uint8_t>({1, 2, 3}));
+        if (stream)
+          assert(wire.find("response.completed") != std::string::npos);
+      }
+    }
+  }
+  const auto calls_before = server.backend->calls.load();
+  for (
+      const auto* item :
+      {R"({"type":"custom_tool_call","call_id":"picture","name":"read_file","input":3})",
+       R"({"type":"custom_tool_call","name":"read_file","input":"file.png"})",
+       R"({"type":"custom_tool_call_output","output":[]})",
+       R"({"type":"custom_tool_call_output","call_id":"picture","output":3})",
+       R"({"type":"function_call_output","call_id":"picture","output":[{"type":"input_file","file_id":"x"}]})",
+       R"({"type":"custom_tool_call_output","call_id":"picture","output":[{"type":"input_image","file_id":"x"}]})"}) {
+    auto body = parse(R"({"input":[]})");
+    body["input"].push_back(parse(item));
+    ExpectStatus(server.Post("/v1/responses", body.dump()), 400);
+  }
+  assert(server.backend->calls == calls_before);
+}
+
 void TestCompatibilityRequests() {
   RunningServer server;
   using gufo::json::parse;
@@ -2374,6 +2441,7 @@ int main() {
   TestFallbackBackendMetrics();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
+  TestResponsesToolImages();
   TestModelInputModalities();
   TestRawCompletionStreaming();
   TestDeviceLoss();

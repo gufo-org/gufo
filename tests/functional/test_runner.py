@@ -205,13 +205,14 @@ class FunctionalRunnerTest(unittest.TestCase):
                         worker.join(timeout=5)
 
     def test_image_inputs_require_a_projector_before_starting_a_server(self):
-        argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
-                "--suite", "image-inputs", "--record-baseline", "--", "gufo", "serve", "llm"]
-        with patch.object(sys, "argv", argv), patch.object(functional, "server") as start, \
-                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
-            functional.main()
-        self.assertEqual(error.exception.code, 2)
-        start.assert_not_called()
+        for suite in ("image-inputs", "image-count", "tool-images"):
+            argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
+                    "--suite", suite, "--record-baseline", "--", "gufo", "serve", "llm"]
+            with patch.object(sys, "argv", argv), patch.object(functional, "server") as start, \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                functional.main()
+            self.assertEqual(error.exception.code, 2)
+            start.assert_not_called()
 
     def test_image_inputs_cover_real_formats_and_require_the_correct_color(self):
         def image(color):

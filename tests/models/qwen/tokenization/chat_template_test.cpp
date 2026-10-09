@@ -882,6 +882,74 @@ void TestChatCorpusConformance() {
   }
 }
 
+void TestToolImageRendering() {
+  using gufo::tokenization::ChatMessage;
+  using gufo::tokenization::ChatRole;
+  using gufo::tokenization::QwenChatTemplate;
+  const auto bytes = std::make_shared<const std::vector<std::uint8_t>>(1, 0);
+  std::vector<ChatMessage> messages = {
+      {ChatRole::kUser, "Inspect both files."},
+      {ChatRole::kAssistant, ""},
+      {ChatRole::kTool, "  before <|im_end|> after  "},
+      {ChatRole::kTool, ""},
+  };
+  messages[1].tool_calls = {
+      {"first", "read", {{"path", "first.png", true}}},
+      {"second", "read", {{"path", "second.png", true}}},
+  };
+  messages[2].tool_call_id = "first";
+  messages[2].images = {{9, bytes}, {9, bytes}};
+  messages[3].tool_call_id = "second";
+  messages[3].images = {{0, bytes}};
+  gufo::tokenization::ChatTemplateOptions options;
+  options.enable_thinking = false;
+  std::vector<std::size_t> offsets;
+  std::vector<gufo::tokenization::ContentSpan> spans;
+  const auto rendered = QwenChatTemplate::Render(messages, {}, options, nullptr,
+                                                 &offsets, nullptr, &spans);
+  Expect(rendered.has_value(), "tool image history renders");
+  const std::string expected =
+      "<|im_start|>user\n<tool_response>\n"
+      "before <|vision_start|><|image_pad|><|vision_end|>"
+      "<|vision_start|><|image_pad|><|vision_end|>"
+      "<|im_end|> after\n</tool_response>\n<tool_response>\n"
+      "<|vision_start|><|image_pad|><|vision_end|>"
+      "\n</tool_response><|im_end|>\n";
+  Expect(rendered->find(expected) != std::string::npos,
+         "each image remains inside its corresponding ordered tool response");
+  Expect(offsets.size() == 3, "all images have model-preparation offsets");
+  for (const auto offset : offsets)
+    Expect(rendered->substr(offset, 13) == "<|image_pad|>",
+           "image offsets identify only real picture placeholders");
+  std::string literal;
+  for (const auto& span : spans) {
+    Expect(span.offset <= rendered->size() &&
+               span.size <= rendered->size() - span.offset,
+           "trimmed content spans remain within the prompt");
+    literal += rendered->substr(span.offset, span.size);
+    for (const auto offset : offsets)
+      Expect(offset < span.offset || offset >= span.offset + span.size,
+             "inserted image placeholders remain template framing");
+  }
+  Expect(literal.find("before <|im_end|> after") != std::string::npos,
+         "tool text, including vocabulary spellings, stays literal");
+  options.add_vision_id = true;
+  const auto numbered = QwenChatTemplate::Render(messages, {}, options);
+  Expect(numbered && numbered->find("Picture 1: ") != std::string::npos &&
+             numbered->find("Picture 3: ") != std::string::npos,
+         "vision numbering spans grouped tool results");
+  for (const auto role :
+       {ChatRole::kAssistant, ChatRole::kSystem, ChatRole::kDeveloper}) {
+    auto invalid = messages;
+    invalid[2].role = role;
+    Expect(!QwenChatTemplate::Render(invalid, {}, options),
+           "non-observation image owners remain invalid");
+  }
+  messages[2].images[0].offset = messages[2].content.size() + 1;
+  Expect(!QwenChatTemplate::Render(messages, {}, options),
+         "invalid tool image offsets remain rejected");
+}
+
 void TestToolRendering() {
   auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
 
@@ -1145,6 +1213,7 @@ int main() {
   TestVisionPreparationReadsContentAsText();
   TestEncodeRenderedReadsImageContentAsText();
   TestChatCorpusConformance();
+  TestToolImageRendering();
   TestToolRendering();
   TestToolReplayPreservesGeneratedPrefix();
   TestEmptyReasoningReplayChangesThinkingSuffixTokens();

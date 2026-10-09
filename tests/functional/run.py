@@ -28,7 +28,7 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
+SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
           "tool-reasoning", "reasoning-separator",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection", "cache")
@@ -51,7 +51,7 @@ def provenance():
     for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
                  "tool_reasoning.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
                  "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py",
-                 "cache_disk_spacing.py"):
+                 "cache_disk_spacing.py", "tool_images.py"):
         source.update((TESTS / name).read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
     kernel_command = Path("/proc/cmdline")
@@ -242,14 +242,14 @@ def main():
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
     if option(command, "--api-key") is not None:
         parser.error("omit --api-key for the isolated loopback test server")
-    if set(args.suite) & {"image-inputs", "image-count"} and option(command, "--mmproj") is None:
-        parser.error("image-inputs and image-count require --mmproj in the server command")
+    if set(args.suite) & {"image-inputs", "image-count", "tool-images"} and option(command, "--mmproj") is None:
+        parser.error("image-inputs, image-count and tool-images require --mmproj in the server command")
     selected = args.suite
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
         selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "prefill-scheduling")
-                    and (suite not in ("image-inputs", "image-count")
+                    and (suite not in ("image-inputs", "image-count", "tool-images")
                          or option(command, "--mmproj") is not None)]
     selected = list(dict.fromkeys(selected))
     disk_enabled = bool(set(selected) & {"cache", "image-count"})

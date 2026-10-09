@@ -170,6 +170,56 @@ void AppendContent(std::string& output, std::vector<ContentSpan>* spans,
   }
 }
 
+// Keep images inside their owning message, including grouped tool results.
+// Only the inserted vision markers are framing; surrounding text stays literal.
+bool AppendMessageContent(std::string& output, const ChatMessage& message,
+                          const ChatTemplateOptions& options,
+                          std::size_t& image_count,
+                          std::vector<std::size_t>* image_offsets,
+                          std::vector<ContentSpan>* content_spans) {
+  if (message.images.empty()) {
+    const auto content = Trim(message.content);
+    AppendContent(output, content_spans, content);
+    return !content.empty();
+  }
+  std::string rendered;
+  std::vector<ContentSpan> spans;
+  std::vector<std::size_t> offsets;
+  std::size_t cursor = 0;
+  for (const auto& image : message.images) {
+    AppendContent(rendered, &spans,
+                  std::string_view(message.content)
+                      .substr(cursor, image.offset - cursor));
+    ++image_count;
+    if (options.add_vision_id)
+      rendered.append("Picture " + std::to_string(image_count) + ": ");
+    rendered.append(kVisionStart);
+    offsets.push_back(rendered.size());
+    rendered.append(kImagePad).append(kVisionEnd);
+    cursor = image.offset;
+  }
+  AppendContent(rendered, &spans,
+                std::string_view(message.content).substr(cursor));
+  const auto content = Trim(rendered);
+  const auto removed =
+      static_cast<std::size_t>(content.data() - rendered.data());
+  const auto start = output.size();
+  if (image_offsets != nullptr)
+    for (const auto offset : offsets)
+      image_offsets->push_back(start + offset - removed);
+  if (content_spans != nullptr) {
+    for (const auto& span : spans) {
+      const auto begin = std::max(span.offset, removed);
+      const auto end =
+          std::min(span.offset + span.size, removed + content.size());
+      if (end > begin)
+        content_spans->push_back({start + begin - removed, end - begin});
+    }
+  }
+  output.append(content);
+  return !content.empty();
+}
+
 void AppendJsonString(std::string& output, std::string_view value) {
   output.push_back('"');
   for (const unsigned char character : value) {
@@ -386,10 +436,11 @@ std::optional<std::string> QwenChatTemplate::Render(
                      msg.thought.size() + 32 + msg.images.size() * 64;
     std::size_t previous = 0;
     for (const auto& image : msg.images) {
-      if (msg.role != ChatRole::kUser || image.bytes == nullptr ||
-          image.offset < previous || image.offset > msg.content.size()) {
+      if ((msg.role != ChatRole::kUser && msg.role != ChatRole::kTool) ||
+          image.bytes == nullptr || image.offset < previous ||
+          image.offset > msg.content.size()) {
         if (error_msg != nullptr)
-          *error_msg = "invalid user image content";
+          *error_msg = "invalid user or tool image content";
         return std::nullopt;
       }
       previous = image.offset;
@@ -513,7 +564,8 @@ std::optional<std::string> QwenChatTemplate::Render(
              messages[message_index].role == ChatRole::kTool) {
         const auto& tool_message = messages[message_index];
         output.append("<tool_response>\n");
-        AppendContent(output, content_spans, Trim(tool_message.content));
+        AppendMessageContent(output, tool_message, options, image_count,
+                             image_offsets, content_spans);
         output.append("\n</tool_response>");
         ++message_index;
         if (message_index < messages.size() &&
@@ -541,33 +593,6 @@ std::optional<std::string> QwenChatTemplate::Render(
     output.append(role_name);
     output.push_back('\n');
 
-    std::string image_content;
-    std::vector<ContentSpan> image_spans;
-    std::vector<std::size_t> local_image_offsets;
-    if (!msg.images.empty()) {
-      std::size_t cursor = 0;
-      for (const auto& image : msg.images) {
-        AppendContent(image_content, &image_spans,
-                      std::string_view(msg.content)
-                          .substr(cursor, image.offset - cursor));
-        ++image_count;
-        if (options.add_vision_id)
-          image_content.append("Picture " + std::to_string(image_count) + ": ");
-        image_content.append(kVisionStart);
-        local_image_offsets.push_back(image_content.size());
-        image_content.append(kImagePad).append(kVisionEnd);
-        cursor = image.offset;
-      }
-      AppendContent(image_content, &image_spans,
-                    std::string_view(msg.content).substr(cursor));
-    }
-    // Trim the fully rendered content, including image markers. Whitespace
-    // between text and images remains significant; image offsets follow the
-    // trim.
-    const std::string_view untrimmed = msg.images.empty()
-                                           ? std::string_view(msg.content)
-                                           : std::string_view(image_content);
-    const std::string_view content = Trim(untrimmed);
     const std::string_view thought = Trim(msg.thought);
     if (msg.role == ChatRole::kAssistant &&
         (options.preserve_thinking || message_index > last_user_index)) {
@@ -576,27 +601,10 @@ std::optional<std::string> QwenChatTemplate::Render(
       output.append("\n</think>\n\n");
     }
 
-    if (image_offsets != nullptr && !local_image_offsets.empty()) {
-      const auto removed =
-          static_cast<std::size_t>(content.data() - untrimmed.data());
-      for (const auto offset : local_image_offsets)
-        image_offsets->push_back(output.size() + offset - removed);
-    }
-    const auto content_offset = output.size();
-    output.append(content);
-    if (content_spans != nullptr) {
-      if (msg.images.empty()) {
-        content_spans->push_back({content_offset, content.size()});
-      } else {
-        const auto removed =
-            static_cast<std::size_t>(content.data() - untrimmed.data());
-        for (const auto& span : image_spans)
-          content_spans->push_back(
-              {content_offset + span.offset - removed, span.size});
-      }
-    }
+    const bool has_content = AppendMessageContent(
+        output, msg, options, image_count, image_offsets, content_spans);
     if (msg.role == ChatRole::kAssistant && !msg.tool_calls.empty()) {
-      if (!content.empty()) {
+      if (has_content) {
         output.append("\n\n");
       }
       AppendToolCalls(output, msg.tool_calls, content_spans);

@@ -275,9 +275,10 @@ bool ParseContent(const json::Value* content,
       const auto* image = part.find("image_url");
       const auto* url =
           image != nullptr && image->is_object() ? image->find("url") : nullptr;
-      if (message->role != tokenization::ChatRole::kUser || url == nullptr ||
-          !url->is_string()) {
-        *error = "image_url requires a user message and a string URL";
+      if ((message->role != tokenization::ChatRole::kUser &&
+           message->role != tokenization::ChatRole::kTool) ||
+          url == nullptr || !url->is_string()) {
+        *error = "image_url requires a user or tool message and a string URL";
         return false;
       }
       // Resolution is model-owned; accept only the automatic policy rather
@@ -3047,16 +3048,33 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
                                 std::string* error) {
   auto converted = item;
   const auto kind = item.member_str("type");
-  if (kind == "function_call" || kind == "function_call_output") {
+  if (kind == "function_call" || kind == "function_call_output" ||
+      kind == "custom_tool_call" || kind == "custom_tool_call_output") {
     const auto* id = item.find("call_id");
     if (!id || !id->is_string() || id->str().empty()) {
       *error = "function items require a nonempty call_id";
       return false;
     }
-    if (kind == "function_call") {
+    if (kind == "function_call" || kind == "custom_tool_call") {
       tokenization::ChatMessage::ToolCall call;
       call.id = id->str();
-      if (!ParseHistoricalFunction(item, &call, error))
+      json::Value custom_function;
+      const auto* function = &item;
+      if (kind == "custom_tool_call") {
+        const auto* input = item.find("input");
+        if (!input || !input->is_string()) {
+          *error = "historical custom tool calls require string input";
+          return false;
+        }
+        // Custom calls carry one free-form input. Preserve it as literal
+        // argument data in the model's native tool-history representation.
+        auto arguments = json::Value::object();
+        arguments["input"] = *input;
+        custom_function = item;
+        custom_function["arguments"] = arguments.dump();
+        function = &custom_function;
+      }
+      if (!ParseHistoricalFunction(*function, &call, error))
         return false;
       message->role = tokenization::ChatRole::kAssistant;
       message->tool_calls.push_back(std::move(call));

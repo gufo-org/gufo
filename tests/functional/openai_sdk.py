@@ -27,6 +27,7 @@ from metrics import CaseComplete, Recorder
 from tool_reasoning import check_reasoning_separator, check_tool_reasoning, response_result
 from discovery import check_discovery
 from image_inputs import check_image_count, check_image_inputs
+from tool_images import check_tool_images
 from tool_native import check_finite_argument_types, check_native_tool_schemas
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
                         check_untyped_agent_tools, check_mixed_tool_schemas,
@@ -2527,7 +2528,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
     assert proposed > 0 if speculative != "off" else proposed == 0, final
 
 
-SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
+SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
               "tool-reasoning", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
@@ -2568,8 +2569,8 @@ def main():
     args = parser.parse_args()
     if args.suite in ("discovery", "all") and args.expected_input_modalities is None:
         parser.error("discovery requires --expected-input-modalities text or text,image")
-    if args.suite in ("image-inputs", "image-count") and not args.vision:
-        parser.error("image-inputs and image-count require --vision and a loaded projector")
+    if args.suite in ("image-inputs", "image-count", "tool-images") and not args.vision:
+        parser.error("image-inputs, image-count and tool-images require --vision and a loaded projector")
     if args.suite in ("all", "sampling-defaults") and not args.sampling_preset:
         parser.error("--sampling-preset is required for all/sampling-defaults")
     if not isinstance(args.sampling_overrides, dict):
@@ -2619,6 +2620,8 @@ def main():
             "image-count": lambda: check_image_count(
                 client, args.model, checks, image_content, chat_result, response_result,
                 args.context, args.concurrency),
+            "tool-images": lambda: check_tool_images(
+                client, args.model, checks, image_content, chat_result, response_result),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
             "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
@@ -2693,7 +2696,7 @@ def main():
                 client, args.model, checks, chat_result),
         }
         selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "prefill-scheduling")
-                     and (name not in ("image-inputs", "image-count") or args.vision)]
+                     and (name not in ("image-inputs", "image-count", "tool-images") or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
         for name in selected:

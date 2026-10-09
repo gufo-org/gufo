@@ -6,6 +6,7 @@ sessions, exact HTTP bodies/SSE, task files and individual request/task timings.
 """
 
 import argparse
+import base64
 import collections
 import hashlib
 import http.client
@@ -43,6 +44,11 @@ PROMPTS = {
         'Read it back with the read tool, then use bash to run Python assertions that '
         f'render("user", "hello") equals "{kImStart}user\\nhello{kImEnd}\\n". '
         'Report success only after the assertions pass.'
+    ),
+    "image-read": (
+        "Use the read tool to open swatch.png. Inspect the image returned by that "
+        "tool, then reply with only its dominant color in lowercase. "
+        "Do not use bash or infer the color from a filename."
     ),
 }
 SLUG_TEST = """const assert = require("node:assert");
@@ -259,6 +265,19 @@ def validate_task(name, cwd, history):
         assert {"write", "read", "bash"} <= names, names
         results = [m for m in history if m.get("role") == "toolResult"]
         assert results and all(not m.get("isError") for m in results), results
+    elif name == "image-read":
+        assert names == {"read"} and text.strip().rstrip(".!").lower() == "red", (names, text)
+        observed = [m for m in history if m.get("role") == "toolResult"]
+        assert observed and all(not m.get("isError") for m in observed), observed
+        images = [part for result in observed for part in result.get("content", [])
+                  if part.get("type") == "image"]
+        assert images, "Pi did not return an actual image from read"
+        from PIL import Image
+        import io
+        for part in images:
+            with Image.open(io.BytesIO(base64.b64decode(part["data"], validate=True))) as image:
+                image.load()
+                assert image.convert("RGB").getpixel((image.width // 2, image.height // 2)) == (255, 0, 0)
     elif name == "creation":
         assert (cwd / "stats.js").is_file() and (cwd / "test.js").is_file()
         subprocess.run(["node", "test.js"], cwd=cwd, check=True, capture_output=True, timeout=10)
@@ -291,6 +310,9 @@ def run_case(args, recorder, env, index, name):
     elif name == "bugfix":
         (cwd / "slugify.js").write_text('module.exports = function slugify(title) {\n  return title.toLowerCase().replace(/ /g, "-");\n};\n')
         (cwd / "slugify.test.js").write_text(SLUG_TEST)
+    elif name == "image-read":
+        from run import image_fixture
+        image_fixture(cwd / "swatch.png")
     session = (args.output if args.conversation else case) / "session.jsonl"
     previous_messages = len(messages(session))
     command = [
@@ -391,7 +413,8 @@ def main():
     env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "SHELL", "SSL_CERT_FILE"}}
     env.update(PI_CODING_AGENT_DIR=str(config), PI_OFFLINE="1", PI_TELEMETRY="0")
     rows = []
-    cases = args.case * args.passes if args.case else ["simple"] + list(PROMPTS) * args.passes
+    cases = (args.case * args.passes if args.case else
+             ["simple"] + [name for name in PROMPTS if name != "image-read"] * args.passes)
     try:
         for index, name in enumerate(cases):
             rows.append(run_case(args, recorder, env, index, name))

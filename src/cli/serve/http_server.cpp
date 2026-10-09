@@ -541,7 +541,9 @@ bool ReadTextMessages(const json::Value* input,
       continue;
     }
     if (responses && (item.member_str("type") == "function_call" ||
-                      item.member_str("type") == "function_call_output")) {
+                      item.member_str("type") == "function_call_output" ||
+                      item.member_str("type") == "custom_tool_call" ||
+                      item.member_str("type") == "custom_tool_call_output")) {
       tokenization::ChatMessage message;
       std::string error;
       if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error)) {

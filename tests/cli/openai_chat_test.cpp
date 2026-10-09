@@ -2060,6 +2060,107 @@ void TestImageCountAndByteBudget() {
          "aggregate byte protection still covers every message");
 }
 
+void TestToolImagesRetainOrderAndIdentity() {
+  using gufo::json::parse;
+  using gufo::tokenization::ChatRole;
+  FakeBackend backend;
+  backend.pieces = {"ok"};
+  const auto response = gufo::server::HandleOpenAiChat(Request(R"({
+    "model":"test-model",
+    "messages":[{"role":"tool","tool_call_id":"call_picture","content":[
+      {"type":"text","text":"left "},
+      {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}},
+      {"type":"text","text":" right"},
+      {"type":"image_url","image_url":{"url":"data:image/png;base64,BAUG"}}
+    ]}]
+  })"),
+                                                       backend);
+  Expect(response.status == 200, "Chat tool images reach the backend");
+  const auto& chat = backend.last_request.messages.front();
+  Expect(chat.role == ChatRole::kTool && chat.tool_call_id == "call_picture" &&
+             chat.content == "left  right" && chat.images.size() == 2 &&
+             chat.images[0].offset == 5 && chat.images[1].offset == 11,
+         "Chat images stay attached to the tool result at their text offsets");
+
+  for (const auto* kind : {"function_call_output", "custom_tool_call_output"}) {
+    for (const bool text : {false, true}) {
+      auto item = parse(R"({"call_id":"call_picture","output":[
+        {"type":"input_image","image_url":"data:image/png;base64,AQID"}
+      ]})");
+      item["type"] = kind;
+      if (text)
+        item["output"] = parse(R"([
+          {"type":"input_text","text":"left "},
+          {"type":"input_image","image_url":"data:image/png;base64,AQID"},
+          {"type":"input_text","text":" right"}
+        ])");
+      gufo::core::ImageReadBudget budget;
+      budget.remaining_bytes = 3;
+      gufo::tokenization::ChatMessage message;
+      std::string error;
+      Expect(gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
+                                                      &error),
+             "Responses accepts image-bearing tool outputs: " + error);
+      Expect(
+          message.role == ChatRole::kTool &&
+              message.tool_call_id == "call_picture" &&
+              message.content == (text ? "left  right" : "") &&
+              message.images.size() == 1 &&
+              message.images[0].offset == (text ? 5 : 0) &&
+              *message.images[0].bytes == std::vector<std::uint8_t>({1, 2, 3}),
+          "Responses retains call association, image bytes and order");
+      gufo::tokenization::ChatMessage overflow;
+      Expect(!gufo::server::ParseOpenAiResponseMessage(item, &overflow, budget,
+                                                       &error),
+             "tool output images consume the shared request byte budget");
+    }
+    auto literal = parse(R"({"call_id":"literal",
+      "output":"data:image/png;base64,AQID"})");
+    literal["type"] = kind;
+    gufo::core::ImageReadBudget budget;
+    budget.remaining_bytes = 0;
+    gufo::tokenization::ChatMessage message;
+    std::string error;
+    Expect(gufo::server::ParseOpenAiResponseMessage(literal, &message, budget,
+                                                    &error) &&
+               message.images.empty() &&
+               message.content == "data:image/png;base64,AQID",
+           "string tool output stays literal text even when it spells an image "
+           "URL");
+  }
+  for (const auto* role : {"assistant", "system", "developer"}) {
+    auto message = parse(R"({"content":[
+      {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}
+    ]})");
+    message["role"] = role;
+    auto body = gufo::json::Value::object();
+    body["model"] = "test-model";
+    body["messages"] = gufo::json::Value::array();
+    body["messages"].push_back(std::move(message));
+    Expect(
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend).status ==
+            400,
+        "images remain rejected on non-observation roles");
+  }
+  for (const auto* image :
+       {R"({"url":17})",
+        R"({"url":"data:image/png;base64,AQID","detail":"high"})",
+        R"({"url":"file:///tmp/image.png"})",
+        R"({"url":"data:image/png;base64,A==="})"}) {
+    auto part = parse(R"({"type":"image_url"})");
+    part["image_url"] = parse(image);
+    auto message = parse(R"({"role":"tool","content":[]})");
+    message["content"].push_back(std::move(part));
+    auto body = parse(R"({"messages":[]})");
+    body["model"] = "test-model";
+    body["messages"].push_back(std::move(message));
+    Expect(
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend).status ==
+            400,
+        "tool images preserve URL, encoding and resolution validation");
+  }
+}
+
 void TestStopSequencesAndDefaultFields() {
   using gufo::json::Value;
   const auto base = gufo::json::parse(
@@ -5053,6 +5154,7 @@ int main() {
   TestStreamingOverloadIsRejectedBeforeHeaders();
   TestImagePartsRetainOrderAndIdentity();
   TestImageCountAndByteBudget();
+  TestToolImagesRetainOrderAndIdentity();
   std::cout << "All OpenAI chat protocol tests passed\n";
   return 0;
 }

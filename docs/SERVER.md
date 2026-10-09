@@ -566,6 +566,17 @@ no native effect are accepted and ignored so conforming clients interoperate
 `store` and `background` must be false when present; server-side conversations
 and `previous_response_id` remain unsupported.
 
+Function-call output accepts either a text string or an array of `input_text`
+and `input_image` parts. Images stay inside the corresponding tool result;
+image-only output and interleaved text/images are supported. Historical
+`custom_tool_call` items and their `custom_tool_call_output` use the same
+association and output parts; the custom call's free-form `input` is retained
+as literal tool-history data. This does not enable custom-tool generation.
+Chat Completions also accepts `image_url` parts in `role:"tool"` content.
+Existing text-string outputs keep their prompt representation. Images remain
+unsupported in assistant/system/developer messages; only `detail:"auto"` is
+accepted, and file IDs and `input_file` parts remain unsupported.
+
 Responses report `incomplete` with reason `max_output_tokens` when generation
 hits its limit. Otherwise they report `completed`. `stream: true` sends typed
 SSE events with consecutive `sequence_number` values: lifecycle, output items,
