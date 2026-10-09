@@ -25,6 +25,7 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, Ope
 from openai.types import Completion, CompletionChoice
 from metrics import CaseComplete, Recorder
 from tool_reasoning import check_reasoning_separator, check_tool_reasoning, response_result
+from tool_streaming import check_tool_streaming
 from discovery import check_discovery
 from image_inputs import check_image_count, check_image_inputs
 from tool_images import check_tool_images
@@ -94,7 +95,7 @@ def chat_result(client, request, streaming=False, on_chunk=None, on_open=None):
             "tools": [t.to_dict() for t in choice.message.tool_calls or []],
             "finish": choice.finish_reason, "usage": result.usage.to_dict(),
         }
-    text, reasoning, tools, finish, usage = "", "", [], None, None
+    text, reasoning, tools, finish, usage = "", "", {}, None, None
     with result:
         if on_open:
             on_open()
@@ -106,10 +107,34 @@ def chat_result(client, request, streaming=False, on_chunk=None, on_open=None):
             for choice in chunk.choices:
                 text += choice.delta.content or ""
                 reasoning += getattr(choice.delta, "reasoning_content", "") or ""
-                tools.extend(t.to_dict() for t in choice.delta.tool_calls or [])
+                for delta in choice.delta.tool_calls or []:
+                    assert 0 <= delta.index <= len(tools), delta
+                    call = tools.setdefault(delta.index, {
+                        "id": "", "type": "function",
+                        "function": {"name": "", "arguments": ""}})
+                    if delta.id:
+                        assert not call["id"], ("repeated tool ID", delta)
+                        call["id"] = delta.id
+                    if delta.function:
+                        call["function"]["name"] += delta.function.name or ""
+                        call["function"]["arguments"] += delta.function.arguments or ""
                 finish = choice.finish_reason or finish
     assert finish is not None and usage is not None, (finish, usage)
-    return dict(text=text, reasoning=reasoning, tools=tools, finish=finish, usage=usage)
+    complete, partial = [], []
+    for call in tools.values():
+        assert call["id"] and call["function"]["name"], call
+        try:
+            json.loads(call["function"]["arguments"])
+        except json.JSONDecodeError:
+            assert finish == "length" or (finish == "stop" and request.get("stop")), (
+                "unfinished tool in a successful turn", call, finish)
+            partial.append(call)
+        else:
+            complete.append(call)
+    result = dict(text=text, reasoning=reasoning, tools=complete, finish=finish, usage=usage)
+    if partial:
+        result["partial_tools"] = partial
+    return result
 
 
 def check_stops(client, model, checks):
@@ -2529,7 +2554,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
 
 
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
-              "tool-reasoning", "reasoning-separator",
+              "tool-reasoning", "tool-streaming", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
               "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection")
@@ -2632,6 +2657,7 @@ def main():
                 client, args.model, checks, chat_result, args.sampling_preset),
             "reasoning-separator": lambda: check_reasoning_separator(
                 client, args.model, checks, chat_result),
+            "tool-streaming": lambda: check_tool_streaming(client, args.model, checks, chat_result),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),

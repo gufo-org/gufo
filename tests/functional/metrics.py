@@ -202,7 +202,21 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         require(name in definitions, "undeclared generated tool")
         if isinstance(choice, dict) and choice.get("type") == "function":
             require(name == choice.get("function", choice).get("name"), "wrong named tool")
-        arguments = json.loads(call["arguments"])
+        try:
+            arguments = json.loads(call["arguments"])
+        except json.JSONDecodeError:
+            interrupted = (
+                output is not None and output["status"] == "incomplete"
+                and call.get("status") == "incomplete"
+            ) or (
+                output is None and any(
+                    item.get("finish") == "length" or
+                    (item.get("finish") == "stop" and body.get("stop"))
+                    for item in choices.values())
+            )
+            require(body.get("stream") and interrupted and call is calls[-1],
+                    "unfinished tool arguments in a successful response")
+            continue
         require(isinstance(arguments, dict), "tool arguments must be a JSON object")
         definition = definitions[name]
         if definition.get("strict"):

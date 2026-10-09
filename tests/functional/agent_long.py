@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -22,6 +23,58 @@ import urllib.request
 import agent_catalog
 from pi_agent import Recorder, save, validate_requests
 from opencode_agent import FRAMING, sse_output, validate_requests as validate_opencode
+
+
+def interruption_ready(path, phase):
+    """Interrupt only a live stream that has reached the requested phase."""
+    if not path.exists():
+        return False
+    thinking = False
+    arguments = {}
+    closed = set()
+    for line in path.read_bytes().decode("utf-8", errors="ignore").splitlines():
+        if not line.startswith("data: "):
+            continue
+        if line == "data: [DONE]":
+            return False
+        try:
+            event = json.loads(line[6:])
+        except json.JSONDecodeError:
+            continue  # The recorder may be writing the last event.
+        if event.get("type") in ("response.completed", "response.incomplete", "response.failed"):
+            return False
+        kind = event.get("type")
+        if kind == "response.reasoning_summary_text.delta" and event.get("delta"):
+            thinking = True
+        elif kind in ("response.reasoning_summary_text.done",
+                      "response.output_text.delta", "response.function_call_arguments.delta"):
+            thinking = False
+        index = event.get("output_index", 0)
+        if kind == "response.function_call_arguments.delta":
+            arguments[index] = arguments.get(index, "") + event["delta"]
+        elif kind == "response.function_call_arguments.done":
+            closed.add(index)
+        for choice in event.get("choices", []):
+            if choice.get("finish_reason"):
+                return False
+            delta = choice.get("delta", {})
+            if delta.get("reasoning_content"):
+                thinking = True
+            if delta.get("content") or delta.get("tool_calls"):
+                thinking = False
+            for call in delta.get("tool_calls") or []:
+                index = call.get("index", 0)
+                arguments[index] = arguments.get(index, "") + (
+                    call.get("function", {}).get("arguments") or "")
+    if phase == "thinking":
+        return thinking
+    for index, value in arguments.items():
+        if value and index not in closed:
+            try:
+                json.loads(value)
+            except json.JSONDecodeError:
+                return True
+    return False
 
 
 def archive(index):
@@ -86,11 +139,10 @@ def run(args):
     args.output.mkdir(parents=True, exist_ok=False)
     previous_report = None
     if args.resume:
-        assert args.agent == "opencode", "resume currently uses OpenCode's persistent session"
         previous_report = json.loads((args.resume / "report.json").read_text())
         assert previous_report["agent"] == args.agent
         assert previous_report["context_limit"] == context
-        work = args.resume / "work"
+        work = Path(previous_report.get("work", args.resume / "work"))
     else:
         work = args.output / "work"
         work.mkdir()
@@ -104,7 +156,10 @@ def run(args):
     env = {k: v for k, v in os.environ.items() if k in {
         "PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "SHELL", "SSL_CERT_FILE"}}
     catalog_log = args.output / "catalog.jsonl"
+    storage = Path(previous_report.get("storage", args.resume / "config")) if args.resume else config
     if args.agent == "pi":
+        if args.resume:
+            shutil.copyfile(args.resume / "session.jsonl", args.output / "session.jsonl")
         save(config / "models.json", {"providers": {"gufo-regression": {
             "baseUrl": base, "api": args.api, "apiKey": "local-test",
             "compat": {"supportsStrictMode": False},
@@ -147,11 +202,12 @@ def run(args):
             save(config / "opencode.json", settings)
         env.update(OPENCODE_CONFIG=str(config / "opencode.json"))
         for name in ("CONFIG", "DATA", "STATE", "CACHE"):
-            storage = args.resume / "config" if args.resume and name != "CONFIG" else config
-            env[f"XDG_{name}_HOME"] = str(storage / name.lower())
+            root = config if name == "CONFIG" else storage
+            env[f"XDG_{name}_HOME"] = str(root / name.lower())
         command = [args.executable, "run", "--pure", "--auto", "--format", "json",
                    "-m", f"gufo/{args.model}", "--variant", args.thinking]
     report = {"agent": args.agent, "context_limit": context,
+              "work": str(work), "storage": str(storage),
               "options": {key: str(value) if isinstance(value, Path) else value
                           for key, value in vars(args).items()}, "turns": []}
     report["version"] = subprocess.check_output([args.executable, "--version"], text=True).strip()
@@ -159,15 +215,19 @@ def run(args):
     max_prompt = 0
     first_turn = 0
     if previous_report:
-        first_turn = len(previous_report["turns"])
-        max_prompt = max(t["max_prompt_tokens"] for t in previous_report["turns"])
+        first_turn = previous_report.get("next_turn", len(previous_report["turns"]))
+        max_prompt = max([previous_report.get("resumed_prompt_tokens", 0)] +
+                         [t["max_prompt_tokens"] for t in previous_report["turns"]])
         report["resumed_prompt_tokens"] = max_prompt
         report["previous_error"] = previous_report.get("error")
-        for path in sorted(args.resume.glob("turn-*.jsonl")):
-            for line in path.read_text().splitlines():
-                event = json.loads(line)
-                session = event.get("sessionID", session)
-        assert session, "no saved OpenCode session"
+        if args.agent == "opencode":
+            session = previous_report.get("session_id")
+            for path in sorted(args.resume.glob("turn-*.jsonl")):
+                for line in path.read_text().splitlines():
+                    event = json.loads(line)
+                    session = event.get("sessionID", session)
+            assert session, "no saved OpenCode session"
+            report["session_id"] = session
     previous_request = None
     previous_body = None
     stress_done = 0
@@ -215,6 +275,8 @@ def run(args):
                     prompt, expected = agent_catalog.prepare(work, turn)
             catalog_start = len(catalog_log.read_text().splitlines()) if catalog_log.exists() else 0
             recorder.case = f"turn-{turn:02d}"
+            report["next_turn"] = turn + 1
+            prompt += " Use relative file paths inside the current task directory."
             start_row = len(recorder.requests)
             invocation = command + (["--session", session] if session else []) + [prompt]
             save(args.output / f"turn-{turn:02d}.command.json", invocation)
@@ -228,13 +290,25 @@ def run(args):
                         raise AssertionError(f"agent timed out on turn {turn}")
                     if len(recorder.requests) - start_row > 40:
                         raise AssertionError(f"excessive tool loop on turn {turn}")
-                    time.sleep(0.5)
+                    if args.interrupt:
+                        for row in recorder.requests[start_row:]:
+                            path = wire / f"request-{row['index']:04d}.sse"
+                            if interruption_ready(path, args.interrupt):
+                                os.killpg(process.pid, signal.SIGINT)
+                                process.wait(timeout=10)
+                                report["finished"] = "interrupted"
+                                report["interruption"] = {
+                                    "phase": args.interrupt, "request": row["index"],
+                                    "turn": turn, "client_returncode": process.returncode}
+                                return
+                    time.sleep(0.05 if args.interrupt else 0.5)
             assert process.returncode == 0, f"client failed on turn {turn}"
             if args.agent == "opencode":
                 events = [json.loads(line) for line in
                           (args.output / f"turn-{turn:02d}.jsonl").read_text().splitlines()]
                 session = next((e["sessionID"] for e in events if e.get("sessionID")), session)
                 assert session, "OpenCode did not expose a persistent session"
+                report["session_id"] = session
             rows = recorder.requests[start_row:]
             if args.agent == "opencode":
                 validate_opencode(rows, wire)
@@ -343,7 +417,9 @@ if __name__ == "__main__":
     parser.add_argument("--server-log", type=Path,
                         help="Gufo informational log (required for Pi Responses timing checks)")
     parser.add_argument("--resume", type=Path,
-                        help="Resume a recorded OpenCode conversation after restarting the server")
+                        help="Resume a recorded Pi/OpenCode conversation, including after interruption")
+    parser.add_argument("--interrupt", choices=("thinking", "tool"),
+                        help="Stop a resumed client during live output; then verify it with --resume")
     parser.add_argument("--thinking", default="low", choices=("off", "low", "medium", "high"))
     parser.add_argument("--api", default="openai-completions",
                         choices=("openai-completions", "openai-responses"))
@@ -354,6 +430,8 @@ if __name__ == "__main__":
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--complex-tools", action="store_true")
     args = parser.parse_args()
+    if args.interrupt and not args.resume:
+        parser.error("--interrupt requires a retained conversation via --resume")
     if args.agent == "pi" and args.api == "openai-responses" and not args.server_log:
         parser.error("Pi Responses requires --server-log for request timing checks")
     run(args)

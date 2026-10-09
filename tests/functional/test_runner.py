@@ -1011,6 +1011,38 @@ class FunctionalRunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_tool_events(events, {"output": []})
 
+    def test_partial_tool_arguments_require_an_interrupted_turn(self):
+        timing = {"prompt_n": 1, "prompt_ms": 2, "predicted_ms": 3,
+                  "cache_restore_ms": 0, "cache_snapshot_ms": 0,
+                  "cache_disk_enqueue_ms": 0, "queue_ms": 0, "ttft_ms": 2}
+        usage = {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3,
+                 "prompt_tokens_details": {"cached_tokens": 0}}
+        body = {"stream": True, "tools": [{"type": "function",
+                "function": {"name": "record", "parameters": {"type": "object"}}}]}
+        events = [
+            {"choices": [{"index": 0, "delta": {"tool_calls": [
+                {"index": 0, "id": "call1", "type": "function",
+                 "function": {"name": "record", "arguments": '{"text":"par'}}]}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
+             "timings": timing},
+            {"choices": [], "usage": usage},
+        ]
+
+        def check(request):
+            data = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n"
+                            for event in events) + b"data: [DONE]\n\n"
+            return summarize([(1, data)], True, True,
+                             ("/v1/chat/completions", request, 200))
+
+        check(body)
+        events[1]["choices"][0]["finish_reason"] = "stop"
+        check({**body, "stop": "STOP"})
+        with self.assertRaisesRegex(ValueError, "unfinished tool"):
+            check(body)
+        events[1]["choices"][0]["finish_reason"] = "tool_calls"
+        with self.assertRaisesRegex(ValueError, "unfinished tool"):
+            check(body)
+
     def test_mode_coverage_checks_loader_restart_and_executed_drafts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
