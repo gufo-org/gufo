@@ -60,6 +60,24 @@ def assert_color(result, color):
         assert usage["gufo"]["prefill_tokens"] == tokens, usage
 
 
+def messages_color_requests(png, color):
+    """Anthropic Messages image blocks: in the user turn and in a tool result."""
+    source = {"type": "base64", "media_type": "image/png", "data": png.split(",", 1)[1]}
+    question = "Name the dominant color in the image. Reply with one lowercase English color name only."
+    common = {"max_tokens": 16, "temperature": 0, "thinking": {"type": "disabled"}}
+    user_turn = {**common, "messages": [{"role": "user", "content": [
+        {"type": "image", "source": source}, {"type": "text", "text": question}]}]}
+    tool_result = {**common, "messages": [
+        {"role": "user", "content": "Read swatch.png."},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_swatch",
+                                           "name": "read_file", "input": {"path": "swatch.png"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_swatch", "content": [
+                {"type": "text", "text": "swatch.png"}, {"type": "image", "source": source}]},
+            {"type": "text", "text": question}]}]}
+    return (("user", user_turn), ("tool_result", tool_result))
+
+
 def check_image_inputs(client, model, checks, image_content, chat_result, response_result):
     from openai import BadRequestError
 
@@ -104,6 +122,21 @@ def check_image_inputs(client, model, checks, image_content, chat_result, respon
         result = request(endpoint, image_content("blue")["image_url"]["url"], True)
         assert_color(result, "blue")
         record(f"image_inputs_{endpoint}_recovery", result)
+    check_messages_images(client, model, checks, image_content)
+
+
+def check_messages_images(client, model, checks, image_content):
+    from messages_tools import messages_tool_result
+
+    for color in ("red", "blue"):
+        png = image_content(color)["image_url"]["url"]
+        for place, body in messages_color_requests(png, color):
+            result = messages_tool_result(client, {"model": model, **body})
+            assert re.fullmatch(color + r"[.!]?", result["text"].strip().lower()), result
+            assert not result["reasoning"] and result["finish"] == "end_turn", result
+            assert result["usage"]["prompt_tokens"] > 0, result
+            checks[f"image_inputs_messages_{place}_{color}"] = result
+            print(f"CHECK image_inputs_messages_{place}_{color}", file=sys.stderr, flush=True)
 
 
 def check_image_count(client, model, checks, image_content, chat_result, response_result,

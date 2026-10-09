@@ -3298,8 +3298,49 @@ std::optional<HttpResponse> ParseAnthropicToolControls(const json::Value& body,
   return {};
 }
 
+bool ParseAnthropicImage(const json::Value& block,
+                         tokenization::ChatMessage* message,
+                         core::ImageReadBudget& budget, std::string* error) {
+  const auto* source = block.find("source");
+  const auto type = source != nullptr && source->is_object()
+                        ? source->member_str("type")
+                        : std::string();
+  std::string url;
+  if (type == "base64") {
+    const auto* media = source->find("media_type");
+    const auto* data = source->find("data");
+    if (media == nullptr || !media->is_string() || data == nullptr ||
+        !data->is_string()) {
+      *error = "base64 image sources require string media_type and data";
+      return false;
+    }
+    url = "data:" + media->str() + ";base64," + data->str();
+  } else if (type == "url") {
+    const auto* spelled = source->find("url");
+    if (spelled == nullptr || !spelled->is_string()) {
+      *error = "url image sources require a string url";
+      return false;
+    }
+    url = spelled->str();
+  } else {
+    *error = "image blocks require a base64 or url source";
+    return false;
+  }
+  try {
+    message->images.push_back(
+        {message->content.size(),
+         std::make_shared<const std::vector<std::uint8_t>>(
+             core::ReadImageUrl(url, budget))});
+  } catch (const std::exception& exception) {
+    *error = exception.what();
+    return false;
+  }
+  return true;
+}
+
 bool ParseAnthropicToolMessage(const json::Value& item,
                                std::vector<tokenization::ChatMessage>* messages,
+                               core::ImageReadBudget& budget,
                                std::string* error) {
   const auto role = item.member_str("role");
   const auto* content = item.find("content");
@@ -3317,6 +3358,13 @@ bool ParseAnthropicToolMessage(const json::Value& item,
     }
     *out += text->str();
     return true;
+  };
+  // User text and tool results may also carry images.
+  const auto read_part = [&](const json::Value& part,
+                             tokenization::ChatMessage* target) {
+    if (part.is_object() && part.member_str("type") == "image")
+      return ParseAnthropicImage(part, target, budget, error);
+    return read_text(part, &target->content);
   };
   if (role == "assistant") {
     tokenization::ChatMessage message(tokenization::ChatRole::kAssistant, "");
@@ -3359,7 +3407,7 @@ bool ParseAnthropicToolMessage(const json::Value& item,
     if (!part.is_object() || part.member_str("type") != "tool_result") {
       if (!text)
         text.emplace(tokenization::ChatRole::kUser, "");
-      if (!read_text(part, &text->content))
+      if (!read_part(part, &*text))
         return false;
       continue;
     }
@@ -3380,11 +3428,11 @@ bool ParseAnthropicToolMessage(const json::Value& item,
       if (output->is_string()) {
         result.content = output->str();
       } else if (!output->is_array()) {
-        *error = "tool_result content must be a string or text blocks";
+        *error = "tool_result content must be a string, text or image blocks";
         return false;
       } else {
         for (const auto& block : output->items())
-          if (!read_text(block, &result.content))
+          if (!read_part(block, &result))
             return false;
       }
     }

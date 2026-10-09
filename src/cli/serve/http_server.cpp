@@ -477,7 +477,10 @@ tokenization::ChatRole RoleFrom(const std::string& r) {
 // Messages replays assistant reasoning as thinking blocks. Restore it as the
 // turn's thought so the prompt reproduces the generated tokens.
 bool ReadTextContent(const json::Value* content, std::string* out,
-                     std::string* thought = nullptr) {
+                     std::string* thought = nullptr,
+                     tokenization::ChatMessage* image_message = nullptr,
+                     core::ImageReadBudget* image_budget = nullptr,
+                     std::string* error = nullptr) {
   if (content == nullptr)
     return false;
   if (content->is_string()) {
@@ -490,6 +493,16 @@ bool ReadTextContent(const json::Value* content, std::string* out,
         if (thinking == nullptr || !thinking->is_string())
           return false;
         *thought += thinking->str();
+        continue;
+      }
+      // Messages images ride along with the text of a user turn; `out` is
+      // that message's content, so the image lands at its current end.
+      if (image_message != nullptr && part.is_object() &&
+          part.member_str("type") == "image") {
+        std::string ignored;
+        if (!ParseAnthropicImage(part, image_message, *image_budget,
+                                 error != nullptr ? error : &ignored))
+          return false;
         continue;
       }
       const auto* text = part.find("text");
@@ -533,7 +546,7 @@ bool ReadTextMessages(const json::Value* input,
                                       part.member_str("type") == "tool_result");
                             })) {
       std::string error;
-      if (!ParseAnthropicToolMessage(item, messages, &error)) {
+      if (!ParseAnthropicToolMessage(item, messages, image_budget, &error)) {
         if (parse_error && !error.empty())
           *parse_error = std::move(error);
         return false;
@@ -601,12 +614,21 @@ bool ReadTextMessages(const json::Value* input,
           *parse_error = std::move(error);
         return false;
       }
-    } else if (!ReadTextContent(
-                   item.find("content"), &message.content,
-                   message.role == tokenization::ChatRole::kAssistant
-                       ? &message.thought
-                       : nullptr))
-      return false;
+    } else {
+      std::string error;
+      if (!ReadTextContent(item.find("content"), &message.content,
+                           message.role == tokenization::ChatRole::kAssistant
+                               ? &message.thought
+                               : nullptr,
+                           message.role == tokenization::ChatRole::kUser
+                               ? &message
+                               : nullptr,
+                           &image_budget, &error)) {
+        if (parse_error && !error.empty())
+          *parse_error = std::move(error);
+        return false;
+      }
+    }
     if (responses &&
         (message.role == tokenization::ChatRole::kSystem ||
          message.role == tokenization::ChatRole::kDeveloper) &&
@@ -1203,8 +1225,8 @@ std::optional<HttpResponse> ReadAnthropicChat(
         {tokenization::ChatRole::kSystem, std::move(text), "", ""});
   }
   std::string messages_error =
-      "'messages' must contain text, thinking, tool_use or tool_result "
-      "blocks; use /v1/chat/completions for images";
+      "'messages' must contain text, image, thinking, tool_use or tool_result "
+      "blocks";
   if (!ReadTextMessages(body.find("messages"), &messages, false,
                         &messages_error)) {
     return InvalidCompatibilityRequest(messages_error);
