@@ -69,7 +69,12 @@ struct RetentionEvent {
 };
 class RetentionEventSink {
 public:
+  RetentionEventSink() = default;
   virtual ~RetentionEventSink() = default;
+  RetentionEventSink(const RetentionEventSink&) = delete;
+  RetentionEventSink& operator=(const RetentionEventSink&) = delete;
+  RetentionEventSink(RetentionEventSink&&) = delete;
+  RetentionEventSink& operator=(RetentionEventSink&&) = delete;
   virtual void Emit(const RetentionEvent&) noexcept = 0;
 };
 struct RetentionRequest {
