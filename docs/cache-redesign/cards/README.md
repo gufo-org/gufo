@@ -49,7 +49,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [02](02-package-and-adapter-api.md) | `src/cache/` package, adapter API and fake adapter | Common package | — | L (contracts + fake) | done |
 | [03](03-resource-ledger.md) | Resource ledger and reservations | Common package | 02 | M | done |
 | [04](04-chunks-and-checkpoints.md) | Chunks, checkpoints and provenance | Common package | 03 | M–L | done |
-| [05](05-prefix-index-and-lookup.md) | Prefix index and lookup | Common package | 04 | M | agreed |
+| [05](05-prefix-index-and-lookup.md) | Prefix index and lookup | Common package | 04 | M | done |
 | [06](06-slot-leases-and-mutation.md) | Slot leases and the mutation guard | Common package | 03, 04 | L | done |
 | [07](07-retention-policy.md) | Retention policy port | Common package | 05, 06 | M | agreed |
 | [08](08-committed-backing-and-streams.md) | Committed backing pool and transfer streams | Common package | 03, D4 | M | agreed |

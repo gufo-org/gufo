@@ -121,7 +121,11 @@ nix develop -c cmake --build build/cache-tsan --target cache_slot_test --paralle
 nix develop -c ctest --test-dir build/cache-tsan -R '^cache_slot_test$' --output-on-failure
 ```
 
-All seven focused CPU checks passed in ordinary and ASan/UBSan builds; the slot
+All 48 hosted PR checks and the production release cache library passed. The
+shared formatting and tracked-source documentation checks passed (86 Markdown
+files, 438 local links/anchors); the workspace-wide documentation scan encounters
+unrelated links in ignored `hrx-system` files. All seven focused CPU checks
+passed in ordinary and ASan/UBSan builds; the slot
 check including concurrent leases passed under ThreadSanitizer. Per-test reports
 remain under each build directory's `Testing/Temporary/`. This is common-package
 validation; no serving behavior or model quality qualification is claimed.
@@ -152,3 +156,14 @@ required (see the README).
 
 ## Review notes
 
+
+### Independent review follow-up
+
+Round one identified a race between reservation conversion and persistence-pin
+admission. An independent ThreadSanitizer reproducer reported concurrent access
+to the reservation's shared-pointer handle. Conversion and publication now share
+the row mutex with persistence admission; copies and completion waits remain
+outside it. Added contention tests use the two-step chunk persistence-pin path,
+copy existing reader/persistence pins during mutation, and fail each preservation
+conversion after earlier ranges have succeeded. Row metadata also charges the
+borrowed-handle object. Ordinary, ASan/UBSan and ThreadSanitizer slot checks pass.

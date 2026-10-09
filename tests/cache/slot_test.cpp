@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <cassert>
 #include <chrono>
 #include <future>
@@ -149,6 +150,80 @@ void Failures() {
     assert(f.adapter.Positions(f.lease.Execution()) == positions);
     assert(f.Read(chunk.Storage(), kTarget, 0, 4) == bytes);
     f.ledger.ClearFaults();
+  }
+}
+void EveryPreservationConversion() {
+  for (std::size_t failed = 0; failed < 4; ++failed) {
+    Fixture f;
+    auto history = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                          f.adapter.CompatibilityIdentity());
+    auto checkpoint = f.Capture(history);
+    auto positions = f.adapter.Positions(f.lease.Execution());
+    auto target =
+        f.Read(checkpoint->Components()[0].chunks[0].Storage(), kTarget, 0, 4);
+    auto draft =
+        f.Read(checkpoint->Components()[1].chunks[0].Storage(), kDraft, 0, 4);
+    f.ledger.FailAfter(LedgerStep::kConvert, failed);
+    std::array<Token, 1> suffix{9};
+    Throws([&] { f.adapter.Append(f.lease.Execution(), suffix, suffix); });
+    assert(checkpoint->IsValid());
+    assert(f.adapter.Positions(f.lease.Execution()) == positions);
+    assert(f.Read(checkpoint->Components()[0].chunks[0].Storage(), kTarget, 0,
+                  4) == target);
+    assert(f.Read(checkpoint->Components()[1].chunks[0].Storage(), kDraft, 0,
+                  4) == draft);
+  }
+}
+void ChunkPinsBlockMutation() {
+  Fixture f;
+  auto history = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                        f.adapter.CompatibilityIdentity());
+  auto checkpoint = f.Capture(history);
+  auto reader = checkpoint->Components()[0].chunks[0].PinReader();
+  auto persistence = checkpoint->Components()[0].chunks[0].PinPersistence();
+  auto worker = std::async(std::launch::async, [&] {
+    f.adapter.GuardRows(f.lease.Execution(), kTarget, 0, 1);
+  });
+  while (checkpoint->Components()[0].chunks[0].Storage().BorrowedFrom())
+    std::this_thread::yield();
+  // Copying existing pins during mutation must not wait on its own readers.
+  auto reader_copy = reader;
+  auto persistence_copy = persistence;
+  assert(worker.wait_for(20ms) == std::future_status::timeout);
+  {
+    auto moved = std::move(reader);
+    auto moved_persistence = std::move(persistence);
+  }
+  assert(worker.wait_for(20ms) == std::future_status::timeout);
+  reader_copy = checkpoint->Components()[1].chunks[0];
+  persistence_copy = checkpoint->Components()[1].chunks[0];
+  worker.get();
+  assert(checkpoint->IsValid());
+}
+void ConcurrentPersistenceAdmission() {
+  for (int round = 0; round < 20; ++round) {
+    Fixture f;
+    auto history = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                          f.adapter.CompatibilityIdentity());
+    auto checkpoint = f.Capture(history);
+    const auto& chunk = checkpoint->Components()[0].chunks[0];
+    std::barrier ready(5);
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 4; ++i)
+      workers.emplace_back([&] {
+        ready.arrive_and_wait();
+        for (int j = 0; j < 100; ++j) {
+          auto pin = chunk.PinPersistence();
+          auto copy = pin;
+        }
+      });
+    ready.arrive_and_wait();
+    f.adapter.GuardRows(f.lease.Execution(), kTarget, 0, 4);
+    for (auto& worker : workers)
+      worker.join();
+    assert(checkpoint->IsValid());
+    assert(!chunk.Storage().BorrowedFrom());
+    assert(f.ledger.Snapshot().persistence_pinned_bytes == 0);
   }
 }
 void Retirement() {
@@ -462,6 +537,9 @@ void MissedGuard() {
 int main() {
   Paths();
   Failures();
+  EveryPreservationConversion();
+  ChunkPinsBlockMutation();
+  ConcurrentPersistenceAdmission();
   Retirement();
   PinsAndCancellation();
   Leases();

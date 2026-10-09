@@ -96,15 +96,16 @@ struct LeaseState final : MutationGuard {
       if (!release)
         CheckStop();
       // Convert may fail; until it succeeds readers still see unchanged rows.
-      auto charge = r->reservation.Convert();
       lock.lock();
+      auto charge = r->reservation.Convert();
       r->charge = std::move(charge);
       r->category = r->charge.Info().category;
       r->materialized = true;
       r->closing = false;
       r->changed.notify_all();
     } catch (...) {
-      lock.lock();
+      if (!lock.owns_lock())
+        lock.lock();
       r->closing = false;
       if (release)
         r->retired = true;
@@ -328,10 +329,10 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
       backing.size() != (end - first) * d->row_bytes ||
       backing.size() > info.bytes)
     throw std::invalid_argument("invalid borrowed row description");
-  auto metadata = state_->ledger.Reserve(ResourceCategory::kMetadata,
-                                         sizeof(detail::RowState) +
-                                             sizeof(detail::LeaseState::Entry) +
-                                             2 * sizeof(void*));
+  auto metadata = state_->ledger.Reserve(
+      ResourceCategory::kMetadata,
+      sizeof(detail::RowState) + sizeof(BorrowedRows) +
+          sizeof(detail::LeaseState::Entry) + 2 * sizeof(void*));
   auto rows = std::make_shared<detail::RowState>();
   rows->reservation = std::move(held);
   rows->owner = std::move(retained_owner);
