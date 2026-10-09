@@ -258,6 +258,11 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
   if (r.new_payload_bytes > limits.total_bytes ||
       r.new_payload_bytes > limits.ram_bytes)
     return refuse(RetentionReason::kByteCapacity);
+  // ReserveSnapshot's optional-role record guard precedes its exact-match
+  // search. Republishing an exact boundary cannot bypass that guard and
+  // downgrade an inferred continuation branch to history/retry.
+  if (size_ == limit_ && !Continuation(r.purpose) && Victim(r, true) == limit_)
+    return refuse(RetentionReason::kRecordCapacity);
   // Exact replacement keeps learned status even if capture later needs space.
   std::size_t exact = limit_;
   for (std::size_t i = 0; i < limit_; ++i) {

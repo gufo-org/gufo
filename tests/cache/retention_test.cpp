@@ -197,6 +197,62 @@ void RecordSourceReplacement() {
   assert(f.log.events[f.log.events.size() - 2].checkpoint == other);
   assert(f.policy.Rank(source) == 2);
 }
+void FullOptionalExactReplacement() {
+  for (const auto purpose :
+       {RetentionPurpose::kRetry, RetentionPurpose::kHistory}) {
+    for (const std::size_t limit : {1U, 2U}) {
+      Fixture f(limit);
+      const std::vector<Token> root{1, 2};
+      const auto id = f.Add(root);
+      if (limit == 2)
+        f.Add({9, 9});
+      bool called = false;
+      assert(!f.policy.Admit({root, {1}, {}, purpose, 0, id}, [&] {
+        called = true;
+        return IndexCheckpoint(f.ledger, root);
+      }));
+      assert(!called && f.policy.Size() == limit && f.Cached({1, 2, 5}) == 2);
+      assert(f.log.events.back().reason == RetentionReason::kRecordCapacity);
+    }
+  }
+  {
+    Fixture f(3);
+    const std::vector<Token> root{1, 2};
+    const auto id = f.Add(root);
+    f.Add({1, 2, 3});
+    f.Add({1, 2, 4});
+    f.policy.Touch(
+        id);  // mirrors Acquire's use before its optional reservation
+    assert(f.policy.Rank(id) == 3);
+    assert(!f.policy.Admit({root, {1}, {}, RetentionPurpose::kHistory, 0, id},
+                           [&] { return IndexCheckpoint(f.ledger, root); }));
+    assert(f.policy.Rank(id) == 3);
+    f.Add({9, 9});
+    assert(f.Cached({1, 2, 5}) == 2);
+  }
+  {
+    Fixture f(1);
+    const std::vector<Token> root{1, 2};
+    const auto id = f.Add(root, RetentionPurpose::kBranchPoint);
+    assert(!f.policy.Admit({root, {1}, {}, RetentionPurpose::kRetry, 0, id},
+                           [&] { return IndexCheckpoint(f.ledger, root); }));
+    assert(f.log.events.back().purpose == RetentionPurpose::kRetry &&
+           f.log.events.back().rank == 0);
+  }
+  {
+    // The original guard permits an optional exact replacement if another
+    // eligible record exists; an exact learned point must stay learned.
+    Fixture f(3);
+    const auto id = f.Add({1, 2}, RetentionPurpose::kBranchPoint);
+    f.Add({7}, RetentionPurpose::kHistory);
+    f.Add({7, 8});
+    const std::vector<Token> root{1, 2};
+    assert(f.policy.Admit({root, {1}, {}, RetentionPurpose::kHistory, 0, id},
+                          [&] { return IndexCheckpoint(f.ledger, root); }));
+    assert(f.policy.Rank(f.log.events.back().checkpoint) == 3);
+    assert(f.policy.Size() == 3);
+  }
+}
 void FailureAndReplay() {
   ResourceLedger ledger{kIndexLimits};
   {
@@ -454,6 +510,7 @@ int main() {
   Branches();
   RanksAndSources();
   RecordSourceReplacement();
+  FullOptionalExactReplacement();
   FailureAndReplay();
   CapacityAndSharing();
   ImpossibleAndAllocationFailure();

@@ -283,3 +283,23 @@ for both flag values, with separate coverage of byte-pressure protection.
 Focused retention CPU, ASan/UBSan, tidy, release-library, formatting and
 documentation checks pass. The trace baseline never reaches its 128-record
 limit, so this record-pressure fix does not alter the corrected table.
+
+### Independent review, round 3
+
+The third fresh-context reviewer verified the earlier fixes and replay evidence,
+and confirmed an optional-admission parity gap. At a full record pool, today's
+`ReserveSnapshot` checks that an eligible non-source record exists before its
+exact-replacement search. The new policy had exempted exact matches, allowing
+retry/history captures to bypass that guard. An exact history could downgrade
+an inferred continuation branch and lose its reusable boundary under pressure.
+
+The original optional-role guard now runs before exact-match handling. New
+regressions failed on the previous revision and pass after the fix: retry and
+history exact replacement with one/two full records refuse before capture; an
+inferred branch remains protected afterward; an exact learned point's refused
+retry reports the original retry role/rank; and a permitted history replacement
+with another eligible record still preserves learned status. Both the third
+review's old/new scratch reproductions and the branch-loss example are retained
+under `/tmp/gufo-pr503-r3-*`. The fixed policy is validated with the focused
+ordinary/sanitizer test, production library rebuild and the final hosted suite.
+The archived baseline stays below its 128-record limit and is unaffected.
