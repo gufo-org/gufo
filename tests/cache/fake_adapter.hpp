@@ -11,10 +11,15 @@
 
 namespace gufo::cache::testing {
 
+struct FakeTransfer;
+struct FakeStreamState;
+
 inline constexpr ComponentId kTarget{1}, kDraft{2}, kRecurrent{3};
 
 // Deterministic single-threaded FIFO stream. A delayed stream advances only
 // through Advance, Wait, Synchronize or completion destruction; no wall clock.
+// Submit runs on the host. Waiting/synchronizing from a running callback on
+// the same stream is a programming error and terminates instead of deadlocking.
 class FakeStream final : public Stream {
 public:
   explicit FakeStream(bool delayed = false);
@@ -22,23 +27,29 @@ public:
   [[nodiscard]] TransferResult Synchronize() noexcept override;
   [[nodiscard]] TransferResult Advance() noexcept;
   [[nodiscard]] Completion Submit(std::function<TransferResult()>);
+  void FailNextSubmission() noexcept;
 
 private:
-  struct State;
+  friend class FakeAdapter;
   class Signal;
-  std::shared_ptr<State> state_;
+  [[nodiscard]] Completion SubmitTracked(
+      std::function<TransferResult()>,
+      std::vector<std::shared_ptr<FakeTransfer>>*);
+  std::shared_ptr<FakeStreamState> state_;
   bool delayed_;
+  bool fail_submission_{false};
 };
 
 class FakeAdapter final : public Adapter {
 public:
-  [[nodiscard]] Capabilities capabilities() const override;
+  [[nodiscard]] Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const ComponentDescriptor> Components()
       const override;
   [[nodiscard]] Identity CompatibilityIdentity() const override;
   [[nodiscard]] std::unique_ptr<Slot> CreateSlot(MutationGuard&) override;
   [[nodiscard]] std::vector<ComponentPosition> Positions(
       const Slot&) const override;
+  void BeginRestore(Slot&, std::span<const ComponentPosition>) override;
   [[nodiscard]] Completion CapturePrivate(const Slot&, ComponentId,
                                           std::span<std::byte>,
                                           Stream&) override;
@@ -52,10 +63,11 @@ public:
                                        Stream&) override;
   [[nodiscard]] bool Validate(Slot&,
                               std::span<const ComponentPosition>) override;
-  void Invalidate(Slot&) noexcept override;
+  [[nodiscard]] bool Invalidate(Slot&) noexcept override;
 
   // Execution fixture: target and draft advance independently. Recurrent state
-  // is a token hash chain, so mixing rows and private state cannot validate.
+  // is a token hash chain. Continued execution detects mismatched checkpoint
+  // bytes; Validate checks metadata and load completeness, not row contents.
   void Append(Slot&, std::span<const Token> target,
               std::span<const Token> draft);
   [[nodiscard]] std::uint64_t RecurrentHash(const Slot&) const;
@@ -63,7 +75,10 @@ public:
   void FailNextTransfer() noexcept;
 
 private:
-  [[nodiscard]] bool TakeTransferFailure() noexcept;
+  [[nodiscard]] Completion SubmitRead(const Slot&, Stream&,
+                                      std::function<TransferResult()>);
+  [[nodiscard]] Completion SubmitLoad(Slot&, Stream&,
+                                      std::function<TransferResult()>);
   bool fail_allocation_{false};
   bool fail_transfer_{false};
 };

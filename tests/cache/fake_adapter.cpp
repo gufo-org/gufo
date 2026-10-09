@@ -4,50 +4,110 @@
 #include <array>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <utility>
 
 namespace gufo::cache::testing {
-namespace {
-struct Job {
+struct FakeTransfer {
   std::function<TransferResult()> run;
   std::optional<TransferResult> result;
+  std::weak_ptr<FakeStreamState> stream;
 };
 
-std::uint64_t Hash(std::span<const Token> tokens) {
-  std::uint64_t hash = 0xcbf29ce484222325ULL;
-  for (Token token : tokens) {
-    hash ^= token;
-    hash *= 0x100000001b3ULL;
+struct FakeStreamState {
+  std::deque<std::shared_ptr<FakeTransfer>> jobs;
+  bool running{false};
+  TransferResult Advance() noexcept {
+    // A callback cannot synchronously wait for itself or later FIFO work.
+    // This is a programming error; fail immediately instead of spinning.
+    if (running)
+      std::terminate();
+    if (jobs.empty())
+      return TransferResult::kSucceeded;
+    auto job = jobs.front();
+    jobs.pop_front();
+    running = true;
+    try {
+      job->result = job->run();
+    } catch (...) {
+      job->result = TransferResult::kFailed;
+    }
+    running = false;
+    job->run = {};
+    return *job->result;
   }
-  return hash;
+};
+
+namespace {
+TransferResult WaitFor(const std::shared_ptr<FakeTransfer>& job) noexcept {
+  if (!job->result) {
+    const auto stream = job->stream.lock();
+    if (!stream || stream->running)
+      std::terminate();
+    while (!job->result)
+      (void)stream->Advance();
+  }
+  return *job->result;
 }
 
-std::uint64_t HashState(std::span<const Token> target,
-                        std::span<const Token> draft) {
-  return Hash(target) * 0x100000001b3ULL + Hash(draft);
+constexpr std::uint64_t kSeed = 0xcbf29ce484222325ULL;
+constexpr std::uint64_t kMultiplier = 0x100000001b3ULL;
+std::uint64_t RowHash(std::span<const Token> tokens) {
+  std::uint64_t hash = kSeed;
+  for (const Token token : tokens)
+    hash = (hash ^ token) * kMultiplier;
+  return hash;
+}
+// Execution depends on both restored private state and preceding row bytes.
+// It is deliberately separate from structural validation of a checkpoint.
+std::uint64_t AdvanceHash(std::uint64_t hash, std::span<const Token> rows,
+                          std::size_t first) {
+  auto context = RowHash(rows.first(first));
+  for (const Token token : rows.subspan(first)) {
+    hash = (hash ^ context ^ token) * kMultiplier;
+    context = (context ^ token) * kMultiplier;
+  }
+  return hash;
 }
 
 class FakeSlot final : public Slot {
 public:
   explicit FakeSlot(MutationGuard& guard) : guard_(guard) {}
-  ~FakeSlot() override { ProtectRows(); }
+  FakeSlot(const FakeSlot&) = delete;
+  FakeSlot& operator=(const FakeSlot&) = delete;
+  FakeSlot(FakeSlot&&) = delete;
+  FakeSlot& operator=(FakeSlot&&) = delete;
+  ~FakeSlot() override {
+    for (const auto& transfer : transfers)
+      (void)WaitFor(transfer);
+    ReleaseRows();
+  }
   bool IsValid() const noexcept override { return valid; }
-  void ProtectRows() {
+  void ReleaseRows() noexcept {
     if (!target.empty())
-      guard_.BeforeOverwrite(kTarget, 0, target.size());
+      guard_.BeforeRelease(kTarget, 0, target.size());
     if (!draft.empty())
-      guard_.BeforeOverwrite(kDraft, 0, draft.size());
+      guard_.BeforeRelease(kDraft, 0, draft.size());
+  }
+  bool Busy() const noexcept {
+    return pending_reads != 0 || pending_loads != 0;
   }
   MutationGuard& guard_;
   std::vector<Token> target, draft;
-  // Target boundary, draft boundary, recurrent hash; whole checkpoint-private.
-  std::array<std::uint64_t, 3> recurrent{0, 0, HashState({}, {})};
+  // Target/draft boundaries and their private recurrent hash chains.
+  std::array<std::uint64_t, 4> recurrent{0, 0, kSeed, kSeed};
+  std::array<ComponentPosition, 3> expected{};
+  std::vector<std::uint8_t> target_loaded, draft_loaded;
+  mutable std::vector<std::shared_ptr<FakeTransfer>> transfers;
+  mutable std::size_t pending_reads{0};
   std::size_t pending_loads{0};
   bool valid{true};
-  bool load_failed{false};
+  bool restoring{false};
+  bool private_loaded{false};
+  bool failed{false};
 };
 
 FakeSlot& AsSlot(Slot& slot) {
@@ -80,69 +140,42 @@ void CheckRange(Rows first, Rows end, std::size_t bytes) {
     throw std::invalid_argument("invalid row range or buffer size");
 }
 void CheckPrivate(ComponentId id, std::size_t bytes) {
-  if (id != kRecurrent || bytes != 3 * sizeof(std::uint64_t))
+  if (id != kRecurrent || bytes != 4 * sizeof(std::uint64_t))
     throw std::invalid_argument("invalid private component or buffer size");
 }
-
-Completion SubmitLoad(FakeSlot& slot, FakeStream& stream,
-                      std::function<TransferResult()> operation) {
-  ++slot.pending_loads;
-  try {
-    auto completion = stream.Submit([&slot, operation = std::move(operation)] {
-      TransferResult result = TransferResult::kFailed;
-      try {
-        result = operation();
-      } catch (...) {
-        // The completion reports preservation/allocation failures too.
-      }
-      --slot.pending_loads;
-      slot.load_failed |= result == TransferResult::kFailed;
-      return result;
-    });
-    slot.valid = false;
-    return completion;
-  } catch (...) {
-    --slot.pending_loads;
-    throw;
-  }
+Rows Position(std::span<const ComponentPosition> positions, ComponentId id) {
+  if (std::ranges::count(positions, id, &ComponentPosition::id) != 1)
+    throw std::invalid_argument("missing or duplicate component position");
+  return std::ranges::find(positions, id, &ComponentPosition::id)->valid_rows;
+}
+Rows ContiguousRows(const std::vector<std::uint8_t>& loaded) {
+  return static_cast<Rows>(std::ranges::find(loaded, 0) - loaded.begin());
+}
+void RequireCapture(const FakeSlot& slot) {
+  if (!slot.valid || slot.restoring || slot.failed)
+    throw std::logic_error("cannot capture an invalid slot");
+}
+void RequireLoad(const FakeSlot& slot) {
+  if (!slot.restoring || slot.failed)
+    throw std::logic_error("load requires an unfailed BeginRestore");
 }
 }  // namespace
 
-struct FakeStream::State {
-  std::deque<std::shared_ptr<Job>> jobs;
-  TransferResult Advance() noexcept {
-    if (jobs.empty())
-      return TransferResult::kSucceeded;
-    auto job = jobs.front();
-    jobs.pop_front();
-    try {
-      job->result = job->run();
-    } catch (...) {
-      job->result = TransferResult::kFailed;
-    }
-    job->run = {};
-    return *job->result;
-  }
-};
-
 class FakeStream::Signal final : public CompletionSignal {
 public:
-  Signal(std::shared_ptr<State> state, std::shared_ptr<Job> job)
+  Signal(std::shared_ptr<FakeStreamState> state,
+         std::shared_ptr<FakeTransfer> job)
       : state_(std::move(state)), job_(std::move(job)) {}
   bool Ready() const noexcept override { return job_->result.has_value(); }
-  TransferResult Wait() noexcept override {
-    while (!job_->result)
-      (void)state_->Advance();
-    return *job_->result;
-  }
+  TransferResult Wait() noexcept override { return WaitFor(job_); }
 
 private:
-  std::shared_ptr<State> state_;
-  std::shared_ptr<Job> job_;
+  std::shared_ptr<FakeStreamState> state_;
+  std::shared_ptr<FakeTransfer> job_;
 };
 
 FakeStream::FakeStream(bool delayed)
-    : state_(std::make_shared<State>()), delayed_(delayed) {}
+    : state_(std::make_shared<FakeStreamState>()), delayed_(delayed) {}
 FakeStream::~FakeStream() {
   (void)Synchronize();
 }
@@ -150,6 +183,8 @@ TransferResult FakeStream::Advance() noexcept {
   return state_->Advance();
 }
 TransferResult FakeStream::Synchronize() noexcept {
+  if (state_->running)
+    std::terminate();
   TransferResult result = TransferResult::kSucceeded;
   while (!state_->jobs.empty()) {
     if (Advance() == TransferResult::kFailed)
@@ -158,29 +193,53 @@ TransferResult FakeStream::Synchronize() noexcept {
   return result;
 }
 Completion FakeStream::Submit(std::function<TransferResult()> run) {
-  auto job = std::make_shared<Job>();
+  return SubmitTracked(std::move(run), nullptr);
+}
+void FakeStream::FailNextSubmission() noexcept {
+  fail_submission_ = true;
+}
+Completion FakeStream::SubmitTracked(
+    std::function<TransferResult()> run,
+    std::vector<std::shared_ptr<FakeTransfer>>* transfers) {
+  if (state_->running)
+    throw std::logic_error(
+        "submission must run on the host, outside stream jobs");
+  if (std::exchange(fail_submission_, false))
+    throw std::bad_alloc();
+  auto job = std::make_shared<FakeTransfer>();
   job->run = std::move(run);
+  job->stream = state_;
   auto signal = std::make_unique<Signal>(state_, job);
-  // All throwing allocations precede queue publication.
-  state_->jobs.push_back(job);
+  if (transfers) {
+    std::erase_if(*transfers,
+                  [](const auto& old) { return old->result.has_value(); });
+    transfers->push_back(job);
+  }
+  try {
+    state_->jobs.push_back(job);
+  } catch (...) {
+    if (transfers)
+      transfers->pop_back();
+    throw;
+  }
   if (!delayed_)
     (void)Synchronize();
   return Completion(std::move(signal));
 }
 
-Capabilities FakeAdapter::capabilities() const {
+Capabilities FakeAdapter::GetCapabilities() const {
   return {.continuation = true};
 }
 std::span<const ComponentDescriptor> FakeAdapter::Components() const {
   static constexpr std::array<ComponentDescriptor, 3> components{{
       {kTarget, 1, ComponentKind::kAppendRows, sizeof(Token), 4, 0},
       {kDraft, 1, ComponentKind::kAppendRows, sizeof(Token), 4, 0},
-      {kRecurrent, 1, ComponentKind::kPrivateState, 0, 0, 24},
+      {kRecurrent, 1, ComponentKind::kPrivateState, 0, 0, 32},
   }};
   return components;
 }
 Identity FakeAdapter::CompatibilityIdentity() const {
-  return {'f', 'a', 'k', 'e', 1};
+  return {'f', 'a', 'k', 'e', 2};
 }
 std::unique_ptr<Slot> FakeAdapter::CreateSlot(MutationGuard& guard) {
   if (std::exchange(fail_allocation_, false))
@@ -189,21 +248,118 @@ std::unique_ptr<Slot> FakeAdapter::CreateSlot(MutationGuard& guard) {
 }
 std::vector<ComponentPosition> FakeAdapter::Positions(const Slot& slot) const {
   const auto& state = AsSlot(slot);
-  return {{kTarget, state.target.size()},
-          {kDraft, state.draft.size()},
+  return {{kTarget, state.restoring ? ContiguousRows(state.target_loaded)
+                                    : state.target.size()},
+          {kDraft, state.restoring ? ContiguousRows(state.draft_loaded)
+                                   : state.draft.size()},
           {kRecurrent, state.recurrent[0]}};
+}
+void FakeAdapter::BeginRestore(Slot& slot,
+                               std::span<const ComponentPosition> positions) {
+  auto& state = AsSlot(slot);
+  if (state.Busy() || state.failed || state.restoring)
+    throw std::logic_error(
+        "reset failed restores and settle transfers before BeginRestore");
+  if (positions.size() != 3)
+    throw std::invalid_argument("restore requires every component position");
+  const Rows target_end = Position(positions, kTarget);
+  const Rows draft_end = Position(positions, kDraft);
+  if (Position(positions, kRecurrent) != target_end)
+    throw std::invalid_argument(
+        "private boundary differs from target boundary");
+  CheckRange(0, target_end,
+             static_cast<std::size_t>(target_end) * sizeof(Token));
+  CheckRange(0, draft_end, static_cast<std::size_t>(draft_end) * sizeof(Token));
+  if (std::exchange(fail_allocation_, false))
+    throw std::bad_alloc();
+  std::vector<Token> target(static_cast<std::size_t>(target_end));
+  std::vector<Token> draft(static_cast<std::size_t>(draft_end));
+  std::vector<std::uint8_t> target_loaded(target.size()),
+      draft_loaded(draft.size());
+  // All preservation runs while the old rows/private state remain readable.
+  state.guard_.BeforeOverwrite(kTarget, 0,
+                               std::max<Rows>(state.target.size(), target_end));
+  state.guard_.BeforeOverwrite(kDraft, 0,
+                               std::max<Rows>(state.draft.size(), draft_end));
+  if (state.Busy())
+    throw std::logic_error(
+        "guard returned with preservation transfers pending");
+  state.target = std::move(target);
+  state.draft = std::move(draft);
+  state.target_loaded = std::move(target_loaded);
+  state.draft_loaded = std::move(draft_loaded);
+  state.expected = {
+      {{kTarget, target_end}, {kDraft, draft_end}, {kRecurrent, target_end}}};
+  state.recurrent = {0, 0, kSeed, kSeed};
+  state.private_loaded = false;
+  state.restoring = true;
+  state.valid = false;
+}
+
+Completion FakeAdapter::SubmitRead(const Slot& slot, Stream& stream,
+                                   std::function<TransferResult()> operation) {
+  const auto& state = AsSlot(slot);
+  auto& fifo = AsStream(stream);
+  const bool fail = fail_transfer_;
+  ++state.pending_reads;
+  try {
+    auto completion = fifo.SubmitTracked(
+        [&state, operation = std::move(operation), fail] {
+          TransferResult result = TransferResult::kFailed;
+          try {
+            if (!fail)
+              result = operation();
+          } catch (...) {
+            result = TransferResult::kFailed;
+          }
+          --state.pending_reads;
+          return result;
+        },
+        &state.transfers);
+    fail_transfer_ =
+        false;  // Only consume injection after successful submission.
+    return completion;
+  } catch (...) {
+    --state.pending_reads;
+    throw;
+  }
+}
+Completion FakeAdapter::SubmitLoad(Slot& slot, Stream& stream,
+                                   std::function<TransferResult()> operation) {
+  auto& state = AsSlot(slot);
+  ++state.pending_loads;
+  try {
+    auto& fifo = AsStream(stream);
+    const bool fail = fail_transfer_;
+    auto completion = fifo.SubmitTracked(
+        [&state, operation = std::move(operation), fail] {
+          TransferResult result = TransferResult::kFailed;
+          try {
+            if (!fail)
+              result = operation();
+          } catch (...) {
+            result = TransferResult::kFailed;
+          }
+          --state.pending_loads;
+          state.failed |= result == TransferResult::kFailed;
+          return result;
+        },
+        &state.transfers);
+    fail_transfer_ = false;
+    return completion;
+  } catch (...) {
+    --state.pending_loads;
+    state.failed = true;
+    throw;
+  }
 }
 Completion FakeAdapter::CapturePrivate(const Slot& slot, ComponentId id,
                                        std::span<std::byte> dst,
                                        Stream& stream) {
   CheckPrivate(id, dst.size());
   const auto& state = AsSlot(slot);
-  if (!state.valid)
-    throw std::invalid_argument("cannot capture an invalid slot");
-  const bool fail = TakeTransferFailure();
-  return AsStream(stream).Submit([&state, dst, fail] {
-    if (fail)
-      return TransferResult::kFailed;
+  RequireCapture(state);
+  return SubmitRead(slot, stream, [&state, dst] {
     std::memcpy(dst.data(), state.recurrent.data(), dst.size());
     return TransferResult::kSucceeded;
   });
@@ -213,13 +369,11 @@ Completion FakeAdapter::CopyRowsOut(const Slot& slot, ComponentId id,
                                     std::span<std::byte> dst, Stream& stream) {
   CheckRange(first, end, dst.size());
   const auto& state = AsSlot(slot);
+  RequireCapture(state);
   const auto& rows = RowArray(state, id);
-  if (!state.valid || end > rows.size())
+  if (end > rows.size())
     throw std::invalid_argument("cannot capture unavailable rows");
-  const bool fail = TakeTransferFailure();
-  return AsStream(stream).Submit([&rows, first, dst, fail] {
-    if (fail)
-      return TransferResult::kFailed;
+  return SubmitRead(slot, stream, [&rows, first, dst] {
     if (!dst.empty())
       std::memcpy(dst.data(), rows.data() + first, dst.size());
     return TransferResult::kSucceeded;
@@ -228,84 +382,113 @@ Completion FakeAdapter::CopyRowsOut(const Slot& slot, ComponentId id,
 Completion FakeAdapter::CopyRowsIn(Slot& slot, ComponentId id, Rows first,
                                    Rows end, std::span<const std::byte> src,
                                    Stream& stream) {
-  CheckRange(first, end, src.size());
   auto& state = AsSlot(slot);
-  (void)RowArray(state, id);
-  const bool fail = TakeTransferFailure();
-  return SubmitLoad(
-      state, AsStream(stream), [&state, id, first, end, src, fail] {
-        if (fail)
-          return TransferResult::kFailed;
-        auto& rows = RowArray(state, id);
-        if (first > rows.size())
-          return TransferResult::kFailed;
-        // Growing a vector can release borrowed prefix storage too.
-        const Rows protected_first = end > rows.capacity() ? 0 : first;
-        state.guard_.BeforeOverwrite(id, protected_first, end);
-        if (end > rows.size())
-          rows.resize(static_cast<std::size_t>(end));
-        if (!src.empty())
-          std::memcpy(rows.data() + first, src.data(), src.size());
-        return TransferResult::kSucceeded;
-      });
+  RequireLoad(state);
+  try {
+    CheckRange(first, end, src.size());
+    auto& rows = RowArray(state, id);
+    if (end > rows.size())
+      throw std::invalid_argument("restore range exceeds prepared capacity");
+    return SubmitLoad(slot, stream, [&state, id, first, end, src] {
+      auto& destination = RowArray(state, id);
+      auto& loaded = id == kTarget ? state.target_loaded : state.draft_loaded;
+      if (!src.empty())
+        std::memcpy(destination.data() + first, src.data(), src.size());
+      std::ranges::fill(
+          std::span(loaded).subspan(static_cast<std::size_t>(first),
+                                    static_cast<std::size_t>(end - first)),
+          std::uint8_t{1});
+      return TransferResult::kSucceeded;
+    });
+  } catch (...) {
+    state.failed = true;
+    throw;
+  }
 }
 Completion FakeAdapter::LoadPrivate(Slot& slot, ComponentId id,
                                     std::span<const std::byte> src,
                                     Stream& stream) {
-  CheckPrivate(id, src.size());
   auto& state = AsSlot(slot);
-  const bool fail = TakeTransferFailure();
-  return SubmitLoad(state, AsStream(stream), [&state, src, fail] {
-    if (fail)
-      return TransferResult::kFailed;
-    std::memcpy(state.recurrent.data(), src.data(), src.size());
-    return TransferResult::kSucceeded;
-  });
+  RequireLoad(state);
+  try {
+    CheckPrivate(id, src.size());
+    return SubmitLoad(slot, stream, [&state, src] {
+      std::memcpy(state.recurrent.data(), src.data(), src.size());
+      state.private_loaded = true;
+      return TransferResult::kSucceeded;
+    });
+  } catch (...) {
+    state.failed = true;
+    throw;
+  }
 }
 bool FakeAdapter::Validate(Slot& slot,
                            std::span<const ComponentPosition> positions) {
   auto& state = AsSlot(slot);
   const auto actual = Positions(slot);
-  state.valid =
-      state.pending_loads == 0 && !state.load_failed && positions.size() == 3 &&
-      std::ranges::all_of(actual,
+  const bool complete =
+      state.restoring && !state.Busy() && !state.failed &&
+      state.private_loaded && positions.size() == 3 &&
+      ContiguousRows(state.target_loaded) == state.target.size() &&
+      ContiguousRows(state.draft_loaded) == state.draft.size() &&
+      std::ranges::all_of(state.expected,
                           [&](const auto& position) {
-                            return std::ranges::count(positions, position) == 1;
+                            return std::ranges::count(positions, position) ==
+                                       1 &&
+                                   std::ranges::count(actual, position) == 1;
                           }) &&
-      state.recurrent[0] == state.target.size() &&
-      state.recurrent[1] == state.draft.size() &&
-      state.recurrent[2] == HashState(state.target, state.draft);
-  return state.valid;
+      state.recurrent[1] == state.draft.size();
+  state.valid = complete;
+  state.failed |= !complete;
+  if (complete)
+    state.restoring = false;
+  return complete;
 }
-void FakeAdapter::Invalidate(Slot& slot) noexcept {
+bool FakeAdapter::Invalidate(Slot& slot) noexcept {
   auto& state = AsSlot(slot);
-  state.ProtectRows();
+  if (state.Busy())
+    return false;
+  state.ReleaseRows();
   state.target.clear();
   state.draft.clear();
-  state.recurrent = {0, 0, HashState({}, {})};
-  state.valid = false;
-  state.load_failed = false;
+  state.target_loaded.clear();
+  state.draft_loaded.clear();
+  state.expected = {};
+  state.recurrent = {0, 0, kSeed, kSeed};
+  state.transfers.clear();
+  state.restoring = false;
+  state.failed = false;
+  state.private_loaded = false;
+  state.valid = true;
+  return true;
 }
 void FakeAdapter::Append(Slot& slot, std::span<const Token> target,
                          std::span<const Token> draft) {
   auto& state = AsSlot(slot);
-  if (!state.valid || state.pending_loads != 0)
-    throw std::invalid_argument("cannot execute a partially restored slot");
-  // Stage allocations before any mutation, and guard both components first.
+  if (!state.valid || state.failed || state.restoring || state.Busy())
+    throw std::logic_error(
+        "cannot execute an invalid slot or mutate pending transfers");
   auto new_target = state.target;
   auto new_draft = state.draft;
   new_target.insert(new_target.end(), target.begin(), target.end());
   new_draft.insert(new_draft.end(), draft.begin(), draft.end());
-  // Replacing the vectors releases their old backing, including prefix rows.
+  const auto target_hash =
+      AdvanceHash(state.recurrent[2], new_target, state.target.size());
+  const auto draft_hash =
+      AdvanceHash(state.recurrent[3], new_draft, state.draft.size());
   state.guard_.BeforeOverwrite(kTarget, 0, new_target.size());
   state.guard_.BeforeOverwrite(kDraft, 0, new_draft.size());
+  if (state.Busy())
+    throw std::logic_error(
+        "guard returned with preservation transfers pending");
   state.target = std::move(new_target);
   state.draft = std::move(new_draft);
-  state.recurrent = {state.target.size(), state.draft.size(),
-                     HashState(state.target, state.draft)};
+  state.recurrent = {state.target.size(), state.draft.size(), target_hash,
+                     draft_hash};
 }
 std::uint64_t FakeAdapter::RecurrentHash(const Slot& slot) const {
-  return AsSlot(slot).recurrent[2];
+  const auto& state = AsSlot(slot);
+  return state.recurrent[2] * kMultiplier + state.recurrent[3];
 }
 void FakeAdapter::FailNextAllocation() noexcept {
   fail_allocation_ = true;
@@ -313,8 +496,4 @@ void FakeAdapter::FailNextAllocation() noexcept {
 void FakeAdapter::FailNextTransfer() noexcept {
   fail_transfer_ = true;
 }
-bool FakeAdapter::TakeTransferFailure() noexcept {
-  return std::exchange(fail_transfer_, false);
-}
-
 }  // namespace gufo::cache::testing

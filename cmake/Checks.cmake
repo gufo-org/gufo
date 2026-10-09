@@ -2,6 +2,7 @@
 # explicit targets; adding a model oracle must not make every PR expensive.
 set(gufo_pr_targets
   cache_adapter_test
+  cache_adapter_lifecycle_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
   logit_sampler_test ggml_dequant_test
   quote_tracker_test

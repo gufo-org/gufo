@@ -29,6 +29,8 @@ public:
 // Move-only ownership of one transfer. Destruction and move assignment drain
 // existing work. Keep slots, buffers and stream alive until Wait or destruction
 // completes; source data must remain immutable during the transfer.
+// Draining alone does not handle a load failure: adapters must latch failures
+// independently of this handle, so Validate rejects discarded errors too.
 class Completion {
 public:
   explicit Completion(std::unique_ptr<CompletionSignal>);

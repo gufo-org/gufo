@@ -1,14 +1,18 @@
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
-#include "src/cache/events.hpp"
 #include "src/cache/identity.hpp"
 #include "tests/cache/fake_adapter.hpp"
 
@@ -16,143 +20,276 @@ using namespace gufo::cache;
 using namespace gufo::cache::testing;
 
 namespace {
+template<class Exception, class Function>
+void Throws(Function&& function) {
+  bool caught = false;
+  try {
+    std::forward<Function>(function)();
+  } catch (const Exception&) {
+    caught = true;
+  }
+  assert(caught);
+}
 class Guard final : public MutationGuard {
 public:
-  void BeforeOverwrite(ComponentId id, Rows first, Rows end) override {
+  void BeforeOverwrite(ComponentId, Rows first, Rows end) override {
     assert(first <= end);
-    calls.push_back({id, first, end});
     if (reject)
       throw std::runtime_error("preservation refused");
   }
-  struct Call {
-    ComponentId id;
-    Rows first;
-    Rows end;
-  };
-  std::vector<Call> calls;
+  void BeforeRelease(ComponentId, Rows first, Rows end) noexcept override {
+    assert(first <= end);
+  }
   bool reject{false};
 };
-
-void RoundTrip() {
-  FakeAdapter adapter;
-  Guard guard;
-  auto source = adapter.CreateSlot(guard);
-  const std::array<Token, 5> target{11, 22, 33, 44, 55};
-  const std::array<Token, 3> draft{11, 22, 33};
-  adapter.Append(*source, target, draft);
-  const auto positions = adapter.Positions(*source);
-  assert((positions == std::vector<ComponentPosition>{
-                           {kTarget, 5}, {kDraft, 3}, {kRecurrent, 5}}));
-  assert(adapter.capabilities().continuation);
-  assert(adapter.Components().size() == 3);
-  assert(adapter.CompatibilityIdentity() ==
-         FakeAdapter{}.CompatibilityIdentity());
-
-  FakeStream stream(true);
-  std::array<std::byte, 24> state{};
-  std::array<std::byte, 20> target_bytes{};
-  std::array<std::byte, 12> draft_bytes{};
-  auto private_copy =
-      adapter.CapturePrivate(*source, kRecurrent, state, stream);
-  auto target_copy =
-      adapter.CopyRowsOut(*source, kTarget, 0, 5, target_bytes, stream);
-  auto draft_copy =
-      adapter.CopyRowsOut(*source, kDraft, 0, 3, draft_bytes, stream);
-  assert(!private_copy.Ready());
-  assert(stream.Advance() == TransferResult::kSucceeded);
-  assert(private_copy.Ready());
-  assert(!target_copy.Ready());
-  assert(draft_copy.Wait() == TransferResult::kSucceeded);
-  assert(target_copy.Ready());
-  assert(private_copy.Wait() == TransferResult::kSucceeded);
-
-  auto restored = adapter.CreateSlot(guard);
-  auto target_load =
-      adapter.CopyRowsIn(*restored, kTarget, 0, 5, target_bytes, stream);
-  auto draft_load =
-      adapter.CopyRowsIn(*restored, kDraft, 0, 3, draft_bytes, stream);
-  auto private_load = adapter.LoadPrivate(*restored, kRecurrent, state, stream);
-  assert(!restored->IsValid());
-  assert(!adapter.Validate(*restored, positions));
-  assert(private_load.Wait() == TransferResult::kSucceeded);
-  assert(target_load.Wait() == TransferResult::kSucceeded);
-  assert(draft_load.Wait() == TransferResult::kSucceeded);
-  assert(adapter.Validate(*restored, positions));
-  assert(restored->IsValid());
-  assert(adapter.RecurrentHash(*restored) == adapter.RecurrentHash(*source));
-
-  const std::array<Token, 1> suffix{66};
-  adapter.Append(*source, suffix, suffix);
-  adapter.Append(*restored, suffix, suffix);
-  assert(adapter.RecurrentHash(*restored) == adapter.RecurrentHash(*source));
-  // Coherent private state must reject rows from another computation.
-  restored = adapter.CreateSlot(guard);
-  assert(
-      adapter.CopyRowsIn(*restored, kDraft, 0, 3, draft_bytes, stream).Wait() ==
-      TransferResult::kSucceeded);
-  target_bytes.front() ^= std::byte{1};
-  assert(adapter.CopyRowsIn(*restored, kTarget, 0, 5, target_bytes, stream)
-             .Wait() == TransferResult::kSucceeded);
-  assert(adapter.LoadPrivate(*restored, kRecurrent, state, stream).Wait() ==
-         TransferResult::kSucceeded);
-  assert(!adapter.Validate(*restored, positions));
-  assert(!restored->IsValid());
+struct Checkpoint {
+  std::vector<ComponentPosition> positions;
+  std::vector<std::byte> target, draft, state;
+};
+Checkpoint Save(FakeAdapter& adapter, const Slot& slot, FakeStream& stream) {
+  Checkpoint saved{adapter.Positions(slot), {}, {}, {}};
+  saved.target.resize(static_cast<std::size_t>(saved.positions[0].valid_rows) *
+                      sizeof(Token));
+  saved.draft.resize(static_cast<std::size_t>(saved.positions[1].valid_rows) *
+                     sizeof(Token));
+  saved.state.resize(adapter.Components().back().state_bytes);
+  auto a = adapter.CopyRowsOut(slot, kTarget, 0, saved.positions[0].valid_rows,
+                               saved.target, stream);
+  auto b = adapter.CopyRowsOut(slot, kDraft, 0, saved.positions[1].valid_rows,
+                               saved.draft, stream);
+  auto c = adapter.CapturePrivate(slot, kRecurrent, saved.state, stream);
+  assert(c.Wait() == TransferResult::kSucceeded);
+  assert(a.Wait() == TransferResult::kSucceeded);
+  assert(b.Wait() == TransferResult::kSucceeded);
+  return saved;
 }
+void Load(FakeAdapter& adapter, Slot& slot, const Checkpoint& saved,
+          FakeStream& stream) {
+  adapter.BeginRestore(slot, saved.positions);
+  auto a = adapter.CopyRowsIn(slot, kTarget, 0, saved.positions[0].valid_rows,
+                              saved.target, stream);
+  auto b = adapter.CopyRowsIn(slot, kDraft, 0, saved.positions[1].valid_rows,
+                              saved.draft, stream);
+  auto c = adapter.LoadPrivate(slot, kRecurrent, saved.state, stream);
+  assert(c.Wait() == TransferResult::kSucceeded);
+  assert(a.Wait() == TransferResult::kSucceeded);
+  assert(b.Wait() == TransferResult::kSucceeded);
+}
+const std::array<Token, 5> kTargetTokens{11, 22, 33, 44, 55};
+const std::array<Token, 3> kDraftTokens{11, 22, 33};
+const std::array<Token, 1> kSuffix{66};
 
-void PartialAndBoundedRestore() {
+void RoundTripAndContentOracle() {
   FakeAdapter adapter;
   Guard guard;
-  FakeStream stream;
   auto source = adapter.CreateSlot(guard);
-  const std::array<Token, 5> target{1, 2, 3, 4, 5};
-  const std::array<Token, 2> draft{1, 2};
-  adapter.Append(*source, target, draft);
-  const auto positions = adapter.Positions(*source);
-  std::array<std::byte, 24> state{};
-  std::array<std::byte, 20> rows{};
-  std::array<std::byte, 8> draft_rows{};
-  assert(adapter.CapturePrivate(*source, kRecurrent, state, stream).Wait() ==
-         TransferResult::kSucceeded);
-  assert(adapter.CopyRowsOut(*source, kTarget, 0, 5, rows, stream).Wait() ==
-         TransferResult::kSucceeded);
-  assert(
-      adapter.CopyRowsOut(*source, kDraft, 0, 2, draft_rows, stream).Wait() ==
-      TransferResult::kSucceeded);
+  adapter.Append(*source, kTargetTokens, kDraftTokens);
+  assert((adapter.Positions(*source) ==
+          std::vector<ComponentPosition>{
+              {kTarget, 5}, {kDraft, 3}, {kRecurrent, 5}}));
+  assert(adapter.GetCapabilities().continuation);
+  FakeStream stream(true);
+  const auto saved = Save(adapter, *source, stream);
+  const auto before = adapter.RecurrentHash(*source);
+  adapter.Append(*source, kSuffix, kSuffix);
+  const auto expected = adapter.RecurrentHash(*source);
   auto restored = adapter.CreateSlot(guard);
-  // Private state may load before bounded row pieces, but cannot execute yet.
-  assert(adapter.LoadPrivate(*restored, kRecurrent, state, stream).Wait() ==
-         TransferResult::kSucceeded);
-  assert(adapter
-             .CopyRowsIn(*restored, kTarget, 0, 2,
-                         std::span<const std::byte>(rows).first(8), stream)
-             .Wait() == TransferResult::kSucceeded);
-  assert(!adapter.Validate(*restored, positions));
-  assert(adapter
-             .CopyRowsIn(*restored, kTarget, 2, 5,
-                         std::span<const std::byte>(rows).subspan(8), stream)
-             .Wait() == TransferResult::kSucceeded);
-  assert(!adapter.Validate(*restored, positions));  // Draft is still missing.
-  assert(
-      adapter.CopyRowsIn(*restored, kDraft, 0, 2, draft_rows, stream).Wait() ==
-      TransferResult::kSucceeded);
-  assert(adapter.Validate(*restored, positions));
-  auto duplicate = positions;
-  duplicate.back() = duplicate.front();
-  assert(!adapter.Validate(*restored, duplicate));
-  auto reordered = positions;
+  Load(adapter, *restored, saved, stream);
+  auto reordered = saved.positions;
   std::reverse(reordered.begin(), reordered.end());
   assert(adapter.Validate(*restored, reordered));
-  // A bounded overwrite must leave rows after end intact.
-  assert(adapter
-             .CopyRowsIn(*restored, kTarget, 0, 2,
-                         std::span<const std::byte>(rows).first(8), stream)
-             .Wait() == TransferResult::kSucceeded);
-  assert(adapter.Validate(*restored, positions));
-  draft_rows.front() ^= std::byte{1};
-  assert(
-      adapter.CopyRowsIn(*restored, kDraft, 0, 2, draft_rows, stream).Wait() ==
-      TransferResult::kSucceeded);
-  assert(!adapter.Validate(*restored, positions));
+  assert(adapter.RecurrentHash(*restored) == before);
+  adapter.Append(*restored, kSuffix, kSuffix);
+  assert(adapter.RecurrentHash(*restored) == expected);
+
+  // Metadata validation cannot verify KV/private contents. The independent
+  // execution comparison detects corrupted target, draft and private bytes.
+  for (unsigned component = 0; component != 3; ++component) {
+    auto corrupted = saved;
+    if (component == 0)
+      corrupted.target.front() ^= std::byte{1};
+    else if (component == 1)
+      corrupted.draft.front() ^= std::byte{1};
+    else
+      corrupted.state[2 * sizeof(std::uint64_t)] ^= std::byte{1};
+    assert(adapter.Invalidate(*restored));
+    Load(adapter, *restored, corrupted, stream);
+    assert(adapter.Validate(*restored, saved.positions));
+    adapter.Append(*restored, kSuffix, kSuffix);
+    assert(adapter.RecurrentHash(*restored) != expected);
+  }
+  // A shorter checkpoint restores directly into the longer frontier.
+  assert(adapter.Invalidate(*restored));
+  adapter.Append(*restored, kTargetTokens, kDraftTokens);
+  adapter.Append(*restored, kSuffix, kSuffix);
+  Load(adapter, *restored, saved, stream);
+  assert(adapter.Validate(*restored, saved.positions));
+  assert(adapter.Positions(*restored) == saved.positions);
+  adapter.Append(*restored, kSuffix, kSuffix);
+  assert(adapter.RecurrentHash(*restored) == expected);
+}
+
+void OutOfOrderPieces() {
+  FakeAdapter adapter;
+  Guard guard;
+  auto source = adapter.CreateSlot(guard);
+  adapter.Append(*source, kTargetTokens, kDraftTokens);
+  FakeStream first(true), second(true);
+  const auto saved = Save(adapter, *source, first);
+  auto slot = adapter.CreateSlot(guard);
+  adapter.BeginRestore(*slot, saved.positions);
+  auto suffix = adapter.CopyRowsIn(
+      *slot, kTarget, 2, 5, std::span<const std::byte>(saved.target).subspan(8),
+      first);
+  auto prefix = adapter.CopyRowsIn(
+      *slot, kTarget, 0, 2, std::span<const std::byte>(saved.target).first(8),
+      second);
+  assert(suffix.Wait() == TransferResult::kSucceeded);
+  assert(adapter.Positions(*slot)[0].valid_rows == 0);
+  assert(!adapter.Invalidate(*slot));
+  auto draft = adapter.CopyRowsIn(*slot, kDraft, 0, 3, saved.draft, first);
+  auto state = adapter.LoadPrivate(*slot, kRecurrent, saved.state, first);
+  assert(state.Wait() == TransferResult::kSucceeded);
+  assert(draft.Wait() == TransferResult::kSucceeded);
+  assert(prefix.Wait() == TransferResult::kSucceeded);
+  assert(adapter.Validate(*slot, saved.positions));
+  adapter.Append(*slot, kSuffix, kSuffix);
+  adapter.Append(*source, kSuffix, kSuffix);
+  assert(adapter.RecurrentHash(*slot) == adapter.RecurrentHash(*source));
+}
+
+void FailedValidationNeedsReset() {
+  FakeAdapter adapter;
+  Guard guard;
+  auto source = adapter.CreateSlot(guard);
+  adapter.Append(*source, kTargetTokens, kDraftTokens);
+  FakeStream stream(true);
+  const auto saved = Save(adapter, *source, stream);
+  auto slot = adapter.CreateSlot(guard);
+  // A validation attempted with pending loads poisons this restore permanently.
+  adapter.BeginRestore(*slot, saved.positions);
+  auto a = adapter.CopyRowsIn(*slot, kTarget, 0, 5, saved.target, stream);
+  auto b = adapter.CopyRowsIn(*slot, kDraft, 0, 3, saved.draft, stream);
+  auto c = adapter.LoadPrivate(*slot, kRecurrent, saved.state, stream);
+  assert(!adapter.Validate(*slot, saved.positions));
+  assert(!adapter.Invalidate(*slot));
+  assert(c.Wait() == TransferResult::kSucceeded);
+  assert(a.Wait() == TransferResult::kSucceeded);
+  assert(b.Wait() == TransferResult::kSucceeded);
+  assert(!adapter.Validate(*slot, saved.positions));
+  assert(adapter.Invalidate(*slot));
+  assert(slot->IsValid());
+
+  for (unsigned missing = 0; missing != 3; ++missing) {
+    adapter.BeginRestore(*slot, saved.positions);
+    if (missing != 0)
+      assert(adapter.CopyRowsIn(*slot, kTarget, 0, 5, saved.target, stream)
+                 .Wait() == TransferResult::kSucceeded);
+    if (missing != 1)
+      assert(
+          adapter.CopyRowsIn(*slot, kDraft, 0, 3, saved.draft, stream).Wait() ==
+          TransferResult::kSucceeded);
+    if (missing != 2)
+      assert(
+          adapter.LoadPrivate(*slot, kRecurrent, saved.state, stream).Wait() ==
+          TransferResult::kSucceeded);
+    assert(!adapter.Validate(*slot, saved.positions));
+    assert(!adapter.Validate(*slot, adapter.Positions(*slot)));
+    assert(adapter.Invalidate(*slot));
+  }
+  Load(adapter, *slot, saved, stream);
+  auto duplicate = saved.positions;
+  duplicate.back() = duplicate.front();
+  assert(!adapter.Validate(*slot, duplicate));
+  assert(!adapter.Validate(*slot, saved.positions));
+  assert(adapter.Invalidate(*slot));
+  Load(adapter, *slot, saved, stream);
+  auto wrong = saved.positions;
+  --wrong.front().valid_rows;
+  assert(!adapter.Validate(*slot, wrong));
+  assert(!adapter.Validate(*slot, saved.positions));
+  assert(adapter.Invalidate(*slot));
+  Load(adapter, *slot, saved, stream);
+  assert(adapter.Validate(*slot, saved.positions));
+}
+
+void DiscardedLoadFailures() {
+  for (const bool replace : {false, true}) {
+    FakeAdapter adapter;
+    Guard guard;
+    auto source = adapter.CreateSlot(guard);
+    adapter.Append(*source, kTargetTokens, kDraftTokens);
+    FakeStream stream(true);
+    const auto saved = Save(adapter, *source, stream);
+    auto slot = adapter.CreateSlot(guard);
+    Load(adapter, *slot, saved, stream);
+    // All components already exist: a failed rewrite must still reject them.
+    adapter.FailNextTransfer();
+    {
+      auto failed =
+          adapter.CopyRowsIn(*slot, kTarget, 0, 5, saved.target, stream);
+      if (replace)
+        failed = adapter.LoadPrivate(*slot, kRecurrent, saved.state, stream);
+      // Destruction/replacement discards the failed result, not the slot latch.
+    }
+    assert(!slot->IsValid());
+    assert(!adapter.Validate(*slot, saved.positions));
+    assert(adapter.Invalidate(*slot));
+    adapter.Append(*slot, kTargetTokens, kDraftTokens);
+  }
+}
+
+class ForeignStream final : public Stream {
+public:
+  TransferResult Synchronize() noexcept override {
+    return TransferResult::kSucceeded;
+  }
+};
+void InjectionSurvivesSubmissionFailure() {
+  FakeAdapter adapter;
+  Guard guard;
+  adapter.FailNextAllocation();
+  Throws<std::bad_alloc>([&] { (void)adapter.CreateSlot(guard); });
+  auto slot = adapter.CreateSlot(guard);
+  adapter.Append(*slot, kTargetTokens, kDraftTokens);
+  FakeStream stream(true);
+  ForeignStream foreign;
+  const auto saved = Save(adapter, *slot, stream);
+  const auto before = adapter.RecurrentHash(*slot);
+  adapter.FailNextAllocation();
+  try {
+    adapter.BeginRestore(*slot, saved.positions);
+    assert(false);
+  } catch (const std::bad_alloc&) {
+    assert(slot->IsValid());
+  }
+  guard.reject = true;
+  try {
+    adapter.BeginRestore(*slot, saved.positions);
+    assert(false);
+  } catch (const std::runtime_error&) {
+    assert(adapter.RecurrentHash(*slot) == before);
+  }
+  guard.reject = false;
+  std::vector<std::byte> bytes(saved.state.size());
+  adapter.FailNextTransfer();
+  Throws<std::bad_cast>(
+      [&] { (void)adapter.CapturePrivate(*slot, kRecurrent, bytes, foreign); });
+  stream.FailNextSubmission();
+  Throws<std::bad_alloc>(
+      [&] { (void)adapter.CapturePrivate(*slot, kRecurrent, bytes, stream); });
+  assert(adapter.CapturePrivate(*slot, kRecurrent, bytes, stream).Wait() ==
+         TransferResult::kFailed);
+  adapter.BeginRestore(*slot, saved.positions);
+  adapter.FailNextTransfer();
+  stream.FailNextSubmission();
+  Throws<std::bad_alloc>([&] {
+    (void)adapter.LoadPrivate(*slot, kRecurrent, saved.state, stream);
+  });
+  assert(!adapter.Validate(*slot, saved.positions));
+  assert(adapter.Invalidate(*slot));
+  assert(adapter.CapturePrivate(*slot, kRecurrent, bytes, stream).Wait() ==
+         TransferResult::kFailed);
 }
 
 void CompletionOwnership() {
@@ -166,14 +303,12 @@ void CompletionOwnership() {
     ++second;
     return TransferResult::kSucceeded;
   });
-  one = std::move(two);  // Old work drains before its handle is replaced.
+  one = std::move(two);
   assert(first == 1 && second == 0);
-  // Wait has an explicit moved-from contract.
+  // The public contract explicitly supports Wait on moved-from handles.
   // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
   assert(two.Wait() == TransferResult::kFailed);
   auto moved = std::move(one);
-  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
-  assert(one.Wait() == TransferResult::kFailed);
   assert(moved.Wait() == TransferResult::kSucceeded);
   assert(second == 1);
   auto completed = std::move(moved);
@@ -187,101 +322,49 @@ void CompletionOwnership() {
   assert(passed.Wait() == TransferResult::kSucceeded);
 }
 
-void FailuresAndLifetime() {
-  FakeAdapter adapter;
-  Guard guard;
-  adapter.FailNextAllocation();
-  bool failed = false;
-  try {
-    (void)adapter.CreateSlot(guard);
-  } catch (const std::bad_alloc&) {
-    failed = true;
+void ReentrantWaitFailsImmediately() {
+  const pid_t child = fork();
+  assert(child >= 0);
+  if (child == 0) {
+    std::set_terminate([] { _exit(86); });
+    FakeStream stream(true);
+    std::optional<Completion> completion;
+    completion.emplace(stream.Submit([&] {
+      (void)completion->Wait();
+      return TransferResult::kSucceeded;
+    }));
+    (void)completion->Wait();
+    _exit(1);
   }
-  assert(failed);
-  auto slot = adapter.CreateSlot(guard);
-  const std::array<Token, 2> tokens{7, 8};
-  adapter.Append(*slot, tokens, tokens);
-  const auto before = adapter.RecurrentHash(*slot);
-  guard.reject = true;
-  try {
-    adapter.Append(*slot, tokens, tokens);
-    assert(false);
-  } catch (const std::runtime_error&) {
-    assert(adapter.RecurrentHash(*slot) == before);
-    assert(adapter.Positions(*slot).front().valid_rows == 2);
-  }
-  guard.reject = false;
-
-  FakeStream stream(true);
-  std::array<std::byte, 8> bytes{};
-  adapter.FailNextTransfer();
-  auto failure = adapter.CopyRowsOut(*slot, kTarget, 0, 2, bytes, stream);
-  assert(!failure.Ready());
-  assert(failure.Wait() == TransferResult::kFailed);
-  assert(failure.Wait() == TransferResult::kFailed);
-  assert(slot->IsValid());
-  {
-    auto copy = adapter.CopyRowsOut(*slot, kTarget, 0, 2, bytes, stream);
-    assert(!copy.Ready());
-  }  // Destroying a completion drains its transfer before releasing buffers.
-  assert(bytes.front() == std::byte{7});
-  adapter.FailNextTransfer();
-  auto load = adapter.CopyRowsIn(*slot, kTarget, 0, 2, bytes, stream);
-  assert(load.Wait() == TransferResult::kFailed);
-  assert(!slot->IsValid());
-  assert(!adapter.Validate(*slot, adapter.Positions(*slot)));
-  try {
-    adapter.Append(*slot, tokens, tokens);
-    assert(false);
-  } catch (const std::invalid_argument&) {
-    assert(!slot->IsValid());
-  }
-  adapter.Invalidate(*slot);
-  assert(adapter.Positions(*slot).front().valid_rows == 0);
-
-  bool invalid_range = false;
-  try {
-    (void)adapter.CopyRowsIn(*slot, kTarget, 2, 1, bytes, stream);
-  } catch (const std::invalid_argument&) {
-    invalid_range = true;
-  }
-  assert(invalid_range);
-  slot = adapter.CreateSlot(guard);
-  guard.calls.clear();
-  adapter.Append(*slot, tokens, tokens);
-  slot.reset();
-  assert(guard.calls.size() ==
-         4);  // Append and destruction protect both arrays.
+  int status = 0;
+  assert(waitpid(child, &status, 0) == child);
+  assert(WIFEXITED(status) && WEXITSTATUS(status) == 86);
 }
-
 void InputBoundaries() {
   const Identity image_a{1, 2, 3}, image_b{4, 5, 6};
-  const std::vector<InputPrefix> before_image{{3, {}}};
-  assert(PrefixInputIdentity(image_a, before_image, 3).empty());
-  assert(PrefixInputIdentity(image_a, before_image, 4).size() == 3);
-  const InputIdentity first{image_a, {{3, {}}}};
-  const InputIdentity changed{image_b, {{3, {}}}};
+  const InputIdentity first(8, image_a, {{3, {}}});
+  const InputIdentity changed(8, image_b, {{3, {}}});
+  assert(first.At(3).empty());
+  assert(first.At(4).size() == 3);
   assert(first.Matches(changed, 3));
   assert(!first.Matches(changed, 4));
-  const InputIdentity appended{{9}, {{3, {}}, {5, image_a}}};
+  const InputIdentity appended(8, {9}, {{3, {}}, {5, image_a}});
   assert(first.Matches(appended, 4));
   assert(first.Matches(appended, 5));
   assert(!first.Matches(appended, 6));
-  bool unordered = false;
-  try {
-    (void)InputIdentity{image_a, {{5, {}}, {3, image_a}}};
-  } catch (const std::invalid_argument&) {
-    unordered = true;
-  }
-  assert(unordered);
+  Throws<std::invalid_argument>(
+      [&] { (void)InputIdentity(8, image_a, {{5, {}}, {3, image_a}}); });
+  Throws<std::invalid_argument>([&] { (void)first.At(9); });
 }
 }  // namespace
-
 int main() {
-  RoundTrip();
-  PartialAndBoundedRestore();
+  RoundTripAndContentOracle();
+  OutOfOrderPieces();
+  FailedValidationNeedsReset();
+  DiscardedLoadFailures();
+  InjectionSurvivesSubmissionFailure();
   CompletionOwnership();
-  FailuresAndLifetime();
+  ReentrantWaitFailsImmediately();
   InputBoundaries();
   std::cout << "cache adapter contracts passed\n";
 }

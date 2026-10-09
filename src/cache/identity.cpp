@@ -5,6 +5,7 @@
 #include <utility>
 
 namespace gufo::cache {
+namespace {
 
 std::span<const std::uint8_t> PrefixInputIdentity(
     std::span<const std::uint8_t> complete,
@@ -15,18 +16,24 @@ std::span<const std::uint8_t> PrefixInputIdentity(
   }
   return complete;
 }
+}  // namespace
 
-InputIdentity::InputIdentity(Identity complete,
+InputIdentity::InputIdentity(Rows token_count, Identity complete,
                              std::vector<InputPrefix> prefixes)
-    : complete_(std::move(complete)), prefixes_(std::move(prefixes)) {
-  for (std::size_t i = 1; i < prefixes_.size(); ++i) {
-    if (prefixes_[i - 1].token_count >= prefixes_[i].token_count)
-      throw std::invalid_argument(
-          "input boundaries must be strictly increasing");
+    : token_count_(token_count),
+      complete_(std::move(complete)),
+      prefixes_(std::move(prefixes)) {
+  Rows previous = 0;
+  for (const auto& prefix : prefixes_) {
+    if (prefix.token_count < previous || prefix.token_count > token_count_)
+      throw std::invalid_argument("input identity boundaries are invalid");
+    previous = prefix.token_count;
   }
 }
 
 std::span<const std::uint8_t> InputIdentity::At(Rows count) const {
+  if (count > token_count_)
+    throw std::invalid_argument("input identity query exceeds prompt length");
   return PrefixInputIdentity(complete_, prefixes_, count);
 }
 

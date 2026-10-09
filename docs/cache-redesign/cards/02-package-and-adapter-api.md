@@ -25,12 +25,13 @@ adapter. No cache behavior yet. This card settles the RFC's open item
     restore is detectable;
   - injectable allocation and transfer failures, and controllable completion
     delays.
-- Boundary check: a test that fails if `src/cache/` includes `cli/`, `models/`
-  or `text_model_runner.hpp`. It runs with the `pr` preset.
+- Boundary check: rejects direct/transitive serving, model or HIP includes and
+  unreviewed CMake link dependencies. It runs with the `pr` preset.
 
 ## API sketch
 
-This is the part to review. Names are placeholders.
+This summarizes the public contract. The headers in `src/cache/` define the
+complete lifetime and failure rules.
 
 ```cpp
 namespace gufo::cache {
@@ -54,22 +55,24 @@ struct ComponentPosition {
   Rows valid_rows;                // target and draft KV may differ
 };
 
-// Handed to each slot by the cache. The adapter calls it before any
-// operation that overwrites append-only rows: prefill, decode, rewind,
-// speculative rollback, reset, destruction.
+// The adapter calls the ordinary guard on the host before queuing writes.
+// Preservation completes across all streams before it returns. Release cannot
+// refuse: it preserves or retires borrowers synchronously without throwing.
 class MutationGuard {
  public:
   virtual void BeforeOverwrite(ComponentId, Rows first, Rows end) = 0;
+  virtual void BeforeRelease(ComponentId, Rows first, Rows end) noexcept = 0;
 };
 
 class Adapter {
  public:
-  virtual Capabilities capabilities() const = 0;
+  virtual Capabilities GetCapabilities() const = 0;
   virtual std::span<const ComponentDescriptor> Components() const = 0;
   virtual Identity CompatibilityIdentity() const = 0;
 
   virtual std::unique_ptr<Slot> CreateSlot(MutationGuard&) = 0;
   virtual std::vector<ComponentPosition> Positions(const Slot&) const = 0;
+  virtual void BeginRestore(Slot&, std::span<const ComponentPosition>) = 0;
 
   // Bounded transfers. The cache owns buffers and streams; the adapter only
   // knows the layout. Each call returns a completion the cache waits on.
@@ -83,9 +86,11 @@ class Adapter {
   virtual Completion LoadPrivate(Slot&, ComponentId,
                                  std::span<const std::byte> src, Stream&) = 0;
 
-  // After every component is loaded. A false result invalidates the slot.
+  // Failed loads or validation latch until successful Invalidate, even if a
+  // completion's failed result is discarded. No content hashing here.
   virtual bool Validate(Slot&, std::span<const ComponentPosition>) = 0;
-  virtual void Invalidate(Slot&) noexcept = 0;
+  // Refuses pending transfers; success leaves a valid empty slot for prefill.
+  virtual bool Invalidate(Slot&) noexcept = 0;
 };
 
 }  // namespace gufo::cache
@@ -100,12 +105,12 @@ stable private-state encoding version.
 | --- | --- |
 | `CreateState` | `Adapter::CreateSlot`; serving keeps owning execution |
 | `Snapshot`, `SnapshotPayloadBytes`, `SnapshotForPersistence` | `Positions` + `CapturePrivate`; rows stay borrowed until mutation |
-| `RestoreOrFork` | Cache-driven `CopyRowsIn` + `LoadPrivate` + `Validate` |
+| `RestoreOrFork` | Cache-driven `BeginRestore` + `CopyRowsIn` + `LoadPrivate` + `Validate` |
 | `PersistentSnapshotPayloadBytes`, `SerializePersistentSnapshot`, `StreamPersistentSnapshot` | The store streams chunks and private state (cards 10–12) |
 | `RestorePersistentSnapshot` | The same restore path, fed by streamed pieces |
 | `CheckpointPosition` | `Positions` |
 | `PrefillCheckpointBytes`, `PrefillThrough` | Stay in the runner; the in-pass boundary calls `CapturePrivate` (card 07) |
-| `PreparePrefixReuse` | Stays in the runner; audited per adapter |
+| `PreparePrefixReuse` | Runner framing preparation stays; exact component shortening belongs to `BeginRestore` |
 | `ContinuationSnapshot::PrefersState` | Removed; provenance tells the cache which slot still holds rows |
 
 ## Not in this PR
@@ -129,27 +134,49 @@ identifiers, descriptors, independent component positions, capabilities,
 compatibility and supplemental input identity, slots, mutation guards,
 bounded transfers, completions, streams and events. It has no link to serving.
 
-The concrete API retains the sketch's guard direction: the cache supplies a
-guard, and model-owned slots call it before changing or releasing append rows.
-Guard refusal may throw before ordinary mutation. Invalidation and destruction
-require nonthrowing preservation/retirement; the guard outlives its slots.
-Real preservation, pins and leases still belong to card 06.
+The cache supplies a guard that outlives model-owned slots. Ordinary mutation
+uses `BeforeOverwrite` on the host and may refuse by throwing; every preservation
+copy and reader wait completes across all streams before it returns. Release
+uses a separate `BeforeRelease` method that cannot throw or refuse. Real
+preservation policy, pins and leases still belong to card 06.
+
+`BeginRestore` prepares a whole restore while the old slot is still readable:
+it checks/allocates capacity and guards all replacement ranges before disabling
+execution or submitting loads. It handles exact shorter frontiers; the cache
+does not truncate recurrent state, and the runner's `PreparePrefixReuse` is not
+responsible for truncating restored components. Row pieces can arrive in any
+order on different streams after preparation. Overlapping writes require caller
+ordering.
 
 `Completion` owns one signal, is move-only and drains outstanding work on
 destruction or replacement. `Wait` settles all buffer accesses even on failure
 and retains the result. Callers retain slots, streams and immutable source
-buffers until completion. Loads invalidate execution immediately; successful
-`Validate` requires every component at its own recorded position. All slot
-transfers must settle before validation, invalidation or destruction.
+buffers until completion. Adapters latch every failed load, including submission
+failures, independently of the handle. `Validate` checks positions and completed
+loads; any false result latches failure until successful `Invalidate`. Repeating
+validation with other positions cannot recover a failed slot.
+
+`Invalidate` refuses without changing a slot with pending reads or loads. After
+they settle, it releases borrowers, clears failures and leaves a valid empty
+slot ready for cold prefill. Destruction drains tracked reads and loads before
+release. The fake refuses execution or restore preparation during pending reads,
+so a delayed capture retains its original coherent boundary.
 
 Supplemental input identities preserve the current cache's inclusive boundary
 semantics: before an appended image, earlier checkpoints keep their original
-identity. `InputIdentity` owns and checks ordered boundaries. Token-prefix
-matching remains separate and arrives with card 05.
+identity. The explicit `InputIdentity` constructor takes the prompt length and
+checks nondecreasing boundaries within it, including the legacy first-match
+behavior at equal boundaries. Queries cannot exceed the prompt length. The
+unchecked lookup helper is internal. Token-prefix matching arrives with card 05.
 
 The fake adapter is test-only in `tests/cache/`. Its target and draft row arrays
-advance independently, and its private hash-chain state detects mismatched
-target or draft rows. It injects slot allocation and transfer failures.
+advance independently. Its continued execution depends on both restored rows
+and private hash chains; tests compare continued state with controls to detect
+corrupted target, draft or private bytes. `Validate` does not inspect their
+contents, matching what real adapters can guarantee. Allocation, transfer and
+submission failures are injectable; transfer injection is consumed only after
+successful submission. Reentrant waits on a running stream callback fail
+immediately instead of spinning.
 `FakeStream` supplies FIFO ordering and manually delayed completion without
 threads, clocks or device dependencies.
 
@@ -159,23 +186,31 @@ merged main `94a4fa8d` (card 01, PR #490), on which this PR is based:
 
 ```sh
 cmake --preset cpu-test
-cmake --build --preset cpu-test --target cache_adapter_test --parallel 4
-ctest --preset cpu-test -R '^cache_(adapter|boundary)_test$' --output-on-failure
+cmake --build --preset cpu-test --target cache_adapter_test cache_adapter_lifecycle_test --parallel 4
+ctest --preset cpu-test -R '^cache_(adapter(_lifecycle)?|boundary)_test$' --output-on-failure
+cmake --preset cpu-sanitizer
+cmake --build --preset cpu-sanitizer --target cache_adapter_test cache_adapter_lifecycle_test --parallel 4
+ctest --preset cpu-sanitizer -R '^cache_(adapter(_lifecycle)?|boundary)_test$' --output-on-failure
 cmake --preset release
 cmake --build --preset release --target gufo_cache --parallel 4
 cmake --build --preset pr --parallel 4
 ```
 
 The focused adapter contracts cover independent positions, bounded and delayed
-round trips, continued execution after restore, corrupted target/draft rows,
-missing/duplicate components, pending or failed loads, preservation refusal,
-allocation/transfer failure, completion lifetime/moves and image boundaries.
-The boundary check rejects serving/model includes, including nested paths and
-continued preprocessor lines, and tests its own rejection cases. Both new tests
-are registered in the hosted `pr` target.
+round trips, continued execution with corrupted checkpoint controls,
+missing/duplicate components, latched failures, discarded completion errors,
+preservation before queueing, cold fallback, exact shorter restores, reversed
+piece arrival, pending capture lifetimes, allocation/submission/transfer failure,
+reentrant waits and bounded image identity. The boundary check follows project
+includes across header/inline/source suffixes, rejects serving/model/HIP
+dependencies and checks generated CMake link metadata. Only the reviewed CPU
+platform target `Threads::Threads` may be linked; arbitrary relay targets cannot
+hide transitive model/HIP dependencies. All three tests run in the hosted `pr`
+target. The unused event-header test include and redundant library flags were
+removed; event contracts remain reserved for later policy/observability cards.
 
-Both focused tests and all 43 hosted PR tests passed; the release library
-build passed. The shared formatting check, focused static analysis, documentation
+All three focused tests (also under ASan/UBSan) and all 44 hosted PR tests passed;
+the release library build passed. The shared formatting check, focused static analysis, documentation
 link check and diff whitespace check passed. Nix shells used the flake's pinned
 inputs: a CPU-only dependency shell for hosted checks and `inputsFrom` the
 production package for release configuration, without building reference tools.
@@ -183,7 +218,10 @@ production package for release configuration, without building reference tools.
 The test-first compilation failed on the missing cache headers before their
 implementation. No GPU numerics, model workload or performance qualification
 is claimed by these CPU fixtures; those remain with the adapter and switch-over
-cards. Build artifacts stay in the ignored `build/` directories.
+cards. Build artifacts stay in the ignored `build/` directories. Review-fix
+logs are retained at `/tmp/gufo-card02-review-sanitizers.log`,
+`/tmp/gufo-card02-review-pr.log`, `/tmp/gufo-card02-review-release.log`,
+`/tmp/gufo-card02-review-tidy.log` and `/tmp/gufo-card02-review-final.log`.
 
 ## Done when
 
