@@ -71,7 +71,9 @@ manifest rename may be discovered as complete on restart even when the caller
 received an error. After a manifest rename attempt fails or a later step fails,
 further publication and retirement are blocked until background recovery
 durably removes unindexed manifests. This protects their shared references and
-prevents duplicate-checkpoint retries.
+prevents duplicate-checkpoint retries. Startup sets the same barrier when it
+rejects managed manifests, so new payload files cannot revive their old claims
+before recovery.
 
 Layout creation syncs `v2/`, the root and its ancestors. Startup also syncs
 `manifests/` after full validation so a surviving rename from an aborted process
@@ -176,3 +178,10 @@ sync before retry. An additional accounting audit corrected index growth so the
 old vector allocation is freed before releasing its capacity charge. CI also
 caught a post-check comment wrap, now corrected and rechecked.
 
+
+Round 2 reproduced a restart variant: startup rejected a checksum-valid manifest
+with a missing chunk, but a subsequent publication filled that missing file and
+created a second manifest for the same checkpoint. The next restart rejected
+both. Startup now sets the same recovery barrier whenever it rejects a managed
+manifest. The regression proves publication is blocked until background recovery,
+then verifies a successful publication survives reopening with one entry.

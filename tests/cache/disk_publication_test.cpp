@@ -215,6 +215,44 @@ void IoOrderingAndShortWrites() {
   store.WaitForReclamation();
   assert(store.Stats().managed_bytes == 0);
 }
+void RejectedStartupBarrier() {
+  Directory dir;
+  Fixture f;
+  {
+    DiskStore layout(ledger, dir.path, 100000);
+  }
+  // Seed a checksum-valid manifest with a missing chunk. Its private files
+  // exist but cannot be adopted by the new publication.
+  auto rejected = f.manifest;
+  rejected.components[0].tail->file = Id(31);
+  rejected.components[1].private_state->file = Id(41);
+  auto encoded = EncodeManifest(rejected);
+  {
+    std::ofstream manifest(dir.path / "v2/manifests" / DiskFileName(Id(100)),
+                           std::ios::binary);
+    manifest.write(reinterpret_cast<const char*>(encoded.data()),
+                   encoded.size());
+    std::ofstream tail(dir.path / "v2/private" / DiskFileName(Id(31)),
+                       std::ios::binary);
+    tail.write(reinterpret_cast<const char*>(f.tail.data()), f.tail.size());
+    std::ofstream state(dir.path / "v2/private" / DiskFileName(Id(41)),
+                        std::ios::binary);
+    state.write(reinterpret_cast<const char*>(f.state.data()), f.state.size());
+  }
+  {
+    DiskStore store(ledger, dir.path, 100000);
+    assert(store.Entries().empty() && store.Stats().rejected_manifests == 1);
+    Reject([&] { store.Publish(Id(101), f.manifest, f.buffers); });
+    store.ReclaimOrphans();
+    store.WaitForReclamation();
+    assert(Managed(dir.path) == 0);
+    store.Publish(Id(101), f.manifest, f.buffers);
+  }
+  DiskStore reopened(ledger, dir.path, 100000);
+  assert(reopened.Entries().size() == 1 &&
+         reopened.Stats().rejected_manifests == 0);
+  CheckPublished(reopened, dir.path);
+}
 void UncertainManifestBarrier() {
   Directory dir;
   Fixture a, b(2);
@@ -438,6 +476,7 @@ int main() {
   Failures();
   RetirementFailure();
   UncertainManifestBarrier();
+  RejectedStartupBarrier();
   RecoveryAndUnknowns();
   LedgerFailures();
   IoOrderingAndShortWrites();

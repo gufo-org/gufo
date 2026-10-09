@@ -506,6 +506,10 @@ struct DiskStore::Impl {
       }
     });
     ValidateReferences();
+    // Rejected manifests still own on-disk claims until durably reclaimed. A
+    // new write could otherwise fill their missing dependencies and resurrect
+    // conflicting checkpoint identities on the next restart.
+    recovery_required = stats.rejected_manifests != 0;
     // A process abort may leave a complete manifest rename in the kernel's
     // cache before the publishing process synced its directory. Make surviving
     // entries durable before startup exposes them; no payload reads are needed.
