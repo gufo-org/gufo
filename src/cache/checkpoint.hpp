@@ -12,6 +12,7 @@
 
 #include "src/cache/identity.hpp"
 #include "src/cache/ledger.hpp"
+#include "src/cache/slot.hpp"
 
 namespace gufo::cache {
 struct LineageId {
@@ -26,11 +27,6 @@ struct CheckpointId {
   std::uint64_t value{};
   bool operator==(const CheckpointId&) const = default;
 };
-struct BorrowedLocation {
-  SlotId slot;
-  std::uint64_t generation{};
-  bool operator==(const BorrowedLocation&) const = default;
-};
 struct PayloadRequest {
   ComponentId component;
   ResourceCategory category;
@@ -39,10 +35,8 @@ struct PayloadRequest {
 };
 
 // Move-only ownership of one retained payload. The opaque owner retains actual
-// committed storage (including spill backing for borrowed rows). It is
-// destroyed before the accounting token. Borrowed source protection is supplied
-// by card 06; this record deliberately contains no slot pointer or mutation
-// implementation.
+// committed storage. Managed borrowed rows retain assigned backing and their
+// source guard. Physical storage is destroyed before its accounting token.
 class Payload {
 public:
   ~Payload() = default;
@@ -51,18 +45,22 @@ public:
   Payload(const Payload&) = delete;
   Payload& operator=(const Payload&) = delete;
   static Payload Committed(ResourceCharge, std::shared_ptr<const void> owner);
-  static Payload Borrowed(ResourceReservation,
-                          std::shared_ptr<const void> backing_owner,
-                          BorrowedLocation);
+  static Payload Borrowed(std::shared_ptr<BorrowedRows>);
+  // Managed borrowed rows require this pin for every source transfer. Keep it
+  // until Completion settles. Owner() is available only after preservation.
+  [[nodiscard]] RowPin PinRows(std::stop_token = {}) const;
+  [[nodiscard]] bool IsValid() const;
   // Allocation capacity, not logical range size. Retain the owning checkpoint
   // or chunk handle throughout each access to Owner(); a bare buffer is no pin.
   [[nodiscard]] std::size_t Bytes() const noexcept { return bytes_; }
-  [[nodiscard]] ResourceCategory Category() const noexcept { return category_; }
-  [[nodiscard]] const std::optional<BorrowedLocation>& BorrowedFrom() const {
-    return borrowed_;
+  [[nodiscard]] ResourceCategory Category() const noexcept {
+    return rows_ ? rows_->Category() : category_;
   }
-  [[nodiscard]] const std::shared_ptr<const void>& Owner() const {
-    return owner_;
+  [[nodiscard]] std::optional<BorrowedLocation> BorrowedFrom() const {
+    return rows_ ? rows_->Location() : std::nullopt;
+  }
+  [[nodiscard]] std::shared_ptr<const void> Owner() const {
+    return rows_ ? rows_->Owner() : owner_;
   }
 
 private:
@@ -70,11 +68,10 @@ private:
   [[nodiscard]] PersistencePin PinPersistence() const;
   Payload() = default;
   ResourceCharge charge_;
-  ResourceReservation reservation_;
   std::size_t bytes_{};
   ResourceCategory category_{};
-  std::optional<BorrowedLocation> borrowed_;
   std::shared_ptr<const void> owner_;
+  std::shared_ptr<BorrowedRows> rows_;
 };
 struct ChunkReferences {
   std::size_t checkpoints{}, readers{}, persistence{};
@@ -108,11 +105,13 @@ public:
 private:
   friend class ExecutionHistory;
   enum class Kind : std::uint8_t { kCheckpoint, kReader, kPersistence };
-  ChunkReference(std::shared_ptr<detail::Chunk>, Kind, PersistencePin = {});
+  ChunkReference(std::shared_ptr<detail::Chunk>, Kind, PersistencePin = {},
+                 RowPin = {});
   void Release() noexcept;
   std::shared_ptr<detail::Chunk> chunk_;
   Kind kind_;
   PersistencePin pin_;
+  RowPin rows_pin_;
 };
 struct CheckpointComponent {
   ComponentDescriptor descriptor;
@@ -141,6 +140,7 @@ public:
   Checkpoint& operator=(const Checkpoint&) = delete;
   Checkpoint(Checkpoint&&) = delete;
   Checkpoint& operator=(Checkpoint&&) = delete;
+  [[nodiscard]] bool IsValid() const;
   [[nodiscard]] CheckpointId Id() const { return id_; }
   [[nodiscard]] LineageId Lineage() const;
   [[nodiscard]] Rows Boundary() const { return tokens_.size(); }

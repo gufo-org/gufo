@@ -28,6 +28,9 @@ public:
   // Invalidation/destruction cannot refuse release. Preserve or retire every
   // borrower and finish all preservation transfers/readers before returning.
   virtual void BeforeRelease(ComponentId, Rows first, Rows end) noexcept = 0;
+  // Called exactly once after a successful Invalidate, even on an empty slot.
+  // All borrowers have been preserved/retired and all readers drained first.
+  virtual void AfterReset() noexcept {}
 };
 
 // Model-owned execution storage, held by the runner. The guard outlives the

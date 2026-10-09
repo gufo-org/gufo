@@ -71,6 +71,8 @@ public:
   void Append(Slot&, std::span<const Token> target,
               std::span<const Token> draft);
   [[nodiscard]] std::uint64_t RecurrentHash(const Slot&) const;
+  // Isolate host guard overhead and row-range tests without fixture mutation.
+  void GuardRows(Slot&, ComponentId, Rows first, Rows end);
   void FailNextAllocation() noexcept;
   void FailNextTransfer() noexcept;
 

@@ -278,7 +278,8 @@ struct PrefixIndex::Impl {
       }
       return true;
     }
-    if (r.checkpoint->Components().size() != tree.descriptors.size())
+    if (!r.checkpoint->IsValid() ||
+        r.checkpoint->Components().size() != tree.descriptors.size())
       return false;
     for (const auto& d : tree.descriptors) {
       auto a =

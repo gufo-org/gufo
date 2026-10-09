@@ -1,8 +1,8 @@
 # Cache redesign implementation cards
 
 Status: draft for review. Revised 2026-10-09 after the first review. Card 01's
-functional coverage is combined into one PR. Cards 02–04's common contracts,
-fake adapter, resource ledger and checkpoint ownership are implemented; the
+functional coverage is combined into one PR. Cards 02–06's common contracts,
+fake adapter, ledger, checkpoints, prefix lookup and slot protection are implemented; the
 cache redesign is not wired in.
 
 These cards split the [RFC implementation plan](../RFC.md#implementation-plan)
@@ -50,7 +50,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [03](03-resource-ledger.md) | Resource ledger and reservations | Common package | 02 | M | done |
 | [04](04-chunks-and-checkpoints.md) | Chunks, checkpoints and provenance | Common package | 03 | M–L | done |
 | [05](05-prefix-index-and-lookup.md) | Prefix index and lookup | Common package | 04 | M | agreed |
-| [06](06-slot-leases-and-mutation.md) | Slot leases and the mutation guard | Common package | 03, 04 | L | agreed |
+| [06](06-slot-leases-and-mutation.md) | Slot leases and the mutation guard | Common package | 03, 04 | L | done |
 | [07](07-retention-policy.md) | Retention policy port | Common package | 05, 06 | M | agreed |
 | [08](08-committed-backing-and-streams.md) | Committed backing pool and transfer streams | Common package | 03, D4 | M | agreed |
 | [09](09-idle-spill.md) | Idle spill and reassignment | Common package | 06, 08 | M | agreed |

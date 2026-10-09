@@ -323,15 +323,12 @@ void FailedCapturesAreInvisible() {
   }
   assert(f.ledger.Snapshot().total_bytes == 0);
 }
-Payload AccountingPayload(ResourceLedger& ledger, const PayloadRequest& r,
-                          bool borrowed = false) {
+Payload AccountingPayload(ResourceLedger& ledger, const PayloadRequest& r) {
   // Sized fake backing: exercises the actual ownership/ledger with model-sized
   // capacities without allocating multi-GiB device buffers on the CPU host.
   auto pool = ledger.Reserve(ResourceCategory::kBackingFree, r.bytes).Convert();
   auto assigned = pool.ReserveBacking(r.category);
   auto owner = std::make_shared<std::size_t>(r.bytes);
-  if (borrowed && r.category != ResourceCategory::kPrivateState)
-    return Payload::Borrowed(std::move(assigned), owner, {{17}, 3});
   return Payload::Committed(assigned.Convert(), owner);
 }
 void PrivateOnlyCheckpoints() {
@@ -373,7 +370,7 @@ void GeometryLocationsAndPins() {
          {{{2}, 6}, {{3}, 8}, {{1}, 8}},
          CheckpointPurpose::kGenerated,
          4},
-        [&](const auto& r) { return AccountingPayload(ledger, r, true); });
+        [&](const auto& r) { return AccountingPayload(ledger, r); });
     assert(checkpoint->Boundary() == 8);
     assert(checkpoint->Rank() == 4);
     assert(checkpoint->Purpose() == CheckpointPurpose::kGenerated);
@@ -385,7 +382,7 @@ void GeometryLocationsAndPins() {
     assert(checkpoint->Components()[1].tail->Bytes() == 16);
     const auto& chunk = checkpoint->Components()[1].chunks[0];
     assert(chunk.First() == 0 && chunk.End() == 5);
-    assert((chunk.Storage().BorrowedFrom() == BorrowedLocation{{17}, 3}));
+    assert(!chunk.Storage().BorrowedFrom());
     auto read = chunk.PinReader();
     ledger.FailAfter(LedgerStep::kPin, 0);
     Throws<std::bad_alloc>([&] { (void)chunk.PinPersistence(); });
@@ -397,7 +394,7 @@ void GeometryLocationsAndPins() {
     checkpoint.reset();
     history.Prune();
     assert(ledger.Snapshot().bytes[static_cast<std::size_t>(
-               ResourceCategory::kBackingAssigned)] == 80);
+               ResourceCategory::kBackingMaterialized)] == 80);
     assert(ledger.Snapshot().bytes[static_cast<std::size_t>(
                ResourceCategory::kPrivateTail)] == 0);
     assert((read.References() == ChunkReferences{0, 1, 2}));
@@ -551,11 +548,7 @@ void PayloadValidationAndReleaseOrder() {
     assert(moved.Bytes() == 64);
   }
   assert(ledger.Snapshot().total_bytes == 0);
-  Throws<std::invalid_argument>([&] {
-    auto ordinary = ledger.Reserve(ResourceCategory::kBackingAssigned, 16);
-    (void)Payload::Borrowed(std::move(ordinary), std::make_shared<int>(),
-                            {{1}, 1});
-  });
+  Throws<std::invalid_argument>([&] { (void)Payload::Borrowed({}); });
   assert(ledger.Snapshot().total_bytes == 0);
 }
 void RejectedPayloadsReleaseOwnersFirst() {
@@ -572,27 +565,6 @@ void RejectedPayloadsReleaseOwnersFirst() {
     Throws<std::invalid_argument>(
         [&] { (void)Payload::Committed(std::move(charge), std::move(owner)); });
     assert(destroyed);
-  }
-  assert(ledger.Snapshot().total_bytes == 0);
-  destroyed = false;
-  {
-    auto pool = ledger.Reserve(ResourceCategory::kBackingFree, 64).Convert();
-    auto assigned = pool.ReserveBacking(ResourceCategory::kBackingAssigned);
-    auto owner = std::shared_ptr<const void>(new int, [&](const void* pointer) {
-      assert(ledger.Snapshot().bytes[static_cast<std::size_t>(
-                 ResourceCategory::kBackingAssigned)] == 64);
-      Throws<std::bad_alloc>([&] {
-        (void)pool.ReserveBacking(ResourceCategory::kBackingAssigned);
-      });
-      destroyed = true;
-      delete static_cast<const int*>(pointer);
-    });
-    Throws<std::invalid_argument>([&] {
-      (void)Payload::Borrowed(std::move(assigned), std::move(owner), {{1}, 0});
-    });
-    assert(destroyed);
-    assert(ledger.Snapshot().bytes[static_cast<std::size_t>(
-               ResourceCategory::kBackingFree)] == 64);
   }
   assert(ledger.Snapshot().total_bytes == 0);
 }

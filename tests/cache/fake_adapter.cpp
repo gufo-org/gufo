@@ -462,6 +462,7 @@ bool FakeAdapter::Invalidate(Slot& slot) noexcept {
   state.failed = false;
   state.private_loaded = false;
   state.valid = true;
+  state.guard_.AfterReset();
   return true;
 }
 void FakeAdapter::Append(Slot& slot, std::span<const Token> target,
@@ -491,6 +492,9 @@ void FakeAdapter::Append(Slot& slot, std::span<const Token> target,
 std::uint64_t FakeAdapter::RecurrentHash(const Slot& slot) const {
   const auto& state = AsSlot(slot);
   return state.recurrent[2] * kMultiplier + state.recurrent[3];
+}
+void FakeAdapter::GuardRows(Slot& slot, ComponentId c, Rows first, Rows end) {
+  AsSlot(slot).guard_.BeforeOverwrite(c, first, end);
 }
 void FakeAdapter::FailNextAllocation() noexcept {
   fail_allocation_ = true;

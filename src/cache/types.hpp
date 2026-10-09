@@ -19,6 +19,12 @@ struct SlotId {
   bool operator==(const SlotId&) const = default;
 };
 
+struct BorrowedLocation {
+  SlotId slot;
+  std::uint64_t generation{};
+  bool operator==(const BorrowedLocation&) const = default;
+};
+
 enum class ComponentKind : std::uint8_t {
   kAppendRows,
   kPrivateState,

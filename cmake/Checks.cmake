@@ -6,6 +6,7 @@ set(gufo_pr_targets
   cache_ledger_test
   cache_checkpoint_test
   cache_prefix_index_test
+  cache_slot_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
   logit_sampler_test ggml_dequant_test
   quote_tracker_test
