@@ -73,12 +73,15 @@ public:
       : stats_(std::move(stats)), measured_bytes_(measured_bytes) {}
 
   void SetCancellationCheck(const CancellationCheck& is_cancelled) override {
+    cancellation_armed = static_cast<bool>(is_cancelled);
     if (is_cancelled) {
       ++stats_->cancellation_bindings;
     } else {
       ++stats_->cancellation_clears;
     }
   }
+
+  bool cancellation_armed{false};
 
   void Invalidate() noexcept override {
     ++stats_->invalidations;
@@ -477,6 +480,23 @@ public:
     restored.frontier = fake->frontier;
     ++stats_->snapshot_restores;
   }
+};
+
+class PartialRetentionRunner final : public SnapshotRunner {
+public:
+  using SnapshotRunner::SnapshotRunner;
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = SnapshotRunner::Descriptor();
+    descriptor.capabilities.partial_prefill_retention = true;
+    return descriptor;
+  }
+  [[nodiscard]] TextPrefillStep Prefill(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens) const override {
+    armed_during_prefill.push_back(RequireFakeState(state).cancellation_armed);
+    return SnapshotRunner::Prefill(state, prompt, offset, max_input_tokens);
+  }
+  mutable std::vector<bool> armed_during_prefill;
 };
 
 class InPassRunner final : public SnapshotRunner {
@@ -926,6 +946,41 @@ void TestGeneratedFrontierPersistsForForks() {
   Expect(resumed.cache_disk_hit() && resumed.cached_prompt_tokens() == 3 &&
              resumed.Prefill(16).consumed_tokens == 2,
          "spaced disk checkpoints resume from the nearest stored prefix");
+}
+
+void TestCancelledPrefillRetainsCompletedChunks() {
+  for (const bool retains : {false, true}) {
+    auto stats = std::make_shared<FakeStats>();
+    const auto partial =
+        std::make_shared<PartialRetentionRunner>(stats, 64, 256, 1);
+    std::shared_ptr<TextModelRunner> runner =
+        retains ? std::static_pointer_cast<TextModelRunner>(partial)
+                : std::make_shared<SnapshotRunner>(stats);
+    TextRunnerPool pool(runner, 1);
+    auto request =
+        pool.Acquire({1, 2, 3, 4, 5, 6}, {}, [] { return false; }, {}, true, 5);
+    const auto bindings = stats->cancellation_bindings;
+    const auto step = request.Prefill(4);
+    Expect(step.consumed_tokens == 4 && !step.decode_ready,
+           "the first chunk does not complete the prompt");
+    if (retains) {
+      Expect(partial->armed_during_prefill == std::vector<bool>{false} &&
+                 stats->cancellation_bindings == bindings + 1,
+             "a prefill step runs to completion and re-arms the cancellation");
+    }
+    request.Cancel();
+    auto continuation =
+        pool.Acquire({1, 2, 3, 4, 5, 6, 7}, {}, {}, {}, true, 6);
+    if (retains) {
+      Expect(continuation.cached_prompt_tokens() == 4 &&
+                 continuation.cache_restore_bytes() == 0,
+             "a prefill cancelled between chunks keeps its live prefix");
+    } else {
+      Expect(continuation.cached_prompt_tokens() == 0,
+             "runners without the capability discard a partial prefill");
+    }
+    continuation.Invalidate();
+  }
 }
 
 void TestCancellationRetainsOnlyCompletedWork() {
@@ -2228,6 +2283,7 @@ int main() {
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();
   TestCancellationRetainsOnlyCompletedWork();
+  TestCancelledPrefillRetainsCompletedChunks();
   TestPromptReuseCanBeDisabledPerRequest();
   TestStableChatPrefixSurvivesInterruptedFraming();
   TestWarmChatCheckpointsStopAtTheStableBoundary();

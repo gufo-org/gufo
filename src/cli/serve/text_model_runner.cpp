@@ -1082,6 +1082,9 @@ struct TextRunnerPool::Request::Impl {
   // A throwing model call may have partially mutated device state. Never
   // publish that state as a live continuation, even if its position is stale.
   bool state_reusable{true};
+  /// The caller's cancellation poll, kept to re-arm it after a prefill step
+  /// that runs to completion (see Request::Prefill).
+  CancellationCheck cancellation;
   bool stopped{false};
   std::optional<TextDecodeSelection> pending_selection;
   sampling::SamplerState sampler;
@@ -1324,6 +1327,22 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     frontier = std::min(frontier, impl_->boundaries.front());
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
+  // A cancellation observed inside a step abandons it half-fed, which loses
+  // the whole conversation. Let a step run to completion instead, and honour
+  // the cancellation at the next step boundary where Cancel keeps the prefix.
+  const bool finish_step =
+      impl_->runner->Descriptor().capabilities.partial_prefill_retention &&
+      impl_->cancellation;
+  struct Rearm {
+    TextRunnerState* state;
+    const CancellationCheck* check;
+    ~Rearm() {
+      if (state != nullptr)
+        state->SetCancellationCheck(*check);
+    }
+  } rearm{finish_step ? &state : nullptr, &impl_->cancellation};
+  if (finish_step)
+    state.SetCancellationCheck({});
   std::unique_ptr<TextRunnerSnapshot> captured;
   auto step =
       in_pass ? impl_->runner->PrefillThrough(
@@ -1546,7 +1565,9 @@ TextRunnerPool::Request::Cancel() noexcept {
     if (impl_->state_reusable &&
         (impl_->decode_ready ||
          impl_->prefill_offset == impl_->snapshot_tokens.size() ||
-         impl_->prefill_offset == impl_->fallback_position)) {
+         impl_->prefill_offset == impl_->fallback_position ||
+         (capabilities.partial_prefill_retention &&
+          impl_->prefill_offset > impl_->lease.cached_tokens()))) {
       if (impl_->decode_ready)
         impl_->runner->PrepareCancellation(state);
       checkpoint.assign(impl_->prompt.begin(),
@@ -1921,6 +1942,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       impl_->validated.runner, impl_->disk_store, std::move(lease),
       std::move(prompt), std::move(boundaries), sampling_config,
       std::move(context), cache_prefix_tokens, impl_->cache.capacity() > 1));
+  request.impl_->cancellation = is_cancelled;
   // Prompts that diverge from a retained one after a long common prefix,
   // such as new conversations under one system prompt, publish a checkpoint
   // at the divergence point. Later prompts sharing it restore it exactly
