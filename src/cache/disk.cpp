@@ -60,6 +60,7 @@ void Validate(const DiskManifest& m) {
       if (!d.row_bytes || !d.rows_per_chunk || d.state_bytes || private_state ||
           c.chunks.size() != c.position.valid_rows / d.rows_per_chunk)
         Invalid();
+      (void)Multiply(d.row_bytes, c.position.valid_rows);
       auto full_bytes = Multiply(d.row_bytes, d.rows_per_chunk);
       std::set<DiskFileId> chunks;
       for (const auto& p : c.chunks)

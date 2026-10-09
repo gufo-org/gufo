@@ -128,6 +128,11 @@ Round 2 caught lexical normalization of `..` across a symlink redirecting
 ownership and cleanup away from the configured directory. Terminal-only stripping
 now preserves the kernel's `..` resolution; a regression checks both the lock
 location and which directory's legacy file is removed.
+Round 3 found no actionable startup issues. Its nonblocking format observation
+also led to explicit rejection of whole-component byte overflow, matching
+`ExecutionHistory` geometry checks. The new regression failed before the guard
+and passed afterward; impossible component geometry now fails encode/decode,
+before startup dependency checks.
 
 ### Validation and step baseline
 

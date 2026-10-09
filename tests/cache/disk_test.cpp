@@ -163,6 +163,15 @@ void Format() {
   m = Manifest();
   m.components[0].descriptor.row_bytes = UINT64_MAX;
   Reject([&] { (void)EncodeManifest(m); });
+  m = Manifest();
+  auto& rows = m.components[0];
+  rows.descriptor.row_bytes = 2;
+  rows.descriptor.rows_per_chunk = 1ULL << 62;
+  rows.position.valid_rows = 1ULL << 63;
+  rows.chunks = {{Id(1), 1ULL << 63, 99}, {Id(2), 1ULL << 63, 100}};
+  rows.tail.reset();
+  // Each chunk size fits u64, but the complete component does not.
+  Reject([&] { (void)EncodeManifest(m); });
 }
 void Ownership() {
   Directory d;
