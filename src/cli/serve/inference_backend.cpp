@@ -3891,4 +3891,29 @@ std::size_t InferenceBackend::count_tokens(std::string_view text) const {
 #endif
 }
 
+std::optional<std::size_t> InferenceBackend::count_chat_tokens(
+    const ChatRequest& request) const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  // The same preparation as chat(): constrained tool or format requests add
+  // prompt text before the template is rendered.
+  auto sampling = sampling::SamplingConfig{};
+  auto constrained =
+      ConstrainChatRequest(request, state->scheduler->runner(), &sampling);
+  const auto& effective_request = constrained ? *constrained : request;
+  const auto prompt =
+      state->scheduler->runner().PreparePrompt(effective_request);
+  if (!prompt.has_value()) {
+    return std::nullopt;
+  }
+  return prompt->tokens.size();
+#else
+  (void)request;
+  return std::nullopt;
+#endif
+}
+
 }  // namespace gufo::server
