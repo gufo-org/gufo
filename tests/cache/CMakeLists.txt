@@ -8,7 +8,8 @@ if (ENGINE_ENABLE_HIP)
     -Wl,--wrap=hipHostRegister -Wl,--wrap=hipMallocManaged
     -Wl,--wrap=hipStreamCreateWithFlags -Wl,--wrap=hipEventCreateWithFlags
     -Wl,--wrap=hipMemcpyAsync -Wl,--wrap=hipEventRecord
-    -Wl,--wrap=hipEventQuery -Wl,--wrap=hipEventSynchronize)
+    -Wl,--wrap=hipEventQuery -Wl,--wrap=hipEventSynchronize
+    -Wl,--wrap=hipStreamSynchronize)
   add_test(NAME cache_backing_test COMMAND cache_backing_test)
   set_tests_properties(cache_backing_test PROPERTIES
     LABELS "hip;gpu;gfx1151;cache" TIMEOUT 60)

@@ -123,6 +123,9 @@ accounting, cancellation, initialization rollback, competing borrowers, pin
 lifetimes after facade destruction, unaligned guarded byte-exact round trips,
 piece bounds, repeat waits, lease reuse, and injected copy/event failures.
 A deliberately blocked stream stays unready while an independent peer finishes.
+Host allocation failure during lease creation cannot synchronize or release an
+unclaimed stream slot. Ledger and package-boundary checks also pass in the
+CPU-only preset.
 
 The production release benchmark [`backing_bench.cpp`](../../../tests/cache/backing_bench.cpp)
 committed **1 GiB in 55.45 ms** with one payload allocation, including admission,
@@ -174,3 +177,9 @@ required (see the README).
 [Idle spill and independent transfer streams](../RFC.md#idle-spill-and-independent-transfer-streams)
 
 ## Review notes
+
+The first fresh-context PR review reproduced a lease-creation allocation race:
+cleanup of an unclaimed lease could unlock and release a slot already acquired
+by another thread. Leases now claim their slot only after both host allocations
+succeed, and unclaimed destruction performs no HIP or pool operation. A focused
+allocation-failure regression check covers that path.

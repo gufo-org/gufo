@@ -2,7 +2,9 @@
 #include <atomic>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <new>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -18,7 +20,24 @@ std::atomic<std::size_t> allocations{};
 std::atomic<std::size_t> max_piece{};
 bool fail_copy{}, fail_record{}, fail_query{}, fail_wait{}, fail_alloc{};
 int copies_before_failure{};
+thread_local bool fail_stream_new{}, observe_allocation_cleanup{};
+std::atomic<unsigned> allocation_cleanup_drains{};
 }  // namespace
+void* operator new(std::size_t size) {
+  if (fail_stream_new && size == sizeof(hip::TransferStream)) {
+    fail_stream_new = false;
+    throw std::bad_alloc();
+  }
+  if (void* memory = std::malloc(size ? size : 1))
+    return memory;
+  throw std::bad_alloc();
+}
+void operator delete(void* memory) noexcept {
+  std::free(memory);
+}
+void operator delete(void* memory, std::size_t) noexcept {
+  std::free(memory);
+}
 // Observe the actual HIP allocation/creation entry points, not just a counter
 // maintained by the implementation. Host bookkeeping is permitted on requests.
 extern "C" {
@@ -73,6 +92,12 @@ hipError_t __wrap_hipEventQuery(hipEvent_t event) {
 hipError_t __real_hipEventSynchronize(hipEvent_t);
 hipError_t __wrap_hipEventSynchronize(hipEvent_t event) {
   return fail_wait ? hipErrorInvalidValue : __real_hipEventSynchronize(event);
+}
+hipError_t __real_hipStreamSynchronize(hipStream_t);
+hipError_t __wrap_hipStreamSynchronize(hipStream_t stream) {
+  if (observe_allocation_cleanup)
+    ++allocation_cleanup_drains;
+  return __real_hipStreamSynchronize(stream);
 }
 }
 
@@ -339,6 +364,22 @@ void PendingStreams() {
   release = true;
   assert(pending.Wait() == Result::kSucceeded);
 }
+void AcquireAllocationFailure() {
+  hip::TransferPool pool(1);
+  fail_stream_new = true;
+  observe_allocation_cleanup = true;
+  Throws<std::bad_alloc>([&] { (void)pool.TryAcquire(); });
+  observe_allocation_cleanup = false;
+  assert(!fail_stream_new);
+  // An unclaimed lease cannot touch HIP or release a slot: after unlocking,
+  // that slot might already belong to another borrower. This failed on the
+  // original implementation before a second thread was even required.
+  assert(allocation_cleanup_drains == 0);
+  auto first = pool.TryAcquire();
+  assert(first && !pool.TryAcquire());
+  first.reset();
+  assert(pool.TryAcquire());
+}
 }  // namespace
 int main() {
   hipDeviceProp_t properties{};
@@ -348,6 +389,7 @@ int main() {
   Transfers();
   LifetimeAndFailures();
   PendingStreams();
+  AcquireAllocationFailure();
   std::puts(
       "PASS: precommitted blocks, accounting, racing borrowers, pinned "
       "lifetime, bounded copies, leases and failure drains");

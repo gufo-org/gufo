@@ -40,6 +40,7 @@ struct TransferLease {
   std::size_t index;
   std::atomic<bool> failed{false};
   bool sealed{};
+  bool claimed{};
   TransferLease(std::shared_ptr<TransferPoolState> state, std::size_t index)
       : state(std::move(state)), index(index) {}
   auto& Slot() const { return state->slots[index]; }
@@ -50,6 +51,10 @@ struct TransferLease {
                   : cache::TransferResult::kSucceeded;
   }
   ~TransferLease() {
+    // Metadata allocation may fail before any slot is claimed. Such a lease
+    // must neither synchronize nor release another borrower's stream.
+    if (!claimed)
+      return;
     (void)Drain();
     const std::lock_guard lock(state->mutex);
     Slot().failed = failed;
@@ -150,22 +155,16 @@ TransferPool::TransferPool(std::size_t capacity) {
   state_ = std::move(state);
 }
 std::unique_ptr<TransferStream> TransferPool::TryAcquire() {
-  std::unique_lock lock(state_->mutex);
+  const std::lock_guard lock(state_->mutex);
   for (std::size_t i = 0; i < state_->slots.size(); ++i) {
     auto& slot = state_->slots[i];
     if (slot.busy || slot.failed)
       continue;
     auto lease = std::make_shared<detail::TransferLease>(state_, i);
-    // Allocate before claiming the slot. A construction failure must not
-    // destroy the lease under mutex (its destructor also locks mutex).
-    std::unique_ptr<TransferStream> stream;
-    try {
-      stream.reset(new TransferStream(lease));
-    } catch (...) {
-      lock.unlock();
-      throw;
-    }
+    // An unclaimed lease has no return-to-pool action on allocation failure.
+    auto stream = std::unique_ptr<TransferStream>(new TransferStream(lease));
     slot.busy = true;
+    lease->claimed = true;
     return stream;
   }
   return nullptr;
