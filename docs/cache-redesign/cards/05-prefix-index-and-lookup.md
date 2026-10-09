@@ -1,7 +1,7 @@
 # 05 · Prefix index and lookup
 
 **Milestone:** Common package · **Depends on:** 04 · **Size:** M ·
-**Affects:** nothing at runtime · **Status:** agreed
+**Affects:** nothing at runtime · **Status:** done
 
 ## Goal
 
@@ -48,9 +48,116 @@ Table-driven tests:
 Lookup time for a 128k-token prompt with 128 retained checkpoints, and index
 memory per checkpoint.
 
+### Implementation record
+
+[`src/cache/prefix_index.hpp`](../../../src/cache/prefix_index.hpp) and
+[`prefix_index.cpp`](../../../src/cache/prefix_index.cpp) add the common
+package's compressed token-prefix tree, partitioned by compatibility identity.
+Each identity registers the adapter's required component inventory. Immutable
+checkpoint handles and live slot/generation descriptions share the tree;
+lookup returns every eligible resident candidate, logical transfer bytes,
+a selected boundary and an explicit selection reason. The deepest usable
+boundary wins, with a live continuation preferred on equal boundaries.
+Checkpoint ID, then slot/generation and entry ID resolve remaining ties.
+This changes no serving behavior; slot leases and generation enforcement remain
+with card 06, and durable-only candidates remain ineligible until card 13.
+
+Per-component availability describes resident, durable, both or neither. Lookup
+requires every registered component, the expected layout and a resident supply.
+Live frontiers supply independent component positions; private state must match
+the exact token boundary. Append-row counts remain component-specific. Transfer
+estimates count logical row bytes plus private-state bytes, rather than backing
+capacity; live continuation estimates zero transfer bytes.
+
+The stable-prefix port preserves `ContinuationCache::Acquire`'s two fallback
+forms: a compatible retained checkpoint at/before the requested stable boundary,
+or a compatible checkpoint attesting a previously established stable boundary
+at/before it. A live frontier alone cannot attest a fallback. Availability and
+input identity gate both fallback forms. The supplemental identity is compared
+at each saved boundary, so a pre-image checkpoint remains usable after an image
+changes, while a boundary after that image requires its identity to match.
+
+`CachedPrefixTokens` ignores the stable-prefix rule and reuse flag and considers
+only usable resident boundaries. `CommonPrefixTokens` learns token agreement
+with stored records even when no saved boundary exists there or a live frontier
+is busy. It conservatively requires the stored record's complete input identity
+at its full boundary; a record longer than the query compares against the
+query's complete supplemental identity. It never invents a restorable checkpoint
+at a divergence point.
+
+Index operations are caller-serialized and invoke no adapter/device callbacks.
+Returned checkpoint handles retain payload ownership after index eviction.
+Metadata admission uses the resource ledger; splits preserve existing record
+pointers and release obsolete token capacity. Traversal and normal teardown
+are iterative. Erasure prunes empty branches and returns their metadata charges.
+The index excludes separately charged checkpoint tokens/storage from its own
+metadata figures. Allocator, shared-pointer and ledger bookkeeping and temporary
+lookup result vectors are outside those figures.
+
+[`tests/cache/prefix_index_test.cpp`](../../../tests/cache/prefix_index_test.cpp)
+covers the selection table, faithful stable-boundary eligibility, appended,
+changed and removed images, missing/durable-only components, incompatible
+inventories/layouts, live private-state positions, deterministic ties,
+compatibility isolation, eviction with result pins, failed admission, branch
+learning and the 128k/128-checkpoint workload in both insertion orders. The test
+is included in CPU presets and the hosted PR target. Size-only capture fixtures
+exercise actual checkpoint and ledger operations without allocating payload
+buffers or claiming numerical restore validation.
+
+## Results
+
+Step baseline on Linux 7.2.9 x86-64, AMD Ryzen AI MAX+ 395, based on main
+`087c192d`, with flake.lock-pinned GCC 15.3.0, CMake 4.3.4 and Python 3.14.6:
+
+| Measurement | Result |
+| --- | ---: |
+| Lookup, 131,072-token prompt, 128 resident checkpoints | 35.13 µs/lookup |
+| Empty registered index metadata | 497 bytes |
+| Retained index metadata, 128 checkpoints | 579,057 bytes |
+| Incremental index metadata per checkpoint | 4,520 bytes |
+
+The benchmark uses three components with independent row frontiers, boundaries
+spaced by 1,024 tokens, 20 warmup lookups and 1,000 measured lookups. It includes
+candidate construction, identity/coherence checks, cost estimates and sorting;
+each iteration verifies the deepest boundary and all 128 candidates. Timing is
+one CPU microbenchmark run in `RelWithDebInfo`, not an inference, GPU transfer or
+contention measurement. This is a step baseline, with no directly comparable
+RFC measurement or speedup claim. Metadata includes shared edge tokens and
+record capacities; both ascending and descending insertion produce the same
+retained metadata. Teardown returns the ledger to zero.
+
+### Validation
+
+CPU commands run in a `pkgs.mkShell` using the repository's flake.lock-pinned
+nixpkgs with CMake, Ninja, pkg-config, Python, clang-tools, ICU, curl, libpng,
+libjpeg, libwebp and OpenSSL. Release configuration uses the production
+package's `inputsFrom` dependency shell.
+
+```sh
+cmake --preset cpu-test -DGUFO_BUILD_TOOLS=ON
+cmake --build --preset cpu-test --target cache_prefix_index_test cache_prefix_index_bench --parallel 4
+ctest --preset cpu-test -R '^cache_(prefix_index|checkpoint|ledger|adapter|adapter_lifecycle|boundary)_test$' --output-on-failure
+build/cpu-test/src/cache/cache_prefix_index_bench
+cmake --preset cpu-sanitizer
+cmake --build --preset cpu-sanitizer --target cache_prefix_index_test cache_checkpoint_test cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test --parallel 4
+ctest --preset cpu-sanitizer -R '^cache_(prefix_index|checkpoint|ledger|adapter|adapter_lifecycle|boundary)_test$' --output-on-failure
+cmake --preset release -DGUFO_BUILD_TOOLS=OFF
+cmake --build --preset release --target gufo_cache --parallel 4
+cmake --build --preset pr --parallel 4
+nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+```
+
+All six focused cache tests passed in ordinary and ASan/UBSan builds; all 47
+hosted PR tests passed. The production release cache library compiled, and
+focused clang-tidy passed for the new index source/header. Shared formatting,
+documentation and diff whitespace checks passed. The focused tidy line filter
+excludes pre-existing header diagnostics outside the changed index files.
+Build artifacts remain in ignored `build/` directories. No inference path is
+connected, so model functional/timing qualification remains with switch-over.
+
 ## Done when
 
-- [ ] Tests above pass, including the lookup cases ported from the current
+- [x] Tests above pass, including the lookup cases ported from the current
   cache's unit tests.
 
 ## Review focus

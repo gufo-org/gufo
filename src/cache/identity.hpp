@@ -28,6 +28,10 @@ public:
   explicit InputIdentity(Rows token_count = 0, Identity complete = {},
                          std::vector<InputPrefix> prefixes = {});
   [[nodiscard]] std::span<const std::uint8_t> At(Rows count) const;
+  [[nodiscard]] Rows TokenCount() const { return token_count_; }
+  [[nodiscard]] std::span<const std::uint8_t> Complete() const {
+    return complete_;
+  }
   // Token prefix matching remains a separate requirement for lookup (card 05).
   [[nodiscard]] bool Matches(const InputIdentity&, Rows count) const;
 

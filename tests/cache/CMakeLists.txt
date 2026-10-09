@@ -28,3 +28,8 @@ add_executable(cache_checkpoint_test checkpoint_test.cpp)
 target_link_libraries(cache_checkpoint_test PRIVATE gufo_cache_fake)
 add_test(NAME cache_checkpoint_test COMMAND cache_checkpoint_test)
 set_tests_properties(cache_checkpoint_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+add_executable(cache_prefix_index_test prefix_index_test.cpp)
+target_link_libraries(cache_prefix_index_test PRIVATE gufo_cache)
+add_test(NAME cache_prefix_index_test COMMAND cache_prefix_index_test)
+set_tests_properties(cache_prefix_index_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
