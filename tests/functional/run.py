@@ -31,7 +31,7 @@ TESTS = Path(__file__).resolve().parent
 SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
           "tool-reasoning", "reasoning-separator",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "system-injection", "cache")
+          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection", "cache")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -50,6 +50,7 @@ def provenance():
     source = hashlib.sha256()
     for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
                  "tool_reasoning.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
+                 "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py",
                  "cache_disk_spacing.py"):
         source.update((TESTS / name).read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
@@ -153,7 +154,7 @@ def compare_runs(baseline_dir, candidate_dir):
 
 
 @contextlib.contextmanager
-def server(command, log_path, startup_timeout):
+def server(command, log_path, startup_timeout, environment=None):
     def interrupt(signum, frame):
         raise KeyboardInterrupt(f"signal {signum}")
 
@@ -163,7 +164,8 @@ def server(command, log_path, startup_timeout):
         try:
             previous_handlers = {signum: signal.signal(signum, interrupt)
                                  for signum in (signal.SIGTERM, signal.SIGHUP)}
-            process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                       env=environment)
             deadline = time.monotonic() + startup_timeout
             while time.monotonic() < deadline:
                 if process.poll() is not None:
@@ -246,7 +248,7 @@ def main():
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "prefill-scheduling")
+        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "prefill-scheduling")
                     and (suite not in ("image-inputs", "image-count")
                          or option(command, "--mmproj") is not None)]
     selected = list(dict.fromkeys(selected))
@@ -376,7 +378,7 @@ def main():
                 report["snapshot_budget"] = check_snapshot_budget(
                     (output / "server.log").read_text(), available_before_load,
                     int(option(command, "--cache-ram-bytes", "0")), sessions)
-            configured = "cache-bridge" in selected and re.search(
+            configured = bool(set(selected) & {"cache-bridge", "cache-pressure"}) and re.search(
                 r"event=snapshot_cache_configured .*?\bcapacity_bytes=(\d+)\b",
                 (output / "server.log").read_text())
             for suite in selected:
@@ -395,7 +397,7 @@ def main():
                     sdk_args += ["--expected-input-modalities", args.expected_input_modalities]
                 if option(command, "--think") is not None:
                     sdk_args += ["--server-thinking", option(command, "--think")]
-                if suite == "cache-bridge" and configured:
+                if suite in ("cache-bridge", "cache-pressure") and configured:
                     sdk_args += ["--snapshot-capacity-bytes", configured[1]]
                 if suite == through_suite:
                     sdk_args += ["--through-case", through_case]

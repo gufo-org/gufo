@@ -35,6 +35,9 @@ from cache_edits import check_cache_edits
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
 from cache_bridge import check_cache_bridge
+from cache_compaction import check_cache_compaction
+from cache_workloads import check_cache_transforms, check_cache_pressure
+from cache_messages_loop import check_cache_messages_loop
 from system_injection import check_system_injection
 from cache_growth import check_cache_growth
 from messages_tools import check_messages_tools
@@ -2528,7 +2531,7 @@ SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs",
               "tool-reasoning", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
-              "cache-bridge", "system-injection")
+              "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection")
 
 
 def main():
@@ -2677,10 +2680,19 @@ def main():
                 client, args.model, checks, chat_result),
             "cache-bridge": lambda: check_cache_bridge(
                 client, args.model, checks, chat_result, args.snapshot_capacity_bytes),
+            "cache-compaction": lambda: check_cache_compaction(
+                client, args.model, checks, chat_result, args.context, args.server_log),
+            "cache-transforms": lambda: check_cache_transforms(
+                client, args.model, checks, chat_result, args.context, args.server_log),
+            "cache-pressure": lambda: check_cache_pressure(
+                client, args.model, checks, chat_result, args.snapshot_capacity_bytes,
+                args.concurrency),
+            "cache-messages-loop": lambda: check_cache_messages_loop(
+                client, args.model, checks, chat_result, args.context),
             "system-injection": lambda: check_system_injection(
                 client, args.model, checks, chat_result),
         }
-        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "prefill-scheduling")
+        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "prefill-scheduling")
                      and (name not in ("image-inputs", "image-count") or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])

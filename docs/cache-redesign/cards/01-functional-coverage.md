@@ -1,7 +1,7 @@
 # 01 · Functional coverage for real cache workloads
 
-**Milestone:** Preparation · **Depends on:** — · **Size:** M (a series: one PR
-per scenario family) · **Affects:** tests only · **Status:** proposed
+**Milestone:** Preparation · **Depends on:** — · **Size:** L (combined scenario
+families) · **Affects:** tests only · **Status:** in progress
 
 ## Goal
 
@@ -65,14 +65,34 @@ For each new scenario, run it on current `main` when it lands and record per
 request: prefilled and restored tokens, TTFT, and pass or fail. That run is
 the comparison point for card 19.
 
+### Combined implementation
+
+- Compaction mechanics: `cache-compaction` preserves system/tools while replacing
+  a near-limit tool history with a summary; checks retries and continued growth
+  against uncached controls. See the [step baseline](01-compaction-baseline.md).
+- History edits: `cache-transforms` covers tool-output clearing, micro-reductions
+  and a 10K+ tool result followed by retry/edit (patterns 2, 3, 5).
+- Retention: `cache-pressure` covers compaction abandonment, idle pressure,
+  volatile headers, UI tasks and parent/child fan-out (1 pressure, 4, 6, 7, 9).
+- Messages: `cache-messages-loop` replays twelve actual streamed tool cycles,
+  growing past 10K tokens, with uncached Chat controls (8).
+- Disk: `cache_lifecycle.py` covers graceful restart, an abrupt kill during a
+  deterministically held unpublished write, deeper disk state beside short RAM
+  state, and a checkpoint exceeding staging (10–12).
+- These families land in one PR. Generated reports, logs and disk snapshots stay
+  outside Git; per-request results and provenance are recorded in Markdown.
+
+The [combined step baseline](01-functional-baseline.md) records all families in
+AR and MTP, including the strict legacy-cache work failures.
+
 ## Done when
 
-- [ ] Each added scenario runs on current `main`, with its result recorded.
-- [ ] New suites are documented in `tests/functional/README.md`.
+- [x] Each added scenario runs on current `main`, with its result recorded.
+- [x] New suites are documented in `tests/functional/README.md`.
 
 ## Review focus
 
-- Which patterns matter most for our users? Order the PR series by that.
+- Which patterns matter most for our users? Prioritize follow-up depth by that.
 - Patterns missing from the list.
 
 ## References
@@ -101,4 +121,3 @@ required (see the README).
 [Client history transformations](../RFC.md#client-history-transformations)
 
 ## Review notes
-

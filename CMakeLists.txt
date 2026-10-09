@@ -305,6 +305,9 @@ if (BUILD_TESTING)
   add_library(device_loss_faults SHARED EXCLUDE_FROM_ALL
     tests/functional/device_loss_faults.cpp)
   target_link_libraries(device_loss_faults PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+  add_library(cache_disk_faults SHARED
+    tests/functional/cache_disk_faults.cpp)
+  target_link_libraries(cache_disk_faults PRIVATE ${CMAKE_DL_LIBS})
 
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
@@ -581,6 +584,15 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/test_runner.py)
   set_tests_properties(functional_runner_test PROPERTIES LABELS "cpu;server;functional")
+  add_test(NAME cache_workloads_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/test_cache_workloads.py)
+  set_tests_properties(cache_workloads_test PROPERTIES LABELS "cpu;server;functional")
+  add_test(NAME cache_disk_faults_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/cache_disk_faults_test.py
+      $<TARGET_FILE:cache_disk_faults>)
+  set_tests_properties(cache_disk_faults_test PROPERTIES LABELS "cpu;server;functional")
 
   add_test(NAME speculative_corpus_test
     COMMAND ${Python3_EXECUTABLE}

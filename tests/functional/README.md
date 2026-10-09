@@ -107,6 +107,10 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
 | `cache-shared-prefix` | New conversations under one system prompt, one after another, with long and short tasks: from the third on they restore the whole shared prefix; compare answers with uncached controls |
 | `cache-bridge` | A chat bridge sends each user message with metadata its history copy drops, under a full RAM budget with small unrelated requests between turns: from the third turn on, reuse reaches the user turn two back; compare answers with uncached controls. Not in `all` |
+| `cache-compaction` | A tool history grows near the context limit, then a summary replaces it while system/tools stay; check shared-boundary reuse, unchanged retries, continued growth and exact uncached answers. Requires context ≥ 16384. Not in `all` |
+| `cache-transforms` | Clear an old tool result, remove a few hundred late user tokens, or retry/edit after a 10K+ result; restore coherent pre-edit boundaries and compare uncached answers. Requires context ≥ 32768. Not in `all` |
+| `cache-pressure` | Fill the RAM budget, compact an abandoned history, resume idle conversations, send volatile headers/UI tasks, then fan out children and resume their parent. Requires a small explicit RAM budget. Not in `all` |
+| `cache-messages-loop` | Twelve streamed `/v1/messages` tool-call/result cycles with actual calls and growing history; each request checks reuse and has an uncached Chat control. Requires context ≥ 16384. Not in `all` |
 | `system-injection` | System/developer messages after the conversation start, in Chat and Responses: accepted, followed by the model and equal to uncached responses; the hoisted turn's reuse is recorded and the next turn must reuse it in full |
 | `cache-concurrency` | Concurrent identical prompts, shared-system fan-out with short and long tasks, short or no shared prefixes, a retained conversation beside a newcomer, and a cancelled leader; check waits, prefill work and uncached answers |
 
@@ -210,6 +214,64 @@ Background requests fill the budget first; a larger budget fails as unqualified.
 requests sharing a long prefix must wait for one prefill and then prefill only
 their own tail; groups sharing little or nothing must not wait. With
 `--sessions 1` no request may wait.
+
+`cache-compaction` measures a small tool result to size a larger append for the
+loaded tokenizer. The measured history must reach 75–95% of the configured
+context, and compaction must drop at least half that capacity. Run explicitly
+with `--suite cache-compaction` and server `--context 32768 --sessions 1`.
+It preserves the declared tools and system text, replaces all other turns with
+a summary, checks reuse at or beyond a coherent system/tools checkpoint measured
+by a short warm branch before the large append, then retries
+and continues the compacted conversation. Cold controls run after every warm
+request. The seed is a genuine model reply; tool calls/results and the summary
+are deterministic client-authored fixtures. This covers compaction mechanics,
+not a real client's summary generation or retention under RAM/disk pressure.
+The [card 01 baseline](../../docs/cache-redesign/cards/01-compaction-baseline.md)
+records compaction outcomes. The [combined baseline](../../docs/cache-redesign/cards/01-functional-baseline.md)
+records the other card 01 families, including failures on the legacy cache.
+
+Run `cache-transforms` with a roomy RAM budget in its own invocation. The
+tool-bearing template can have a longer assistant opening than the plain
+conversation; the suite checks zero-prefill retries without adding pressure.
+`cache-pressure` instead runs explicitly with `--cache-ram-bytes 2147483648`,
+`--context 32768`, and `--sessions 2` (also supports one session, with sequential
+children). It verifies that background requests published at least twice the
+configured budget before the measured histories. UI prompts embed actual chat
+history, and volatile headers change the first system tokens. Warm histories
+and all children finish before cold controls start.
+
+`cache-messages-loop` streams actual model-authored `read_archive` calls and
+replays their IDs/typed arguments with deterministic tool results. Compaction
+is not performed in this loop. Its final prompt must exceed 10K tokens.
+Messages streams expose token usage but not full server phase timings;
+request TTFT and draft work are joined from the server log, while the buffered
+Chat controls expose full phase timings. Every streamed call/result is checked
+against the same uncached rendered prompt, after the entire warm loop.
+
+Disk workloads use a separate runner so their restarts and publication gate
+cannot affect other suites:
+
+```sh
+nix develop -c cmake --preset cpu-test
+nix develop -c cmake --build --preset cpu-test --target cache_disk_faults
+nix develop -c python3 tests/functional/cache_lifecycle.py \
+  --output /tmp/cache-lifecycle --fault-library build/cpu-test/libcache_disk_faults.so -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --context 32768 --sessions 1 --think off --speculative off
+```
+
+Repeat `--case restart|tiered|oversized|crash` to select cases. `restart` models
+llama-swap stopping and starting a server between turns. `tiered` first warms a
+short RAM prefix after restart, then requests a history with a deeper published
+disk checkpoint. `oversized` uses 1 MiB staging beneath an observed larger
+checkpoint. `crash` uses the CMake-built, child-only preload helper to hold a
+private-cache file at `fsync`, verifies queued bytes and the completed HTTP
+request, then SIGKILLs that child. Restart may restore only previously published
+boundaries. The helper is disarmed for initial publication and is covered by
+CPU process tests. Every case owns an 8 GiB disk budget, checks free space and
+deletes its cache on completion/failure. Reports and logs remain outside Git.
+Known cache-work failures exit nonzero and retain controls/evidence; they are
+not skipped, marked as expected passes, or fixed in this test-only card.
 
 Unchanged retries must reproduce the complete output with zero prefill. After a
 restart, disk restores may re-prefill less than one 2048-token disk step;

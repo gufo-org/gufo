@@ -29,6 +29,7 @@ from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
 from cache_bridge import check_cache_bridge
+from cache_compaction import check_cache_compaction, ARCHIVE_LINE
 from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
 from cache_depth import check_cache_depth
@@ -704,6 +705,90 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_shared_prefix_rejects_grid_only_reuse(self):
         with self.assertRaisesRegex(AssertionError, "of the shared system prompt"):
             self.run_cache_shared_prefix(regress=True)
+
+    def run_cache_compaction(self, regression=None):
+        requests, checks, seen = [], {}, set()
+        stem_total = compact_total = None
+
+        def chat_result(client, body):
+            nonlocal stem_total, compact_total
+            requests.append(deepcopy(body))
+            messages = body["messages"]
+            cold = body.get("extra_body", {}).get("cache_prompt") is False
+            compacted = "Compacted archive summary:" in messages[1]["content"]
+            lines = sum(message.get("content", "").count(ARCHIVE_LINE)
+                        for message in messages if message["role"] == "tool")
+            total = 3000 + 12 * lines + (len(messages) - 2) * 24
+            if compacted:
+                total += 48
+                compact_total = compact_total or total
+            stem_total = stem_total or total
+            key = json.dumps(body, sort_keys=True)
+            repeated = key in seen and not cold
+            cached = (0 if cold or len(requests) == 1 else total if repeated
+                      else stem_total - 48 if len(messages) == 2
+                      else compact_total - 8 if compacted else stem_total - 16)
+            if compacted and not cold and not repeated:
+                if regression == "lost":
+                    cached = 0
+                elif regression == "false_hit":
+                    cached = stem_total + 1
+                elif regression == "pinned" and len(messages) > 2:
+                    cached = stem_total - 48
+            if repeated and regression == "retry_work":
+                cached -= 1
+            seen.add(key)
+            code = ("GAMMA" if messages[-1]["content"] == "Return exactly GAMMA."
+                    else "BETA" if compacted else "ALPHA")
+            if compacted and not cold and regression == "stale_answer":
+                code = "ALPHA"
+            return {"text": code, "reasoning": "", "tools": [], "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached}}}
+
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                check_cache_compaction(None, "fixture", checks, chat_result, 32768)
+        finally:
+            self.compaction_requests, self.compaction_checks = requests, checks
+        return requests, checks
+
+    def test_cache_compaction_keeps_system_tools_and_delays_controls(self):
+        requests, checks = self.run_cache_compaction()
+        self.assertEqual(len(requests), 16)
+        self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is False
+                            for body in requests[8:]))
+        for body in requests:
+            self.assertEqual(body["messages"][0], requests[0]["messages"][0])
+            self.assertEqual(body["tools"], requests[0]["tools"])
+        self.assertEqual(requests[2]["messages"][2]["content"],
+                         checks["compaction_seed"]["text"])
+        self.assertEqual(requests[3], requests[4])
+        self.assertEqual(requests[5], requests[6])
+        self.assertEqual(len(requests[5]["messages"]), 2)
+        self.assertIn("Compacted archive summary:", requests[5]["messages"][1]["content"])
+        self.assertEqual(requests[7]["messages"][2]["content"],
+                         checks["compaction_summary"]["text"])
+        bounds = checks["compaction_boundaries"]
+        self.assertGreaterEqual(bounds["near_limit_tokens"], 32768 * .75)
+        self.assertGreaterEqual(bounds["dropped_tokens"], 32768 // 2)
+
+    def test_cache_compaction_rejects_misses_and_false_hits_after_controls(self):
+        for regression in ("lost", "false_hit", "pinned"):
+            with self.subTest(regression=regression), self.assertRaises(AssertionError):
+                self.run_cache_compaction(regression)
+            self.assertEqual(len(self.compaction_requests), 16)
+            self.assertTrue(self.compaction_checks["compaction_boundaries"]["failures"])
+
+    def test_cache_compaction_rejects_retry_work_and_abandoned_answers(self):
+        for regression in ("retry_work", "stale_answer"):
+            with self.subTest(regression=regression), self.assertRaises(AssertionError):
+                self.run_cache_compaction(regression)
+
+    def test_cache_compaction_requires_room_for_a_large_drop(self):
+        with self.assertRaisesRegex(ValueError, "at least 16384"):
+            check_cache_compaction(None, "fixture", {}, None, 8192)
 
     def run_cache_bridge(self, lost=False, restore_bytes=100, capacity=1000):
         requests = []

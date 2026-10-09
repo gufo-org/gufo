@@ -1,7 +1,7 @@
 # Cache redesign implementation cards
 
-Status: draft for review. Revised 2026-10-09 after the first review. Nothing
-here is implemented.
+Status: draft for review. Revised 2026-10-09 after the first review. Card 01's
+functional coverage is combined into one PR; the cache redesign is not wired in.
 
 These cards split the [RFC implementation plan](../RFC.md#implementation-plan)
 into isolated steps. Each PR card is meant to become one pull request, or a
@@ -43,7 +43,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 
 | Card | Title | Milestone | Depends on | Size | Status |
 | --- | --- | --- | --- | --- | --- |
-| [01](01-functional-coverage.md) | Functional coverage for real cache workloads | Preparation | — | M (series) | proposed |
+| [01](01-functional-coverage.md) | Functional coverage for real cache workloads | Preparation | — | L (combined) | in progress |
 | [02](02-package-and-adapter-api.md) | `src/cache/` package, adapter API and fake adapter | Common package | — | M | agreed |
 | [03](03-resource-ledger.md) | Resource ledger and reservations | Common package | 02 | M | agreed |
 | [04](04-chunks-and-checkpoints.md) | Chunks, checkpoints and provenance | Common package | 03 | M–L | agreed |
