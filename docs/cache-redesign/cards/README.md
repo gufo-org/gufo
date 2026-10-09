@@ -2,7 +2,8 @@
 
 Status: draft for review. Revised 2026-10-09 after the first review. Card 01's
 functional coverage is combined into one PR. Cards 02–04's common contracts,
-fake adapter, resource ledger and checkpoint ownership are implemented; the cache redesign is not wired in.
+fake adapter, resource ledger and checkpoint ownership are implemented; the
+cache redesign is not wired in.
 
 These cards split the [RFC implementation plan](../RFC.md#implementation-plan)
 into isolated steps. Each PR card is meant to become one pull request, or a
@@ -124,7 +125,9 @@ These come from the RFC, `AGENTS.md` and the review decisions; cards do not
 repeat them.
 
 - **Step baseline (D3):** each card records what it measured when it lands. It
-  is a reference point for card 20, not a target.
+  is a reference point for card 20, not a target. Keep important measurements,
+  their environment, commands and limitations in a **Results** section in the
+  relevant card. Do not add standalone measurement JSON files to the repository.
 - **Starting points, not file lists:** cards name types and areas to start
   from. The implementer chooses which files change.
 - **The current cache is untouched** until card 19 deletes it. Improvements to

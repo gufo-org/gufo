@@ -92,6 +92,8 @@ chunks and frontiers, borrowed backing, pin failures, metadata/transfer failure,
 every reserve/convert failure point, identity changes and zero-byte teardown.
 It is registered in both CPU presets and the hosted PR target.
 
+## Results
+
 Step baseline on Linux x86-64 (AMD Ryzen AI MAX+ 395), based on `c8d3ab55`,
 with flake.lock-pinned GCC 15.3.0, CMake 4.3.4 and Python 3.14.6:
 
@@ -99,6 +101,12 @@ with flake.lock-pinned GCC 15.3.0, CMake 4.3.4 and Python 3.14.6:
 | --- | ---: |
 | Full-chunk record (`sizeof`, excluding allocator bookkeeping) | 176 |
 | Checkpoint metadata at 86,016 tokens, including token/component/reference capacities | 348,397 |
+| Checkpoint metadata at 88,064 tokens | 356,669 |
+| Checkpoint metadata at 90,112 tokens | 364,941 |
+| Checkpoint metadata at 92,160 tokens | 373,213 |
+| Checkpoint metadata at 94,208 tokens | 381,485 |
+| Checkpoint metadata at 96,256 tokens | 389,757 |
+| Checkpoint metadata at 98,304 tokens | 398,029 |
 | Checkpoint metadata at 100,352 tokens | 406,301 |
 | Eight checkpoints' metadata combined | 3,018,792 |
 | All retained metadata, including history, lineage and chunk records | 3,447,181 |
@@ -111,9 +119,10 @@ with size-only opaque backing owners. It does not allocate 7.94 GiB of physical
 buffers or qualify GPU numerics, transfers, inference speed or contention.
 Metadata records object sizes and retained vector capacities; allocator,
 shared-pointer and ledger-token bookkeeping and temporary test inputs are outside
-these reported figures. The complete machine/toolchain record, per-checkpoint
-sizes, source/binary hashes and results are in
-[`04-chunks-and-checkpoints.json`](../measurements/04-chunks-and-checkpoints.json).
+these reported figures. The replay ran once on Linux 7.2.9 using the `cpu-test`
+build. Teardown returned the ledger to zero.
+
+### Validation
 
 Validation commands (CPU dependency shell from pinned nixpkgs; production
 package `inputsFrom` for the release configuration):
@@ -134,8 +143,8 @@ build/cpu-test/tests/cache/cache_checkpoint_test
 All five focused tests passed in ordinary and ASan/UBSan builds; all 46 hosted
 PR tests passed. The production release library, shared formatting check,
 focused clang-tidy, documentation checks and diff whitespace checks passed.
-Build artifacts remain in ignored `build/` directories; the committed step
-record identifies the baseline source independently of the eventual commit.
+Build artifacts remain in ignored `build/` directories. These results were
+recorded from the implementation committed as `bc61da51`.
 
 ## Done when
 

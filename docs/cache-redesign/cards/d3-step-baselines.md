@@ -11,7 +11,9 @@ Instead:
 
 1. **Every card records a step baseline when it lands.** Each card says what
    to measure (operation cost, bytes, latency) and records the result in its
-   PR. It is a reference point, not a pass/fail target.
+   **Results** section and summarizes it in the PR. Important measurements
+   belong in the card; do not add standalone measurement JSON files. A step
+   baseline is a reference point, not a pass/fail target.
 2. **Correctness and repository rules still gate every card.** Exact restored
    state, numerical quality, no partial-state execution, and at the switch-over
    (card 19) the repository's per-request 5% / 3 ms timing gates against

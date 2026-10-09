@@ -138,28 +138,6 @@ production package plus clang-tools and Python; the GPU/tools configuration
 also required the pinned rocprofiler-sdk. The initial test-first compile failed
 on the missing ledger header. No model or device-transfer quality claim is made.
 
-The [initial baseline](../measurements/03-resource-ledger.json), before the review
-follow-up below, has source and
-binary hashes, machine/build details and every measured result. One unpinned
-run measured 20,000 cycles per thread, with 64-byte charges. External operation
-timers include host bookkeeping and mutex contention. The library uses release
-optimization; internal lock clocks are disabled for operation measurements.
-
-| Operation | Metadata allocation: eight-thread mean / p95 | Spill block: eight-thread mean / p95 | Instrumented mean lock hold: metadata / spill |
-| --- | --- | --- | --- |
-| Reserve | 907 / 2,965 ns | 935 / 3,367 ns | 44 / 42 ns |
-| Convert | 712 / 2,715 ns | 836 / 3,236 ns | 39 / 39 ns |
-| Release | 736 / 2,746 ns | 799 / 3,166 ns | 35 / 37 ns |
-
-Lock hold time was measured in separate instrumented runs. It includes the
-ending clock read but excludes the subsequent statistics update and unlock;
-wait time includes the acquiring clock read. Instrumentation increased the
-eight-thread metadata cycle wall time from 47.87 to 92.07 ms and spill cycles
-from 52.85 to 82.36 ms. Those instrumented operation timings are retained but
-are not the uninstrumented baseline. Single-thread results and maximum hold
-times are also retained. These are step measurements, without an inference
-timing gate or a comparable RFC microbenchmark.
-
 ### Review follow-up
 
 The committed-private-memory path, assignment contention, pin scope, assertion
@@ -176,11 +154,37 @@ tests pass in `gpu-test`. Compile commands confirm the ledger itself receives
 retains `-DNDEBUG` without `-UNDEBUG`. Formatting, focused static analysis,
 documentation links and whitespace checks pass.
 
-The [review baseline](../measurements/03-resource-ledger-review.json) uses the
-release library and benchmark, built with the same pinned toolchain and
-20,000-cycle methodology. The original run is retained separately. These
-single-run CPU measurements describe the revised implementation; they are not
-a matched performance-gain comparison.
+## Results
+
+### Initial baseline
+
+Before the review follow-up, one unpinned run on the machine and toolchain
+above measured 20,000 cycles per thread, with 64-byte charges. External operation
+timers include host bookkeeping and mutex contention. The library uses release
+optimization; internal lock clocks are disabled for operation measurements.
+
+| Operation | Metadata allocation: eight-thread mean / p95 | Spill block: eight-thread mean / p95 | Instrumented mean lock hold: metadata / spill |
+| --- | --- | --- | --- |
+| Reserve | 907 / 2,965 ns | 935 / 3,367 ns | 44 / 42 ns |
+| Convert | 712 / 2,715 ns | 836 / 3,236 ns | 39 / 39 ns |
+| Release | 736 / 2,746 ns | 799 / 3,166 ns | 35 / 37 ns |
+
+Lock hold time was measured in separate instrumented runs. It includes the
+ending clock read but excludes the subsequent statistics update and unlock;
+wait time includes the acquiring clock read. Instrumentation increased the
+eight-thread metadata cycle wall time from 47.87 to 92.07 ms and spill cycles
+from 52.85 to 82.36 ms. Instrumented operation timings describe the cost of enabling clocks rather
+than the uninstrumented baseline. These are step measurements, without an
+inference timing gate or a comparable RFC microbenchmark.
+
+### Review baseline
+
+The review baseline uses the release library and benchmark, based on
+`0d228432` plus its review follow-up, with the same pinned toolchain and
+20,000-cycle methodology. Each thread charges 64-byte blocks; affinity is left
+to the scheduler, with no warmup. The host runs Linux 7.2.9 on AMD Ryzen AI
+MAX+ 395. These single-run CPU measurements describe the revised implementation;
+they are not a matched performance-gain comparison.
 
 | Allocation/category | Eight-thread mean reserve / convert / release (ns) | Instrumented mean lock hold for each operation (ns) |
 | --- | --- | --- |
@@ -189,8 +193,7 @@ a matched performance-gain comparison.
 | Private-state block assignment | 943 / 863 / 871 | 43 / 38 / 37 |
 | Private-tail block assignment | 877 / 810 / 814 | 47 / 41 / 40 |
 
-Raw records include single-thread cases, percentiles, lock wait/max hold and
-instrumentation overhead. Eight-thread metadata wall time was 48.43 ms without
+Eight-thread metadata wall time was 48.43 ms without
 internal clocks versus 113.39 ms with them; spill was 45.91 versus 80.27 ms,
 private state 54.77 versus 81.56 ms, and tails 50.89 versus 90.77 ms.
 
