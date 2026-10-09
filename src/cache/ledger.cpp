@@ -211,6 +211,21 @@ ResourceReservation ResourceLedger::Reserve(ResourceCategory category,
   state_->Peaks();
   return ResourceReservation(std::move(token));
 }
+namespace {
+ResourceAllocationInfo Info(const std::shared_ptr<detail::ChargeToken>& token) {
+  if (!token)
+    throw std::logic_error("empty ledger handle");
+  const auto& a = *token->allocation;
+  const std::lock_guard lock(a.ledger->mutex);
+  return {a.category, a.bytes, a.reserved, a.backing, token->pooled};
+}
+}  // namespace
+ResourceAllocationInfo ResourceReservation::Info() const {
+  return cache::Info(token_);
+}
+ResourceAllocationInfo ResourceCharge::Info() const {
+  return cache::Info(token_);
+}
 ResourceCharge ResourceReservation::Convert() {
   if (!token_)
     throw std::logic_error("empty ledger reservation");

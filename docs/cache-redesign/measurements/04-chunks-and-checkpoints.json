@@ -1,0 +1,90 @@
+{
+  "recorded_at_utc": "2026-10-09T13:44:59.919402+00:00",
+  "base_revision": "c8d3ab550d20df3e5b3d244318e8c4757625dd5a",
+  "source_state": "uncommitted card 04 implementation; identified by source hashes",
+  "source_sha256": {
+    "cmake/Checks.cmake": "9eb20c7b4c83caa6bef4f3cb552c1005a861e092144af91444054c382ab06d56",
+    "flake.lock": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+    "src/cache/CMakeLists.txt": "4908572af72baa734bb459da3c0cba5e5e5df535642e5252b758bdeadb274d0a",
+    "src/cache/adapter.hpp": "1ca61417e15d6afe35e3e4f6f4e696bc2b7569bad1d6105e4816cee54bf019d2",
+    "src/cache/checkpoint.cpp": "ab05a1f407ceda5cd4d62735a6becf3b3b1245d50709506b9ace8db23c9e99d9",
+    "src/cache/checkpoint.hpp": "4507342bb86b5a1e21a2f88bc45e9be05922cd24964a6807283772a25a1a9075",
+    "src/cache/completion.cpp": "7d754d17008ef8ebd4532184da05c6eaabe79e961dd2652205d8d6411f5053a1",
+    "src/cache/completion.hpp": "a596e74dd1243834163fcf794b2c8c5a694b235b79d1f1cb698609c7a30aa1f7",
+    "src/cache/events.hpp": "e6ffc4c001244c047100743147ae275ef2c9b6baf494235e57528a441d791a11",
+    "src/cache/identity.cpp": "2f9a85b878692d830b4b3bc6cb4024acdbad02bcf70904796924f3276601a3c1",
+    "src/cache/identity.hpp": "8bfe4b0e0bfeda71fd6b7988b4a2dbb626a2eafc7d2335ab622bcca3774aa3e8",
+    "src/cache/ledger.cpp": "a667557223110a4e66e40140cf0f63f09d9f2e78029cf72b5305c9e99a63a228",
+    "src/cache/ledger.hpp": "8a8a63a998f903f3e9b87bba553510c8c37a21c6eeeee58296c70e56c6fb5c91",
+    "src/cache/stream.hpp": "24348525e5cd137c2b9341c7054f67b1aa5691f34e8b6745d58524fb33ed985e",
+    "src/cache/types.hpp": "893523e80931f6fb0529335f3993823a2ca6d67b531610ccc44ef890feda730a",
+    "tests/cache/CMakeLists.txt": "bc2747d010f9daa93928d91bc3a73b8f0b0c0994efb7a957f7651069aec47b90",
+    "tests/cache/checkpoint_test.cpp": "ff3fdf87d6103496cab4aafe5c767deb30983b600193ebb87ae1554f69668d6c",
+    "tests/cache/fake_adapter.cpp": "2b889a0beb1bbc666337116fbea0c64b452aadd733e5eba22ba0f3e1c137d56a",
+    "tests/cache/fake_adapter.hpp": "14ef2d48a773f5335dba26f4c4bb078c78011030caf8ff0dbe7bc57c0a0c4a12"
+  },
+  "binary_sha256": "f3833a1654a9178549fd5bdd2b128602ff9f247978f2a559a6fb6c0d68e3ed82",
+  "machine": {
+    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "kernel": "7.2.9",
+    "architecture": "x86_64"
+  },
+  "build": {
+    "preset": "cpu-test",
+    "compiler": "g++ (GCC) 15.3.0",
+    "cmake": "cmake version 4.3.4",
+    "python": "3.14.6",
+    "dependency_source": "flake.lock-pinned nixpkgs; CPU dependency shell"
+  },
+  "command": "build/cpu-test/tests/cache/cache_checkpoint_test",
+  "method": {
+    "runs": 1,
+    "checkpoints": [
+      86016,
+      88064,
+      90112,
+      92160,
+      94208,
+      96256,
+      98304,
+      100352
+    ],
+    "target_row_bytes": 32768,
+    "draft_row_bytes": 32768,
+    "rows_per_chunk": 2048,
+    "private_state_bytes": 243700000,
+    "lineages": 1,
+    "row_frontiers": "both append components at the checkpoint boundary",
+    "payload_backing": "sized accounting fake: real ledger capacities, opaque size-only owners; no multi-GiB allocation or device transfer",
+    "metadata": "sizeof record objects plus retained vector capacities; excludes allocator/shared_ptr/ledger-token bookkeeping and transient harness/request inputs",
+    "interpretation": "CPU ownership/accounting step baseline; not a physical RSS, GPU quality, transfer or inference measurement"
+  },
+  "results": {
+    "payload_bytes": 8526268672,
+    "metadata_bytes": 3447181,
+    "checkpoint_metadata_bytes": 3018792,
+    "chunk_metadata_bytes": 176,
+    "chunk_count": 98,
+    "checkpoint_metadata_by_boundary": [
+      348397,
+      356669,
+      364941,
+      373213,
+      381485,
+      389757,
+      398029,
+      406301
+    ],
+    "payload_gib": 7.940706491470337,
+    "full_copy_payload_bytes": 50804852992,
+    "retained_accounted_bytes": 8529715853,
+    "teardown_total_bytes": 0
+  },
+  "validation": {
+    "ordinary_cache_contract_tests": "5 passed",
+    "asan_ubsan_cache_contract_tests": "5 passed",
+    "hosted_pr_tests": "46 passed",
+    "production_release_library": "gufo_cache built with ENGINE_ENABLE_HIP=ON",
+    "source_boundary": "no serving/model/HIP dependencies; gufo_cache remains outside serving"
+  }
+}

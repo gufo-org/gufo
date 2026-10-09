@@ -1,7 +1,7 @@
 # 04 · Chunks, checkpoints and provenance
 
 **Milestone:** Common package · **Depends on:** 03 · **Size:** M–L ·
-**Affects:** nothing at runtime · **Status:** agreed
+**Affects:** nothing at runtime · **Status:** done
 
 ## Goal
 
@@ -47,9 +47,99 @@ With the fake adapter:
 - Retained bytes for the RFC's eight-checkpoint 27B example replayed with real
   sizes in the fake adapter (the RFC estimate is 7.94 GiB).
 
+### Implementation record
+
+[`src/cache/checkpoint.hpp`](../../../src/cache/checkpoint.hpp) and
+[`checkpoint.cpp`](../../../src/cache/checkpoint.cpp) add immutable checkpoint
+records, full-chunk references, checkpoint-private state/tails and execution
+history. `gufo_cache` remains independent of serving; this changes no runtime
+behavior. Prefix lookup, slot protection, preservation/materialization and the
+physical backing pool remain with cards 05, 06 and 08.
+
+A cold execution gets a new lineage. A successfully restored checkpoint seeds
+its new execution history with exactly that checkpoint's full chunks and inherits
+its lineage. Each branch has its own weak chunk directory: a lineage ID alone
+never authorizes sharing a later sibling's suffix. Partial tails are always new
+private payloads, including repeated capture at the same boundary. Completing
+a chunk later leaves the older checkpoint's tail intact. History checks token
+and supplemental-input prefixes and independent component frontiers before
+calling the capture provider. Geometry comes from each component descriptor.
+
+Capture returns a `shared_ptr<const Checkpoint>` only after all component
+callbacks and metadata admission/conversion succeed. Callbacks return completed
+private copies or borrowed descriptions with already assigned backing; callers
+settle adapter transfers and preserve a coherent execution boundary. Failed
+capture unwinds private owners, new chunks and temporary references without
+publishing or changing the history. Reporting peaks retain attempted admission;
+current byte categories return to their pre-attempt values. The provider cannot
+reenter capture. The ledger facade outlives histories.
+
+Chunks distinguish checkpoint references, reader pins and persistence pins.
+Pins retain both actual storage and accounting; persistence adds the ledger's
+unique-byte overlay. History directories hold weak references and cannot keep
+payload alive after the last checkpoint/reader/writer reference. `Prune` releases
+expired weak bookkeeping; retained directory capacity stays charged until
+replacement or teardown. Opaque payload owners release before their charges.
+The ledger's new `Info` accessor validates capacity/category and distinguishes
+the pool handle from the active payload assignment. Borrowed locations carry
+slot ID and generation; enforcing that generation belongs to card 06.
+
+[`tests/cache/checkpoint_test.cpp`](../../../tests/cache/checkpoint_test.cpp)
+uses the existing fake adapter for captures, actual restore/continuation and
+content comparisons. It covers sharing, identical independent cold prefills,
+parent/child eviction, private tails, sibling forks, differently sized component
+chunks and frontiers, borrowed backing, pin failures, metadata/transfer failure,
+every reserve/convert failure point, identity changes and zero-byte teardown.
+It is registered in both CPU presets and the hosted PR target.
+
+Step baseline on Linux x86-64 (AMD Ryzen AI MAX+ 395), based on `c8d3ab55`,
+with flake.lock-pinned GCC 15.3.0, CMake 4.3.4 and Python 3.14.6:
+
+| Measurement | Recorded bytes |
+| --- | ---: |
+| Full-chunk record (`sizeof`, excluding allocator bookkeeping) | 176 |
+| Checkpoint metadata at 86,016 tokens, including token/component/reference capacities | 348,397 |
+| Checkpoint metadata at 100,352 tokens | 406,301 |
+| Eight checkpoints' metadata combined | 3,018,792 |
+| All retained metadata, including history, lineage and chunk records | 3,447,181 |
+| Retained payload: 98 full chunks plus eight private-state copies | 8,526,268,672 (7.9407 GiB) |
+
+The sized fake replay uses the RFC's eight boundaries, 65,536 combined row
+bytes/token and 243,700,000 private bytes/checkpoint. Its two row components split
+the combined row size equally. It exercises real ownership and ledger operations
+with size-only opaque backing owners. It does not allocate 7.94 GiB of physical
+buffers or qualify GPU numerics, transfers, inference speed or contention.
+Metadata records object sizes and retained vector capacities; allocator,
+shared-pointer and ledger-token bookkeeping and temporary test inputs are outside
+these reported figures. The complete machine/toolchain record, per-checkpoint
+sizes, source/binary hashes and results are in
+[`04-chunks-and-checkpoints.json`](../measurements/04-chunks-and-checkpoints.json).
+
+Validation commands (CPU dependency shell from pinned nixpkgs; production
+package `inputsFrom` for the release configuration):
+
+```sh
+cmake --preset cpu-test
+cmake --build --preset cpu-test --target cache_checkpoint_test cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test --parallel 4
+ctest --preset cpu-test -R '^cache_(checkpoint|adapter|adapter_lifecycle|ledger|boundary)_test$' --output-on-failure
+cmake --preset cpu-sanitizer
+cmake --build --preset cpu-sanitizer --target cache_checkpoint_test cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test --parallel 4
+ctest --preset cpu-sanitizer -R '^cache_(checkpoint|adapter|adapter_lifecycle|ledger|boundary)_test$' --output-on-failure
+cmake --preset release
+cmake --build --preset release --target gufo_cache --parallel 4
+cmake --build --preset pr --parallel 4
+build/cpu-test/tests/cache/cache_checkpoint_test
+```
+
+All five focused tests passed in ordinary and ASan/UBSan builds; all 46 hosted
+PR tests passed. The production release library, shared formatting check,
+focused clang-tidy, documentation checks and diff whitespace checks passed.
+Build artifacts remain in ignored `build/` directories; the committed step
+record identifies the baseline source independently of the eventual commit.
+
 ## Done when
 
-- [ ] Tests above pass.
+- [x] Tests above pass.
 
 ## Review focus
 

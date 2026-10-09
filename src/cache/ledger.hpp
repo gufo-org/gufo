@@ -58,6 +58,15 @@ struct LedgerState;
 struct ChargeToken;
 struct PinToken;
 }  // namespace detail
+// Stable allocation capacity and current ownership, read under the ledger lock.
+// An original pool handle cannot stand in for its assigned payload owner.
+struct ResourceAllocationInfo {
+  ResourceCategory category;
+  std::size_t bytes;
+  bool reserved;
+  bool pool_backing;
+  bool assigned_backing;
+};
 class ResourceCharge;
 class PersistencePin;
 
@@ -73,6 +82,7 @@ public:
   ResourceReservation(const ResourceReservation&) = delete;
   ResourceReservation& operator=(const ResourceReservation&) = delete;
   [[nodiscard]] ResourceCharge Convert();
+  [[nodiscard]] ResourceAllocationInfo Info() const;
   // Queued jobs may pin assigned spill or borrowed-tail backing before its
   // rows materialize. Pending new allocations/private captures cannot be
   // pinned. Cancellation returns backing to free only after every queued pin
@@ -105,6 +115,7 @@ private:
 class ResourceCharge {
 public:
   ResourceCharge() = default;
+  [[nodiscard]] ResourceAllocationInfo Info() const;
   // Reclassify one already committed pool block as kBackingAssigned (spill),
   // kPrivateState or kPrivateTail without another admission/physical charge.
   // Convert after capture/copy completes; spill then becomes materialized.

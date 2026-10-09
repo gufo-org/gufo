@@ -23,3 +23,8 @@ add_test(NAME cache_boundary_test
     ${PROJECT_SOURCE_DIR}/src/cache
     ${CMAKE_CURRENT_BINARY_DIR}/cache-links-$<CONFIG>.txt)
 set_tests_properties(cache_boundary_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+add_executable(cache_checkpoint_test checkpoint_test.cpp)
+target_link_libraries(cache_checkpoint_test PRIVATE gufo_cache_fake)
+add_test(NAME cache_checkpoint_test COMMAND cache_checkpoint_test)
+set_tests_properties(cache_checkpoint_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
