@@ -1,7 +1,7 @@
 # 01 · Functional coverage for real cache workloads
 
 **Milestone:** Preparation · **Depends on:** — · **Size:** L (combined scenario
-families) · **Affects:** tests only · **Status:** in progress
+families) · **Affects:** tests only · **Status:** done
 
 ## Goal
 

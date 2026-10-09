@@ -24,7 +24,7 @@ shape the PR cards; they produce no code.
 ## Status values
 
 `proposed` (written or revised, not reviewed) · `agreed` · `in progress` ·
-`merged` · `dropped`.
+`done` (implemented and checked) · `merged` · `dropped`.
 
 ## Sizes
 
@@ -44,8 +44,8 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 
 | Card | Title | Milestone | Depends on | Size | Status |
 | --- | --- | --- | --- | --- | --- |
-| [01](01-functional-coverage.md) | Functional coverage for real cache workloads | Preparation | — | L (combined) | in progress |
-| [02](02-package-and-adapter-api.md) | `src/cache/` package, adapter API and fake adapter | Common package | — | L (contracts + fake) | in progress |
+| [01](01-functional-coverage.md) | Functional coverage for real cache workloads | Preparation | — | L (combined) | done |
+| [02](02-package-and-adapter-api.md) | `src/cache/` package, adapter API and fake adapter | Common package | — | L (contracts + fake) | done |
 | [03](03-resource-ledger.md) | Resource ledger and reservations | Common package | 02 | M | agreed |
 | [04](04-chunks-and-checkpoints.md) | Chunks, checkpoints and provenance | Common package | 03 | M–L | agreed |
 | [05](05-prefix-index-and-lookup.md) | Prefix index and lookup | Common package | 04 | M | agreed |

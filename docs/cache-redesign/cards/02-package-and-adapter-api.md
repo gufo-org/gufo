@@ -2,7 +2,7 @@
 
 **Milestone:** Common package · **Depends on:** — · **Size:** L (contracts and fake adapter) ·
 **Affects:** nothing at runtime (new library, not linked into serving yet) ·
-**Status:** in progress
+**Status:** done
 
 ## Goal
 
