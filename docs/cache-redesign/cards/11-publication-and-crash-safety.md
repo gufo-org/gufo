@@ -1,7 +1,7 @@
 # 11 · Crash-safe publication and orphan recovery
 
 **Milestone:** Disk store · **Depends on:** 10 · **Size:** M ·
-**Affects:** nothing at runtime until card 19 · **Status:** agreed
+**Affects:** nothing at runtime until card 19 · **Status:** done
 
 ## Goal
 
@@ -44,9 +44,103 @@ For each publication step, crash (abort the child process) and restart:
 Publication latency per checkpoint on the target disk: number of `fsync`
 calls and their total time, for a small and a 100k-token checkpoint.
 
+### Implementation record
+
+The standalone [`DiskStore`](../../../src/cache/disk.hpp) now accepts a
+manifest and caller-owned immutable host buffers. Serving does not instantiate
+it until card 19. Publication reserves the complete additional logical disk
+size before writing, and admits encoding, decoded index metadata, reference
+validation, vector growth and verification buffers through `ResourceLedger`.
+A store mutex serializes publication, retirement and recovery: an active writer
+holds its dependencies until its manifest is durably indexed. Reader pin tokens
+block retirement of their checkpoint and therefore protect every dependency.
+`Entries()` is a quiescent view; callers must not hold its span across mutations.
+Pin acquisition, retirement and statistics are thread-safe; recovery scheduling
+and joining are caller-ordered.
+
+Missing payloads are checksum-verified, written exclusively into `tmp/`, synced
+individually and moved with Linux `renameat2(RENAME_NOREPLACE)` into their final
+namespaces. Existing referenced chunks are independently checksum-verified
+using a 64 KiB admitted buffer. Unknown destinations and unreferenced existing
+files cannot be overwritten or adopted. After all payload moves, `tmp/`,
+`chunks/` and `private/` are synced once each. Only then is the checksummed
+manifest written, synced, moved into `manifests/`, and its destination directory
+synced. A final `tmp/` sync durably removes the source entry before the index
+commits. On failure, actual written bytes remain charged as orphans; an uncertain
+manifest rename may be discovered as complete on restart even when the caller
+received an error.
+
+Layout creation syncs `v2/`, the root and its ancestors. Startup also syncs
+`manifests/` after full validation so a surviving rename from an aborted process
+becomes durable before its entry is exposed. Neither operation reads payloads
+or reclaims orphans. Retirement unlinks and syncs the manifest directory before
+removing dependencies no remaining entry references. If that sync fails, the
+entry stops being exposed and dependencies remain for later recovery.
+
+`ReclaimOrphans()` explicitly launches a worker after full discovery;
+`WaitForReclamation()` delivers errors, and destruction joins before releasing
+state or directory ownership. The worker removes rejected/unindexed manifests
+and syncs their directory before deleting orphan payloads or temporary files.
+Only managed, regular, singly linked files are removed; unknown files,
+directories, symlinks and hard links are preserved. Failed reclamation can be
+retried. Test hooks are compiled only with `BUILD_TESTING`; the production
+library has no crash hook.
+
+### Validation and step baseline
+
+`cache_disk_publication_test` aborts forked children at all twelve publication
+boundaries, including each occurrence of the three per-payload boundaries:
+18 actual abort cases and 18 successful controls. Reopening verifies every
+visible payload's length and checksum, then runs background reclamation and
+checks exact byte accounting. Independent linker wrappers observe actual
+`fsync` descriptors and manifest-first `unlinkat` ordering, inject every
+publication sync failure plus retirement sync failure, and exercise `EINTR`,
+short writes and partial `ENOSPC` writes. Tests also cover reader pins, writer
+versus eviction concurrency, shared references, conflicting publication,
+checksum rejection, disk budget admission, metadata reserve/convert failures,
+and preservation of unknown/symlink/hard-link contents.
+
+The focused disk, publication and package-boundary tests pass in ordinary and
+ASan/UBSan builds with pinned GCC 15.3.0 and CMake 4.3.4. A separate
+`BUILD_TESTING=OFF` CPU build of `gufo_cache` validates the production path.
+These process-abort and syscall-order checks do not simulate a physical power
+failure or filesystem-specific storage failures.
+
+Reproduce in the pinned CPU dependency shell described by card 10:
+
+```sh
+cmake --preset cpu-test -DGUFO_BUILD_TOOLS=ON
+cmake --build --preset cpu-test --target cache_disk_test cache_disk_publication_test cache_disk_publication_bench --parallel 4
+ctest --preset cpu-test -R '^cache_(disk|disk_publication|boundary)_test$' --output-on-failure
+build/cpu-test/tests/cache/cache_disk_publication_bench /tmp
+cmake --preset cpu-sanitizer
+cmake --build --preset cpu-sanitizer --target cache_disk_test cache_disk_publication_test --parallel 4
+ctest --preset cpu-sanitizer -R '^cache_(disk|disk_publication|boundary)_test$' --output-on-failure
+```
+
+Step baseline on Linux 7.2.9, AMD Ryzen AI MAX+ 395, Btrfs on
+`/dev/mapper/cryptroot`, using the pinned CPU toolchain above, from main
+`9024101b`. Each observation publishes one fresh checkpoint into a fresh `/tmp`
+directory with one append-row component (4 bytes/row, 2,048 rows/chunk), its
+private tail and a 16-byte private-state component. Buffers and tokens are built
+before timing; layout creation is excluded. These are host-buffer store
+measurements, not model payload sizes, inference performance or cold restores.
+
+| Checkpoint | Logical bytes | `fsync` calls | Initial publication / sync time | Retained repeat publication / sync time |
+| --- | ---: | ---: | ---: | ---: |
+| 128 tokens | 1,283 | 8 | 3.499 / 3.329 ms | 3.600 / 3.488 ms |
+| 100,000 tokens | 801,795 | 56 | 36.120 / 32.219 ms | 36.041 / 31.871 ms |
+
+Times are separate observations, never averaged. The repeat includes the
+metadata admission and additional crash-boundary refinements. Successful
+publication uses one sync per new payload, one manifest sync and five directory
+syncs: `new_payload_count + 6`. Directory syncs are batched after payload moves;
+file syncs remain individual so dependency contents are durable before the
+manifest can reference them. Group commit across checkpoints is deferred.
+
 ## Done when
 
-- [ ] Crash tests pass for every step.
+- [x] Crash tests pass for every step.
 
 ## Review focus
 

@@ -3,6 +3,7 @@
 
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -69,6 +70,7 @@ public:
 private:
   friend class DiskStore;
   ResourceCharge metadata_;
+  std::shared_ptr<const ResourceCharge> pin_;
   DiskFileId file_{};
   DiskManifest manifest_;
   bool durable_{true};
@@ -79,14 +81,49 @@ struct DiskStartupStats {
   std::uint64_t dependency_stats{}, rejected_manifests{};
   std::uint64_t managed_bytes{}, removed_legacy_bytes{};
 };
-// Linux process ownership: LOCK lives at the configured root, covering v2 and
-// legacy cleanup together. The lock file is never unlinked. Managed namespaces
-// must be real directories; symlinks and nonregular dependencies are rejected.
-// Unknown files/directories are never removed or descended into. Startup never
-// opens a v2 payload. Retained and transient metadata are admitted through the
-// supplied ledger, which must outlive construction. No writes/eviction/lookup
-// yet; excess v2 usage fails startup after legacy cleanup, before the caller
-// can publish any new bytes.
+// Host-buffer publication only; caller retains and admits immutable buffers until
+// Publish returns. Full chunks already referenced by a checkpoint can be
+// omitted.
+struct DiskWriteBuffer {
+  bool private_file{};
+  DiskFileId file{};
+  std::span<const std::uint8_t> bytes;
+};
+struct DiskPublicationStats {
+  std::uint64_t fsync_calls{}, fsync_ns{};
+};
+// Retains a checkpoint's dependency pin while the store is alive.
+class DiskReadPin {
+public:
+  explicit operator bool() const { return bool(token_); }
+
+private:
+  friend class DiskStore;
+  std::shared_ptr<const ResourceCharge> token_;
+};
+#ifdef GUFO_CACHE_TESTING
+enum class DiskPublicationStep {
+  kPayloadWritten,
+  kPayloadSynced,
+  kPayloadRenamed,
+  kTemporaryDirectorySynced,
+  kChunkDirectorySynced,
+  kDependenciesSynced,
+  kManifestWritten,
+  kManifestSynced,
+  kManifestRenamed,
+  kManifestDirectorySynced,
+  kFinalTemporaryDirectorySynced,
+  kIndexed,
+};
+#endif
+// Linux directory ownership; no payload reads or reclamation at startup.
+// Mutating operations serialize through one store lock (including writers),
+// protecting their dependencies from eviction. Entries() is a quiescent view:
+// do not retain it across publication/retirement or background reclamation.
+// Pin() is thread-safe and blocks retirement until all copies are released.
+// The supplied ledger must outlive the store and its worker.
+// Excess preexisting bytes still fail startup before new writes are admitted.
 class DiskStore {
 public:
   DiskStore(ResourceLedger&, const std::filesystem::path& directory,
@@ -97,7 +134,21 @@ public:
   DiskStore(DiskStore&&) = delete;
   DiskStore& operator=(DiskStore&&) = delete;
   [[nodiscard]] std::span<const DurableEntry> Entries() const;
-  [[nodiscard]] const DiskStartupStats& Stats() const;
+  [[nodiscard]] DiskStartupStats Stats() const;
+  [[nodiscard]] DiskPublicationStats PublicationStats() const;
+  void Publish(DiskFileId manifest_file, const DiskManifest&,
+               std::span<const DiskWriteBuffer>);
+  [[nodiscard]] DiskReadPin Pin(CheckpointId) const;
+  // Returns false for a missing or pinned checkpoint. Unlinks and fsyncs its
+  // manifest before releasing any dependency; shared chunks remain referenced.
+  bool Retire(CheckpointId);
+  // Explicitly schedule a worker after complete startup discovery. Errors are
+  // delivered by WaitForReclamation(); destruction joins the worker.
+  void ReclaimOrphans();
+  void WaitForReclamation();
+#ifdef GUFO_CACHE_TESTING
+  void SetCrashHook(std::function<void(DiskPublicationStep)>);
+#endif
 
 private:
   struct Impl;
