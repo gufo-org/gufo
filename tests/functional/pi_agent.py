@@ -67,13 +67,14 @@ def save(path, value):
 class Recorder(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, upstream, output):
+    def __init__(self, upstream, output, *, request_timeout=180):
         super().__init__(("127.0.0.1", 0), Proxy)
         self.upstream = urllib.parse.urlsplit(upstream)
         self.output = output
         self.requests = []
         self.lock = threading.Lock()
         self.case = "startup"
+        self.request_timeout = request_timeout
 
 
 class Proxy(http.server.BaseHTTPRequestHandler):
@@ -110,7 +111,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         stem.with_suffix(".json").write_bytes(body)
         conn = http.client.HTTPConnection(
-            server.upstream.hostname, server.upstream.port, timeout=180
+            server.upstream.hostname, server.upstream.port, timeout=server.request_timeout
         )
         start = time.monotonic()
         try:

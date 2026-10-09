@@ -3,9 +3,10 @@
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
-from agent_long import check_continuation, interruption_ready
+from agent_long import check_continuation, interruption_ready, prepare_turn, resume_prompt
 from opencode_agent import sse_output
 
 
@@ -110,6 +111,37 @@ class ContinuationTest(unittest.TestCase):
                 self.output.write_bytes(raw)
                 self.assertEqual(interruption_ready(self.output, "thinking"), index == 0)
                 self.assertEqual(interruption_ready(self.output, "tool"), index == 1)
+
+    def test_resume_preserves_the_pending_task_and_completed_work(self):
+        root = Path(self.directory.name)
+        args = SimpleNamespace(agent="pi", complex_tools=True)
+        task = prepare_turn(args, root, 2, True)
+        state = root / "catalog-state.json"
+        state.write_text('{"revision":1,"already_committed":true}')
+        fixture = root / "transaction-2.json"
+        before = fixture.read_bytes()
+        resumed = prepare_turn(args, root, 2, True, task)
+        self.assertEqual(resumed["expected"], task["expected"])
+        self.assertEqual(fixture.read_bytes(), before)
+        self.assertEqual(json.loads(state.read_text())["revision"], 1)
+        self.assertFalse((root / "transaction-3.json").exists())
+        with self.assertRaises(AssertionError):
+            prepare_turn(args, root, 3, True, task)
+        self.assertFalse((root / "transaction-3.json").exists())
+
+    def test_resume_distinguishes_this_task_from_earlier_transactions(self):
+        task = {"turn": 30, "prompt": "Read transaction-30.json, query, then apply.",
+                "completed_calls": []}
+        prompt = resume_prompt(task)
+        self.assertIn(task["prompt"], prompt)
+        self.assertIn("No tool calls completed for this task", prompt)
+        self.assertIn("Results from earlier tasks do not complete steps", prompt)
+        task["completed_calls"] = [
+            {"name": "catalog_apply", "arguments": '{"id":42,"dry_run":false}'}]
+        prompt = resume_prompt(task)
+        self.assertNotIn("No tool calls completed", prompt)
+        self.assertIn(json.dumps(task["completed_calls"]), prompt)
+        self.assertIn("do not repeat committed changes", prompt)
 
 
 if __name__ == "__main__":
