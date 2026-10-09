@@ -134,11 +134,11 @@ void RanksAndSources() {
   assert(f.log.events[f.log.events.size() - 2].checkpoint == retry);
   f.Add({8, 8});
   assert(f.log.events[f.log.events.size() - 2].checkpoint == history);
-  {
+  for (const bool preserve : {true, false}) {
     Fixture g(2);
     const auto other = g.Add({9, 9});
     const auto source = g.Add({1, 2});
-    g.Add({1, 2, 3}, RetentionPurpose::kContinuation, 0, source, false);
+    g.Add({1, 2, 3}, RetentionPurpose::kContinuation, 0, source, preserve);
     assert(g.Cached({9, 9, 1}) == 2 &&
            g.log.events[g.log.events.size() - 2].checkpoint == source);
     g.policy.Touch(other);
@@ -172,6 +172,30 @@ void RanksAndSources() {
     g.Add({1, 2, 3}, RetentionPurpose::kContinuation, 0, {}, true, {2});
     assert(g.policy.Rank(a) == 3);  // image identities never cover each other
   }
+}
+void RecordSourceReplacement() {
+  for (const bool preserve : {true, false}) {
+    Fixture f(1);
+    const auto source = f.Add({1, 2});
+    f.Add({1, 2, 3}, RetentionPurpose::kContinuation, 0, source, preserve);
+    assert(f.Cached({1, 2, 3, 4}) == 3);
+    assert(f.log.events[f.log.events.size() - 2].checkpoint == source);
+  }
+  // The byte-pressure flag remains effective while capture is incomplete.
+  Fixture f(4);
+  const auto other = f.Add({9, 9});
+  const auto source = f.Add({1, 2});
+  std::vector<Token> incoming{1, 2, 3};
+  int attempt = 0;
+  assert(f.policy.Admit(
+      {incoming, {1}, {}, RetentionPurpose::kContinuation, 0, source, true},
+      [&] {
+        if (!attempt++)
+          throw ResourceExhausted();
+        return IndexCheckpoint(f.ledger, incoming);
+      }));
+  assert(f.log.events[f.log.events.size() - 2].checkpoint == other);
+  assert(f.policy.Rank(source) == 2);
 }
 void FailureAndReplay() {
   ResourceLedger ledger{kIndexLimits};
@@ -429,6 +453,7 @@ int main() {
   Planning();
   Branches();
   RanksAndSources();
+  RecordSourceReplacement();
   FailureAndReplay();
   CapacityAndSharing();
   ImpossibleAndAllocationFailure();

@@ -83,6 +83,8 @@ struct RetentionRequest {
   RetentionPurpose purpose{RetentionPurpose::kContinuation};
   Rows stable{};
   CheckpointId source{};
+  // Protects incomplete byte admission. Full-record publication can advance
+  // a redundant source (or replace the sole record), matching today's cache.
   bool preserve_source{true};
   std::stop_token stop{};
   // Preflight with ExecutionHistory::NewPayloadBytes, or a conservative lower

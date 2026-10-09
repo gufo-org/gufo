@@ -192,17 +192,20 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
          records_[i].last_used < records_[target].last_used))
       target = i;
   }
-  if (!r.preserve_source && source != limit_ && eligible(source) &&
-      Continuation(r.purpose) && Priority(source, &r) < 3 &&
+  // preserve_source protects byte admission while capture is incomplete. At
+  // full-record publication, advance a redundant source before another
+  // family's last copy regardless of that flag (ContinuationCache::Commit).
+  if ((record_pressure || !r.preserve_source) && source != limit_ &&
+      eligible(source) && Continuation(r.purpose) && Priority(source, &r) < 3 &&
       records_[source].checkpoint->Compatibility() == r.compatibility &&
       records_[source].checkpoint->Input() == r.input &&
       records_[source].checkpoint->Boundary() < r.tokens.size() &&
       Prefix(records_[source].checkpoint->Tokens(), r.tokens) &&
       (target == limit_ || Priority(target, &r) == 3))
     return source;
-  if (target == limit_ && !r.preserve_source && source != limit_ &&
-      eligible(source) &&
-      (!record_pressure || (limit_ == 1 && Continuation(r.purpose))))
+  if (target == limit_ && source != limit_ && eligible(source) &&
+      ((!record_pressure && !r.preserve_source) ||
+       (record_pressure && limit_ == 1 && Continuation(r.purpose))))
     return source;
   return target;
 }

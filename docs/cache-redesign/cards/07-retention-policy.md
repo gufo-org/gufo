@@ -264,3 +264,22 @@ corrected files are `/tmp/gufo-card07-replay-summary.json` and
 ownership, not an inference performance result. The initial focused clang-tidy
 check also identified missing deleted special members on the event sink; these
 are fixed, and focused tidy passes.
+
+### Independent review, round 2
+
+The second fresh-context reviewer confirmed both round 1 fixes and independently
+replayed all eight corrected CSV logs, including retained IDs, touches, counts,
+sequence resets, payload peaks and empty teardown. It identified a remaining
+parity error: `preserve_source` is a byte-admission flag in today's cache, while
+full-record publication may still advance a redundant source before evicting
+another family's last copy. The port had incorrectly applied that flag at record
+pressure too.
+
+Record-pressure source advancement now follows `ContinuationCache::Commit`
+regardless of the flag. The sole-record continuation replacement also matches
+that path. Byte-pressure admission continues protecting the incomplete source
+when requested. The new regression failed before the fix and passes afterward
+for both flag values, with separate coverage of byte-pressure protection.
+Focused retention CPU, ASan/UBSan, tidy, release-library, formatting and
+documentation checks pass. The trace baseline never reaches its 128-record
+limit, so this record-pressure fix does not alter the corrected table.
