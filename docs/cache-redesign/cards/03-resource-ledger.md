@@ -173,8 +173,8 @@ Lock hold time was measured in separate instrumented runs. It includes the
 ending clock read but excludes the subsequent statistics update and unlock;
 wait time includes the acquiring clock read. Instrumentation increased the
 eight-thread metadata cycle wall time from 47.87 to 92.07 ms and spill cycles
-from 52.85 to 82.36 ms. Instrumented operation timings describe the cost of enabling clocks rather
-than the uninstrumented baseline. These are step measurements, without an
+from 52.85 to 82.36 ms. Instrumented operation timings describe the cost of
+enabling clocks rather than the uninstrumented baseline. These are step measurements, without an
 inference timing gate or a comparable RFC microbenchmark.
 
 ### Review baseline

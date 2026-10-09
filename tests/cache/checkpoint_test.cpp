@@ -58,6 +58,26 @@ struct Fixture {
     adapter.Append(*slot, suffix, suffix);
     tokens.insert(tokens.end(), suffix.begin(), suffix.end());
   }
+  std::vector<std::byte> Read(ComponentId component) {
+    const auto components = adapter.Components();
+    const auto descriptor =
+        *std::find_if(components.begin(), components.end(),
+                      [&](const auto& d) { return d.id == component; });
+    const auto positions = adapter.Positions(*slot);
+    const auto rows =
+        std::find_if(positions.begin(), positions.end(), [&](const auto& p) {
+          return p.id == component;
+        })->valid_rows;
+    std::vector<std::byte> bytes(descriptor.kind == ComponentKind::kPrivateState
+                                     ? descriptor.state_bytes
+                                     : rows * descriptor.row_bytes);
+    auto transfer =
+        descriptor.kind == ComponentKind::kPrivateState
+            ? adapter.CapturePrivate(*slot, component, bytes, stream)
+            : adapter.CopyRowsOut(*slot, component, 0, rows, bytes, stream);
+    assert(transfer.Wait() == TransferResult::kSucceeded);
+    return bytes;
+  }
   void Restore(const Checkpoint& checkpoint) {
     std::vector<ComponentPosition> positions;
     for (const auto& c : checkpoint.Components())
@@ -93,6 +113,12 @@ struct Fixture {
     tokens.assign(checkpoint.Tokens().begin(), checkpoint.Tokens().end());
   }
 };
+void AssertSameState(Fixture& restored, Fixture& control) {
+  assert(restored.adapter.Positions(*restored.slot) ==
+         control.adapter.Positions(*control.slot));
+  for (const auto& component : control.adapter.Components())
+    assert(restored.Read(component.id) == control.Read(component.id));
+}
 void SharingAndTeardown() {
   Fixture f;
   {
@@ -118,6 +144,39 @@ void SharingAndTeardown() {
     parent.reset();
     assert((reader.References() == ChunkReferences{0, 1, 1}));
     assert(f.ledger.Snapshot().persistence_pinned_bytes == 4 * sizeof(Token));
+  }
+  assert(f.ledger.Snapshot().total_bytes == 0);
+}
+void EmptyAndShortCheckpoints() {
+  Fixture f;
+  {
+    auto history = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                          f.adapter.CompatibilityIdentity());
+    auto empty = f.Capture(history);
+    assert(empty->Boundary() == 0);
+    for (const auto& c : empty->Components()) {
+      assert(c.chunks.empty());
+      assert(!c.tail);
+    }
+    auto empty_restore = ExecutionHistory::Restored(f.ledger, *empty);
+    f.Restore(*empty);
+    f.Append(3);
+    auto short_checkpoint = f.Capture(empty_restore);
+    const auto hash = f.adapter.RecurrentHash(*f.slot);
+    for (std::size_t i = 0; i < 2; ++i) {
+      assert(short_checkpoint->Components()[i].chunks.empty());
+      assert(short_checkpoint->Components()[i].tail->Bytes() ==
+             3 * sizeof(Token));
+    }
+    auto restored = ExecutionHistory::Restored(f.ledger, *short_checkpoint);
+    f.Restore(*short_checkpoint);
+    assert(f.adapter.RecurrentHash(*f.slot) == hash);
+    f.Append(1);
+    auto full = f.Capture(restored);
+    assert(full->Components()[0].chunks.size() == 1);
+    assert(!full->Components()[0].tail);
+    assert(short_checkpoint->Components()[0].tail->Bytes() ==
+           3 * sizeof(Token));
   }
   assert(f.ledger.Snapshot().total_bytes == 0);
 }
@@ -192,8 +251,22 @@ void RestoredForksAndPrivateTails() {
     const auto expected = f.adapter.RecurrentHash(*f.slot);
     f.Restore(*child);
     assert(f.adapter.RecurrentHash(*f.slot) == expected);
+    Fixture child_control;
+    child_control.Append(5);
+    child_control.Append(3, 9);
+    AssertSameState(f, child_control);
+    f.Append(1, 77);
+    child_control.Append(1, 77);
+    AssertSameState(f, child_control);
     f.Restore(*original_child);
     assert(f.adapter.RecurrentHash(*f.slot) == original_hash);
+    Fixture original_control;
+    original_control.Append(5);
+    original_control.Append(3, 8);
+    AssertSameState(f, original_control);
+    f.Append(1, 77);
+    original_control.Append(1, 77);
+    AssertSameState(f, original_control);
   }
   assert(f.ledger.Snapshot().total_bytes == 0);
 }
@@ -221,8 +294,7 @@ void FailedCapturesAreInvisible() {
     assert(child->Components()[0].chunks[0].Id() ==
            parent->Components()[0].chunks[0].Id());
     assert(child->Components()[0].chunks[1].References().checkpoints == 1);
-    // Failure after all descriptions exist, during checkpoint metadata
-    // admission.
+    // A callback failure after copying private state still cannot publish it.
     const auto retained = f.ledger.Snapshot().bytes;
     unsigned captures = 0;
     Throws<std::runtime_error>([&] {
@@ -261,6 +333,30 @@ Payload AccountingPayload(ResourceLedger& ledger, const PayloadRequest& r,
   if (borrowed && r.category != ResourceCategory::kPrivateState)
     return Payload::Borrowed(std::move(assigned), owner, {{17}, 3});
   return Payload::Committed(assigned.Convert(), owner);
+}
+void PrivateOnlyCheckpoints() {
+  ResourceLedger ledger(kLimits);
+  {
+    const std::array<ComponentDescriptor, 1> layout{
+        {{kRecurrent, 1, ComponentKind::kPrivateState, 0, 0, 32}}};
+    auto history = ExecutionHistory::Cold(ledger, layout, {1});
+    std::array<Token, 3> tokens{7, 7, 7};
+    const CheckpointRequest request{tokens,
+                                    InputIdentity(3),
+                                    {{kRecurrent, 3}},
+                                    CheckpointPurpose::kPrompt,
+                                    1};
+    auto save = [&](const auto& r) { return AccountingPayload(ledger, r); };
+    auto checkpoint = history.Capture(request, save);
+    assert(checkpoint->Components()[0].chunks.empty());
+    assert(checkpoint->Components()[0].private_state);
+    auto restored = ExecutionHistory::Restored(ledger, *checkpoint);
+    auto child = restored.Capture(request, save);
+    assert(child->Lineage() == checkpoint->Lineage());
+    assert(child->Components()[0].private_state->Owner() !=
+           checkpoint->Components()[0].private_state->Owner());
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
 }
 void GeometryLocationsAndPins() {
   ResourceLedger ledger(kLimits);
@@ -462,6 +558,44 @@ void PayloadValidationAndReleaseOrder() {
   });
   assert(ledger.Snapshot().total_bytes == 0);
 }
+void RejectedPayloadsReleaseOwnersFirst() {
+  ResourceLedger ledger(kLimits);
+  bool destroyed = false;
+  {
+    auto charge = ledger.Reserve(ResourceCategory::kMetadata, 64).Convert();
+    auto owner = std::shared_ptr<const void>(new int, [&](const void* pointer) {
+      assert(ledger.Snapshot().bytes[static_cast<std::size_t>(
+                 ResourceCategory::kMetadata)] == 64);
+      destroyed = true;
+      delete static_cast<const int*>(pointer);
+    });
+    Throws<std::invalid_argument>(
+        [&] { (void)Payload::Committed(std::move(charge), std::move(owner)); });
+    assert(destroyed);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+  destroyed = false;
+  {
+    auto pool = ledger.Reserve(ResourceCategory::kBackingFree, 64).Convert();
+    auto assigned = pool.ReserveBacking(ResourceCategory::kBackingAssigned);
+    auto owner = std::shared_ptr<const void>(new int, [&](const void* pointer) {
+      assert(ledger.Snapshot().bytes[static_cast<std::size_t>(
+                 ResourceCategory::kBackingAssigned)] == 64);
+      Throws<std::bad_alloc>([&] {
+        (void)pool.ReserveBacking(ResourceCategory::kBackingAssigned);
+      });
+      destroyed = true;
+      delete static_cast<const int*>(pointer);
+    });
+    Throws<std::invalid_argument>([&] {
+      (void)Payload::Borrowed(std::move(assigned), std::move(owner), {{1}, 0});
+    });
+    assert(destroyed);
+    assert(ledger.Snapshot().bytes[static_cast<std::size_t>(
+               ResourceCategory::kBackingFree)] == 64);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
 void Baseline() {
   constexpr std::size_t gib = std::size_t{1} << 30;
   ResourceLedger ledger({64 * gib, 64 * gib, 0, 64 * gib});
@@ -524,6 +658,9 @@ void Baseline() {
 }
 }  // namespace
 int main() {
+  RejectedPayloadsReleaseOwnersFirst();
+  EmptyAndShortCheckpoints();
+  PrivateOnlyCheckpoints();
   SharingAndTeardown();
   ColdPrefillsNeverShare();
   RestoredForksAndPrivateTails();

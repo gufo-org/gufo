@@ -97,36 +97,36 @@ struct Chunk {
 }  // namespace detail
 Payload Payload::Committed(ResourceCharge charge,
                            std::shared_ptr<const void> owner) {
-  const auto info = charge.Info();
-  if (!owner || info.reserved ||
+  Payload result;
+  result.charge_ = std::move(charge);
+  result.owner_ = std::move(owner);
+  const auto info = result.charge_.Info();
+  if (!result.owner_ || info.reserved ||
       (info.pool_backing && !info.assigned_backing) ||
       (info.category != ResourceCategory::kBackingMaterialized &&
        info.category != ResourceCategory::kPrivateState &&
        info.category != ResourceCategory::kPrivateTail))
     throw std::invalid_argument("committed payload requires owned backing");
-  Payload result;
   result.bytes_ = info.bytes;
   result.category_ = info.category;
-  result.charge_ = std::move(charge);
-  result.owner_ = std::move(owner);
   return result;
 }
 Payload Payload::Borrowed(ResourceReservation reservation,
                           std::shared_ptr<const void> owner,
                           BorrowedLocation location) {
-  const auto info = reservation.Info();
-  if (!owner || !location.slot.value || !location.generation ||
+  Payload result;
+  result.reservation_ = std::move(reservation);
+  result.owner_ = std::move(owner);
+  const auto info = result.reservation_.Info();
+  if (!result.owner_ || !location.slot.value || !location.generation ||
       !info.assigned_backing || !info.reserved ||
       (info.category != ResourceCategory::kBackingAssigned &&
        info.category != ResourceCategory::kPrivateTail))
     throw std::invalid_argument(
         "borrowed payload requires assigned spill backing");
-  Payload result;
   result.bytes_ = info.bytes;
   result.category_ = info.category;
-  result.reservation_ = std::move(reservation);
   result.borrowed_ = location;
-  result.owner_ = std::move(owner);
   return result;
 }
 Payload& Payload::operator=(Payload&& other) noexcept {
@@ -262,8 +262,10 @@ ExecutionHistory ExecutionHistory::Restored(ResourceLedger& ledger,
   std::size_t chunks = 0;
   for (const auto& c : checkpoint.components_)
     chunks = Add(chunks, c.chunks.size());
-  auto entries_reservation =
-      ledger.Reserve(ResourceCategory::kMetadata, Bytes(chunks, sizeof(Entry)));
+  auto entries_reservation = chunks == 0
+                                 ? ResourceReservation{}
+                                 : ledger.Reserve(ResourceCategory::kMetadata,
+                                                  Bytes(chunks, sizeof(Entry)));
   const auto token_bytes =
       Add(Add(Bytes(checkpoint.tokens_.size(), sizeof(Token)),
               Bytes(checkpoint.components_.size(), sizeof(ComponentPosition))),
@@ -286,7 +288,8 @@ ExecutionHistory ExecutionHistory::Restored(ResourceLedger& ledger,
           history.input_.capacity());
   if (history.entries_.capacity() > chunks || actual_token_bytes > token_bytes)
     throw std::logic_error("allocator exceeded reserved metadata capacity");
-  history.entries_metadata_ = entries_reservation.Convert();
+  if (entries_reservation)
+    history.entries_metadata_ = entries_reservation.Convert();
   history.tokens_metadata_ = tokens_reservation.Convert();
   return history;
 }
@@ -338,8 +341,11 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   // publication. reserve() is exact with the pinned libstdc++; verify
   // capacities before commit.
   const auto entry_capacity = Add(entries_.size(), chunk_count);
-  auto entries_reservation = ledger_->Reserve(
-      ResourceCategory::kMetadata, Bytes(entry_capacity, sizeof(Entry)));
+  auto entries_reservation =
+      entry_capacity == 0
+          ? ResourceReservation{}
+          : ledger_->Reserve(ResourceCategory::kMetadata,
+                             Bytes(entry_capacity, sizeof(Entry)));
   const auto token_bytes =
       Add(Add(Bytes(request.tokens.size(), sizeof(Token)),
               Bytes(descriptors_.size(), sizeof(ComponentPosition))),
@@ -428,7 +434,8 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
     throw std::logic_error("allocator exceeded reserved metadata capacity");
   checkpoint->metadata_bytes_ = bytes;
   checkpoint->metadata_ = checkpoint_reservation.Convert();
-  auto entries_metadata = entries_reservation.Convert();
+  auto entries_metadata =
+      entries_reservation ? entries_reservation.Convert() : ResourceCharge{};
   auto tokens_metadata = tokens_reservation.Convert();
   // Publication is nonthrowing. No checkpoint or new history escapes earlier.
   entries_.swap(entries);

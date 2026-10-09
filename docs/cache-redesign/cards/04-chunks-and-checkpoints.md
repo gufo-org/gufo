@@ -146,6 +146,24 @@ focused clang-tidy, documentation checks and diff whitespace checks passed.
 Build artifacts remain in ignored `build/` directories. These results were
 recorded from the implementation committed as `bc61da51`.
 
+### Review follow-up
+
+Independent review found two missing edge cases. Empty, short and private-only
+checkpoints now skip entry-directory reservations when no full chunks exist,
+both during capture and when seeding a restored history. Rejected committed or
+borrowed descriptions first place the physical owner and accounting token in a
+local `Payload`, so exception cleanup destroys the owner before releasing its
+charge or allowing the committed pool block to be reassigned.
+
+The new regression tests failed before these fixes. They verify empty/short
+capture and restore, private-only histories, and deleters that observe a live
+charge and cannot reassign borrowed backing while the old owner is being
+destroyed. Restore checks now compare complete target rows, draft rows and
+private bytes with independent uncached executions, both at the restored
+boundary and after continued execution. The focused ordinary and ASan/UBSan
+cache checks, hosted PR suite, release library and shared repository checks
+were rerun for the fixes. The step-baseline figures above remain unchanged.
+
 ## Done when
 
 - [x] Tests above pass.
