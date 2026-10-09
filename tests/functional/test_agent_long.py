@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from agent_long import check_continuation
+from agent_long import check_continuation, interruption_ready
 from opencode_agent import sse_output
 
 
@@ -67,6 +67,49 @@ class ContinuationTest(unittest.TestCase):
             self.assertEqual(content, "")
             self.assertEqual(calls, [])
             self.assertIn("<tool_call>\n<function=", "".join(reasoning))
+
+    def test_interrupt_targets_live_thinking_or_tool_fragments(self):
+        for response in (False, True):
+            for phase in ("thinking", "tool"):
+                if response:
+                    event = {"type": "response.reasoning_summary_text.delta"
+                             if phase == "thinking" else "response.function_call_arguments.delta",
+                             "delta": "partial"}
+                    done = {"type": "response.completed"}
+                else:
+                    delta = {"reasoning_content": "partial"} if phase == "thinking" else {
+                        "tool_calls": [{"index": 0, "function": {"arguments": '{"text":"par'}}]}
+                    event = {"choices": [{"delta": delta}]}
+                    done = {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
+                raw = ("data: " + json.dumps(event) + "\n\n").encode()
+                self.output.write_bytes(raw + b'data: {"unfinished":"\xc3')
+                self.assertTrue(interruption_ready(self.output, phase))
+                other = "tool" if phase == "thinking" else "thinking"
+                self.assertFalse(interruption_ready(self.output, other))
+                self.output.write_bytes(raw + ("data: " + json.dumps(done) + "\n\n").encode())
+                self.assertFalse(interruption_ready(self.output, phase))
+
+    def test_interrupt_does_not_mislabel_a_finished_phase(self):
+        for response in (False, True):
+            events = [
+                {"type": "response.reasoning_summary_text.delta", "delta": "thought"},
+                {"type": "response.function_call_arguments.delta", "output_index": 1,
+                 "delta": '{"text":"part'},
+                {"type": "response.function_call_arguments.delta", "output_index": 1,
+                 "delta": 'ial"}'},
+            ] if response else [
+                {"choices": [{"delta": {"reasoning_content": "thought"}}]},
+                {"choices": [{"delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": '{"text":"part'}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": 'ial"}'}}]}}]},
+            ]
+            raw = b""
+            for index, event in enumerate(events):
+                raw += ("data: " + json.dumps(event) + "\n\n").encode()
+                self.output.write_bytes(raw)
+                self.assertEqual(interruption_ready(self.output, "thinking"), index == 0)
+                self.assertEqual(interruption_ready(self.output, "tool"), index == 1)
 
 
 if __name__ == "__main__":
