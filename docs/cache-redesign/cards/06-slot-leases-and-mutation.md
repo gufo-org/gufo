@@ -156,7 +156,6 @@ required (see the README).
 
 ## Review notes
 
-
 ### Independent review follow-up
 
 Round one identified a race between reservation conversion and persistence-pin
@@ -167,3 +166,20 @@ outside it. Added contention tests use the two-step chunk persistence-pin path,
 copy existing reader/persistence pins during mutation, and fail each preservation
 conversion after earlier ranges have succeeded. Row metadata also charges the
 borrowed-handle object. Ordinary, ASan/UBSan and ThreadSanitizer slot checks pass.
+
+Rounds two and three independently reviewed `db7d31c2` without conversation
+history and reported no additional actionable findings. Round three repeated
+focused CPU, ASan/UBSan and ThreadSanitizer checks. The final local hosted PR
+suite passed all 48 checks; the release cache library and tracked-source
+documentation check also passed. Repeating the same microbenchmark on `db7d31c2`
+recorded 14.21 ns/op for live acquire/commit/release, 3.78 ns/op for the empty
+guard and 2.51 ns/op for the no-op fixture (1.27 ns/op incremental). Both baseline
+runs are retained above; neither is an inference performance qualification.
+
+Review comments and the fix response are retained in
+[PR #501](https://github.com/gufo-org/gufo/pull/501). The independent race
+reproducer rebuilt against the fixed ThreadSanitizer library passed with
+`TSAN_OPTIONS=halt_on_error=1`, reporting zero persistence-admission errors.
+Its source/report remain in `/tmp/gufo-pr501-review-persistence.cpp` and
+`/tmp/gufo-pr501-review-persistence-tsan.log`; the final local hosted report is
+`/tmp/gufo-card06-final-pr.log`.
