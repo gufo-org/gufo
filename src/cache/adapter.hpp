@@ -91,9 +91,11 @@ public:
   [[nodiscard]] virtual Completion LoadPrivate(Slot&, ComponentId,
                                                std::span<const std::byte>,
                                                Stream&) = 0;
+  // Requires an active BeginRestore. Outside a restore (including after a
+  // successful Validate), throw std::logic_error without changing the slot.
   // Check complete loads and exactly one position per component, not
-  // row-content integrity (the store/test oracle owns that). Any failed load or
-  // false Validate since the last successful Invalidate MUST keep this
+  // row-content integrity (the store/test oracle owns that). During a restore,
+  // any failed load or false Validate since the last Invalidate MUST keep this
   // returning false. A false result latches failure, forbidding execution or
   // another restore.
   [[nodiscard]] virtual bool Validate(Slot&,

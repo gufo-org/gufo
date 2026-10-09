@@ -9,9 +9,24 @@ import unittest
 
 
 SOURCE_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx", ".inl", ".ipp", ".inc", ".tpp", ".hip"}
-FORBIDDEN = re.compile(r"(?:^|/)(?:cli|models|hip)/|(?:^|/)text_model_runner\.hpp$")
+FORBIDDEN = re.compile(r"(?:^|/)(?:cli|models|(?:hip|roc)\w*)/|(?:^|/)text_model_runner\.hpp$")
 INCLUDES = re.compile(r"^\s*#\s*include\s*([^\n]+)", re.MULTILINE)
 LITERAL = re.compile(r'^[<"]([^>"\n]+)[>"]')
+COMMENTS_AND_LITERALS = re.compile(
+    r'(?P<raw>(?:u8|u|U|L)?R"(?P<delimiter>[^\s()\\]{0,16})\(.*?\)(?P=delimiter)")'
+    r'|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\\n])*\''
+    r'|(?P<comment>/\*.*?\*/|//[^\n]*)', re.DOTALL)
+
+
+def strip_comments(source: str) -> str:
+    def replace(match: re.Match) -> str:
+        # Preserve quoted include paths and strings containing comment markers.
+        # Raw-string contents cannot contain actual preprocessing directives.
+        if match.group("comment") is not None or match.group("raw") is not None:
+            return re.sub(r"[^\n]", " ", match[0])
+        return match[0]
+
+    return COMMENTS_AND_LITERALS.sub(replace, source)
 
 
 def violations(root: Path, project_root: Path | None = None) -> list[str]:
@@ -27,7 +42,7 @@ def violations(root: Path, project_root: Path | None = None) -> list[str]:
             return
         visited.add(path)
         source = re.sub(r"\\\r?\n", "", path.read_text())
-        source = re.sub(r"/\*.*?\*/|//[^\n]*", " ", source, flags=re.DOTALL)
+        source = strip_comments(source)
         for directive in INCLUDES.findall(source):
             match = LITERAL.match(directive)
             if not match:
@@ -64,7 +79,8 @@ class BoundaryTests(unittest.TestCase):
     def test_forbidden_direct_and_transitive_includes(self):
         for suffix in SOURCE_SUFFIXES:
             for include in ("src/cli/serve/logging.hpp", "src/models/qwen/config.hpp",
-                            "text_model_runner.hpp", "hip/hip_runtime.h", "src/core/hip/stream.hpp"):
+                            "text_model_runner.hpp", "hip/hip_runtime.h", "src/core/hip/stream.hpp",
+                            "hipblas/hipblas.h", "rocblas/rocblas.h", "hipcub/hipcub.hpp"):
                 with self.subTest(suffix=suffix, include=include), tempfile.TemporaryDirectory() as tmp:
                     project = Path(tmp)
                     root = project / "src/cache"
@@ -73,6 +89,29 @@ class BoundaryTests(unittest.TestCase):
                     (root / ("adapter" + suffix)).write_text('#include "src/core/relay.hpp"\n')
                     (project / "src/core/relay.hpp").write_text('# include \\\n"' + include + '"\n')
                     self.assertEqual(len(violations(root, project)), 1)
+
+    def test_forbidden_system_headers(self):
+        for include in ("hip/hip_runtime.h", "hipblas/hipblas.h", "rocblas/rocblas.h", "hipcub/hipcub.hpp"):
+            with self.subTest(include=include), tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp)
+                root = project / "src/cache"
+                root.mkdir(parents=True)
+                (root / "adapter.hpp").write_text(f"#include <{include}>\n")
+                self.assertEqual(len(violations(root, project)), 1)
+
+    def test_comment_markers_in_literals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            root = project / "src/cache"
+            root.mkdir(parents=True)
+            source = ('const char* text = "/*";\n'
+                      'const char* url = "https://example.com";\n'
+                      'const char* raw = R"fixture(\n#include <hip/unused.h>\n)fixture";\n'
+                      '#include <span>\n')
+            (root / "adapter.cpp").write_text(source)
+            self.assertEqual(violations(root, project), [])
+            (root / "adapter.cpp").write_text(source + '#include <hipblas/hipblas.h>\n')
+            self.assertEqual(len(violations(root, project)), 1)
 
     def test_allowed_comments_cycles_and_missing_directory(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -425,10 +425,12 @@ Completion FakeAdapter::LoadPrivate(Slot& slot, ComponentId id,
 bool FakeAdapter::Validate(Slot& slot,
                            std::span<const ComponentPosition> positions) {
   auto& state = AsSlot(slot);
+  if (!state.restoring)
+    throw std::logic_error("validation requires an active restore");
   const auto actual = Positions(slot);
   const bool complete =
-      state.restoring && !state.Busy() && !state.failed &&
-      state.private_loaded && positions.size() == 3 &&
+      !state.Busy() && !state.failed && state.private_loaded &&
+      positions.size() == 3 &&
       ContiguousRows(state.target_loaded) == state.target.size() &&
       ContiguousRows(state.draft_loaded) == state.draft.size() &&
       std::ranges::all_of(state.expected,

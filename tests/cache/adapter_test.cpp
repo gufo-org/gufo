@@ -129,6 +129,39 @@ void RoundTripAndContentOracle() {
   assert(adapter.RecurrentHash(*restored) == expected);
 }
 
+void ValidationMisusePreservesLiveState() {
+  FakeAdapter adapter;
+  Guard guard;
+  FakeStream stream(true);
+  auto source = adapter.CreateSlot(guard);
+  adapter.Append(*source, kTargetTokens, kDraftTokens);
+  const auto saved = Save(adapter, *source, stream);
+  const auto before = adapter.RecurrentHash(*source);
+  adapter.Append(*source, kSuffix, kSuffix);
+  const auto expected = adapter.RecurrentHash(*source);
+
+  for (const bool restored : {false, true}) {
+    auto slot = adapter.CreateSlot(guard);
+    if (restored) {
+      Load(adapter, *slot, saved, stream);
+      assert(adapter.Validate(*slot, saved.positions));
+    } else {
+      adapter.Append(*slot, kTargetTokens, kDraftTokens);
+    }
+    Throws<std::logic_error>(
+        [&] { (void)adapter.Validate(*slot, saved.positions); });
+    assert(slot->IsValid());
+    assert(adapter.RecurrentHash(*slot) == before);
+    const auto after = Save(adapter, *slot, stream);
+    assert(after.positions == saved.positions);
+    assert(after.target == saved.target);
+    assert(after.draft == saved.draft);
+    assert(after.state == saved.state);
+    adapter.Append(*slot, kSuffix, kSuffix);
+    assert(adapter.RecurrentHash(*slot) == expected);
+  }
+}
+
 void OutOfOrderPieces() {
   FakeAdapter adapter;
   Guard guard;
@@ -359,6 +392,7 @@ void InputBoundaries() {
 }  // namespace
 int main() {
   RoundTripAndContentOracle();
+  ValidationMisusePreservesLiveState();
   OutOfOrderPieces();
   FailedValidationNeedsReset();
   DiscardedLoadFailures();

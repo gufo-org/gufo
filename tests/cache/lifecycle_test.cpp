@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iostream>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -166,4 +167,5 @@ int main() {
   HostPreservation(true);
   GuardMustSettlePreservation();
   IdentityBounds();
+  std::cout << "cache adapter lifecycle passed\n";
 }

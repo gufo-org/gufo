@@ -88,6 +88,7 @@ class Adapter {
 
   // Failed loads or validation latch until successful Invalidate, even if a
   // completion's failed result is discarded. No content hashing here.
+  // Outside an active restore, throw logic_error without changing the slot.
   virtual bool Validate(Slot&, std::span<const ComponentPosition>) = 0;
   // Refuses pending transfers; success leaves a valid empty slot for prefill.
   virtual bool Invalidate(Slot&) noexcept = 0;
@@ -153,8 +154,11 @@ destruction or replacement. `Wait` settles all buffer accesses even on failure
 and retains the result. Callers retain slots, streams and immutable source
 buffers until completion. Adapters latch every failed load, including submission
 failures, independently of the handle. `Validate` checks positions and completed
-loads; any false result latches failure until successful `Invalidate`. Repeating
-validation with other positions cannot recover a failed slot.
+loads during an active restore; any false result latches failure until successful
+`Invalidate`. Repeating validation with other positions cannot recover a failed
+slot. Calling `Validate` without an active `BeginRestore`, including a second
+call after successful validation, throws `std::logic_error` without changing the
+slot or its execution state.
 
 `Invalidate` refuses without changing a slot with pending reads or loads. After
 they settle, it releases borrowers, clears failures and leaves a valid empty
@@ -199,29 +203,31 @@ cmake --build --preset pr --parallel 4
 The focused adapter contracts cover independent positions, bounded and delayed
 round trips, continued execution with corrupted checkpoint controls,
 missing/duplicate components, latched failures, discarded completion errors,
+rejected validation outside a restore without changing rows or execution,
 preservation before queueing, cold fallback, exact shorter restores, reversed
 piece arrival, pending capture lifetimes, allocation/submission/transfer failure,
 reentrant waits and bounded image identity. The boundary check follows project
-includes across header/inline/source suffixes, rejects serving/model/HIP
-dependencies and checks generated CMake link metadata. Only the reviewed CPU
+includes across header/inline/source suffixes, rejects serving/model/HIP/ROCm
+dependencies (including system library headers) and checks generated CMake link
+metadata. Comment removal preserves quoted literals and ignores raw-string
+contents. Only the reviewed CPU
 platform target `Threads::Threads` may be linked; arbitrary relay targets cannot
 hide transitive model/HIP dependencies. All three tests run in the hosted `pr`
 target. The unused event-header test include and redundant library flags were
 removed; event contracts remain reserved for later policy/observability cards.
 
-All three focused tests (also under ASan/UBSan) and all 44 hosted PR tests passed;
-the release library build passed. The shared formatting check, focused static analysis, documentation
-link check and diff whitespace check passed. Nix shells used the flake's pinned
-inputs: a CPU-only dependency shell for hosted checks and `inputsFrom` the
+At review revision `93240037`, all 44 hosted PR tests and the release library
+build passed. The validation-misuse follow-up passed all three focused tests in
+ordinary and ASan/UBSan builds. Its regression test failed before the fix. The
+shared formatting check, focused static analysis, documentation link check and
+diff whitespace check passed. Nix shells used the flake's pinned inputs: a
+CPU-only dependency shell for hosted checks and `inputsFrom` the
 production package for release configuration, without building reference tools.
 
 The test-first compilation failed on the missing cache headers before their
 implementation. No GPU numerics, model workload or performance qualification
 is claimed by these CPU fixtures; those remain with the adapter and switch-over
-cards. Build artifacts stay in the ignored `build/` directories. Review-fix
-logs are retained at `/tmp/gufo-card02-review-sanitizers.log`,
-`/tmp/gufo-card02-review-pr.log`, `/tmp/gufo-card02-review-release.log`,
-`/tmp/gufo-card02-review-tidy.log` and `/tmp/gufo-card02-review-final.log`.
+cards. Build artifacts stay in the ignored `build/` directories.
 
 ## Done when
 

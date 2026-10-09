@@ -54,6 +54,11 @@ and evicted, and unique retained bytes over time.
 - Parity with the current cache's policy: anything missed?
 - Is the pass-plan query enough to avoid splitting prefill passes for
   optional checkpoints?
+- In-pass captures must finish before the next chunk mutates their sources:
+  the guard is host-synchronous and transfer sources must remain unchanged.
+  Measure the resulting host stall per checkpoint and shared-stream coupling,
+  as seen in [#445](https://github.com/gufo-org/gufo/pull/445), alongside any
+  additional prefill pass splits.
 
 ## References
 
@@ -71,4 +76,3 @@ required (see the README).
 [Checkpoint selection and eviction](../RFC.md#checkpoint-selection-and-eviction)
 
 ## Review notes
-
