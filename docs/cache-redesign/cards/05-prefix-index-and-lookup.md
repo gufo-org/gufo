@@ -180,6 +180,25 @@ metadata (**579,057 bytes**, **4,520 incremental bytes/checkpoint**). The initia
 35.13 µs result remains above as prior step evidence; this is not a regression
 qualification or an inference timing comparison.
 
+### Review follow-up, rounds 2 and 3
+
+Round 2 confirmed the prior fixes and found no new actionable defect. Its
+independent scratch oracle passed 100,000 lookup/common-prefix comparisons
+across 20,000 mixed live insert/erase operations.
+
+Round 3 found that checkpoint eligibility omitted the exact private-state
+position check already applied to live frontiers. Lookup now rejects a
+checkpoint whose private execution position differs from its advertised token
+boundary, and excludes it from both retained and attested stable fallbacks.
+The new regression failed before the guard and covers private state before and
+after the boundary, both fallback forms, and a valid matching checkpoint.
+Append-row frontiers remain independent of target token count.
+
+All six ordinary focused cache tests, the expanded index test with ASan/UBSan,
+focused tidy, shared formatting, documentation, whitespace checks and the release
+cache-library rebuild passed. The post-fix benchmark recorded **36.50 µs/lookup**,
+with metadata unchanged. Earlier measurements remain above as step evidence.
+
 ## Done when
 
 - [x] Tests above pass, including the lookup cases ported from the current

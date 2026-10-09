@@ -287,7 +287,9 @@ struct PrefixIndex::Impl {
           r.checkpoint->Components(),
           [&](const auto& c) { return Same(d, c.descriptor); });
       if (a == r.availability.end() || !a->resident ||
-          c == r.checkpoint->Components().end())
+          c == r.checkpoint->Components().end() ||
+          (d.kind == ComponentKind::kPrivateState &&
+           c->position.valid_rows != r.Boundary()))
         return false;
     }
     return true;

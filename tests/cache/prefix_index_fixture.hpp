@@ -3,6 +3,7 @@
 
 #include <array>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "src/cache/prefix_index.hpp"
@@ -23,13 +24,14 @@ inline std::vector<ComponentAvailability> ResidentComponents() {
 inline std::shared_ptr<const Checkpoint> IndexCheckpoint(
     ResourceLedger& ledger, std::span<const Token> tokens,
     Identity compatibility = {1}, Identity input = {},
-    std::span<const ComponentDescriptor> descriptors = kIndexComponents) {
+    std::span<const ComponentDescriptor> descriptors = kIndexComponents,
+    std::optional<Rows> private_boundary = {}) {
   auto history =
       ExecutionHistory::Cold(ledger, descriptors, std::move(compatibility));
   std::vector<ComponentPosition> positions;
   for (const auto& d : descriptors)
     positions.push_back({d.id, d.kind == ComponentKind::kPrivateState
-                                   ? tokens.size()
+                                   ? private_boundary.value_or(tokens.size())
                                    : tokens.size() / d.id.value});
   return history.Capture(
       {tokens, InputIdentity(tokens.size(), std::move(input)), positions,

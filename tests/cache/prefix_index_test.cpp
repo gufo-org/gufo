@@ -263,6 +263,41 @@ void CoherenceAndFallback() {
   assert(index.Lookup(Query(tokens)).reason ==
          SelectionReason::kMissingComponent);
 }
+void CheckpointPrivateBoundary() {
+  ResourceLedger ledger{kIndexLimits};
+  PrefixIndex index{ledger};
+  index.Register({1}, kIndexComponents);
+  const Tokens tokens{1, 2, 3, 4};
+  for (const Rows position : {3ULL, 5ULL}) {
+    auto malformed =
+        IndexCheckpoint(ledger, tokens, {1}, {}, kIndexComponents, position);
+    const auto entry = index.Insert(malformed, ResidentComponents());
+    assert(index.Lookup(Query(tokens)).reason ==
+           SelectionReason::kMissingComponent);
+    assert(index.CachedPrefixTokens(Query(tokens)) == 0);
+    index.Erase(entry);
+  }
+  const auto deep =
+      index.Insert(IndexCheckpoint(ledger, tokens), ResidentComponents());
+  // An incoherent shorter checkpoint cannot supply a stable fallback.
+  auto malformed =
+      IndexCheckpoint(ledger, Tokens{1, 2}, {1}, {}, kIndexComponents, 1);
+  auto entry = index.Insert(malformed, ResidentComponents());
+  assert(index.Lookup(Query(tokens, 2)).reason ==
+         SelectionReason::kStablePrefixBoundary);
+  index.Erase(entry);
+  // An incoherent later checkpoint cannot attest an established fallback
+  // either.
+  malformed =
+      IndexCheckpoint(ledger, Tokens{1, 2, 3}, {1}, {}, kIndexComponents, 2);
+  entry = index.Insert(malformed, ResidentComponents(), 2);
+  assert(index.Lookup(Query(tokens, 2)).reason ==
+         SelectionReason::kStablePrefixBoundary);
+  index.Erase(entry);
+  (void)index.Insert(IndexCheckpoint(ledger, Tokens{1, 2}),
+                     ResidentComponents());
+  assert(index.Lookup(Query(tokens, 2)).selected->entry == deep);
+}
 void TiesAndIsolation() {
   ResourceLedger ledger{kIndexLimits};
   PrefixIndex index{ledger};
@@ -496,6 +531,7 @@ int main() {
   SelectionTable();
   ImagesAndLearning();
   CoherenceAndFallback();
+  CheckpointPrivateBoundary();
   TiesAndIsolation();
   LongPromptAndMemory();
   PrefixChurn();
