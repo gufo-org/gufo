@@ -350,6 +350,8 @@ int main() {
     ok = Run(7, 131069, 0x2468ACE0U) && ok;
     ok = Run(257, 131069, 0xC0FFEE01U, false, 0, true, ScoreLayout::kAligned) &&
          ok;
+    ok = Run(81, 260013, 0xC0FFEE02U, false, 0, true, ScoreLayout::kAligned) &&
+         ok;
     ok = Run(129, 131069, 0, true, 0, true) && ok;  // deep, partial word
     ok = Run(1, 9001, 0x0BADF00DU) && ok;           // decode
     ok = Run(40, 2040, 0xDEADBEEFU) && ok;          // straddles the budget

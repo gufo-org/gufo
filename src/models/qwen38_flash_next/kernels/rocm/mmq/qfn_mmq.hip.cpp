@@ -632,8 +632,11 @@ extern "C" int qfn_mmq_q8_0_dense_vec_preq(const void* W, const void* W_gate,
                                            int M, int N, int K,
                                            hipStream_t stream) {
   const bool wide_matrix = K == 2560 && M >= 8192 && N <= 48;
+  const bool grouped_matrix =
+      N > 48 && N % 32 == 0 &&
+      ((K == 2560 && M >= 1024) || (K == 320 && M == 10240));
   if (!W || !X_q8 || !out_f32 || M <= 0 || N <= 0 || K <= 0 || K % 32 != 0 ||
-      (N > 32 && !wide_matrix &&
+      (N > 32 && !wide_matrix && !grouped_matrix &&
        (M != 320 || K != 10240 || N % 8 != 0)) ||
       (N > MMVQ_MAX_BATCH_SIZE && W_gate)) {
     fprintf(stderr,

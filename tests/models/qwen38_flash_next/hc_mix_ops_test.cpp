@@ -177,6 +177,12 @@ void CheckFusedProjection(std::uint32_t tokens) {
     if (outputs & 4)
       exact(d_ref_inject, d_out_inject, "inject partials");
   }
+  if (!q::HcMixF16Gemm(d_up.get(), d_low.get(), d_norm.get(), d_inject_w.get(),
+                       nullptr, d_out_half.get(), nullptr, d_out_inject.get(),
+                       tokens, kHidden, kRank, nullptr))
+    throw std::runtime_error("HC F16-only projection rejected");
+  exact(d_ref_half, d_out_half, "F16-only mixed row");
+  exact(d_ref_inject, d_out_inject, "F16-only inject partials");
   std::cerr << "HC projection fusion exact at " << tokens << " tokens\n";
 }
 

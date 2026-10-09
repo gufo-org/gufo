@@ -526,6 +526,27 @@ double Run(std::size_t batch, std::size_t m, std::size_t k, std::uint32_t seed,
       0) {
     throw std::runtime_error("F16 replay changed the output");
   }
+  if (batch >= 1024 && m == 2560 && k == 6144) {
+    const std::size_t stride = k + 32;
+    __half* padded = nullptr;
+    // The ragged final row ends at the allocation boundary. NaN padding
+    // exposes accidental reads without masking them with extra valid rows.
+    const auto elements = (batch - 1) * stride + k;
+    CheckHip(hipMalloc(&padded, elements * sizeof(__half)), "padded input");
+    CheckHip(hipMemset(padded, 0xFF, elements * sizeof(__half)), "padding");
+    CheckHip(hipMemcpy2D(padded, stride * sizeof(__half), d_x_half,
+                         k * sizeof(__half), k * sizeof(__half), batch,
+                         hipMemcpyDeviceToDevice),
+             "padded rows");
+    if (!q::DenseF16Gemm(d_w, padded, d_f16, batch, m, k, nullptr, stride))
+      throw std::runtime_error("strided F16 projection rejected the shape");
+    CheckHip(hipMemcpy(replay.data(), d_f16, replay.size() * sizeof(float),
+                       hipMemcpyDeviceToHost),
+             "strided output");
+    CheckHip(hipFree(padded), "free padded input");
+    if (std::memcmp(replay.data(), f16.data(), replay.size() * sizeof(float)))
+      throw std::runtime_error("strided F16 projection changed the output");
+  }
 
   // Large production shapes still compare every output against MMQ. Sample
   // evenly spaced tokens for the more expensive independent F64 reference.
@@ -664,8 +685,9 @@ void CheckSmallProjection(q::WeightType type, unsigned rows, unsigned cols) {
   CheckHip(hipFree(dw), "small weights free");
 }
 
-void CheckDecodeGrouping(int rows, int cols) {
-  const int tokens = rows == 320 && cols == 10240
+void CheckDecodeGrouping(int rows, int cols, int grouped_tokens = 0) {
+  const int tokens = grouped_tokens != 0 ? grouped_tokens
+                     : rows == 320 && cols == 10240
                          ? 64
                          : (rows >= 8192 && cols == 2560 ? 48 : 32);
   const auto w = MakeWeights(rows, cols, 11, false);
@@ -717,6 +739,8 @@ void CheckDecodeGrouping(int rows, int cols) {
                        hipMemcpyDeviceToHost),
              "scalar output");
     for (int n = 2; n <= (gated ? 8 : tokens); ++n) {
+      if (grouped_tokens != 0 && n > 32 && n % 32 != 0)
+        continue;
       if (rows == 320 && cols == 10240 && n > 32 && n % 8 != 0)
         continue;
       CheckHip(hipMemset(out, 0xA5, batch.size() * sizeof(float)),
@@ -838,9 +862,9 @@ int main() {
     CheckSmallProjection(q::WeightType::kF16, 7, 131);
     CheckDecodeGrouping(64, 2560);
     CheckDecodeGrouping(320, 10240);
-    CheckDecodeGrouping(1024, 2560);
-    CheckDecodeGrouping(10240, 320);
-    CheckDecodeGrouping(2561, 2560);
+    CheckDecodeGrouping(1024, 2560, 256);
+    CheckDecodeGrouping(10240, 320, 256);
+    CheckDecodeGrouping(2561, 2560, 64);
     CheckDecodeGrouping(12289, 2560);
     CheckDecodeGrouping(65537, 2560);
     CheckMtpOutputHead(1.0F);

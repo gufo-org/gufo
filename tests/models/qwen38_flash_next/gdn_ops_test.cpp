@@ -284,6 +284,37 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
       if (std::memcmp(half_state.data(), states[route].data(),
                       kStateCount * sizeof(float)) != 0)
         throw std::runtime_error("GDN F16 epilogue changed the state");
+      constexpr std::size_t kHalfStride = kZ + 32;
+      const auto padded_count = (kTokens - 1) * kHalfStride + kZ + kHalfGuard;
+      HipBuffer<__half> padded(padded_count);
+      CheckHip(hipMemset(padded.get(), 0x7F, padded.bytes()), "padded guard");
+      Upload(&d_conv_state, conv_state);
+      Upload(&d_state, state);
+      q::GatedDeltaNet(d_qkv.get(), kChannels, d_z.get(), kZ,
+                       d_alpha_beta.get(), d_conv_w.get(), d_a.get(),
+                       d_dt.get(), d_norm_w.get(), d_conv_state.get(),
+                       d_scratch.get(), d_qn.get(), d_kn.get(), d_raw.get(),
+                       d_state.get(), nullptr, nullptr, {}, {}, kTokens,
+                       kKHeads, kVHeads, kDim, kKernel, route == 1, false, kEps,
+                       nullptr, padded.get(), {}, kHalfStride);
+      std::vector<__half> padded_host(padded_count);
+      CheckHip(hipMemcpy(padded_host.data(), padded.get(), padded.bytes(),
+                         hipMemcpyDeviceToHost),
+               "padded half output");
+      for (std::size_t i = 0; i < padded_count; ++i) {
+        const auto token = i / kHalfStride;
+        const auto channel = i % kHalfStride;
+        if (token < kTokens && channel < kZ) {
+          const auto expected = half[token * kZ + channel];
+          if (std::memcmp(&expected, &padded_host[i], sizeof(__half)))
+            throw std::runtime_error("padded GDN output changed rounding");
+        } else {
+          std::uint16_t bits;
+          std::memcpy(&bits, &padded_host[i], sizeof(bits));
+          if (bits != 0x7F7F)
+            throw std::runtime_error("padded GDN output overwrote padding");
+        }
+      }
       // The causal conv's output (the scratch's first rows) against a CPU
       // reference over the same history.
       conv_out = Download(&d_scratch, kScratch);

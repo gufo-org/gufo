@@ -292,6 +292,28 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                    d_rows_slot, static_cast<std::uint32_t>(n_tokens),
                    static_cast<std::uint32_t>(used),
                    static_cast<std::uint32_t>(experts), nullptr);
+  const auto bounds = Download(d_bounds, experts + 1);
+  const auto token_rows = Download(d_rows_token, compact);
+  const auto slot_rows = Download(d_rows_slot, compact);
+  std::vector<bool> seen(slots, false);
+  for (std::size_t e = 0; e < experts; ++e) {
+    for (auto row = bounds[e]; row < bounds[e + 1]; ++row) {
+      const auto slot = slot_rows[row];
+      if (static_cast<std::uint32_t>(row - bounds[e]) >= counts[e]) {
+        if (slot != -1 || token_rows[row] != -1)
+          throw std::runtime_error(
+              "routed padding retained a stale assignment");
+      } else {
+        if (slot < 0 || static_cast<std::size_t>(slot) >= slots || seen[slot] ||
+            ids[slot] != static_cast<std::int32_t>(e) ||
+            token_rows[row] != slot / static_cast<std::int32_t>(used))
+          throw std::runtime_error("routed compaction lost an assignment");
+        seen[slot] = true;
+      }
+    }
+  }
+  if (std::find(seen.begin(), seen.end(), false) != seen.end())
+    throw std::runtime_error("routed compaction omitted a slot");
   std::vector<__half> x_half(x.size());
   for (std::size_t i = 0; i < x.size(); ++i) {
     x_half[i] = __float2half(x[i]);

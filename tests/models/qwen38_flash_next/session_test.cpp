@@ -133,17 +133,31 @@ void CheckFailureRecovery(const std::shared_ptr<qfn::Model>& model) {
   Require(snapshot->SizeBytes() < 200ULL * 1024 * 1024,
           "short prompt snapshot retains a full prefill hidden buffer");
 
+  auto peer = model->CreateSession(gufo::core::SessionMode::kAutoregressive, 64,
+                                   &error);
+  Require(peer && peer->Sync(pattern, &error), error);
+  const std::vector<float> peer_expected(peer->Logits().begin(),
+                                         peer->Logits().end());
   unsigned checks = 0;
-  session->SetCancellationCheck([&] { return ++checks >= 6; });
-  Require(!session->Evaluate(prompt.front(), &error) && !session->IsValid(),
-          "cancelled mutation left a reusable session");
-  Require(session->Tokens().empty() && session->Logits().empty() &&
-              !session->SaveSnapshot(&error),
-          "poisoned state exposed reusable tokens, logits or a snapshot");
-  session->SetCancellationCheck({});
-  Require(session->Sync(prompt, &error) && session->IsValid(), error);
-  RequireExact(expected, session->Logits(),
-               "Sync reused partially mutated state");
+  for (const unsigned stop_at : {3U, 4U, 6U}) {
+    peer->Reset();
+    checks = 0;
+    // Exercise both sides of PLE and reuse its mapped reader buffer in
+    // another request immediately after cancellation.
+    session->SetCancellationCheck([&] { return ++checks >= stop_at; });
+    Require(!session->Evaluate(prompt.front(), &error) && !session->IsValid(),
+            "cancelled mutation left a reusable session");
+    Require(session->Tokens().empty() && session->Logits().empty() &&
+                !session->SaveSnapshot(&error),
+            "poisoned state exposed reusable tokens, logits or a snapshot");
+    session->SetCancellationCheck({});
+    Require(peer->Sync(pattern, &error), error);
+    RequireExact(peer_expected, peer->Logits(),
+                 "cancelled forward left pinned inputs in use");
+    Require(session->Sync(prompt, &error) && session->IsValid(), error);
+    RequireExact(expected, session->Logits(),
+                 "Sync reused partially mutated state");
+  }
 
   checks = 0;
   session->SetCancellationCheck([&] { return ++checks >= 3; });

@@ -84,5 +84,31 @@
     "measurement": "One warmed valid sample per point. Ordered full depth sweep; cache/prefill count calibration attempts are retained in private raw logs.",
     "quality": "All 24 requests generate 128 tokens and retain the October 6 prompt/cache/output counts, completion hashes and speculative counts. This checks consistency, not original unquantized-model accuracy.",
     "retained": "Reference, concurrency, loading and memory retain September 22-23 measurements."
+  },
+  "benchmarks-2026-10-08-09": {
+    "scope": "Gufo single-user AR/MTP mixed/repetitive pp2048/tg128 at d0/4K/8K/12K/16K/32K/64K/128K; C1/2/4/6/8 AR/MTP; both memory rows.",
+    "gufo": {
+      "baseRevision": "50900eb717925cc8e85ed952e1a75e522958a7f6",
+      "branch": "perf/qwen-flash-long-prefill",
+      "dirty": true,
+      "build": "nix build, production gfx1151",
+      "binarySha256": "e462fc4fdca5718aece434fedd2391f5734c5609e0d3fbd294ca0baf769a9a99",
+      "derivation": "/nix/store/bcigl89m146dgiwgnkygzmhd0dsvsfvn-gufo-0-unstable-50900eb-dirty.drv",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+      "productionSourceSha256": {
+        "src/models/qwen38_flash_next/kernels/rocm/batch.cpp": "0c5d93133dd2377fd150512ce3fa7aa11e0df67fdeb07d9187d3cdc429004b14",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": "1356388f360634399cbf551e0daa0774e182cb5b6a05c2113cf78afea5bc6f46",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.hpp": "0b6c337fd16874bc4d46a4555f062bba68b9adbeb7fd733bd7ee669dbf3f2bbe",
+        "src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp": "cfe9bcc6b928ab35c07313b19f5b18c4142f4c5aa87badd6f21ec006a32d0aff",
+        "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp": "cc29f19e149153e224a5fa6e45f970b4d13c6c840e65c870077b297ba6c539db",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/mmvq.hip.cpp": "cc772ba28ee1a8d9b5a5b9700c518930b35eda32785b9178a052acc5285b6e92",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.hip.cpp": "1d756110b8599e40064997a9e6aca43969f4a4e905305b5124a08e12c30084d7"
+      }
+    },
+    "measurement": "One measured sample per point using the complete ordered depth sweep; exact prompt/cache/output counts retained. MTP pp is the maximum of mixed and repetitive. Concurrency prefills every session before timed tg128 and sums individual request decode rates.",
+    "quality": "All 24 depth-sweep outputs and prompt/cache/draft counts match the previous published sweep. All 63 concurrent requests match fresh isolated AR outputs and reuse the prompt. Native real-image regression checks, cancellation, sampled replay and RAM/disk restoration pass. Independent upstream vision parity remains unresolved.",
+    "timingControl": "C2 repetitive: 84.52 tok/s in the sweep versus 84.46 on current main and 84.40 in a focused candidate repeat. The original measurement is retained; the historical 93.16 tok/s did not reproduce on current main.",
+    "retained": "Loading and all llama.cpp measurements retain their September 22-23 provenance.",
+    "evidence": "prefill-long-context.json"
   }
 }

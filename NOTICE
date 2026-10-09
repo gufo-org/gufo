@@ -16,6 +16,8 @@ Adapted code includes:
 - ccv ancestry through h3.c: Copyright (c) 2010 Liu Liu (BSD-3-Clause).
 - ROCm kernels/headers: AMD and the contributors identified in their notices.
 - hipCUB: Duane Merrill, NVIDIA CORPORATION and AMD (BSD-3-Clause).
+- Flash-Next GDN row reuse and SSM stride optimization: adapted from
+  mikealanni/gufo f450218743bc, Copyright (c) 2026 gufo contributors (MIT).
 
 Strix Halo optimization inspiration also came from these MIT-licensed projects:
 - LaurentZuijdwijk/llama.cpp: https://github.com/LaurentZuijdwijk/llama.cpp

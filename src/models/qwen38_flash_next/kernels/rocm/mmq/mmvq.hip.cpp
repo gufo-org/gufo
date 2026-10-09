@@ -58,11 +58,15 @@ __launch_bounds__(32 * token_waves, 1) static __global__
 // Integer matrix products reuse each Q8 weight across up to 48 inputs.
 // Keep four separate K8 sums per wave: merging them into a K32 integer sum
 // would change the scalar kernel's rounded products, FMA chain and reduction.
-template<int token_tiles, bool ragged>
+template<int token_tiles, bool ragged, bool grouped = false>
 __launch_bounds__(256) static __global__ void mul_mat_q8_decode_batch(
     const block_q8_0* __restrict__ weights,
     const block_q8_1* __restrict__ input, float* __restrict__ output,
     int k, int rows, int input_stride, int tokens) {
+  if constexpr (grouped) {
+    input += std::size_t{blockIdx.y} * token_tiles * 16 * input_stride;
+    output += std::size_t{blockIdx.y} * token_tiles * 16 * rows;
+  }
   using Int4 = __attribute__((ext_vector_type(4))) int;
   using Int8 = __attribute__((ext_vector_type(8))) int;
   __shared__ float partial[16 * 16 * 32];
@@ -526,6 +530,15 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                              hipStream_t stream) {
   const bool matrix_shape =
       (k == 2560 && rows >= 1024) || (k == 320 && rows == 10240);
+  if (!gate && matrix_shape && tokens > 48 && tokens % 32 == 0) {
+    // Independent 32-row tiles retain the cache-invariant arithmetic.
+    // Put the tile loop in the grid instead of launching once per tile.
+    mul_mat_q8_decode_batch<2, false, true>
+        <<<dim3((rows + 15) / 16, tokens / 32), 256, 0, stream>>>(
+            static_cast<const block_q8_0*>(weights), input, output, k, rows,
+            input_stride, 32);
+    return;
+  }
   if (!gate && matrix_shape && tokens >= 9 && tokens <= 48) {
     if (tokens <= 16)
       launch_q8_matrix<1>(weights, input, output, k, rows, tokens, input_stride,

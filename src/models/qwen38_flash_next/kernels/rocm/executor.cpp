@@ -995,7 +995,6 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.attn_partials = f32(static_cast<std::size_t>(kVecBatch) * c.num_heads *
                         kAttnSplits * (c.head_dim + 2));
   if (c.ple_layer >= 0) {
-    s.ple_emb = f32(T * c.PleEmbeddingDim());
     // PLE finishes before this layer's mixer/SSM. Its gate consumes key
     // and query before normalization/convolution reuse those two buffers.
     // The gated input stays separate until PleInject consumes both outputs.
@@ -1007,12 +1006,22 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     s.ple_conv = s.xn;
     s.ple_history_scratch =
         f32(static_cast<std::size_t>(c.PleConvHistory()) * hc_dim);
+    // The quantizer reads each n-gram row once. On this UMA target it can
+    // consume the coherent reader buffer directly, without another device
+    // allocation or upload. Its address stays fixed for graph replay; the
+    // next-chunk prefetch uses separate storage until this forward finishes.
     void* pinned = nullptr;
-    if (!Check(hipHostMalloc(&pinned, T * c.PleEmbeddingDim() * sizeof(float)),
+    if (!Check(hipHostMalloc(&pinned, T * c.PleEmbeddingDim() * sizeof(float),
+                             hipHostMallocMapped | hipHostMallocCoherent),
                "pinned n-gram buffer", error_msg)) {
       return nullptr;
     }
     e->host_emb_ = static_cast<float*>(pinned);
+    if (!Check(hipHostGetDevicePointer(reinterpret_cast<void**>(&s.ple_emb),
+                                       pinned, 0),
+               "mapped n-gram buffer", error_msg)) {
+      return nullptr;
+    }
     e->host_rows_.resize(T * c.ple_heads);
   }
   s.router = f32(T * (c.num_experts + 1));
@@ -1734,7 +1743,7 @@ void Executor::Combine(float* res, const float* gamma,
 
 bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
                      float* mixed, float* inject, std::uint32_t n_tokens,
-                     std::string* error_msg) const {
+                     std::string* error_msg, bool half_only) const {
   const Config& c = config();
   // Without `normed` this mixer's grouped norm of res is computed here (F32);
   // otherwise the previous combine produced it, as F16 plus tiled Q8 on the
@@ -1777,6 +1786,10 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
   }
   const bool fused_inject =
       inject != nullptr && !m.inject.empty() && m.inject.type == GgmlType::kF32;
+  // A separate inject projection can overwrite the cached half input. Keep
+  // the full mixed row available for the following projection in that case.
+  half_only =
+      half_only && (inject == nullptr || m.inject.empty() || fused_inject);
   const float* xn = s_.xn;
   const bool vectorized =
       xn_half_ ||
@@ -1790,9 +1803,10 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
     if (fused_projection) {
       if (!HcMixF16Gemm(m.up.data, reinterpret_cast<const __half*>(s_.hc_gate),
                         s_.xn_half, fused_inject ? m.inject.f32() : nullptr,
-                        mixed, static_cast<__half*>(s_.x_half), s_.x_q8t,
-                        inject, n_tokens, c.hidden_size, c.hc_low_rank,
-                        stream_)) {
+                        half_only ? nullptr : mixed,
+                        static_cast<__half*>(s_.x_half),
+                        half_only ? nullptr : s_.x_q8t, inject, n_tokens,
+                        c.hidden_size, c.hc_low_rank, stream_)) {
         AssignError(error_msg, "fused HC projection failed");
         return false;
       }
@@ -1808,9 +1822,11 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
       half_rows_ = n_tokens;
       half_cols_ = c.hidden_size;
       half_bf16_ = false;
-      q8t_src_ = mixed;
-      q8t_rows_ = n_tokens;
-      q8t_cols_ = c.hidden_size;
+      if (!half_only || !fused_projection) {
+        q8t_src_ = mixed;
+        q8t_rows_ = n_tokens;
+        q8t_cols_ = c.hidden_size;
+      }
     }
   } else if (vectorized) {
     HcMixEpilogueVec4(xn, s_.hc_gate, fused_inject ? m.inject.f32() : nullptr,
@@ -1935,13 +1951,7 @@ bool Executor::Ple(const DeviceLayer& l, Session& session, std::uint32_t n,
                    float* res, bool speculative, std::string* error_msg,
                    bool embeddings_ready, PrefillCheckpoint* checkpoint) const {
   const Config& c = config();
-  const std::size_t emb_count =
-      static_cast<std::size_t>(n) * c.PleEmbeddingDim();
-  if (!embeddings_ready &&
-      (!WaitPle(error_msg) ||
-       !Check(hipMemcpyAsync(s_.ple_emb, host_emb_, emb_count * sizeof(float),
-                             hipMemcpyHostToDevice, stream_),
-              "n-gram upload", error_msg))) {
+  if (!embeddings_ready && !WaitPle(error_msg)) {
     return false;
   }
   if (!embeddings_ready && !prefetch_next_.empty()) {
@@ -2030,6 +2040,10 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
       tiled && l.ssm_out.rows == 2560 && l.ssm_out.cols == 6144;
   auto* out_half =
       half_output ? reinterpret_cast<__half*>(s_.gdn_out) : nullptr;
+  // Shift successive rows off the 12 KiB pitch while retaining every half.
+  // The existing F32 scratch has room for these slightly padded F16 rows.
+  const std::uint32_t half_stride =
+      half_output && n_tokens >= 1024 ? l.ssm_out.cols + 32 : 0;
   GatedDeltaNet(qkv, qkv_stride, z, z_stride, s_.alpha_beta, l.ssm_conv1d.f32(),
                 l.ssm_a.f32(), l.ssm_dt.f32(), l.ssm_norm.f32(), s.conv_state,
                 s_.conv_scratch, s_.qn, s_.kn, s_.gdn_raw, s.state, s_.gdn_out,
@@ -2038,13 +2052,14 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                 speculative ? s.conv_snapshots : RollbackRows{}, n_tokens,
                 c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
                 c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative,
-                convolved, c.rms_eps, stream_, out_half, checkpoint);
+                convolved, c.rms_eps, stream_, out_half, checkpoint,
+                half_stride);
   if (!project_output) {
     return true;
   }
   if (half_output) {
     if (!DenseF16Gemm(l.ssm_out.data, out_half, out, n_tokens, l.ssm_out.rows,
-                      l.ssm_out.cols, stream_)) {
+                      l.ssm_out.cols, stream_, half_stride)) {
       AssignError(error_msg, "SSM output F16 GEMM failed");
       return false;
     }
@@ -2168,12 +2183,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     const std::uint32_t blocks =
         (score_context + c.compress_ratio - 1) / c.compress_ratio;
     const std::uint32_t max_blocks = (blocks + 31) / 32 * 32;
-    const auto select_chunk = static_cast<std::uint32_t>(std::min(
-        std::size_t{512}, std::bit_floor(select_score_floats_ / max_blocks)));
-    // Catch-up consumes only the final attention tile. Keep all its query
-    // masks (sparse attention packs four queries; dense tiles hold sixteen)
-    // but avoid scoring the unused prefix against the complete context.
-    const auto first_query = last_only ? (n_tokens - 1) / 16 * 16 : 0U;
+    // Query rows are independent; rounding down to a power of two wasted
+    // up to half the bounded scratch and doubled launches above 160K.
+    const auto select_chunk = static_cast<std::uint32_t>(
+        std::min(std::size_t{512}, select_score_floats_ / max_blocks));
+    // Catch-up consumes only the final attention tile. Cover its masks even
+    // when the dense/sparse boundary shifts the four-query sparse groups.
+    const auto first_query = last_only && n_tokens > 16 ? n_tokens - 16 : 0U;
     for (std::uint32_t t0 = first_query; t0 < n_tokens; t0 += select_chunk) {
       const std::uint32_t n = std::min(select_chunk, n_tokens - t0);
       // Batches wider than kVecBatch are never captured, so the host
@@ -2208,10 +2224,9 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // first: it is the launch that can be refused.
   const auto attend = [&](std::uint32_t first, std::uint32_t rows, bool last) {
     const std::uint32_t pos = start_pos + first;
-    const std::uint32_t dense_rows =
-        mask != nullptr && !last && pos < c.indexer_top_k
-            ? std::min(rows, c.indexer_top_k - pos)
-            : 0;
+    const std::uint32_t dense_rows = mask != nullptr && pos < c.indexer_top_k
+                                         ? std::min(rows, c.indexer_top_k - pos)
+                                         : 0;
     const auto at = [&](std::uint32_t row) {
       return std::size_t{first + row} * c.AttentionQDim();
     };
@@ -2224,11 +2239,11 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                 mask_words_, s_.ctx + at(dense_rows), rows - dense_rows,
                 pos + dense_rows, c.num_heads, c.num_kv_heads, c.head_dim,
                 c.compress_ratio, stream_, last)) &&
-           (dense_rows == 0 ||
+           (dense_rows == 0 || (last && dense_rows != rows) ||
             WmmaCausalAttention(s_.q + at(0), s_.attn_gate + at(0), s.k_cache,
                                 s.v_cache, nullptr, mask_words_, s_.ctx + at(0),
                                 dense_rows, pos, c.num_heads, c.num_kv_heads,
-                                c.head_dim, c.compress_ratio, stream_, false));
+                                c.head_dim, c.compress_ratio, stream_, last));
   };
   if (checkpoint_tokens != 0 && checkpoint_tokens < n_tokens) {
     // Sparse tiles compact the union of their queries' selected keys.
@@ -2593,6 +2608,17 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   }
   if (speculative && !EnsureRollback(session, n - 1, error_msg))
     return false;
+  // Failed eager/captured work can still be reading pinned inputs. Drain it
+  // before another request reuses those buffers; successful forwards already
+  // synchronize below and need no additional wait.
+  struct PinnedInputGuard {
+    hipStream_t stream;
+    bool completed{false};
+    ~PinnedInputGuard() {
+      if (!completed)
+        (void)hipStreamSynchronize(stream);
+    }
+  } pinned_inputs{stream_};
   // Start the disk rows before protecting checkpoint rows, which can commit
   // device pages: layer 0 alone cannot hide the whole read.
   const auto ngram = session.ngram_;
@@ -2690,6 +2716,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                     s_.res))
       return false;
   }
+  pinned_inputs.completed = true;
   return true;
 }
 
@@ -2726,7 +2753,14 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                                  false, checkpoint)) {
       return false;
     }
-    if (!HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject, n, error_msg)) {
+    // Both stacked SSM projections consume the same F16 input. Avoid writing
+    // unused F32/Q8 copies when the wide mixer can supply that input directly.
+    const bool half_only =
+        prefill_phase && n >= 1024 && n <= options_.max_batch && l.linear &&
+        DenseF16Route(l.ssm_in, n) && l.ssm_alpha_beta.type == GgmlType::kF16 &&
+        l.ssm_alpha_beta.cols == l.ssm_in.cols;
+    if (!HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject, n, error_msg,
+               half_only)) {
       return false;
     }
     // The last target layer's query outputs have no later cache consumer.
@@ -3806,11 +3840,20 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
               1, c.rms_eps, stream_);
   // The hidden input: kept trunk rows from `hidden_row`, or the block's
   // own carried residual.
-  MtpHidden(hidden_source ? hidden_source : session.mtp_.target_hidden,
-            session.mtp_.h, &session.control_->hidden_row, s_.mtp_h, n, hc_dim,
-            stream_);
+  const float* hidden = s_.mtp_h;
+  if (hidden_source && control_host_->hidden_row >= 0) {
+    // Eager catch-up can normalize the trunk rows directly. Graphs use the
+    // device-selected source below because their hidden-row index can change
+    // on replay. Neither path modifies the trunk residual.
+    hidden = hidden_source +
+             static_cast<std::size_t>(control_host_->hidden_row) * hc_dim;
+  } else {
+    MtpHidden(hidden_source ? hidden_source : session.mtp_.target_hidden,
+              session.mtp_.h, &session.control_->hidden_row, s_.mtp_h, n,
+              hc_dim, stream_);
+  }
   // Unlike the HC mixers, this normalization spans the complete HC * H row.
-  RmsNormRows(s_.mtp_h, l.nextn_hnorm.f32(), s_.mtp_h, n, hc_dim, 1, c.rms_eps,
+  RmsNormRows(hidden, l.nextn_hnorm.f32(), s_.mtp_h, n, hc_dim, 1, c.rms_eps,
               stream_);
   if (trace && !copy_trace(s_.mtp_h + final_row, trace->normalized_hidden))
     return false;

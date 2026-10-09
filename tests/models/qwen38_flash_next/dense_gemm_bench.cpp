@@ -138,6 +138,27 @@ int main(int argc, char** argv) try {
         reps);
     report("out", ms, 2.0 * tokens * m * k,
            Hash(y, tokens * m * sizeof(float)));
+    if (tokens >= 1024) {
+      constexpr auto stride = k + 32;
+      auto* padded =
+          static_cast<__half*>(Zeros(tokens * stride * sizeof(__half)));
+      CheckHip(
+          hipMemcpy2D(padded, stride * sizeof(__half), x, k * sizeof(__half),
+                      k * sizeof(__half), tokens, hipMemcpyDeviceToDevice),
+          "padded activation");
+      const auto expected = Hash(y, tokens * m * sizeof(float));
+      const double padded_ms = MedianMs(
+          [&] {
+            if (!q::DenseF16Gemm(w, padded, y, tokens, m, k, nullptr, stride))
+              throw std::runtime_error("strided DenseF16Gemm");
+          },
+          reps);
+      const auto actual = Hash(y, tokens * m * sizeof(float));
+      if (actual != expected)
+        throw std::runtime_error("strided projection changed output");
+      report("out-padded", padded_ms, 2.0 * tokens * m * k, actual);
+      CheckHip(hipFree(padded), "hipFree");
+    }
     CheckHip(hipFree(w), "hipFree");
     CheckHip(hipFree(x), "hipFree");
     CheckHip(hipFree(y), "hipFree");

@@ -442,8 +442,8 @@ private:
   /// `normed` says the previous Combine already produced m's grouped norm
   /// of res (F32 in s_.xn, or F16 plus tiled Q8 on the wide route).
   bool HcMix(const DeviceMixer& m, const float* res, bool normed, float* mixed,
-             float* inject, std::uint32_t n_tokens,
-             std::string* error_msg) const;
+             float* inject, std::uint32_t n_tokens, std::string* error_msg,
+             bool half_only = false) const;
   /// Share mixer projections across decode requests without selecting the
   /// prefill arithmetic. Injection rows are compact across the whole batch.
   bool HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
@@ -636,16 +636,16 @@ private:
   /// Bounded score scratch, shared by sequential selector chunks.
   std::size_t select_score_floats_{0};
   std::vector<void*> allocations_;
-  /// Pinned: the n-gram rows go up with hipMemcpyAsync, and a pageable
-  /// source would not be ordered against the kernels behind it.
+  /// Coherent pinned storage, read directly by the GPU through s_.ple_emb.
+  /// Reused only after the preceding forward has drained its stream.
   float* host_emb_{nullptr};
   mutable std::vector<std::uint32_t> host_rows_;
   mutable bool ple_pending_{false};
   /// The rows a prefill chunk reads are a pure function of its tokens and
   /// the n-gram history before them, so prefetched rows are claimed only by
   /// a batch with exactly those tokens and that history, whichever session
-  /// it belongs to. A claim copies them into host_emb_, the only buffer
-  /// uploads (and captured graphs) read.
+  /// it belongs to. A claim copies them into host_emb_, whose stable address
+  /// is retained by captured graphs.
   struct PlePrefetch {
     bool pending{false};  ///< read in flight
     bool ready{false};    ///< rows complete in `rows`

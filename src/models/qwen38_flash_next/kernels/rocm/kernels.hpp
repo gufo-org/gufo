@@ -185,8 +185,11 @@ bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
                         hipStream_t stream);
+/// input_stride is in half elements; zero means k. Padded rows are supported
+/// by the wide SSM output projection (batch >= 1024, m=2560, k=6144).
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
-                  std::size_t m, std::size_t k, hipStream_t stream);
+                  std::size_t m, std::size_t k, hipStream_t stream,
+                  std::size_t input_stride = 0);
 /// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
 /// F32 K16 chain per output. Token t's chain starts ((t / 32) % 4) * 128
 /// elements into K and wraps: hipBLASLt's MT32x32x64 order (BlasLt::Gemm).
@@ -318,7 +321,8 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t k_heads, std::uint32_t v_heads,
                    std::uint32_t d, std::uint32_t kernel, bool row_split,
                    bool convolved, float eps, hipStream_t stream,
-                   __half* out_half = nullptr, GdnCheckpoint checkpoint = {});
+                   __half* out_half = nullptr, GdnCheckpoint checkpoint = {},
+                   std::uint32_t out_half_stride = 0);
 
 /// Private rows for one request in a decode batch. Scratch regions and all
 /// recurrent/history/rollback buffers must be disjoint between requests.

@@ -561,6 +561,10 @@ bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
           ? (w.cols == 2560 && w.rows >= 8192 && rows > 32 && rows <= 48 ? 48U
                                                                          : 32U)
           : kDecodeRows;
+  if (chunk == 32 && rows >= 64) {
+    const auto full = rows / 32 * 32;
+    return project(0, full) && (full == rows || project(full, rows - full));
+  }
   for (std::uint32_t r = 0; r < rows; r += chunk) {
     if (!project(r, std::min(chunk, rows - r)))
       return false;
@@ -792,16 +796,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       if (!AnyActive(items))
         return true;
       const auto& l = layers[il];
-      if (c.IsPleLayer(il)) {
-        if (!WaitPle(error) ||
-            !Check(hipMemcpyAsync(base.ple_emb, host_emb_,
-                                  static_cast<std::size_t>(rows) *
-                                      c.PleEmbeddingDim() * sizeof(float),
-                                  hipMemcpyHostToDevice, stream_),
-                   error)) {
-          return false;
-        }
-      }
+      if (c.IsPleLayer(il) && !WaitPle(error))
+        return false;
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto& item = items[i];
         const auto n = static_cast<std::uint32_t>(item.tokens.size());

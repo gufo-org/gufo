@@ -1,14 +1,18 @@
 # Qwen3.8 Flash-Next quality
 
-**Retained concurrency qualification: 63 tg128 requests match fresh AR completions:**
+**Concurrency: 63 tg128 requests match fresh AR completions:**
 21 AR, 21 mixed MTP and 21 repetitive MTP at C1/2/4/6/8. Unsloth UD-Q4_K_XL target,
 shared Q8_0 MTP; [identities](artifacts/model-identities.json).
 These are consistency checks, not original unquantized-model or GGUF-conversion
-qualification. Concurrency checks: September 20–23, 2026; attention review:
+qualification. Concurrency checks: October 9, 2026; attention review:
 September 27–28.
 
 | Check | Result |
 | --- | --- |
+| Real-image regression checks | 1024×1024 encoding passes. Nine main/candidate HTTP image, retry and continuation responses have identical outputs and token/cache counts. AR/MTP C4 image batching, sampled replay, cancellation and RAM/disk restoration pass. The disk fixture reprocesses only its seven-token assistant suffix; identical RAM retries require zero prefill. [Evidence](artifacts/prefill-long-context.json). |
+| Prefill kernels | Final build: 7,946,240 logits after 32,640 prompt tokens remain byte-identical to main (KL 0). The earlier deep-context gate reaches 259,938 tokens with exact logits. Independent GDN/projection/selector checks, ragged chunks and graph replay pass. [Evidence](artifacts/prefill-long-context.json). |
+| Mapped input and MTP catch-up | Exact Q8 projections, full/tail predictor stages and candidates; sampled output, acceptance, RAM/serialized replay and C2/4/6/8 state/RNG checks pass. Default sampling and thinking-off penalties are covered at d0/32K/128K. [Evidence](artifacts/prefill-long-context.json). |
+| HTTP depth sweep | All 24 pp2048/tg128 AR and mixed/repetitive MTP completions through d128K retain the previous sweep's output hashes and prompt/cache/draft counts. [Evidence](artifacts/prefill-long-context.json). |
 | Unused final-layer outputs | Full-vocabulary logits match unpruned execution byte-for-byte through 133,120 tokens, also with mixed code/Unicode text and image input. Mixed batching and sampled RAM/serialized snapshot replay preserve logits and RNG state. [Evidence](artifacts/prefill-final-rows.json). |
 | Bounded selector scratch | After 133,824 prompt tokens, 15,892,480 logits are byte-identical to the previous build. Ragged chunks retain exact masks and the independent FP64 score check. [Evidence](artifacts/prefill-deep-context.json). |
 | Unused normalization removal | 15,892,480 logits are byte-identical to main; ragged residual-only fusion matches normalized fusion and the separate epilogue/combine. [Evidence](artifacts/prefill-normalization.json). |
@@ -59,7 +63,7 @@ For independent MTP checks:
 nix develop -c cmake --build --preset gpu-test \
   --target qwen38_flash_next_model_tests qwen38_flash_next_gpu_probe
 nix develop -c build/gpu-test/tests/models/qwen38_flash_next/qwen38_flash_next_gpu_probe \
-  --model "$MODEL" --mtp-model "$MTP" --mtp-audit
+  --model "$MODEL" --mtp-model "$MTP" --batch 2048 --mtp-audit
 ```
 
 The [vLLM](https://github.com/vllm-project/vllm/blob/751f6807d9cb3de50c27a5f27188c4fb04fe0e2b/vllm/models/qwen4_exp/amd/mtp.py)
@@ -69,9 +73,10 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-Gufo single-user pp/tg refreshed October 7, 2026 (`def2ed1e`), Performance power
-profile. Reference, concurrency, loading and memory retain September 22–23
-provenance.
+Gufo pp/tg, concurrency and memory refreshed October 8–9, 2026 using the production
+Nix build of `50900eb7` plus the prefill optimizations. Binary and source hashes
+are retained in [model identities](artifacts/model-identities.json).
+Reference and loading results retain September 22–23 provenance.
 One warmed sample per point, greedy, thinking off, penalties disabled.
 Single-user uses pp2048/tg128; MTP pp is the maximum across mixed/repetitive
 workloads. Gufo capacity is 133760; reference capacity is 35456 through 32K,
@@ -82,6 +87,9 @@ Depth calibration depends on the ordered sweep. Paired speed controls use
 the same depth list. Deep AR/MTP HTTP cache frontiers differ by one token;
 exact replay is checked separately with identical prefill boundaries.
 AR reference is llama.cpp b11069; MTP uses pinned `6fcaa16f`.
+The historical C2 repetitive rate was not reproduced: current main measured
+84.46 tok/s, versus 84.52 in this sweep and 84.40 in a focused repeat. The original
+sweep sample is retained; this difference is not introduced by the prefill changes.
 Loading: cold files, C1/MTP/capacity 262144. Memory: C1/AR/capacity 133121,
 peak global HIP allocation including idle memory. Full commands, counts and
 identities remain in [artifacts](artifacts/bench.json) and the
