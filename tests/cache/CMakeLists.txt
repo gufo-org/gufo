@@ -10,6 +10,16 @@ target_link_libraries(cache_adapter_lifecycle_test PRIVATE gufo_cache_fake)
 add_test(NAME cache_adapter_lifecycle_test COMMAND cache_adapter_lifecycle_test)
 set_tests_properties(cache_adapter_lifecycle_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
+add_executable(cache_ledger_test ledger_test.cpp)
+target_link_libraries(cache_ledger_test PRIVATE gufo_cache Threads::Threads)
+add_test(NAME cache_ledger_test COMMAND cache_ledger_test)
+set_tests_properties(cache_ledger_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+if (GUFO_BUILD_TOOLS)
+  add_executable(cache_ledger_bench ledger_bench.cpp)
+  target_link_libraries(cache_ledger_bench PRIVATE gufo_cache Threads::Threads)
+endif()
+
 file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cache-links-$<CONFIG>.txt CONTENT
   "$<TARGET_GENEX_EVAL:gufo_cache,$<TARGET_PROPERTY:gufo_cache,LINK_LIBRARIES>>\n$<TARGET_GENEX_EVAL:gufo_cache,$<TARGET_PROPERTY:gufo_cache,INTERFACE_LINK_LIBRARIES>>\n")
 

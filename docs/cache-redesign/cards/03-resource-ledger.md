@@ -1,7 +1,7 @@
 # 03 · Resource ledger and reservations
 
 **Milestone:** Common package · **Depends on:** 02 · **Size:** M ·
-**Affects:** nothing at runtime · **Status:** agreed
+**Affects:** nothing at runtime · **Status:** done
 
 ## Goal
 
@@ -44,9 +44,106 @@ Property tests over random operation sequences:
 Cost of reserve, convert and release, and lock hold time, under contention
 from eight threads (microbenchmark).
 
+### Implementation record
+
+[`src/cache/ledger.hpp`](../../../src/cache/ledger.hpp) defines admission
+reservations, shared charges, persistence pins, limits and snapshots. The
+implementation uses one mutex for counter/state changes; host bookkeeping is
+allocated before acquiring it. No payload allocation, I/O, callbacks or device
+waits happen under the lock. It is part of `gufo_cache`, with the reviewed
+`Threads::Threads` dependency, and is not linked into serving.
+
+`ResourceLedger::Reserve` admits a new allocation against total and RAM or
+staging limits. Its category includes pending bytes; `reserved_bytes` reports
+that subset separately. The allocator/capture owner calls `Convert` only after
+its work succeeds. Conversion consumes the reservation without another charge;
+destruction cancels it. Failure preserves the reservation and the complete
+resource snapshot, including peaks. Callers charge allocation capacity rather
+than logical payload size, and admit owner/index metadata explicitly. This is
+an accounting contract, not a physical allocator or process-memory tracker;
+live slots, weights and execution scratch remain outside the retained-cache
+ledger, as specified in the RFC.
+
+The pool first reserves and converts a free backing allocation after committing
+its pages. A borrower then calls `ResourceCharge::ReserveSpill` on that block,
+and the preservation owner converts the result after the copy completes.
+Whole blocks move **free → assigned → materialized**, with unchanged total RAM
+charge. A duplicate assignment fails. The last reservation/chunk/pin returns
+the block to free while the pool retains its original charge. Without that
+pool reference, the final reference releases the physical charge. The fixed
+block geometry matches card 08; allocation and physical page commitment remain
+that card's responsibility. Borrowed rows cannot enter through an unbacked
+byte promise.
+
+Charges and pins can be shared without duplicating accounting. Persistence
+pins report unique pinned bytes as an independently bounded overlay, rather
+than adding them to the physical total. Queued jobs may pin an assigned spill
+reservation before materialization; cancellation cannot recycle its backing
+until all pins release it. New allocation reservations cannot be pinned before
+conversion. Tokens account for lifetimes; their owners must also retain the
+actual buffers and finish accesses before releasing them. Shared ledger state
+survives destruction of the public ledger object until the final token ends.
+
+`cache_ledger_test` is included in the hosted `check-pr` target. Its independent
+operation model covers 64 deterministic seeds × 2,000 operations, including
+shared charges/pins, pending and converted backing, cancellation, injected
+reserve/convert/pin failures, and zero current bytes after teardown. Additional
+cases cover separate RAM/staging/pin limits, SIZE_MAX overflow, moves replacing
+live reservations/charges, lifetime after ledger destruction, eight-thread
+shared pin activity, and races in which exactly one of eight contenders can
+admit an allocation or assign one backing block.
+
+Validation on Linux x86-64 Strix Halo, based on `2dd8b111`, with the flake.lock
+toolchain (GCC 15.3.0, CMake 4.3.4, Python 3.14.6):
+
+```sh
+cmake --preset cpu-test
+cmake --build --preset cpu-test --target cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test --parallel 4
+ctest --preset cpu-test -R '^cache_(ledger|adapter(_lifecycle)?|boundary)_test$' --output-on-failure
+cmake --preset cpu-sanitizer
+cmake --build --preset cpu-sanitizer --target cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test --parallel 4
+ctest --preset cpu-sanitizer -R '^cache_(ledger|adapter(_lifecycle)?|boundary)_test$' --output-on-failure
+cmake --preset gpu-test
+cmake --build --preset gpu-test --target cache_ledger_test cache_ledger_bench --parallel 4
+ctest --preset gpu-full -R '^cache_(ledger|boundary)_test$' --output-on-failure
+cmake --preset release
+cmake --build --preset release --target gufo_cache --parallel 4
+build/gpu-test/tests/cache/cache_ledger_bench
+```
+
+The four focused cache tests passed in CPU and ASan/UBSan builds; the ledger
+and boundary tests passed in `gpu-test`. The last additions to the randomized
+pin model and admission races passed in all three presets. The release library
+build, shared formatting check, focused `clang-tidy`, documentation links and
+diff whitespace check passed. Nix development shells used `inputsFrom` the
+production package plus clang-tools and Python; the GPU/tools configuration
+also required the pinned rocprofiler-sdk. The initial test-first compile failed
+on the missing ledger header. No model or device-transfer quality claim is made.
+
+The [retained baseline](../measurements/03-resource-ledger.json) has source and
+binary hashes, machine/build details and every measured result. One unpinned
+run measured 20,000 cycles per thread, with 64-byte charges. External operation
+timers include host bookkeeping and mutex contention. The library uses release
+optimization; internal lock clocks are disabled for operation measurements.
+
+| Operation | Metadata allocation: eight-thread mean / p95 | Spill block: eight-thread mean / p95 | Instrumented mean lock hold: metadata / spill |
+| --- | --- | --- | --- |
+| Reserve | 907 / 2,965 ns | 935 / 3,367 ns | 44 / 42 ns |
+| Convert | 712 / 2,715 ns | 836 / 3,236 ns | 39 / 39 ns |
+| Release | 736 / 2,746 ns | 799 / 3,166 ns | 35 / 37 ns |
+
+Lock hold time was measured in separate instrumented runs. It includes the
+ending clock read but excludes the subsequent statistics update and unlock;
+wait time includes the acquiring clock read. Instrumentation increased the
+eight-thread metadata cycle wall time from 47.87 to 92.07 ms and spill cycles
+from 52.85 to 82.36 ms. Those instrumented operation timings are retained but
+are not the uninstrumented baseline. Single-thread results and maximum hold
+times are also retained. These are step measurements, without an inference
+timing gate or a comparable RFC microbenchmark.
+
 ## Done when
 
-- [ ] Tests above pass under the `gpu-test` assertions build and with sanitizers
+- [x] Tests above pass under the `gpu-test` assertions build and with sanitizers
   in the CPU presets.
 
 ## Review focus
@@ -69,4 +166,3 @@ required (see the README).
 [Budget accounting and preservation before mutation](../RFC.md#budget-accounting-and-preservation-before-mutation)
 
 ## Review notes
-
