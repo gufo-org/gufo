@@ -1,6 +1,6 @@
 # 09 · Idle spill and reassignment
 
-**Milestone:** Common package · **Depends on:** 06, 08 · **Size:** M ·
+**Milestone:** Common package · **Depends on:** 06, 08 · **Size:** L ·
 **Affects:** nothing at runtime until card 19 · **Status:** done
 
 ## Goal
@@ -121,6 +121,62 @@ nix develop -c cmake --build --preset gpu-test --target cache_backing_test --par
 nix develop -c ctest --preset gpu-full -R '^cache_backing_test$' --output-on-failure
 nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
 ```
+
+All 50 hosted PR checks pass. Final focused CPU cache checks pass (11 tests),
+as do the slot/idle-spill ASan/UBSan and ThreadSanitizer tests, the GPU backing
+test, the shared formatting check (537 C++ files), and documentation validation
+(86 Markdown files, 456 local links/anchors before adding measurement links).
+This validates the inactive common package, without claiming model numerics or
+serving latency qualification.
+
+## Results
+
+Measured 2026-10-09 on Linux 7.2.9, Ryzen AI MAX+ 395 / Radeon 8060S
+(`gfx1151`), implementation `d201c87f` based on main `e6c850d3`, with unchanged
+`flake.lock`: GCC 15.3.0, HIP Clang 22.0.0, ROCm 7.2.3, HIP runtime 70253211.
+
+```sh
+nix develop -c cmake --preset release -DGUFO_BUILD_TOOLS=ON
+nix develop -c cmake --build --preset release --target cache_idle_spill_bench --parallel 4
+nix develop -c build/release/cache_idle_spill_bench
+```
+
+[`idle_spill_bench.cpp`](../../../tests/cache/idle_spill_bench.cpp) runs the
+actual worker, mutation guard, committed backing pool and HIP transfer leases
+through a byte-row adapter. Source allocation/initialization, backing commitment,
+stream creation and borrow registration precede the timer. Blocks are 128 MiB,
+pieces 4 MiB, with one stream/event pair returned after each settled completion.
+Every iteration checks every byte of every retained block outside timing and
+checks the pool still has only its single startup payload allocation.
+
+One warmup and five measured iterations per size/history are retained in
+[`09-gfx1151.csv`](../measurements/09-gfx1151.csv); the table reports medians in
+milliseconds. The idle total runs from lease commit through fully preserved
+reassignment. Residual wait comes from cold acquisition and includes any active
+piece drain, remaining copies and old readers; recreation is excluded. The
+zero-idle history denies all background work. The mid-spill history stops idle
+admission after exactly half the payload settles, then immediately reassigns;
+it measures halfway preservation, without artificially blocking DMA. Unit tests
+separately control arrivals while a piece's completion is blocked.
+
+| Borrowed rows | Idle total ms | Residual after idle ms | Zero-idle residual ms | Half-spilled residual ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 GiB | 17.345 | 0.003 | 17.271 | 7.556 |
+| 6 GiB | 96.663 | 0.005 | 94.403 | 46.443 |
+
+Idle/foreground bytes are respectively 1/0, 0/1 and 0.5/0.5 GiB for the 1 GiB
+histories, and 6/0, 0/6 and 3/3 GiB for 6 GiB. Median successful idle copy wall
+time is 16.971/94.605 ms for fully idle 1/6 GiB; zero-idle foreground copy time
+is 17.185/93.892 ms. Stream admission contributes 0.014–0.031 ms (1 GiB) and
+0.080–0.122 ms (6 GiB) across these histories. Raw data includes both copy-time
+categories, total and residual timing, and stream wait for every sample.
+
+The earlier preliminary run is retained in
+[`09-initial-gfx1151.csv`](../measurements/09-initial-gfx1151.csv). It overlapped
+a hosted build and preceded the final no-work sleep refinement; it is excluded
+from the table. The final run had no concurrent compilation. These are step
+baselines rather than matched serving speedups; card 19 still must gate real
+requests and decoding peers under idle, zero-idle and active-copy reassignment.
 
 ## Done when
 
