@@ -278,6 +278,21 @@ struct LeaseState final : MutationGuard {
         Preserve(r, release);
     }
   }
+  void PrepareReassignment() {
+    CheckStop();
+    // Acquisition can refuse/cancel without mutating the old live frontier.
+    // Actual adapter release remains nonthrowing and may retire on failure.
+    for (auto it = rows.begin(); it != rows.end();) {
+      auto r = it->rows.lock();
+      if (!r) {
+        it = rows.erase(it);
+        continue;
+      }
+      ++it;
+      Preserve(r, false);
+    }
+    CheckStop();
+  }
   void BeforeOverwrite(ComponentId c, Rows first, Rows end) override {
     Guard(c, first, end, false);
     CheckStop();
@@ -547,22 +562,34 @@ SlotLease LeasedSlot::Acquire(std::optional<BorrowedLocation> live,
     }
     state_->stop = stop;
   }
-  SlotLease lease(state_);
-  if (!live) {
-    state_->Invalidate();
-    {
-      std::lock_guard lock(state_->metrics_mutex);
-      state_->metrics.residual_wait_ns +=
-          detail::LeaseState::Nanoseconds(start);
-      ++state_->metrics.reassignments;
+  try {
+    if (!live) {
+      // Finish cancellable admission, copies and reader waits BEFORE entering
+      // the adapter's nonthrowing invalidation/release path. On refusal the
+      // original generation and execution frontier remain reusable.
+      state_->PrepareReassignment();
+      state_->Invalidate();
+      {
+        std::lock_guard lock(state_->metrics_mutex);
+        state_->metrics.residual_wait_ns +=
+            detail::LeaseState::Nanoseconds(start);
+        ++state_->metrics.reassignments;
+      }
+      if (!state_->slot) {
+        state_->slot = state_->adapter.CreateSlot(*state_);
+        state_->raw = state_->slot.get();
+      }
     }
-    if (!state_->slot) {
-      state_->slot = state_->adapter.CreateSlot(*state_);
-      state_->raw = state_->slot.get();
-    }
+    return SlotLease(state_);
+  } catch (...) {
+    std::lock_guard lock(state_->mutex);
+    state_->stop = {};
+    state_->leased = false;
+    state_->changed.notify_all();
+    throw;
   }
-  return lease;
 }
+
 bool LeasedSlot::PreservationComplete() const {
   std::lock_guard lock(state_->mutex);
   if (state_->leased)

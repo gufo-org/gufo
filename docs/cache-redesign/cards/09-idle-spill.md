@@ -64,8 +64,10 @@ their stream and source pins release, including failures and cancellation.
 Acquisition claims the slot before waiting for an active piece, preventing the
 worker from submitting another. Live reuse keeps unfinished ranges borrowed;
 subsequent guarded mutation completes only the required ranges. Cold
-reassignment finishes remaining pieces before reset, without recopying finished
-pieces. Cancelled acquisition releases its claim without resetting the source.
+reassignment finishes remaining pieces and old source-reader waits through a
+cancellable preparation step before nonthrowing reset, without recopying
+finished pieces. Cancelled or failed preparation releases its claim without
+resetting the source, including while waiting for stream admission.
 `StopIdleSpill` drains the current piece and leaves unfinished ranges available
 for foreground preservation; facade destruction stops the worker while an
 outstanding lease can still retain the slot.
@@ -82,7 +84,8 @@ already bounded and must drain. Stream exhaustion defers idle work and retries
 foreground admission; permanent stream failure must throw through the supplied
 factory. Copy/conversion/admission exceptions suspend the idle worker until the
 next lease release. The foreground keeps card 06's contracts: ordinary mutation
-refuses on failure, while nonthrowing release retires failed ranges and drains
+and cold reassignment refuse on failure, while actual nonthrowing release
+retires failed ranges and drains
 their old source readers. Merely waiting for reassignment does **not** make any
 checkpoint eligible for policy eviction. This card adds no policy retirement;
 all still-needed ranges are preserved during successful reassignment. Card 19
@@ -99,7 +102,8 @@ rows are retained. No third-party implementation was reused.
 [`idle_spill_test.cpp`](../../../tests/cache/idle_spill_test.cpp) uses the fake
 adapter and permit-controlled completions for idle, zero-idle and mid-spill
 reassignment, byte-exact retained chunks/tails, cancellation during worker drain
-and foreground stream admission, source-reader draining, conversion/copy
+and foreground stream admission (including cold reassignment), cold
+cancellation during copying and source-reader waits, source-reader draining, conversion/copy
 failures, scheduler priority, stream-pool exhaustion, slot preference and
 concurrent persistence/read admission during publication. Each fixture's final
 ledger total must return to zero. The test belongs to the hosted PR target.
@@ -203,3 +207,17 @@ required (see the README).
 
 ## Review notes
 
+
+### Independent review follow-up
+
+Round one, on `9b85d77e`, reproduced cancellation being ignored during cold
+stream admission: acquisition stayed blocked after stop, then invalidated the
+old frontier once a stream arrived. Cold acquisition now prepares all remaining
+ranges with cancellable preservation before entering nonthrowing invalidation.
+Cancellation/refusal drops the claim while retaining the original generation
+and execution. Actual lease teardown still drains and may retire failed ranges.
+Regression tests cancel cold admission, an in-flight foreground piece, and old
+source-reader waits, checking that the original live frontier can be reacquired.
+
+The finding and response are recorded in
+[PR #505](https://github.com/gufo-org/gufo/pull/505).

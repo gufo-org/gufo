@@ -294,6 +294,61 @@ void CancelForegroundStreamWait() {
   f.lease = {};
   f.Verify();
 }
+void CancelColdReassignment() {
+  for (int phase = 0; phase < 3; ++phase) {
+    Fixture f;
+    f.device_idle = false;
+    const auto live = f.lease.Location();
+    f.lease.Commit();
+    std::stop_source stop;
+    RowPin pin;
+    if (phase == 0)
+      f.streams_available = false;
+    if (phase == 2)
+      pin = f.rows->Pin();
+    auto request = std::async(std::launch::async, [&] {
+      try {
+        auto lease = f.slot.Acquire({}, stop.get_token());
+        return false;
+      } catch (const std::runtime_error&) {
+        return true;
+      }
+    });
+    if (phase == 0) {
+      while (f.stream_attempts < 3)
+        std::this_thread::yield();
+    } else {
+      f.adapter.gate.WaitFor(1);
+      if (phase == 2) {
+        f.adapter.gate.Allow(3);
+        f.adapter.gate.WaitFor(3);
+        while (f.rows->Location())
+          std::this_thread::yield();
+      }
+    }
+    assert(request.wait_for(20ms) == std::future_status::timeout);
+    stop.request_stop();
+    if (phase == 1) {
+      // Submitted work must settle even after cancellation. Only this piece
+      // finishes; the cancelled acquirer cannot enqueue remaining pieces.
+      assert(request.wait_for(20ms) == std::future_status::timeout);
+      f.adapter.gate.Allow();
+    }
+    assert(request.wait_for(1s) == std::future_status::ready);
+    assert(request.get());
+    assert(f.rows->IsValid());
+    if (phase != 2)
+      assert(f.rows->Location());
+    f.lease = f.slot.Acquire(live);
+    assert(f.lease.Location() == live);
+    assert(f.adapter.Positions(f.lease.Execution())[0].valid_rows == 5);
+    pin = {};
+    f.streams_available = true;
+    f.adapter.gate.Allow(3);
+    f.lease = {};
+    f.Verify();
+  }
+}
 void Failure() {
   for (bool conversion : {false, true}) {
     Fixture f;
@@ -417,6 +472,7 @@ int main() {
   Failure();
   ForegroundStreamWait();
   CancelForegroundStreamWait();
+  CancelColdReassignment();
   SlotPreference();
   RetainedCheckpoints();
   PersistencePublicationRace();
