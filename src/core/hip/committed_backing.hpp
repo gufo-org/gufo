@@ -7,6 +7,7 @@
 #include <span>
 
 #include "src/cache/ledger.hpp"
+#include "src/cache/slot.hpp"
 
 namespace gufo::hip {
 namespace detail {
@@ -40,6 +41,12 @@ public:
   [[nodiscard]] std::span<std::byte> Bytes() const;
   [[nodiscard]] cache::ResourceAllocationInfo Info() const;
   void Convert();
+  // Consume an unconverted assigned block as borrowed checkpoint backing.
+  // Payload is a prefix of the block; accounting still charges full capacity.
+  // The row handle retains the slab after this block/pool facade is destroyed.
+  [[nodiscard]] std::shared_ptr<cache::BorrowedRows> Borrow(
+      cache::SlotLease&, cache::ComponentId, cache::Rows first, cache::Rows end,
+      std::size_t payload_bytes) &&;
   [[nodiscard]] BackingPin PinPersistence() const;
 
 private:

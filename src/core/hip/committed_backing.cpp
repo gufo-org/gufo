@@ -70,6 +70,16 @@ cache::ResourceAllocationInfo BackingBlock::Info() const {
 void BackingBlock::Convert() {
   charge_ = reservation_.Convert();
 }
+std::shared_ptr<cache::BorrowedRows> BackingBlock::Borrow(
+    cache::SlotLease& lease, cache::ComponentId component, cache::Rows first,
+    cache::Rows end, std::size_t payload_bytes) && {
+  auto buffer = Bytes();
+  if (!reservation_ || payload_bytes > buffer.size())
+    throw std::invalid_argument("invalid borrowed backing block");
+  auto owner = std::shared_ptr<const void>(std::move(state_), buffer.data());
+  return lease.Borrow(component, first, end, std::move(reservation_),
+                      std::move(owner), buffer.first(payload_bytes));
+}
 BackingPin BackingBlock::PinPersistence() const {
   return BackingPin(state_, reservation_ ? reservation_.PinPersistence()
                                          : charge_.PinPersistence());

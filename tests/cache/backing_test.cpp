@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cstdio>
@@ -11,6 +12,7 @@
 
 #include "src/core/hip/committed_backing.hpp"
 #include "src/core/hip/transfer_pool.hpp"
+#include "tests/cache/fake_adapter.hpp"
 
 using namespace gufo;
 using Category = cache::ResourceCategory;
@@ -364,6 +366,36 @@ void PendingStreams() {
   release = true;
   assert(pending.Wait() == Result::kSucceeded);
 }
+void BorrowedPoolLifetime() {
+  using namespace cache::testing;
+  cache::ResourceLedger ledger(Limits(2 * budget));
+  {
+    FakeAdapter adapter;
+    FakeStream stream;
+    cache::LeasedSlot slot(ledger, adapter, stream, cache::SlotId{1});
+    auto lease = slot.Acquire();
+    const std::array<cache::Token, 5> tokens{1, 2, 3, 4, 5};
+    adapter.Append(lease.Execution(), tokens, tokens);
+    std::shared_ptr<cache::BorrowedRows> rows;
+    {
+      hip::CommittedBackingPool pool(ledger, {budget, block_bytes, metadata});
+      auto block = pool.TryAcquire(Category::kBackingAssigned);
+      const auto before = allocations.load();
+      rows = std::move(*block).Borrow(lease, kTarget, 0, tokens.size(),
+                                      sizeof(tokens));
+      assert(allocations == before);
+      assert(rows->Bytes() == block_bytes);  // Capacity padding stays charged.
+      Throws<std::logic_error>([&] { (void)block->Bytes(); });
+    }
+    lease.Commit();
+    lease = slot.Acquire();  // Preserve into the slab after pool facade
+                             // destruction.
+    assert(!rows->Location());
+    auto pin = rows->Pin();
+    assert(std::memcmp(pin.Owner().get(), tokens.data(), sizeof(tokens)) == 0);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
 void AcquireAllocationFailure() {
   hip::TransferPool pool(1);
   fail_stream_new = true;
@@ -390,6 +422,7 @@ int main() {
   LifetimeAndFailures();
   PendingStreams();
   AcquireAllocationFailure();
+  BorrowedPoolLifetime();
   std::puts(
       "PASS: precommitted blocks, accounting, racing borrowers, pinned "
       "lifetime, bounded copies, leases and failure drains");

@@ -1,10 +1,13 @@
 #ifndef GUFO_CACHE_SLOT_HPP_
 #define GUFO_CACHE_SLOT_HPP_
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <stop_token>
+#include <thread>
 
 #include "src/cache/adapter.hpp"
 #include "src/cache/ledger.hpp"
@@ -91,6 +94,27 @@ private:
   std::shared_ptr<detail::LeaseState> state_;
   bool committed_{false};
 };
+struct IdleSpillConfig {
+  // At least one complete row must fit. Each piece leases a fresh stream;
+  // null means the pool is busy. Callbacks run outside metadata locks and must
+  // not acquire/stop this slot; metric queries are safe. Null defers idle
+  // work; foreground waits/retries.
+  // Throw for permanent failure (e.g. all pairs quarantined), never return
+  // null forever. Captured resources outlive the slot and its leases.
+  std::size_t piece_bytes;
+  std::function<std::unique_ptr<Stream>()> acquire_stream;
+  // Scheduler admission, checked before EVERY idle piece. False yields to
+  // device model work. Already submitted pieces drain before yielding.
+  std::function<bool()> device_idle;
+};
+struct SpillMetrics {
+  std::size_t idle_bytes{}, foreground_bytes{};
+  std::uint64_t idle_copy_ns{}, foreground_copy_ns{}, stream_wait_ns{};
+  // Cold acquisition: active idle-piece drain plus required preservation and
+  // reader waits. Includes stream acquisition; excludes slot recreation.
+  std::uint64_t residual_wait_ns{};
+  std::size_t reassignments{}, idle_failures{};
+};
 // One exclusive lease per model slot; distinct slots/leases may run
 // concurrently. Adapter and preservation stream outlive this facade AND all
 // outstanding leases. The stream is exclusive to this slot. External transfer
@@ -99,7 +123,8 @@ private:
 // waits for it outside metadata locks.
 class LeasedSlot {
 public:
-  LeasedSlot(ResourceLedger&, Adapter&, Stream&, SlotId);
+  LeasedSlot(ResourceLedger&, Adapter&, Stream&, SlotId,
+             std::optional<IdleSpillConfig> = {});
   ~LeasedSlot();
   LeasedSlot(const LeasedSlot&) = delete;
   LeasedSlot& operator=(const LeasedSlot&) = delete;
@@ -109,8 +134,25 @@ public:
   [[nodiscard]] SlotLease Acquire(std::optional<BorrowedLocation> live = {},
                                   std::stop_token = {});
 
+  // Snapshot only: another acquirer may win before Acquire. Busy slots return
+  // false; successful acquisitions still enforce exclusive generation checks.
+  [[nodiscard]] bool PreservationComplete() const;
+  [[nodiscard]] SpillMetrics Metrics() const;
+  // Stop at a piece boundary, drain its completion and release source pins.
+  // Retained partial ranges stay borrowed and can finish in the foreground.
+  void StopIdleSpill();
+
 private:
   std::shared_ptr<detail::LeaseState> state_;
+  std::jthread worker_;
 };
+class SlotBusy final : public std::runtime_error {
+public:
+  SlotBusy() : std::runtime_error("slot busy") {}
+};
+// Cold assignment tries complete idle slots first, then remaining idle slots.
+// Busy races are retried; cancellation/other failures propagate.
+[[nodiscard]] SlotLease AcquireSlot(std::span<LeasedSlot* const>,
+                                    std::stop_token = {});
 }  // namespace gufo::cache
 #endif

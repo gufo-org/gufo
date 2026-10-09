@@ -1,7 +1,7 @@
 add_library(gufo_cache_fake STATIC fake_adapter.cpp)
 if (ENGINE_ENABLE_HIP)
   add_executable(cache_backing_test backing_test.cpp)
-  target_link_libraries(cache_backing_test PRIVATE gufo_cache_hip)
+  target_link_libraries(cache_backing_test PRIVATE gufo_cache_hip gufo_cache_fake)
   target_compile_options(cache_backing_test PRIVATE -UNDEBUG)
   target_link_options(cache_backing_test PRIVATE
     -Wl,--wrap=hipHostMalloc -Wl,--wrap=hipMalloc
@@ -73,3 +73,8 @@ if (GUFO_BUILD_TOOLS)
   add_executable(cache_retention_bench retention_bench.cpp)
   target_link_libraries(cache_retention_bench PRIVATE gufo_cache_fake)
 endif()
+
+add_executable(cache_idle_spill_test idle_spill_test.cpp)
+target_link_libraries(cache_idle_spill_test PRIVATE gufo_cache_fake)
+add_test(NAME cache_idle_spill_test COMMAND cache_idle_spill_test)
+set_tests_properties(cache_idle_spill_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
