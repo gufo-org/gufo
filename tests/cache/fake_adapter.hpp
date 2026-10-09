@@ -49,6 +49,9 @@ public:
   [[nodiscard]] std::unique_ptr<Slot> CreateSlot(MutationGuard&) override;
   [[nodiscard]] std::vector<ComponentPosition> Positions(
       const Slot&) const override;
+  [[nodiscard]] std::vector<Rows> PlanPrefill(const Slot&, Rows first,
+                                              Rows end) const override;
+  void SetPrefillPassRows(Rows rows);
   void BeginRestore(Slot&, std::span<const ComponentPosition>) override;
   [[nodiscard]] Completion CapturePrivate(const Slot&, ComponentId,
                                           std::span<std::byte>,
@@ -83,6 +86,7 @@ private:
                                       std::function<TransferResult()>);
   bool fail_allocation_{false};
   bool fail_transfer_{false};
+  Rows prefill_pass_rows_{2048};
 };
 
 }  // namespace gufo::cache::testing

@@ -63,6 +63,11 @@ public:
   [[nodiscard]] virtual std::unique_ptr<Slot> CreateSlot(MutationGuard&) = 0;
   [[nodiscard]] virtual std::vector<ComponentPosition> Positions(
       const Slot&) const = 0;
+  // Pure host query: strictly increasing token boundaries of the planned
+  // prefill passes, ending at end. No execution or state mutation. The caller
+  // may insert exact required captures; optional captures can reuse this plan.
+  [[nodiscard]] virtual std::vector<Rows> PlanPrefill(const Slot&, Rows first,
+                                                      Rows end) const = 0;
 
   // Prepare one complete restore, including an exact shorter frontier. On the
   // host, allocate/check capacity and guard every range that will be replaced

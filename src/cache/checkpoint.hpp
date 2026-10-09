@@ -196,6 +196,10 @@ public:
   [[nodiscard]] LineageId Lineage() const;
   // Remove expired chunk bookkeeping. Does not evict a checkpoint or payload.
   void Prune();
+  // New unique payload capacity needed at these component positions. Excludes
+  // separately charged metadata; inherited full chunks contribute zero.
+  [[nodiscard]] std::size_t NewPayloadBytes(
+      std::span<const ComponentPosition>) const;
   [[nodiscard]] static std::size_t ChunkMetadataBytes();
 
 private:

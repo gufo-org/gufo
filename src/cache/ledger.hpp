@@ -5,8 +5,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <new>
 
 namespace gufo::cache {
+
+// Actual capacity exhaustion permits retention to reclaim eligible owners.
+// Allocation and injected failures remain ordinary bad_alloc and must not
+// trigger policy eviction. Existing bad_alloc callers remain compatible.
+class ResourceExhausted : public std::bad_alloc {};
 
 enum class ResourceCategory : std::uint8_t {
   kBackingFree,
@@ -154,6 +160,7 @@ public:
   // use ReserveBacking on existing committed blocks instead of allocating.
   [[nodiscard]] ResourceReservation Reserve(ResourceCategory, std::size_t);
   [[nodiscard]] ResourceSnapshot Snapshot() const;
+  [[nodiscard]] ResourceLimits Limits() const;
   // Atomic end/start of a global reporting window. The returned snapshot keeps
   // the ending peaks; next-window peaks start at the current charges/pins.
   // Overlapping request-local attribution belongs to card 19, not this reset.

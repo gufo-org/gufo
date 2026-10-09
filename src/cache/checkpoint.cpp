@@ -479,6 +479,44 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   tokens_metadata_ = std::move(tokens_metadata);
   return checkpoint;
 }
+std::size_t ExecutionHistory::NewPayloadBytes(
+    std::span<const ComponentPosition> positions) const {
+  if (positions.size() != descriptors_.size())
+    throw std::invalid_argument("incomplete capture positions");
+  std::size_t bytes = 0;
+  for (std::size_t i = 0; i < descriptors_.size(); ++i) {
+    const auto& d = descriptors_[i];
+    if (std::count_if(positions.begin(), positions.end(),
+                      [&](const auto& p) { return p.id == d.id; }) != 1)
+      throw std::invalid_argument("capture needs unique component positions");
+    const auto p = *std::find_if(positions.begin(), positions.end(),
+                                 [&](const auto& p) { return p.id == d.id; });
+    if (!positions_.empty() && p.valid_rows < positions_[i].valid_rows)
+      throw std::invalid_argument("capture estimate rewound without restore");
+    if (d.kind == ComponentKind::kPrivateState) {
+      bytes = Add(bytes, d.state_bytes);
+      continue;
+    }
+    const auto full = p.valid_rows - p.valid_rows % d.rows_per_chunk;
+    (void)Bytes(p.valid_rows, d.row_bytes);
+    bytes = Add(bytes, Bytes(p.valid_rows - full, d.row_bytes));
+    for (Rows first = 0; first < full; first += d.rows_per_chunk) {
+      bool shared = false;
+      for (const auto& e : entries_)
+        if (e.component == d.id && e.first == first) {
+          if (const auto chunk = e.chunk.lock()) {
+            if (!chunk->storage.IsValid())
+              throw std::invalid_argument("cannot estimate retired rows");
+            shared = true;
+          }
+          break;
+        }
+      if (!shared)
+        bytes = Add(bytes, Bytes(d.rows_per_chunk, d.row_bytes));
+    }
+  }
+  return bytes;
+}
 void ExecutionHistory::Prune() {
   // Destroy expired control blocks before releasing their accounting. Clearing
   // holes first also makes vector compaction's member-wise moves safe.

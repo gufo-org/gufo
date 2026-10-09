@@ -246,6 +246,22 @@ std::unique_ptr<Slot> FakeAdapter::CreateSlot(MutationGuard& guard) {
     throw std::bad_alloc();
   return std::make_unique<FakeSlot>(guard);
 }
+void FakeAdapter::SetPrefillPassRows(Rows rows) {
+  if (!rows)
+    throw std::invalid_argument("empty prefill pass");
+  prefill_pass_rows_ = rows;
+}
+std::vector<Rows> FakeAdapter::PlanPrefill(const Slot& slot, Rows first,
+                                           Rows end) const {
+  if (!slot.IsValid() || first > end)
+    throw std::invalid_argument("invalid prefill plan");
+  std::vector<Rows> result;
+  while (first < end) {
+    first += std::min(prefill_pass_rows_, end - first);
+    result.push_back(first);
+  }
+  return result;
+}
 std::vector<ComponentPosition> FakeAdapter::Positions(const Slot& slot) const {
   const auto& state = AsSlot(slot);
   return {{kTarget, state.restoring ? ContiguousRows(state.target_loaded)

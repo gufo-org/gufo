@@ -200,7 +200,7 @@ ResourceReservation ResourceLedger::Reserve(ResourceCategory category,
       (category == Staging
            ? bytes > limits.staging_bytes - s.bytes[Index(Staging)]
            : bytes > limits.ram_bytes - s.ram_bytes))
-    throw std::bad_alloc();
+    throw ResourceExhausted();
   s.bytes[Index(category)] += bytes;
   s.reserved_bytes[Index(category)] += bytes;
   s.total_bytes += bytes;
@@ -257,7 +257,7 @@ ResourceReservation ResourceCharge::ReserveBacking(
       std::make_shared<detail::ChargeToken>(token_->allocation, true);
   const detail::Lock lock(*a.ledger, LedgerStep::kReserve);
   if (a.category != Free) {
-    throw std::bad_alloc();
+    throw ResourceExhausted();
   }
   assert(!a.reserved);
   a.ledger->Fail(LedgerStep::kReserve);
@@ -307,6 +307,9 @@ PersistencePin ResourceCharge::PinPersistence() const {
 }
 PersistencePin ResourceReservation::PinPersistence() const {
   return PersistencePin(Pin(token_));
+}
+ResourceLimits ResourceLedger::Limits() const {
+  return state_->limits;
 }
 ResourceSnapshot ResourceLedger::Snapshot() const {
   const std::lock_guard lock(state_->mutex);

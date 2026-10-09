@@ -465,6 +465,10 @@ void TeardownAndCancelledAdmission() {
 // Simulate an adapter that resets its generation while omitting preservation.
 class BadAdapter final : public Adapter {
 public:
+  std::vector<Rows> PlanPrefill(const Slot&, Rows first,
+                                Rows end) const override {
+    return first == end ? std::vector<Rows>{} : std::vector<Rows>{end};
+  }
   FakeAdapter fake;
   MutationGuard* guard{};
   Capabilities GetCapabilities() const override {

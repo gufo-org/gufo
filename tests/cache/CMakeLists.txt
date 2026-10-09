@@ -43,3 +43,18 @@ if (GUFO_BUILD_TOOLS)
   add_executable(cache_slot_bench slot_bench.cpp)
   target_link_libraries(cache_slot_bench PRIVATE gufo_cache_fake)
 endif()
+
+add_executable(cache_retention_test retention_test.cpp)
+target_link_libraries(cache_retention_test PRIVATE gufo_cache_fake)
+add_test(NAME cache_retention_test COMMAND cache_retention_test)
+set_tests_properties(cache_retention_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+if (GUFO_BUILD_TOOLS)
+  add_executable(cache_retention_replay retention_replay.cpp)
+  target_link_libraries(cache_retention_replay PRIVATE gufo_cache_fake)
+endif()
+
+if (GUFO_BUILD_TOOLS)
+  add_executable(cache_retention_bench retention_bench.cpp)
+  target_link_libraries(cache_retention_bench PRIVATE gufo_cache_fake)
+endif()
