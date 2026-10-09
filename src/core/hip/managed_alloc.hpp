@@ -17,7 +17,9 @@ namespace gufo::hip {
 [[nodiscard]] inline hipError_t AllocateDevice(void** pointer,
                                                std::size_t bytes) {
   hipError_t status = hipMalloc(pointer, bytes);
-  if (status != hipSuccess) {
+  if (status == hipErrorOutOfMemory) {
+    // Clear the error as it remains sticky
+    (void)hipGetLastError();
     status = hipMallocManaged(pointer, bytes, hipMemAttachGlobal);
   }
   return status;
