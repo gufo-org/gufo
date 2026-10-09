@@ -85,6 +85,9 @@ public:
   void SetLiveAvailable(IndexEntryId, bool);
   void Erase(IndexEntryId);
   [[nodiscard]] PrefixLookup Lookup(const PrefixQuery&) const;
+  // Validate an admission against the registered inventory/layout and exact
+  // private-state boundary, without publishing or allocating index metadata.
+  [[nodiscard]] bool IsResidentCoherent(const Checkpoint&) const;
   // Ignores stable-prefix rules and the query's reuse flag; leases nothing.
   [[nodiscard]] Rows CachedPrefixTokens(const PrefixQuery&) const;
   // Conservative input-identity check at the stored record's full boundary,

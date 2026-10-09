@@ -123,13 +123,13 @@ archived retokenization, without scaling to reported production token counts.
 
 | Trace | Requests | Admitted | Refused | Evicted | Peak unique payload bytes | Final records | Required / optional predicted splits |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fn/w1 | 36 | 81 | 5 | 80 | 9116310526 | 1 | 36 / 14 |
+| fn/w1 | 36 | 76 | 9 | 41 | 9186913708 | 35 | 36 / 13 |
 | fn/w2 | 36 | 76 | 0 | 25 | 9216642132 | 51 | 36 / 1 |
-| fn/w3 | 60 | 116 | 26 | 75 | 9111036350 | 41 | 60 / 18 |
-| fn/w4 | 33 | 97 | 0 | 6 | 8822587420 | 42 | 33 / 13 |
-| q27/w1 | 36 | 83 | 3 | 53 | 22911687872 | 30 | 36 / 14 |
-| q27/w2 | 36 | 77 | 0 | 17 | 23196579552 | 60 | 36 / 2 |
-| q27/w3 | 60 | 125 | 16 | 72 | 23344317312 | 53 | 60 / 18 |
+| fn/w3 | 60 | 112 | 30 | 71 | 9111036350 | 41 | 60 / 18 |
+| fn/w4 | 33 | 97 | 0 | 5 | 8869009478 | 42 | 33 / 13 |
+| q27/w1 | 36 | 79 | 6 | 35 | 22926332864 | 44 | 36 / 13 |
+| q27/w2 | 36 | 77 | 0 | 16 | 23196579552 | 61 | 36 / 2 |
+| q27/w3 | 60 | 123 | 18 | 70 | 23338764288 | 53 | 60 / 18 |
 | q27/w4 | 33 | 97 | 0 | 0 | 20686749440 | 41 | 33 / 11 |
 
 This is a sequential checkpoint-only policy baseline. It uses real prefix lookup
@@ -229,3 +229,38 @@ required (see the README).
 [Checkpoint selection and eviction](../RFC.md#checkpoint-selection-and-eviction)
 
 ## Review notes
+
+### Independent review, round 1
+
+A fresh-context reviewer reported two confirmed P2 findings in
+[PR #503](https://github.com/gufo-org/gufo/pull/503).
+Admission now shares the prefix index's resident-coherence predicate, checking
+its complete registered inventory, layouts and exact private-state boundary
+before insertion or replacement. Regressions for missing components, changed
+layout/row bytes/chunk geometry and private state before the boundary verify
+that the existing exact checkpoint and ledger bytes remain unchanged.
+
+The replay previously retained every `PrefixLookup` candidate handle throughout
+admission. Those unintended reader pins prevented victims' storage reclamation,
+distorting the retention baseline. It now releases lookup handles after selecting
+and planning; the selected source remains protected by its record ID. All eight
+traces were rerun and their logs replayed successfully. The corrected table above
+supersedes this original, invalid harness evidence from `7de22156`:
+
+| Trace | Requests | Admitted | Refused | Evicted | Peak unique payload bytes | Final records | Required / optional predicted splits |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fn/w1 | 36 | 81 | 5 | 80 | 9116310526 | 1 | 36 / 14 |
+| fn/w2 | 36 | 76 | 0 | 25 | 9216642132 | 51 | 36 / 1 |
+| fn/w3 | 60 | 116 | 26 | 75 | 9111036350 | 41 | 60 / 18 |
+| fn/w4 | 33 | 97 | 0 | 6 | 8822587420 | 42 | 33 / 13 |
+| q27/w1 | 36 | 83 | 3 | 53 | 22911687872 | 30 | 36 / 14 |
+| q27/w2 | 36 | 77 | 0 | 17 | 23196579552 | 60 | 36 / 2 |
+| q27/w3 | 60 | 125 | 16 | 72 | 23344317312 | 53 | 60 / 18 |
+| q27/w4 | 33 | 97 | 0 | 0 | 20686749440 | 41 | 33 / 11 |
+
+The original summary and CSV logs remain in `/tmp/gufo-card07-initial-replay/`;
+corrected files are `/tmp/gufo-card07-replay-summary.json` and
+`/tmp/gufo-card07-{fn,q27}-{w1,w2,w3,w4}.csv`. This is a correction of CPU replay
+ownership, not an inference performance result. The initial focused clang-tidy
+check also identified missing deleted special members on the event sink; these
+are fixed, and focused tidy passes.

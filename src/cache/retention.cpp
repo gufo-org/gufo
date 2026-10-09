@@ -275,19 +275,13 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       return refuse(RetentionReason::kCancelled);
     try {
       auto checkpoint = capture();
-      if (!checkpoint || !checkpoint->IsValid() ||
+      if (!checkpoint || !index_.IsResidentCoherent(*checkpoint) ||
           checkpoint->Compatibility() != r.compatibility ||
           checkpoint->Input() != r.input ||
           !std::ranges::equal(checkpoint->Tokens(), r.tokens)) {
         checkpoint.reset();
         return refuse(RetentionReason::kInvalid);
       }
-      for (const auto& c : checkpoint->Components())
-        if (c.descriptor.kind == ComponentKind::kPrivateState &&
-            c.position.valid_rows != checkpoint->Boundary()) {
-          checkpoint.reset();
-          return refuse(RetentionReason::kInvalid);
-        }
       if (r.stop.stop_requested()) {
         checkpoint.reset();
         return refuse(RetentionReason::kCancelled);

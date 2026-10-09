@@ -326,6 +326,35 @@ void CapacityAndSharing() {
   assert(f.log.events[f.log.events.size() - 2].reason ==
          RetentionReason::kByteCapacity);
 }
+void InvalidInventoriesPreserveReplacement() {
+  for (int fault = 0; fault < 5; ++fault) {
+    Fixture f(1);
+    const std::vector<Token> tokens{1, 2, 3, 4};
+    const auto original = f.Add(tokens);
+    auto components = std::vector<ComponentDescriptor>(kIndexComponents.begin(),
+                                                       kIndexComponents.end());
+    if (fault == 0)
+      components.resize(1);
+    if (fault == 1)
+      ++components[0].layout_version;
+    if (fault == 2)
+      ++components[0].row_bytes;
+    if (fault == 3)
+      ++components[0].rows_per_chunk;
+    const auto before = f.ledger.Snapshot().total_bytes;
+    assert(!f.policy.Admit({tokens, {1}, {}}, [&] {
+      return IndexCheckpoint(
+          f.ledger, tokens, {1}, {}, components,
+          fault == 4 ? std::optional<Rows>{3} : std::nullopt);
+    }));
+    assert(f.policy.Size() == 1 && f.Cached(tokens) == tokens.size());
+    assert(f.policy.Rank(original) == 3);
+    assert(f.ledger.Snapshot().total_bytes == before);
+    assert(f.log.events.back().action == RetentionAction::kRefused &&
+           f.log.events.back().reason == RetentionReason::kInvalid);
+    assert(f.log.events.back().ledger_bytes == before);
+  }
+}
 void RealCapacityAndUniqueAdmission() {
   ResourceLedger ledger({32768, 32768, 0, 0});
   {
@@ -404,4 +433,5 @@ int main() {
   CapacityAndSharing();
   ImpossibleAndAllocationFailure();
   RealCapacityAndUniqueAdmission();
+  InvalidInventoriesPreserveReplacement();
 }

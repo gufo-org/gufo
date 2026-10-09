@@ -96,6 +96,10 @@ int main(int argc, char** argv) {
       const auto candidates =
           PlanCaptures(adapter, *slot,
                        {count, reused, stable, common, true, true, retained});
+      // Candidate handles are selection readers, not retention owners. The
+      // selected source remains protected by its ID throughout this request;
+      // release lookup pins before admission so victims can reclaim storage.
+      lookup = {};
       for (const auto& candidate : candidates) {
         if (candidate.splits_pass) {
           if (candidate.required)

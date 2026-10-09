@@ -263,6 +263,22 @@ struct PrefixIndex::Impl {
     }
     return bytes;
   }
+  bool CheckpointResident(const Tree& tree,
+                          const Checkpoint& checkpoint) const {
+    if (!checkpoint.IsValid() ||
+        checkpoint.Components().size() != tree.descriptors.size())
+      return false;
+    for (const auto& d : tree.descriptors) {
+      auto c = std::ranges::find_if(
+          checkpoint.Components(),
+          [&](const auto& c) { return Same(d, c.descriptor); });
+      if (c == checkpoint.Components().end() ||
+          (d.kind == ComponentKind::kPrivateState &&
+           c->position.valid_rows != checkpoint.Boundary()))
+        return false;
+    }
+    return true;
+  }
   bool Resident(const Tree& tree, const Record& r) const {
     if (r.live) {
       if (!r.live->available ||
@@ -278,19 +294,12 @@ struct PrefixIndex::Impl {
       }
       return true;
     }
-    if (!r.checkpoint->IsValid() ||
-        r.checkpoint->Components().size() != tree.descriptors.size())
+    if (!CheckpointResident(tree, *r.checkpoint))
       return false;
     for (const auto& d : tree.descriptors) {
       auto a =
           std::ranges::find(r.availability, d.id, &ComponentAvailability::id);
-      auto c = std::ranges::find_if(
-          r.checkpoint->Components(),
-          [&](const auto& c) { return Same(d, c.descriptor); });
-      if (a == r.availability.end() || !a->resident ||
-          c == r.checkpoint->Components().end() ||
-          (d.kind == ComponentKind::kPrivateState &&
-           c->position.valid_rows != r.Boundary()))
+      if (a == r.availability.end() || !a->resident)
         return false;
     }
     return true;
@@ -493,6 +502,11 @@ PrefixLookup PrefixIndex::Lookup(const PrefixQuery& query) const {
                       ? SelectionReason::kExactLiveContinuation
                       : SelectionReason::kDeepestCheckpoint;
   return result;
+}
+bool PrefixIndex::IsResidentCoherent(const Checkpoint& checkpoint) const {
+  const auto it = impl_->trees.find(checkpoint.Compatibility());
+  return it != impl_->trees.end() &&
+         impl_->CheckpointResident(it->second, checkpoint);
 }
 Rows PrefixIndex::CachedPrefixTokens(const PrefixQuery& query) const {
   auto copy = query;
