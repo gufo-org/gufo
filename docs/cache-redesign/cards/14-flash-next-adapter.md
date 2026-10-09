@@ -100,3 +100,58 @@ required (see the README).
 
 ## Review notes
 
+### Adapter behavior after device loss
+
+Context: this note comes from an out-of-tree model port that uses exact
+recurrent checkpoints.
+
+The adapter contract does not define teardown after a device loss. These
+statements are in `src/cache/adapter.hpp` at `9024101b`:
+
+- `Invalidate` returns false while any read or load is pending (lines 111-115).
+- Destruction drains all outstanding slot transfers before the nonthrowing
+  release path (lines 113-114).
+- `BeforeRelease` is `noexcept` (line 30). Invalidation and destruction "cannot
+  refuse release" (line 28). The guard must preserve or retire every borrower
+  and finish all preservation transfers and readers before it returns
+  (lines 28-30).
+
+The RFC covers only the request side (RFC.md:329-331): "A device failure that
+invalidates execution follows the normal request failure path; it cannot be
+hidden as a harmless cache miss." No text defines `Invalidate`, release, drain or
+teardown on a lost device.
+
+Card 08 transfer pools and card 09 idle-spill workers keep copies in flight
+beside decode. A fault can occur while transfers are pending. In that state,
+`Invalidate` returns false. The only remaining path is destruction, and that
+path waits on device work. Card 08 latches wait failures when HIP reports an
+error. The observation below shows that a failure path with device calls can
+also hang.
+
+Observation on gfx1151 (Strix Halo) with ROCm 7.1.1:
+
+- The hang occurred with the injected HIP errors of the device_loss functional
+  suite. The suite injects HIP errors. It never resets the GPU.
+- The failure path of the port made device calls. It called a session reset.
+- A host-only invalidate, with no device calls, fixed the hang. The suite then
+  passed 10 of 10 cases.
+- The fix was not tested again on ROCm 7.2.3. Cards 08 and 09 measured on that
+  version.
+- On the same hardware, kernel compute-ring timeouts reset the compute queues
+  during long GPU jobs ("device wedged"). This was observed with a long-running
+  inference job. Device loss is therefore a real event, not only an injected
+  one.
+
+Request: add a device-lost state to the adapter contract (card 02 API). Card 14
+applies it first. The rule applies to every adapter, not only to one model.
+After the adapter latches the state:
+
+1. `Invalidate`, `BeforeRelease` and destruction retire borrowers. They do not
+   preserve them.
+2. These calls do not wait on device work.
+3. The cache treats all outstanding completions on that device as failed.
+4. Transfer and spill workers stop. They do not block server shutdown or
+   restart.
+5. `tests/functional/device_loss.py` gains a case through its fault library. A
+   spill or preservation copy is in flight when the injected loss arrives. The
+   server must exit with status 75 without a hang.
