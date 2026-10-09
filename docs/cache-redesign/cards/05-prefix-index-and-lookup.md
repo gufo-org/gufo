@@ -119,7 +119,7 @@ Step baseline on Linux 7.2.9 x86-64, AMD Ryzen AI MAX+ 395, based on main
 The benchmark uses three components with independent row frontiers, boundaries
 spaced by 1,024 tokens, 20 warmup lookups and 1,000 measured lookups. It includes
 candidate construction, identity/coherence checks, cost estimates and sorting;
-each iteration verifies the deepest boundary and all 128 candidates. Timing is
+each iteration verifies the deepest boundary and all 128 candidates. The initial timing is
 one CPU microbenchmark run in `RelWithDebInfo`, not an inference, GPU transfer or
 contention measurement. This is a step baseline, with no directly comparable
 RFC measurement or speedup claim. Metadata includes shared edge tokens and
@@ -154,6 +154,31 @@ documentation and diff whitespace checks passed. The focused tidy line filter
 excludes pre-existing header diagnostics outside the changed index files.
 Build artifacts remain in ignored `build/` directories. No inference path is
 connected, so model functional/timing qualification remains with switch-over.
+
+### Review follow-up, round 1
+
+A fresh-context review identified retained empty unary nodes after prefix
+insert/erase churn and token-edge allocation before ledger admission. Both are
+fixed. Erasure coalesces empty unary paths while preserving surviving record
+pointers. If temporary replacement admission/allocation fails, erasure succeeds
+with a coherent tree and a later erasure retries compaction. A regression retains
+one 131,072-token checkpoint through 1,023 short live-prefix insert/erase cycles
+and verifies unchanged metadata and exactly one candidate after every cycle.
+Additional reserve/convert fault tests verify safe deferred compaction.
+
+Index construction, registered inventories, new edges and split suffixes now
+reserve predictable capacity before allocating, verify actual retained capacity
+with the pinned standard library, and convert after successful construction.
+Publication map nodes are preallocated before mutating the token tree. Rejection
+tests observe actual heap allocations and confirm that denied new edges, split
+suffixes and component inventories allocate no unadmitted large buffer.
+
+The focused test passed with ASan/UBSan and ordinary assertions; focused tidy,
+formatting, documentation and the production cache-library rebuild passed.
+The benchmark rerun after these fixes recorded **36.16 µs/lookup** and unchanged
+metadata (**579,057 bytes**, **4,520 incremental bytes/checkpoint**). The initial
+35.13 µs result remains above as prior step evidence; this is not a regression
+qualification or an inference timing comparison.
 
 ## Done when
 

@@ -1,8 +1,30 @@
+#include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 
 #include "tests/cache/prefix_index_fixture.hpp"
+
+namespace {
+bool watch_allocations = false;
+std::size_t largest_allocation = 0;
+}  // namespace
+// Observe actual edge allocation order when a ledger reservation is rejected.
+void* operator new(std::size_t bytes) {
+  if (watch_allocations)
+    largest_allocation = std::max(largest_allocation, bytes);
+  if (void* pointer = std::malloc(bytes ? bytes : 1))
+    return pointer;
+  throw std::bad_alloc();
+}
+void operator delete(void* pointer) noexcept {
+  std::free(pointer);
+}
+void operator delete(void* pointer, std::size_t) noexcept {
+  std::free(pointer);
+}
 
 using namespace gufo::cache;
 using namespace gufo::cache::testing;
@@ -309,30 +331,131 @@ void LongPromptAndMemory() {
   }
   assert(ledger.Snapshot().total_bytes == 0);
 }
+void PrefixChurn() {
+  ResourceLedger ledger{kIndexLimits};
+  {
+    PrefixIndex index{ledger};
+    index.Register({1}, kIndexComponents);
+    std::vector<Token> prompt(131072, 7);
+    (void)index.Insert(IndexCheckpoint(ledger, prompt), ResidentComponents());
+    const auto retained = index.MetadataBytes();
+    for (std::size_t count = 128; count < prompt.size(); count += 128) {
+      auto entry = index.Insert(IndexLive(std::vector<Token>(count, 7)));
+      index.Erase(entry);
+      assert(index.MetadataBytes() == retained);
+    }
+    const auto result = index.Lookup(Query(prompt));
+    assert(result.candidates.size() == 1);
+    assert(result.selected->boundary == prompt.size());
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
+void DeferredCompaction() {
+  ResourceLedger ledger{kIndexLimits};
+  PrefixIndex index{ledger};
+  index.Register({1}, kIndexComponents);
+  const Tokens tokens{1, 2, 3, 4, 5};
+  (void)index.Insert(IndexCheckpoint(ledger, tokens), ResidentComponents());
+  const auto retained = index.MetadataBytes();
+  for (const auto step : {LedgerStep::kReserve, LedgerStep::kConvert}) {
+    auto short_live = index.Insert(IndexLive({1, 2}));
+    ledger.FailAfter(step, 0);
+    index.Erase(short_live);
+    assert(index.Lookup(Query(tokens)).candidates.size() == 1);
+    assert(index.CachedPrefixTokens(Query(Tokens{1, 2})) == 0);
+    assert(index.MetadataBytes() > retained);
+    auto retry = index.Insert(IndexLive({1, 2, 3}));
+    index.Erase(retry);
+    assert(index.MetadataBytes() == retained);
+  }
+}
+void AdmissionBeforeAllocation() {
+  ResourceLedger ledger{kIndexLimits};
+  PrefixIndex index{ledger};
+  index.Register({1}, kIndexComponents);
+  std::vector<Token> prompt(131072, 7);
+  auto checkpoint = IndexCheckpoint(ledger, prompt);
+  auto availability = ResidentComponents();
+  const auto before = ledger.Snapshot().total_bytes;
+  ledger.FailAfter(LedgerStep::kReserve, 1);
+  largest_allocation = 0;
+  watch_allocations = true;
+  bool rejected = false;
+  try {
+    (void)index.Insert(checkpoint, std::move(availability));
+  } catch (const std::bad_alloc&) {
+    rejected = true;
+  }
+  watch_allocations = false;
+  assert(rejected);
+  assert(largest_allocation < prompt.size() * sizeof(Token));
+  assert(ledger.Snapshot().total_bytes == before);
+  (void)index.Insert(checkpoint, ResidentComponents());
+  auto prefix = IndexCheckpoint(ledger, std::span(prompt).first(1024));
+  availability = ResidentComponents();
+  const auto split_before = ledger.Snapshot().total_bytes;
+  ledger.FailAfter(LedgerStep::kReserve, 2);
+  largest_allocation = 0;
+  watch_allocations = true;
+  rejected = false;
+  try {
+    (void)index.Insert(prefix, std::move(availability));
+  } catch (const std::bad_alloc&) {
+    rejected = true;
+  }
+  watch_allocations = false;
+  assert(rejected);
+  assert(largest_allocation < (prompt.size() - 1024) * sizeof(Token));
+  assert(ledger.Snapshot().total_bytes == split_before);
+
+  std::vector<ComponentDescriptor> inventory(1024);
+  for (std::size_t i = 0; i < inventory.size(); ++i)
+    inventory[i] = {{static_cast<std::uint32_t>(i)},
+                    1,
+                    ComponentKind::kPrivateState,
+                    0,
+                    0,
+                    32};
+  ledger.FailAfter(LedgerStep::kReserve, 0);
+  largest_allocation = 0;
+  watch_allocations = true;
+  rejected = false;
+  try {
+    index.Register({2}, inventory);
+  } catch (const std::bad_alloc&) {
+    rejected = true;
+  }
+  watch_allocations = false;
+  assert(rejected);
+  assert(largest_allocation < inventory.size() * sizeof(ComponentDescriptor));
+  assert(ledger.Snapshot().total_bytes == split_before);
+}
 void AdmissionAndValidation() {
   ResourceLedger ledger{kIndexLimits};
   const Tokens original{1, 2, 3, 4}, split{1, 2, 9}, prefix{1, 2};
   auto retained = IndexCheckpoint(ledger, original);
   auto branch = IndexCheckpoint(ledger, split);
   auto parent = IndexCheckpoint(ledger, prefix);
-  for (std::size_t failure = 0; failure < 5; ++failure) {
-    PrefixIndex index{ledger};
-    index.Register({1}, kIndexComponents);
-    (void)index.Insert(retained, ResidentComponents());
-    const auto bytes = ledger.Snapshot().total_bytes;
-    ledger.FailAfter(LedgerStep::kReserve, failure);
-    bool failed = false;
-    try {
-      (void)index.Insert(branch, ResidentComponents());
-    } catch (const std::bad_alloc&) {
-      failed = true;
+  for (const auto step : {LedgerStep::kReserve, LedgerStep::kConvert}) {
+    for (std::size_t failure = 0; failure < 5; ++failure) {
+      PrefixIndex index{ledger};
+      index.Register({1}, kIndexComponents);
+      (void)index.Insert(retained, ResidentComponents());
+      const auto bytes = ledger.Snapshot().total_bytes;
+      ledger.FailAfter(step, failure);
+      bool failed = false;
+      try {
+        (void)index.Insert(branch, ResidentComponents());
+      } catch (const std::bad_alloc&) {
+        failed = true;
+      }
+      ledger.ClearFaults();
+      assert(index.Lookup(Query(original)).selected->checkpoint == retained);
+      if (failed)
+        assert(ledger.Snapshot().total_bytes == bytes);
+      else
+        assert(index.Lookup(Query(split)).selected->checkpoint == branch);
     }
-    ledger.ClearFaults();
-    assert(index.Lookup(Query(original)).selected->checkpoint == retained);
-    if (failed)
-      assert(ledger.Snapshot().total_bytes == bytes);
-    else
-      assert(index.Lookup(Query(split)).selected->checkpoint == branch);
   }
   PrefixIndex index{ledger};
   index.Register({1}, kIndexComponents);
@@ -375,6 +498,9 @@ int main() {
   CoherenceAndFallback();
   TiesAndIsolation();
   LongPromptAndMemory();
+  PrefixChurn();
+  DeferredCompaction();
+  AdmissionBeforeAllocation();
   AdmissionAndValidation();
   std::cout << "prefix index tests passed\n";
 }
