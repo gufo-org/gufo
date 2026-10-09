@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -724,6 +725,12 @@ Runtime::Runtime(const Weights& weights)
 
 Runtime::~Runtime() {
   (void)hipStreamSynchronize(stream_);
+  for (std::size_t i = 0; i < staging_.size(); ++i) {
+    if (staging_[i])
+      (void)hipHostFree(staging_[i]);
+    if (staging_done_[i])
+      (void)hipEventDestroy(staging_done_[i]);
+  }
   device_weights_.clear();
   packed_source_ = {};
   packed_input_ = {};
@@ -732,6 +739,32 @@ Runtime::~Runtime() {
     (void)hipblasDestroy(blas_);
   if (stream_)
     (void)hipStreamDestroy(stream_);
+}
+
+// Copy mapped weights through runtime-owned pinned buffers. A direct
+// hipMemcpyAsync from the file mapping lets HIP pin the mapped page-cache
+// pages for the transfer; when the host reclaims them, every invalidation
+// evicts this process's GPU queues, and a 64 GB host stalls indefinitely.
+void Runtime::UploadMapped(void* device, const void* host, std::size_t bytes) {
+  constexpr std::size_t kStagingBytes = 64ULL << 20;
+  for (std::size_t i = 0; i < staging_.size(); ++i) {
+    if (!staging_[i])
+      Check(hipHostMalloc(&staging_[i], kStagingBytes, hipHostMallocDefault));
+    if (!staging_done_[i])
+      Check(hipEventCreateWithFlags(&staging_done_[i], hipEventDisableTiming));
+  }
+  auto* target = static_cast<std::byte*>(device);
+  const auto* source = static_cast<const std::byte*>(host);
+  for (std::size_t offset = 0, slot = 0; offset < bytes;
+       offset += kStagingBytes, slot ^= 1U) {
+    const auto chunk = std::min(kStagingBytes, bytes - offset);
+    // The buffer is reused only after its previous copy has completed.
+    Check(hipEventSynchronize(staging_done_[slot]));
+    std::memcpy(staging_[slot], source + offset, chunk);
+    Check(hipMemcpyAsync(target + offset, staging_[slot], chunk,
+                         hipMemcpyHostToDevice, stream_));
+    Check(hipEventRecord(staging_done_[slot], stream_));
+  }
 }
 
 Matrix Runtime::Raw(std::size_t bytes) {
@@ -800,12 +833,10 @@ Matrix Runtime::Weight(std::string_view name) {
   const int cols = static_cast<int>(count / rows);
   Matrix m = New(rows, cols);
   if (w.bf16)
-    Check(hipMemcpyAsync(m.data, w.data, w.bytes, hipMemcpyHostToDevice,
-                         stream_));
+    UploadMapped(m.data, w.data, w.bytes);
   else {
     auto raw = Raw(w.bytes);
-    Check(hipMemcpyAsync(raw.data, w.data, w.bytes, hipMemcpyHostToDevice,
-                         stream_));
+    UploadMapped(raw.data, w.data, w.bytes);
     FloatToBf16<<<Blocks(count), 256, 0, stream_>>>(
         reinterpret_cast<const float*>(raw.data), Ptr(m), count);
   }
