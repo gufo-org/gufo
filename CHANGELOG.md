@@ -4,6 +4,26 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.10.0](https://github.com/gufo-org/gufo/compare/v0.9.1...v0.10.0) (2026-10-09)
+
+
+### Features
+
+* **serve:** support tools and streaming on /v1/messages ([#469](https://github.com/gufo-org/gufo/issues/469)) ([50900eb](https://github.com/gufo-org/gufo/commit/50900eb717925cc8e85ed952e1a75e522958a7f6))
+
+
+### Performance
+
+* **ds4:** keep the 8-row IQ2 gate/up tiles out of scratch ([#482](https://github.com/gufo-org/gufo/issues/482)) ([e9b0f0b](https://github.com/gufo-org/gufo/commit/e9b0f0b34b41b1968dcf6eb2f215cbfd53ae4ebe))
+* **qwen-flash:** accelerate prefill and MTP catch-up ([#485](https://github.com/gufo-org/gufo/issues/485)) ([fd747a5](https://github.com/gufo-org/gufo/commit/fd747a51951ccd09eda20de5c34313670dc9b9d3))
+* **qwen-image:** unroll the fused attention value halves ([#481](https://github.com/gufo-org/gufo/issues/481)) ([b2438a4](https://github.com/gufo-org/gufo/commit/b2438a4a12717cd0970b46bb293875eaf31d9839))
+
+
+### Documentation
+
+* **cache:** add cache redesign implementation cards ([#489](https://github.com/gufo-org/gufo/issues/489)) ([d221a01](https://github.com/gufo-org/gufo/commit/d221a01c74052737a04148ef86a47e1db3e270b7))
+* **cache:** propose continuation cache redesign RFC ([#488](https://github.com/gufo-org/gufo/issues/488)) ([b3facce](https://github.com/gufo-org/gufo/commit/b3facce1180e4bb44ac25c8f8a0fee348ae36da9))
+
 ## [0.9.1](https://github.com/gufo-org/gufo/compare/v0.9.0...v0.9.1) (2026-10-08)
 
 
