@@ -1644,6 +1644,19 @@ void TestCompatibilityRequests() {
            sent[3].role == gufo::tokenization::ChatRole::kUser &&
            sent[3].images.empty() && sent[3].content == "which color?");
   }
+  // The streamed path takes the same parsed turn.
+  const auto streamed_image = server.Post("/v1/messages", R"({"stream":true,
+      "max_tokens":8,"messages":[{"role":"user","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+          "data":"AQID"}},
+        {"type":"text","text":"what is it?"}]}]})");
+  ExpectStatus(streamed_image, 200);
+  assert(streamed_image.find("event: message_start\n") != std::string::npos);
+  {
+    const auto sent = server.backend->LastCall().chat.messages.back();
+    assert(sent.content == "what is it?" && sent.images.size() == 1 &&
+           sent.images[0].offset == 0);
+  }
   // Unsupported spellings stay errors that name the problem.
   const auto calls_before_images = server.backend->calls.load();
   for (const auto& [body, expected] :

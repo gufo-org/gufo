@@ -60,7 +60,7 @@ def assert_color(result, color):
         assert usage["gufo"]["prefill_tokens"] == tokens, usage
 
 
-def messages_color_requests(png, color):
+def messages_color_requests(png):
     """Anthropic Messages image blocks: in the user turn and in a tool result."""
     source = {"type": "base64", "media_type": "image/png", "data": png.split(",", 1)[1]}
     question = "Name the dominant color in the image. Reply with one lowercase English color name only."
@@ -130,7 +130,7 @@ def check_messages_images(client, model, checks, image_content):
 
     for color in ("red", "blue"):
         png = image_content(color)["image_url"]["url"]
-        for place, body in messages_color_requests(png, color):
+        for place, body in messages_color_requests(png):
             result = messages_tool_result(client, {"model": model, **body})
             assert re.fullmatch(color + r"[.!]?", result["text"].strip().lower()), result
             assert not result["reasoning"] and result["finish"] == "end_turn", result
