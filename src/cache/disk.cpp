@@ -405,6 +405,7 @@ struct DiskStore::Impl {
   std::vector<DurableEntry> entries;
   std::uint64_t budget_bytes;
   DiskPublicationStats publication_stats;
+  bool recovery_required{};
   mutable std::mutex mutex;
 #ifdef GUFO_CACHE_TESTING
   std::function<void(DiskPublicationStep)> crash_hook;
@@ -630,6 +631,12 @@ struct DiskStore::Impl {
     }
     return false;
   }
+  void RequireRecovered() const {
+    if (recovery_required)
+      throw std::runtime_error(
+          "cache publication outcome uncertain; run orphan recovery before "
+          "publication or retirement");
+  }
   void Reclaim() {
     // Even invalid manifests are removed and that removal made durable before
     // dependencies: a crash must never resurrect a manifest with deleted bytes.
@@ -647,6 +654,7 @@ struct DiskStore::Impl {
       });
       Sync(directory);
     }
+    recovery_required = false;
   }
   void Rename(int target, const std::string& name) {
     if (syscall(SYS_renameat2, temporary.Get(), name.c_str(), target,
@@ -704,6 +712,7 @@ struct DiskStore::Impl {
   }
   void Publish(DiskFileId file, const DiskManifest& m,
                std::span<const DiskWriteBuffer> buffers) {
+    RequireRecovered();
     // Admission covers vector growth, encoding, validation and dependency map
     // before allocating them. Host buffers remain caller-owned.
     std::uint64_t estimate =
@@ -723,6 +732,7 @@ struct DiskStore::Impl {
     DurableEntry candidate;
     candidate.manifest_ = DecodeManifest(bytes);
     candidate.file_ = file;
+    candidate.durable_ = false;
     auto pin_reservation =
         ledger->Reserve(ResourceCategory::kMetadata, sizeof(ResourceCharge));
     candidate.pin_ =
@@ -784,10 +794,12 @@ struct DiskStore::Impl {
       for (auto& e : entries)
         replacement.push_back(std::move(e));
       entries.swap(replacement);
-      replacement.clear();
+      // Release the old allocation while its capacity charge is still live.
+      std::vector<DurableEntry>().swap(replacement);
       entry_capacity = std::move(charge);
     }
     entries.push_back(std::move(candidate));
+    bool manifest_attempted{};
     try {
       ValidateReferences(false);
       // Candidate is present only under the store mutex. Determine reuse from
@@ -821,6 +833,7 @@ struct DiskStore::Impl {
       DISK_STEP(kManifestWritten);
       Sync(fd.Get());
       DISK_STEP(kManifestSynced);
+      manifest_attempted = true;
       Rename(manifests.Get(), name);
       DISK_STEP(kManifestRenamed);
       Sync(manifests.Get());
@@ -828,8 +841,11 @@ struct DiskStore::Impl {
       Sync(temporary.Get());
       DISK_STEP(kFinalTemporaryDirectorySynced);
       entries.back().payload_verified_ = true;
+      entries.back().durable_ = true;
       DISK_STEP(kIndexed);
     } catch (...) {
+      if (manifest_attempted)
+        recovery_required = true;
       entries.pop_back();
       // Conservatively retain every byte as an orphan, including an uncertain
       // manifest rename. Recovery removes manifests durably before payloads.
@@ -1010,6 +1026,7 @@ DiskReadPin DiskStore::Pin(CheckpointId id) const {
 }
 bool DiskStore::Retire(CheckpointId id) {
   std::lock_guard guard(impl_->mutex);
+  impl_->RequireRecovered();
   auto& entries = impl_->entries;
   auto it = std::find_if(entries.begin(), entries.end(), [&](const auto& e) {
     return e.manifest_.checkpoint == id;

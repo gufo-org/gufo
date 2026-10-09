@@ -215,6 +215,47 @@ void IoOrderingAndShortWrites() {
   store.WaitForReclamation();
   assert(store.Stats().managed_bytes == 0);
 }
+void UncertainManifestBarrier() {
+  Directory dir;
+  Fixture a, b(2);
+  {
+    DiskStore store(ledger, dir.path, 100000);
+    store.Publish(Id(100), a.manifest, a.buffers);
+    b.buffers.erase(b.buffers.begin());
+    // Two new private payloads: fail the final temporary-directory sync, after
+    // B's manifest rename has already become durable.
+    fail_sync = 7;
+    Reject([&] { store.Publish(Id(101), b.manifest, b.buffers); });
+    fail_sync = -1;
+    assert(fs::exists(dir.path / "v2/manifests" / DiskFileName(Id(101))));
+    assert(store.Entries().size() == 1);
+    Reject([&] { (void)store.Retire({1}); });
+    assert(fs::exists(dir.path / "v2/chunks" / DiskFileName(Id(1))));
+    Fixture retry(2);
+    retry.manifest.components[0].tail->file = Id(32);
+    retry.manifest.components[1].private_state->file = Id(42);
+    retry.buffers[1].file = Id(32);
+    retry.buffers[2].file = Id(42);
+    Reject([&] { store.Publish(Id(102), retry.manifest, retry.buffers); });
+    // A failed recovery barrier must keep publication and retirement blocked.
+    fail_sync = 0;
+    store.ReclaimOrphans();
+    Reject([&] { store.WaitForReclamation(); });
+    fail_sync = -1;
+    Reject([&] { (void)store.Retire({1}); });
+    Reject([&] { store.Publish(Id(102), retry.manifest, retry.buffers); });
+    store.ReclaimOrphans();
+    store.WaitForReclamation();
+    store.Publish(Id(102), retry.manifest, retry.buffers);
+    assert(store.Retire({1}));
+    assert(store.Entries().size() == 1);
+    CheckPublished(store, dir.path);
+  }
+  DiskStore reopened(ledger, dir.path, 100000);
+  assert(reopened.Entries().size() == 1);
+  assert(reopened.Entries()[0].Manifest().checkpoint.value == 2);
+  CheckPublished(reopened, dir.path);
+}
 void RetirementFailure() {
   Directory dir;
   Fixture f;
@@ -396,6 +437,7 @@ int main() {
   WriterEviction();
   Failures();
   RetirementFailure();
+  UncertainManifestBarrier();
   RecoveryAndUnknowns();
   LedgerFailures();
   IoOrderingAndShortWrites();

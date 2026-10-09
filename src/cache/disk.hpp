@@ -81,8 +81,8 @@ struct DiskStartupStats {
   std::uint64_t dependency_stats{}, rejected_manifests{};
   std::uint64_t managed_bytes{}, removed_legacy_bytes{};
 };
-// Host-buffer publication only; caller retains and admits immutable buffers until
-// Publish returns. Full chunks already referenced by a checkpoint can be
+// Host-buffer publication only; caller retains and admits immutable buffers
+// until Publish returns. Full chunks already referenced by a checkpoint can be
 // omitted.
 struct DiskWriteBuffer {
   bool private_file{};

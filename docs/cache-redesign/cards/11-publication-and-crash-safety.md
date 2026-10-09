@@ -68,7 +68,10 @@ manifest written, synced, moved into `manifests/`, and its destination directory
 synced. A final `tmp/` sync durably removes the source entry before the index
 commits. On failure, actual written bytes remain charged as orphans; an uncertain
 manifest rename may be discovered as complete on restart even when the caller
-received an error.
+received an error. After a manifest rename attempt fails or a later step fails,
+further publication and retirement are blocked until background recovery
+durably removes unindexed manifests. This protects their shared references and
+prevents duplicate-checkpoint retries.
 
 Layout creation syncs `v2/`, the root and its ancestors. Startup also syncs
 `manifests/` after full validation so a surviving rename from an aborted process
@@ -161,4 +164,15 @@ required (see the README).
 [Publication, crash recovery and format upgrades](../RFC.md#publication-crash-recovery-and-format-upgrades)
 
 ## Review notes
+
+Round 1 found that a failed publication could leave a valid, unindexed manifest:
+retirement of an indexed checkpoint then deleted chunks the failed manifest
+shared, and retrying the same checkpoint with fresh file IDs created duplicate
+manifests that startup rejected. Publication now sets a recovery barrier after
+any failed manifest rename attempt or subsequent step; publication and retirement
+remain blocked until successful background reclamation, including a durable
+manifest-directory sync. Regressions cover both failures and a failed recovery
+sync before retry. An additional accounting audit corrected index growth so the
+old vector allocation is freed before releasing its capacity charge. CI also
+caught a post-check comment wrap, now corrected and rechecked.
 
