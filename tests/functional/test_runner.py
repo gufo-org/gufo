@@ -41,6 +41,15 @@ from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_harness_hash_covers_imported_modules(self):
+        # Baselines are matched by harness_sha256, so modules reached only
+        # through imports must change the hash too.
+        hashed = {path.relative_to(ROOT).as_posix() for path in functional.harness_files()}
+        self.assertLessEqual({f"tests/functional/{name}" for name in functional.HARNESS_ROOTS},
+                             hashed)
+        self.assertLessEqual({"tests/functional/messages_tools.py",
+                              "tools/gufo/control_tokens.py"}, hashed)
+
     def test_continuation_restore_reports_observed_equality(self):
         import continuation
 
