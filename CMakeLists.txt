@@ -398,6 +398,11 @@ if (BUILD_TESTING)
   add_test(NAME json_test COMMAND json_test)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
 
+  add_executable(sampling_test tests/core/sampling_test.cpp)
+  target_link_libraries(sampling_test PRIVATE gufo_core)
+  add_test(NAME sampling_test COMMAND sampling_test)
+  set_tests_properties(sampling_test PROPERTIES LABELS "cpu;sampling")
+
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp
     src/cli/serve/logging.cpp

@@ -225,11 +225,14 @@ bool SamplingConfig::uses_random_sampling() const noexcept {
 }
 
 bool SamplingConfig::can_use_unmodified_argmax() const noexcept {
-  return !constraint && temperature == 0.0F && !penalties_enabled();
+  return !constraint && !reasoning_budget && temperature == 0.0F &&
+         !penalties_enabled();
 }
 
 bool SamplerState::CanSelectArgmax(TokenId token,
                                    bool penalties_applied) const {
+  if (const auto forced = ForcedToken())
+    return !pending_sample_ && token == *forced;
   if (pending_sample_ || config_.temperature != 0.0F ||
       (!penalties_applied && config_.penalties_enabled()))
     return false;
@@ -446,7 +449,8 @@ SamplerState::SamplerState(SamplingConfig config,
                            std::span<const TokenId> initial_history)
     : config_(config),
       history_(initial_history.begin(), initial_history.end()),
-      rng_state_(InitialRngState(config.seed)) {
+      rng_state_(InitialRngState(config.seed)),
+      reasoning_open_(config.reasoning_budget.has_value()) {
   config_.Validate();
   if (config_.constraint)
     constraint_state_ = config_.constraint->grammar->Start();
@@ -462,7 +466,9 @@ SamplerState::SamplerState(const SamplerState& other)
       history_(other.history_),
       penalty_counts_(other.penalty_counts_),
       rng_state_(other.rng_state_),
-      pending_sample_(other.pending_sample_) {}
+      pending_sample_(other.pending_sample_),
+      reasoning_tokens_(other.reasoning_tokens_),
+      reasoning_open_(other.reasoning_open_) {}
 
 SamplerState& SamplerState::operator=(const SamplerState& other) {
   if (this == &other) {
@@ -477,6 +483,8 @@ SamplerState& SamplerState::operator=(const SamplerState& other) {
   candidate_scratch_.clear();
   rng_state_ = other.rng_state_;
   pending_sample_ = other.pending_sample_;
+  reasoning_tokens_ = other.reasoning_tokens_;
+  reasoning_open_ = other.reasoning_open_;
   return *this;
 }
 
@@ -489,6 +497,10 @@ SamplerState SamplerState::WithoutConstraint() const {
 }
 
 bool SamplerState::NeedsConstraintMask() const {
+  // Executors that sample on the GPU fall back to Sample/Distribution here,
+  // which return the forced reasoning end.
+  if (ForcedToken())
+    return true;
   if (!config_.constraint)
     return false;
   if (!constraint_mask_) {
@@ -548,6 +560,8 @@ void SamplerState::ResetHistory(std::span<const TokenId> tokens) {
     constraint_state_ = config_.constraint->grammar->Start();
   constraint_mask_.reset();
   pending_sample_.reset();
+  reasoning_tokens_ = 0;
+  reasoning_open_ = config_.reasoning_budget.has_value();
   penalty_counts_.clear();
   history_.assign(tokens.begin(), tokens.end());
   TrimHistory();
@@ -558,7 +572,21 @@ void SamplerState::Accept(TokenId token) {
   Accept(std::span<const TokenId>(&token, 1));
 }
 
+std::optional<TokenId> SamplerState::ForcedToken() const noexcept {
+  if (reasoning_open_ && reasoning_tokens_ >= *config_.reasoning_budget)
+    return config_.reasoning_end;
+  return std::nullopt;
+}
+
 void SamplerState::Accept(std::span<const TokenId> tokens) {
+  for (const auto token : tokens) {
+    if (!reasoning_open_)
+      break;
+    if (token == config_.reasoning_end)
+      reasoning_open_ = false;
+    else
+      ++reasoning_tokens_;
+  }
   if (config_.constraint) {
     auto next = constraint_state_;
     for (const auto token : tokens)
@@ -589,6 +617,11 @@ void SamplerState::Accept(std::span<const TokenId> tokens) {
 
 SamplingDistribution SamplerState::Distribution(
     std::span<const float> logits) const {
+  if (const auto forced = ForcedToken()) {
+    if (*forced >= logits.size())
+      throw std::invalid_argument("forced token exceeds vocabulary");
+    return SamplingDistribution({{*forced, 1.0}}, 1.0);
+  }
   if (NeedsConstraintMask()) {
     if (config_.temperature == 0) {
       config_.Validate();
@@ -621,6 +654,13 @@ SamplingDistribution SamplerState::Distribution(
 
 SamplingDistribution SamplerState::Distribution(
     std::span<const float> logits, std::span<const TokenId> token_ids) const {
+  if (const auto forced = ForcedToken()) {
+    const auto found = std::ranges::find(token_ids, *forced);
+    if (found == token_ids.end())
+      throw std::invalid_argument("forced token is not among compact logits");
+    return SamplingDistribution(
+        {{static_cast<TokenId>(found - token_ids.begin()), 1.0}}, 1.0);
+  }
   if (NeedsConstraintMask()) {
     const auto masked = ConstrainedLogits(logits, token_ids);
     return WithoutConstraint().Distribution(masked, token_ids);
@@ -656,6 +696,12 @@ TokenId SamplerState::Sample(std::span<const float> logits) {
   if (logits.size() >
       static_cast<std::size_t>(std::numeric_limits<TokenId>::max())) {
     throw std::invalid_argument("logit distribution exceeds token ID range");
+  }
+  if (const auto forced = ForcedToken()) {
+    if (*forced >= logits.size())
+      throw std::invalid_argument("forced token exceeds vocabulary");
+    pending_sample_.reset();
+    return *forced;
   }
   if (pending_sample_) {
     if (*pending_sample_ >= logits.size()) {
