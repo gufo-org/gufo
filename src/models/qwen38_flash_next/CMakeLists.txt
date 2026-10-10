@@ -2,6 +2,7 @@
 # only by explicit validation targets, not by production or routine checks.
 add_library(gufo_qwen38_flash_next STATIC
   config.cpp
+  continuation_layout.cpp
   ngram.cpp
   weights.cpp)
 
@@ -48,6 +49,7 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC hip::host roc::hipblas)
 
   set(QFN_HIP_SOURCES
+    continuation_adapter.cpp
     ${QFN_ROCM_DIR}/kernels.hip.cpp
     ${QFN_ROCM_DIR}/w8a8_wave64.hip
     ${QFN_ROCM_DIR}/blaslt.cpp
@@ -68,5 +70,13 @@ if (ENGINE_ENABLE_HIP)
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
   target_link_libraries(gufo_qwen38_flash_next PUBLIC
+    gufo_cache_hip
     gufo_qwen38_flash_next_mmq hip::host roc::hipblas roc::hipblaslt)
+
+  if (GUFO_BUILD_TOOLS AND NOT BUILD_TESTING)
+    add_executable(qwen38_flash_next_continuation_probe EXCLUDE_FROM_ALL
+      ${PROJECT_SOURCE_DIR}/tests/models/qwen38_flash_next/continuation_probe.cpp)
+    target_link_libraries(qwen38_flash_next_continuation_probe PRIVATE
+      gufo_qwen38_flash_next)
+  endif()
 endif()

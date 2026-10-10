@@ -213,6 +213,16 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     const auto& item = items.front();
     return MtpForward(*item.session, item.tokens, item.hidden_row, {}, error);
   }
+  for (const auto& item : items) {
+    auto& session = *item.session;
+    if (!session.Cancelled() && session.continuation_hooks_) {
+      const auto end = session.mtp_.position +
+                       static_cast<std::uint32_t>(item.tokens.size());
+      session.continuation_hooks_->BeforeWrite(
+          true, session.mtp_.position, end, session.mtp_.blocks,
+          end > c.indexer_top_k ? end / c.compress_ratio : session.mtp_.blocks);
+    }
+  }
   for (const auto& item : items)
     if (!item.session->Cancelled())
       item.session->PreserveSnapshots(item.session->position_,
@@ -697,6 +707,16 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   }
   if (!AnyActive(items))
     return true;
+  for (const auto& item : items) {
+    auto& session = *item.session;
+    if (!session.Cancelled() && session.continuation_hooks_) {
+      const auto end =
+          session.position_ + static_cast<std::uint32_t>(item.tokens.size());
+      session.continuation_hooks_->BeforeWrite(
+          false, session.position_, end, session.blocks_,
+          end > c.indexer_top_k ? end / c.compress_ratio : session.blocks_);
+    }
+  }
   for (const auto& item : items) {
     if (!item.session->Cancelled())
       item.session->PreserveSnapshots(item.session->position_,

@@ -19,6 +19,7 @@
 #include "src/core/session_mode.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
+#include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -131,6 +132,7 @@ public:
 private:
   friend class Executor;
   friend struct PrefillCheckpoint;
+  friend class gufo::models::qwen38_flash_next::ContinuationAdapter;
   Session() = default;
 
   struct LinearState {
@@ -175,6 +177,7 @@ private:
   bool mtp_enabled_{false};
   std::uint32_t index_capacity_{0};  ///< power-of-two raw indexer ring rows
   std::uint32_t position_{0};
+  ContinuationHooks* continuation_hooks_{nullptr};
   std::vector<LinearState> linear_;
   std::vector<AttentionState> attention_;
   float* ple_history_{nullptr};  ///< [PleConvHistory()][hc_dim]
@@ -367,7 +370,12 @@ public:
       const SnapshotState* deferred = nullptr) const;
 
   /// Rewinds the draft block's own context.
-  void MtpRewind(Session& session, std::uint32_t position) const noexcept {
+  void MtpRewind(Session& session, std::uint32_t position) const {
+    if (session.continuation_hooks_ && position < session.mtp_.position)
+      session.continuation_hooks_->BeforeWrite(
+          true, position, session.mtp_.position,
+          std::min(session.mtp_.blocks, position / config().compress_ratio),
+          session.mtp_.blocks);
     if (session.mtp_.position != position)
       session.mtp_.residual_valid = false;
     session.mtp_.position = position;
