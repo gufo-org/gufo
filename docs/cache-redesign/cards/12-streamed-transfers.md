@@ -2,7 +2,7 @@
 
 **Milestone:** Disk store · **Depends on:** 08, 11 · **Size:** L (split
 candidate: write path, restore path) · **Affects:** nothing at runtime until
-card 19 · **Status:** in review
+card 19 · **Status:** done
 
 ## Goal
 
@@ -72,6 +72,10 @@ required (see the README).
 [Disk representation and bounded transfers](../RFC.md#disk-representation-and-bounded-transfers)
 
 ## Review notes
+
+Four independent fresh-context review rounds completed. The final review of
+`8b1e29cf` found no actionable issues and passed six focused CPU checks and
+three sanitizer checks. Draft PR: [#515](https://github.com/gufo-org/gufo/pull/515).
 
 Fresh reviews found and fixed cancellation and shutdown issues. Interrupted staging
 waits now retain their elapsed timing. Streamed publication checks cancellation
