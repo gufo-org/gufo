@@ -152,10 +152,8 @@
               pkgs.${system}.sqlite
               # Debugging and repository work. The test presets build
               # RelWithDebInfo with assertions, and contributors commit with
-              # jj when it is available, otherwise Git.
               pkgs.${system}.gdb
               pkgs.${system}.git
-              pkgs.${system}.jujutsu
               pkgs.${system}.ripgrep
               pkgs.${system}.radeontop
               # Compiler cache for the local loop; CMake attaches it as the C
