@@ -2458,6 +2458,7 @@ public:
     struct Backing {
       hip::TransferPool streams{64};
       std::map<std::size_t, std::unique_ptr<hip::CommittedBackingPool>> pools;
+      std::map<std::uint32_t, std::size_t> component_classes;
     };
     auto result = std::make_unique<ComponentCacheResources>();
     result->adapter =
@@ -2475,6 +2476,7 @@ public:
       const auto bytes = rounded(d.kind == cache::ComponentKind::kPrivateState
                                      ? d.state_bytes
                                      : d.row_bytes * d.rows_per_chunk);
+      backing->component_classes.emplace(d.id.value, bytes);
       const auto count = d.kind == cache::ComponentKind::kPrivateState
                              ? 8ULL
                              : 2ULL * ((max_context_ + d.rows_per_chunk - 1) /
@@ -2504,10 +2506,13 @@ public:
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
       return backing->streams.TryAcquire();
     };
-    result->allocate = [backing,
-                        rounded](const cache::PayloadRequest& request) {
+    result->allocate = [backing](const cache::PayloadRequest& request) {
       // Tails use their component's full chunk size class. Slack is charged.
-      auto pool = backing->pools.lower_bound(rounded(request.bytes));
+      const auto capacity =
+          backing->component_classes.at(request.component.value);
+      if (request.bytes > capacity)
+        throw std::logic_error("component capture exceeds its backing class");
+      auto pool = backing->pools.find(capacity);
       if (pool == backing->pools.end())
         throw cache::ResourceExhausted();
       const auto category =

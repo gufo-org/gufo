@@ -140,7 +140,7 @@ while an execution lease is active.
 | Serving EOS | Scalar/concurrent MTP, exact zero-prefill replay and per-request ignore-EOS policy pass |
 | Serving sampling | All 25 strategies pass AR/MTP replay, C2 interleaving and short output budgets; actual drafts checked |
 | Independent MTP numerical audit | Full-width normalization, split projections, attention, recursive carry and Q8 head pass |
-| End-to-end functional and matched timing matrix | Running; no performance qualification yet |
+| End-to-end functional and matched timing matrix | R4 measurements retained; correctness failures prevent qualification |
 | Pressure, bridge, lifecycle, long Pi replay and standard speed benchmark | Pending |
 
 Raw logs, production binaries, source patches and hashes are retained outside
@@ -173,4 +173,53 @@ The restarted matrix uses `candidate-r4-gufo`, SHA-256
 `618c9cbe3baf4d9e3e77a05217436ceb4c965090377f7bea392d2e786584d001`.
 Main is still `665fc182` after checking the remote. Both production builds now
 have external RSS/high-water and global HIP/UMA memory sampling for a matched
-RAM comparison. Candidate timings and the memory difference remain pending.
+RAM comparison. The retained R4 results below precede the next correction.
+
+### R4 matched RAM observations
+
+The complete C2/32768 core histories used the same 8 GiB RAM, 8 GiB disk
+and 1 GiB staging settings. These are observations from the failing R4
+candidate, not qualification of the subsequent fixes.
+
+| Mode | Main process RSS high-water (GiB) | R4 process RSS high-water (GiB) | Difference (GiB) | Main global HIP peak (GiB) | R4 global HIP peak (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 8.640 | 9.385 | +0.746 | 94.181 | 92.412 |
+| MTP | 8.744 | 9.372 | +0.628 | 97.588 | 95.494 |
+
+RSS is sampled through `/proc/<pid>/status`, retaining kernel `VmHWM`;
+completed-request logs independently retain RSS throughout each history.
+HIP is device-global `hipMemGetInfo` on UMA, sampled every 0.5 seconds. Do
+not add HIP and RSS: their accounting can overlap. The main AR sampler began
+after the first suite because its initial status parser rejected a hexadecimal
+field; its RSS high-water remains complete, while its initial HIP observations
+are missing. The other three runs have samples from startup.
+
+Precommitting the candidate's pool changes the memory curve substantially:
+growth alone peaks at 9504 MiB completed-request RSS versus 6790 MiB on main
+in AR, while later main histories allocate more memory. After restart, the
+candidate also immediately recommits its pool. The whole-run peak difference
+therefore does not describe each request or startup. The retained
+`memory-analysis-r4.json` includes all 202 matched AR and 176 matched MTP
+completed-request RSS observations. Request coverage differs because failed
+suites stopped early; hit rates across these unequal sets are not comparable.
+
+The candidate's global RAM ledger peaks at 7733701160 bytes in AR and
+7736221724 bytes in MTP (about 7.20 GiB), with a separate 1073741824-byte
+staging allocation. Free backing, assigned/materialized rows, private state,
+tails and metadata are charged within that RAM total. Category high-waters
+occur at different times and must not be summed.
+
+R4 AR passes growth, depth, shared-prefix, rotation and concurrency. MTP
+fails several reuse histories. Both modes expose strict replay failures;
+main also fails history-edit reuse and long-context replay. No clean timing
+qualification is claimed. All original reports and failed comparisons remain
+in the artifact directory.
+
+The next allocator correction selects backing by component identity. A short
+KV tail must use its component's full chunk class, rather than the smallest
+class fitting its current bytes: that could consume a scarce predictor-private
+class and make later MTP checkpoints impossible despite ample free backing.
+With that correction, the focused RAM-only MTP run passes growth, depth and
+history edits. State-edge and long-context exact retries still fall back by
+seven tokens after those histories fill the private pools; fresh-cache checks
+and disk-enabled follow-ups remain outstanding.
