@@ -1369,6 +1369,9 @@ void TestCompatibilityRequests() {
          blocks[1].member_str("type") == "text" &&
          blocks[1].member_str("text") == "answer");
   assert(server.backend->LastCall().chat.reasoning.enabled == true);
+  // budget_tokens caps the reasoning that the sampler allows (#266).
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{1024});
   response_body(server.Post("/v1/messages", R"({"messages":[
       {"role":"user","content":"hi"},
       {"role":"assistant","content":[
@@ -1377,7 +1380,8 @@ void TestCompatibilityRequests() {
       {"role":"user","content":"next"}],
     "thinking":{"type":"disabled"}})"));
   const auto replayed = server.backend->LastCall().chat;
-  assert(replayed.reasoning.enabled == false);
+  assert(replayed.reasoning.enabled == false &&
+         !replayed.reasoning.budget_tokens);
   assert(replayed.messages.size() == 3 &&
          replayed.messages[1].thought == "plan" &&
          replayed.messages[1].content == "answer");
