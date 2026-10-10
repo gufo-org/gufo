@@ -709,7 +709,8 @@ void TestFramingAndMetrics() {
        {"Content-Length: nope", "Content-Length: -1", "Content-Length: 4junk",
         "Content-Length: 18446744073709551616",
         "Content-Length: 4\r\nContent-Length: 3", "Transfer-Encoding: chunked",
-        "broken-header"}) {
+        "broken-header", "Transfer-Encoding : chunked", "Content-Length\t: 5",
+        "X-Test: one\r\n folded", "Bad Name: x"}) {
     ExpectStatus(server.Send("POST /echo HTTP/1.1\r\n" + header + "\r\n\r\n"),
                  400);
   }
