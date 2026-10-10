@@ -21,8 +21,11 @@ def retry_copy_refused(server_log, start, end, prompt_tokens):
     with server_log.open("rb") as log:
         log.seek(start)
         window = log.read(end - start).decode(errors="replace")
-    return re.search(r"event=snapshot action=skipped reason=(?:byte|entry)_capacity "
-                     rf"bytes=\d+ tokens={prompt_tokens} ", window) is not None
+    legacy = re.search(r"event=snapshot action=skipped reason=(?:byte|entry)_capacity "
+                       rf"bytes=\d+ tokens={prompt_tokens} ", window)
+    component = re.search(r"schema=component-cache-v1 event=capture_refused "
+                          rf"reason=(?:byte|entry)_capacity tokens={prompt_tokens}(?:\s|$)", window)
+    return legacy is not None or component is not None
 
 
 def check_unchanged_retry(label, retry, prefilled, server_log, start, end):
@@ -235,8 +238,8 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
             cold = chat_result(client, dict(
                 model=model, messages=chat, temperature=0, seed=31,
                 max_completion_tokens=request["max_tokens"],
-                **({} if thinking else {"reasoning_effort": "none"}),
-                extra_body={"cache_prompt": False}))
+                extra_body={"cache_prompt": False,
+                            "thinking": {"type": "enabled" if thinking else "disabled"}}))
             record(f"cold_control_{turn}", cold)
             total = warm["usage"]["prompt_tokens"]
             assert work(cold) == (total, 0, total), (warm, cold)

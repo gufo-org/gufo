@@ -97,10 +97,15 @@ std::vector<cache::ComponentPosition> ContinuationLayout::Positions(
   positions.reserve(components_.size());
   for (const auto& component : components_) {
     const bool draft_part = IsDraft(component.part);
+    // Private state belongs to this target checkpoint, including the lagging
+    // predictor's residual and raw ring. Its execution frontier is recorded
+    // by the draft row components and private metadata.
     positions.push_back(
-        {component.descriptor.id, IsPool(component.part)
-                                      ? (draft_part ? draft_blocks : blocks)
-                                      : (draft_part ? draft : target)});
+        {component.descriptor.id,
+         component.descriptor.kind == cache::ComponentKind::kPrivateState
+             ? target
+         : IsPool(component.part) ? (draft_part ? draft_blocks : blocks)
+                                  : (draft_part ? draft : target)});
   }
   return positions;
 }

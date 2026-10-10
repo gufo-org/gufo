@@ -163,6 +163,28 @@ void RoundTripAndFailures() {
   }
   assert(disk.Retire({2}));
   {
+    // Serving queues later checkpoints with the same immutable chunks before
+    // their first publication has supplied checksums to any durable manifest.
+    auto reused = fixture.manifest;
+    reused.checkpoint = {3};
+    reused.tokens.resize(4);
+    reused.components.resize(1);
+    reused.components[0].position.valid_rows = 4;
+    reused.components[0].chunks.resize(1);
+    auto sources = fixture.Sources();
+    TransferTiming timing;
+    streams.Write(Id(102), reused, std::span(sources).first(1), timing);
+    assert(timing.bytes == 0);
+    const auto original = disk.Open({1});
+    const auto published = disk.Open({3});
+    assert(published);
+    for (std::size_t i = 0; i < reused.components.size(); ++i) {
+      assert(published->Manifest().components[i].chunks.front() ==
+             original->Manifest().components[i].chunks.front());
+    }
+  }
+  assert(disk.Retire({3}));
+  {
     auto snapshot = disk.Open({1});
     const auto payload = snapshot->Manifest().components[0].chunks[0];
     const auto baseline = ledger.Snapshot().total_bytes;
@@ -230,6 +252,24 @@ void RoundTripAndFailures() {
     std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
     char corrupt = 99;
     file.write(&corrupt, 1);
+  }
+  {
+    // Resolving an unspecified checksum must still attest the existing file;
+    // a new durable checkpoint cannot hide corruption in a shared chunk.
+    auto reused = fixture.manifest;
+    reused.checkpoint = {4};
+    reused.tokens.resize(4);
+    reused.components.resize(1);
+    reused.components[0].position.valid_rows = 4;
+    reused.components[0].chunks.resize(1);
+    auto sources = fixture.Sources();
+    bool rejected{};
+    try {
+      streams.Write(Id(103), reused, std::span(sources).first(1), timing);
+    } catch (const DiskDependencyError&) {
+      rejected = true;
+    }
+    assert(rejected && !disk.Open({4}));
   }
   bool fallback{};
   assert(!streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,

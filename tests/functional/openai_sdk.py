@@ -2678,7 +2678,8 @@ def main():
                 client, args.model, checks, chat_result, args.concurrency, args.context),
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency,
                                                      args.context, args.speculative),
-            "cache-edits": lambda: check_cache_edits(client, args.model, checks, chat_result),
+            "cache-edits": lambda: check_cache_edits(
+                client, args.model, checks, chat_result, args.server_log),
             "cache-growth": lambda: check_cache_growth(
                 client, args.model, checks, chat_result, args.server_log),
             "cache-depth": lambda: check_cache_depth(

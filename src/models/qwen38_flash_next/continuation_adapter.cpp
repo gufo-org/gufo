@@ -215,7 +215,7 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
     for (unsigned i = 0; i < 4; ++i)
       identity_.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
   };
-  put(1);  // Component state ABI; independent of the legacy payload ABI.
+  put(2);  // Private components attest the target checkpoint boundary.
   put(Session::kSnapshotPayloadVersion);
   put(context);
   put(mode == core::SessionMode::kSpeculative);

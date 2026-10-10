@@ -16,6 +16,10 @@ def check_snapshot_budget(log, available_before_load, requested_bytes, sessions)
     configured = re.findall(
         r"event=snapshot_cache_configured sessions=(\d+) snapshot_entries=(\d+) "
         r"capacity_bytes=(\d+)\b", log)
+    component = re.findall(
+        r"schema=component-cache-v1 event=configured sessions=(\d+) "
+        r"snapshot_entries=(\d+) capacity_bytes=(\d+)\b", log)
+    configured += component
     if len(configured) != 1:
         raise ValueError("expected one snapshot cache configuration at startup")
     loaded_sessions, entries, capacity = map(int, configured[0])

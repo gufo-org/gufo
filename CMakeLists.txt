@@ -257,12 +257,13 @@ add_executable(gufo
   src/cli/serve/serve.cpp
   src/cli/serve/continuation_cache.cpp
   src/cli/serve/continuation_disk_store.cpp
+  src/cli/serve/component_text_cache.cpp
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
 target_compile_definitions(gufo PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
   GUFO_REVISION="${GUFO_REVISION}"
@@ -272,7 +273,7 @@ target_compile_definitions(gufo PRIVATE
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
 
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo PRIVATE gufo_deepseek_v4_flash)
+  target_link_libraries(gufo PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
 endif()
 target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr)
 
@@ -496,12 +497,23 @@ if (BUILD_TESTING)
   set_tests_properties(continuation_cache_test PROPERTIES
     LABELS "cpu;server;cache;state;lifecycle")
 
+  add_executable(component_text_cache_test
+    tests/cli/component_text_cache_test.cpp
+    src/cli/serve/component_text_cache.cpp
+    src/cli/serve/continuation_cache.cpp
+    src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/text_model_runner.cpp)
+  target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake gufo_core gufo_logging)
+  add_test(NAME component_text_cache_test COMMAND component_text_cache_test)
+  set_tests_properties(component_text_cache_test PROPERTIES LABELS "cpu;server;cache;state;lifecycle")
+
   add_executable(text_model_runner_test
     tests/cli/text_model_runner_test.cpp
     src/cli/serve/continuation_cache.cpp
     src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/text_model_runner.cpp)
-  target_link_libraries(text_model_runner_test PRIVATE gufo_logging gufo_core)
+    src/cli/serve/component_text_cache.cpp
+  src/cli/serve/text_model_runner.cpp)
+  target_link_libraries(text_model_runner_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
   set_tests_properties(text_model_runner_test PROPERTIES
     LABELS "cpu;server;runner;cache;state;lifecycle")
@@ -509,9 +521,10 @@ if (BUILD_TESTING)
   add_executable(continuation_disk_store_test
     tests/cli/continuation_disk_store_test.cpp
     src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/text_model_runner.cpp
+    src/cli/serve/component_text_cache.cpp
+  src/cli/serve/text_model_runner.cpp
     src/cli/serve/continuation_cache.cpp)
-  target_link_libraries(continuation_disk_store_test PRIVATE gufo_logging gufo_core)
+  target_link_libraries(continuation_disk_store_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME continuation_disk_store_test
     COMMAND continuation_disk_store_test)
   set_tests_properties(continuation_disk_store_test PROPERTIES
@@ -527,9 +540,10 @@ if (BUILD_TESTING)
     tests/cli/text_generation_scheduler_test.cpp
     src/cli/serve/continuation_cache.cpp
     src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/text_model_runner.cpp
+    src/cli/serve/component_text_cache.cpp
+  src/cli/serve/text_model_runner.cpp
     src/cli/serve/text_generation_scheduler.cpp)
-  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_logging gufo_core)
+  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
   set_tests_properties(text_generation_scheduler_test PROPERTIES
@@ -564,7 +578,7 @@ if (BUILD_TESTING)
     tests/cli/video_jobs_test.cpp
     src/cli/serve/video_jobs.cpp
   )
-  target_link_libraries(video_jobs_test PRIVATE gufo_logging gufo_core)
+  target_link_libraries(video_jobs_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME video_jobs_test COMMAND video_jobs_test)
   set_tests_properties(video_jobs_test PROPERTIES
     LABELS "cpu;server;video;minimax-h3;queue;cancellation;quality")
@@ -574,7 +588,7 @@ if (BUILD_TESTING)
     src/cli/serve/video_api.cpp
     src/cli/serve/video_jobs.cpp
   )
-  target_link_libraries(video_api_test PRIVATE gufo_logging gufo_core)
+  target_link_libraries(video_api_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME video_api_test COMMAND video_api_test)
   set_tests_properties(video_api_test PROPERTIES
     LABELS "cpu;server;api;video;minimax-h3;quality")

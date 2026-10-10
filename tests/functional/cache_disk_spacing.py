@@ -76,7 +76,12 @@ DISK_EVENT = re.compile(r"event=disk_cache action=(\w+) reason=(\w+) .*?\btokens
 
 
 def disk_events(log):
-    return [(action, reason, int(tokens)) for action, reason, tokens in DISK_EVENT.findall(log)]
+    events = [(action, reason, int(tokens)) for action, reason, tokens in DISK_EVENT.findall(log)]
+    events += [("stored", "saved", int(tokens)) for tokens in re.findall(
+        r"schema=component-cache-v1 event=published tokens=(\d+)\b", log)]
+    events += [("skipped", "min_step", int(tokens)) for tokens in re.findall(
+        r"schema=component-cache-v1 event=persistence_refused reason=min_step tokens=(\d+)\b", log)]
+    return events
 
 
 def check_disk_spacing(grown_log, restored_log, report):

@@ -100,3 +100,77 @@ card 01 scenarios with their `main` results. All of this feeds card 20.
 
 ## Review notes
 
+## Results: Flash-Next draft integration, October 10, 2026
+
+PR #543 is the early Flash-Next branch permitted by D1, not the final
+all-model switch-over. The follow-up starts from `1cb96824`, with matched
+production controls at its main base `665fc182`, the pinned Nix toolchain,
+Strix Halo gfx1151, UD-Q4_K_XL target and shared Q8_0 MTP weights.
+
+The integration checks exposed and fixed these defects:
+
+- Streamed publication now resolves the store's attested checksum when a
+  later checkpoint inherits an already published chunk. It still verifies
+  the file and rejects corruption or conflicting nonzero checksum claims.
+- Capture admits its complete backing plan before copying. A late size-class
+  refusal therefore cannot repeatedly copy the whole checkpoint while
+  reclaiming earlier records. Preparation pins inherited chunks and failed
+  admission leaves history unchanged.
+- All private components attest the target checkpoint boundary, including
+  predictor-private state. Draft append rows and metadata retain the actual
+  lagging draft frontier. The component-state ABI changes to 2.
+- The typed in-process model API can use RAM caching without file
+  fingerprints, with identity scoped to its immutable model lifetime.
+  Durable caching still requires validated artifact fingerprints.
+- Messages growth controls explicitly match the request's thinking mode.
+  Cache-edit retries use the existing strict, logged capacity-refusal
+  exception for at most nine assistant-opening tokens.
+
+Peak total/RAM/category ledger gauges are exposed in `component-cache-v1`.
+They describe cache allocations, including free committed pool backing;
+model memory and process RSS are separate. Publication logs include logical
+payload bytes for the oversized-staging check. Optional disk pieces yield
+while an execution lease is active.
+
+| Check | Follow-up status |
+| --- | --- |
+| Hosted PR contract suite | All 57 tests pass |
+| Shared C++ formatting | All 567 files pass |
+| AR/MTP component adapter | Transfer guards, 2047/8203 boundaries, edits, failed restores and image restoration pass |
+| Serving EOS | Scalar/concurrent MTP, exact zero-prefill replay and per-request ignore-EOS policy pass |
+| Serving sampling | All 25 strategies pass AR/MTP replay, C2 interleaving and short output budgets; actual drafts checked |
+| Independent MTP numerical audit | Full-width normalization, split projections, attention, recursive carry and Q8 head pass |
+| End-to-end functional and matched timing matrix | Running; no performance qualification yet |
+| Pressure, bridge, lifecycle, long Pi replay and standard speed benchmark | Pending |
+
+Raw logs, production binaries, source patches and hashes are retained outside
+Git at `/home/mixer/gufo-qualification/pr543-followup`. The current measured
+candidate is `candidate-r3-gufo`, SHA-256
+`b2b271a70620e91e5d95e78fea8563f78c4f76b9b59796dfcbb0e68991b86eec`.
+The core run uses C2, context 32768, 8 GiB cache RAM, 8 GiB disk and 1 GiB
+staging, selecting growth, depth, edits, shared-prefix, rotation, concurrency,
+state-edges, long-context and cache explicitly for both AR and MTP.
+
+Borrowed-row capture and idle spill are not wired into serving yet. These
+checks do not establish reassignment latency, capacity-row qualification or
+the final per-request 5% / 3 ms timing gate. The PR remains draft.
+
+### Backing assignment follow-up
+
+The `candidate-r3-gufo` AR run passed all 54 growth requests, then exposed
+77.65 seconds of snapshot work on a cold 23,521-token depth request. The
+retained CPU profile shows exception unwinding in `ReserveBacking`: every
+assignment restarted its scan at block zero, repeatedly trying occupied
+blocks. That matrix was interrupted, with its observations retained.
+
+The pool now resumes its scan after the last successful assignment. A relaxed
+atomic cursor is only a hint; ledger ownership still arbitrates races. The
+128-block fill/wraparound host-allocation bound fails before this change and
+passes afterwards. Existing allocation/failure/persistence-pin/concurrent-owner
+checks and the AR/MTP adapter restoration tests also pass.
+
+The restarted matrix uses `candidate-r4-gufo`, SHA-256
+`618c9cbe3baf4d9e3e77a05217436ceb4c965090377f7bea392d2e786584d001`.
+Main is still `665fc182` after checking the remote. Both production builds now
+have external RSS/high-water and global HIP/UMA memory sampling for a matched
+RAM comparison. Candidate timings and the memory difference remain pending.

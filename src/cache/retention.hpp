@@ -116,6 +116,9 @@ public:
   // No overwrite/next prefill pass occurs during this synchronous call. There
   // is no per-checkpoint payload charge.
   [[nodiscard]] bool Admit(const RetentionRequest&, const Capture&);
+  // Reclaim one eligible record for a caller that captures outside its index
+  // lock. The caller retries the same frozen frontier before publication.
+  [[nodiscard]] bool Reclaim(const RetentionRequest&);
   void Touch(CheckpointId);
   void Remove(CheckpointId);
   [[nodiscard]] std::uint32_t Rank(CheckpointId) const;

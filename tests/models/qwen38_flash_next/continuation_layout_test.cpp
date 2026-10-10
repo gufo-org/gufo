@@ -71,6 +71,9 @@ void Check(bool mtp) {
       const auto& component = layout.Components()[i];
       Require(component.descriptor.id.value == i + 1,
               "component IDs are not unique and stable");
+      if (component.descriptor.kind == cache::ComponentKind::kPrivateState)
+        Require(positions[i].valid_rows == target,
+                "private state does not attest the checkpoint boundary");
       if (component.part == qfn::ContinuationPart::kDraftKey)
         Require(positions[i].valid_rows == draft,
                 "predictor KV lost its independent frontier");

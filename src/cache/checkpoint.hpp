@@ -62,9 +62,17 @@ public:
   [[nodiscard]] std::shared_ptr<const void> Owner() const {
     return rows_ ? rows_->Owner() : owner_;
   }
+  // Assigned immutable storage token, never the original pool handle. Keep
+  // the checkpoint and physical owner alive throughout a persistence job.
+  [[nodiscard]] ResourceCharge CommittedCharge() const {
+    if (rows_)
+      throw std::logic_error("borrowed payload requires preservation");
+    return charge_;
+  }
 
 private:
   friend class ChunkReference;
+  friend class ExecutionHistory;
   [[nodiscard]] PersistencePin PinPersistence() const;
   Payload() = default;
   ResourceCharge charge_;
@@ -182,6 +190,14 @@ public:
   static ExecutionHistory Cold(ResourceLedger&,
                                std::span<const ComponentDescriptor>, Identity);
   static ExecutionHistory Restored(ResourceLedger&, const Checkpoint&);
+  // A validated durable restore with no resident chunk owners starts a fresh
+  // branch. Future captures copy its rows rather than infer hash sharing.
+  static ExecutionHistory RestoredUnshared(ResourceLedger&,
+                                           std::span<const ComponentDescriptor>,
+                                           Identity);
+  // Startup discovery calls this before creating histories. IDs of retained
+  // durable checkpoints cannot be reused after a process restart.
+  static void ObserveDurableId(CheckpointId);
   ExecutionHistory(ExecutionHistory&&) noexcept = default;
   ExecutionHistory& operator=(ExecutionHistory&&) noexcept = delete;
   ExecutionHistory(const ExecutionHistory&) = delete;
@@ -192,8 +208,12 @@ public:
   // no history; partially built owners and references unwind. No callback runs
   // under a lock. Every private state/tail callback must return a fresh copy
   // or a distinct committed assignment; a callback cannot alias private bytes.
+  // Optional prepare sees the exact new payload plan with shared chunks pinned.
+  // It can reserve every backing assignment before the first capture callback.
+  // A refused preparation performs no payload copies and changes no history.
   [[nodiscard]] std::shared_ptr<const Checkpoint> Capture(
-      const CheckpointRequest&, const CapturePayload&);
+      const CheckpointRequest&, const CapturePayload&,
+      const std::function<void(std::span<const PayloadRequest>)>& prepare = {});
   [[nodiscard]] LineageId Lineage() const;
   // Remove expired chunk bookkeeping. Does not evict a checkpoint or payload.
   void Prune();

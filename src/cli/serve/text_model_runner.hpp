@@ -15,11 +15,15 @@
 #include <string_view>
 #include <vector>
 
+#include "src/cache/adapter.hpp"
+#include "src/cache/ledger.hpp"
 #include "src/cli/serve/continuation_cache.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/core/sampling.hpp"
 
 namespace gufo::server {
+
+struct ComponentCacheResources;
 
 using TextRunnerToken = ContinuationToken;
 
@@ -313,6 +317,13 @@ public:
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> CreateState()
       const = 0;
 
+  [[nodiscard]] virtual bool UsesComponentCache() const { return false; }
+  [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
+  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const;
+  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
+      cache::Adapter&, cache::Slot&) const;
+  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const;
+
   /// Optional first-token preview without advancing model state. The caller
   /// supplies a copy of the sampler; normal decoding must reproduce the token.
   /// This lets serving publish a token before capturing its prompt snapshot.
@@ -437,6 +448,7 @@ public:
   class Request {
   public:
     struct CommitMetrics {
+      std::optional<ComponentCacheMetrics> component_cache;
       std::size_t snapshot_bytes{0};
       double snapshot_ms{0.0};
       std::size_t disk_queued_bytes{0};
@@ -463,6 +475,8 @@ public:
     [[nodiscard]] std::size_t cache_restore_bytes() const noexcept;
     [[nodiscard]] double cache_restore_ms() const noexcept;
     [[nodiscard]] bool cache_disk_hit() const noexcept;
+    [[nodiscard]] std::optional<ComponentCacheMetrics> component_cache_metrics()
+        const;
     [[nodiscard]] std::size_t prompt_tokens() const noexcept;
     [[nodiscard]] bool prefill_complete() const noexcept;
     [[nodiscard]] std::span<const TextRunnerToken> prompt() const noexcept;

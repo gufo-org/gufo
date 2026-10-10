@@ -6,6 +6,7 @@
 #include <optional>
 #include <span>
 
+#include "src/cache/checkpoint.hpp"
 #include "src/cache/ledger.hpp"
 #include "src/cache/slot.hpp"
 
@@ -41,6 +42,7 @@ public:
   [[nodiscard]] std::span<std::byte> Bytes() const;
   [[nodiscard]] cache::ResourceAllocationInfo Info() const;
   void Convert();
+  [[nodiscard]] cache::Payload TakePayload() &&;
   // Consume an unconverted assigned block as borrowed checkpoint backing.
   // Payload is a prefix of the block; accounting still charges full capacity.
   // The row handle retains the slab after this block/pool facade is destroyed.

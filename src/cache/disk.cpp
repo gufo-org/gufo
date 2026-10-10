@@ -977,9 +977,49 @@ struct DiskStore::Impl {
           Invalid();
     }
     std::uint64_t additional = bytes.size();
-    for (const auto& [key, p] : dependencies) {
+    for (auto& [key, p] : dependencies) {
       int dir = key.first ? private_files.Get() : chunks.Get();
       if (Referenced(dir, p.file)) {
+        // Streamed captures do not hash their immutable sources up front.
+        // A queued continuation may reuse a chunk published by an earlier
+        // job. Resolve its unspecified checksum from the store's attestation,
+        // then verify the file against that attestation before reusing it.
+        if (!p.checksum &&
+            std::ranges::any_of(sources, [&](const auto& source) {
+              return source.private_file == key.first && source.file == p.file;
+            })) {
+          std::lock_guard guard(index_mutex);
+          const auto resolve = [&](const DiskPayload& existing) {
+            if (existing.file != p.file)
+              return;
+            if (existing.bytes != p.bytes)
+              Invalid();
+            p.checksum = existing.checksum;
+          };
+          for (const auto& entry : entries)
+            for (const auto& component : entry.manifest_.components) {
+              if (key.first) {
+                for (const auto& payload :
+                     {component.tail, component.private_state})
+                  if (payload)
+                    resolve(*payload);
+              } else {
+                for (const auto& payload : component.chunks)
+                  resolve(payload);
+              }
+            }
+          for (auto& component : candidate.manifest_.components) {
+            if (key.first) {
+              for (auto* payload : {&component.tail, &component.private_state})
+                if (*payload && (*payload)->file == p.file)
+                  **payload = p;
+            } else {
+              for (auto& payload : component.chunks)
+                if (payload.file == p.file)
+                  payload = p;
+            }
+          }
+        }
         Verify(dir, p, staging, access);
         continue;
       }
@@ -1000,7 +1040,7 @@ struct DiskStore::Impl {
       additional = Add(additional, p.bytes);
     }
     if (additional > budget_bytes - stats.managed_bytes)
-      throw ResourceExhausted();
+      throw DiskCapacityExhausted();
     std::unique_lock index_guard(index_mutex, std::defer_lock);
     {
       CostTimer timer(publication_stats.metadata_lock_ns);

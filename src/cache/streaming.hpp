@@ -114,7 +114,9 @@ class PersistenceQueue {
 public:
   PersistenceQueue(ResourceLedger&, StreamedStore&, std::size_t max_depth,
                    std::size_t max_pinned_bytes,
-                   std::function<bool()> model_idle);
+                   std::function<bool()> model_idle,
+                   std::function<void(CheckpointId, bool)> completed = {},
+                   std::function<bool(const DiskManifest&)> reclaim = {});
   ~PersistenceQueue();
   PersistenceQueue(const PersistenceQueue&) = delete;
   PersistenceQueue& operator=(const PersistenceQueue&) = delete;

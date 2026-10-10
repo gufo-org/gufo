@@ -19,6 +19,7 @@ using Category = cache::ResourceCategory;
 using Result = cache::TransferResult;
 namespace {
 std::atomic<std::size_t> allocations{};
+std::atomic<std::size_t> host_allocations{};
 std::atomic<std::size_t> max_piece{};
 bool fail_copy{}, fail_record{}, fail_query{}, fail_wait{}, fail_alloc{};
 int copies_before_failure{};
@@ -26,6 +27,7 @@ thread_local bool fail_stream_new{}, observe_allocation_cleanup{};
 std::atomic<unsigned> allocation_cleanup_drains{};
 }  // namespace
 void* operator new(std::size_t size) {
+  ++host_allocations;
   if (fail_stream_new && size == sizeof(hip::TransferStream)) {
     fail_stream_new = false;
     throw std::bad_alloc();
@@ -196,6 +198,32 @@ void Backing() {
     hip::CommittedBackingPool empty(ledger, {metadata, block_bytes, metadata});
     assert(empty.CommittedBytes() == 0 &&
            !empty.TryAcquire(Category::kPrivateTail));
+  }
+  // Filling a large pool must not repeatedly allocate assignment tokens for
+  // its occupied prefix. Repeat after release to exercise cursor wraparound.
+  {
+    constexpr std::size_t count = 128;
+    constexpr std::size_t headroom = (count + 4) * 1024;
+    constexpr std::size_t capacity = count * block_bytes + headroom;
+    cache::ResourceLedger large_ledger(Limits(capacity));
+    hip::CommittedBackingPool large(large_ledger,
+                                    {capacity, block_bytes, headroom});
+    std::vector<hip::BackingBlock> held;
+    held.reserve(count);
+    for (unsigned iteration = 0; iteration < 3; ++iteration) {
+      const auto before_host = host_allocations.load();
+      for (std::size_t i = 0; i < count; ++i) {
+        auto block = large.TryAcquire(Category::kPrivateTail);
+        assert(block);
+        held.push_back(std::move(*block));
+      }
+      assert(host_allocations - before_host <= 2 * count);
+      assert(!large.TryAcquire(Category::kPrivateTail));
+      held.clear();
+      assert(large_ledger.Snapshot()
+                 .bytes[static_cast<std::size_t>(Category::kBackingFree)] ==
+             count * block_bytes);
+    }
   }
   // Competing borrowers may never own the same physical block.
   hip::CommittedBackingPool pool(ledger, {budget, block_bytes, metadata});

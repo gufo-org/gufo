@@ -8,8 +8,9 @@
 
 namespace gufo::cache {
 namespace {
+std::atomic<std::uint64_t> next_id{1};
 std::uint64_t NextId() {
-  static std::atomic<std::uint64_t> next{1};
+  auto& next = next_id;
   auto value = next.load();
   while (true) {
     if (value == std::numeric_limits<std::uint64_t>::max())
@@ -278,6 +279,19 @@ ExecutionHistory ExecutionHistory::Cold(
   return ExecutionHistory(ledger, descriptors, std::move(compatibility),
                           std::move(lineage));
 }
+ExecutionHistory ExecutionHistory::RestoredUnshared(
+    ResourceLedger& ledger, std::span<const ComponentDescriptor> descriptors,
+    Identity compatibility) {
+  return Cold(ledger, descriptors, std::move(compatibility));
+}
+void ExecutionHistory::ObserveDurableId(CheckpointId id) {
+  if (id.value == std::numeric_limits<std::uint64_t>::max())
+    throw std::overflow_error("cache identifiers exhausted");
+  auto value = next_id.load();
+  while (value <= id.value &&
+         !next_id.compare_exchange_weak(value, id.value + 1)) {
+  }
+}
 ExecutionHistory ExecutionHistory::Restored(ResourceLedger& ledger,
                                             const Checkpoint& checkpoint) {
   if (!checkpoint.IsValid())
@@ -323,7 +337,8 @@ ExecutionHistory ExecutionHistory::Restored(ResourceLedger& ledger,
   return history;
 }
 std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
-    const CheckpointRequest& request, const CapturePayload& capture) {
+    const CheckpointRequest& request, const CapturePayload& capture,
+    const std::function<void(std::span<const PayloadRequest>)>& prepare) {
   if (capturing_)
     throw std::logic_error("reentrant checkpoint capture");
   const CaptureScope scope(&capturing_);
@@ -397,16 +412,39 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
       entries.push_back(entry);
   std::vector<ComponentPosition> positions;
   positions.reserve(descriptors_.size());
+  auto preparation_metadata =
+      prepare ? ledger_->Reserve(
+                    ResourceCategory::kMetadata,
+                    Bytes(Add(chunk_count, Bytes(descriptors_.size(), 2)),
+                          sizeof(PayloadRequest) + sizeof(Payload*)))
+              : ResourceReservation{};
+  std::vector<PayloadRequest> payloads;
+  std::vector<Payload*> destinations;
+  if (prepare) {
+    payloads.reserve(Add(chunk_count, Bytes(descriptors_.size(), 2)));
+    destinations.reserve(payloads.capacity());
+  }
+  const auto save = [&](Payload& destination, const PayloadRequest& r) {
+    if (prepare) {
+      payloads.push_back(r);
+      destinations.push_back(&destination);
+      return;
+    }
+    auto storage = capture(r);
+    ValidatePayload(storage, r);
+    destination = std::move(storage);
+  };
   for (const auto& d : descriptors_) {
     const auto p = position_for(d.id);
     positions.push_back(p);
     const auto end = p.valid_rows;
-    CheckpointComponent component{d, p, {}, {}, {}};
+    checkpoint->components_.push_back({d, p, {}, {}, {}});
+    auto& component = checkpoint->components_.back();
     if (d.kind == ComponentKind::kPrivateState) {
       const PayloadRequest r{d.id, ResourceCategory::kPrivateState, 0, end,
                              d.state_bytes};
-      component.private_state.emplace(capture(r));
-      ValidatePayload(*component.private_state, r);
+      component.private_state.emplace(Payload{});
+      save(*component.private_state, r);
     } else {
       const auto full_end = end - end % d.rows_per_chunk;
       component.chunks.reserve(end / d.rows_per_chunk);
@@ -423,15 +461,12 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
                                  Bytes(d.rows_per_chunk, d.row_bytes)};
           auto metadata_reservation = ledger_->Reserve(
               ResourceCategory::kMetadata, ChunkMetadataBytes());
-          auto storage = capture(r);
-          ValidatePayload(storage, r);
-          chunk = std::make_shared<detail::Chunk>(ResourceCharge{}, lineage_,
-                                                  d.id, r.first, r.end,
-                                                  std::move(storage));
+          chunk = std::make_shared<detail::Chunk>(
+              ResourceCharge{}, lineage_, d.id, r.first, r.end, Payload{});
+          save(chunk->storage, r);
           chunk->metadata = metadata_reservation.Convert();
           entries.push_back({chunk->metadata, d.id, first, chunk});
-        }
-        if (!chunk->storage.IsValid())
+        } else if (!chunk->storage.IsValid())
           throw std::invalid_argument("cannot publish retired checkpoint rows");
         component.chunks.push_back(ChunkReference(
             std::move(chunk), ChunkReference::Kind::kCheckpoint));
@@ -439,11 +474,21 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
       if (full_end != end) {
         const PayloadRequest r{d.id, ResourceCategory::kPrivateTail, full_end,
                                end, Bytes(end - full_end, d.row_bytes)};
-        component.tail.emplace(capture(r));
-        ValidatePayload(*component.tail, r);
+        component.tail.emplace(Payload{});
+        save(*component.tail, r);
       }
     }
-    checkpoint->components_.push_back(std::move(component));
+  }
+  if (prepare) {
+    // The checkpoint now pins every shared chunk used by this exact plan.
+    // Admit all new backing before any capture can submit a transfer.
+    prepare(payloads);
+    for (std::size_t i = 0; i < payloads.size(); ++i) {
+      const auto& r = payloads[i];
+      auto storage = capture(r);
+      ValidatePayload(storage, r);
+      *destinations[i] = std::move(storage);
+    }
   }
   std::vector<Token> tokens(request.tokens.begin(), request.tokens.end());
   Identity new_input(input.begin(), input.end());
