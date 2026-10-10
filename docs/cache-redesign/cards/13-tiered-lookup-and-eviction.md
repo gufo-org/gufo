@@ -139,3 +139,8 @@ ms**. Each crossed three directory sync barriers. The eviction catalog sizes
 were 1,003 and 1,002, including the fixture's additional records; lookup retained
 1,000 candidates. These are warmed metadata lookups and tiny synthetic 8/32-byte
 payload files, not full-model disk-transfer timings. No speedup is claimed.
+
+The second independent review found that replacing a quarantined publication
+before catalog reconciliation could shed its marker from an old RAM record.
+`Track` now honors both catalog and disk quarantine when replacing an epoch;
+a direct retire/republish regression proves the old RAM record stays excluded.

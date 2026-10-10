@@ -123,7 +123,10 @@ void DiskCatalog::Track(CheckpointId id) {
   if (existing != impl_->records.end()) {
     if (existing->second.description->Epoch() == description->Epoch())
       return;
-    impl_->index->RemoveDurable(*existing->second.description);
+    impl_->index->RemoveDurable(
+        *existing->second.description,
+        existing->second.invalid ||
+            existing->second.description->Quarantined());
     impl_->Erase(existing);
   }
   const auto used = impl_->loading ? 0 : impl_->Tick();

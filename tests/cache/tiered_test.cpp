@@ -249,6 +249,50 @@ void PublicationCorruptionQuarantinesImmediately() {
     assert(description->Quarantined());
   }
 }
+void RepublishedQuarantineCannotRehabilitateOldRAM() {
+  for (bool direct_removal : {false, true}) {
+    TieredFixture f;
+    f.Append(16, 12);
+    auto checkpoint = f.Capture();
+    auto old = f.Publish(*checkpoint);
+    auto entry = f.index.Insert(checkpoint, f.Resident());
+    f.index.AttachDurable(entry, old);
+    auto manifest = old->Manifest();
+    manifest.checkpoint = {999};
+    manifest.components.resize(1);
+    const auto chunk = manifest.components[0].chunks[0];
+    {
+      std::fstream file(
+          f.directory.path / "v2/chunks" / DiskFileName(chunk.file),
+          std::ios::binary | std::ios::in | std::ios::out);
+      file.put('\xff');
+    }
+    TransferTiming timing;
+    bool failed{};
+    try {
+      f.streams.Write(TieredFile(4, 999), manifest, {}, timing);
+    } catch (const DiskDependencyError&) {
+      failed = true;
+    }
+    assert(failed && old->Quarantined());
+    assert(!f.index.Lookup(f.Query()).selected);
+    // Direct retirement/republication may precede caller reconciliation. Track
+    // must erase the poisoned RAM record before dropping its old marker.
+    if (direct_removal) {
+      f.index.RemoveDurable(*old);
+      assert(!f.index.Lookup(f.Query()).selected);
+    }
+    assert(f.disk.Retire(checkpoint->Id()));
+    auto replacement = f.Publish(*checkpoint);
+    assert(replacement->Epoch() != old->Epoch());
+    assert(!replacement->Quarantined() && old->Quarantined());
+    assert(!f.index.Lookup(f.Query()).selected);
+    f.catalog.Reconcile();
+    assert(!f.index.Lookup(f.Query()).selected);
+    (void)f.index.Insert(f.adapter.CompatibilityIdentity(), replacement);
+    assert(f.index.Lookup(f.Query()).selected->durable == replacement);
+  }
+}
 void InvalidUnusedRAMComponentStillSelectsMixed() {
   TieredFixture f;
   LeasedSlot local(f.ledger, f.adapter, f.stream, SlotId{55});
@@ -409,6 +453,7 @@ int main() {
   GlobalLRUAndSharedFiles();
   MixedSourcesAndCompatibility();
   PublicationCorruptionQuarantinesImmediately();
+  RepublishedQuarantineCannotRehabilitateOldRAM();
   InvalidUnusedRAMComponentStillSelectsMixed();
   CatalogAdmissionFailures();
   EvictionDoesNotWaitForYieldingWriter();

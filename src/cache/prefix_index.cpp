@@ -620,6 +620,7 @@ void PrefixIndex::DropResident(IndexEntryId id) {
 }
 void PrefixIndex::RemoveDurable(const DiskDescription& description,
                                 bool corrupt) {
+  corrupt = corrupt || description.Quarantined();
   for (auto it = impl_->directory.begin(); it != impl_->directory.end();) {
     auto& record = impl_->Get(IndexEntryId{it->first});
     const auto id = record.id;
