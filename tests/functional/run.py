@@ -7,6 +7,7 @@ No weights are downloaded. Model checks are manual, not hosted CI workloads.
 """
 
 import argparse
+import ast
 import contextlib
 import http.client
 import hashlib
@@ -46,13 +47,41 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
                      "expected_input_modalities")
 
 
-def provenance():
-    source = hashlib.sha256()
-    for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
+HARNESS_ROOTS = ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
                  "tool_reasoning.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
                  "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py",
-                 "cache_disk_spacing.py", "tool_images.py"):
-        source.update((TESTS / name).read_bytes())
+                 "cache_disk_spacing.py", "tool_images.py")
+
+
+def harness_files():
+    """The harness modules and every local module they import, transitively."""
+    search = (TESTS, TESTS.parents[1] / "tools")
+    pending, found = [TESTS / name for name in HARNESS_ROOTS], set()
+    while pending:
+        path = pending.pop()
+        if path in found:
+            continue
+        found.add(path)
+        for node in ast.walk(ast.parse(path.read_text(), str(path))):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+                modules = [node.module]
+            else:
+                continue
+            for module in modules:
+                for base in search:
+                    candidate = base.joinpath(*module.split(".")).with_suffix(".py")
+                    if candidate.is_file():
+                        pending.append(candidate)
+                        break
+    return sorted(found)
+
+
+def provenance():
+    source = hashlib.sha256()
+    for path in harness_files():
+        source.update(path.read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
     kernel_command = Path("/proc/cmdline")
     return {

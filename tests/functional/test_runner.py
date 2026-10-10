@@ -41,6 +41,15 @@ from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_harness_hash_covers_imported_modules(self):
+        # Baselines are matched by harness_sha256, so modules reached only
+        # through imports must change the hash too.
+        hashed = {path.relative_to(ROOT).as_posix() for path in functional.harness_files()}
+        self.assertLessEqual({f"tests/functional/{name}" for name in functional.HARNESS_ROOTS},
+                             hashed)
+        self.assertLessEqual({"tests/functional/messages_tools.py",
+                              "tools/gufo/control_tokens.py"}, hashed)
+
     def test_continuation_restore_reports_observed_equality(self):
         import continuation
 
@@ -1623,6 +1632,47 @@ class PiWatchdogTest(unittest.TestCase):
         self.assertEqual(repeated_actions(history([
             "missing module", "case 1 fails", "case 2 fails", "ok"])), 1)
 
+
+
+class ClaudeCodeAgentTest(unittest.TestCase):
+    @staticmethod
+    def events(outputs):
+        result = []
+        for index, output in enumerate(outputs):
+            result += [
+                {"type": "assistant", "message": {"content": [{
+                    "type": "tool_use", "id": str(index), "name": "Bash",
+                    "input": {"command": "python3 test.py"}}]}},
+                {"type": "user", "message": {"content": [{
+                    "type": "tool_result", "tool_use_id": str(index), "content": output}]}}]
+        return result
+
+    def test_repeated_command_can_make_progress(self):
+        from claude_code_agent import repeated_actions
+
+        self.assertEqual(repeated_actions(self.events(["same error"] * 6)), 6)
+        self.assertEqual(repeated_actions(self.events(["missing", "fails", "ok"])), 1)
+
+    def test_transcript_skips_a_partial_line_and_finds_calls(self):
+        from claude_code_agent import blocks, transcript
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stdout.jsonl"
+            path.write_text("".join(json.dumps(e) + "\n" for e in self.events(["ok"]))
+                            + '{"type": "result", "subty')
+            events = transcript(path)
+        self.assertEqual(len(events), 2)
+        self.assertEqual([b["name"] for b in blocks(events, "assistant", "tool_use")], ["Bash"])
+        self.assertEqual(blocks(events, "user", "tool_result")[0]["content"], "ok")
+
+    def test_task_rejects_tool_framing_in_arguments(self):
+        from claude_code_agent import validate_task
+
+        events = self.events(["ok"])
+        events[0]["message"]["content"][0]["input"]["command"] = "cat x</parameter>"
+        events.append({"type": "result", "subtype": "success", "is_error": False, "result": "Done"})
+        with self.assertRaises(AssertionError):
+            validate_task("tools", Path("."), events)
 
 if __name__ == "__main__":
     unittest.main()

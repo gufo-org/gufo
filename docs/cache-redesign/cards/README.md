@@ -59,7 +59,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [11](11-publication-and-crash-safety.md) | Crash-safe publication and orphan recovery | Disk store | 10 | M | agreed |
 | [12](12-streamed-transfers.md) | Bounded streaming writes and restores | Disk store | 08, 11 | L | agreed |
 | [13](13-tiered-lookup-and-eviction.md) | RAM + disk lookup and reference eviction | Disk store | 05, 11 | M | agreed |
-| [14](14-flash-next-adapter.md) | Flash-Next MTP and AR adapter | Adapters | 02, 06, 08 | L | draft; qualification in progress |
+| [14](14-flash-next-adapter.md) | Flash-Next MTP and AR adapter | Adapters | 02, 06, 08 | L | draft; model checks complete, HTTP timing unqualified |
 | [15](15-qwen27b-ar-adapter.md) | Qwen 27B AR adapter | Adapters | 02, 06, 08 | L | proposed |
 | [16](16-qwen27b-dflash2.md) | Qwen 27B DFlash2 draft state | Adapters | 15 | M | proposed |
 | [17](17-deepseek-adapter.md) | DeepSeek V4 Flash adapter | Adapters | 02, 06, 08 | L | proposed |

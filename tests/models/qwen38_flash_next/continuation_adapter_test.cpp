@@ -637,16 +637,57 @@ void CheckImages(const std::shared_ptr<qfn::Model>& model, bool mtp) {
           "text restore retained stale image input");
   Require(a.Evaluate(44, &error) && b.Evaluate(44, &error), error);
   SameLogits(a, b);
+  auto suffix = std::make_shared<vision::Prompt>();
+  suffix->tokens.push_back(42);
+  for (const auto& input : {red, blue}) {
+    auto prepared = input->images.front();
+    prepared.grid.offset = static_cast<std::uint32_t>(suffix->tokens.size());
+    suffix->rope.images.push_back(prepared.grid);
+    suffix->images.push_back(std::move(prepared));
+    suffix->tokens.insert(suffix->tokens.end(), input->tokens.begin(),
+                          input->tokens.end());
+  }
+  suffix->cache_identity.assign(32, 2);
+  const std::vector<std::int32_t> suffix_tokens(suffix->tokens.begin(),
+                                                suffix->tokens.end());
+  for (const std::size_t boundary : {1, 6}) {
+    qfn::ContinuationAdapter suffix_adapter(
+        model,
+        mtp ? gufo::core::SessionMode::kSpeculative
+            : gufo::core::SessionMode::kAutoregressive,
+        64, {'s', 'u', 'f', 'f', 'i', 'x'});
+    Guard ga, gb;
+    auto source = suffix_adapter.CreateSlot(ga);
+    auto destination = suffix_adapter.CreateSlot(gb);
+    auto& sa = suffix_adapter.GetSession(*source);
+    auto& sb = suffix_adapter.GetSession(*destination);
+    sa.ConfigureVision(suffix);
+    sb.ConfigureVision(suffix);
+    Require(sa.Sync(std::span(suffix_tokens).first(boundary), &error), error);
+    const auto saved = Capture(suffix_adapter, *source, streams);
+    Load(suffix_adapter, *destination, saved, streams);
+    Require(suffix_adapter.Validate(*destination, saved.positions),
+            "future image checkpoint rejected");
+    Require(sa.Sync(suffix_tokens, &error) && sb.Sync(suffix_tokens, &error),
+            error);
+    SameLogits(sa, sb);
+    Require(Capture(suffix_adapter, *source, streams).bytes ==
+                Capture(suffix_adapter, *destination, streams).bytes,
+            "restoration changed future image component bytes");
+  }
   std::cout << (mtp ? "MTP" : "AR") << ",image_restore,PASS\n";
 }
 }  // namespace
 int main(int argc, char** argv) {
   const bool guard_only =
       argc == 6 && std::string_view(argv[5]) == "--guard-only";
-  if ((argc != 5 && !guard_only) || std::string_view(argv[1]) != "--model" ||
+  const bool image_only =
+      argc == 6 && std::string_view(argv[5]) == "--image-only";
+  if ((argc != 5 && !guard_only && !image_only) ||
+      std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
     std::cerr << "Usage: continuation_adapter_test --model FIRST.gguf "
-                 "--mtp-model MTP.gguf [--guard-only]\n";
+                 "--mtp-model MTP.gguf [--guard-only|--image-only]\n";
     return 77;
   }
   try {
@@ -661,12 +702,16 @@ int main(int argc, char** argv) {
     std::vector<std::int32_t> prompt(10000);
     for (std::size_t i = 0; i < prompt.size(); ++i)
       prompt[i] = pattern[i % pattern.size()];
-    CheckTransferAndGuardLifetime(model, false, prompt);
-    CheckTransferAndGuardLifetime(model, true, prompt);
+    if (!image_only) {
+      CheckTransferAndGuardLifetime(model, false, prompt);
+      CheckTransferAndGuardLifetime(model, true, prompt);
+    }
     if (guard_only)
       return 0;
-    Check(model, false, prompt);
-    Check(model, true, prompt);
+    if (!image_only) {
+      Check(model, false, prompt);
+      Check(model, true, prompt);
+    }
     CheckImages(model, false);
     CheckImages(model, true);
     return 0;

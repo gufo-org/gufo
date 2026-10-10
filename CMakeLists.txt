@@ -439,6 +439,11 @@ if (BUILD_TESTING)
   set_tests_properties(kernel_resources_parser_test PROPERTIES
     LABELS "cpu;kernels" TIMEOUT 30)
 
+  add_test(NAME check_docs_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_docs_test.py)
+  set_tests_properties(check_docs_test PROPERTIES LABELS "cpu;docs" TIMEOUT 30)
+
   if(ENGINE_ENABLE_HIP)
     # A compiler update can make a kernel spill with no source change. Clang 23
     # increased the scratch of the Q8 prefill GEMM from 0 to 480 bytes. This

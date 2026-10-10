@@ -689,10 +689,11 @@ bool ContinuationAdapter::Validate(
     if (metadata.image_bytes && (identity.size() != 32 ||
                                  !std::ranges::equal(identity, metadata.image)))
       return refuse();
-    if (metadata.image_bytes) {
-      native.RestoreVisionLayout(
-          session.image_prompt_->rope.Prefix(metadata.target),
-          model_->executor_->stream());
+    if (metadata.image_bytes || (session.image_prompt_ && identity.empty())) {
+      // Preserve the attached request's future images as well as its matching
+      // computed prefix, including checkpoints before the first image.
+      native.RestoreVisionLayout(session.image_prompt_->rope,
+                                 model_->executor_->stream());
     } else {
       native.ConfigureVision(nullptr, nullptr, model_->executor_->stream());
       session.image_prompt_.reset();

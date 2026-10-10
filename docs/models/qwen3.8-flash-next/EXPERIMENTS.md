@@ -46,6 +46,7 @@
 | Integer WMMA Q8 verification | Retained through 48 input rows for wide target projections/heads; preserves K8 partials/FMA order and reduces each result once, with exact session replay. Small batches retain vector kernels. |
 | Q8 activation reuse across output rows | Rejected: no repeatable gain on the real projection shapes. |
 | Wider Q8 decode and Q5 expert tiles | Rejected: 56–64 dense rows, phased/packed token tiles, Q5 wave64 and 16/32 Q5 expert rows were slower despite exact output. |
+| Decode producer-written Q8_1 rows, up-front loads, DPP/`permlanex16` reductions and branch-free Q4_K/HC reads | Retained; bit-identical verify-width logit dumps (widths 1–8, four repository documents) and served output hashes. tg32 +5.8–6.0% at d0 and +7.1–7.2% at d32K on two machines (interleaved ABBA, `-r 6`); served agent replay +6.8%/+7.1%, everyday prompts +5.9%, speedbench +6.0–6.8%, 2–4 concurrent sessions +3.9–4.4%. Prefill and peak memory unchanged. |
 | Compact expert launch groups | Rejected: improved shared routing but negligible mixed-routing gain. |
 | Sparse attention register/cache retuning | Rejected: exact d128K output, but register scheduling/occupancy gave no material gain and reloading queries was slower. |
 | Shared attention selection lists | Rejected: exact outputs, but roughly 1% isolated gain did not justify another buffer and setup kernel. |

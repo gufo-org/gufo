@@ -53,29 +53,58 @@ FENCED_BLOCK_REGEX = re.compile(r'```(?P<lang>\w+)?\n(?P<code>.*?)```', re.DOTAL
 
 def slugify_heading(title: str) -> str:
     """Convert heading title to GitHub markdown anchor slug."""
-    # Remove inline markdown links/formatting [foo](bar) -> foo, `code` -> code
-    t = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', title)
-    t = re.sub(r'[`*_]', '', t)
-    # Strip HTML tags
+    # GitHub slugs the rendered text: drop a closing ATX sequence, link targets,
+    # HTML tags and emphasis markers, but keep underscores inside words and code.
+    t = re.sub(r'\s+#+\s*$', '', title)
+    t = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', t)
     t = re.sub(r'<[^>]+>', '', t)
-    # Lowercase
-    slug = t.strip().lower()
-    # Replace non-alphanumeric (except dashes and spaces)
-    slug = re.sub(r'[^\w\s-]', '', slug)
-    # Replace spaces and consecutive dashes with a single dash
-    slug = re.sub(r'[\s_]+', '-', slug)
-    slug = re.sub(r'-+', '-', slug)
-    return slug
+    pieces = re.split(r'`([^`]*)`', t)
+    t = "".join(piece if index % 2 else re.sub(r'(?<!\w)[*_]+|[*_]+(?!\w)', '', piece)
+                for index, piece in enumerate(pieces))
+    # Lowercase, remove punctuation other than '-' and '_', then map each
+    # space to '-' without collapsing repeats.
+    slug = re.sub(r'[^\w\- ]', '', t.strip().lower())
+    return slug.replace(" ", "-")
+
+
+def strip_fenced_blocks(content: str) -> str:
+    """Blank fenced code blocks while preserving diagnostic line numbers."""
+    lines = content.splitlines()
+    fence = None
+    for index, line in enumerate(lines):
+        match = re.match(r' {0,3}(`{3,}|~{3,})', line)
+        if fence is None:
+            if match:
+                marker = match.group(1)
+                # Backtick fence info strings cannot contain backticks.
+                if marker[0] == "`" and "`" in line[match.end():]:
+                    continue
+                fence = marker
+                lines[index] = ""
+        else:
+            lines[index] = ""
+            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence) \
+                    and not line.strip().lstrip(fence[0]):
+                fence = None
+    return "\n".join(lines)
 
 
 def extract_anchors(content: str) -> Set[str]:
-    """Extract all heading anchor slugs from markdown text."""
+    """Extract all heading anchor slugs, numbering repeats as GitHub does."""
     anchors: Set[str] = set()
-    for match in MD_HEADING_REGEX.finditer(content):
-        title = match.group("title").strip()
-        slug = slugify_heading(title)
-        if slug:
-            anchors.add(slug)
+    seen: Dict[str, int] = {}
+    for match in MD_HEADING_REGEX.finditer(strip_fenced_blocks(content)):
+        slug = slugify_heading(match.group("title").strip())
+        if not slug:
+            continue
+        base_slug = slug
+        count = seen.get(base_slug, 0)
+        # Generated suffixes can collide with literal headings such as "Dup-1".
+        while slug in anchors:
+            count += 1
+            slug = f"{base_slug}-{count}"
+        seen[base_slug] = count
+        anchors.add(slug)
     return anchors
 
 
@@ -143,8 +172,8 @@ def check_links_and_anchors(repo_root: Path, md_files: List[Path]) -> Tuple[int,
         # Check JSON blocks
         errors.extend(check_json_blocks(md_file, content))
 
-        # Check links
-        lines = content.splitlines()
+        # Code examples contain literal link syntax, not rendered links.
+        lines = strip_fenced_blocks(content).splitlines()
         for line_idx, line in enumerate(lines, start=1):
             for match in MD_LINK_REGEX.finditer(line):
                 target = match.group("target").strip()
@@ -167,14 +196,10 @@ def check_links_and_anchors(repo_root: Path, md_files: List[Path]) -> Tuple[int,
 
                 # Resolve file target
                 if file_part:
-                    # Resolve relative to current md file
-                    resolved_target = (md_file.parent / file_part).resolve()
-                    # Also try relative to repo root if not found
-                    if not resolved_target.exists():
-                        resolved_root = (repo_root / file_part).resolve()
-                        if resolved_root.exists():
-                            resolved_target = resolved_root
-                    
+                    # GitHub resolves '/path' from the repository root and
+                    # everything else from the linking file's directory.
+                    base = repo_root if file_part.startswith("/") else md_file.parent
+                    resolved_target = (base / file_part.lstrip("/")).resolve()
                     if not resolved_target.exists():
                         errors.append(
                             f"{md_file}:{line_idx}: Broken local link to non-existent file '{file_part}'"

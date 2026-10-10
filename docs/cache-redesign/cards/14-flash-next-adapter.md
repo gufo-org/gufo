@@ -2,7 +2,7 @@
 
 **Milestone:** Adapters · **Depends on:** 02, 06, 08 · **Size:** L (split:
 inventory, then AR, then MTP) · **Affects:** nothing served until card 19 ·
-**Status:** draft implementation; qualification in progress
+**Status:** draft; model checks complete, HTTP timing inconclusive
 
 ## Goal
 
@@ -102,6 +102,40 @@ required (see the README).
 
 
 ## Results (2026-10-10, draft)
+
+Three independent reviews of committed adapter revisions are complete. The
+first found batch readiness admission could abort healthy peers; the fix and
+both batch APIs pass. The second and third found no confirmed actionable code
+defect. Additional lifetime tests address the second review's coverage notes,
+and final speed results and persistent evidence address the third review's
+documentation notes. Noisy HTTP timings remain explicitly unqualified.
+
+A subsequent Qwen 27B review exposed the same future-image restore issue in
+this adapter. Validation now retains the matching attached request's complete
+RoPE and future embeddings, including a text checkpoint before its first
+image. Focused AR/MTP checks before the first image and between two images
+pass with exact component bytes and continuation logits. The production
+serving binary remains byte-identical to the qualified integrated binary
+(`1b2a208fff43`), since this fix belongs to the unattached adapter.
+
+Main's `7e4621c3` Flash-Next kernel work was integrated without conflicts from
+`3fac1bb5`. Its new Q8 projections and readiness records are execution scratch,
+not checkpoint components. The full model-local adapter checks pass again in
+AR/MTP, including images, independent-stream loads and both batch APIs. Matched
+production pp2048/tg128 at d0/32k passes for AR and mixed/repetitive MTP: every
+count, completion hash, draft and acceptance count is exact; worst slowdowns
+are 2.94% prefill and 1.59% decode. These integration observations and frozen
+binary hashes are retained separately under the persistent evidence directory's
+`integration-main-3fac1bb5/` subdirectory. Matched HTTP `long-context`/`cache`
+correctness passes against `3fac1bb5`, with zero quality or coverage changes:
+AR executes no drafts; MTP executes 298 drafts with 210 accepted. Reversed
+candidate/main controls retain 578 passed / 24 inconclusive metrics in AR and
+586 passed / 16 inconclusive in MTP, with zero confirmed regressions. Snapshot
+copy, disk restore and queueing timing flags remain unqualified; all observations
+and the strict 5% / 3 ms gate are retained. Two setup attempts lacked the
+baseline flag or the shell Python's OpenAI SDK; they are retained as setup
+failures, followed by complete runs in the pinned Nix environment. The HTTP and
+capacity records below stay pinned to their original revision.
 
 The model-local [inventory and mutation audit](../../models/qwen3.8-flash-next/CONTINUATION-ADAPTER.md)
 record 124 AR / 130 MTP components, private recurrent/ring state and independent

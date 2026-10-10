@@ -191,6 +191,20 @@ commands in disposable fixtures using isolated Pi configuration. Use `--passes 1
 for a focused check; the default five passes matches the reported debug workload.
 `--conversation --context-file FILE` additionally tests retained long history.
 
+For Claude Code sessions over `/v1/messages`, run `claude_code_agent.py` with
+`--base-url`, `--model`, `--claude /path/to/claude`, `--server-log` and a fresh
+`--output` directory outside any project that has a `CLAUDE.md` (the CLI would
+read it). It runs the real CLI non-interactively with its `Read`, `Write`,
+`Edit` and `Bash` tools allowed, an isolated home and configuration, and every
+model alias mapped to `--model`, through the same recording proxy. The
+`simple`, `tools`, `edit` and `literal-protocol` tasks match Pi's and are
+verified the same way: files and generated code directly, the CLI's
+stream-json transcript for tool use and framing leaks, and the server log for
+completed requests and cache reuse on every later agent turn. Claude Code ends
+each request with a `system` message whose copy differs in the next request,
+so later turns reuse the prompt up to that message, not the whole previous
+prompt.
+
 For image tool results, explicitly select `--case image-read --passes 1` with
 a vision-capable model. The task opens a fixture through Pi's real `read`
 tool and checks both the returned image pixels and the model's color answer.

@@ -268,6 +268,7 @@
               ".devops/nix/package.nix"
               "flake.nix"
               "THIRD_PARTY_NOTICES.md"
+              "tests/tools/check_dependencies_test.py"
               "tools/ci/check-dependencies.py"
             ];
           };
@@ -346,6 +347,7 @@
             cd "$src"
             mkdir -p $out
             python3 tools/ci/check-dependencies.py --json-report $out/dependency-inventory.json
+            python3 -B tests/tools/check_dependencies_test.py
             echo "PASS: Dependency inventory clean" > $out/result.txt
           '';
 
