@@ -64,6 +64,21 @@ void SetError(std::string* error, std::string message) {
 }
 
 #if defined(ENGINE_ENABLE_HIP)
+/// Draft ceiling for a speculative step shared by `active` sessions. Batched
+/// verification costs grow with the stacked rows, so concurrent sessions
+/// shorten their drafts to stay near a lone session's eight rows. Measured on
+/// Qwen3.6-35B-A3B DFlash2 (gfx1151): two sessions at 3 draft tokens raise
+/// aggregate decode from 60 to 82 tok/s; four sessions at 1 reach 107 tok/s,
+/// against 89 at 7 and 109 without drafting.
+std::uint32_t ConcurrentDraftCap(std::size_t active) {
+  if (active <= 1)
+    return std::numeric_limits<std::uint32_t>::max();
+  if (active == 2)
+    return 3;
+  if (active == 3)
+    return 2;
+  return 1;
+}
 
 struct QwenImageContext final : TextPromptContext {
   std::shared_ptr<const models::qwen::vision::Prompt> prompt;
@@ -1184,6 +1199,9 @@ public:
         indices.push_back(index);
       }
     }
+    const auto draft_cap = ConcurrentDraftCap(requests.size());
+    for (auto& request : requests)
+      request.max_draft_tokens = draft_cap;
     auto verified = speculative::SpeculativeVerifier::VerifyBatch(requests);
     for (std::size_t item = 0; item < indices.size(); ++item) {
       const std::size_t index = indices[item];

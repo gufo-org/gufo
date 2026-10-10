@@ -216,6 +216,46 @@ struct QwenFfnScratch {
   std::span<float> out;
 };
 
+/// MoE routed-expert workspaces over one stable arena block (empty on dense
+/// models). Slot-indexed buffers hold batch * expert_used_count rows.
+struct QwenMoeScratch {
+  std::span<float> router_logits;         // [batch, n_experts]
+  std::span<float> shexp_gate;            // [batch]
+  std::span<std::int32_t> ids;            // [batch, n_used]
+  std::span<float> weights;               // [batch, n_used]
+  std::span<float> gate_e;                // [batch*n_used, expert_ff]
+  std::span<float> up_e;                  // [batch*n_used, expert_ff]
+  std::span<float> down_e;                // [batch*n_used, hidden]
+  std::span<float> shexp_out;             // [batch, hidden]
+  std::span<float> shexp_act;             // [batch, shared_ff]
+  std::span<std::int32_t> ids_src1;       // [batch*n_used]
+  std::span<std::int32_t> ids_dst;        // [batch*n_used]
+  std::span<std::int32_t> expert_bounds;  // [n_experts + 1]
+  // Routed F16 expert GEMMs (Flash-Next's route): per-expert counts, buckets
+  // padded to 16 rows, the (expert, token tile) map and F16 token rows.
+  std::span<std::int32_t> routed_counts;   // [n_experts], uint32 counts
+  std::span<std::int32_t> routed_bounds;   // [n_experts + 1]
+  std::span<std::int32_t> routed_cursors;  // [n_experts]
+  std::span<std::int32_t> rows_token;      // [RoutedRows(slots, experts)]
+  std::span<std::int32_t> rows_slot;       // [RoutedRows(slots, experts)]
+  std::span<std::int32_t> routed_tiles;    // [RoutedTiles(slots, experts)]
+  std::span<std::uint16_t> x_half;         // [batch, hidden] F16
+};
+
+/// Row capacity of the routed buckets: each expert pads to 16 rows.
+[[nodiscard]] constexpr std::size_t RoutedRows(std::size_t slots,
+                                               std::size_t n_experts) {
+  return slots + (15 * n_experts);
+}
+
+/// Tile-map capacity: the narrowest (16-row) map, plus the paired gate/up
+/// map of 64 or more rows that large chunks append after it.
+[[nodiscard]] constexpr std::size_t RoutedTiles(std::size_t slots,
+                                                std::size_t n_experts) {
+  return (RoutedRows(slots, n_experts) / 16) +
+         (RoutedRows(slots, n_experts) / 64) + (2 * n_experts) + 2;
+}
+
 /// Typed non-owning capability views over stable Qwen GPU arena allocations.
 /// The nested aggregates carry element counts without owning memory or changing
 /// any address used by kernels or graph capture.
@@ -224,12 +264,32 @@ struct QwenGpuScratchView {
   QwenAttentionScratch attention;
   QwenSsmScratch ssm;
   QwenFfnScratch ffn;
+  QwenMoeScratch moe;
 };
 
 static_assert(std::is_trivially_copyable_v<QwenDecodeScratch>);
 static_assert(std::is_trivially_copyable_v<QwenAttentionScratch>);
 static_assert(std::is_trivially_copyable_v<QwenSsmScratch>);
 static_assert(std::is_trivially_copyable_v<QwenFfnScratch>);
+static_assert(std::is_trivially_copyable_v<QwenMoeScratch>);
+
+/// Bytes of one MoE scratch block for `batch` tokens; every section is
+/// 256-byte aligned.
+[[nodiscard]] std::size_t MoeScratchBytes(const core::ModelConfig& config,
+                                          std::size_t batch);
+
+/// Carves QwenMoeScratch spans out of a block sized by MoeScratchBytes.
+[[nodiscard]] QwenMoeScratch CarveMoeScratch(std::uint8_t* block,
+                                             const core::ModelConfig& config,
+                                             std::size_t batch);
+
+/// Single-token routed MoE FFN (qwen35moe) on `stream`: router and top-k,
+/// routed experts, sigmoid-gated shared expert, weighted combine into `out`.
+/// Shared by target decode and the MTP layer.
+void ExecuteMoeDecodeStep(hipStream_t stream, const QwenMoeScratch& moe,
+                          const models::QwenLayerWeights& layer,
+                          const core::ModelConfig& config, const float* x,
+                          float* out);
 static_assert(std::is_trivially_copyable_v<QwenGpuScratchView>);
 static_assert(std::is_same_v<decltype(QwenDecodeScratch::sampled_token),
                              std::span<std::uint32_t>>);
@@ -308,6 +368,8 @@ public:
   float* d_split_k_attention{nullptr};
   hip_bfloat16* d_weights_bf16{nullptr};
   void* d_scratch_q8_act{nullptr};
+  /// Single backing block for QwenMoeScratch; nullptr on dense models.
+  std::uint8_t* d_moe_scratch{nullptr};
 
   [[nodiscard]] std::uint32_t GetMaxBatch() const noexcept {
     return max_batch_;

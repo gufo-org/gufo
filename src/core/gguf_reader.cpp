@@ -960,6 +960,21 @@ std::optional<ModelConfig> GgufReader::ExtractModelConfig(
     config.rotary_dim = config.head_dim;
   }
 
+  // 2b. MoE hyperparameters (absent on dense models)
+  if (auto val = GetMetadataUint32(prefix + "expert_count")) {
+    config.expert_count = *val;
+  }
+  if (auto val = GetMetadataUint32(prefix + "expert_used_count")) {
+    config.expert_used_count = *val;
+  }
+  if (auto val = GetMetadataUint32(prefix + "expert_feed_forward_length")) {
+    config.expert_ff_length = *val;
+  }
+  if (auto val =
+          GetMetadataUint32(prefix + "expert_shared_feed_forward_length")) {
+    config.expert_shared_ff_length = *val;
+  }
+
   // 3. MTP speculative layers are included in qwen35.block_count but are not
   // part of the main autoregressive transformer stack.
   const auto embedded_mtp_layers =
@@ -1005,6 +1020,15 @@ std::optional<ModelConfig> GgufReader::ExtractModelConfig(
       *error_msg = "Model config failed Qwen structural validation (head_dim=" +
                    std::to_string(config.head_dim) +
                    ", layers=" + std::to_string(config.num_layers) + ")";
+    }
+    return std::nullopt;
+  }
+  if (config.IsMoE() &&
+      (config.expert_used_count == 0 ||
+       config.expert_used_count > config.expert_count ||
+       config.expert_ff_length == 0 || config.expert_shared_ff_length == 0)) {
+    if (error_msg != nullptr) {
+      *error_msg = "Model config has incomplete MoE hyperparameters";
     }
     return std::nullopt;
   }

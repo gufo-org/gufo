@@ -1425,6 +1425,65 @@ void TestPersistentVerifierSnapshotRoundTrip() {
 
 }  // namespace
 
+void TestConcurrentDraftCapBoundsProposals() {
+  using namespace gufo::speculative;
+  class CountingDraft final : public IDraftBackend {
+  public:
+    std::string_view Name() const noexcept override { return "cap fixture"; }
+    DraftProposal Propose(std::span<const TokenId>, std::uint32_t position,
+                          std::uint32_t count) override {
+      counts.push_back(count);
+      DraftProposal result;
+      result.start_pos = position;
+      result.tokens.assign(count, 1U);
+      return result;
+    }
+    std::vector<std::uint32_t> counts;
+  };
+  for (const std::uint32_t cap : {std::numeric_limits<std::uint32_t>::max(),
+                                  std::uint32_t{3}, std::uint32_t{1}}) {
+    SpeculativeOptions options;
+    options.max_draft_tokens = options.initial_draft_tokens = 7;
+    options.enable_adaptive_draft_length = false;
+    options.use_batched_verification = true;
+    std::vector<std::unique_ptr<SampledTargetExecutor>> targets;
+    std::vector<std::unique_ptr<SpeculativeVerifier>> verifiers;
+    std::vector<const CountingDraft*> drafts;
+    std::vector<gufo::sampling::SamplerState> samplers;
+    samplers.reserve(2);
+    std::vector<TokenId> sequence{0};
+    std::vector<TokenId> firsts;
+    std::vector<SpeculativeVerifier::StepRequest> requests;
+    for (std::size_t index = 0; index < 2; ++index) {
+      targets.push_back(std::make_unique<SampledTargetExecutor>(
+          std::vector<float>{-INFINITY, 0.0F, -INFINITY}, true));
+      auto draft = std::make_unique<CountingDraft>();
+      drafts.push_back(draft.get());
+      verifiers.push_back(std::make_unique<SpeculativeVerifier>(
+          *targets.back(), std::move(draft), options));
+      firsts.push_back(verifiers.back()->Prime(std::span(sequence).first(1)));
+    }
+    Expect(firsts[0] == firsts[1], "both sessions prime to the same token");
+    sequence.push_back(firsts[0]);
+    for (std::size_t index = 0; index < 2; ++index)
+      samplers.emplace_back(gufo::sampling::SamplingConfig{}, sequence);
+    const auto position = static_cast<std::uint32_t>(sequence.size() - 1);
+    for (std::size_t index = 0; index < 2; ++index) {
+      requests.push_back({*verifiers[index], sequence, position,
+                          sequence.back(), 99U, 64U, samplers[index], cap});
+    }
+    const auto results = SpeculativeVerifier::VerifyBatch(requests);
+    const std::uint32_t expected = std::min<std::uint32_t>(cap, 7);
+    for (std::size_t index = 0; index < 2; ++index) {
+      Expect(drafts[index]->counts == std::vector<std::uint32_t>{expected},
+             "the step cap bounds the requested draft length");
+      Expect(results[index].draft_count == expected &&
+                 results[index].accepted_count == expected,
+             "a capped draft is verified and accepted at its capped length");
+    }
+  }
+}
+
 int main() {
   TestSpeculativeDraftBackendInterface();
   TestSpeculativeStats();
@@ -1446,6 +1505,7 @@ int main() {
   TestConcurrentTargetOnlySteps();
   TestConstrainedGreedyVerification();
   TestConcurrentVerificationChunks();
+  TestConcurrentDraftCapBoundsProposals();
   TestPersistentVerifierSnapshotRoundTrip();
   std::cout << "All speculative verification tests passed.\n";
   return 0;

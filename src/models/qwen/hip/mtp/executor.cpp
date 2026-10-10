@@ -93,7 +93,13 @@ void QwenMtpGpuExecutor::Allocate() {
   AllocateBuffer(d_gate_, attention);
   AllocateBuffer(d_context_, attention);
   AllocateBuffer(d_attn_out_, hidden);
-  AllocateBuffer(d_ffn_act_, intermediate);
+  if (config.IsMoE()) {
+    d_moe_ = static_cast<std::uint8_t*>(
+        detail::AllocateDevice(MoeScratchBytes(config, 1)));
+    moe_ = CarveMoeScratch(d_moe_, config, 1);
+  } else {
+    AllocateBuffer(d_ffn_act_, intermediate);
+  }
   AllocateBuffer(d_ffn_out_, hidden);
   AllocateBuffer(d_feedback_hidden_, hidden);
   AllocateBuffer(d_logits_, config.vocab_size);
@@ -127,6 +133,8 @@ void QwenMtpGpuExecutor::Free() noexcept {
   free_buffer(d_attn_out_);
   free_buffer(d_ffn_act_);
   free_buffer(d_ffn_out_);
+  free_buffer(d_moe_);
+  moe_ = {};
   free_buffer(d_feedback_hidden_);
   free_buffer(d_logits_);
   free_buffer(d_kv_cache_);
@@ -235,12 +243,19 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
 
   LaunchRMSNorm(d_hidden_, static_cast<const float*>(layer.ffn_norm.data),
                 d_normed_, hidden, 1.0e-6F, stream_);
-  LaunchFusedSwiGLUGEMV(layer.ffn_gate.data, layer.ffn_gate.type,
-                        layer.ffn_up.data, layer.ffn_up.type, d_normed_,
-                        d_ffn_act_, config.intermediate_size, hidden, stream_);
-  LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, d_ffn_act_, d_ffn_out_,
-             hidden, config.intermediate_size, stream_,
-             models::qwen::QwenGemmMode::kHipMtp);
+  if (config.IsMoE()) {
+    // The MTP block of a MoE target is a MoE block too; it runs the same
+    // single-token kernels as the target's decode step.
+    ExecuteMoeDecodeStep(stream_, moe_, layer, config, d_normed_, d_ffn_out_);
+  } else {
+    LaunchFusedSwiGLUGEMV(layer.ffn_gate.data, layer.ffn_gate.type,
+                          layer.ffn_up.data, layer.ffn_up.type, d_normed_,
+                          d_ffn_act_, config.intermediate_size, hidden,
+                          stream_);
+    LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, d_ffn_act_, d_ffn_out_,
+               hidden, config.intermediate_size, stream_,
+               models::qwen::QwenGemmMode::kHipMtp);
+  }
   LaunchResidualAdd(d_hidden_, d_ffn_out_, d_hidden_, hidden, stream_);
   LaunchRMSNorm(d_hidden_,
                 static_cast<const float*>(weights.shared_head_norm.data),
