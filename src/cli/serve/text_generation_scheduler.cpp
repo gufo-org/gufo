@@ -455,7 +455,8 @@ struct TextGenerationScheduler::Impl {
         scheduler_policy.max_output_bytes_per_request == 0 ||
         scheduler_policy.max_buffered_output_bytes_per_request == 0 ||
         scheduler_policy.max_buffered_output_bytes_total == 0 ||
-        scheduler_policy.request_timeout.count() < 0) {
+        scheduler_policy.request_timeout.count() < 0 ||
+        scheduler_policy.stall_timeout.count() < 0) {
       throw std::invalid_argument("invalid text scheduler limits");
     }
     incremental_prefill_supported =
@@ -479,9 +480,18 @@ struct TextGenerationScheduler::Impl {
     device_lost_requests.reserve(runner_pool->capacity());
     worker = std::jthread(
         [this](const std::stop_token& stop_token) { Run(stop_token); });
+    if (scheduler_policy.stall_timeout.count() > 0) {
+      stall_monitor = std::jthread([this](const std::stop_token& stop_token) {
+        MonitorStalls(stop_token);
+      });
+    }
   }
 
   ~Impl() {
+    stall_monitor.request_stop();
+    if (stall_monitor.joinable()) {
+      stall_monitor.join();
+    }
     {
       const std::lock_guard<std::mutex> lock(queue_mutex);
       stopping = true;
@@ -745,6 +755,45 @@ struct TextGenerationScheduler::Impl {
                                      std::string(reason));
     } catch (...) {
       // Loss remains observable even if logging fails.
+    }
+  }
+
+  // A device call that never returns blocks its thread, so nothing on that
+  // thread can report it. This thread only reads atomics; it never touches
+  // the device or the scheduler's queues.
+  void MonitorStalls(const std::stop_token& stop_token) noexcept {
+    const auto timeout = scheduler_policy.stall_timeout;
+    const auto interval = std::clamp<std::chrono::milliseconds>(
+        timeout / 4, std::chrono::milliseconds(1), std::chrono::minutes(1));
+    std::mutex mutex;
+    std::condition_variable_any condition;
+    std::unique_lock<std::mutex> lock(mutex);
+    std::uint64_t seen = progress.load(std::memory_order_relaxed);
+    // Stalled time is counted in wake-ups, not read from the clock, so a
+    // process paused as a whole (SIGSTOP, a cgroup freeze) is credited one
+    // interval for the pause however long it lasted.
+    std::chrono::milliseconds stalled{0};
+    while (!stop_token.stop_requested()) {
+      condition.wait_for(lock, stop_token, interval, [] { return false; });
+      if (stop_token.stop_requested() ||
+          device_lost.load(std::memory_order_acquire))
+        return;
+      const std::uint64_t now = progress.load(std::memory_order_relaxed);
+      if (now != seen || !loop_working.load(std::memory_order_relaxed)) {
+        seen = now;
+        stalled = std::chrono::milliseconds(0);
+        continue;
+      }
+      stalled += interval;
+      if (stalled < timeout)
+        continue;
+      try {
+        MarkDeviceLost("scheduler made no progress for " +
+                       std::to_string(timeout.count()) + " ms");
+      } catch (...) {
+        MarkDeviceLost("scheduler made no progress");
+      }
+      return;
     }
   }
 
@@ -1034,6 +1083,8 @@ struct TextGenerationScheduler::Impl {
             },
             std::move(request->prompt_context), request->cache_prompt,
             request->cache_prefix_tokens, request->stop_at_eos);
+        // Each admission may restore or capture a checkpoint of its own.
+        progress.fetch_add(1, std::memory_order_relaxed);
         if (!request->runner_request) {
           CompleteCancelled(request);
           continue;
@@ -1722,6 +1773,7 @@ struct TextGenerationScheduler::Impl {
     while (!stop_token.stop_requested()) {
       if (device_lost.load(std::memory_order_acquire))
         break;
+      loop_working.store(true, std::memory_order_relaxed);
       ProcessQueuedCancellations();
 
       for (std::size_t count = capturing.size(); count != 0; --count) {
@@ -1729,7 +1781,10 @@ struct TextGenerationScheduler::Impl {
         capturing.pop_front();
         if (request->runner_request.SnapshotPending()) {
           capturing.push_back(std::move(request));
-        } else if (!CompleteIfStopped(request)) {
+          continue;
+        }
+        progress.fetch_add(1, std::memory_order_relaxed);
+        if (!CompleteIfStopped(request)) {
           if (request->runner_request.prefill_complete()) {
             // Its capture already waited through peer prefill. Resume it
             // before another bounded chunk, as for any due decoder.
@@ -1754,8 +1809,12 @@ struct TextGenerationScheduler::Impl {
           // Only the idle wait has a timer. Arrival interrupts it immediately;
           // no clock checks or device polling are added to active work units.
           while (!wake()) {
-            if (queue_condition.wait_for(
-                    lock, scheduler_policy.device_probe_interval, wake))
+            loop_working.store(false, std::memory_order_relaxed);
+            const bool woken = queue_condition.wait_for(
+                lock, scheduler_policy.device_probe_interval, wake);
+            progress.fetch_add(1, std::memory_order_relaxed);
+            loop_working.store(true, std::memory_order_relaxed);
+            if (woken)
               break;
             lock.unlock();
             try {
@@ -1774,6 +1833,7 @@ struct TextGenerationScheduler::Impl {
         continue;
       }
 
+      progress.fetch_add(1, std::memory_order_relaxed);
       const bool due_decoder = HasDueDecoder(decoding);
       const std::size_t resident_count = prefilling.size() + decoding.size();
       const bool preparing_multi_token_batch =
@@ -1899,7 +1959,15 @@ struct TextGenerationScheduler::Impl {
   std::size_t consecutive_active_prefill_chunks{0};
   std::uint64_t last_prefill_request_id{0};
   std::atomic<std::uint64_t> next_request_id{1};
+  // Written by the scheduler thread and read by the stall monitor. `progress`
+  // advances when a request is admitted, a work unit starts, a pending
+  // capture completes or an idle wait returns; `loop_working` is false only
+  // inside that idle wait. A loop that only polls a capture which never
+  // completes makes no progress.
+  std::atomic<std::uint64_t> progress{0};
+  std::atomic<bool> loop_working{false};
   std::jthread worker;
+  std::jthread stall_monitor;
 };
 
 TextGenerationScheduler::Request::Request() = default;
