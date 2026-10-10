@@ -42,7 +42,7 @@ from cache_messages_loop import check_cache_messages_loop
 from system_injection import check_system_injection
 from cache_growth import check_cache_growth
 from messages_tools import check_messages_tools
-from messages_count_tokens import check_messages_count_tokens
+from messages_count_tokens import check_messages_count_tokens, check_messages_image_counts
 from cache_depth import check_cache_depth
 from cache_rotation import check_cache_rotation
 from prefill_scheduling import check_prefill_scheduling
@@ -2529,7 +2529,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
     assert proposed > 0 if speculative != "off" else proposed == 0, final
 
 
-SDK_SUITES = ("discovery", "messages-count-tokens", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
+SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
               "tool-reasoning", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
@@ -2568,8 +2568,8 @@ def main():
     parser.add_argument("--server-log", type=Path,
                         help="Server log; shows retry copies refused under memory pressure")
     args = parser.parse_args()
-    if args.suite in ("discovery", "all") and args.expected_input_modalities is None:
-        parser.error("discovery requires --expected-input-modalities text or text,image")
+    if args.suite in ("discovery", "messages-image-counts", "all") and args.expected_input_modalities is None:
+        parser.error("discovery and messages-image-counts require --expected-input-modalities text or text,image")
     if args.suite in ("image-inputs", "image-count", "tool-images") and not args.vision:
         parser.error("image-inputs, image-count and tool-images require --vision and a loaded projector")
     if args.suite in ("all", "sampling-defaults") and not args.sampling_preset:
@@ -2611,6 +2611,9 @@ def main():
         suites = {
             "messages-count-tokens": lambda: check_messages_count_tokens(
                 client, args.model, checks, args.context),
+            "messages-image-counts": lambda: check_messages_image_counts(
+                client, args.model, checks, args.context, image_content,
+                args.expected_input_modalities.split(",")),
             "discovery": lambda: check_discovery(
                 client, args.model, checks, args.context,
                 args.expected_input_modalities.split(",")),

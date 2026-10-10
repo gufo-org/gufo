@@ -133,3 +133,118 @@ def check_messages_count_tokens(client, model, checks, context):
     assert count("recovery", plain) == initial
     recovered = generate("recovery_generated", plain, initial)
     assert recovered["content"] == cold["content"], (cold, recovered)
+
+
+def check_messages_image_counts(client, model, checks, context, image_content,
+                                input_modalities):
+    """Image counts must agree with generation and with model capabilities."""
+    import openai
+    from discovery import assert_model_listing
+    from image_inputs import JPEG, WEBP_LOSSLESS, messages_color_requests
+    from messages_tools import messages_stream
+
+    metrics = ServerMetrics(client.base_url)
+
+    def record(label, value):
+        checks["messages_image_counts_" + label] = value
+        print(f"CHECK messages_image_counts_{label}", file=sys.stderr, flush=True)
+        return value
+
+    listing = client.models.list().to_dict()
+    assert_model_listing(listing, model, context, input_modalities)
+    record("capabilities", listing)
+
+    def idle():
+        return metrics.wait(lambda m: m[PROCESSING] == m[DEFERRED] == 0, "idle")
+
+    def unchanged(before):
+        after = metrics.read()
+        assert all(after[key] == before[key] for key in COUNTERS), (before, after)
+        assert after[PROCESSING] == after[DEFERRED] == 0, after
+        return {key: after[key] - before[key] for key in COUNTERS}
+
+    def count(label, body):
+        before = idle()
+        response = client.post("/messages/count_tokens", body=body, cast_to=object)
+        record(label, {"response": response, "counter_deltas": unchanged(before)})
+        return assert_count_response(response)
+
+    def reject(label, endpoint, body):
+        before = idle()
+        try:
+            client.post(endpoint, body=body, cast_to=object)
+        except openai.APIStatusError as error:
+            record(label, {"status": error.status_code, "body": error.body,
+                           "counter_deltas": unchanged(before)})
+            assert error.status_code == 400, error
+        else:
+            raise AssertionError(f"{label}: invalid image request was accepted")
+
+    def generate(label, body, expected, color, streaming=False):
+        if streaming:
+            response = messages_stream(client, body)
+        else:
+            raw = client.post("/messages", body=body, cast_to=object)
+            assert raw["timings"]["prompt_n"] + raw["usage"]["cache_read_input_tokens"] == expected, raw
+            response = {"blocks": raw["content"], "finish": raw["stop_reason"],
+                        "usage": raw["usage"]}
+        record(label, response)
+        assert_prompt_count(expected, response["usage"])
+        assert response["finish"] == "end_turn", response
+        assert all(block["type"] == "text" for block in response["blocks"]), response
+        text = "".join(block["text"] for block in response["blocks"])
+        assert text.strip().lower().rstrip(".!") == color, response
+        return response
+
+    red = messages_color_requests(image_content("red")["image_url"]["url"])
+    if "image" not in input_modalities:
+        # This is a capability rejection check, not a vision workload on a
+        # text-only model. Both routes must reject, including tool images.
+        for place, request in red:
+            body = {"model": model, **request}
+            reject(place + "_count_unsupported", "/messages/count_tokens", body)
+            reject(place + "_generate_unsupported", "/messages", body)
+    else:
+        for color in ("red", "blue"):
+            png = image_content(color)["image_url"]["url"]
+            for place, request in messages_color_requests(png):
+                label = place + "_" + color
+                body = {"model": model, **request}
+                # The sizing endpoint does not require max_tokens.
+                sizing = {key: value for key, value in body.items() if key != "max_tokens"}
+                expected = count(label, sizing)
+                assert count(label + "_repeat", sizing) == expected
+                generate(label + "_generated", body, expected, color)
+                assert count(label + "_warm", sizing) == expected
+                warm = generate(label + "_streamed", body, expected, color, True)
+                assert warm["usage"]["cache_read_input_tokens"] > 0, warm
+
+        for name, media, payload in (("jpeg", "image/jpeg", JPEG),
+                                      ("webp", "image/webp", WEBP_LOSSLESS)):
+            body = {"model": model, **deepcopy(red[0][1])}
+            body["messages"][0]["content"][0]["source"] = {
+                "type": "base64", "media_type": media, "data": payload}
+            generate(name + "_generated", body, count(name, body), "red")
+
+        body = {"model": model, **deepcopy(red[0][1])}
+        parts = body["messages"][0]["content"]
+        blue = messages_color_requests(image_content("blue")["image_url"]["url"])[0][1]
+        parts[:0] = [{"type": "text", "text": "café 東京 🦉"}, blue["messages"][0]["content"][0]]
+        parts[-1]["text"] = "Name the color of the LAST image. Reply with one lowercase English color name only."
+        generate("multi_image_generated", body, count("multi_image", body), "red")
+
+        oversized = {"model": model, **deepcopy(red[0][1])}
+        oversized["messages"][0]["content"].append({
+            "type": "text", "text": " counting" * (context * 2)})
+        assert count("over_context", oversized) > context
+        reject("over_context_generation", "/messages", oversized)
+
+        corrupt = {"model": model, **deepcopy(red[0][1])}
+        corrupt["messages"][0]["content"][0]["source"]["data"] = "AQID"
+        reject("corrupt_count", "/messages/count_tokens", corrupt)
+        reject("corrupt_generation", "/messages", corrupt)
+
+    recovery = {"model": model, "max_tokens": 16, "temperature": 0,
+                "thinking": {"type": "disabled"},
+                "messages": [{"role": "user", "content": "Reply with only BETA."}]}
+    generate("text_recovery_generated", recovery, count("text_recovery", recovery), "beta")

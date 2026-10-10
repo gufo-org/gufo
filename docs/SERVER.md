@@ -11,7 +11,7 @@ fields return explicit errors.
 
 Chat Completions is the main API, including streaming, images and tools.
 Responses supports text, images and function tools with optional streaming.
-Anthropic Messages exposes a synchronous text subset.
+Anthropic Messages supports text, images and custom tools.
 The reference protocols are:
 
 - https://developers.openai.com/api/reference/resources/responses/methods/create/
@@ -606,7 +606,7 @@ The other compatibility routes are deliberately limited:
 | Route | Supported request | Output limit |
 | --- | --- | --- |
 | `/v1/completions` | One prompt string, buffered or SSE completion | `max_tokens` |
-| `/v1/messages` | Text, thinking and tool blocks, optional text system instructions and custom tools; buffered or SSE | `max_tokens` |
+| `/v1/messages` | Text, image, thinking and tool blocks, optional text system instructions and custom tools; buffered or SSE | `max_tokens` |
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
@@ -633,16 +633,22 @@ reasoning effort used while thinking is on; it never enables thinking. Other
 constraints and cache reuse match Chat Completions. Calls are returned as
 `tool_use` blocks with `stop_reason: "tool_use"`; replay them unchanged with
 the following `tool_result` blocks. Server tools such as `web_search` are
-rejected. Completions routes accept `stop`;
+rejected. Messages accepts `image` blocks in user turns and in `tool_result`
+content, with a `base64` source (PNG, JPEG or WebP) or an HTTPS `url` source,
+under the same limits and model requirements as Chat Completions images;
+images in assistant turns, `file` sources and `document` blocks are rejected.
+Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
-`POST /v1/messages/count_tokens` accepts the same text, system, thinking and
+`POST /v1/messages/count_tokens` accepts the same text, images, system, thinking and
 tool history as Messages and returns `{"input_tokens": N}` after rendering the
 model's chat template. `max_tokens` is optional; `stream: true` is rejected.
 The count includes cached prompt tokens and does not generate, prefill or
 change the conversation cache. Prompts may exceed the configured execution
 context so clients can size them before trimming; generation still enforces
-the context limit. Images are unsupported, as on Messages. Backends without
-chat counting support return 501. `/infill` still returns 501 because
+the context limit. Images use the same resizing and visual token expansion as
+generation, without running the vision encoder; the matching projector must
+be loaded. Models without image support reject image counts with 400.
+Backends without chat counting support return 501. `/infill` still returns 501 because
 suffix-conditioned infill is not implemented.
 
 Raw Completions accepts `stream: true` and

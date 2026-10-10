@@ -29,7 +29,7 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "messages-count-tokens", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
+SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
           "tool-reasoning", "reasoning-separator",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection", "cache")
@@ -258,8 +258,8 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- ./result/bin/gufo serve llm --model PATH [server options]")
     args = parser.parse_args()
-    if ("discovery" in args.suite or "all" in args.suite) and args.expected_input_modalities is None:
-        parser.error("discovery requires --expected-input-modalities text or text,image")
+    if set(args.suite) & {"discovery", "messages-image-counts", "all"} and args.expected_input_modalities is None:
+        parser.error("discovery and messages-image-counts require --expected-input-modalities text or text,image")
     if args.allow_missing_progress and not args.record_baseline:
         parser.error("--allow-missing-progress is only for --record-baseline")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command

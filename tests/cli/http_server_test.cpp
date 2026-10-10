@@ -1607,6 +1607,81 @@ void TestCompatibilityRequests() {
        })
     ExpectStatus(server.Post("/v1/messages", invalid), 400);
   assert(server.backend->calls == calls_before);
+  // Image blocks in a user turn and in a tool result reach the backend as
+  // images at their place in the text, from a base64 source.
+  server.backend->SetOutput("seen");
+  response_body(server.Post("/v1/messages", R"({"max_tokens":8,"messages":[
+      {"role":"user","content":[
+        {"type":"text","text":"look: "},
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+          "data":"AQID"}},
+        {"type":"text","text":"what is it?"}]}]})"));
+  {
+    const auto sent = server.backend->LastCall().chat.messages.back();
+    assert(sent.role == gufo::tokenization::ChatRole::kUser &&
+           sent.content == "look: what is it?" && sent.images.size() == 1 &&
+           sent.images[0].offset == 6 &&
+           *sent.images[0].bytes == std::vector<std::uint8_t>({1, 2, 3}));
+  }
+  response_body(server.Post("/v1/messages", R"({"max_tokens":8,"messages":[
+      {"role":"user","content":"read it"},
+      {"role":"assistant","content":[{"type":"tool_use","id":"toolu_1",
+        "name":"read","input":{}}]},
+      {"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_1","content":[
+          {"type":"text","text":"swatch.png"},
+          {"type":"image","source":{"type":"base64","media_type":"image/jpeg",
+            "data":"BAUG"}}]},
+        {"type":"text","text":"which color?"}]}]})"));
+  {
+    const auto sent = server.backend->LastCall().chat.messages;
+    assert(sent.size() == 4 &&
+           sent[2].role == gufo::tokenization::ChatRole::kTool &&
+           sent[2].tool_call_id == "toolu_1" &&
+           sent[2].content == "swatch.png" && sent[2].images.size() == 1 &&
+           sent[2].images[0].offset == 10 &&
+           *sent[2].images[0].bytes == std::vector<std::uint8_t>({4, 5, 6}) &&
+           sent[3].role == gufo::tokenization::ChatRole::kUser &&
+           sent[3].images.empty() && sent[3].content == "which color?");
+  }
+  // The streamed path takes the same parsed turn.
+  const auto streamed_image = server.Post("/v1/messages", R"({"stream":true,
+      "max_tokens":8,"messages":[{"role":"user","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+          "data":"AQID"}},
+        {"type":"text","text":"what is it?"}]}]})");
+  ExpectStatus(streamed_image, 200);
+  assert(streamed_image.find("event: message_start\n") != std::string::npos);
+  {
+    const auto sent = server.backend->LastCall().chat.messages.back();
+    assert(sent.content == "what is it?" && sent.images.size() == 1 &&
+           sent.images[0].offset == 0);
+  }
+  // Unsupported spellings stay errors that name the problem.
+  const auto calls_before_images = server.backend->calls.load();
+  for (const auto& [body, expected] :
+       {std::pair<std::string, std::string>{
+            R"({"messages":[{"role":"user","content":[{"type":"image",
+                 "source":{"type":"base64","media_type":"image/gif",
+                 "data":"AA=="}}]}]})",
+            "image/gif"},
+        {R"({"messages":[{"role":"user","content":[{"type":"image",
+              "source":{"type":"url","url":"file:///tmp/x.png"}}]}]})",
+         "HTTPS"},
+        {R"({"messages":[{"role":"user","content":[{"type":"image",
+              "source":{"type":"file","file_id":"f"}}]}]})",
+         "base64 or url source"},
+        {R"({"messages":[{"role":"assistant","content":[{"type":"image",
+              "source":{"type":"base64","media_type":"image/png",
+              "data":"AQID"}}]}]})",
+         "'messages' must contain"}}) {
+    const auto rejected = server.Post("/v1/messages", body);
+    ExpectStatus(rejected, 400);
+    const auto error = parse(rejected.substr(rejected.find("\r\n\r\n") + 4));
+    assert(error.find("error")->member_str("message").find(expected) !=
+           std::string::npos);
+  }
+  assert(server.backend->calls == calls_before_images);
   // A turn cut by max_tokens reports the cut, as Chat finish_reason does,
   // even when a complete call precedes it.
   server.backend->SetOutput(

@@ -295,6 +295,40 @@ public:
 private:
 };
 
+void TestPromptCountingValidatesCapabilitiesBeforeInference() {
+  const auto stats = std::make_shared<FakeStats>();
+  FakeRunner runner(stats);
+  ChatRequest request;
+  Expect(!runner.CountPromptTokens(request),
+         "unsupported template has no count");
+  gufo::tokenization::ChatMessage message;
+  message.role = gufo::tokenization::ChatRole::kUser;
+  message.content = std::string(runner.Descriptor().max_context + 1, 'x');
+  request.messages.push_back(message);
+  Expect(runner.CountPromptTokens(request) == message.content.size(),
+         "counting accepts text beyond the execution context");
+  // A text renderer can ignore images. Counting must reject them first,
+  // including images carried by a tool result.
+  for (const auto role : {gufo::tokenization::ChatRole::kUser,
+                          gufo::tokenization::ChatRole::kTool}) {
+    auto& input = request.messages.front();
+    input.role = role;
+    input.images = {{0, std::make_shared<const std::vector<std::uint8_t>>(
+                            std::initializer_list<std::uint8_t>{1})}};
+    bool rejected = false;
+    try {
+      (void)runner.CountPromptTokens(request);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    Expect(rejected,
+           "text-only counting rejects images instead of dropping them");
+  }
+  Expect(stats->states_created == 0 && stats->prefill_spans.empty() &&
+             stats->advanced_tokens.empty(),
+         "counting never creates execution state or runs inference");
+}
+
 void TestBoundedPrefillDecodeAndPrefixReuse() {
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<FakeRunner>(stats);
@@ -2218,6 +2252,7 @@ void TestServerInstructionsAreFraming() {
 }  // namespace
 
 int main() {
+  TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.

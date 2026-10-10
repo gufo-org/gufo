@@ -322,7 +322,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                 assert_no_envelope_framing({**result, "text": text})
 
     def test_discovery_requires_an_explicit_expectation_before_starting_a_server(self):
-        for suite in ("discovery", "all"):
+        for suite in ("discovery", "messages-image-counts", "all"):
             argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
                     "--suite", suite, "--record-baseline", "--", "gufo", "serve", "llm"]
             with self.subTest(suite=suite), patch.object(sys, "argv", argv), \
