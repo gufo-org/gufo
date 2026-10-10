@@ -8,6 +8,7 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 
 #include "src/cli/serve/audio_stream.hpp"
@@ -93,6 +94,12 @@ WebSocket::WebSocket(int fd, std::string buffered)
   // stays at the server's idle timeout.
   const timeval timeout{5, 0};
   (void)::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  timeval idle{};
+  socklen_t idle_size = sizeof(idle);
+  if (::getsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &idle, &idle_size) == 0)
+    idle_ = std::chrono::seconds(idle.tv_sec) +
+            std::chrono::microseconds(idle.tv_usec);
+  last_send_ = std::chrono::steady_clock::now().time_since_epoch().count();
   reader_ = std::jthread([this] { ReadLoop(); });
 }
 
@@ -118,6 +125,16 @@ bool WebSocket::Read(char* data, std::size_t size) {
     const auto count = ::recv(fd_, data, size, 0);
     if (count < 0 && errno == EINTR)
       continue;
+    if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      // A client that only listens to streamed output is not idle.
+      const std::chrono::steady_clock::duration since_send(
+          std::chrono::steady_clock::now().time_since_epoch().count() -
+          last_send_.load());
+      if (since_send < idle_)
+        continue;
+      Close(1001);
+      return false;
+    }
     if (count <= 0)
       return false;
     data += count;
@@ -151,6 +168,7 @@ bool WebSocket::Send(std::uint8_t opcode, std::string_view bytes) {
         return false;
       }
       part.remove_prefix(static_cast<std::size_t>(count));
+      last_send_ = std::chrono::steady_clock::now().time_since_epoch().count();
     }
   }
   return true;
