@@ -1382,6 +1382,19 @@ void TestCompatibilityRequests() {
   const auto replayed = server.backend->LastCall().chat;
   assert(replayed.reasoning.enabled == false &&
          !replayed.reasoning.budget_tokens);
+
+  // --reasoning-budget is a server default; Messages budget_tokens overrides
+  // it per request.
+  server.backend->reasoning.budget_tokens = 50;
+  response_body(server.Post("/v1/responses", R"({"input":"hi"})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  response_body(server.Post("/v1/messages", R"({"messages":[
+      {"role":"user","content":"hi"}],
+      "thinking":{"type":"enabled","budget_tokens":8}})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{8});
+  server.backend->reasoning.budget_tokens.reset();
   assert(replayed.messages.size() == 3 &&
          replayed.messages[1].thought == "plan" &&
          replayed.messages[1].content == "answer");
