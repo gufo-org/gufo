@@ -299,6 +299,11 @@ Use `--think off` or `chat_template_kwargs.enable_thinking=false` for direct
 answers. DeepSeek defaults to thinking with `high` effort. Quality comparisons
 must use the same reasoning mode and effort.
 
+`--reasoning-budget N` forces `</think>` (when it is a single token) after N
+reasoning tokens on Chat, Responses and Messages requests; Messages
+`thinking.budget_tokens` overrides it per request. The default 0 leaves
+reasoning unlimited.
+
 Keep `reasoning_effort` (Chat) or `output_config.effort` (Messages) consistent
 across turns while thinking is enabled: Qwen and DeepSeek render the effort
 instruction into the prompt, so changing it changes the prompt prefix and can

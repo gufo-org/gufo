@@ -1383,10 +1383,15 @@ void TestCompatibilityRequests() {
   assert(replayed.reasoning.enabled == false &&
          !replayed.reasoning.budget_tokens);
 
-  // --reasoning-budget is a server default; Messages budget_tokens overrides
-  // it per request.
+  // --reasoning-budget is a server default for Chat, Responses and Messages;
+  // Messages budget_tokens overrides it per request.
   server.backend->reasoning.budget_tokens = 50;
   response_body(server.Post("/v1/responses", R"({"input":"hi"})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  response_body(
+      server.Post("/v1/chat/completions", R"({"model":"test","messages":[
+      {"role":"user","content":"hi"}]})"));
   assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
          std::size_t{50});
   response_body(server.Post("/v1/messages", R"({"messages":[

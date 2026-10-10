@@ -891,6 +891,9 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   if (!output->chat.reasoning.preserve_thinking.has_value()) {
     output->chat.reasoning.preserve_thinking = defaults.preserve_thinking;
   }
+  if (!output->chat.reasoning.budget_tokens.has_value()) {
+    output->chat.reasoning.budget_tokens = defaults.budget_tokens;
+  }
 
   if (const json::Value* stream = body.find("stream");
       stream != nullptr && !stream->is_null()) {
