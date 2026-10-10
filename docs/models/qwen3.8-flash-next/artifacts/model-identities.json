@@ -110,5 +110,107 @@
     "timingControl": "C2 repetitive: 84.52 tok/s in the sweep versus 84.46 on current main and 84.40 in a focused candidate repeat. The original measurement is retained; the historical 93.16 tok/s did not reproduce on current main.",
     "retained": "Loading and all llama.cpp measurements retain their September 22-23 provenance.",
     "evidence": "prefill-long-context.json"
+  },
+  "benchmarks-2026-10-10": {
+    "scope": "Gufo full AR/MTP depth and C1/2/4/6/8 sweep, cold-file loading, both memory rows; matched main controls.",
+    "gufo": {
+      "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe",
+      "binary_sha256": "5b000aa50220c68d6a0156afbacab9eb687324c799b8d1a73ae11fdcf271a17e",
+      "model_source_tree": "77af3d5a995a03c3cbf5bc879cc77406b8290adf"
+    },
+    "mainControl": {
+      "revision": "a41e88da229441f31b49cef5ea1cbfc5f2704dc3",
+      "binary_sha256": "1aa49f8929309fd1619ed9da591f08ec75883c25a45d33230428fa79b697e88d",
+      "model_source_tree": "c0a33be9af558d0394bb82dbab251773788cf8f8"
+    },
+    "originalPrRevision": "8190ee5f86da4601e27021b278b43027a4b60114",
+    "rebase": "All 16 patches unchanged after clean rebase onto the pinned main.",
+    "build": "nix build, production gfx1151; same pinned toolchain and dependencies on both builds.",
+    "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+    "measurement": "One warmed measured sample per point; ordered full depth lists and prepared concurrent decoding. MTP pp is the maximum of mixed and repetitive rates. Raw per-request timings and every original flag retained.",
+    "quality": "All 24 depth outputs and counts match main. All 63 concurrent tg128 outputs match fresh AR; independent operators, sampled/cache replay and fixed-history full-vocabulary checks pass. This is not original-unquantized-model qualification.",
+    "timingGate": "Two functional request phases still fail; noisy benchmark/setup/queue/gap timings remain inconclusive. See review evidence; no blanket no-regression claim.",
+    "reference": "All existing llama.cpp artifacts, displayed values and September 22\u201323 dates preserved at user request. A separate MTP own-AR control failed; historical reference numbers were not requalified or refreshed.",
+    "conditions": {
+      "profile": "performance",
+      "allModelJobsSerialized": true,
+      "buildsDuringBenchmarks": false,
+      "referencePolicy": "Existing llama.cpp measurements and dates preserved unchanged at user request.",
+      "runs": {
+        "main-sweep-1": {
+          "utc": "2026-10-10T09:28:27.645583+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 56.625,
+            "amdgpu:edge": 42.0
+          },
+          "returncode": 0,
+          "seconds": 721.4217913890025
+        },
+        "main-sweep-2": {
+          "utc": "2026-10-10T09:58:31.312157+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 58.125,
+            "amdgpu:edge": 42.0
+          },
+          "returncode": 0,
+          "seconds": 372.9397837650031
+        },
+        "main-sweep-3": {
+          "utc": "2026-10-10T10:04:44.253265+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 57.5,
+            "amdgpu:edge": 42.0
+          },
+          "returncode": 0,
+          "seconds": 62.73534694701084
+        },
+        "candidate-sweep-1": {
+          "utc": "2026-10-10T09:40:29.076906+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 63.625,
+            "amdgpu:edge": 50.0
+          },
+          "returncode": 0,
+          "seconds": 717.1319539480028
+        },
+        "candidate-sweep-2": {
+          "utc": "2026-10-10T09:52:26.210715+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 63.25,
+            "amdgpu:edge": 50.0
+          },
+          "returncode": 0,
+          "seconds": 365.09954650799045
+        },
+        "candidate-sweep-3": {
+          "utc": "2026-10-10T10:05:46.989786+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 57.25,
+            "amdgpu:edge": 43.0
+          },
+          "returncode": 0,
+          "seconds": 61.820584646979114
+        }
+      },
+      "profileVerifiedThroughout": true,
+      "monitorSamples": 230,
+      "k10temp:TctlRangeC": [
+        57.125,
+        92.5
+      ],
+      "amdgpu:edgeRangeC": [
+        42.0,
+        79.0
+      ],
+      "minimumAvailableGiB": 21.738788604736328
+    },
+    "evidence": "decode-kernels-review.json",
+    "ppRetry": "C1 at64K, exact saved prompts and token/cache counts, one output token: AR1467.30 to1497.60tok/s (+2.1%); MTP1451.39 to1463.63tok/s (+0.8%). Fresh prefix pairs; original ordered-sweep samples retained separately. All single-user PP rows audited: no drop over5% versus main or the previous published table."
   }
 }

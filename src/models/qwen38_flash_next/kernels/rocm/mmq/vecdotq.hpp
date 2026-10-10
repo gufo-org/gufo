@@ -816,6 +816,26 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1(
     return vec_dot_q3_K_q8_1_impl_mmvq(vl, vh, u, bq3_K->scales, scale_offset, d, d8);
 }
 
+// The 6-bit scale and min of sub-blocks 2j and 2j + 1 (j in 0..3) of a Q4_K
+// block. The twelve scale bytes are read as three words by every lane, and
+// both packings are formed before a select: with a branch on j, the third
+// word's load was sunk into the j >= 2 side, whose wait then covered every
+// load the wave had in flight. The 16-bit words and masks are the usual ones.
+static __device__ __forceinline__ void q4_K_scale_pair(
+    const block_q4_K * __restrict__ b, const int j, uint16_t * __restrict__ aux) {
+    const uint32_t * words = (const uint32_t *)b->scales;
+    const int shift = 16*(j & 1);
+    const uint32_t lo  = (words[0] >> shift) & 0xffff; // scales[j % 2]
+    const uint32_t mid = (words[1] >> shift) & 0xffff; // scales[j % 2 + 2]
+    const uint32_t hi  = (words[2] >> shift) & 0xffff; // scales[j % 2 + 4]
+    const uint32_t low0  = lo  & 0x3f3f;
+    const uint32_t low1  = mid & 0x3f3f;
+    const uint32_t high0 = ((hi >> 0) & 0x0f0f) | ((lo  & 0xc0c0) >> 2);
+    const uint32_t high1 = ((hi >> 4) & 0x0f0f) | ((mid & 0xc0c0) >> 2);
+    aux[0] = j < 2 ? low0 : high0;
+    aux[1] = j < 2 ? low1 : high1;
+}
+
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -837,16 +857,8 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     v[0] = q4[0];
     v[1] = q4[4];
 
-    const uint16_t * scales = (const uint16_t *)bq4_K->scales;
     uint16_t aux[2];
-    const int j = bq8_offset/2;
-    if (j < 2) {
-        aux[0] = scales[j+0] & 0x3f3f;
-        aux[1] = scales[j+2] & 0x3f3f;
-    } else {
-        aux[0] = ((scales[j+2] >> 0) & 0x0f0f) | ((scales[j-2] & 0xc0c0) >> 2);
-        aux[1] = ((scales[j+2] >> 4) & 0x0f0f) | ((scales[j-0] & 0xc0c0) >> 2);
-    }
+    q4_K_scale_pair(bq4_K, bq8_offset/2, aux);
     const uint8_t * sc = (const uint8_t *)aux;
     const uint8_t * m  = sc + 2;
 
@@ -1287,17 +1299,7 @@ struct Q4MoeFragment {
     v[0] = q[0];
     v[1] = q[4];
     dm = w->dm;
-    const auto* scales = reinterpret_cast<const uint16_t*>(w->scales);
-    const int j = offset / 2;
-    if (j < 2) {
-      aux[0] = scales[j] & 0x3f3f;
-      aux[1] = scales[j + 2] & 0x3f3f;
-    } else {
-      aux[0] = ((scales[j + 2] >> 0) & 0x0f0f) |
-               ((scales[j - 2] & 0xc0c0) >> 2);
-      aux[1] = ((scales[j + 2] >> 4) & 0x0f0f) |
-               ((scales[j] & 0xc0c0) >> 2);
-    }
+    q4_K_scale_pair(w, offset / 2, aux);
   }
 
   __device__ __forceinline__ float Dot(const block_q8_1* x, int iqs) const {

@@ -43,6 +43,13 @@ int qfn_mmq_moe_gated_vec(int weight_type, const void* gate, const void* up,
                           int k, int tokens, int experts, int experts_used,
                           hipStream_t stream);
 
+// qfn_mmq_moe_gated_vec over x already in qfn_mmq_quantize_q8_1's layout.
+int qfn_mmq_moe_gated_vec_preq(int weight_type, const void* gate,
+                               const void* up, const void* x_q8,
+                               const int32_t* ids, float* out, int m, int k,
+                               int tokens, int experts, int experts_used,
+                               hipStream_t stream);
+
 size_t qfn_mmq_q8_1_bytes(int N, int K);
 
 int qfn_mmq_quantize_q8_1(const float* X_f32, void* X_q8, int N, int K,

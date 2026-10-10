@@ -5,7 +5,10 @@ namespace qfn_mmq {
 #include "vecdotq.hpp"
 
 // Each wave handles up to eight dense inputs for one weight row on gfx1151.
-template<int ncols_dst, bool has_gate, int token_waves = 1, bool ragged = false>
+// `scatter` reduces the inputs' sums together and stores them from one lane
+// each (same bits as reducing each sum on every lane and storing from lane 0).
+template<int ncols_dst, bool has_gate, int token_waves = 1, bool ragged = false,
+         bool scatter = false>
 __launch_bounds__(32 * token_waves, 1) static __global__
     void mul_mat_vec_q8(const void* __restrict__ weights,
                         const void* __restrict__ gate,
@@ -41,6 +44,22 @@ __launch_bounds__(32 * token_waves, 1) static __global__
       }
     }
   }
+  if constexpr (scatter) {
+    static_assert(token_waves == 1 && !ragged);
+    constexpr int shift = 5 - ScatterLevels(ncols_dst);
+    // Both reductions run on the full wave; only the stores are per lane.
+    float value = scatter_reduce_sum(sum, lane);
+    float gate_value = 0.0f;
+    if constexpr (has_gate)
+      gate_value = scatter_reduce_sum(gate_sum, lane);
+    const int token = lane >> shift;
+    if ((lane & ((1 << shift) - 1)) == 0 && token < ncols_dst) {
+      if constexpr (has_gate)
+        value *= ggml_hip_op_silu_single(gate_value);
+      output[token * nrows_x + row] = value;
+    }
+    return;
+  }
 #pragma unroll
   for (int j = 0; j < ncols_dst; ++j) {
     sum[j] = warp_reduce_sum<32>(sum[j]);
@@ -53,6 +72,66 @@ __launch_bounds__(32 * token_waves, 1) static __global__
       output[(first_token + j) * nrows_x + row] = value;
     }
   }
+}
+
+__device__ __forceinline__ float Q8Materialize(float v) {
+  asm volatile("" : "+v"(v));
+  return v;
+}
+
+// mul_mat_vec_q8 for one input over a few long rows (the draft block's
+// 4-row HC inject, K 10240): a wave is a row's whole latency chain, so each
+// lane loads `steps` of its blocks before the first product. The lane's
+// blocks, products and order are the one-row kernel's, spelled out as it
+// compiles them: d0 * sumi, then one fma with d1 into the sum.
+template<int steps>
+__launch_bounds__(32, 1) static __global__
+    void mul_mat_vec_q8_ahead(const void* __restrict__ weights,
+                              const block_q8_1* __restrict__ input,
+                              float* __restrict__ output,
+                              const uint32_t ncols_x) {
+  constexpr int qi = QI8_0;
+  constexpr int vdr = VDR_Q8_0_Q8_1_MMVQ;
+  constexpr int blocks_per_iter = vdr * 32 / qi;
+  const int lane = threadIdx.x;
+  const int row = blockIdx.x;
+  const int blocks_per_row = ncols_x / QK8_0;
+  const block_q8_0* bx =
+      static_cast<const block_q8_0*>(weights) + row * blocks_per_row;
+  const int kqs = vdr * (lane % (qi / vdr));
+  float sum = 0.0f;
+  for (int kb = lane / (qi / vdr); kb < blocks_per_row;
+       kb += steps * blocks_per_iter) {
+    int v[steps][vdr];
+    int u[steps][vdr];
+    half d0[steps];
+    half d1[steps];
+#pragma unroll
+    for (int s = 0; s < steps; ++s) {
+      const block_q8_0* w = bx + kb + s * blocks_per_iter;
+      const block_q8_1* y = input + kb + s * blocks_per_iter;
+#pragma unroll
+      for (int i = 0; i < vdr; ++i) {
+        v[s][i] = get_int_b2(w->qs, kqs + i);
+        u[s][i] = get_int_b4(y->qs, kqs + i);
+      }
+      d0[s] = w->d;
+      d1[s] = __low2half(y->ds);
+    }
+#pragma unroll
+    for (int s = 0; s < steps; ++s) {
+      int sumi = 0;
+#pragma unroll
+      for (int i = 0; i < vdr; ++i)
+        sumi = ggml_hip_dp4a(v[s][i], u[s][i], sumi);
+      const float p =
+          Q8Materialize(__half2float(d0[s]) * static_cast<float>(sumi));
+      sum = Q8Materialize(__builtin_fmaf(p, __half2float(d1[s]), sum));
+    }
+  }
+  sum = warp_reduce_sum<32>(sum);
+  if (lane == 0)
+    output[row] = sum;
 }
 
 // Integer matrix products reuse each Q8 weight across up to 48 inputs.
@@ -180,7 +259,8 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
                            const uint32_t stride_channel_x,
                            const uint32_t stride_channel_dst,
                            const uint32_t ncols_dst, const uint32_t ids_stride,
-                           const void* __restrict__ up_weights = nullptr) {
+                           const void* __restrict__ up_weights = nullptr,
+                           const int32_t* __restrict__ dst_slots = nullptr) {
   constexpr int qk = ggml_hip_type_traits<type>::qk;
   constexpr int qi = ggml_hip_type_traits<type>::qi;
   constexpr int vdr = get_vdr_mmvq(type);
@@ -206,6 +286,9 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
   // and its validity are uniform within a wave.
   const int32_t id_raw = ids[channel_dst + token_idx * ids_stride];
   const bool invalid_id = id_raw < 0;
+  // Expert-ordered slot rows store to their source slot; the load is issued
+  // with the expert's, not after the dot product.
+  const uint32_t dst_token = dst_slots ? dst_slots[token_idx] : token_idx;
   const uint32_t channel_x = invalid_id ? 0u : (uint32_t)id_raw;
 
   const block_q8_1* y = ((const block_q8_1*)vy) + token_idx * stride_col_y;
@@ -260,36 +343,87 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
     // Write results
     if (threadIdx.x < c_rows_per_block && (c_rows_per_block == 1 || uint32_t(row0 + threadIdx.x) < nrows_x)) {
         const float value = tmp[threadIdx.x];
-        dst[channel_dst*stride_channel_dst + token_idx*stride_col_dst + row0 + threadIdx.x] =
+        dst[channel_dst*stride_channel_dst + dst_token*stride_col_dst + row0 + threadIdx.x] =
             isfinite(value) ? value : 0.0f;
     }
 }
 
 // Keep one anchor per expert and a slot mask for each token. Duplicate
 // experts share their weights; inactive slots still get explicit zeroes.
+// Two anchor lists follow the groups, each a count and then its anchors in
+// ascending order: list 0 holds the inactive slots and the groups the first
+// launch computes, list 1 (split launches only) the groups with one active
+// token. One block of at most kMoeGroupAnchors threads covers every anchor.
+constexpr int kMoeGroupAnchors = 256;
+
 static __global__ void group_moe_slots(const int32_t* ids, int32_t* groups,
-                                       int tokens, int experts_used) {
-  const int anchor = blockIdx.x * blockDim.x + threadIdx.x;
-  if (anchor >= tokens * experts_used)
-    return;
-  const int expert = ids[anchor];
-  int32_t* group = groups + anchor * (tokens + 1);
-  group[0] = -1;
-  if (expert < 0) {
-    group[0] = -2;
-    return;
+                                       int tokens, int experts_used,
+                                       bool split) {
+  const int anchors = tokens * experts_used;
+  const int anchor = threadIdx.x;
+  // The scans below read the routing from LDS, not one dependent global
+  // load per step.
+  __shared__ int32_t routed[kMoeGroupAnchors];
+  if (anchor < anchors)
+    routed[anchor] = ids[anchor];
+  __syncthreads();
+  int list = -1;
+  if (anchor < anchors) {
+    const int expert = routed[anchor];
+    int32_t* group = groups + anchor * (tokens + 1);
+    group[0] = -1;
+    if (expert < 0) {
+      group[0] = -2;
+      list = 0;
+    } else {
+      bool leader = true;
+#pragma unroll 8
+      for (int i = 0; i < anchor; ++i)
+        leader &= routed[i] != expert;
+      if (leader) {
+        group[0] = expert;
+        int active = 0;
+        for (int t = 0; t < tokens; ++t) {
+          uint32_t slots = 0;
+          for (int j = 0; j < experts_used; ++j)
+            if (routed[t * experts_used + j] == expert)
+              slots |= uint32_t{1} << j;
+          group[t + 1] = static_cast<int32_t>(slots);
+          active += slots != 0;
+        }
+        list = split && active == 1 ? 1 : 0;
+      }
+    }
   }
-  for (int i = 0; i < anchor; ++i)
-    if (ids[i] == expert)
-      return;
-  group[0] = expert;
-  for (int t = 0; t < tokens; ++t) {
-    uint32_t slots = 0;
-    for (int j = 0; j < experts_used; ++j)
-      if (ids[t * experts_used + j] == expert)
-        slots |= uint32_t{1} << j;
-    group[t + 1] = static_cast<int32_t>(slots);
+  // Each list keeps its anchors in ascending order: a rank is the members
+  // in lower lanes of this wave plus the members of lower waves.
+  __shared__ int wave_counts[2][kMoeGroupAnchors / 32];
+  const int lane = anchor % 32;
+  const int wave = anchor / 32;
+  const uint32_t member[2] = {static_cast<uint32_t>(__ballot(list == 0)),
+                              static_cast<uint32_t>(__ballot(list == 1))};
+  if (lane == 0) {
+    wave_counts[0][wave] = __popc(member[0]);
+    wave_counts[1][wave] = __popc(member[1]);
   }
+  __syncthreads();
+  int32_t* lists = groups + anchors * (tokens + 1);
+  const int waves = blockDim.x / 32;
+  if (anchor == 0) {
+    int counts[2] = {};
+    for (int w = 0; w < waves; ++w) {
+      counts[0] += wave_counts[0][w];
+      counts[1] += wave_counts[1][w];
+    }
+    lists[0] = counts[0];
+    lists[anchors + 1] = counts[1];
+  }
+  if (list < 0)
+    return;
+  int rank = __popc(member[list] & ((uint32_t{1} << lane) - 1));
+  for (int w = 0; w < wave; ++w)
+    rank += wave_counts[list][w];
+  lists[list * (anchors + 1) + 1 + rank] = anchor;
 }
 
 
@@ -299,6 +433,7 @@ __launch_bounds__(64) static __global__
                                  const void* __restrict__ up,
                                  const block_q8_1* __restrict__ input,
                                  const int32_t* __restrict__ groups,
+                                 const int32_t* __restrict__ list,
                                  float* __restrict__ output, int k, int rows,
                                  int experts_used, int input_stride) {
   constexpr int qk = ggml_hip_type_traits<type>::qk;
@@ -306,17 +441,19 @@ __launch_bounds__(64) static __global__
   constexpr int vdr = get_vdr_mmvq(type);
   constexpr int blocks_per_iter = vdr * 32 / qi;
   constexpr auto dot = get_vec_dot_q_hip(type);
-  const int anchor = blockIdx.y;
   const int tid = threadIdx.x;
   const int lane = tid % 32;
   const bool is_up = tid >= 32;
   const int row0 = blockIdx.x * 2;
+  const int listed = list != nullptr ? list[0] : static_cast<int>(gridDim.y);
+  for (int entry = blockIdx.y; entry < listed; entry += gridDim.y) {
+  const int anchor = list != nullptr ? list[1 + entry] : entry;
   const int32_t* group = groups + anchor * (tokens + 1);
   const int expert = group[0];
   if (expert < 0) {
     if (!single_request && expert == -2 && tid < 2 && row0 + tid < rows)
       output[anchor * rows + row0 + tid] = 0.0f;
-    return;
+    continue;
   }
 
   constexpr bool split = type == GGML_TYPE_Q4_K && tokens >= 3;
@@ -332,7 +469,7 @@ __launch_bounds__(64) static __global__
       }
     }
     if (single_request ? active != 1 : active <= 1)
-      return;
+      continue;
   }
   const void* weights = is_up ? up : gate;
   const int blocks_per_row = k / qk;
@@ -405,6 +542,9 @@ __launch_bounds__(64) static __global__
       }
     }
   }
+  // The next listed group rewrites values.
+  __syncthreads();
+  }
 }
 
 // Group equal experts across the complete request batch. Each distinct token
@@ -464,15 +604,23 @@ static void launch_moe_grouped(const void* gate, const void* up,
                                int experts_used, int input_stride,
                                hipStream_t stream) {
   if (n_tokens == tokens) {
-    mul_mat_vec_moe_grouped<type, tokens>
-        <<<dim3((rows + 1) / 2, tokens * experts_used), 64, 0, stream>>>(
-            gate, up, input, groups, output, k, rows, experts_used,
-            input_stride);
-    if constexpr (type == GGML_TYPE_Q4_K && tokens >= 3) {
-      mul_mat_vec_moe_grouped<type, tokens, true>
-          <<<dim3((rows + 1) / 2, tokens * experts_used), 64, 0, stream>>>(
-              gate, up, input, groups, output, k, rows, experts_used,
-              input_stride);
+    // Q4_K splits groups across two launches from three tokens on, so most
+    // of a block row per slot would only read a group header and exit. Two
+    // block rows walk each launch's anchor list instead. Two tokens keep one
+    // block row per slot.
+    constexpr bool split = type == GGML_TYPE_Q4_K && tokens >= 3;
+    constexpr int kListRows = 2;
+    const int anchors = tokens * experts_used;
+    const int32_t* lists = split ? groups + anchors * (tokens + 1) : nullptr;
+    const dim3 grid((rows + 1) / 2,
+                    split ? std::min(kListRows, anchors) : anchors);
+    mul_mat_vec_moe_grouped<type, tokens><<<grid, 64, 0, stream>>>(
+        gate, up, input, groups, lists, output, k, rows, experts_used,
+        input_stride);
+    if constexpr (split) {
+      mul_mat_vec_moe_grouped<type, tokens, true><<<grid, 64, 0, stream>>>(
+          gate, up, input, groups, lists + anchors + 1, output, k, rows,
+          experts_used, input_stride);
     }
   } else if constexpr (tokens < MMVQ_MAX_BATCH_SIZE) {
     launch_moe_grouped<type, tokens + 1>(gate, up, input, groups, output, k,
@@ -486,9 +634,19 @@ static void launch_moe_grouped(const void* gate, const void* up,
 template <int tokens>
 static void launch_q8(const void* weights, const void* gate, const block_q8_1* input,
                       float* output, int k, int rows, int input_stride, hipStream_t stream) {
-    if (gate) {
+    if (gate && tokens > 1) {
+        mul_mat_vec_q8<tokens, true, 1, false, true><<<rows, 32, 0, stream>>>(
+            weights, gate, input, output, k, rows, input_stride);
+    } else if (gate) {
         mul_mat_vec_q8<tokens, true><<<rows, 32, 0, stream>>>(
             weights, gate, input, output, k, rows, input_stride);
+    } else if (tokens == 1 && rows <= 64 && k % (32 * 8 * 20) == 0) {
+        // Few rows cannot hide a lane's load latency behind other waves.
+        mul_mat_vec_q8_ahead<20><<<rows, 32, 0, stream>>>(weights, input,
+                                                          output, k);
+    } else if (tokens > 1) {
+        mul_mat_vec_q8<tokens, false, 1, false, true><<<rows, 32, 0, stream>>>(
+            weights, nullptr, input, output, k, rows, input_stride);
     } else {
         mul_mat_vec_q8<tokens, false><<<rows, 32, 0, stream>>>(
             weights, nullptr, input, output, k, rows, input_stride);
@@ -602,7 +760,8 @@ template<ggml_type type, int rows_per_wave = 2>
 static void launch_moe(const void* weights, const block_q8_1* input,
                        const int32_t* ids, float* output, int k, int rows,
                        int tokens, int experts_used, int input_stride,
-                       hipStream_t stream) {
+                       hipStream_t stream,
+                       const int32_t* dst_slots = nullptr) {
   GGML_ASSERT(k % ggml_blck_size(type) == 0 && rows > 0);
   GGML_ASSERT(tokens > 0);
   const int block_tokens = std::min(tokens, mmvq_moe_max_batch(type));
@@ -612,13 +771,19 @@ static void launch_moe(const void* weights, const block_q8_1* input,
               (tokens + block_tokens - 1) / block_tokens),
          dim3(32, block_tokens), 0, stream>>>(
           weights, input, ids, output, k, rows, row_stride, input_stride,
-          rows * experts_used, rows * row_stride, rows, tokens, experts_used);
+          rows * experts_used, rows * row_stride, rows, tokens, experts_used,
+          nullptr, dst_slots);
 }
 
 void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                              const block_q8_1* input, const int32_t* ids, float* output,
                              int k, int rows, int tokens, int experts_used,
-                             int input_stride, hipStream_t stream) {
+                             int input_stride, hipStream_t stream,
+                             const int32_t* dst_slots) {
+    // dst_slots (expert-ordered slot rows) is only used by the down view.
+    GGML_ASSERT(!dst_slots || (k == 640 && experts_used == 1 && tokens > 1 &&
+                               (type == GGML_TYPE_Q5_1 ||
+                                type == GGML_TYPE_Q8_0)));
     switch (type) {
         case GGML_TYPE_Q5_1:
           // Down projection slots have independent inputs. Wider row tiles
@@ -627,11 +792,11 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
             if (tokens > 20) {
               launch_moe<GGML_TYPE_Q5_1, 8>(
                   weights, input, ids, output, k, rows, tokens, experts_used,
-                  input_stride, stream);
+                  input_stride, stream, dst_slots);
             } else {
               launch_moe<GGML_TYPE_Q5_1, 4>(
                   weights, input, ids, output, k, rows, tokens, experts_used,
-                  input_stride, stream);
+                  input_stride, stream, dst_slots);
             }
             break;
           }
@@ -644,7 +809,7 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
           if (k == 640 && experts_used == 1 && tokens > 1) {
             launch_moe<GGML_TYPE_Q8_0, 4>(weights, input, ids, output, k, rows,
                                           tokens, experts_used, input_stride,
-                                          stream);
+                                          stream, dst_slots);
             break;
           }
             launch_moe<GGML_TYPE_Q8_0>(weights, input, ids, output, k, rows, tokens,
@@ -678,8 +843,11 @@ void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
   }
   if (tokens > 1) {
     GGML_ASSERT(groups && experts_used <= 32);
-    group_moe_slots<<<(tokens * experts_used + 127) / 128, 128, 0, stream>>>(
-        ids, groups, tokens, experts_used);
+    const int anchors = tokens * experts_used;
+    GGML_ASSERT(anchors <= kMoeGroupAnchors);
+    group_moe_slots<<<1, (anchors + 31) / 32 * 32, 0, stream>>>(
+        ids, groups, tokens, experts_used,
+        type == GGML_TYPE_Q4_K && tokens >= 3);
     if (type == GGML_TYPE_Q4_K) {
       launch_moe_grouped<GGML_TYPE_Q4_K>(gate, up, input, groups, output, k,
                                          rows, tokens, experts_used,

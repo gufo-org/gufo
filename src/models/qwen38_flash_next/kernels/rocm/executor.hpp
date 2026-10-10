@@ -410,6 +410,12 @@ private:
   };
   bool Quantize(const float* x, std::uint32_t n_tokens, std::uint32_t k,
                 Q8Input* q, std::string* error_msg) const;
+  /// Q8_1 rows of a small-batch input that its producer kernel already
+  /// wrote (byte-identical to Quantize's), or null.
+  const void* ReadyQ8(const float* x, std::uint32_t n_tokens,
+                      std::uint32_t k) const;
+  /// Forgets the producer-written Q8_1 rows (their sources are rewritten).
+  void DropReadyQ8() const;
   bool Dense(const DeviceTensor& w, const Q8Input& q, float* out,
              std::string* error_msg) const;
   bool Dense(const DeviceTensor& w, const float* x, float* out,
@@ -529,7 +535,14 @@ private:
     std::int32_t* tokens;
     void* x_half;   ///< activations narrowed to the weight's 16-bit type
     void* x_q8[2];  ///< Q8_1 activations of a decode batch, alternating
-    void* x_q8t;    ///< tiled Q8 activations of a wide batch (W8A8 route)
+    /// Q8_1 rows of a decode batch written by the kernel that produces
+    /// them: xn by HcCombine, lo by SiluScale, mixed by the mix epilogue.
+    void* xn_q8_1;
+    void* lo_q8_1;
+    void* mixed_q8_1;
+    void* gdn_q8_1;  ///< by the GDN epilogue (ssm_out's input)
+    void* ctx_q8_1;  ///< by the attention output gate (attn_out's input)
+    void* x_q8t;     ///< tiled Q8 activations of a wide batch (W8A8 route)
     float* res;
     float* xn;
     __half* xn_half;  ///< xn as F16 on the F16 mixer input route
@@ -695,6 +708,15 @@ private:
   /// Partial sums per inject logit the last HcMix left in s_.inject.
   mutable std::uint32_t inject_parts_{1};
   mutable unsigned q8_slot_{0};
+  /// Producer-written Q8_1 rows (see ReadyQ8): source, rows and width.
+  struct ReadyRows {
+    const float* src{nullptr};
+    const void* data{nullptr};
+    std::uint32_t n{0};
+    std::uint32_t k{0};
+  };
+  mutable ReadyRows xn_q8_ready_;
+  mutable ReadyRows mixed_q8_ready_;
 };
 
 }  // namespace gufo::models::qwen38_flash_next::rocm
