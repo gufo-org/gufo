@@ -442,6 +442,48 @@ void RestorePreemptsYield() {
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
   assert(disk.Retire({1}));
 }
+void CancelledStagingWait() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 16, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  Fixture first(ledger), second(ledger, 2, 30);
+  auto first_sources = first.Sources();
+  TransferTiming write;
+  streams.Write(Id(100), first.manifest, first_sources, write);
+  std::promise<void> holding, release;
+  auto released = release.get_future().share();
+  std::atomic<bool> observed{};
+  auto second_sources = second.Sources([&] {
+    if (!observed.exchange(true))
+      holding.set_value();
+    released.wait();
+  });
+  auto writer = std::async(std::launch::async, [&] {
+    TransferTiming timing;
+    streams.Write(Id(101), second.manifest, second_sources, timing);
+  });
+  holding.get_future().wait();
+  std::stop_source stop;
+  TransferTiming timing;
+  auto destination = first.adapter.CreateSlot(first.guard);
+  std::promise<void> started;
+  auto restore = std::async(std::launch::async, [&] {
+    started.set_value();
+    return streams.Restore({1}, first.manifest.compatibility, first.adapter,
+                           *destination, timing, stop.get_token());
+  });
+  started.get_future().wait();
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  stop.request_stop();
+  assert(restore.wait_for(std::chrono::seconds(2)) ==
+         std::future_status::ready);
+  assert(!restore.get());
+  assert(timing.staging_wait_ns > 0);
+  release.set_value();
+  writer.get();
+  assert(disk.Retire({1}) && disk.Retire({2}));
+}
 }  // namespace
 int main() {
   RoundTripAndFailures();
@@ -450,4 +492,5 @@ int main() {
   AdmissionFailures();
   FailedSubmission();
   RestorePreemptsYield();
+  CancelledStagingWait();
 }

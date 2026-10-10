@@ -152,10 +152,10 @@ struct StreamedStore::Impl {
   std::unique_lock<std::timed_mutex> Lock(std::stop_token stop,
                                           TransferTiming& timing) {
     const auto start = Clock::now();
+    Finally wait_observation{[&] { timing.staging_wait_ns += Elapsed(start); }};
     std::unique_lock guard(mutex, std::defer_lock);
     while (!guard.try_lock_for(std::chrono::milliseconds(2)))
       CheckStop(stop);
-    timing.staging_wait_ns += Elapsed(start);
     CheckStop(stop);
     return guard;
   }
