@@ -73,11 +73,14 @@ required (see the README).
 
 ## Review notes
 
-Fresh reviews found and fixed two cancellation issues. Interrupted staging
+Fresh reviews found and fixed cancellation and shutdown issues. Interrupted staging
 waits now retain their elapsed timing. Streamed publication checks cancellation
 while acquiring the disk I/O lock, so stopping a queue does not wait for another
 writer that is indefinitely yielding. Regression tests hold the staging piece
 and the publication lock separately, then cancel the competing operation.
+Concurrent queue stops serialize their worker join without holding the queue
+state mutex. A regression holds asynchronous completion settlement while two
+callers stop the same queue, then confirms both return and release all pins.
 The retained transfer samples below precede this cancellation-aware lock change;
 they do not qualify concurrent queue shutdown or serving interference.
 

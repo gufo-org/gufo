@@ -1,5 +1,6 @@
 #include "src/cache/streaming.hpp"
 
+#include <barrier>
 #include <cassert>
 #include <cstring>
 #include <filesystem>
@@ -102,18 +103,21 @@ struct Fixture {
       manifest.components.push_back(std::move(component));
     }
   }
-  std::vector<PersistenceSource> Sources(std::function<void()> on_copy = {}) {
+  std::vector<PersistenceSource> Sources(std::function<void()> on_copy = {},
+                                         std::function<void()> on_settle = {}) {
     std::vector<PersistenceSource> result;
     for (const auto& buffer : buffers) {
       auto* data = buffer.owner->data();
       result.emplace_back(
           buffer.private_file, buffer.file, buffer.owner->size(),
           buffer.alignment, buffer.charge, buffer.owner,
-          [data, on_copy](auto offset, auto bytes, Stream& stream) {
+          [data, on_copy, on_settle](auto offset, auto bytes, Stream& stream) {
             if (on_copy)
               on_copy();
             return dynamic_cast<FakeStream&>(stream).Submit(
-                [data, offset, bytes] {
+                [data, offset, bytes, on_settle] {
+                  if (on_settle)
+                    on_settle();
                   std::memcpy(bytes.data(), data + offset, bytes.size());
                   return TransferResult::kSucceeded;
                 });
@@ -522,6 +526,41 @@ void CancelledPublicationWait() {
   blocked.Stop();
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
 }
+void ConcurrentStop() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 16, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  Fixture fixture(ledger);
+  std::promise<void> entered, release;
+  auto released = release.get_future().share();
+  std::atomic<bool> observed{};
+  PersistenceQueue queue(ledger, streams, 1, 336, [] { return true; });
+  assert(queue.TrySubmit(PersistenceJob(ledger, Id(100), fixture.manifest,
+                                        fixture.Sources({}, [&] {
+                                          if (!observed.exchange(true)) {
+                                            entered.set_value();
+                                            released.wait();
+                                          }
+                                        }))));
+  entered.get_future().wait();
+  std::barrier start(3);
+  auto stop = [&] {
+    start.arrive_and_wait();
+    queue.Stop();
+  };
+  auto one = std::async(std::launch::async, stop);
+  auto two = std::async(std::launch::async, stop);
+  start.arrive_and_wait();
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  release.set_value();
+  assert(one.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  assert(two.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  one.get();
+  two.get();
+  assert(queue.Stats().pending == 0);
+  assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+}
 }  // namespace
 int main() {
   RoundTripAndFailures();
@@ -532,4 +571,5 @@ int main() {
   RestorePreemptsYield();
   CancelledStagingWait();
   CancelledPublicationWait();
+  ConcurrentStop();
 }

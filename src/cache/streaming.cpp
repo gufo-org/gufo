@@ -378,6 +378,7 @@ struct PersistenceQueue::Impl {
   std::size_t max_bytes;
   std::function<bool()> idle;
   mutable std::mutex mutex;
+  std::mutex stop_mutex;
   std::condition_variable wake;
   std::vector<std::unique_ptr<PersistenceJob>> pending;
   std::unique_ptr<PersistenceJob> active;
@@ -482,6 +483,9 @@ void PersistenceQueue::Drain() {
   impl_->wake.wait(guard, [&] { return impl_->stats.pending == 0; });
 }
 void PersistenceQueue::Stop() {
+  // Joining a jthread is not concurrently safe. Keep lifecycle serialization
+  // separate from state: the worker needs the state mutex while settling.
+  std::lock_guard stop_guard(impl_->stop_mutex);
   {
     std::lock_guard guard(impl_->mutex);
     impl_->stopped = true;
