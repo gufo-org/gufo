@@ -1051,6 +1051,13 @@ bool Session::RunIsolatedBatch(std::span<const Request> requests,
       outcome.error = "invalid or non-independent batch request";
       continue;
     }
+    try {
+      if (r.session->continuation_hooks_)
+        r.session->continuation_hooks_->BeforeExecution();
+    } catch (const std::exception& exception) {
+      outcome.error = exception.what();
+      continue;
+    }
     if (!r.session->session_->CheckCancellation(&outcome.error))
       continue;
     model = r.session->model_.get();
@@ -1121,17 +1128,11 @@ bool Session::RunIsolatedBatch(std::span<const Request> requests,
 
 bool Session::DecodeBatch(std::span<const DecodeRequest> requests,
                           std::string* error_msg) {
-  for (const auto& request : requests)
-    if (request.session && request.session->continuation_hooks_)
-      request.session->continuation_hooks_->BeforeExecution();
   return RunIsolatedBatch(requests, error_msg);
 }
 
 bool Session::EvaluateBatch(std::span<const AdvanceRequest> requests,
                             std::string* error_msg) {
-  for (const auto& request : requests)
-    if (request.session && request.session->continuation_hooks_)
-      request.session->continuation_hooks_->BeforeExecution();
   return RunIsolatedBatch(requests, error_msg);
 }
 

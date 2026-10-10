@@ -9,10 +9,13 @@
 #include <string>
 #include <vector>
 
+#include "src/cache/slot.hpp"
+
 namespace qfn = gufo::models::qwen38_flash_next;
 namespace cache = gufo::cache;
 namespace sampling = gufo::sampling;
 void FailNextResetSubmission();
+void FailNextTransferWait();
 namespace {
 void Require(bool ok, const std::string& message) {
   if (!ok)
@@ -30,6 +33,12 @@ void Reject(F&& call) {
 }
 struct IncompatibleStream final : cache::Stream {
   cache::TransferResult Synchronize() noexcept override {
+    return cache::TransferResult::kSucceeded;
+  }
+};
+struct Finished final : cache::CompletionSignal {
+  bool Ready() const noexcept override { return true; }
+  cache::TransferResult Wait() noexcept override {
     return cache::TransferResult::kSucceeded;
   }
 };
@@ -84,6 +93,21 @@ void Load(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
   // Reverse component and piece order: metadata arrives after the device
   // regions, and the first piece of each tensor arrives last.
   constexpr std::size_t piece = (1 << 20) + 13;
+  std::vector<cache::Completion> pending;
+  auto settle = [&] {
+    for (auto& completion : pending)
+      Wait(std::move(completion));
+    pending.clear();
+  };
+  auto acquire = [&] {
+    auto stream = streams.TryAcquire();
+    if (!stream) {
+      settle();
+      stream = streams.TryAcquire();
+    }
+    Require(bool(stream), "stream exhausted");
+    return stream;
+  };
   for (std::size_t i = adapter.Components().size(); i-- > 0;) {
     const auto& component = adapter.Components()[i];
     const auto& bytes = checkpoint.bytes[i];
@@ -91,9 +115,8 @@ void Load(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
       const auto rows = checkpoint.positions[i].valid_rows;
       for (cache::Rows end = rows; end;) {
         const auto first = end > 97 ? end - 97 : 0;
-        auto stream = streams.TryAcquire();
-        Require(bool(stream), "stream exhausted");
-        Wait(adapter.CopyRowsIn(
+        auto stream = acquire();
+        pending.push_back(adapter.CopyRowsIn(
             slot, component.id, first, end,
             std::span(bytes).subspan(first * component.row_bytes,
                                      (end - first) * component.row_bytes),
@@ -103,18 +126,18 @@ void Load(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
     } else {
       for (std::size_t end = bytes.size(); end;) {
         const auto first = end > piece ? end - piece : 0;
-        auto stream = streams.TryAcquire();
-        Require(bool(stream), "stream exhausted");
+        auto stream = acquire();
         auto count = end - first;
         if (omit_last && component.id.value == 2 && !first)
           --count;
-        Wait(adapter.LoadPrivatePiece(slot, component.id, first,
-                                      std::span(bytes).subspan(first, count),
-                                      *stream));
+        pending.push_back(adapter.LoadPrivatePiece(
+            slot, component.id, first, std::span(bytes).subspan(first, count),
+            *stream));
         end = first;
       }
     }
   }
+  settle();
 }
 struct Guard final : cache::MutationGuard {
   qfn::ContinuationAdapter* adapter{};
@@ -185,6 +208,167 @@ void SameLogits(const qfn::Session& a, const qfn::Session& b) {
               std::memcmp(a.Logits().data(), b.Logits().data(),
                           a.Logits().size_bytes()) == 0,
           "restored next-step logits differ");
+}
+void CheckTransferAndGuardLifetime(const std::shared_ptr<qfn::Model>& model,
+                                   bool mtp,
+                                   std::span<const std::int32_t> prompt) {
+  std::cout << (mtp ? "MTP" : "AR") << ",transfer_and_guard_lifetime"
+            << std::endl;
+  qfn::ContinuationAdapter adapter(
+      model,
+      mtp ? gufo::core::SessionMode::kSpeculative
+          : gufo::core::SessionMode::kAutoregressive,
+      64, {'l', 'i', 'f', 'e'});
+  gufo::hip::TransferPool streams(2);
+  Guard source_guard, destination_guard;
+  auto source = adapter.CreateSlot(source_guard);
+  auto destination = adapter.CreateSlot(destination_guard);
+  const auto checkpoint = Capture(adapter, *source, streams);
+  for (const bool overwrite : {false, true}) {
+    Load(adapter, *destination, checkpoint, streams);
+    gufo::hip::TransferPool failed_streams(1);
+    auto stream = failed_streams.TryAcquire();
+    {
+      auto copy =
+          adapter.LoadPrivate(*destination, {4}, checkpoint.bytes[3], *stream);
+      FailNextTransferWait();
+      if (overwrite)
+        copy = cache::Completion(std::make_unique<Finished>());
+    }
+    Require(!adapter.Validate(*destination, checkpoint.positions),
+            "discarded completion error was not latched");
+    Require(adapter.Invalidate(*destination),
+            "discarded completion error could not recover");
+  }
+  auto bytes = checkpoint.bytes[3];
+  auto stream = streams.TryAcquire();
+  auto copy = adapter.CapturePrivate(*source, {4}, bytes, *stream);
+  source.reset();
+  Wait(std::move(copy));
+  Require(bytes == checkpoint.bytes[3],
+          "slot destruction failed to drain an outstanding capture");
+  stream.reset();
+  destination.reset();
+
+  // The real slot guard leases a new independent transfer for every piece.
+  // The idle worker is kept dormant so each foreground mutation is the oracle.
+  for (const int path : {0, 1, 2, 3, 4}) {
+    cache::ResourceLedger ledger({8 << 20, 8 << 20, 8 << 20, 8 << 20});
+    IncompatibleStream unused;
+    cache::LeasedSlot leased(
+        ledger, adapter, unused, {1},
+        cache::IdleSpillConfig{
+            .piece_bytes = 4096,
+            .acquire_stream = [&]() -> std::unique_ptr<cache::Stream> {
+              return streams.TryAcquire();
+            },
+            .device_idle = [] { return false; }});
+    auto lease = leased.Acquire();
+    auto& session = adapter.GetSession(lease.Execution());
+    std::string error;
+    Require(session.Sync(prompt.first(17), &error), error);
+    const auto positions = adapter.Positions(lease.Execution());
+    auto legacy = session.SaveSnapshot(&error);
+    Require(bool(legacy), error);
+    std::vector<cache::ResourceCharge> charges;
+    std::vector<std::shared_ptr<cache::BorrowedRows>> borrowed;
+    std::vector<std::vector<std::byte>> expected;
+    for (const auto& component : adapter.Components()) {
+      const auto rows = positions[component.id.value - 1].valid_rows;
+      if (!component.row_bytes || !rows)
+        continue;
+      auto& oracle = expected.emplace_back(rows * component.row_bytes);
+      auto transfer = streams.TryAcquire();
+      Wait(adapter.CopyRowsOut(lease.Execution(), component.id, 0, rows, oracle,
+                               *transfer));
+      transfer.reset();
+      auto reservation =
+          ledger.Reserve(cache::ResourceCategory::kBackingFree, oracle.size());
+      auto backing = std::make_shared<std::vector<std::byte>>(oracle.size());
+      auto charge = reservation.Convert();
+      auto assigned =
+          charge.ReserveBacking(cache::ResourceCategory::kBackingAssigned);
+      charges.push_back(charge);
+      borrowed.push_back(lease.Borrow(component.id, 0, rows,
+                                      std::move(assigned), backing, *backing));
+    }
+    if (path == 0)
+      session.Reset();
+    else if (path == 1)
+      Require(session.RestoreSnapshot(*legacy, &error), error);
+    else if (path == 2)
+      adapter.BeginRestore(lease.Execution(), positions);
+    else if (path == 3) {
+      auto edited =
+          std::vector<std::int32_t>(prompt.begin(), prompt.begin() + 17);
+      edited[3] = edited[3] == 1 ? 2 : 1;
+      Require(session.Sync(edited, &error), error);
+    } else {
+      Guard peer_guard;
+      auto peer = adapter.CreateSlot(peer_guard);
+      auto& other = adapter.GetSession(*peer);
+      Require(other.Sync(prompt.first(17), &error), error);
+      std::array<qfn::Session::BatchOutcome, 2> outcomes;
+      const std::array<qfn::Session::AdvanceRequest, 2> advances{
+          {{&session, prompt[17], &outcomes[0]},
+           {&other, prompt[17], &outcomes[1]}}};
+      Require(qfn::Session::EvaluateBatch(advances, &error), error);
+      Require(outcomes[0].completed && outcomes[1].completed,
+              "guarded advance batch did not execute both peers");
+      std::array<sampling::SamplerState, 2> samplers;
+      std::array<qfn::Session::DecodeResult, 2> results;
+      const std::array<qfn::Session::DecodeRequest, 2> decodes{
+          {{&session, 4, &samplers[0], &results[0], false, &outcomes[0]},
+           {&other, 4, &samplers[1], &results[1], false, &outcomes[1]}}};
+      Require(qfn::Session::DecodeBatch(decodes, &error), error);
+      Require(outcomes[0].completed && outcomes[1].completed,
+              "guarded decode batch did not execute both peers");
+      session.Reset();
+    }
+    for (std::size_t i = 0; i < borrowed.size(); ++i) {
+      Require(borrowed[i]->IsValid() && !borrowed[i]->Location(),
+              "real guard did not preserve a borrowed component");
+      const auto owner = std::static_pointer_cast<const std::vector<std::byte>>(
+          borrowed[i]->Owner());
+      Require(owner && *owner == expected[i],
+              "real guard preserved changed rows");
+    }
+  }
+  std::cout << (mtp ? "MTP" : "AR") << ",transfer_and_guard_lifetime,PASS\n";
+}
+void BatchIsolation(qfn::Session& rejected, qfn::Session& healthy,
+                    std::int32_t token) {
+  const auto rejected_position = rejected.Position();
+  auto healthy_position = healthy.Position();
+  std::array<qfn::Session::BatchOutcome, 2> outcomes;
+  std::string error;
+  const std::array<qfn::Session::AdvanceRequest, 2> advances{
+      {{&rejected, token, &outcomes[0]}, {&healthy, token, &outcomes[1]}}};
+  Require(!qfn::Session::EvaluateBatch(advances, &error),
+          "unready batch peer was admitted");
+  Require(!outcomes[0].completed && !outcomes[0].error.empty() &&
+              outcomes[1].completed && outcomes[1].error.empty() &&
+              healthy.Position() == healthy_position + 1 &&
+              rejected.Position() == rejected_position,
+          "advance readiness failure prevented healthy peer execution");
+  std::array<sampling::SamplerState, 2> samplers{
+      sampling::SamplerState({.temperature = 0.0F}),
+      sampling::SamplerState({.temperature = 0.0F})};
+  std::array<qfn::Session::DecodeResult, 2> results;
+  outcomes = {};
+  healthy_position = healthy.Position();
+  const std::array<qfn::Session::DecodeRequest, 2> decodes{
+      {{&rejected, 4, &samplers[0], &results[0], false, &outcomes[0]},
+       {&healthy, 4, &samplers[1], &results[1], false, &outcomes[1]}}};
+  Require(!qfn::Session::DecodeBatch(decodes, &error),
+          "unready decode peer was admitted");
+  Require(
+      !outcomes[0].completed && !outcomes[0].error.empty() &&
+          outcomes[1].completed && outcomes[1].error.empty() &&
+          !results[1].tokens.empty() &&
+          healthy.Position() == healthy_position + results[1].tokens.size() &&
+          rejected.Position() == rejected_position,
+      "decode readiness failure prevented healthy peer execution");
 }
 void Check(const std::shared_ptr<qfn::Model>& model, bool mtp,
            std::span<const std::int32_t> prompt) {
@@ -330,6 +514,7 @@ void Check(const std::shared_ptr<qfn::Model>& model, bool mtp,
   auto capture = adapter.CapturePrivate(*source, {4}, bytes, *stream);
   Reject([&] { (void)a.Evaluate(prompt[0], &error); });
   Require(!adapter.Invalidate(*source), "reset ignored a pending read");
+  BatchIsolation(a, b, prompt[0]);
   Wait(std::move(capture));
   stream.reset();
   Load(adapter, *destination, checkpoint, streams, true);
@@ -337,9 +522,11 @@ void Check(const std::shared_ptr<qfn::Model>& model, bool mtp,
           "missing private byte accepted");
   Require(!adapter.Validate(*destination, checkpoint.positions),
           "validation failure was not latched");
+  BatchIsolation(b, a, prompt[0]);
   Require(adapter.Invalidate(*destination),
           "failed restore could not be invalidated");
   adapter.BeginRestore(*destination, checkpoint.positions);
+  BatchIsolation(b, a, prompt[0]);
   stream = streams.TryAcquire();
   IncompatibleStream incompatible;
   Reject([&] {
@@ -359,11 +546,13 @@ void Check(const std::shared_ptr<qfn::Model>& model, bool mtp,
   Reject([&] { (void)adapter.GetSession(*destination); });
   Require(adapter.Invalidate(*destination),
           "failed zero-fill submission could not recover");
-  source_guard.Borrow(checkpoint);
+  const auto reset_checkpoint = Capture(adapter, *source, streams);
+  source_guard.Borrow(reset_checkpoint);
   a.Reset();
   Require(!source_guard.release_failed, "reset preservation failed");
   for (std::size_t i = 0; i < adapter.Components().size(); ++i)
-    if (adapter.Components()[i].row_bytes && checkpoint.positions[i].valid_rows)
+    if (adapter.Components()[i].row_bytes &&
+        reset_checkpoint.positions[i].valid_rows)
       Require(source_guard.detached[i],
               "reset failed to preserve borrowed component");
   source_guard.borrowed = nullptr;
@@ -452,10 +641,12 @@ void CheckImages(const std::shared_ptr<qfn::Model>& model, bool mtp) {
 }
 }  // namespace
 int main(int argc, char** argv) {
-  if (argc != 5 || std::string_view(argv[1]) != "--model" ||
+  const bool guard_only =
+      argc == 6 && std::string_view(argv[5]) == "--guard-only";
+  if ((argc != 5 && !guard_only) || std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
     std::cerr << "Usage: continuation_adapter_test --model FIRST.gguf "
-                 "--mtp-model MTP.gguf\n";
+                 "--mtp-model MTP.gguf [--guard-only]\n";
     return 77;
   }
   try {
@@ -470,6 +661,10 @@ int main(int argc, char** argv) {
     std::vector<std::int32_t> prompt(10000);
     for (std::size_t i = 0; i < prompt.size(); ++i)
       prompt[i] = pattern[i % pattern.size()];
+    CheckTransferAndGuardLifetime(model, false, prompt);
+    CheckTransferAndGuardLifetime(model, true, prompt);
+    if (guard_only)
+      return 0;
     Check(model, false, prompt);
     Check(model, true, prompt);
     CheckImages(model, false);

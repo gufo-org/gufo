@@ -64,8 +64,8 @@ slot. RFC E1 for comparison: about 113.8 MiB fixed plus 27.46 KB per token
 
 ## Done when
 
-- [ ] Tests above pass on gfx1151 for both modes.
-- [ ] The model's standard speed benchmark against matched `main` shows no
+- [x] Tests above pass on gfx1151 for both modes.
+- [x] The model's standard speed benchmark against matched `main` shows no
   regression from the inactive guard calls (per phase, 5% / 3 ms).
 
 ## After this card
@@ -113,13 +113,19 @@ CMake release builds compare with clean main `92aaed5d30cd82e5730e43be3501775b77
 Weights are the retained four-shard UD-Q4_K_XL target and shared Q8_0 predictor
 from [model identities](../../models/qwen3.8-flash-next/artifacts/model-identities.json).
 
-CPU geometry passes. The earlier candidate passed AR/MTP exact component and
+CPU geometry passes. The final candidate passed AR/MTP exact component and
 next-step checks, seeded rejection and carried residual/controller replay, empty
 state, reset/release, peer-stream overlap, shorter/edit restore and image input
 identity/layout. Legacy snapshot checks and independent GDN numerical checks
-pass. Hosted CPU checks passed 54/54; the geometry test has since been added to
-the hosted target and needs the final 55-test check. The final prefill-tail
-planner and injected reset-submission failure checks are awaiting their rerun.
+pass. Hosted CPU checks pass 55/55, including the geometry test. The final
+prefill-tail planner, injected reset-submission failure, batch failure isolation
+and simultaneous independent-stream restore checks pass in both modes.
+Focused lifetime checks also pass: completion errors discarded by destruction
+or move assignment stay latched; slot destruction drains a capture whose handle
+outlives the slot; the real `LeasedSlot` guard preserves exact borrowed bytes
+before reset, legacy restore, new restore and edited prefill, including execution
+through both active batch APIs. No GPU loss is injected: the real event is
+drained before a process-local wrapper reports an error.
 
 Production adapter baselines use serial transfers into packed, precommitted
 64 MiB slabs, with 4 GiB total backing committed before prefill. Times exclude
@@ -132,27 +138,51 @@ next-step logits/drafts are checked exactly.
 | AR | 32,768 | 131,614,880 | 830,603,264 | 8.35 | 19.89 | 12.68 | 1,006,632,960 |
 | AR | 100,000 | 131,614,880 | 2,534,800,000 | 8.04 | 40.21 | 33.26 | 2,684,354,560 |
 | MTP | 32,768 | 133,032,096 | 899,806,976 | 8.67 | 21.64 | 13.61 | 1,073,741,824 |
+| MTP | 100,000 | 133,032,096 | 2,745,997,696 | 8.08 | 44.11 | 35.90 | 2,885,681,152 |
 
-MTP 100k qualification is still running. The 32k/100k cross-slot probes use
+All eight capacity rows pass. The 32k/100k cross-slot probes use
 slot capacities 32,896/100,128 so the restored next step fits. AR C1 at capacity
 100k and AR C8 at capacity 8,192 also fit with every live slot prefilled, four
 decode cycles, 4 GiB physically committed backing and conservative remaining
-rollback/vision/scratch claims. These measurements qualify the adapter and
+rollback/vision/scratch claims. MTP C1/100k and C8/8,192 also pass, with 23/24
+actual proposed drafts. Remaining HIP-free bytes are 35,060,039,680 and
+33,699,983,360, respectively, exceeding the conservative outstanding live and
+scratch claims. Measured resident model bytes are 82,384,141,824 AR and
+85,157,259,776 MTP: the PLE ngram table uses the existing bounded DirectIO path,
+so GGUF artifact size is not the resident weight claim. These measurements qualify the adapter and
 physical memory envelope, not card 19's checkpoint-store allocation policy.
 Eight long histories remain excluded.
 
-The initial inactive-hook speed gate passes at d0/32k for pp2048/tg128 AR and
+The first independent review found readiness hooks outside batch isolation.
+Readiness now runs during per-request admission, preserving outcomes and healthy
+peer execution. Regression tests cover pending reads, incomplete restores and
+failed restores for both batch APIs. Restore tests now submit non-overlapping
+loads on two independent streams before waiting.
+
+The final inactive-hook speed gate passes at d0/32k for pp2048/tg128 AR and
 MTP mixed/repetitive: counts, completion hashes, proposed drafts and acceptance
-are exact. Per-phase time changes are within 2.79% prefill and 0.97% decode;
+are exact. Worst slowdowns are 3.38% prefill and 0.05% decode;
 there is no averaging across requests. All setup observations were retained: the
 first candidate had stale build dependencies, and one fresh MTP 32k observation
 overlapped a test rebuild. Those timings are unqualified; clean matched repeats
-pass. The final reset-error hardening still needs its production rerun.
+pass. The production rerun includes final reset-error hardening and batch
+admission. Its retained binary SHA-256 is
+`eaed305de12a35d1d448e6da38f85aaadffa8038d35ad0531bd87b39cf0a5385`.
 
 Candidate HTTP `long-context` and `cache` correctness passes in AR (zero drafts)
 and MTP (298 actual drafts, 210 accepted). Individual request/phase timing flags
 in snapshot copies, restore, cancellation and queueing remain **inconclusive and
-unqualified**; unchanged-main controls and the final candidate rerun are pending.
+unqualified** after matched final-build replays and unchanged-main controls.
+AR retains 586 passed / 16 inconclusive metrics; MTP retains 528 passed / 74
+inconclusive metrics, with zero quality/coverage changes and zero currently
+confirmed timing regressions. Every request/phase retains the 5% / 3 ms gate.
+The first two MTP pairs flagged `disk-spacing` request 4 snapshot time at
+36.10/38.19 ms versus main 30.84/30.07 ms. An affected-history follow-up kept
+preceding suites and cache history: unchanged main took 34.82 ms and the same
+candidate binary took 30.92 ms. The observed ranges overlap and main varies
+beyond the margin. The original failed report remains retained; this evidence
+does not qualify that phase or imply a speedup. Snapshot allocation/copy code
+is unchanged, and no timing tolerance or numerical contract was relaxed.
 The new cache's HTTP path remains deferred until card 19 exists and attaches it.
 
 Reproduction (select a mode and depth explicitly):
@@ -174,8 +204,9 @@ build/release/src/models/qwen38_flash_next/qwen38_flash_next_continuation_probe 
 ```
 
 Raw logs, commands, JSON request measurements and failed/inconclusive runs are
-retained outside the repository under `/tmp/gufo-card14-*`; they will be copied
-to persistent qualification storage before final review. Benchmark `source`
+retained outside the repository under `/tmp/gufo-card14-*` and copied to
+`/home/mixer/gufo-qualification/cache-card14-2026-10-10/`, excluding generated
+disk-cache payloads. Benchmark `source`
 metadata identifies the harness checkout, so binary hashes and the clean main
 workspace/source patch are recorded separately. No standalone measurement JSON
 is added to this repository.
