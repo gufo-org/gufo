@@ -2621,7 +2621,8 @@ def main():
                 client, args.model, checks, image_content, chat_result, response_result,
                 args.context, args.concurrency),
             "tool-images": lambda: check_tool_images(
-                client, args.model, checks, image_content, chat_result, response_result),
+                client, args.model, checks, image_content, chat_result, response_result,
+                args.server_log),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
             "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),

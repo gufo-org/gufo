@@ -3,8 +3,11 @@
 from copy import deepcopy
 import sys
 
+from cache_growth import check_unchanged_retry, log_offset
 
-def check_tool_images(client, model, checks, image_content, chat_result, response_result):
+
+def check_tool_images(client, model, checks, image_content, chat_result, response_result,
+                      server_log=None):
     from openai import BadRequestError
 
     def record(name, result):
@@ -106,10 +109,13 @@ def check_tool_images(client, model, checks, image_content, chat_result, respons
             label = f"tool_images_{transport}_{'mixed' if mixed else 'only'}"
             turns = history(transport, "red", mixed)
             expected = "red WALNUT" if mixed else "red"
+            start = log_offset(server_log)
             first = record(label, check(run(transport, turns), expected))
             retry = record(label + "_retry", check(run(transport, turns, True), expected))
             assert first["text"] == retry["text"], (first, retry)
-            assert counts(retry)[0] == counts(retry)[1], retry
+            total, cached = counts(retry)
+            check_unchanged_retry(label + "_retry", retry, total - cached, server_log,
+                                  start, log_offset(server_log))
             # Same image position and transport with different pixels must
             # invalidate the old observation, even when token counts match.
             changed = history(transport, "blue", mixed)

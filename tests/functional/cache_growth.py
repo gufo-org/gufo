@@ -32,7 +32,8 @@ def check_unchanged_retry(label, retry, prefilled, server_log, start, end):
     restores the stable boundary and prefills only the assistant opening."""
     if not prefilled:
         return
-    total = retry["usage"]["prompt_tokens"]
+    usage = retry["usage"]
+    total = usage.get("prompt_tokens", usage.get("input_tokens"))
     assert prefilled <= ASSISTANT_OPENING_TOKENS and \
         retry_copy_refused(server_log, start, end, total), retry
     print(f"NOTE {label}: retry copy refused under memory pressure; "
