@@ -1,4 +1,5 @@
 #include "qfn_mmq_prelude.h"
+#include "src/core/hip/managed_alloc.hpp"
 namespace qfn_mmq {
 // SPDX-License-Identifier: MIT
 // Implementations of the ggml-API stubs declared in qfn_ggml_stubs.h plus
@@ -135,7 +136,7 @@ struct qfn_stack_pool : public ggml_hip_pool {
         if (base) (void)hipFree(base);
         size_t next = capacity ? capacity : (size_t) 256 << 20;
         while (next < bytes) next *= 2;
-        HIP_CHECK(hipMalloc((void **) &base, next));
+        HIP_CHECK(gufo::hip::AllocateDevice(&base, next));
         capacity = next;
     }
 

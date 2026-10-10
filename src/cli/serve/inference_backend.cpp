@@ -2458,18 +2458,14 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
-    std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-      const auto deferred = model_->DeferredScratchBytes();
-      capacity = free_bytes > deferred ? free_bytes - deferred : 0;
-    }
+    // State allocations fall back to managed memory, so capacity is host
+    // RAM still available after load.
     // Admission charges complete snapshot payloads. Flash-Next can retain
     // mutable state and protected K/V rows in private device storage.
     return {
         .resident_weights_bytes = model_->ResidentBytes(),
-        .state_capacity_bytes = capacity,
+        .state_capacity_bytes = HostStateCapacityBytes(
+            HostAvailableBytes(), model_->DeferredScratchBytes()),
         .per_request_state_bytes = model_->SessionBytes(
             use_mtp_ ? gufo::core::SessionMode::kSpeculative
                      : gufo::core::SessionMode::kAutoregressive,

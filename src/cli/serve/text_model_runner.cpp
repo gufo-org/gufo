@@ -109,10 +109,6 @@ std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
          1024;
 }
 
-namespace {
-
-/// Host RAM still available, after cgroup limits. Unified-memory device
-/// allocations draw from the same RAM, so HIP's device capacity is not used.
 std::uint64_t HostAvailableBytes() {
   const long pages = sysconf(_SC_AVPHYS_PAGES);
   const long page_size = sysconf(_SC_PAGESIZE);
@@ -149,6 +145,8 @@ std::uint64_t HostAvailableBytes() {
   return available;
 }
 
+namespace {
+
 std::size_t ClampToSize(std::uint64_t bytes) {
   return static_cast<std::size_t>(
       std::min<std::uint64_t>(bytes, std::numeric_limits<std::size_t>::max()));
@@ -165,6 +163,20 @@ std::size_t HostSnapshotCeilingBytes() {
   return ClampToSize(available > kHostSnapshotHeadroomBytes
                          ? available - kHostSnapshotHeadroomBytes
                          : 0);
+}
+
+std::size_t HostStateCapacityBytes(std::uint64_t host_available_bytes,
+                                   std::size_t deferred_scratch_bytes) {
+  const auto deferred = static_cast<std::uint64_t>(deferred_scratch_bytes);
+  if (deferred >
+      std::numeric_limits<std::uint64_t>::max() - kHostSnapshotHeadroomBytes) {
+    return 0;
+  }
+  const std::uint64_t reserved = kHostSnapshotHeadroomBytes + deferred;
+  if (host_available_bytes <= reserved) {
+    return 0;
+  }
+  return ClampToSize(host_available_bytes - reserved);
 }
 
 namespace {
