@@ -2461,14 +2461,16 @@ public:
       std::map<std::uint32_t, std::size_t> component_classes;
     };
     auto result = std::make_unique<ComponentCacheResources>();
-    result->adapter =
+    auto adapter =
         std::make_unique<models::qwen38_flash_next::ContinuationAdapter>(
             model_,
             use_mtp_ ? core::SessionMode::kSpeculative
                      : core::SessionMode::kAutoregressive,
             max_context_, component_identity_);
+    const auto plan = adapter->BackingPlan(ram);
+    result->adapter = std::move(adapter);
     auto backing = std::make_shared<Backing>();
-    std::map<std::size_t, long double> weights;
+    result->transfer_batch_size = 4;
     const auto rounded = [](std::size_t bytes) {
       return (bytes + 4095) / 4096 * 4096;
     };
@@ -2477,30 +2479,17 @@ public:
                                      ? d.state_bytes
                                      : d.row_bytes * d.rows_per_chunk);
       backing->component_classes.emplace(d.id.value, bytes);
-      const auto count = d.kind == cache::ComponentKind::kPrivateState
-                             ? 8ULL
-                             : 2ULL * ((max_context_ + d.rows_per_chunk - 1) /
-                                       d.rows_per_chunk);
-      weights[bytes] += static_cast<long double>(bytes + 1024) * count;
     }
-    long double total = 0;
-    for (const auto& [bytes, weight] : weights)
-      total += weight;
     // The remainder belongs to index, histories, disk catalog and queue
     // metadata. The pools charge their own per-block allocator headroom.
-    const auto payload_budget =
-        ram > (4ULL << 20) ? (ram - (4ULL << 20)) * 9 / 10 : 0;
-    for (const auto& [bytes, weight] : weights) {
-      const auto share =
-          static_cast<std::size_t>(payload_budget * weight / total);
-      const auto blocks = share > 4096 ? (share - 4096) / (bytes + 1024) : 0;
-      if (!blocks)
-        continue;
-      const auto metadata = 4096 + blocks * 1024;
+    for (const auto& allocation : plan) {
       backing->pools.emplace(
-          bytes, std::make_unique<hip::CommittedBackingPool>(
-                     ledger, hip::BackingPoolConfig{blocks * bytes + metadata,
-                                                    bytes, metadata}));
+          allocation.block_bytes,
+          std::make_unique<hip::CommittedBackingPool>(
+              ledger, hip::BackingPoolConfig{
+                          allocation.blocks * allocation.block_bytes +
+                              allocation.metadata_bytes,
+                          allocation.block_bytes, allocation.metadata_bytes}));
     }
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
@@ -2523,10 +2512,12 @@ public:
       if (!block)
         throw cache::ResourceExhausted();
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
-      return ComponentCaptureBuffer{owner->Bytes(), [owner] {
+      return ComponentCaptureBuffer{owner->Bytes(),
+                                    [owner] {
                                       owner->Convert();
                                       return std::move(*owner).TakePayload();
-                                    }};
+                                    },
+                                    pool->second.get()};
     };
     result->staging = [](std::size_t bytes) {
       void* data = nullptr;

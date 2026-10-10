@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 
 namespace qfn = gufo::models::qwen38_flash_next;
@@ -102,12 +103,65 @@ void Check(bool mtp) {
   Require(layout.PrivateBytes() - no_ple_layout.PrivateBytes() == 368640,
           "PLE history inventory is incorrect");
 }
+void CheckBacking(bool mtp, std::uint32_t context, std::uint32_t concurrency,
+                  std::size_t ram, std::size_t checkpoints,
+                  std::size_t independent_rows) {
+  const auto c = ProductionGeometry();
+  const qfn::ContinuationLayout layout(c, mtp, context, 8);
+  std::map<std::size_t, std::size_t> available, required;
+  std::size_t bytes = 0;
+  for (const auto& allocation : layout.BackingPlan(ram, concurrency)) {
+    Require(allocation.block_bytes % 4096 == 0 && allocation.blocks != 0,
+            "invalid physical backing class");
+    Require(allocation.metadata_bytes >= 4096 + allocation.blocks * 1024,
+            "backing plan omitted allocator headroom");
+    available[allocation.block_bytes] = allocation.blocks;
+    bytes +=
+        allocation.block_bytes * allocation.blocks + allocation.metadata_bytes;
+  }
+  Require(bytes <= (ram - (4ULL << 20)) / 10 * 9,
+          "physical backing exceeds the startup budget");
+  for (const auto& component : layout.Components()) {
+    const auto& d = component.descriptor;
+    const auto payload = d.kind == cache::ComponentKind::kPrivateState
+                             ? d.state_bytes
+                             : d.rows_per_chunk * d.row_bytes;
+    const auto capacity = (payload + 4095) / 4096 * 4096;
+    if (d.kind == cache::ComponentKind::kPrivateState)
+      required[capacity] += checkpoints;
+    else {
+      const bool pooled =
+          component.part == qfn::ContinuationPart::kPooledKeys ||
+          component.part == qfn::ContinuationPart::kDraftPooledKeys;
+      const auto rows =
+          pooled ? independent_rows / c.compress_ratio : independent_rows;
+      required[capacity] +=
+          (rows + d.rows_per_chunk - 1) / d.rows_per_chunk + checkpoints;
+    }
+  }
+  // Independent physical demands, including shared-class collisions and a
+  // partial tail per checkpoint. A row-heavy pool must not strand most of its
+  // budget while private state already refuses feasible histories.
+  for (const auto& [capacity, count] : required)
+    Require(available[capacity] >= count,
+            "feasible capture envelope does not fit its classes");
+  Require(layout.BackingPlan(1 << 20, concurrency).empty(),
+          "tiny budgets should leave cache metadata headroom");
+  Reject([&] { (void)layout.BackingPlan(ram, 0); });
+  Reject([&] { (void)layout.BackingPlan(ram, 9); });
+}
 }  // namespace
 
 int main() {
   try {
     Check(false);
     Check(true);
+    for (const auto mtp : {false, true}) {
+      CheckBacking(mtp, 32768, 2, 8ULL << 30, 32, 2 * 32768);
+      CheckBacking(mtp, 32768, 2, 2ULL << 30, 8, 2 * 4096);
+      CheckBacking(mtp, 4096, 8, 8ULL << 30, 8, 8 * 4096);
+      CheckBacking(mtp, 133760, 1, 8ULL << 30, 8, 2 * 100000);
+    }
     const auto c = ProductionGeometry();
     Reject([&] { qfn::ContinuationLayout layout(c, false, 0, 8); });
     Reject([&] { qfn::ContinuationLayout layout(c, true, 100000, 0); });

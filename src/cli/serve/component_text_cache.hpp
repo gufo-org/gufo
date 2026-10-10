@@ -22,6 +22,9 @@ struct TextPromptContext;
 struct ComponentCaptureBuffer {
   std::span<std::byte> bytes;
   std::function<cache::Payload()> finish;
+  // Identity of one underlying allocation, for joining adjacent byte spans.
+  // Null providers always transfer each buffer separately.
+  const void* allocation{};
 };
 struct ComponentCacheResources {
   std::shared_ptr<void> owner;
@@ -29,6 +32,10 @@ struct ComponentCacheResources {
   cache::StreamLease stream;
   std::function<ComponentCaptureBuffer(const cache::PayloadRequest&)> allocate;
   cache::StagingAllocator staging;
+  // The provider guarantees this many concurrent leases per execution slot,
+  // in addition to preservation and disk work. One keeps generic providers
+  // usable without a pool-capacity contract.
+  std::size_t transfer_batch_size{1};
 };
 
 class ComponentTextCache {

@@ -18,6 +18,10 @@ public:
                       std::uint32_t context, cache::Identity);
   ~ContinuationAdapter() override;
   [[nodiscard]] Session& GetSession(cache::Slot&);
+  [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
+      std::size_t ram_bytes) const {
+    return layout_.BackingPlan(ram_bytes, model_->DecodeConcurrency());
+  }
   [[nodiscard]] cache::Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
       const override;

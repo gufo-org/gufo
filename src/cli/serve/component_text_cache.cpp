@@ -75,6 +75,42 @@ void Check(cache::Completion completion) {
   if (completion.Wait() != cache::TransferResult::kSucceeded)
     throw std::runtime_error("component cache transfer failed");
 }
+bool SameOwner(const std::shared_ptr<const void>& a,
+               const std::shared_ptr<const void>& b) {
+  return !a.owner_before(b) && !b.owner_before(a);
+}
+class TransferBatch {
+public:
+  explicit TransferBatch(std::size_t capacity) : capacity_(capacity) {
+    if (!capacity || capacity > jobs_.size())
+      throw std::invalid_argument("invalid cache transfer batch size");
+  }
+  template<class Acquire, class Submit>
+  void Add(Acquire acquire, Submit submit) {
+    if (size_ == capacity_)
+      Finish();
+    auto stream = acquire();
+    auto completion = submit(*stream);
+    jobs_[size_++].emplace(Job{std::move(stream), std::move(completion)});
+  }
+  void Finish() {
+    // Jobs keep their streams and completions together. On any exception,
+    // destruction drains every remaining transfer before buffers unwind.
+    for (std::size_t i = 0; i < size_; ++i) {
+      Check(std::move(jobs_[i]->completion));
+      jobs_[i].reset();
+    }
+    size_ = 0;
+  }
+
+private:
+  struct Job {
+    std::unique_ptr<cache::Stream> stream;
+    cache::Completion completion;
+  };
+  std::array<std::optional<Job>, 4> jobs_;
+  std::size_t capacity_, size_{};
+};
 class Events final : public cache::RetentionEventSink {
 public:
   void Emit(const cache::RetentionEvent& e) noexcept override {
@@ -477,6 +513,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             positions.push_back(c.position);
           impl_->resources->adapter->BeginRestore(request.slot.Execution(),
                                                   positions);
+          TransferBatch transfers(impl_->resources->transfer_batch_size);
           for (const auto& c : checkpoint.Components()) {
             auto load = [&](const cache::Payload& payload, cache::Rows first,
                             cache::Rows end) {
@@ -484,33 +521,63 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
               if (pin.Location())
                 throw std::logic_error("unpreserved RAM source");
               auto owner = pin.Owner() ? pin.Owner() : payload.Owner();
-              auto stream = impl_->Stream();
               const auto bytes =
                   c.descriptor.kind == cache::ComponentKind::kPrivateState
                       ? c.descriptor.state_bytes
                       : (end - first) * c.descriptor.row_bytes;
               const std::span<const std::byte> buffer(
                   static_cast<const std::byte*>(owner.get()), bytes);
-              if (c.descriptor.kind == cache::ComponentKind::kPrivateState)
-                Check(impl_->resources->adapter->LoadPrivate(
-                    request.slot.Execution(), c.descriptor.id, buffer,
-                    *stream));
-              else
-                Check(impl_->resources->adapter->CopyRowsIn(
-                    request.slot.Execution(), c.descriptor.id, first, end,
-                    buffer, *stream));
+              transfers.Add(
+                  [&] { return impl_->Stream(); },
+                  [&](cache::Stream& stream) {
+                    return c.descriptor.kind ==
+                                   cache::ComponentKind::kPrivateState
+                               ? impl_->resources->adapter->LoadPrivate(
+                                     request.slot.Execution(), c.descriptor.id,
+                                     buffer, stream)
+                               : impl_->resources->adapter->CopyRowsIn(
+                                     request.slot.Execution(), c.descriptor.id,
+                                     first, end, buffer, stream);
+                  });
               request.restored += bytes;
             };
             if (c.private_state)
               load(*c.private_state, 0, 0);
-            for (const auto& chunk : c.chunks)
-              load(chunk.Storage(), chunk.First(), chunk.End());
-            if (c.tail)
+            bool loaded_tail = false;
+            for (std::size_t i = 0; i < c.chunks.size();) {
+              const auto& chunk = c.chunks[i];
+              auto end = chunk.End();
+              const auto owner = chunk.Storage().Owner();
+              const auto* data = static_cast<const std::byte*>(owner.get());
+              auto next = i + 1;
+              while (data && next < c.chunks.size() &&
+                     c.chunks[next].First() == end &&
+                     SameOwner(owner, c.chunks[next].Storage().Owner()) &&
+                     c.chunks[next].Storage().Owner().get() ==
+                         data +
+                             (end - chunk.First()) * c.descriptor.row_bytes) {
+                end = c.chunks[next].End();
+                ++next;
+              }
+              if (data && next == c.chunks.size() && c.tail &&
+                  SameOwner(owner, c.tail->Owner()) &&
+                  end == c.position.valid_rows / c.descriptor.rows_per_chunk *
+                             c.descriptor.rows_per_chunk &&
+                  c.tail->Owner().get() ==
+                      data + (end - chunk.First()) * c.descriptor.row_bytes) {
+                end = c.position.valid_rows;
+                loaded_tail = true;
+              }
+              load(chunk.Storage(), chunk.First(), end);
+              i = next;
+            }
+            if (c.tail && !loaded_tail)
               load(*c.tail,
                    c.position.valid_rows / c.descriptor.rows_per_chunk *
                        c.descriptor.rows_per_chunk,
                    c.position.valid_rows);
           }
+          transfers.Finish();
           if (!impl_->resources->adapter->Validate(request.slot.Execution(),
                                                    positions))
             throw std::runtime_error("component RAM restore validation failed");
@@ -704,17 +771,8 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
                ? cache::CheckpointPurpose::kLearned
                : cache::CheckpointPurpose::kPrompt,
            0},
-          [&](const cache::PayloadRequest& payload) {
+          [&](const cache::PayloadRequest&) {
             auto& buffer = buffers.at(next_buffer++);
-            auto stream = cache.Stream();
-            if (payload.category == cache::ResourceCategory::kPrivateState)
-              Check(cache.resources->adapter->CapturePrivate(
-                  request.slot.Execution(), payload.component,
-                  buffer.bytes.first(payload.bytes), *stream));
-            else
-              Check(cache.resources->adapter->CopyRowsOut(
-                  request.slot.Execution(), payload.component, payload.first,
-                  payload.end, buffer.bytes.first(payload.bytes), *stream));
             auto storage = buffer.finish();
             captured_capacity += storage.Bytes();
             return storage;
@@ -726,6 +784,42 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
             buffers.reserve(payloads.size());
             for (const auto& payload : payloads)
               buffers.push_back(cache.resources->allocate(payload));
+            TransferBatch transfers(cache.resources->transfer_batch_size);
+            for (std::size_t i = 0; i < payloads.size();) {
+              const auto& payload = payloads[i];
+              auto end = payload.end;
+              auto bytes = payload.bytes;
+              auto next = i + 1;
+              if (payload.category != cache::ResourceCategory::kPrivateState)
+                while (buffers[i].allocation && next < payloads.size() &&
+                       buffers[next].allocation == buffers[i].allocation &&
+                       payloads[next].component == payload.component &&
+                       payloads[next].category !=
+                           cache::ResourceCategory::kPrivateState &&
+                       payloads[next].first == end &&
+                       buffers[next].bytes.data() ==
+                           buffers[i].bytes.data() + bytes) {
+                  end = payloads[next].end;
+                  bytes += payloads[next].bytes;
+                  ++next;
+                }
+              const std::span<std::byte> buffer(buffers[i].bytes.data(), bytes);
+              transfers.Add(
+                  [&] { return cache.Stream(); },
+                  [&](cache::Stream& stream) {
+                    return payload.category ==
+                                   cache::ResourceCategory::kPrivateState
+                               ? cache.resources->adapter->CapturePrivate(
+                                     request.slot.Execution(),
+                                     payload.component, buffer, stream)
+                               : cache.resources->adapter->CopyRowsOut(
+                                     request.slot.Execution(),
+                                     payload.component, payload.first, end,
+                                     buffer, stream);
+                  });
+              i = next;
+            }
+            transfers.Finish();
           });
       break;
     } catch (const cache::ResourceExhausted&) {

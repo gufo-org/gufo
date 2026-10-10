@@ -158,6 +158,14 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
   // owner check; this relaxed hint may race without affecting correctness.
   auto i = state_->next.load(std::memory_order_relaxed);
   for (std::size_t tried = 0; tried < count; ++tried) {
+    // Exhausted size classes are expected under retention pressure. Avoid
+    // allocating an assignment token and unwinding an exception for every
+    // occupied block. ReserveBacking still resolves any race after this hint.
+    if (state_->blocks[i].Info().category !=
+        cache::ResourceCategory::kBackingFree) {
+      i = i + 1 == count ? 0 : i + 1;
+      continue;
+    }
     try {
       auto reservation = state_->blocks[i].ReserveBacking(category);
       state_->next.store(i + 1 == count ? 0 : i + 1, std::memory_order_relaxed);

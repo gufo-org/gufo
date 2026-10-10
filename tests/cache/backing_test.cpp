@@ -218,7 +218,9 @@ void Backing() {
         held.push_back(std::move(*block));
       }
       assert(host_allocations - before_host <= 2 * count);
+      const auto before_full = host_allocations.load();
       assert(!large.TryAcquire(Category::kPrivateTail));
+      assert(host_allocations.load() == before_full);
       held.clear();
       assert(large_ledger.Snapshot()
                  .bytes[static_cast<std::size_t>(Category::kBackingFree)] ==

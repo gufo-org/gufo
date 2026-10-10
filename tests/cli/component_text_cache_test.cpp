@@ -60,34 +60,44 @@ public:
       cache::ResourceLedger& ledger, std::size_t) const override {
     struct Block {
       cache::ResourceCharge pool;
-      std::shared_ptr<std::array<std::byte, 64>> data;
+      std::span<std::byte> data;
+      std::shared_ptr<const void> owner;
     };
     auto blocks = std::make_shared<std::vector<Block>>();
     // Physical backing commits once, before any request; assigned owner tokens
     // account for the entire block including unused bytes.
-    for (std::size_t i = 0; i < 2048; ++i) {
+    auto data = std::make_shared<std::array<std::byte, 2048 * 16 + 128 * 64>>();
+    for (std::size_t i = 0; i < 2048 + 128; ++i) {
+      const auto size = i < 2048 ? 16ULL : 64ULL;
+      const auto offset = i < 2048 ? i * 16 : 2048 * 16 + (i - 2048) * 64;
       auto reservation =
-          ledger.Reserve(cache::ResourceCategory::kBackingFree, 64);
-      auto data = std::make_shared<std::array<std::byte, 64>>();
-      blocks->push_back({reservation.Convert(), std::move(data)});
+          ledger.Reserve(cache::ResourceCategory::kBackingFree, size);
+      auto bytes = std::span(*data).subspan(offset, size);
+      blocks->push_back({reservation.Convert(), bytes,
+                         std::shared_ptr<const void>(data, bytes.data())});
     }
     auto resources = std::make_unique<ComponentCacheResources>();
     resources->adapter = std::make_unique<FakeAdapter>();
     adapter = dynamic_cast<FakeAdapter*>(resources->adapter.get());
     resources->owner = blocks;
-    resources->stream = [] { return std::make_unique<FakeStream>(); };
-    resources->allocate = [this, blocks](const cache::PayloadRequest& request) {
+    resources->stream = [] { return std::make_unique<FakeStream>(true); };
+    resources->transfer_batch_size = 4;
+    resources->allocate = [this, blocks,
+                           data](const cache::PayloadRequest& request) {
       for (const auto& block : *blocks) {
+        if ((request.category == cache::ResourceCategory::kPrivateState) !=
+            (block.data.size() == 64))
+          continue;
         try {
           auto reservation = std::make_shared<cache::ResourceReservation>(
               block.pool.ReserveBacking(request.category));
           ++captures;
-          auto owner =
-              std::shared_ptr<const void>(block.data, block.data->data());
-          return ComponentCaptureBuffer{*block.data, [reservation, owner] {
+          return ComponentCaptureBuffer{block.data,
+                                        [reservation, owner = block.owner] {
                                           return cache::Payload::Committed(
                                               reservation->Convert(), owner);
-                                        }};
+                                        },
+                                        data.get()};
         } catch (const std::bad_alloc&) {
         }
       }
@@ -233,6 +243,41 @@ void RestartAndCorruption() {
   }
   std::filesystem::remove_all(directory);
 }
+void FailedCaptureKeepsPublishedBoundary() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  std::vector<TextRunnerToken> prompt(42);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, std::span(prompt).first(40),
+                          std::span(prompt).first(40));
+  const auto hash = runner->adapter->RecurrentHash(state.slot);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), 40, false,
+                                   SnapshotPurpose::kContinuation, {}));
+  std::shared_ptr<const TextRunnerSnapshot> snapshot = lease->Capture();
+  assert(lease->PublishSnapshot({prompt.begin(), prompt.begin() + 40}, snapshot,
+                                false));
+  snapshot.reset();
+  runner->adapter->Append(state.slot, std::span(prompt).last(2),
+                          std::span(prompt).last(2));
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), 42, false,
+                                   SnapshotPurpose::kContinuation, {}));
+  runner->adapter->FailNextTransfer();
+  bool failed = false;
+  try {
+    (void)lease->Capture();
+  } catch (const std::runtime_error&) {
+    failed = true;
+  }
+  assert(failed);
+  lease->Invalidate();
+  auto restored =
+      cache.Acquire(std::span(prompt).first(40), {}, {}, true, 0, true);
+  assert(restored->cached_tokens() == 40);
+  auto& restored_state = dynamic_cast<State&>(restored->state());
+  assert(runner->adapter->RecurrentHash(restored_state.slot) == hash);
+}
 void DiskBudgetEvictsAnUnpinnedConversation() {
   char pattern[] = "/tmp/gufo-component-budget-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
@@ -266,5 +311,6 @@ void DiskBudgetEvictsAnUnpinnedConversation() {
 int main() {
   ReuseAndBranches();
   RestartAndCorruption();
+  FailedCaptureKeepsPublishedBoundary();
   DiskBudgetEvictsAnUnpinnedConversation();
 }
