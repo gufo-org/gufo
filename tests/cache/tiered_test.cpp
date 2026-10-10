@@ -1,8 +1,29 @@
+#include <cstdlib>
 #include <fstream>
 #include <future>
+#include <new>
 
 #include "src/cache/retention.hpp"
 #include "tests/cache/tiered_fixture.hpp"
+
+namespace {
+bool watch_allocations{};
+std::size_t watched_allocations{};
+}  // namespace
+// Observe physical allocation before a rejected ledger admission.
+void* operator new(std::size_t bytes) {
+  if (watch_allocations)
+    ++watched_allocations;
+  if (void* pointer = std::malloc(bytes ? bytes : 1))
+    return pointer;
+  throw std::bad_alloc();
+}
+void operator delete(void* pointer) noexcept {
+  std::free(pointer);
+}
+void operator delete(void* pointer, std::size_t) noexcept {
+  std::free(pointer);
+}
 
 using namespace gufo::cache;
 using namespace gufo::cache::testing;
@@ -347,6 +368,63 @@ void InvalidUnusedRAMComponentStillSelectsMixed() {
   assert(fallback.selected && fallback.selected->UsesDisk(kTarget));
   assert(!fallback.selected->UsesDisk(kDraft));
 }
+void DurableAvailabilityAdmissionOrder() {
+  // Ledger bookkeeping is explicitly outside payload admission. Measure its
+  // allocations so the observer rejects any additional plan allocation.
+  ResourceLedger bookkeeping{{4096, 4096, 4096, 4096}};
+  bookkeeping.FailAfter(LedgerStep::kReserve, 0);
+  watched_allocations = 0;
+  watch_allocations = true;
+  bool bookkeeping_failed{};
+  try {
+    (void)bookkeeping.Reserve(ResourceCategory::kMetadata, 1);
+  } catch (const std::bad_alloc&) {
+    bookkeeping_failed = true;
+  }
+  watch_allocations = false;
+  assert(bookkeeping_failed);
+  const auto bookkeeping_allocations = watched_allocations;
+  for (bool attach : {false, true}) {
+    for (auto step : {LedgerStep::kReserve, LedgerStep::kConvert}) {
+      TieredFixture f;
+      f.Append(16, 12);
+      auto checkpoint = f.Capture();
+      auto description = f.Publish(*checkpoint);
+      auto compatibility = f.adapter.CompatibilityIdentity();
+      const auto entry =
+          attach ? f.index.Insert(checkpoint, f.Resident()) : IndexEntryId{};
+      const auto baseline = f.ledger.Snapshot();
+      f.ledger.FailAfter(step, 0);
+      watched_allocations = 0;
+      watch_allocations = step == LedgerStep::kReserve;
+      bool failed{};
+      try {
+        if (attach)
+          f.index.AttachDurable(entry, description);
+        else
+          (void)f.index.Insert(std::move(compatibility), description);
+      } catch (const std::bad_alloc&) {
+        failed = true;
+      }
+      watch_allocations = false;
+      f.ledger.ClearFaults();
+      assert(failed);
+      if (step == LedgerStep::kReserve) {
+        assert(watched_allocations == bookkeeping_allocations);
+        assert(f.ledger.Snapshot() == baseline);
+      } else {
+        assert(f.ledger.Snapshot().total_bytes == baseline.total_bytes);
+      }
+      auto lookup = f.index.Lookup(f.Query());
+      if (attach) {
+        assert(lookup.selected && lookup.selected->entry == entry);
+        assert(!lookup.selected->durable);
+      } else {
+        assert(!lookup.selected);
+      }
+    }
+  }
+}
 void CatalogAdmissionFailures() {
   for (auto step : {LedgerStep::kReserve, LedgerStep::kConvert}) {
     TieredFixture f;
@@ -455,6 +533,7 @@ int main() {
   PublicationCorruptionQuarantinesImmediately();
   RepublishedQuarantineCannotRehabilitateOldRAM();
   InvalidUnusedRAMComponentStillSelectsMixed();
+  DurableAvailabilityAdmissionOrder();
   CatalogAdmissionFailures();
   EvictionDoesNotWaitForYieldingWriter();
   QuarantineRacingPublication();

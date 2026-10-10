@@ -145,7 +145,17 @@ before catalog reconciliation could shed its marker from an old RAM record.
 `Track` now honors both catalog and disk quarantine when replacing an epoch;
 a direct retire/republish regression proves the old RAM record stays excluded.
 
+The third completed fresh-context review found that durable insertion and
+attachment allocated their internal availability lists before metadata
+admission. Both now reserve the complete plan capacity before allocating the
+object or vector, and convert only after construction succeeds. An allocation
+observer regression fails on the reviewed source and proves denied admission
+allocates no plan storage beyond the ledger's own bookkeeping; conversion
+failure preserves ledger totals and prior lookup state in both paths.
+
 The CSV also retains the original `aca631cd` and first-review-fix `59062b47`
 baselines. These are separate step observations, without a matched performance
-gain or regression claim; the final source numbers above include immediate
-quarantine-marker checks and caller-boundary reconciliation.
+gain or regression claim. The `17703771` numbers above include immediate
+quarantine-marker checks and caller-boundary reconciliation, and precede the
+subsequent admission-order fix in durable insertion and attachment. That fix
+does not change lookup or eviction code.

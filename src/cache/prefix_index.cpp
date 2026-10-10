@@ -310,6 +310,29 @@ struct PrefixIndex::Impl {
     result->metadata = reservation.Convert();
     return result;
   }
+  std::shared_ptr<const CandidateAvailability> DurableAvailability(
+      const Tree& tree, const CandidateAvailability* existing = nullptr) {
+    auto reservation = ledger->Reserve(
+        ResourceCategory::kMetadata,
+        Add(sizeof(CandidateAvailability) + 64,
+            Bytes(tree.descriptors.size(), sizeof(ComponentAvailability))));
+    auto result = std::make_shared<CandidateAvailability>();
+    result->components.reserve(tree.descriptors.size());
+    if (result->components.capacity() != tree.descriptors.size())
+      throw std::logic_error("unexpected availability capacity");
+    for (const auto& descriptor : tree.descriptors) {
+      bool resident{};
+      if (existing) {
+        const auto component = std::ranges::find(
+            existing->components, descriptor.id, &ComponentAvailability::id);
+        resident =
+            component != existing->components.end() && component->resident;
+      }
+      result->components.push_back({descriptor.id, resident, true});
+    }
+    result->metadata = reservation.Convert();
+    return result;
+  }
   bool DurableCoherent(const Tree& tree,
                        const DiskDescription& description) const {
     const auto& manifest = description.Manifest();
@@ -538,11 +561,7 @@ IndexEntryId PrefixIndex::Insert(Identity compatibility,
       !impl_->DurableCoherent(tree, *durable) || !durable->Pin())
     throw std::invalid_argument("invalid durable checkpoint description");
   Impl::Record record;
-  std::vector<ComponentAvailability> availability;
-  availability.reserve(tree.descriptors.size());
-  for (const auto& descriptor : tree.descriptors)
-    availability.push_back({descriptor.id, false, true});
-  record.availability = impl_->Availability(std::move(availability));
+  record.availability = impl_->DurableAvailability(tree);
   record.durable = std::move(durable);
   record.tree = &tree;
   record.stable = stable;
@@ -580,18 +599,8 @@ void PrefixIndex::AttachDurable(
              record.durable->Manifest().checkpoint != manifest.checkpoint) {
     throw std::invalid_argument("durable publication identity mismatch");
   }
-  std::vector<ComponentAvailability> availability;
-  availability.reserve(record.tree->descriptors.size());
-  for (const auto& descriptor : record.tree->descriptors) {
-    const auto existing =
-        std::ranges::find(record.availability->components, descriptor.id,
-                          &ComponentAvailability::id);
-    availability.push_back({descriptor.id,
-                            existing != record.availability->components.end() &&
-                                existing->resident,
-                            true});
-  }
-  auto admitted = impl_->Availability(std::move(availability));
+  auto admitted =
+      impl_->DurableAvailability(*record.tree, record.availability.get());
   record.availability = std::move(admitted);
   record.durable = std::move(durable);
 }
