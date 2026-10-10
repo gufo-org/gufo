@@ -2329,6 +2329,17 @@ void TestStopSequencesAndDefaultFields() {
              backend.last_sampling.presence_penalty ==
                  backend.defaults.sampling.presence_penalty,
          "null sampling fields retain server defaults");
+  for (const std::string field : {"max_tokens", "max_completion_tokens"}) {
+    auto invalid = base;
+    invalid[field] = 0;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(invalid.dump()), backend);
+    Expect(
+        response.status == 400 &&
+            response.body.find("'" + field + "' must be a positive integer") !=
+                std::string::npos,
+        "an invalid token limit names the field that carried it");
+  }
   body["logprobs"] = false;
   body["logit_bias"] = Value::object();
   body["response_format"] = gufo::json::parse(R"({"type":"text"})");

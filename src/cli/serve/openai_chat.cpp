@@ -925,9 +925,11 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     }
   }
 
-  const json::Value* max_tokens = body.find("max_completion_tokens");
+  const char* max_tokens_field = "max_completion_tokens";
+  const json::Value* max_tokens = body.find(max_tokens_field);
   if (max_tokens == nullptr || max_tokens->is_null()) {
-    max_tokens = body.find("max_tokens");
+    max_tokens_field = "max_tokens";
+    max_tokens = body.find(max_tokens_field);
   }
   if (max_tokens != nullptr && !max_tokens->is_null()) {
     const double value =
@@ -936,9 +938,10 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
         std::floor(value) != value || value < 1.0 ||
         value >
             static_cast<double>(std::numeric_limits<std::uint32_t>::max())) {
-      return Error(400, "Bad Request",
-                   "'max_tokens' must be a positive integer",
-                   "invalid_max_tokens");
+      return Error(
+          400, "Bad Request",
+          "'" + std::string(max_tokens_field) + "' must be a positive integer",
+          "invalid_max_tokens");
     }
     output->max_tokens = max_tokens->as_size();
   }
