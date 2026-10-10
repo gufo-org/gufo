@@ -31,6 +31,10 @@ struct SamplingConfig {
   float frequency_penalty{0.0F};
   float presence_penalty{0.0F};
   std::shared_ptr<const TokenConstraint> constraint;
+  /// Reasoning tokens allowed before `reasoning_end` is forced (#266). Set
+  /// only for requests that start in their reasoning phase.
+  std::optional<std::size_t> reasoning_budget;
+  TokenId reasoning_end{0};
 
   void Validate() const;
 
@@ -106,6 +110,9 @@ public:
   /// Retain ordinary CPU/GPU sampling while its mask makes no restriction.
   [[nodiscard]] bool NeedsConstraintMask() const;
   [[nodiscard]] std::span<const TokenId> history() const noexcept;
+  /// The token every sampling path returns next, if any: an exhausted
+  /// reasoning budget forces the reasoning end.
+  [[nodiscard]] std::optional<TokenId> ForcedToken() const noexcept;
   [[nodiscard]] std::span<const TokenPenalty> penalties() const noexcept {
     return penalty_counts_;
   }
@@ -169,6 +176,8 @@ private:
   std::vector<Probability> candidate_scratch_;
   std::uint64_t rng_state_{0};
   std::optional<TokenId> pending_sample_;
+  std::size_t reasoning_tokens_{0};
+  bool reasoning_open_{false};
 };
 
 [[nodiscard]] std::uint64_t NextRandom(std::uint64_t* state);
