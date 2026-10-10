@@ -68,14 +68,18 @@ def slugify_heading(title: str) -> str:
 
 
 def strip_fenced_blocks(content: str) -> str:
-    """Blank fenced code blocks so their '#' lines are not read as headings."""
+    """Blank fenced code blocks while preserving diagnostic line numbers."""
     lines = content.splitlines()
     fence = None
     for index, line in enumerate(lines):
         match = re.match(r' {0,3}(`{3,}|~{3,})', line)
         if fence is None:
             if match:
-                fence = match.group(1)
+                marker = match.group(1)
+                # Backtick fence info strings cannot contain backticks.
+                if marker[0] == "`" and "`" in line[match.end():]:
+                    continue
+                fence = marker
                 lines[index] = ""
         else:
             lines[index] = ""
@@ -93,9 +97,14 @@ def extract_anchors(content: str) -> Set[str]:
         slug = slugify_heading(match.group("title").strip())
         if not slug:
             continue
-        count = seen.get(slug, 0)
-        seen[slug] = count + 1
-        anchors.add(slug if count == 0 else f"{slug}-{count}")
+        base_slug = slug
+        count = seen.get(base_slug, 0)
+        # Generated suffixes can collide with literal headings such as "Dup-1".
+        while slug in anchors:
+            count += 1
+            slug = f"{base_slug}-{count}"
+        seen[base_slug] = count
+        anchors.add(slug)
     return anchors
 
 
@@ -163,8 +172,8 @@ def check_links_and_anchors(repo_root: Path, md_files: List[Path]) -> Tuple[int,
         # Check JSON blocks
         errors.extend(check_json_blocks(md_file, content))
 
-        # Check links
-        lines = content.splitlines()
+        # Code examples contain literal link syntax, not rendered links.
+        lines = strip_fenced_blocks(content).splitlines()
         for line_idx, line in enumerate(lines, start=1):
             for match in MD_LINK_REGEX.finditer(line):
                 target = match.group("target").strip()

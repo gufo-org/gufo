@@ -51,6 +51,83 @@ class CheckDocsTest(unittest.TestCase):
         self.assertEqual(len(errors), 2, errors)
         self.assertTrue(all("#maxtokens" in e or "#dup-2" in e for e in errors), errors)
 
+    def test_numbered_headings_do_not_collide(self):
+        for headings, expected in (
+            ("## Dup\n## Dup-1\n## Dup\n", {"dup", "dup-1", "dup-2"}),
+            ("## Dup\n## Dup\n## Dup-1\n", {"dup", "dup-1", "dup-1-1"}),
+            ("## Dup\n## Dup-1\n## Dup\n## Dup\n## Dup-1\n",
+             {"dup", "dup-1", "dup-2", "dup-3", "dup-1-1"}),
+        ):
+            with self.subTest(headings=headings):
+                self.assertEqual(DOCS.extract_anchors(headings), expected)
+                links = "\n".join(f"[jump](#{anchor})" for anchor in sorted(expected))
+                self.assertEqual(self.check({"a.md": headings + links}), [])
+
+    def test_fenced_examples_do_not_validate_literal_links(self):
+        for opening, closing in (
+            ("```markdown", "```"),
+            ("~~~markdown", "~~~"),
+            ("````markdown", "````"),
+            ("   ~~~`example`", "   ~~~~\t"),
+        ):
+            with self.subTest(opening=opening):
+                content = (
+                    f"# Guide\n\n{opening}\n## Example\n"
+                    f"[Jump](#example) [File](missing.md)\n{closing}\n\n"
+                    "[Guide](#guide)\n"
+                )
+                self.assertEqual(self.check({"a.md": content}), [])
+                self.assertEqual(DOCS.extract_anchors(content), {"guide"})
+
+    def test_backticks_in_info_do_not_open_a_fence(self):
+        for opening in ("```foo`bar", "   ````foo`bar"):
+            with self.subTest(opening=opening):
+                content = f"# Guide\n\n{opening}\n## Visible\n\n[Visible](#visible)\n"
+                self.assertEqual(self.check({"a.md": content}), [])
+                self.assertEqual(DOCS.extract_anchors(content), {"guide", "visible"})
+
+    def test_fences_require_a_matching_closing_line(self):
+        for opening, false_closing, closing in (
+            ("````markdown", "```", "````"),
+            ("```markdown", "~~~", "```"),
+            ("~~~markdown", "```", "~~~"),
+            ("~~~markdown", "~~~ trailing text", "~~~"),
+        ):
+            with self.subTest(opening=opening, false_closing=false_closing):
+                content = (
+                    f"# Guide\n\n{opening}\n{false_closing}\n"
+                    f"## Hidden\n[Hidden](#hidden) [File](missing.md)\n{closing}\n"
+                    "## Visible\n[Visible](#visible)\n"
+                )
+                self.assertEqual(self.check({"a.md": content}), [])
+                self.assertEqual(DOCS.extract_anchors(content), {"guide", "visible"})
+
+    def test_unclosed_fence_hides_literal_links(self):
+        for opening in ("```markdown", "~~~markdown"):
+            with self.subTest(opening=opening):
+                content = f"# Guide\n\n{opening}\n## Hidden\n[Hidden](missing.md#hidden)\n"
+                self.assertEqual(self.check({"a.md": content}), [])
+                self.assertEqual(DOCS.extract_anchors(content), {"guide"})
+
+    def test_link_errors_after_fences_keep_line_numbers(self):
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=repr(newline)):
+                content = newline.join((
+                    "# Guide", "", "```markdown", "## Example",
+                    "[Jump](#example)", "```", "[Broken](#example)", "",
+                ))
+                errors = self.check({"a.md": content})
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn("a.md:7: Broken anchor '#example'", errors[0])
+
+    def test_json_blocks_still_validate_syntax(self):
+        valid = '# Guide\n\n```json\n{"example": "[Jump](missing.md#example)"}\n```\n'
+        self.assertEqual(self.check({"a.md": valid}), [])
+        invalid = '# Guide\n\n```json\n{"values": [1, 2,]}\n```\n'
+        errors = self.check({"a.md": invalid})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("a.md:3: Invalid JSON in fenced code block", errors[0])
+
 
 if __name__ == "__main__":
     unittest.main()
