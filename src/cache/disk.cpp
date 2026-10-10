@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -306,18 +307,37 @@ bool Regular(const struct stat& st) {
 }  // namespace
 std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
                            std::uint64_t crc) {
-  static const auto table = [] {
-    std::array<std::uint64_t, 256> t{};
+  static constexpr auto table = [] {
+    std::array<std::array<std::uint64_t, 256>, 8> t{};
     for (unsigned i = 0; i < 256; ++i) {
       auto n = std::uint64_t(i) << 56;
       for (unsigned j = 0; j < 8; ++j)
         n = (n << 1) ^ ((n >> 63) ? 0x42f0e1eba9ea3693ULL : 0);
-      t[i] = n;
+      t[0][i] = n;
     }
+    for (unsigned slice = 1; slice < t.size(); ++slice)
+      for (unsigned i = 0; i < 256; ++i) {
+        const auto previous = t[slice - 1][i];
+        t[slice][i] = (previous << 8) ^ t[0][previous >> 56];
+      }
     return t;
   }();
+  // Preserve CRC-64/ECMA and streaming seeds while breaking the per-byte
+  // dependency chain. memcpy permits arbitrary payload alignment.
+  while (bytes.size() >= 8) {
+    std::uint64_t word;
+    std::memcpy(&word, bytes.data(), sizeof(word));
+    if constexpr (std::endian::native == std::endian::little)
+      word = __builtin_bswap64(word);
+    crc ^= word;
+    crc = table[7][crc >> 56] ^ table[6][(crc >> 48) & 255] ^
+          table[5][(crc >> 40) & 255] ^ table[4][(crc >> 32) & 255] ^
+          table[3][(crc >> 24) & 255] ^ table[2][(crc >> 16) & 255] ^
+          table[1][(crc >> 8) & 255] ^ table[0][crc & 255];
+    bytes = bytes.subspan(8);
+  }
   for (auto b : bytes)
-    crc = (crc << 8) ^ table[(crc >> 56) ^ b];
+    crc = (crc << 8) ^ table[0][(crc >> 56) ^ b];
   return crc;
 }
 std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {

@@ -348,3 +348,32 @@ Disk restore is the main flagged phase (for example, 119.84 ms on main versus
 for confirmation; no clean timing gate is claimed. The lifecycle runner can
 now require a measured 100K seed/publication/restore depth instead of inferring
 it from background line count. Its existing 12 CPU workload/gate tests pass.
+
+### CRC and pressure follow-up
+
+Native CPU profiles of matched 13K disk restores identify CRC-64 as 64.10%
+of R11 CPU samples. The GPU profiler fails during startup with duplicate
+`gflags` registration; that failure and the successful native profiles remain
+in the artifact directory. R12 processes eight bytes per checksum update,
+with the same CRC-64/ECMA and streaming seed semantics. An independent bitwise
+oracle covers alignments, lengths, seeds and split updates; all six focused
+CPU disk/cache targets and all 57 hosted PR checks pass. Focused AR and MTP
+HTTP cache histories also pass. [Source and evidence](../../models/qwen3.8-flash-next/artifacts/cache-crc-review.json).
+
+AR disk restore observations improve from 238–526 ms on R11 to 65–164 ms
+on R12, versus 89–180 ms on main. All 479 observations are retained: 476
+pass and three need confirmation. MTP disk restore improves too, but its
+overall comparison remains failed due to changed cache-work counts after
+cancellation, with 99 timing flags needing investigation. This is not an
+overall performance pass. The R11 MTP lifecycle passes all four cases.
+
+The separate R11 AR pressure history at 2 GiB fails five reuse assertions,
+while every generated answer matches its cold control. Private-state pools
+fill while row backing remains free; the fixed class allocation strands
+capacity. The pressure report remains failed. Main is being measured under
+that same pressure history before selecting the allocator correction.
+
+The measured main control remains `665fc182`; current main `d0f7c3a0` differs
+only in server/cache documentation and has identical production sources,
+toolchain lock and functional harness. The R8 matched RAM observations above
+remain applicable to the allocation plan, which R12 does not change.

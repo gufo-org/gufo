@@ -3,6 +3,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cerrno>
@@ -172,6 +174,40 @@ void Format() {
   rows.tail.reset();
   // Each chunk size fits u64, but the complete component does not.
   Reject([&] { (void)EncodeManifest(m); });
+}
+void ChecksumReference() {
+  std::vector<std::uint8_t> storage(65536 + 16);
+  std::uint64_t random = 0x3fd52bb7c4186a95ULL;
+  for (auto& byte : storage) {
+    random ^= random << 13;
+    random ^= random >> 7;
+    random ^= random << 17;
+    byte = random;
+  }
+  const auto reference = [](auto bytes, std::uint64_t crc) {
+    for (const auto byte : bytes) {
+      crc ^= std::uint64_t(byte) << 56;
+      for (unsigned bit = 0; bit < 8; ++bit)
+        crc = (crc << 1) ^ ((crc >> 63) ? 0x42f0e1eba9ea3693ULL : 0);
+    }
+    return crc;
+  };
+  for (std::size_t offset = 0; offset < 16; ++offset)
+    for (const std::size_t length :
+         {0, 1, 7, 8, 9, 15, 16, 17, 255, 256, 4095, 4096, 4097, 65536}) {
+      const auto bytes = std::span(storage).subspan(offset, length);
+      for (const auto seed :
+           std::array<std::uint64_t, 3>{0, UINT64_MAX, 0x1a3875eb2cf049d6ULL}) {
+        const auto expected = reference(bytes, seed);
+        assert(DiskChecksum(bytes, seed) == expected);
+        for (const std::size_t split : {0, 1, 7, 8, 9, 257}) {
+          const auto first = std::min(length, split);
+          assert(DiskChecksum(bytes.subspan(first),
+                              DiskChecksum(bytes.first(first), seed)) ==
+                 expected);
+        }
+      }
+    }
 }
 void Ownership() {
   Directory d;
@@ -439,6 +475,7 @@ void BudgetAndDirectories() {
 }  // namespace
 int main() {
   Format();
+  ChecksumReference();
   Ownership();
   Index();
   Conflicts();
