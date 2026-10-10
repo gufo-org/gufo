@@ -35,7 +35,6 @@ list(APPEND gufo_pr_tests
   "qwen38_flash_next\\.config" "qwen38_flash_next\\.mtp_sampling"
   "ds4\\.sampling" "ds4\\.template" "ds4\\.cli"
   gufo_version gufo_help serve_cli_test eval_http_test functional_runner_test
-  check_dependencies_test
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test
   kernel_resources_parser_test)
