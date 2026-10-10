@@ -150,6 +150,15 @@
               pkgs.${system}.sox
               pkgs.${system}.rocmPackages.rocprofiler-sdk
               pkgs.${system}.sqlite
+              # Debugging and repository work. The test presets build
+              # RelWithDebInfo with assertions, and contributors commit with
+              pkgs.${system}.gdb
+              pkgs.${system}.git
+              pkgs.${system}.ripgrep
+              pkgs.${system}.radeontop
+              # Compiler cache for the local loop; CMake attaches it as the C
+              # and C++ launcher when it is on PATH, as the CPU checks do.
+              pkgs.${system}.ccache
               audio-cpp.packages.${system}.rocm-gfx1151
             ];
             env = {
@@ -159,6 +168,14 @@
                 pkgs.${system}.zlib
               ];
             };
+            # Cache policy mirrors the CPU check derivations. CCACHE_DIR stays
+            # at the user default so a container run can mount it as a volume.
+            shellHook = ''
+              export CCACHE_BASEDIR="$PWD"
+              export CCACHE_COMPILERCHECK=content
+              export CCACHE_MAXSIZE=2G
+              export CCACHE_NOHASHDIR=true
+            '';
           };
 
         }

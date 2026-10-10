@@ -18,6 +18,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(GUFO_RELEASE_VERSION "development" CACHE STRING "Gufo release version")
 set(GUFO_REVISION "unknown" CACHE STRING "Gufo source revision")
 include_directories(${CMAKE_SOURCE_DIR})
+
+# Reuse the compiler cache whenever it is installed, as the CPU check
+# derivations do. HIP kernels stay uncached: hipcc drive files and bitcode
+# paths need their own hit-rate measurement before they join the cache.
+find_program(GUFO_CCACHE_PROGRAM NAMES ccache)
+if (GUFO_CCACHE_PROGRAM)
+  set(CMAKE_C_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")
+  set(CMAKE_CXX_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")
+  message(STATUS "gufo: compiling C and CXX through ${GUFO_CCACHE_PROGRAM}")
+else()
+  message(STATUS "gufo: ccache not found, compiling without a launcher")
+endif()
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
