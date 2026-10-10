@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 #include "src/cache/identity.hpp"
@@ -99,6 +100,25 @@ public:
   [[nodiscard]] virtual Completion LoadPrivate(Slot&, ComponentId,
                                                std::span<const std::byte>,
                                                Stream&) = 0;
+  // Bounded private-state serialization. Offsets address the descriptor's
+  // private_bytes representation; loads may arrive in non-overlapping pieces.
+  // Defaults support a whole buffer only. Continuation adapters must override
+  // these for arbitrary pieces and validate complete coverage, including when
+  // one device tensor crosses a piece boundary.
+  [[nodiscard]] virtual Completion CapturePrivatePiece(
+      const Slot& slot, ComponentId id, std::size_t offset,
+      std::span<std::byte> bytes, Stream& stream) {
+    if (offset != 0)
+      throw std::invalid_argument("private capture requires piece support");
+    return CapturePrivate(slot, id, bytes, stream);
+  }
+  [[nodiscard]] virtual Completion LoadPrivatePiece(
+      Slot& slot, ComponentId id, std::size_t offset,
+      std::span<const std::byte> bytes, Stream& stream) {
+    if (offset != 0)
+      throw std::invalid_argument("private restore requires piece support");
+    return LoadPrivate(slot, id, bytes, stream);
+  }
   // Requires an active BeginRestore. Outside a restore (including after a
   // successful Validate), throw std::logic_error without changing the slot.
   // Check complete loads and exactly one position per component, not

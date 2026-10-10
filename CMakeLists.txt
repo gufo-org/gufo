@@ -87,6 +87,7 @@ add_subdirectory(src/cache)
 if (ENGINE_ENABLE_HIP)
   add_library(gufo_cache_hip STATIC
     src/core/hip/committed_backing.cpp
+    src/core/hip/staging.cpp
     src/core/hip/transfer_pool.cpp)
   target_link_libraries(gufo_cache_hip PUBLIC gufo_cache hip::host)
   if (BUILD_TESTING)
@@ -97,6 +98,8 @@ if (ENGINE_ENABLE_HIP)
     target_link_libraries(cache_idle_spill_bench PRIVATE gufo_cache_hip)
     add_executable(cache_backing_bench tests/cache/backing_bench.cpp)
     target_link_libraries(cache_backing_bench PRIVATE gufo_cache_hip)
+    add_executable(cache_streaming_bench tests/cache/streaming_bench.cpp)
+    target_link_libraries(cache_streaming_bench PRIVATE gufo_cache_hip)
   endif()
 endif()
 

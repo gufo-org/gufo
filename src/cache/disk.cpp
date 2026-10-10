@@ -21,6 +21,34 @@
 
 namespace gufo::cache {
 namespace {
+template<class F>
+struct Finally {
+  F action;
+  ~Finally() { action(); }
+};
+DiskPublicationStats Difference(const DiskPublicationStats& after,
+                                const DiskPublicationStats& before) {
+  return {after.fsync_calls - before.fsync_calls,
+          after.fsync_ns - before.fsync_ns,
+          after.filesystem_ns - before.filesystem_ns,
+          after.checksum_ns - before.checksum_ns,
+          after.metadata_lock_ns - before.metadata_lock_ns,
+          after.io_lock_ns - before.io_lock_ns};
+}
+class CostTimer {
+public:
+  explicit CostTimer(std::uint64_t& cost)
+      : cost_(cost), start_(std::chrono::steady_clock::now()) {}
+  ~CostTimer() {
+    cost_ += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                 std::chrono::steady_clock::now() - start_)
+                 .count();
+  }
+
+private:
+  std::uint64_t& cost_;
+  std::chrono::steady_clock::time_point start_;
+};
 constexpr std::array<std::uint8_t, 8> kMagic{'G', 'U', 'F', 'O',
                                              'M', 'N', 'F', '2'};
 constexpr std::size_t kMaxTokens = std::size_t{2} * 1024 * 1024;
@@ -407,6 +435,28 @@ struct DiskStore::Impl {
   DiskPublicationStats publication_stats;
   bool recovery_required{};
   mutable std::mutex mutex;
+  mutable std::mutex index_mutex;
+  mutable std::mutex stats_mutex;
+  struct FileIdentity {
+    dev_t device;
+    ino_t inode;
+    off_t size;
+    timespec modified, changed;
+    std::uint64_t checksum;
+    bool operator==(const FileIdentity& b) const {
+      return device == b.device && inode == b.inode && size == b.size &&
+             modified.tv_sec == b.modified.tv_sec &&
+             modified.tv_nsec == b.modified.tv_nsec &&
+             changed.tv_sec == b.changed.tv_sec &&
+             changed.tv_nsec == b.changed.tv_nsec && checksum == b.checksum;
+    }
+  };
+  struct VerifiedFile {
+    ResourceCharge charge;
+    FileIdentity identity;
+  };
+  std::mutex verification_mutex;
+  std::map<std::pair<bool, DiskFileId>, VerifiedFile> verified;
 #ifdef GUFO_CACHE_TESTING
   std::function<void(DiskPublicationStep)> crash_hook;
 #define DISK_STEP(step)                      \
@@ -519,6 +569,15 @@ struct DiskStore::Impl {
     std::sort(entries.begin(), entries.end(),
               [](const auto& a, const auto& b) { return a.file_ < b.file_; });
   }
+  ~Impl() {
+    if (reclamation.valid())
+      reclamation.wait();
+    while (!verified.empty()) {
+      auto node = verified.extract(verified.begin());
+      auto charge = std::move(node.mapped().charge);
+      node = {};
+    }
+  }
   void ValidateReferences(bool reject = true) {
     if (entries.empty())
       return;
@@ -618,7 +677,10 @@ struct DiskStore::Impl {
       return;
     if (unlinkat(directory, name.c_str(), 0) < 0)
       IoError("remove cache file");
-    stats.managed_bytes -= st.st_size;
+    {
+      std::lock_guard guard(stats_mutex);
+      stats.managed_bytes -= st.st_size;
+    }
   }
   bool Referenced(int directory, DiskFileId id) const {
     for (const auto& entry : entries) {
@@ -672,26 +734,42 @@ struct DiskStore::Impl {
         if (ParseName(name))
           managed = Add(managed, st.st_size);
       });
-    stats.managed_bytes = managed;
+    {
+      std::lock_guard guard(stats_mutex);
+      stats.managed_bytes = managed;
+    }
     recovery_required = false;
   }
   void Rename(int target, const std::string& name) {
+    CostTimer timer(publication_stats.filesystem_ns);
     if (syscall(SYS_renameat2, temporary.Get(), name.c_str(), target,
                 name.c_str(), RENAME_NOREPLACE) < 0)
       IoError("publish cache file");
   }
   void WriteFile(int fd, std::span<const std::uint8_t> bytes) {
     while (!bytes.empty()) {
-      auto n = write(fd, bytes.data(), bytes.size());
+      ssize_t n;
+      {
+        CostTimer timer(publication_stats.filesystem_ns);
+        n = write(fd, bytes.data(), bytes.size());
+      }
       if (n < 0 && errno == EINTR)
         continue;
       if (n <= 0)
         IoError("write cache file");
-      stats.managed_bytes += n;
+      {
+        std::unique_lock guard(stats_mutex, std::defer_lock);
+        {
+          CostTimer timer(publication_stats.metadata_lock_ns);
+          guard.lock();
+        }
+        stats.managed_bytes += n;
+      }
       bytes = bytes.subspan(n);
     }
   }
   Fd Create(const std::string& name) {
+    CostTimer timer(publication_stats.filesystem_ns);
     Fd fd(openat(temporary.Get(), name.c_str(),
                  O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
     if (fd.Get() < 0)
@@ -699,6 +777,7 @@ struct DiskStore::Impl {
     return fd;
   }
   bool Exists(int directory, const std::string& name) {
+    CostTimer timer(publication_stats.filesystem_ns);
     struct stat st{};
     if (fstatat(directory, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0)
       return true;
@@ -706,31 +785,64 @@ struct DiskStore::Impl {
       IoError("stat publication destination");
     return false;
   }
-  void Verify(int directory, const DiskPayload& payload) {
-    Fd fd(openat(directory, DiskFileName(payload.file).c_str(),
-                 O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
+  void Verify(int directory, const DiskPayload& payload,
+              std::span<std::uint8_t> staging = {},
+              const DiskStagingAccess* access = nullptr) {
+    int descriptor;
     struct stat st{};
-    if (fd.Get() < 0 || fstat(fd.Get(), &st) < 0 || !Regular(st) ||
+    {
+      CostTimer timer(publication_stats.filesystem_ns);
+      descriptor = openat(directory, DiskFileName(payload.file).c_str(),
+                          O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    }
+    Fd fd(descriptor);
+    int status;
+    {
+      CostTimer timer(publication_stats.filesystem_ns);
+      status = fstat(fd.Get(), &st);
+    }
+    if (fd.Get() < 0 || status < 0 || !Regular(st) ||
         std::uint64_t(st.st_size) != payload.bytes)
       Invalid();
-    auto charge = ledger->Reserve(ResourceCategory::kMetadata, 65536);
-    std::vector<std::uint8_t> buffer(65536);
+    ResourceReservation charge;
+    std::vector<std::uint8_t> allocated;
+    if (staging.empty()) {
+      charge = ledger->Reserve(ResourceCategory::kMetadata, 65536);
+      allocated.resize(65536);
+      staging = allocated;
+    }
     std::uint64_t remaining = payload.bytes, crc{};
     while (remaining) {
-      auto n = read(fd.Get(), buffer.data(),
-                    std::min<std::uint64_t>(remaining, buffer.size()));
+      Finally release{[&] {
+        if (access)
+          access->release();
+      }};
+      if (access)
+        access->acquire();
+      ssize_t n;
+      {
+        CostTimer timer(publication_stats.filesystem_ns);
+        n = read(fd.Get(), staging.data(),
+                 std::min<std::uint64_t>(remaining, staging.size()));
+      }
       if (n < 0 && errno == EINTR)
         continue;
       if (n <= 0)
         Invalid();
-      crc = DiskChecksum(std::span(buffer).first(n), crc);
+      {
+        CostTimer timer(publication_stats.checksum_ns);
+        crc = DiskChecksum(staging.first(n), crc);
+      }
       remaining -= n;
     }
     if (crc != payload.checksum)
       Invalid();
   }
   void Publish(DiskFileId file, const DiskManifest& m,
-               std::span<const DiskWriteBuffer> buffers) {
+               std::span<const DiskWriteBuffer> buffers,
+               std::span<const DiskWriteSource> sources = {},
+               std::span<std::uint8_t> staging = {},
+               const DiskStagingAccess* access = nullptr) {
     RequireRecovered();
     // Admission covers vector growth, encoding, validation and dependency map
     // before allocating them. Host buffers remain caller-owned.
@@ -781,11 +893,23 @@ struct DiskStore::Impl {
             buffers[j].private_file == b.private_file)
           Invalid();
     }
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+      const auto& source = sources[i];
+      auto it = dependencies.find({source.private_file, source.file});
+      if (it == dependencies.end() || source.bytes != it->second.bytes ||
+          !source.read || !source.alignment ||
+          staging.size() < source.alignment || source.bytes % source.alignment)
+        Invalid();
+      for (std::size_t j = 0; j < i; ++j)
+        if (sources[j].file == source.file &&
+            sources[j].private_file == source.private_file)
+          Invalid();
+    }
     std::uint64_t additional = bytes.size();
     for (const auto& [key, p] : dependencies) {
       int dir = key.first ? private_files.Get() : chunks.Get();
       if (Referenced(dir, p.file)) {
-        Verify(dir, p);
+        Verify(dir, p, staging, access);
         continue;
       }
       if (Exists(dir, DiskFileName(p.file)) ||
@@ -797,12 +921,20 @@ struct DiskStore::Impl {
           std::find_if(buffers.begin(), buffers.end(), [&](const auto& b) {
             return b.private_file == key.first && b.file == p.file;
           });
-      if (it == buffers.end())
+      if (it == buffers.end() &&
+          std::none_of(sources.begin(), sources.end(), [&](const auto& s) {
+            return s.private_file == key.first && s.file == p.file;
+          }))
         Invalid();
       additional = Add(additional, p.bytes);
     }
     if (additional > budget_bytes - stats.managed_bytes)
       throw ResourceExhausted();
+    std::unique_lock index_guard(index_mutex, std::defer_lock);
+    {
+      CostTimer timer(publication_stats.metadata_lock_ns);
+      index_guard.lock();
+    }
     if (entries.size() == entries.capacity()) {
       auto reserve =
           ledger->Reserve(ResourceCategory::kMetadata,
@@ -821,10 +953,11 @@ struct DiskStore::Impl {
     bool manifest_attempted{};
     try {
       ValidateReferences(false);
-      // Candidate is present only under the store mutex. Determine reuse from
+      index_guard.unlock();
+      // Candidate is invisible to pinned snapshots until committed. Reuse from
       // filesystem existence after validating claims, never from this
       // candidate.
-      for (const auto& [key, p] : dependencies) {
+      for (auto& [key, p] : dependencies) {
         int dir = key.first ? private_files.Get() : chunks.Get();
         auto payload_name = DiskFileName(p.file);
         if (Exists(dir, payload_name))
@@ -834,7 +967,48 @@ struct DiskStore::Impl {
               return b.private_file == key.first && b.file == p.file;
             });
         auto fd = Create(payload_name);
-        WriteFile(fd.Get(), it->bytes);
+        if (it != buffers.end()) {
+          WriteFile(fd.Get(), it->bytes);
+        } else {
+          auto source =
+              std::find_if(sources.begin(), sources.end(), [&](const auto& s) {
+                return s.private_file == key.first && s.file == p.file;
+              });
+          std::uint64_t offset{}, crc{};
+          const auto piece_bytes =
+              staging.size() / source->alignment * source->alignment;
+          while (offset < p.bytes) {
+            Finally release{[&] {
+              if (access)
+                access->release();
+            }};
+            if (access)
+              access->acquire();
+            auto piece = staging.first(
+                std::min<std::uint64_t>(piece_bytes, p.bytes - offset));
+            source->read(offset, piece);
+            {
+              CostTimer timer(publication_stats.checksum_ns);
+              crc = DiskChecksum(piece, crc);
+            }
+            WriteFile(fd.Get(), piece);
+            offset += piece.size();
+          }
+          if (p.checksum && p.checksum != crc)
+            Invalid();
+          p.checksum = crc;
+          for (auto& c : entries.back().manifest_.components) {
+            if (!key.first) {
+              for (auto& chunk : c.chunks)
+                if (chunk.file == p.file)
+                  chunk.checksum = crc;
+            } else {
+              for (auto* private_payload : {&c.tail, &c.private_state})
+                if (*private_payload && (*private_payload)->file == p.file)
+                  (*private_payload)->checksum = crc;
+            }
+          }
+        }
         DISK_STEP(kPayloadWritten);
         Sync(fd.Get());
         DISK_STEP(kPayloadSynced);
@@ -847,6 +1021,11 @@ struct DiskStore::Impl {
       DISK_STEP(kChunkDirectorySynced);
       Sync(private_files.Get());
       DISK_STEP(kDependenciesSynced);
+      if (!sources.empty()) {
+        // Free the provisional encoding before allocating the final one.
+        std::vector<std::uint8_t>().swap(bytes);
+        bytes = EncodeManifest(entries.back().manifest_);
+      }
       auto fd = Create(name);
       WriteFile(fd.Get(), bytes);
       DISK_STEP(kManifestWritten);
@@ -859,10 +1038,13 @@ struct DiskStore::Impl {
       DISK_STEP(kManifestDirectorySynced);
       Sync(temporary.Get());
       DISK_STEP(kFinalTemporaryDirectorySynced);
+      index_guard.lock();
       entries.back().payload_verified_ = true;
       entries.back().durable_ = true;
       DISK_STEP(kIndexed);
     } catch (...) {
+      if (!index_guard.owns_lock())
+        index_guard.lock();
       if (manifest_attempted)
         recovery_required = true;
       entries.pop_back();
@@ -1021,7 +1203,7 @@ std::span<const DurableEntry> DiskStore::Entries() const {
   return impl_->entries;
 }
 DiskStartupStats DiskStore::Stats() const {
-  std::lock_guard guard(impl_->mutex);
+  std::lock_guard guard(impl_->stats_mutex);
   return impl_->stats;
 }
 DiskPublicationStats DiskStore::PublicationStats() const {
@@ -1033,11 +1215,155 @@ void DiskStore::Publish(DiskFileId file, const DiskManifest& manifest,
   std::lock_guard guard(impl_->mutex);
   impl_->Publish(file, manifest, buffers);
 }
-DiskReadPin DiskStore::Pin(CheckpointId id) const {
+DiskPublicationStats DiskStore::PublishStream(
+    DiskFileId file, const DiskManifest& manifest,
+    std::span<const DiskWriteSource> sources, std::span<std::uint8_t> staging,
+    DiskPublicationStats* observation, const DiskStagingAccess* access) {
+  if (staging.empty())
+    throw std::invalid_argument("empty streamed publication staging");
+  if (access && (!access->acquire || !access->release))
+    throw std::invalid_argument("incomplete disk staging lease");
+  auto begin = std::chrono::steady_clock::now();
   std::lock_guard guard(impl_->mutex);
+  const auto before = impl_->publication_stats;
+  Finally observe{[&] {
+    if (observation)
+      *observation = Difference(impl_->publication_stats, before);
+  }};
+  impl_->publication_stats.io_lock_ns +=
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - begin)
+          .count();
+  impl_->Publish(file, manifest, {}, sources, staging, access);
+  return Difference(impl_->publication_stats, before);
+}
+std::optional<DiskSnapshot> DiskStore::Open(CheckpointId id) const {
+  std::lock_guard guard(impl_->index_mutex);
+  for (const auto& entry : impl_->entries) {
+    if (!entry.durable_ || entry.manifest_.checkpoint != id)
+      continue;
+    auto reservation = impl_->ledger->Reserve(ResourceCategory::kMetadata,
+                                              entry.metadata_.Info().bytes);
+    DiskSnapshot snapshot;
+    snapshot.manifest_ = entry.manifest_;
+    snapshot.metadata_ = reservation.Convert();
+    snapshot.pin_.token_ = entry.pin_;
+    snapshot.store_ = impl_.get();
+    return snapshot;
+  }
+  return {};
+}
+DiskReadStats DiskStore::ReadPayload(
+    const DiskSnapshot& snapshot, bool private_file, const DiskPayload& payload,
+    std::span<std::uint8_t> staging,
+    const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
+        consume,
+    DiskReadStats* observation) {
+  if (snapshot.store_ != impl_.get() || !snapshot.pin_ || staging.empty() ||
+      !consume)
+    throw std::invalid_argument("invalid disk read lease or staging");
+  bool belongs{};
+  for (const auto& c : snapshot.manifest_.components) {
+    if (private_file)
+      belongs |= c.tail == payload || c.private_state == payload;
+    else
+      belongs |= std::find(c.chunks.begin(), c.chunks.end(), payload) !=
+                 c.chunks.end();
+  }
+  if (!belongs)
+    throw std::invalid_argument("payload outside disk snapshot");
+  using Clock = std::chrono::steady_clock;
+  const auto elapsed = [](auto start) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
+                                                                start)
+        .count();
+  };
+  DiskReadStats stats;
+  Finally observe{[&] {
+    if (observation)
+      *observation = stats;
+  }};
+  auto begin = Clock::now();
+  const int directory =
+      private_file ? impl_->private_files.Get() : impl_->chunks.Get();
+  Fd file(openat(directory, DiskFileName(payload.file).c_str(),
+                 O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
+  struct stat before{}, after{};
+  if (file.Get() < 0 || fstat(file.Get(), &before) < 0 || !Regular(before) ||
+      std::uint64_t(before.st_size) != payload.bytes)
+    Invalid();
+  const Impl::FileIdentity identity{before.st_dev,  before.st_ino,
+                                    before.st_size, before.st_mtim,
+                                    before.st_ctim, payload.checksum};
+  stats.filesystem_ns += elapsed(begin);
+  const auto key = std::make_pair(private_file, payload.file);
+  {
+    std::lock_guard guard(impl_->verification_mutex);
+    auto it = impl_->verified.find(key);
+    stats.verification_cached =
+        it != impl_->verified.end() && it->second.identity == identity;
+  }
+  std::uint64_t offset{}, checksum{};
+  while (offset < payload.bytes) {
+    auto piece = staging.first(
+        std::min<std::uint64_t>(staging.size(), payload.bytes - offset));
+    begin = Clock::now();
+    std::size_t filled{};
+    while (filled < piece.size()) {
+      auto n = read(file.Get(), piece.data() + filled, piece.size() - filled);
+      if (n < 0 && errno == EINTR)
+        continue;
+      if (n <= 0)
+        Invalid();
+      filled += n;
+    }
+    stats.filesystem_ns += elapsed(begin);
+    if (!stats.verification_cached) {
+      begin = Clock::now();
+      checksum = DiskChecksum(piece, checksum);
+      stats.checksum_ns += elapsed(begin);
+    }
+    stats.bytes += piece.size();
+    consume(offset, piece);
+    offset += piece.size();
+  }
+  begin = Clock::now();
+  if (fstat(file.Get(), &after) < 0 || !Regular(after) ||
+      identity != Impl::FileIdentity{after.st_dev, after.st_ino, after.st_size,
+                                     after.st_mtim, after.st_ctim,
+                                     payload.checksum} ||
+      (!stats.verification_cached && checksum != payload.checksum))
+    Invalid();
+  stats.filesystem_ns += elapsed(begin);
+  if (!stats.verification_cached) {
+    std::lock_guard guard(impl_->verification_mutex);
+    auto it = impl_->verified.find(key);
+    if (it != impl_->verified.end()) {
+      it->second.identity = identity;
+    } else if (impl_->verified.size() < 1024) {
+      try {
+        auto reservation =
+            impl_->ledger->Reserve(ResourceCategory::kMetadata, 256);
+        auto [inserted, added] =
+            impl_->verified.emplace(key, Impl::VerifiedFile{{}, identity});
+        try {
+          inserted->second.charge = reservation.Convert();
+        } catch (...) {
+          impl_->verified.erase(inserted);
+          throw;
+        }
+      } catch (const std::bad_alloc&) {
+        // Verification caching is optional; the completed read remains valid.
+      }
+    }
+  }
+  return stats;
+}
+DiskReadPin DiskStore::Pin(CheckpointId id) const {
+  std::lock_guard guard(impl_->index_mutex);
   DiskReadPin pin;
   for (const auto& entry : impl_->entries)
-    if (entry.manifest_.checkpoint == id) {
+    if (entry.durable_ && entry.manifest_.checkpoint == id) {
       pin.token_ = entry.pin_;
       break;
     }
@@ -1046,6 +1372,7 @@ DiskReadPin DiskStore::Pin(CheckpointId id) const {
 bool DiskStore::Retire(CheckpointId id) {
   std::lock_guard guard(impl_->mutex);
   impl_->RequireRecovered();
+  std::unique_lock index_guard(impl_->index_mutex);
   auto& entries = impl_->entries;
   auto it = std::find_if(entries.begin(), entries.end(), [&](const auto& e) {
     return e.manifest_.checkpoint == id;
@@ -1057,6 +1384,7 @@ bool DiskStore::Retire(CheckpointId id) {
   // dependencies untouched until the manifest-directory barrier succeeds.
   auto retired = std::move(*it);
   entries.erase(it);
+  index_guard.unlock();
   try {
     impl_->Remove(impl_->manifests.Get(), DiskFileName(retired.file_));
     impl_->Sync(impl_->manifests.Get());

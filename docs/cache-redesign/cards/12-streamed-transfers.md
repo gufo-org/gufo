@@ -2,7 +2,7 @@
 
 **Milestone:** Disk store · **Depends on:** 08, 11 · **Size:** L (split
 candidate: write path, restore path) · **Affects:** nothing at runtime until
-card 19 · **Status:** agreed
+card 19 · **Status:** in review
 
 ## Goal
 
@@ -49,7 +49,7 @@ With the fake adapter:
 
 ## Done when
 
-- [ ] Tests above pass.
+- [x] Tests above pass.
 
 ## Review focus
 
@@ -73,3 +73,95 @@ required (see the README).
 
 ## Review notes
 
+
+## Implementation
+
+`StreamedStore` owns one startup-admitted, committed staging piece. The HIP
+allocator uses coherent pinned storage and the card 08 stream pool supplies
+precreated stream/event leases. Each completion settles before a piece is reused;
+row pieces preserve component alignment and private state supports byte ranges.
+Persistence sources retain immutable committed checkpoint owners, not live slot
+readers. Borrowed rows must be preserved before constructing a source.
+
+Publication streams through card 11's transaction and computes CRC without a
+whole-payload buffer. Reads retain an owned metadata snapshot and dependency pin,
+stream into a non-executable destination, check each CRC and stable file identity,
+and call adapter validation only after all components settle. Any error drains
+loads and invalidates before fallback; cancellation invalidates without fallback.
+The caller supplies the SHA-256 compatibility digest for its current adapter;
+layout checks and independent target/draft positions remain mandatory.
+
+The verification cache includes device, inode, size, nanosecond mtime and ctime,
+and expected CRC. It is bounded to 1,024 admitted metadata nodes; cache admission
+failure skips memoization. A cache hit still reads every byte and checks the file
+identity again after copying. Retirement is blocked by snapshot pins.
+
+One optional persistence worker bounds active plus pending depth and retained
+allocation capacities. Admission/coalescing precedes pinning; duplicate logical
+checkpoints are skipped. Optional writes check model idleness between pieces,
+without holding live-source readers, a stream, staging, or the disk metadata
+lock. Staging is leased through each complete read/CRC/write piece, so a
+foreground restore can finish while an optional writer waits for model idleness. Source storage and
+callback metadata are caller-admitted before submission. Queue stop cancels,
+drains and joins. Filesystem mutations remain serialized, while index snapshots,
+pins and accounting queries use separate short locks.
+
+Timing counters separate initialization allocation, request metadata allocation,
+stream acquisition, completion waits, index-lock waits, staging/I/O serialization,
+filesystem calls, CRC, directory/file `fsync`, and optional yielding. Partial
+attempts retain observations even when a transfer throws.
+
+## Validation and measurements
+
+The fake adapter round-trips 336 bytes with a ten-byte staging allocation, with
+unaligned row-sized pieces and split private state. It verifies target/draft
+positions and continued recurrent hashes, corrupts an already memoized file and
+checks cold invalidation before fallback, and cancels after partial loads without
+leaking a disk pin. Queue tests prove active/pending depth and 672-byte pin bounds,
+coalescing, skipping, yielding without blocking index/accounting queries, and
+stop cleanup. A concurrent restore completes while an optional writer yields,
+which would deadlock if the writer held staging through its transaction. Admission tests inject every staging reserve/convert and source pin
+failure, and verification-cache admission/commit faults skip memoization; physical staging is freed while its charge is still live. Reused chunks
+also publish with no new sources and no hidden verification buffer.
+
+Normal and ASan/UBSan checks cover the changed common cache contract. The pinned
+production CMake configuration (`BUILD_TESTING=OFF`, tools enabled) builds the
+standalone HIP transfer benchmark with GCC 15.3.0, ROCm 7.2.3 and HIP Clang 22.0.0.
+The target is Ryzen AI MAX+ 395, gfx1151, Linux 7.2.9 and encrypted Btrfs with
+`compress=zstd:3`. The benchmark writes deterministic noncompressible device
+bytes, hints file-cache eviction with `POSIX_FADV_DONTNEED`, restores to another
+device allocation, and independently checks every restored byte after timing.
+The hint does not prove physical cold reads. Source/destination commitment and
+staging initialization are outside transfer timing. This is a synthetic transfer
+fixture, not model qualification or serving throughput.
+
+All samples are retained in [12-gfx1151.csv](../measurements/12-gfx1151.csv).
+Two initial 256 MiB runs per piece size gave:
+
+| Piece | Write ms | Advised restore ms | Peak staging |
+| --- | --- | --- | --- |
+| 256 KiB | 927.865 / 925.471 | 762.862 / 768.317 | 256 KiB |
+| 1 MiB | 889.774 / 898.311 | 735.972 / 715.577 | 1 MiB |
+| 4 MiB | 890.014 / 889.907 | 719.268 / 684.201 | 4 MiB |
+| 16 MiB | 891.041 / 892.328 | 722.026 / 725.014 | 16 MiB |
+
+The 1 MiB default starts the write-throughput plateau while keeping memory and
+between-piece yield intervals smaller. These initial samples precede the final
+short accounting lock and exception-observation plumbing; they are retained as
+piece-selection evidence. A subsequent synthetic Flash-Next MTP 100k-sized
+**2,865,327,944-byte** fixture with that plumbing took **9,255.995 ms** to publish
+and **7,656.989 ms** to restore, at a **1 MiB** peak. This approximates the RFC's
+113.8 MiB + 27.46 decimal KB/token payload, represented as one private file to
+exercise a payload much larger than staging. It does not simulate the model's
+component layout. Publication spent 4,478.579 ms on CRC, 4,473.257 ms on `fsync`,
+and 151.289 ms waiting for D2H; restore spent 7,179.146 ms on CRC, 157.016 ms in
+file reads/stats and 249.701 ms waiting for H2D. Later results with piece leases and build overlap are also retained: the 100k
+write took 5,254.727 ms with 224.853 ms of `fsync`, and restore took 7,726.329 ms.
+The large `fsync` variation is visibly inconclusive as a performance comparison;
+no speedup is claimed. The subsequent isolated final 100k run took
+10,789.963 ms to publish (6,008.299 ms `fsync`, 4,482.152 ms CRC) and
+7,683.856 ms to restore (7,220.908 ms CRC, 152.175 ms filesystem,
+243.297 ms H2D), again at 1 MiB peak staging. Its 256 MiB control took
+894.190 / 702.942 ms for publish/restore. Publication timing remains
+unqualified because of filesystem sync variance; the byte round trips pass.
+No 782-second stall occurred in this bounded fixture; decode-peer interference remains card 19's measurement.

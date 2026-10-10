@@ -85,6 +85,11 @@ target_link_options(cache_disk_test PRIVATE -Wl,--wrap=read -Wl,--wrap=pread)
 add_test(NAME cache_disk_test COMMAND cache_disk_test)
 set_tests_properties(cache_disk_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
+add_executable(cache_streaming_test streaming_test.cpp)
+target_link_libraries(cache_streaming_test PRIVATE gufo_cache_fake)
+add_test(NAME cache_streaming_test COMMAND cache_streaming_test)
+set_tests_properties(cache_streaming_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
 if (GUFO_BUILD_TOOLS)
   add_executable(cache_disk_bench disk_bench.cpp)
   target_link_libraries(cache_disk_bench PRIVATE gufo_cache)

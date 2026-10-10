@@ -64,6 +64,13 @@ public:
   [[nodiscard]] Completion LoadPrivate(Slot&, ComponentId,
                                        std::span<const std::byte>,
                                        Stream&) override;
+  [[nodiscard]] Completion CapturePrivatePiece(const Slot&, ComponentId,
+                                               std::size_t,
+                                               std::span<std::byte>,
+                                               Stream&) override;
+  [[nodiscard]] Completion LoadPrivatePiece(Slot&, ComponentId, std::size_t,
+                                            std::span<const std::byte>,
+                                            Stream&) override;
   [[nodiscard]] bool Validate(Slot&,
                               std::span<const ComponentPosition>) override;
   [[nodiscard]] bool Invalidate(Slot&) noexcept override;

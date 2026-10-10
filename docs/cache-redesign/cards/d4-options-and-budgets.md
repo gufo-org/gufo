@@ -28,7 +28,8 @@ From `src/cli/serve/serve.cpp` and `docs/SERVER.md`:
    ~25 GB/s page-commit rate, 8 GiB adds roughly 0.34 s to startup (estimate).
 2. **`--cache-disk-staging-bytes` keeps its name; its meaning narrows.** It
    bounds the transfer buffer only and no longer limits checkpoint size. Card 12
-   measures the default.
+   selects a 1 MiB default from target-disk piece measurements; it is a
+   transfer-piece budget, independent of checkpoint size.
 3. **`--cache-disk-bytes` keeps its meaning.** Referenced, temporary and orphan
    bytes all count against it.
 4. **`--cache-disk DIR` becomes single-process.** A second process gets a clear
