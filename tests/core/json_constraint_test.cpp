@@ -195,6 +195,28 @@ void TestSchemaIntersections() {
   assert(!Accepts(*formats, R"({"x":"127.example"})"));
 }
 
+void TestMixedEnumValues() {
+  // An untyped member can hold a string in one enum value and a number in
+  // another; each must stay reachable whatever the enum order.
+  for (const char* values :
+       {R"([{"x":"a"},{"x":1}])", R"([{"x":1},{"x":"a"}])"}) {
+    auto schema = parse(R"({"type":"object","properties":{"x":{"anyOf":[
+      {"type":"string"},{"type":"integer"}]}},"required":["x"],
+      "additionalProperties":false})");
+    schema["enum"] = parse(values);
+    const auto grammar = JsonConstraint::Compile(schema, true);
+    assert(Accepts(*grammar, R"({"x":"a"})"));
+    assert(Accepts(*grammar, R"({"x":1})"));
+    assert(!Accepts(*grammar, R"({"x":2})"));
+  }
+  const auto list = JsonConstraint::Compile(
+      parse(R"({"type":"object","properties":{"l":{"type":"array","items":{
+        "anyOf":[{"type":"string"},{"type":"number"}]},"enum":[["a",1]]}},
+        "required":["l"],"additionalProperties":false})"),
+      true);
+  assert(Accepts(*list, R"({"l":["a",1]})"));
+}
+
 void TestPrimitiveConstraints() {
   auto compile = [](std::string_view property) {
     return JsonConstraint::Compile(
@@ -2018,6 +2040,7 @@ int main(int argc, char** argv) {
   TestJsonLanguage();
   TestSchemaLanguage();
   TestSchemaIntersections();
+  TestMixedEnumValues();
   TestRejectedSchemas();
   TestIntegerBoundsAndRecursion();
   TestPrimitiveConstraints();
