@@ -154,3 +154,23 @@ state-edges, long-context and cache explicitly for both AR and MTP.
 Borrowed-row capture and idle spill are not wired into serving yet. These
 checks do not establish reassignment latency, capacity-row qualification or
 the final per-request 5% / 3 ms timing gate. The PR remains draft.
+
+### Backing assignment follow-up
+
+The `candidate-r3-gufo` AR run passed all 54 growth requests, then exposed
+77.65 seconds of snapshot work on a cold 23,521-token depth request. The
+retained CPU profile shows exception unwinding in `ReserveBacking`: every
+assignment restarted its scan at block zero, repeatedly trying occupied
+blocks. That matrix was interrupted, with its observations retained.
+
+The pool now resumes its scan after the last successful assignment. A relaxed
+atomic cursor is only a hint; ledger ownership still arbitrates races. The
+128-block fill/wraparound host-allocation bound fails before this change and
+passes afterwards. Existing allocation/failure/persistence-pin/concurrent-owner
+checks and the AR/MTP adapter restoration tests also pass.
+
+The restarted matrix uses `candidate-r4-gufo`, SHA-256
+`618c9cbe3baf4d9e3e77a05217436ceb4c965090377f7bea392d2e786584d001`.
+Main is still `665fc182` after checking the remote. Both production builds now
+have external RSS/high-water and global HIP/UMA memory sampling for a matched
+RAM comparison. Candidate timings and the memory difference remain pending.
