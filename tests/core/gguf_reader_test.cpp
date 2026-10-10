@@ -575,6 +575,41 @@ void TestVisionMetadataArrays() {
          "deepstack flags are retained");
 }
 
+void TestNarrowIntegerArrays() {
+  // Writers store small integer lists in the narrowest type. Each width must
+  // decode, and an array must never read back as a scalar.
+  using gufo::core::GgufValueType;
+  GgufBuilder builder;
+  builder.AddMetadataArray<std::uint8_t>("u8", GgufValueType::kUint8,
+                                         {0, 255, 7});
+  builder.AddMetadataArray<std::uint16_t>("u16", GgufValueType::kUint16,
+                                          {65535, 2});
+  builder.AddMetadataArray<std::int8_t>("i8", GgufValueType::kInt8, {-128, 5});
+  builder.AddMetadataArray<std::int16_t>("i16", GgufValueType::kInt16,
+                                         {-32768, 32767});
+  auto bytes = builder.Build();
+  auto reader = gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size());
+  Expect(reader != nullptr, "narrow integer arrays parse");
+  Expect(
+      std::get<std::vector<std::uint64_t>>(reader->FindMetadata("u8")->value) ==
+          std::vector<std::uint64_t>({0, 255, 7}),
+      "uint8 array is decoded");
+  Expect(std::get<std::vector<std::uint64_t>>(
+             reader->FindMetadata("u16")->value) ==
+             std::vector<std::uint64_t>({65535, 2}),
+         "uint16 array is decoded");
+  Expect(
+      std::get<std::vector<std::int64_t>>(reader->FindMetadata("i8")->value) ==
+          std::vector<std::int64_t>({-128, 5}),
+      "int8 array is decoded with its sign");
+  Expect(
+      std::get<std::vector<std::int64_t>>(reader->FindMetadata("i16")->value) ==
+          std::vector<std::int64_t>({-32768, 32767}),
+      "int16 array is decoded with its sign");
+  Expect(!reader->GetMetadataUint32("u8") && !reader->GetMetadataUint64("i16"),
+         "an integer array is not a scalar");
+}
+
 void TestIntegerRoutingTensor() {
   GgufBuilder builder;
   builder.AddMetadataString("general.architecture", "deepseek4");
@@ -634,6 +669,7 @@ int main() {
   TestMappedPrefetch();
   TestIntegerRoutingTensor();
   TestVisionMetadataArrays();
+  TestNarrowIntegerArrays();
   std::cout << "Running GgufReader unit tests...\n";
   TestBasicGgufParsing();
   TestQwen38_27BParsing();
