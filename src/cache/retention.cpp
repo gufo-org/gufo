@@ -243,6 +243,16 @@ void RetentionPolicy::Erase(std::size_t i, RetentionReason reason,
   Emit(RetentionAction::kRemoved, reason, id, boundary, purpose, rank, used,
        before > after ? before - after : 0);
 }
+bool RetentionPolicy::Reclaim(const RetentionRequest& r) {
+  if (r.new_payload_bytes > ledger_.Limits().ram_bytes)
+    return false;
+  const auto victim = Victim(r, false);
+  if (victim == limit_)
+    return false;
+  Erase(victim, RetentionReason::kByteCapacity, Priority(victim, &r));
+  return true;
+}
+
 bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
   auto purpose = r.purpose;
   const auto refuse = [&](RetentionReason reason) {

@@ -8,8 +8,9 @@
 
 namespace gufo::cache {
 namespace {
+std::atomic<std::uint64_t> next_id{1};
 std::uint64_t NextId() {
-  static std::atomic<std::uint64_t> next{1};
+  auto& next = next_id;
   auto value = next.load();
   while (true) {
     if (value == std::numeric_limits<std::uint64_t>::max())
@@ -277,6 +278,19 @@ ExecutionHistory ExecutionHistory::Cold(
   lineage->metadata = reservation.Convert();
   return ExecutionHistory(ledger, descriptors, std::move(compatibility),
                           std::move(lineage));
+}
+ExecutionHistory ExecutionHistory::RestoredUnshared(
+    ResourceLedger& ledger, std::span<const ComponentDescriptor> descriptors,
+    Identity compatibility) {
+  return Cold(ledger, descriptors, std::move(compatibility));
+}
+void ExecutionHistory::ObserveDurableId(CheckpointId id) {
+  if (id.value == std::numeric_limits<std::uint64_t>::max())
+    throw std::overflow_error("cache identifiers exhausted");
+  auto value = next_id.load();
+  while (value <= id.value &&
+         !next_id.compare_exchange_weak(value, id.value + 1)) {
+  }
 }
 ExecutionHistory ExecutionHistory::Restored(ResourceLedger& ledger,
                                             const Checkpoint& checkpoint) {

@@ -27,8 +27,9 @@ STAGING_BYTES = 2 * 1024**3
 
 
 def published_tokens(log):
-    return [int(n) for n in re.findall(
-        r"event=disk_cache action=stored reason=saved .*?\btokens=(\d+)\b", log)]
+    legacy = re.findall(r"event=disk_cache action=stored reason=saved .*?\btokens=(\d+)\b", log)
+    component = re.findall(r"schema=component-cache-v1 event=published tokens=(\d+)\b", log)
+    return [int(tokens) for tokens in legacy + component]
 
 
 def wait_until(predicate, description, timeout=30):

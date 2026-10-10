@@ -2148,6 +2148,8 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
   usage["draft_tokens_accepted"] = result.draft_accepted_tokens;
 
   json::Value metrics = json::Value::object();
+  if (result.component_cache)
+    metrics["component_cache"] = ComponentCacheJson(*result.component_cache);
   metrics["cache_hit"] = result.cache_hit;
   if (!result.cache_miss_reason.empty()) {
     metrics["cache_miss_reason"] = result.cache_miss_reason;

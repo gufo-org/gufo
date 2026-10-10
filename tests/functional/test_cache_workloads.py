@@ -224,6 +224,23 @@ class CacheWorkloadsTest(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 check_unchanged_retry("kept", retry, 7, log, 0, 0)
 
+    def test_component_retry_requires_capacity_refusal_at_its_exact_boundary(self):
+        retry = {"usage": {"prompt_tokens": 169}}
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "server.log"
+            for event, tokens, accepted in (
+                    ("capture_refused reason=byte_capacity", 169, True),
+                    ("capture_refused reason=entry_capacity", 169, True),
+                    ("capture_failed reason=transfer", 169, False),
+                    ("capture_refused reason=byte_capacity", 168, False)):
+                log.write_text(f"schema=component-cache-v1 event={event} tokens={tokens}\n")
+                if accepted:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        check_unchanged_retry("refused", retry, 7, log, 0, log.stat().st_size)
+                else:
+                    with self.assertRaises(AssertionError):
+                        check_unchanged_retry("failed", retry, 7, log, 0, log.stat().st_size)
+
     def test_lifecycle_removes_its_disk_after_a_failed_stage(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

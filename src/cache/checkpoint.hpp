@@ -62,6 +62,13 @@ public:
   [[nodiscard]] std::shared_ptr<const void> Owner() const {
     return rows_ ? rows_->Owner() : owner_;
   }
+  // Assigned immutable storage token, never the original pool handle. Keep
+  // the checkpoint and physical owner alive throughout a persistence job.
+  [[nodiscard]] ResourceCharge CommittedCharge() const {
+    if (rows_)
+      throw std::logic_error("borrowed payload requires preservation");
+    return charge_;
+  }
 
 private:
   friend class ChunkReference;
@@ -182,6 +189,14 @@ public:
   static ExecutionHistory Cold(ResourceLedger&,
                                std::span<const ComponentDescriptor>, Identity);
   static ExecutionHistory Restored(ResourceLedger&, const Checkpoint&);
+  // A validated durable restore with no resident chunk owners starts a fresh
+  // branch. Future captures copy its rows rather than infer hash sharing.
+  static ExecutionHistory RestoredUnshared(ResourceLedger&,
+                                           std::span<const ComponentDescriptor>,
+                                           Identity);
+  // Startup discovery calls this before creating histories. IDs of retained
+  // durable checkpoints cannot be reused after a process restart.
+  static void ObserveDurableId(CheckpointId);
   ExecutionHistory(ExecutionHistory&&) noexcept = default;
   ExecutionHistory& operator=(ExecutionHistory&&) noexcept = delete;
   ExecutionHistory(const ExecutionHistory&) = delete;

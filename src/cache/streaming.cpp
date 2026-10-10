@@ -386,6 +386,8 @@ struct PersistenceQueue::Impl {
   StreamedStore* store;
   std::size_t max_bytes;
   std::function<bool()> idle;
+  std::function<void(CheckpointId, bool)> completed;
+  std::function<bool(const DiskManifest&)> reclaim;
   mutable std::mutex mutex;
   std::mutex stop_mutex;
   std::condition_variable wake;
@@ -395,11 +397,15 @@ struct PersistenceQueue::Impl {
   bool stopped{};
   std::jthread worker;
   Impl(ResourceReservation reservation, StreamedStore& streams,
-       std::size_t depth, std::size_t bytes, std::function<bool()> model_idle)
+       std::size_t depth, std::size_t bytes, std::function<bool()> model_idle,
+       std::function<void(CheckpointId, bool)> on_completed,
+       std::function<bool(const DiskManifest&)> on_reclaim)
       : metadata(reservation.Convert()),
         store(&streams),
         max_bytes(bytes),
         idle(std::move(model_idle)),
+        completed(std::move(on_completed)),
+        reclaim(std::move(on_reclaim)),
         pending(depth) {
     if (!depth || !bytes || !idle)
       throw std::invalid_argument("invalid persistence queue limits");
@@ -416,13 +422,31 @@ struct PersistenceQueue::Impl {
         }
         bool succeeded{};
         TransferTiming timing;
-        try {
-          store->Write(active->file_, active->manifest_, active->sources_,
-                       timing, stop, idle);
-          succeeded = true;
-        } catch (...) {
-          // Optional persistence failures remain observable and never enable a
-          // checkpoint. Disk recovery retains partial bytes conservatively.
+        while (!stop.stop_requested()) {
+          try {
+            store->Write(active->file_, active->manifest_, active->sources_,
+                         timing, stop, idle);
+            succeeded = true;
+            break;
+          } catch (const DiskCapacityExhausted&) {
+            try {
+              if (reclaim && reclaim(active->manifest_))
+                continue;
+            } catch (...) {
+            }
+            break;
+          } catch (...) {
+            // Non-capacity failures must never evict another checkpoint.
+            break;
+          }
+        }
+        if (completed) {
+          try {
+            completed(active->manifest_.checkpoint, succeeded);
+          } catch (...) {
+            // Publication remains durable and discoverable at restart even
+            // if optional serving metadata cannot be admitted now.
+          }
         }
         {
           std::lock_guard guard(mutex);
@@ -438,13 +462,16 @@ struct PersistenceQueue::Impl {
     });
   }
 };
-PersistenceQueue::PersistenceQueue(ResourceLedger& ledger, StreamedStore& store,
-                                   std::size_t depth, std::size_t bytes,
-                                   std::function<bool()> model_idle)
+PersistenceQueue::PersistenceQueue(
+    ResourceLedger& ledger, StreamedStore& store, std::size_t depth,
+    std::size_t bytes, std::function<bool()> model_idle,
+    std::function<void(CheckpointId, bool)> completed,
+    std::function<bool(const DiskManifest&)> reclaim)
     : impl_(std::make_unique<Impl>(
           ledger.Reserve(ResourceCategory::kMetadata,
                          Add(sizeof(Impl), Multiply(depth, sizeof(void*)))),
-          store, depth, bytes, std::move(model_idle))) {}
+          store, depth, bytes, std::move(model_idle), std::move(completed),
+          std::move(reclaim))) {}
 PersistenceQueue::~PersistenceQueue() {
   Stop();
 }

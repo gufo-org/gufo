@@ -16,6 +16,7 @@
 namespace gufo::cache {
 inline constexpr std::uint32_t kDiskFormatVersion = 2;
 inline constexpr std::size_t kMaxManifestBytes = std::size_t{16} * 1024 * 1024;
+class DiskCapacityExhausted : public ResourceExhausted {};
 using DiskFileId = std::array<std::uint8_t, 16>;
 // SHA-256 of the adapter's canonical compatibility identity, supplied by the
 // caller. Display names never participate in the persistent compatibility key.

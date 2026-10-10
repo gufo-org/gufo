@@ -70,6 +70,13 @@ cache::ResourceAllocationInfo BackingBlock::Info() const {
 void BackingBlock::Convert() {
   charge_ = reservation_.Convert();
 }
+cache::Payload BackingBlock::TakePayload() && {
+  if (!charge_ || reservation_)
+    throw std::logic_error("backing capture has not completed");
+  const auto bytes = Bytes();
+  auto owner = std::shared_ptr<const void>(std::move(state_), bytes.data());
+  return cache::Payload::Committed(std::move(charge_), std::move(owner));
+}
 std::shared_ptr<cache::BorrowedRows> BackingBlock::Borrow(
     cache::SlotLease& lease, cache::ComponentId component, cache::Rows first,
     cache::Rows end, std::size_t payload_bytes) && {

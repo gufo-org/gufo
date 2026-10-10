@@ -162,6 +162,14 @@ inline std::string GenerationLogDetails(
       << " draft_accepted=" << result.draft_accepted_tokens
       << " draft_proposed=" << result.draft_tokens
       << " draft_rounds=" << result.draft_rounds;
+  if (result.component_cache)
+    out << " cache_schema=component-cache-v1 cache_reuse="
+        << result.component_cache->reuse
+        << " cache_captures=" << result.component_cache->captures
+        << " cache_captured_capacity_bytes="
+        << result.component_cache->captured_bytes
+        << " cache_global_ledger_bytes="
+        << result.component_cache->ledger.total_bytes;
   if (result.draft_tokens > 0)
     out << " acceptance_pct="
         << 100.0 * result.draft_accepted_tokens / result.draft_tokens;

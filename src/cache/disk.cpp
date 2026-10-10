@@ -1000,7 +1000,7 @@ struct DiskStore::Impl {
       additional = Add(additional, p.bytes);
     }
     if (additional > budget_bytes - stats.managed_bytes)
-      throw ResourceExhausted();
+      throw DiskCapacityExhausted();
     std::unique_lock index_guard(index_mutex, std::defer_lock);
     {
       CostTimer timer(publication_stats.metadata_lock_ns);
