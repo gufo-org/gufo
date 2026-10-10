@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cache_compaction import ARCHIVE_LINE
+from cache_growth import check_unchanged_retry
 from cache_workloads import Workload, check_cache_transforms, check_cache_pressure
 from cache_messages_loop import check_cache_messages_loop, chat_messages
 from cache_lifecycle import Lifecycle, published_tokens
@@ -210,6 +211,18 @@ class CacheWorkloadsTest(unittest.TestCase):
                "event=disk_cache action=skipped reason=staging_capacity file_bytes=2 tokens=8000\n"
                "event=disk_cache action=restored reason=hit file_bytes=1 tokens=3000\n")
         self.assertEqual(published_tokens(log), [3000])
+
+    def test_unchanged_retry_accepts_a_logged_refusal_in_responses_usage(self):
+        retry = {"usage": {"input_tokens": 169, "input_tokens_details": {"cached_tokens": 162}}}
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "server.log"
+            log.write_text("event=snapshot action=skipped reason=byte_capacity "
+                           "bytes=124941224 tokens=169 retained_bytes=2103961064\n")
+            with contextlib.redirect_stderr(io.StringIO()):
+                check_unchanged_retry("refused", retry, 7, log, 0, log.stat().st_size)
+            log.write_text("")
+            with self.assertRaises(AssertionError):
+                check_unchanged_retry("kept", retry, 7, log, 0, 0)
 
     def test_lifecycle_removes_its_disk_after_a_failed_stage(self):
         with tempfile.TemporaryDirectory() as directory:
