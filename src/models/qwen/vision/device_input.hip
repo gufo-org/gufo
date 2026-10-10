@@ -32,6 +32,7 @@ DeviceInput::~DeviceInput() {
 void DeviceInput::Configure(std::shared_ptr<const Prompt> prompt,
                             std::shared_ptr<Encoder> encoder,
                             hipStream_t stream) {
+  if (continuation_hooks_) continuation_hooks_->BeforeVision(prompt.get(), nullptr);
   if (prompt && !prompt->images.empty() && !encoder) {
     throw std::invalid_argument("image input has no vision encoder");
   }
@@ -48,6 +49,7 @@ void DeviceInput::Configure(std::shared_ptr<const Prompt> prompt,
 }
 
 void DeviceInput::RestoreLayout(const RopeLayout& layout, hipStream_t stream) {
+  if (continuation_hooks_) continuation_hooks_->BeforeVision(nullptr, &layout);
   layout.Validate(std::numeric_limits<std::int32_t>::max());
   if (layout == layout_ && (descriptor_ != nullptr || layout.images.empty()))
     return;

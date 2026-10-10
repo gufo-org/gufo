@@ -54,6 +54,25 @@ Q4/Q8 image snapshots restored after cancellation inside the image encoder or
 text prefill match all target logits exactly; token-limit endings and stripped
 tool reasoning retain the compatible conversation prefix.
 
+## Autoregressive component checkpoints
+
+October 10, 2026: the model-local component adapter passes Q4/Q8 checks in
+both FP16 and FP32 attention KV layouts. Every restored component byte and
+full continuation logit row matches uninterrupted execution. The checks cover
+earlier-boundary edits, pending generation tokens, leased-row preservation,
+committed recurrent replay, failed/discarded transfers and completion lifetime.
+Image regressions restore before the first image and between two images while
+retaining the matching request's future images and complete RoPE layout;
+those focused image checks use production FP16 KV.
+
+Production FP16 probes at 32K and 100K also match every restored byte and
+sixteen continuation logit rows/token decisions after transfer to another slot.
+These are Gufo execution-consistency checks. They do not extend upstream or
+weight-conversion parity, qualify alternate BF16 recurrence, or qualify the
+common checkpoint allocator. The [adapter inventory and commands](CONTINUATION-ADAPTER.md)
+and [card 15 results](../../cache-redesign/cards/15-qwen27b-ar-adapter.md)
+record the scope and retained evidence.
+
 ## Reproduce
 
 Run only the affected [model suite](../../../tools/qwen27b/check.py):

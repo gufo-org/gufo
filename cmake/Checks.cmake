@@ -21,6 +21,7 @@ set(gufo_pr_targets
   text_model_runner_test continuation_disk_store_test
   bench_cli_test prompt_cli_test eval_http_client_test
   qwen_tokenizer_test qwen_chat_template_test
+  qwen27b_continuation_layout_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test
   qwen3_asr_config_test qwen3_asr_audio_api_test

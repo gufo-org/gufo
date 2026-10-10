@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "src/core/model_config.hpp"
+#include "src/models/qwen/continuation_hooks.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/state.hpp"
@@ -348,6 +349,8 @@ public:
 
 private:
   void FreeAll() noexcept;
+  friend class models::qwen::ContinuationAdapter;
+  friend class QwenGpuExecutor;
   void AllocateRecurrentSnapshot();
   [[nodiscard]] bool AllocateSsmReplayLog();
 
@@ -546,6 +549,8 @@ public:
   void FinishVerification();
 
 private:
+  friend class models::qwen::ContinuationAdapter;
+  models::qwen::ContinuationHooks* continuation_hooks_{nullptr};
   void CheckPrefillCancellation() const;
   void PrefillLayerCheckpoint(std::uint32_t layer);
   std::function<bool()> cancellation_check_;
@@ -553,6 +558,8 @@ private:
   void CheckReset() const {
     if (reset_failure_)
       std::rethrow_exception(reset_failure_);
+    if (continuation_hooks_)
+      continuation_hooks_->BeforeExecution();
   }
   std::exception_ptr reset_failure_;
   void ReplaySsmState(std::uint32_t position, std::uint32_t count = 1);
