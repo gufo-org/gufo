@@ -236,7 +236,7 @@ void RetentionPolicy::Erase(std::size_t i, RetentionReason reason,
   const auto boundary = e.checkpoint->Boundary();
   const auto purpose = e.purpose;
   const auto used = e.last_used;
-  index_.Erase(e.entry);
+  index_.DropResident(e.entry);
   e = {};
   --size_;
   const auto after = ledger_.Snapshot().total_bytes;

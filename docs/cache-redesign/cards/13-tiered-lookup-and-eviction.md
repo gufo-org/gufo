@@ -1,7 +1,7 @@
 # 13 · RAM + disk lookup and reference eviction
 
 **Milestone:** Disk store · **Depends on:** 05, 11 · **Size:** M ·
-**Affects:** nothing at runtime until card 19 · **Status:** agreed
+**Affects:** nothing at runtime until card 19 · **Status:** in review
 
 ## Goal
 
@@ -44,7 +44,7 @@ checkpoint with shared and with unshared dependencies.
 
 ## Done when
 
-- [ ] Tests above pass.
+- [x] Tests above pass.
 
 ## Review focus
 
@@ -69,3 +69,59 @@ required (see the README).
 
 ## Review notes
 
+The compressed per-compatibility token tree now admits resident, durable and
+mixed component candidates. Persistent descriptions bind the caller's canonical
+identity to its supplied SHA-256 digest, exact inventory/layout and independent
+component positions. Deepest usable remains the first rule; equal-depth ties
+prefer live, resident, mixed, then durable candidates. Distinct selection reasons
+expose durable/mixed choices to the later serving logger. A description owns
+only admitted manifest metadata. Lookup takes a publication-epoch pin, so an old
+description cannot acquire a replacement checkpoint with the same ID. Lookup
+candidate capacity and retained availability plans are admitted metadata too.
+
+RAM retention removal drops its checkpoint owner while leaving a complete
+durable description in the tree. The fake W2 test proves the former checkpoint
+object expires, restores target 40 / draft 36 into another slot, checks every
+component byte, and compares continued execution with the uninterrupted slot.
+Mixed-source plans remain stable across availability changes. Digest/layout
+mismatches and all catalog reserve/convert fault points fail without leakage.
+
+`DiskCatalog` keeps global LRU across all discovered disk identities, including
+ones not loaded into lookup. New publications become most recent; callers touch
+successful uses. Startup ties use ascending checkpoint ID. Eviction skips reader
+pins and immediately refuses a busy writer. Manifest retirement and directory
+sync still precede dependency deletion; shared files survive another manifest's
+retirement. Only completed durable deletion contributes reusable disk budget.
+
+A reverse dependency map quarantines every affected catalog/index record before
+fallback, including its RAM lookup candidate. The disk layer also quarantines
+untracked and provisional claims without waiting for the writer's I/O lock. A
+writer rechecks quarantine before creating its manifest and before indexing;
+late quarantine retains the inherited recovery gate until its unindexed manifest
+has been durably reclaimed. Tests exercise invalidation during verification,
+after dependency sync, and after the manifest barriers. Physical cleanup remains
+caller-scheduled at an idle boundary after reader pins settle.
+
+These are common-cache and fake-adapter checks. Real model state and serving
+integration remain the following cards; no model quality or HTTP speed claim is
+made here.
+
+The 13 common-cache checks pass in normal and ASan/UBSan builds. The shared
+format check passes 554 C++ files. The production `BUILD_TESTING=OFF` benchmark
+uses pinned GCC 15.3.0, ROCm 7.2.3 and the release preset on Ryzen AI MAX+ 395,
+gfx1151, Linux 7.2.9, with encrypted Btrfs (`compress=zstd:3`). Run it with:
+
+```sh
+cmake --build --preset release --target cache_tiered_bench
+build/release/src/cache/cache_tiered_bench /tmp
+```
+
+All samples are retained in [13-gfx1151.csv](../measurements/13-gfx1151.csv).
+After ten warmups, 100 lookups through 1,000 matching durable boundaries,
+including acquisition/release of every candidate's pin, had median **0.304605
+ms**, range **0.296440–0.525031 ms**. Retiring one checkpoint with a still-shared
+dependency took **0.760766 ms**; one with an unshared dependency took **1.335950
+ms**. Each crossed three directory sync barriers. The eviction catalog sizes
+were 1,003 and 1,002, including the fixture's additional records; lookup retained
+1,000 candidates. These are warmed metadata lookups and tiny synthetic 8/32-byte
+payload files, not full-model disk-transfer timings. No speedup is claimed.

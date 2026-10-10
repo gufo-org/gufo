@@ -11,6 +11,7 @@ set(gufo_pr_targets
   cache_disk_test
   cache_disk_publication_test
   cache_streaming_test
+  cache_tiered_test
   cache_retention_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
   logit_sampler_test ggml_dequant_test

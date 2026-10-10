@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -67,6 +68,7 @@ public:
   // validate payload checksums before making a destination executable.
   [[nodiscard]] bool Durable() const { return durable_; }
   [[nodiscard]] bool PayloadVerified() const { return payload_verified_; }
+  [[nodiscard]] std::uint64_t Epoch() const { return epoch_; }
 
 private:
   friend class DiskStore;
@@ -76,6 +78,8 @@ private:
   DiskManifest manifest_;
   bool durable_{true};
   bool payload_verified_{false};
+  bool available_{true};
+  std::uint64_t epoch_{};
 };
 struct DiskStartupStats {
   std::uint64_t manifest_bytes_read{}, legacy_probe_bytes_read{};
@@ -119,11 +123,41 @@ struct DiskPublicationStats {
 class DiskReadPin {
 public:
   explicit operator bool() const { return bool(token_); }
+  [[nodiscard]] std::uint64_t Epoch() const { return epoch_; }
 
 private:
   friend class DiskStore;
   std::shared_ptr<const ResourceCharge> token_;
+  std::uint64_t epoch_{};
 };
+class DiskStore;
+// Admitted immutable metadata without a dependency pin or any RAM payload.
+// Store and ledger outlive descriptions and candidates. Epochs prevent an old
+// description from acquiring a replacement publication with the same ID.
+class DiskDescription {
+public:
+  [[nodiscard]] const DiskManifest& Manifest() const { return manifest_; }
+  [[nodiscard]] std::uint64_t Epoch() const { return epoch_; }
+  [[nodiscard]] DiskStore& Store() const { return *store_; }
+  [[nodiscard]] DiskReadPin Pin() const;
+
+private:
+  friend class DiskStore;
+  ResourceCharge metadata_;
+  DiskManifest manifest_;
+  DiskStore* store_{};
+  std::uint64_t epoch_{};
+};
+class DiskDependencyError : public std::runtime_error {
+public:
+  DiskDependencyError(bool private_file, DiskFileId file)
+      : std::runtime_error("invalid disk checkpoint dependency"),
+        private_file(private_file),
+        file(file) {}
+  bool private_file;
+  DiskFileId file;
+};
+enum class DiskRetireResult { kRetired, kMissing, kPinned, kBusy };
 // Owned metadata plus a dependency pin. The store must outlive this snapshot
 // and every read using it. It remains stable across concurrent index changes.
 class DiskSnapshot {
@@ -187,6 +221,7 @@ public:
       DiskPublicationStats* observation = nullptr,
       const DiskStagingAccess* access = nullptr, std::stop_token stop = {});
   [[nodiscard]] std::optional<DiskSnapshot> Open(CheckpointId) const;
+  [[nodiscard]] std::shared_ptr<const DiskDescription> Describe(CheckpointId);
   // Reads one dependency, invokes consume only with complete pieces, and
   // checks its CRC and stable file identity before returning. Consumers must
   // keep their destination non-executable until every dependency has passed.
@@ -196,10 +231,16 @@ public:
       const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
           consume,
       DiskReadStats* observation = nullptr);
-  [[nodiscard]] DiskReadPin Pin(CheckpointId) const;
+  [[nodiscard]] DiskReadPin Pin(CheckpointId, std::uint64_t epoch = 0) const;
+  // Short logical quarantine; keeps filesystem references until retirement.
+  void Invalidate(CheckpointId, std::uint64_t epoch);
+  // Includes provisional writers, without acquiring the I/O lock. New claims
+  // cannot reuse dependencies of quarantined entries before reclamation.
+  void InvalidateDependency(bool private_file, DiskFileId);
   // Returns false for a missing or pinned checkpoint. Unlinks and fsyncs its
   // manifest before releasing any dependency; shared chunks remain referenced.
   bool Retire(CheckpointId);
+  [[nodiscard]] DiskRetireResult TryRetire(CheckpointId, std::uint64_t epoch);
   // Explicitly schedule a worker after complete startup discovery. Errors are
   // delivered by WaitForReclamation(); destruction joins the worker.
   void ReclaimOrphans();

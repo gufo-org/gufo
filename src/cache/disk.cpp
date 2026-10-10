@@ -434,6 +434,8 @@ struct DiskStore::Impl {
   std::uint64_t budget_bytes;
   DiskPublicationStats publication_stats;
   bool recovery_required{};
+  std::uint64_t next_epoch{1};
+  DiskRetireResult Retire(CheckpointId, std::uint64_t);
   mutable std::timed_mutex mutex;
   mutable std::mutex index_mutex;
   mutable std::mutex stats_mutex;
@@ -550,6 +552,7 @@ struct DiskStore::Impl {
         if (!available)
           Invalid();
         entry.file_ = *id;
+        entry.epoch_ = next_epoch++;
         entries.push_back(std::move(entry));
       } catch (const std::invalid_argument&) {
         ++stats.rejected_manifests;
@@ -935,6 +938,18 @@ struct DiskStore::Impl {
       CostTimer timer(publication_stats.metadata_lock_ns);
       index_guard.lock();
     }
+    for (const auto& entry : entries) {
+      if (entry.available_)
+        continue;
+      for (const auto& component : entry.manifest_.components) {
+        for (const auto& chunk : component.chunks)
+          if (dependencies.contains({false, chunk.file}))
+            throw DiskDependencyError(false, chunk.file);
+        for (const auto& payload : {component.tail, component.private_state})
+          if (payload && dependencies.contains({true, payload->file}))
+            throw DiskDependencyError(true, payload->file);
+      }
+    }
     if (entries.size() == entries.capacity()) {
       auto reserve =
           ledger->Reserve(ResourceCategory::kMetadata,
@@ -949,6 +964,9 @@ struct DiskStore::Impl {
       std::vector<DurableEntry>().swap(replacement);
       entry_capacity = std::move(charge);
     }
+    if (next_epoch == UINT64_MAX)
+      throw std::overflow_error("disk publication epochs exhausted");
+    candidate.epoch_ = next_epoch++;
     entries.push_back(std::move(candidate));
     bool manifest_attempted{};
     try {
@@ -1021,6 +1039,10 @@ struct DiskStore::Impl {
       DISK_STEP(kChunkDirectorySynced);
       Sync(private_files.Get());
       DISK_STEP(kDependenciesSynced);
+      index_guard.lock();
+      if (!entries.back().available_)
+        throw std::runtime_error("checkpoint dependency quarantined");
+      index_guard.unlock();
       if (!sources.empty()) {
         // Free the provisional encoding before allocating the final one.
         std::vector<std::uint8_t>().swap(bytes);
@@ -1039,6 +1061,8 @@ struct DiskStore::Impl {
       Sync(temporary.Get());
       DISK_STEP(kFinalTemporaryDirectorySynced);
       index_guard.lock();
+      if (!entries.back().available_)
+        throw std::runtime_error("checkpoint dependency quarantined");
       entries.back().payload_verified_ = true;
       entries.back().durable_ = true;
       DISK_STEP(kIndexed);
@@ -1187,6 +1211,8 @@ DurableEntry& DurableEntry::operator=(DurableEntry&& other) noexcept {
     file_ = other.file_;
     durable_ = other.durable_;
     payload_verified_ = other.payload_verified_;
+    available_ = other.available_;
+    epoch_ = other.epoch_;
     metadata_ = std::move(other.metadata_);
     pin_ = std::move(other.pin_);
   }
@@ -1254,7 +1280,8 @@ DiskPublicationStats DiskStore::PublishStream(
 std::optional<DiskSnapshot> DiskStore::Open(CheckpointId id) const {
   std::lock_guard guard(impl_->index_mutex);
   for (const auto& entry : impl_->entries) {
-    if (!entry.durable_ || entry.manifest_.checkpoint != id)
+    if (!entry.durable_ || !entry.available_ ||
+        entry.manifest_.checkpoint != id)
       continue;
     auto reservation = impl_->ledger->Reserve(ResourceCategory::kMetadata,
                                               entry.metadata_.Info().bytes);
@@ -1262,6 +1289,7 @@ std::optional<DiskSnapshot> DiskStore::Open(CheckpointId id) const {
     snapshot.manifest_ = entry.manifest_;
     snapshot.metadata_ = reservation.Convert();
     snapshot.pin_.token_ = entry.pin_;
+    snapshot.pin_.epoch_ = entry.epoch_;
     snapshot.store_ = impl_.get();
     return snapshot;
   }
@@ -1305,7 +1333,7 @@ DiskReadStats DiskStore::ReadPayload(
   struct stat before{}, after{};
   if (file.Get() < 0 || fstat(file.Get(), &before) < 0 || !Regular(before) ||
       std::uint64_t(before.st_size) != payload.bytes)
-    Invalid();
+    throw DiskDependencyError(private_file, payload.file);
   const Impl::FileIdentity identity{before.st_dev,  before.st_ino,
                                     before.st_size, before.st_mtim,
                                     before.st_ctim, payload.checksum};
@@ -1328,7 +1356,7 @@ DiskReadStats DiskStore::ReadPayload(
       if (n < 0 && errno == EINTR)
         continue;
       if (n <= 0)
-        Invalid();
+        throw DiskDependencyError(private_file, payload.file);
       filled += n;
     }
     stats.filesystem_ns += elapsed(begin);
@@ -1347,7 +1375,7 @@ DiskReadStats DiskStore::ReadPayload(
                                      after.st_mtim, after.st_ctim,
                                      payload.checksum} ||
       (!stats.verification_cached && checksum != payload.checksum))
-    Invalid();
+    throw DiskDependencyError(private_file, payload.file);
   stats.filesystem_ns += elapsed(begin);
   if (!stats.verification_cached) {
     std::lock_guard guard(impl_->verification_mutex);
@@ -1373,26 +1401,28 @@ DiskReadStats DiskStore::ReadPayload(
   }
   return stats;
 }
-DiskReadPin DiskStore::Pin(CheckpointId id) const {
+DiskReadPin DiskStore::Pin(CheckpointId id, std::uint64_t epoch) const {
   std::lock_guard guard(impl_->index_mutex);
   DiskReadPin pin;
   for (const auto& entry : impl_->entries)
-    if (entry.durable_ && entry.manifest_.checkpoint == id) {
+    if (entry.durable_ && entry.available_ &&
+        entry.manifest_.checkpoint == id && (!epoch || epoch == entry.epoch_)) {
       pin.token_ = entry.pin_;
+      pin.epoch_ = entry.epoch_;
       break;
     }
   return pin;
 }
-bool DiskStore::Retire(CheckpointId id) {
-  std::lock_guard guard(impl_->mutex);
-  impl_->RequireRecovered();
-  std::unique_lock index_guard(impl_->index_mutex);
-  auto& entries = impl_->entries;
+DiskRetireResult DiskStore::Impl::Retire(CheckpointId id, std::uint64_t epoch) {
+  RequireRecovered();
+  std::unique_lock index_guard(index_mutex);
   auto it = std::find_if(entries.begin(), entries.end(), [&](const auto& e) {
     return e.manifest_.checkpoint == id;
   });
-  if (it == entries.end() || it->pin_.use_count() > 1)
-    return false;
+  if (it == entries.end() || (epoch && it->epoch_ != epoch))
+    return DiskRetireResult::kMissing;
+  if (it->pin_.use_count() > 1)
+    return DiskRetireResult::kPinned;
   // Remove the index claim before attempting unlink: an I/O error can report
   // an uncertain outcome even when the directory entry has disappeared. Keep
   // dependencies untouched until the manifest-directory barrier succeeds.
@@ -1400,25 +1430,78 @@ bool DiskStore::Retire(CheckpointId id) {
   entries.erase(it);
   index_guard.unlock();
   try {
-    impl_->Remove(impl_->manifests.Get(), DiskFileName(retired.file_));
-    impl_->Sync(impl_->manifests.Get());
+    Remove(manifests.Get(), DiskFileName(retired.file_));
+    Sync(manifests.Get());
     for (const auto& c : retired.manifest_.components) {
       for (const auto& p : c.chunks)
-        if (!impl_->Referenced(impl_->chunks.Get(), p.file))
-          impl_->Remove(impl_->chunks.Get(), DiskFileName(p.file));
+        if (!Referenced(chunks.Get(), p.file))
+          Remove(chunks.Get(), DiskFileName(p.file));
       for (auto p : {c.tail, c.private_state})
-        if (p && !impl_->Referenced(impl_->private_files.Get(), p->file))
-          impl_->Remove(impl_->private_files.Get(), DiskFileName(p->file));
+        if (p && !Referenced(private_files.Get(), p->file))
+          Remove(private_files.Get(), DiskFileName(p->file));
     }
-    impl_->Sync(impl_->chunks.Get());
-    impl_->Sync(impl_->private_files.Get());
-    return true;
+    Sync(chunks.Get());
+    Sync(private_files.Get());
+    return DiskRetireResult::kRetired;
   } catch (...) {
     // Both checkpoint identities and freed payload capacity remain uncertain
     // until every deletion has crossed its directory durability barrier.
-    impl_->recovery_required = true;
+    recovery_required = true;
     throw;
   }
+}
+
+bool DiskStore::Retire(CheckpointId id) {
+  std::lock_guard guard(impl_->mutex);
+  return impl_->Retire(id, 0) == DiskRetireResult::kRetired;
+}
+DiskRetireResult DiskStore::TryRetire(CheckpointId id, std::uint64_t epoch) {
+  std::unique_lock guard(impl_->mutex, std::try_to_lock);
+  if (!guard.owns_lock())
+    return DiskRetireResult::kBusy;
+  return impl_->Retire(id, epoch);
+}
+void DiskStore::Invalidate(CheckpointId id, std::uint64_t epoch) {
+  std::lock_guard guard(impl_->index_mutex);
+  for (auto& entry : impl_->entries)
+    if (entry.manifest_.checkpoint == id && entry.epoch_ == epoch)
+      entry.available_ = false;
+}
+void DiskStore::InvalidateDependency(bool private_file, DiskFileId file) {
+  std::lock_guard guard(impl_->index_mutex);
+  for (auto& entry : impl_->entries)
+    for (const auto& component : entry.manifest_.components) {
+      if (private_file) {
+        for (const auto& payload : {component.tail, component.private_state})
+          if (payload && payload->file == file)
+            entry.available_ = false;
+      } else {
+        for (const auto& payload : component.chunks)
+          if (payload.file == file)
+            entry.available_ = false;
+      }
+    }
+}
+std::shared_ptr<const DiskDescription> DiskStore::Describe(CheckpointId id) {
+  std::lock_guard guard(impl_->index_mutex);
+  for (const auto& entry : impl_->entries) {
+    if (!entry.durable_ || !entry.available_ ||
+        entry.manifest_.checkpoint != id)
+      continue;
+    auto reservation = impl_->ledger->Reserve(
+        ResourceCategory::kMetadata,
+        Add(entry.metadata_.Info().bytes, sizeof(DiskDescription) + 64));
+    auto description = std::make_shared<DiskDescription>();
+    description->manifest_ = entry.manifest_;
+    description->store_ = this;
+    description->epoch_ = entry.epoch_;
+    description->metadata_ = reservation.Convert();
+    return description;
+  }
+  return {};
+}
+DiskReadPin DiskDescription::Pin() const {
+  return store_->Pin(manifest_.checkpoint, epoch_);
 }
 
 void DiskStore::ReclaimOrphans() {

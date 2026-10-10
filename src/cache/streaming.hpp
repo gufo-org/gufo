@@ -70,11 +70,13 @@ public:
              const std::function<bool()>& model_idle = {});
   // Invalidation happens before fallback. Cancellation also invalidates, but
   // does not run fallback. All loads and disk pins settle before either path.
-  [[nodiscard]] bool Restore(CheckpointId,
-                             CompatibilityDigest expected_compatibility,
-                             Adapter&, Slot&, TransferTiming&,
-                             std::stop_token = {},
-                             const std::function<void()>& fallback = {});
+  // dependency_failed runs after invalidation and before fallback, only for
+  // filesystem/checksum failures; it can quarantine reverse dependencies.
+  [[nodiscard]] bool Restore(
+      CheckpointId, CompatibilityDigest expected_compatibility, Adapter&, Slot&,
+      TransferTiming&, std::stop_token = {},
+      const std::function<void()>& fallback = {},
+      const std::function<void(bool, DiskFileId)>& dependency_failed = {});
   [[nodiscard]] std::size_t StagingBytes() const;
   [[nodiscard]] std::uint64_t StartupAllocatorNanoseconds() const;
 

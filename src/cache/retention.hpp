@@ -94,7 +94,8 @@ struct RetentionRequest {
 };
 // Caller serializes policy, index and history operations. Ledger and index
 // outlive this object; sink, if present, does too. Callbacks/sinks cannot
-// reenter. Policy owns only its index entries. Returned lookup/reader pins
+// reenter. Policy owns resident retention; durable entries stay index-owned
+// after RAM removal. Returned lookup/reader pins
 // remain valid after removal and their ledger charges cannot be spent again
 // prematurely.
 class RetentionPolicy {

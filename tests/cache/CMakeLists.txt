@@ -90,6 +90,11 @@ target_link_libraries(cache_streaming_test PRIVATE gufo_cache_fake)
 add_test(NAME cache_streaming_test COMMAND cache_streaming_test)
 set_tests_properties(cache_streaming_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
+add_executable(cache_tiered_test tiered_test.cpp)
+target_link_libraries(cache_tiered_test PRIVATE gufo_cache_fake)
+add_test(NAME cache_tiered_test COMMAND cache_tiered_test)
+set_tests_properties(cache_tiered_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
 if (GUFO_BUILD_TOOLS)
   add_executable(cache_disk_bench disk_bench.cpp)
   target_link_libraries(cache_disk_bench PRIVATE gufo_cache)

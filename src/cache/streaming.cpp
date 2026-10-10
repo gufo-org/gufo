@@ -255,10 +255,12 @@ void StreamedStore::Write(DiskFileId file, const DiskManifest& manifest,
   (void)impl_->disk->PublishStream(file, manifest, writes, impl_->staging.bytes,
                                    &costs, &access, stop);
 }
-bool StreamedStore::Restore(CheckpointId id, CompatibilityDigest compatibility,
-                            Adapter& adapter, Slot& slot,
-                            TransferTiming& timing, std::stop_token stop,
-                            const std::function<void()>& fallback) {
+bool StreamedStore::Restore(
+    CheckpointId id, CompatibilityDigest compatibility, Adapter& adapter,
+    Slot& slot, TransferTiming& timing, std::stop_token stop,
+    const std::function<void()>& fallback,
+    const std::function<void(bool, DiskFileId)>& dependency_failed) {
+  std::optional<std::pair<bool, DiskFileId>> failed;
   try {
     auto guard = impl_->Lock(stop, timing);
     auto start = Clock::now();
@@ -307,27 +309,32 @@ bool StreamedStore::Restore(CheckpointId id, CompatibilityDigest compatibility,
           timing.filesystem_ns += costs.filesystem_ns;
           timing.checksum_ns += costs.checksum_ns;
         }};
-        (void)impl_->disk->ReadPayload(
-            *snapshot, private_file, payload, piece,
-            [&](std::uint64_t offset, auto bytes) {
-              CheckStop(stop);
-              auto stream = impl_->Lease(timing);
-              auto completion =
-                  private_state
-                      ? adapter.LoadPrivatePiece(slot, c.descriptor.id, offset,
-                                                 std::as_bytes(bytes), *stream)
-                      : adapter.CopyRowsIn(
-                            slot, c.descriptor.id,
-                            first + offset / c.descriptor.row_bytes,
-                            first + (offset + bytes.size()) /
-                                        c.descriptor.row_bytes,
-                            std::as_bytes(bytes), *stream);
-              Settle(std::move(completion), timing);
-              ++timing.pieces;
-              timing.bytes += bytes.size();
-              CheckStop(stop);
-            },
-            &costs);
+        try {
+          (void)impl_->disk->ReadPayload(
+              *snapshot, private_file, payload, piece,
+              [&](std::uint64_t offset, auto bytes) {
+                CheckStop(stop);
+                auto stream = impl_->Lease(timing);
+                auto completion =
+                    private_state ? adapter.LoadPrivatePiece(
+                                        slot, c.descriptor.id, offset,
+                                        std::as_bytes(bytes), *stream)
+                                  : adapter.CopyRowsIn(
+                                        slot, c.descriptor.id,
+                                        first + offset / c.descriptor.row_bytes,
+                                        first + (offset + bytes.size()) /
+                                                    c.descriptor.row_bytes,
+                                        std::as_bytes(bytes), *stream);
+                Settle(std::move(completion), timing);
+                ++timing.pieces;
+                timing.bytes += bytes.size();
+                CheckStop(stop);
+              },
+              &costs);
+        } catch (const DiskDependencyError& error) {
+          failed = {error.private_file, error.file};
+          throw;
+        }
         if (!private_state)
           first += payload.bytes / c.descriptor.row_bytes;
       };
@@ -347,6 +354,8 @@ bool StreamedStore::Restore(CheckpointId id, CompatibilityDigest compatibility,
     // also have disabled execution, so invalidate even when began is false.
     if (!adapter.Invalidate(slot))
       throw std::runtime_error("cannot invalidate failed disk restore");
+    if (failed && dependency_failed)
+      dependency_failed(failed->first, failed->second);
     if (!stop.stop_requested() && fallback)
       fallback();
     return false;
