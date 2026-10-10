@@ -51,6 +51,12 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
+def integer_number(value):
+    """JSON integers may use exponent notation; booleans are never counts."""
+    return type(value) is int or (
+        type(value) is float and math.isfinite(value) and value.is_integer())
+
+
 def validate_tool_events(events, output):
     """A correct final response must not hide corrupted streamed arguments."""
     items, completed = {}, {}
@@ -159,9 +165,10 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
                     "incomplete response is missing details")
     else:
         input_count, output_count = usage.get("prompt_tokens"), usage.get("completion_tokens")
-    require(type(input_count) is int and type(output_count) is int
+    require(integer_number(input_count) and integer_number(output_count)
             and input_count >= 0 and output_count >= 0, "invalid token counts")
-    require(usage.get("total_tokens") == input_count + output_count, "inconsistent usage total")
+    require(integer_number(usage.get("total_tokens"))
+            and usage["total_tokens"] == input_count + output_count, "inconsistent usage total")
     limit = body.get("max_completion_tokens", body.get("max_tokens", body.get("max_output_tokens")))
     if limit is not None:
         require(output_count <= limit, "output exceeds the request token limit")
@@ -174,14 +181,15 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         value = timing.get(field)
         require(type(value) in (int, float) and math.isfinite(value) and value >= 0,
                 f"missing or invalid {field}")
-    require(type(timing.get("prefill_tokens")) is int, "missing prefill token count")
+    require(integer_number(timing.get("prefill_tokens")) and timing["prefill_tokens"] >= 0,
+            "missing or invalid prefill token count")
     if output_count:
         require(timing["decode_ms"] > 0, "generated tokens have no decode time")
     if timing["prefill_tokens"]:
         require(timing["prefill_ms"] > 0, "prefilled tokens have no prefill time")
     cached = usage.get("cached_tokens", usage.get(
         "prompt_tokens_details", usage.get("input_tokens_details", {})).get("cached_tokens"))
-    require(type(cached) is int and 0 <= cached <= input_count, "invalid cached token count")
+    require(integer_number(cached) and 0 <= cached <= input_count, "invalid cached token count")
     definitions = {tool.get("function", tool).get("name"): tool.get("function", tool)
                    for tool in body.get("tools", []) if tool.get("type") == "function"}
     calls = [call for choice in choices.values() for call in choice["tools"].values()]
@@ -202,7 +210,21 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         require(name in definitions, "undeclared generated tool")
         if isinstance(choice, dict) and choice.get("type") == "function":
             require(name == choice.get("function", choice).get("name"), "wrong named tool")
-        arguments = json.loads(call["arguments"])
+        try:
+            arguments = json.loads(call["arguments"])
+        except json.JSONDecodeError:
+            interrupted = (
+                output is not None and output["status"] == "incomplete"
+                and call.get("status") == "incomplete"
+            ) or (
+                output is None and any(
+                    item.get("finish") == "length" or
+                    (item.get("finish") == "stop" and body.get("stop"))
+                    for item in choices.values())
+            )
+            require(body.get("stream") and interrupted and call is calls[-1],
+                    "unfinished tool arguments in a successful response")
+            continue
         require(isinstance(arguments, dict), "tool arguments must be a JSON object")
         definition = definitions[name]
         if definition.get("strict"):

@@ -1011,6 +1011,38 @@ class FunctionalRunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_tool_events(events, {"output": []})
 
+    def test_partial_tool_arguments_require_an_interrupted_turn(self):
+        timing = {"prompt_n": 1, "prompt_ms": 2, "predicted_ms": 3,
+                  "cache_restore_ms": 0, "cache_snapshot_ms": 0,
+                  "cache_disk_enqueue_ms": 0, "queue_ms": 0, "ttft_ms": 2}
+        usage = {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3,
+                 "prompt_tokens_details": {"cached_tokens": 0}}
+        body = {"stream": True, "tools": [{"type": "function",
+                "function": {"name": "record", "parameters": {"type": "object"}}}]}
+        events = [
+            {"choices": [{"index": 0, "delta": {"tool_calls": [
+                {"index": 0, "id": "call1", "type": "function",
+                 "function": {"name": "record", "arguments": '{"text":"par'}}]}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
+             "timings": timing},
+            {"choices": [], "usage": usage},
+        ]
+
+        def check(request):
+            data = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n"
+                            for event in events) + b"data: [DONE]\n\n"
+            return summarize([(1, data)], True, True,
+                             ("/v1/chat/completions", request, 200))
+
+        check(body)
+        events[1]["choices"][0]["finish_reason"] = "stop"
+        check({**body, "stop": "STOP"})
+        with self.assertRaisesRegex(ValueError, "unfinished tool"):
+            check(body)
+        events[1]["choices"][0]["finish_reason"] = "tool_calls"
+        with self.assertRaisesRegex(ValueError, "unfinished tool"):
+            check(body)
+
     def test_mode_coverage_checks_loader_restart_and_executed_drafts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1068,6 +1100,53 @@ class FunctionalRunnerTest(unittest.TestCase):
             self.assertEqual(measured["decode_ms"], 3)
             self.assertEqual(measured["prefill_ms"], 2)
             self.assertIsNotNone(fingerprint)
+
+    def test_integer_usage_accepts_exponents_but_rejects_invalid_counts(self):
+        # The production serializer writes a 200K cache hit as 2e+05. JSON
+        # Schema's integer type describes the value, not Python's parsed type.
+        timing = {"prompt_n": 92.0, "prompt_ms": 2, "predicted_ms": 3,
+                  "cache_restore_ms": 0, "cache_snapshot_ms": 0,
+                  "cache_disk_enqueue_ms": 0, "queue_ms": 0, "ttft_ms": 2}
+        for endpoint in ("chat/completions", "completions", "responses"):
+            if endpoint == "responses":
+                usage = {"input_tokens": 200092.0, "output_tokens": 219.0,
+                         "total_tokens": 200311.0,
+                         "input_tokens_details": {"cached_tokens": 200000.0}}
+                response = {"status": "completed", "output": [], "usage": usage,
+                            "timings": timing}
+                input_key, output_key, details = "input_tokens", "output_tokens", "input_tokens_details"
+            else:
+                usage = {"prompt_tokens": 200092.0, "completion_tokens": 219.0,
+                         "total_tokens": 200311.0,
+                         "prompt_tokens_details": {"cached_tokens": 200000.0}}
+                response = {"choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "ok"}}],
+                            "usage": usage, "timings": timing}
+                input_key, output_key, details = "prompt_tokens", "completion_tokens", "prompt_tokens_details"
+
+            def check(value):
+                raw = json.dumps(value).replace("200000.0", "2e+05").encode()
+                return summarize([(5, raw)], False, True, ("/v1/" + endpoint, {}, 200))
+
+            measured, fingerprint = check(response)
+            self.assertEqual(measured["cached_tokens"], 200000)
+            self.assertIsNotNone(fingerprint)
+            for bad in (True, False, -1, .5, "200000", None, float("nan"), float("inf")):
+                for path in (("usage", input_key), ("usage", output_key),
+                             ("usage", "total_tokens"), ("usage", details, "cached_tokens"),
+                             ("timings", "prompt_n")):
+                    with self.subTest(endpoint=endpoint, path=path, bad=bad):
+                        altered = deepcopy(response)
+                        target = altered
+                        for key in path[:-1]:
+                            target = target[key]
+                        target[path[-1]] = bad
+                        with self.assertRaises(ValueError):
+                            check(altered)
+            altered = deepcopy(response)
+            altered["usage"][details]["cached_tokens"] = 200093
+            with self.assertRaisesRegex(ValueError, "invalid cached token count"):
+                check(altered)
 
     def messages_fixture(self):
         request = {"model": "fixture", "max_tokens": 2, "temperature": 0, "seed": 31,

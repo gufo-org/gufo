@@ -93,6 +93,7 @@ RAM, disk and restart settings once their contracts pass.
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata, foreign tool markers in prose and parallel calls (no DeepSeek text after the call block) |
 | `tool-reasoning` | Quoted tags, exact literal arguments, early stops, disabled tools, envelope framing, completed tool-result continuations and warm replay of contaminated history; Chat/Responses |
+| `tool-streaming` | Incremental argument arrival and exact assembly in Chat/Responses/Messages; stable IDs, literal framing, thinking, stopped/limited calls and successful retries |
 | `reasoning-separator` | No leading separator newlines after reasoning in Chat/Responses, plain/tools/JSON; exact streamed/buffered text, warm retry, continuation and thinking-off paragraph breaks |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
@@ -211,6 +212,19 @@ the previous prompt plus generated tokens; transcripts
 and phase timings are retained. No synthetic system-padding counts as growth.
 If Pi omits a reasoning-only reply, the report identifies that history change
 and verifies reuse through the measured pre-generation boundary instead.
+Use `--resume PREVIOUS_OUTPUT` to continue either client's retained session,
+including after a server restart. To test cancellation, add `--interrupt tool`
+or `--interrupt thinking` to a resumed run. The harness sends SIGINT only after
+observing that phase in a live stream and records the interruption separately.
+Then resume that output directory without `--interrupt`. The harness preserves
+the unfinished task and its files, and requires successful tool execution and
+state/digest checks without repeating committed changes. An interrupted run
+alone is not a pass. Resume prompts distinguish completed calls for this task
+from earlier transactions; the checks still require the file read and catalog
+query, even when the model could infer their contents from earlier tasks.
+Use `--interrupt-after-tools 5` with `--complex-tools --interrupt tool` to
+interrupt the receipt after the transaction has committed. Resuming must
+preserve the committed revision and finish the receipt without another apply.
 
 `opencode_agent.py` runs real opencode (`--opencode PATH`, default on `PATH`)
 against a local server with `--base-url`, `--model` and a fresh `--output`.
