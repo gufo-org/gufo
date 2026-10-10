@@ -392,8 +392,9 @@ Qwen3.8-27B **(measured)**. Automatic disk staging therefore has no fixed cap:
 it follows available RAM and the disk budget, so `--cache-disk` keeps 27B
 checkpoints at moderate depth without an explicit limit. See #259.
 
-RAM eviction follows the checkpoint priorities above. Disk eviction remains
-global least-recently-used, without conversation or rebuild-cost awareness.
+RAM eviction follows the checkpoint priorities above. Disk retention prefers
+removing covered intermediate checkpoints before falling back to global LRU,
+as described below.
 
 ## The disk tier
 
@@ -426,9 +427,38 @@ differ from the pre-restart response, because the re-prefilled gap follows
 different chunk shapes, as with any partial hit. Plain continuation from RAM is
 unaffected.
 
-Disk entries are evicted by global LRU on last access, so one active run whose
-checkpoints are all recent will displace every other conversation in age order
-**(measured)**. See #275.
+Under byte pressure, disk retention first removes covered intermediate
+checkpoints: an eligible checkpoint has both a shorter retained ancestor and a
+longer compatible extension. Keeping an earlier anchor matters because a retry
+beyond its stable prompt boundary requires an earlier saved prefix too. Exact
+token prefixes and complete persistence identities establish these relationships;
+client conversation IDs and filename hashes do not. A shared branch point is
+not treated as an intermediate, including when the incoming checkpoint creates
+the second branch. Neither is a checkpoint saved at a learned shared-prefix
+boundary, whose second branch may be too short to persist; that protection is
+held in memory and does not survive a restart.
+
+The new checkpoint becomes durable before any existing entry is removed to
+admit it. Eligible intermediates are removed in last-access order and logged as
+`action=removed reason=superseded`. Retention rechecks the relationships after
+each removal. Startup capacity enforcement uses the same preference among
+verified entries; files too large for current staging still count toward the
+budget but cannot establish ancestry from unverified metadata.
+
+When no eligible intermediate remains, eviction falls back to global LRU with
+`reason=lru`. This can still remove an earlier anchor, a shared prefix, or another
+conversation's last checkpoint when the budget is insufficient. Intermediate
+checkpoints remain available while there is space; losing one under pressure
+may require more prefill after edits or rewinds. This is a preference within one
+store's index, not a per-conversation quota or a guarantee of retention across
+independent store instances. Further lineage retention work is tracked in #275.
+
+Restoring from disk can avoid creating intermediate RAM checkpoints below the
+restored position. A later request with `cache_prompt=false` may then need to
+create those checkpoints if they are still absent, whereas an earlier full
+prefill may already have left them in RAM. Cache bypass disables reuse of the
+prompt state, but existing intermediate snapshots still prevent redundant
+captures.
 
 ## What invalidates reuse
 
@@ -464,7 +494,8 @@ still populate the cache.
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |
 | `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |
-| `event=disk_cache action=removed reason=lru` | a disk entry was evicted to stay inside `--cache-disk-bytes` |
+| `event=disk_cache action=removed reason=superseded` | a covered intermediate disk entry was evicted to stay inside `--cache-disk-bytes`; a shorter ancestor and a longer extension remain |
+| `event=disk_cache action=removed reason=lru` | a disk entry was evicted to stay inside `--cache-disk-bytes` after no covered intermediate remained |
 | `event=disk_cache action=skipped reason=staging_capacity` | a checkpoint exceeded `--cache-disk-staging-bytes` and was never written |
 | `event=disk_cache action=skipped reason=min_step` | a checkpoint was less than 2048 tokens past a stored prefix; RAM still retains it |
 

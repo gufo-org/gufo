@@ -41,6 +41,8 @@ enum class ContinuationDiskEventReason : std::uint8_t {
   kSerializationFailure,
   kRestoreFailure,
   kBusy,
+  /// A covered intermediate yields while its earlier anchor remains retained.
+  kSuperseded,
 };
 
 /// Sanitized disk-cache event. Prompt contents, token values, paths, model
