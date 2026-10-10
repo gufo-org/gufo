@@ -2,13 +2,20 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
+#include "src/core/json_constraint.hpp"
+
 namespace {
 
+using gufo::sampling::ConstraintVocabulary;
+using gufo::sampling::JsonConstraint;
 using gufo::sampling::SamplerState;
 using gufo::sampling::SamplingConfig;
+using gufo::sampling::TokenConstraint;
 using gufo::sampling::TokenId;
 
 void Expect(bool condition, std::string_view message) {
@@ -72,11 +79,37 @@ void TestEarlyEndAndNoBudget() {
          "a zero budget closes reasoning immediately");
 }
 
+// With a tool or format grammar, the forced end must be a legal grammar step
+// and the answer after it stays constrained.
+void TestReasoningBudgetWithGrammar() {
+  const std::vector<std::string> pieces{
+      "thinking", "</think>", "{\"x\":", "true}", "prose", ""};
+  auto binding = std::make_shared<TokenConstraint>();
+  binding->grammar = JsonConstraint::WithReasoning(JsonConstraint::Object());
+  binding->vocabulary = std::make_shared<ConstraintVocabulary>(
+      pieces.size(), [&](std::uint32_t i) {
+        return ConstraintVocabulary::Piece{pieces[i], i == 5};
+      });
+  SamplingConfig config;
+  config.constraint = binding;
+  config.reasoning_budget = 1;
+  config.reasoning_end = 1;
+  SamplerState sampler(config);
+  sampler.Accept(sampler.Sample(std::vector<float>{5, 0, 0, 0, 0, 0}));
+  const auto forced = sampler.Sample(std::vector<float>{5, 0, 0, 0, 4, 0});
+  Expect(forced == 1, "the grammar request also closes at its budget");
+  sampler.Accept(forced);
+  Expect(!sampler.ForcedToken() &&
+             sampler.Sample(std::vector<float>{5, 0, 1, 0, 4, 0}) == 2,
+         "after the forced end the answer still follows the grammar");
+}
+
 }  // namespace
 
 int main() {
   TestReasoningBudgetForcesTheEnd();
   TestEarlyEndAndNoBudget();
+  TestReasoningBudgetWithGrammar();
   std::cout << "sampling_test passed\n";
   return 0;
 }
