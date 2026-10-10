@@ -1,7 +1,7 @@
 # 13 · RAM + disk lookup and reference eviction
 
 **Milestone:** Disk store · **Depends on:** 05, 11 · **Size:** M ·
-**Affects:** nothing at runtime until card 19 · **Status:** in review
+**Affects:** nothing at runtime until card 19 · **Status:** done
 
 ## Goal
 
@@ -68,6 +68,12 @@ required (see the README).
 [Checkpoint selection and eviction](../RFC.md#checkpoint-selection-and-eviction)
 
 ## Review notes
+
+Four independent fresh-context reviews completed. The final review of
+`a592c0c3` against main `081e8a04` found no actionable issues and passed seven
+focused normal checks plus three ASan/UBSan checks. After the final fix, six
+affected checks also passed in both normal and sanitizer builds. PR:
+[#517](https://github.com/gufo-org/gufo/pull/517).
 
 The compressed per-compatibility token tree now admits resident, durable and
 mixed component candidates. Persistent descriptions bind the caller's canonical
