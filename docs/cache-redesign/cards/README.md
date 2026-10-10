@@ -1,9 +1,10 @@
 # Cache redesign implementation cards
 
 Status: draft for review. Revised 2026-10-09 after the first review. Card 01's
-functional coverage is combined into one PR. Cards 02–06's common contracts,
-fake adapter, ledger, checkpoints, prefix lookup and slot protection are implemented; the
-cache redesign is not wired in.
+functional coverage is combined into one PR. Cards 02–13's common contracts,
+fake adapter, ledger, checkpoints, prefix lookup, slot protection, retention,
+backing, idle spill, disk store and tiered lookup are implemented; the cache
+redesign is not wired in.
 
 These cards split the [RFC implementation plan](../RFC.md#implementation-plan)
 into isolated steps. Each PR card is meant to become one pull request, or a
@@ -51,13 +52,13 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [04](04-chunks-and-checkpoints.md) | Chunks, checkpoints and provenance | Common package | 03 | M–L | done |
 | [05](05-prefix-index-and-lookup.md) | Prefix index and lookup | Common package | 04 | M | done |
 | [06](06-slot-leases-and-mutation.md) | Slot leases and the mutation guard | Common package | 03, 04 | L | done |
-| [07](07-retention-policy.md) | Retention policy port | Common package | 05, 06 | M | agreed |
+| [07](07-retention-policy.md) | Retention policy port | Common package | 05, 06 | M | done |
 | [08](08-committed-backing-and-streams.md) | Committed backing pool and transfer streams | Common package | 03, D4 | M | done |
 | [09](09-idle-spill.md) | Idle spill and reassignment | Common package | 06, 08 | L | done |
-| [10](10-disk-format-and-index.md) | Disk format, directory lock and startup index | Disk store | 04, D4 | M | agreed |
-| [11](11-publication-and-crash-safety.md) | Crash-safe publication and orphan recovery | Disk store | 10 | M | agreed |
-| [12](12-streamed-transfers.md) | Bounded streaming writes and restores | Disk store | 08, 11 | L | agreed |
-| [13](13-tiered-lookup-and-eviction.md) | RAM + disk lookup and reference eviction | Disk store | 05, 11 | M | agreed |
+| [10](10-disk-format-and-index.md) | Disk format, directory lock and startup index | Disk store | 04, D4 | M | done |
+| [11](11-publication-and-crash-safety.md) | Crash-safe publication and orphan recovery | Disk store | 10 | M | done |
+| [12](12-streamed-transfers.md) | Bounded streaming writes and restores | Disk store | 08, 11 | L | done |
+| [13](13-tiered-lookup-and-eviction.md) | RAM + disk lookup and reference eviction | Disk store | 05, 11 | M | done |
 | [14](14-flash-next-adapter.md) | Flash-Next MTP and AR adapter | Adapters | 02, 06, 08 | L | proposed |
 | [15](15-qwen27b-ar-adapter.md) | Qwen 27B AR adapter | Adapters | 02, 06, 08 | L | proposed |
 | [16](16-qwen27b-dflash2.md) | Qwen 27B DFlash2 draft state | Adapters | 15 | M | proposed |
