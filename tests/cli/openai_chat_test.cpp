@@ -2263,6 +2263,19 @@ void TestStopSequencesAndDefaultFields() {
   using gufo::json::Value;
   const auto base = gufo::json::parse(
       R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
+  for (const auto& [field, value, message] :
+       {std::tuple{"model", "5", "'model' must be a string"},
+        std::tuple{"reasoning_effort", "\"bogus\"",
+                   "reasoning_effort must be none, minimal"}}) {
+    auto invalid = base;
+    invalid[field] = gufo::json::parse(value);
+    FakeBackend backend;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(invalid.dump()), backend);
+    Expect(response.status == 400 &&
+               response.body.find(message) != std::string::npos,
+           "validation errors describe the accepted values");
+  }
   for (const auto* stop : {"null", "[]", "\"END\"", "[\"END\",\"終\"]"}) {
     auto body = base;
     body["stop"] = gufo::json::parse(stop);

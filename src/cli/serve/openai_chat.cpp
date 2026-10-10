@@ -623,7 +623,7 @@ bool AssignReasoningEffort(ReasoningOptions* options, std::string_view value,
   const auto effort = ParseReasoningEffortName(value);
   if (!effort.has_value()) {
     *error =
-        "reasoning_effort must be off, minimal, low, medium, high, xhigh, or "
+        "reasoning_effort must be none, minimal, low, medium, high, xhigh, or "
         "max";
     return false;
   }
@@ -813,6 +813,11 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                  "invalid_body");
   }
 
+  if (const auto* model = body.find("model");
+      model != nullptr && !model->is_null() && !model->is_string()) {
+    return Error(400, "Bad Request", "'model' must be a string",
+                 "invalid_model");
+  }
   output->model = body.member_str("model");
   if (output->model.empty()) {
     return Error(400, "Bad Request", "'model' is required", "missing_model");
