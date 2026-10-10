@@ -1094,6 +1094,14 @@ void TestCompatibilityRequests() {
       invalid[field] = true;
       ExpectStatus(server.Post(endpoint.path, invalid.dump()), 400);
     }
+    const bool streams = std::string_view(endpoint.path) != "/completion";
+    if (streams) {
+      auto invalid = body;
+      invalid["stream"] = "true";
+      const auto rejected = server.Post(endpoint.path, invalid.dump());
+      ExpectStatus(rejected, 400);
+      assert(rejected.find("'stream' must be a boolean") != std::string::npos);
+    }
     auto invalid = body;
     invalid["n"] = 1.4;
     ExpectStatus(server.Post(endpoint.path, invalid.dump()), 400);
@@ -1103,6 +1111,14 @@ void TestCompatibilityRequests() {
     ExpectStatus(server.Post(endpoint.path, "[]"), 400);
     ExpectStatus(server.Post(endpoint.path, "{"), 400);
     assert(server.backend->calls == calls);
+    if (streams) {
+      // A null stream is unset, as on Chat Completions.
+      auto unset = body;
+      unset["stream"] = gufo::json::Value();
+      const auto buffered = server.Post(endpoint.path, unset.dump());
+      assert(buffered.find("text/event-stream") == std::string::npos);
+      response_body(buffered);
+    }
   }
   const int calls = server.backend->calls;
   ExpectStatus(server.Post("/v1/completions", R"({"prompt":["one","two"]})"),
