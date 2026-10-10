@@ -619,9 +619,10 @@ complete usage, and `message_stop`. `message_start` reports zero usage because
 prompt accounting is final only at the end. A failure after the headers sends
 an `error` event. Responses and Messages honor the server's thinking defaults.
 Messages accepts `thinking.type` (`enabled`, `adaptive` or `disabled`);
-`adaptive` keeps the server's thinking default, and `budget_tokens` has no
-native equivalent, so the effort stays the server's unless
-`output_config.effort` sets it. Reasoning is returned as a `thinking` block
+`adaptive` keeps the server's thinking default. `budget_tokens` caps the
+reasoning: after that many reasoning tokens the next token is `</think>`, and
+the answer follows. The effort stays the server's unless `output_config.effort`
+sets it. Reasoning is returned as a `thinking` block
 before the `text` block, with an empty `signature`, for every accepted
 `thinking.display` (`summarized`, `omitted` or `updates`). Replay assistant
 `thinking` blocks unchanged so later turns reuse the cached prompt.
