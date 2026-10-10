@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cache_compaction import ARCHIVE_LINE
-from cache_growth import check_unchanged_retry
+from cache_growth import check_messages_growth, check_unchanged_retry
 from cache_workloads import Workload, check_cache_transforms, check_cache_pressure
 from cache_messages_loop import check_cache_messages_loop, chat_messages
 from cache_lifecycle import Lifecycle, published_tokens
@@ -28,6 +28,43 @@ def reply(total, cached, code="ALPHA", tools=None):
 
 
 class CacheWorkloadsTest(unittest.TestCase):
+    def test_messages_growth_controls_override_a_thinking_off_server_default(self):
+        controls, checks = [], {}
+
+        def response(thinking, turn, cached):
+            result = reply((3000 if thinking else 2964) + turn * 200,
+                           cached, "BETA")
+            result["reasoning"] = "Brief reasoning." if thinking else ""
+            result["usage"]["completion_tokens"] = 30 if thinking else 2
+            result["blocks"] = ([{"type": "thinking", "thinking": result["reasoning"]}]
+                                if thinking else []) + [{"type": "text", "text": "BETA"}]
+            return result
+
+        def messages(client, body):
+            thinking = body["thinking"]["type"] == "enabled"
+            turn = (len(body["messages"]) - 1) // 2
+            total = (3000 if thinking else 2964) + turn * 200
+            key = (thinking, turn)
+            cached = total if key in seen else total - 100 if turn else 0
+            seen.add(key)
+            return response(thinking, turn, cached)
+
+        def chat(client, body):
+            controls.append(deepcopy(body))
+            # The server's default is off. Missing an explicit enable changes
+            # both framing/token count and the presence of reasoning.
+            thinking = body["extra_body"].get("thinking", {}).get("type") == "enabled"
+            return response(thinking, (len(body["messages"]) - 2) // 2, 0)
+
+        seen = set()
+        with patch("cache_growth.messages_result", messages), \
+                contextlib.redirect_stderr(io.StringIO()):
+            failures = []
+            check_messages_growth(None, "fixture", checks, chat, failures, None)
+        self.assertFalse(failures)
+        self.assertEqual(len(controls), 8)
+        self.assertTrue(all(b["extra_body"]["cache_prompt"] is False for b in controls))
+
     def transforms(self, lost=False):
         calls, checks, seen, seeds, large = [], {}, set(), {}, {}
 
@@ -211,6 +248,9 @@ class CacheWorkloadsTest(unittest.TestCase):
                "event=disk_cache action=skipped reason=staging_capacity file_bytes=2 tokens=8000\n"
                "event=disk_cache action=restored reason=hit file_bytes=1 tokens=3000\n")
         self.assertEqual(published_tokens(log), [3000])
+        self.assertEqual(published_tokens(
+            "schema=component-cache-v1 event=published tokens=8000 payload_bytes=4\n"
+            "schema=component-cache-v1 event=persistence_failed\n"), [8000])
 
     def test_unchanged_retry_accepts_a_logged_refusal_in_responses_usage(self):
         retry = {"usage": {"input_tokens": 169, "input_tokens_details": {"cached_tokens": 162}}}

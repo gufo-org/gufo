@@ -72,6 +72,7 @@ public:
 
 private:
   friend class ChunkReference;
+  friend class ExecutionHistory;
   [[nodiscard]] PersistencePin PinPersistence() const;
   Payload() = default;
   ResourceCharge charge_;
@@ -207,8 +208,12 @@ public:
   // no history; partially built owners and references unwind. No callback runs
   // under a lock. Every private state/tail callback must return a fresh copy
   // or a distinct committed assignment; a callback cannot alias private bytes.
+  // Optional prepare sees the exact new payload plan with shared chunks pinned.
+  // It can reserve every backing assignment before the first capture callback.
+  // A refused preparation performs no payload copies and changes no history.
   [[nodiscard]] std::shared_ptr<const Checkpoint> Capture(
-      const CheckpointRequest&, const CapturePayload&);
+      const CheckpointRequest&, const CapturePayload&,
+      const std::function<void(std::span<const PayloadRequest>)>& prepare = {});
   [[nodiscard]] LineageId Lineage() const;
   // Remove expired chunk bookkeeping. Does not evict a checkpoint or payload.
   void Prune();

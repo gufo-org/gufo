@@ -40,6 +40,18 @@ cache::Identity At(const cache::InputIdentity& input, std::size_t boundary) {
   const auto bytes = input.At(boundary);
   return {bytes.begin(), bytes.end()};
 }
+std::size_t PayloadBytes(const cache::DiskManifest& manifest) {
+  std::size_t bytes = 0;
+  for (const auto& component : manifest.components) {
+    for (const auto& chunk : component.chunks)
+      bytes += chunk.bytes;
+    if (component.tail)
+      bytes += component.tail->bytes;
+    if (component.private_state)
+      bytes += component.private_state->bytes;
+  }
+  return bytes;
+}
 class ComponentSnapshot final : public TextRunnerSnapshot {
 public:
   std::shared_ptr<const cache::Checkpoint> checkpoint;
@@ -166,7 +178,12 @@ struct ComponentTextCache::Impl {
       disk_step = options->min_checkpoint_step_tokens;
       disk->ReclaimOrphans();
       queue = std::make_unique<cache::PersistenceQueue>(
-          ledger, *streaming, pending.size(), ram, [] { return true; },
+          ledger, *streaming, pending.size(), ram,
+          [this] {
+            const std::lock_guard lock(mutex);
+            return std::ranges::none_of(
+                entries, [](const auto& entry) { return entry->busy; });
+          },
           [this](cache::CheckpointId id, bool success) {
             const std::lock_guard lock(mutex);
             for (auto& checkpoint : pending)
@@ -196,21 +213,15 @@ struct ComponentTextCache::Impl {
               Logger::Info(
                   "cache",
                   "schema=component-cache-v1 event=published tokens=" +
-                      std::to_string(description->Manifest().tokens.size()));
+                      std::to_string(description->Manifest().tokens.size()) +
+                      " payload_bytes=" +
+                      std::to_string(PayloadBytes(description->Manifest())));
             }
           },
           [this](const cache::DiskManifest& manifest) {
             // A checkpoint larger than the entire disk budget cannot be
             // admitted by deleting other conversations.
-            std::size_t bytes = 0;
-            for (const auto& c : manifest.components) {
-              for (const auto& chunk : c.chunks)
-                bytes += chunk.bytes;
-              if (c.tail)
-                bytes += c.tail->bytes;
-              if (c.private_state)
-                bytes += c.private_state->bytes;
-            }
+            const auto bytes = PayloadBytes(manifest);
             if (bytes > disk_capacity)
               return false;
             const std::lock_guard lock(mutex);
@@ -652,8 +663,18 @@ bool ComponentTextCache::Lease::TryReserveSnapshot(
   impl_->purpose = purpose;
   return true;
 }
-void ComponentTextCache::Lease::SkipSnapshot(SnapshotEventReason, std::size_t,
-                                             std::size_t) noexcept {}
+void ComponentTextCache::Lease::SkipSnapshot(SnapshotEventReason reason,
+                                             std::size_t bytes,
+                                             std::size_t boundary) noexcept {
+  try {
+    Logger::Info("cache",
+                 "schema=component-cache-v1 event=snapshot_skipped reason=" +
+                     std::to_string(static_cast<unsigned>(reason)) +
+                     " tokens=" + std::to_string(boundary) +
+                     " bytes=" + std::to_string(bytes));
+  } catch (...) {
+  }
+}
 std::size_t ComponentTextCache::Lease::CaptureBytes() const {
   return impl_->entry->history->NewPayloadBytes(
       impl_->cache->resources->adapter->Positions(impl_->slot.Execution()));
@@ -670,6 +691,9 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   while (true) {
     try {
       captured_capacity = 0;
+      cache::ResourceReservation buffer_metadata;
+      std::vector<ComponentCaptureBuffer> buffers;
+      std::size_t next_buffer = 0;
       checkpoint = request.entry->history->Capture(
           {request.capture_tokens,
            cache::InputIdentity(request.capture_tokens.size(), retain.input),
@@ -681,7 +705,7 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
                : cache::CheckpointPurpose::kPrompt,
            0},
           [&](const cache::PayloadRequest& payload) {
-            auto buffer = cache.resources->allocate(payload);
+            auto& buffer = buffers.at(next_buffer++);
             auto stream = cache.Stream();
             if (payload.category == cache::ResourceCategory::kPrivateState)
               Check(cache.resources->adapter->CapturePrivate(
@@ -694,6 +718,14 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
             auto storage = buffer.finish();
             captured_capacity += storage.Bytes();
             return storage;
+          },
+          [&](std::span<const cache::PayloadRequest> payloads) {
+            buffer_metadata = cache.ledger.Reserve(
+                cache::ResourceCategory::kMetadata,
+                payloads.size() * sizeof(ComponentCaptureBuffer));
+            buffers.reserve(payloads.size());
+            for (const auto& payload : payloads)
+              buffers.push_back(cache.resources->allocate(payload));
           });
       break;
     } catch (const cache::ResourceExhausted&) {

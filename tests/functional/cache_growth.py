@@ -238,8 +238,8 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
             cold = chat_result(client, dict(
                 model=model, messages=chat, temperature=0, seed=31,
                 max_completion_tokens=request["max_tokens"],
-                **({} if thinking else {"reasoning_effort": "none"}),
-                extra_body={"cache_prompt": False}))
+                extra_body={"cache_prompt": False,
+                            "thinking": {"type": "enabled" if thinking else "disabled"}}))
             record(f"cold_control_{turn}", cold)
             total = warm["usage"]["prompt_tokens"]
             assert work(cold) == (total, 0, total), (warm, cold)

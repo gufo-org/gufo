@@ -34,8 +34,12 @@ inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
   // These are contemporaneous global gauges, not request-local attribution.
   result["global_ledger_bytes"] = value.ledger.total_bytes;
   result["global_ram_bytes"] = value.ledger.ram_bytes;
+  result["global_peak_ledger_bytes"] = value.ledger.peak_total_bytes;
+  result["global_peak_ram_bytes"] = value.ledger.peak_ram_bytes;
   result["global_persistence_pinned_bytes"] =
       value.ledger.persistence_pinned_bytes;
+  result["global_peak_persistence_pinned_bytes"] =
+      value.ledger.peak_persistence_pinned_bytes;
   auto categories = json::Value::object();
   constexpr const char* names[]{"backing_free",         "backing_assigned",
                                 "backing_materialized", "private_state",
@@ -45,6 +49,7 @@ inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
     auto gauge = json::Value::object();
     gauge["bytes"] = value.ledger.bytes[i];
     gauge["reserved_bytes"] = value.ledger.reserved_bytes[i];
+    gauge["peak_bytes"] = value.ledger.peak_bytes[i];
     categories[names[i]] = std::move(gauge);
   }
   result["global_categories"] = std::move(categories);

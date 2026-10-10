@@ -2423,6 +2423,10 @@ public:
         max_context_(max_context),
         use_mtp_(use_mtp),
         max_draft_tokens_(max_draft_tokens) {
+    // The typed in-process API owns an immutable loaded model but need not
+    // supply file fingerprints when disk caching is disabled. Its model
+    // lifetime is an exact process-local identity; durable caches still
+    // require the validated full artifact fingerprints below.
     if (!artifact_fingerprint.empty()) {
       persistence_ = TextRunnerPersistenceDescriptor{
           .compatibility_identity = QwenFlashNextCompatibilityIdentity(
@@ -2432,6 +2436,18 @@ public:
           .payload_version =
               models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
       };
+      component_identity_ = persistence_->compatibility_identity;
+    } else {
+      std::ostringstream identity;
+      identity << "schema=gufo-process-text-continuation-v1\n"
+               << "model_instance=" << model_.get() << '\n'
+               << "context_tokens=" << max_context_ << '\n'
+               << "mtp=" << use_mtp_ << '\n'
+               << "draft_max_tokens=" << max_draft_tokens_ << '\n'
+               << "draft_cost_concurrency=" << model_->DecodeConcurrency()
+               << '\n';
+      const auto canonical = identity.str();
+      component_identity_.assign(canonical.begin(), canonical.end());
     }
   }
 
@@ -2439,9 +2455,6 @@ public:
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
-    if (!persistence_)
-      throw std::logic_error(
-          "Flash-Next cache requires full artifact identity");
     struct Backing {
       hip::TransferPool streams{64};
       std::map<std::size_t, std::unique_ptr<hip::CommittedBackingPool>> pools;
@@ -2452,7 +2465,7 @@ public:
             model_,
             use_mtp_ ? core::SessionMode::kSpeculative
                      : core::SessionMode::kAutoregressive,
-            max_context_, persistence_->compatibility_identity);
+            max_context_, component_identity_);
     auto backing = std::make_shared<Backing>();
     std::map<std::size_t, long double> weights;
     const auto rounded = [](std::size_t bytes) {
@@ -2902,6 +2915,7 @@ private:
   bool use_mtp_;
   std::uint32_t max_draft_tokens_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
+  cache::Identity component_identity_;
 };
 #endif
 

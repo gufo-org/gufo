@@ -149,7 +149,7 @@ class Lifecycle:
                 if name == "oversized":
                     log = (root / "initial/server.log").read_text()
                     sizes = [int(n) for n in re.findall(
-                        r"event=disk_cache .*?\b(?:file|payload)_bytes=(\d+)", log)]
+                        r"event=(?:disk_cache|published) .*?\b(?:file|payload)_bytes=(\d+)", log)]
                     assert sizes and max(sizes) > staging, (
                         "unqualified: checkpoint did not exceed staging", sizes, staging)
                     self.row["oversized_bytes"] = max(sizes)

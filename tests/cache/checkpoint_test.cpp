@@ -279,6 +279,28 @@ void FailedCapturesAreInvisible() {
     auto parent = f.Capture(history);
     f.Append(3);
     const auto before = f.ledger.Snapshot();
+    unsigned prepared_copies = 0;
+    Throws<ResourceExhausted>([&] {
+      (void)history.Capture(
+          {f.tokens, InputIdentity(f.tokens.size()),
+           f.adapter.Positions(*f.slot), CheckpointPurpose::kPrompt, 1},
+          [&](const auto& request) {
+            ++prepared_copies;
+            return f.Save(request);
+          },
+          [&](std::span<const PayloadRequest> payloads) {
+            assert(!payloads.empty());
+            assert(payloads.front().first == 4 && payloads.front().end == 8);
+            // Planning must pin inherited chunks until admission and all
+            // copies complete, even if retention drops its parent handle.
+            assert(parent->Components()[0].chunks[0].References().checkpoints ==
+                   2);
+            throw ResourceExhausted();
+          });
+    });
+    assert(prepared_copies == 0);
+    assert(f.ledger.Snapshot().bytes == before.bytes);
+    assert(f.ledger.Snapshot().reserved_bytes == before.reserved_bytes);
     f.adapter.FailNextTransfer();
     Throws<std::runtime_error>([&] { (void)f.Capture(history); });
     const auto failed = f.ledger.Snapshot();
