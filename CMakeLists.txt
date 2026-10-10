@@ -433,6 +433,12 @@ if (BUILD_TESTING)
       $<TARGET_FILE:gufo>)
   set_tests_properties(serve_cli_test PROPERTIES LABELS "cpu;server;cli" TIMEOUT 30)
 
+  add_test(NAME check_dependencies_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_dependencies_test.py)
+  set_tests_properties(check_dependencies_test PROPERTIES
+    LABELS "cpu;dependencies" TIMEOUT 30)
+
   add_test(NAME kernel_resources_parser_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/kernel_resources_test.py)
