@@ -453,8 +453,8 @@ These do **not** invalidate reuse **(measured)**: changing `temperature`,
 `top_p`, `seed`, `max_tokens`, penalties or `stop` between turns; streaming
 versus not, which reuse identically and interoperate within one conversation.
 
-`cache_prompt: false` bypasses lookup for a single request. The result can
-still populate the cache.
+`cache_prompt: false` on `/v1/chat/completions` or `/v1/responses` bypasses
+lookup for a single request. The result can still populate the cache.
 
 ## Observing it
 
