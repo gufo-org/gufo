@@ -497,6 +497,10 @@ SamplerState SamplerState::WithoutConstraint() const {
 }
 
 bool SamplerState::NeedsConstraintMask() const {
+  // Executors that sample on the GPU fall back to Sample/Distribution here,
+  // which return the forced reasoning end.
+  if (ForcedToken())
+    return true;
   if (!config_.constraint)
     return false;
   if (!constraint_mask_) {
