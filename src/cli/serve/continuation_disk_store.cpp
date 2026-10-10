@@ -347,11 +347,17 @@ struct ParsedImage {
   std::size_t payload_bytes{0};
 };
 
-ParseFailure ParseAndVerifyImage(std::vector<std::uint8_t>* image,
-                                 ParsedImage* parsed) {
-  if (image == nullptr || parsed == nullptr || image->size() < kHeaderBytes ||
+/// Structural header validation: magic, versions, size fields, the checksum
+/// field's format, and the compatibility identity and token vector it
+/// carries. expected_file_bytes decouples this from having read the payload:
+/// startup indexing passes the stat size, full-image reads pass image.size().
+/// No checksum of the image is computed here.
+ParseFailure ParseImageHeader(std::span<const std::uint8_t> image,
+                               std::size_t expected_file_bytes,
+                               ParsedImage* parsed) {
+  if (parsed == nullptr || image.size() < kHeaderBytes ||
       !std::equal(kMagic.begin(), kMagic.end(),
-                  image->begin() + kMagicOffset)) {
+                  image.begin() + kMagicOffset)) {
     return ParseFailure::kCorrupt;
   }
 
@@ -360,12 +366,11 @@ ParseFailure ParseAndVerifyImage(std::vector<std::uint8_t>* image,
   std::uint32_t identity_bytes_u32 = 0;
   std::uint32_t token_count_u32 = 0;
   std::uint64_t payload_bytes_u64 = 0;
-  const std::span<const std::uint8_t> readonly(*image);
-  if (!GetLittleEndian(readonly, kFileVersionOffset, &file_version) ||
-      !GetLittleEndian(readonly, kPayloadVersionOffset, &payload_version) ||
-      !GetLittleEndian(readonly, kIdentityBytesOffset, &identity_bytes_u32) ||
-      !GetLittleEndian(readonly, kTokenCountOffset, &token_count_u32) ||
-      !GetLittleEndian(readonly, kPayloadBytesOffset, &payload_bytes_u64) ||
+  if (!GetLittleEndian(image, kFileVersionOffset, &file_version) ||
+      !GetLittleEndian(image, kPayloadVersionOffset, &payload_version) ||
+      !GetLittleEndian(image, kIdentityBytesOffset, &identity_bytes_u32) ||
+      !GetLittleEndian(image, kTokenCountOffset, &token_count_u32) ||
+      !GetLittleEndian(image, kPayloadBytesOffset, &payload_bytes_u64) ||
       file_version != kFileVersion || payload_version == 0 ||
       identity_bytes_u32 == 0 || identity_bytes_u32 > kMaxIdentityBytes ||
       token_count_u32 == 0 || token_count_u32 > kMaxTokenCount ||
@@ -385,32 +390,25 @@ ParseFailure ParseAndVerifyImage(std::vector<std::uint8_t>* image,
   } catch (...) {
     return ParseFailure::kCorrupt;
   }
-  if (expected_bytes != image->size()) {
+  if (expected_bytes != expected_file_bytes) {
     return ParseFailure::kCorrupt;
   }
 
   const std::string stored_checksum(
-      reinterpret_cast<const char*>(image->data() + kChecksumOffset),
+      reinterpret_cast<const char*>(image.data() + kChecksumOffset),
       kChecksumBytes);
   if (!IsLowerHexDigest(stored_checksum)) {
     return ParseFailure::kCorrupt;
-  }
-  std::fill_n(image->begin() + kChecksumOffset, kChecksumBytes, 0);
-  const std::string computed_checksum = crypto::Sha256Hex(*image);
-  std::copy(stored_checksum.begin(), stored_checksum.end(),
-            image->begin() + kChecksumOffset);
-  if (computed_checksum != stored_checksum) {
-    return ParseFailure::kChecksum;
   }
 
   parsed->persistence.payload_version = payload_version;
   parsed->persistence.compatibility_identity.resize(identity_bytes);
   std::memcpy(parsed->persistence.compatibility_identity.data(),
-              image->data() + kHeaderBytes, identity_bytes);
+              image.data() + kHeaderBytes, identity_bytes);
   parsed->tokens.resize(token_count);
   std::size_t token_offset = kHeaderBytes + identity_bytes;
   for (TextRunnerToken& token : parsed->tokens) {
-    if (!GetLittleEndian(readonly, token_offset, &token)) {
+    if (!GetLittleEndian(image, token_offset, &token)) {
       return ParseFailure::kCorrupt;
     }
     token_offset += sizeof(std::uint32_t);
@@ -418,6 +416,41 @@ ParseFailure ParseAndVerifyImage(std::vector<std::uint8_t>* image,
   parsed->payload_offset = token_offset;
   parsed->payload_bytes = payload_bytes;
   return ParseFailure::kNone;
+}
+
+/// Whole-image SHA-256 verification against the stored digest. Leaves the
+/// image intact whether or not it matches.
+ParseFailure VerifyImageChecksum(std::span<std::uint8_t> image) {
+  if (image.size() < kHeaderBytes) {
+    return ParseFailure::kCorrupt;
+  }
+  const std::string stored_checksum(
+      reinterpret_cast<const char*>(image.data() + kChecksumOffset),
+      kChecksumBytes);
+  if (!IsLowerHexDigest(stored_checksum)) {
+    return ParseFailure::kCorrupt;
+  }
+  std::fill_n(image.begin() + kChecksumOffset, kChecksumBytes, 0);
+  const std::string computed_checksum = crypto::Sha256Hex(image);
+  std::copy(stored_checksum.begin(), stored_checksum.end(),
+            image.begin() + kChecksumOffset);
+  if (computed_checksum != stored_checksum) {
+    return ParseFailure::kChecksum;
+  }
+  return ParseFailure::kNone;
+}
+
+ParseFailure ParseAndVerifyImage(std::vector<std::uint8_t>* image,
+                                 ParsedImage* parsed) {
+  if (image == nullptr) {
+    return ParseFailure::kCorrupt;
+  }
+  const ParseFailure header =
+      ParseImageHeader(*image, image->size(), parsed);
+  if (header != ParseFailure::kNone) {
+    return header;
+  }
+  return VerifyImageChecksum(*image);
 }
 
 std::vector<std::uint8_t> BuildHeader(
@@ -839,6 +872,11 @@ struct ContinuationDiskStore::Impl {
       throw std::runtime_error(
           "failed to enumerate continuation disk directory");
     }
+    struct StartupFile {
+      std::string filename;
+      std::size_t file_bytes{0};
+    };
+    std::vector<StartupFile> startup_files;
     for (const auto& directory_entry : iterator) {
       const std::string filename = directory_entry.path().filename().string();
       if (filename.starts_with(kTemporaryPrefix)) {
@@ -853,75 +891,157 @@ struct ContinuationDiskStore::Impl {
       if (!HasSuffix(filename, kFileSuffix)) {
         continue;
       }
-
-      std::vector<std::uint8_t> image;
-      ContinuationDiskEventReason failure_reason =
-          ContinuationDiskEventReason::kCorrupt;
-      ParsedImage parsed;
-      std::size_t file_bytes = 0;
-      if (!ReadImage(filename, &image, &failure_reason, &file_bytes)) {
-        if (failure_reason == ContinuationDiskEventReason::kStagingCapacity) {
-          // A smaller RAM budget must not destroy a previously valid cache.
-          // Account the file for LRU/retention, but never index unverified
-          // tokens. A restart with enough staging can validate and reuse it.
-          auto access = directory_entry.last_write_time(error);
-          if (error) {
-            error.clear();
-            access = std::filesystem::file_time_type::min();
-          }
-          entries.push_back({.filename = filename,
-                             .key_hash = {},
-                             .persistence = {},
-                             .tokens = {},
-                             .file_bytes = file_bytes,
-                             .last_access = access});
-          retained += file_bytes;
-          retained_entries.fetch_add(1, std::memory_order_relaxed);
-          Emit(ContinuationDiskEventAction::kSkipped, failure_reason,
-               file_bytes, 0, 0);
-          continue;
-        }
-        RemoveFileOnly(filename);
-        Emit(ContinuationDiskEventAction::kRemoved, failure_reason, 0, 0, 0);
-        continue;
-      }
-      const ParseFailure parse_failure = ParseAndVerifyImage(&image, &parsed);
-      if (parse_failure != ParseFailure::kNone) {
+      struct stat status{};
+      if (!SafeRegularFile(filename, &status)) {
+        // Unsafe entries are removed, not followed.
         RemoveFileOnly(filename);
         Emit(ContinuationDiskEventAction::kRemoved,
-             parse_failure == ParseFailure::kChecksum
-                 ? ContinuationDiskEventReason::kChecksumMismatch
-                 : ContinuationDiskEventReason::kCorrupt,
-             image.size(), 0, 0);
+             ContinuationDiskEventReason::kUnsafeFile, 0, 0, 0);
         continue;
       }
+      startup_files.push_back(
+          {std::move(filename), static_cast<std::size_t>(status.st_size)});
+    }
 
-      std::filesystem::file_time_type last_access =
-          directory_entry.last_write_time(error);
-      if (error) {
-        error.clear();
-        last_access = std::filesystem::file_time_type::min();
+    // Startup verification is whole-image: the checksum covers header,
+    // tokens and payload, so each file is read in full and hashed. Hashing
+    // dominates the restart, so files are read and verified in parallel
+    // (like the fault workers in the constructor) and merged into the
+    // lookup structures serially below. Unreadable or checksum-invalid
+    // files are removed exactly as a serial startup would, and files
+    // beyond the staging budget are accounted without index so a restart
+    // with enough staging can validate and reuse them later.
+    struct StartupResult {
+      enum class Kind { kVerified, kAccounted };
+      Kind kind{Kind::kVerified};
+      std::string filename;
+      std::size_t file_bytes{0};
+      std::filesystem::file_time_type last_access;
+      ParsedImage parsed;
+      std::string digest;
+    };
+    std::vector<ContinuationDiskEvent> events;
+    std::vector<StartupResult> results;
+    std::mutex merge_mutex;
+    std::vector<std::jthread> workers;
+    std::size_t next = 0;
+    const auto worker_count = std::min<std::size_t>(
+        startup_files.size(),
+        std::max<std::size_t>(1, std::thread::hardware_concurrency()));
+    std::mutex next_mutex;
+    const auto worker = [&] {
+      while (true) {
+        std::size_t position = 0;
+        {
+          const std::lock_guard next_lock(next_mutex);
+          if (next >= startup_files.size()) {
+            return;
+          }
+          position = next++;
+        }
+        const auto& file = startup_files[position];
+        std::vector<std::uint8_t> image;
+        ContinuationDiskEventReason failure_reason =
+            ContinuationDiskEventReason::kCorrupt;
+        ParsedImage parsed;
+        if (!ReadImage(file.filename, &image, &failure_reason)) {
+          const std::lock_guard merge_lock(merge_mutex);
+          if (failure_reason == ContinuationDiskEventReason::kStagingCapacity) {
+            results.push_back({.kind = StartupResult::Kind::kAccounted,
+                               .filename = file.filename,
+                               .file_bytes = file.file_bytes});
+            events.push_back(
+                {.action = ContinuationDiskEventAction::kSkipped,
+                 .reason = failure_reason,
+                 .file_bytes = file.file_bytes});
+          } else {
+            RemoveFileOnly(file.filename);
+            events.push_back(
+                {.action = ContinuationDiskEventAction::kRemoved,
+                 .reason = failure_reason,
+                 .file_bytes = file.file_bytes});
+          }
+          continue;
+        }
+        const ParseFailure parse_failure =
+            ParseAndVerifyImage(&image, &parsed);
+        if (parse_failure != ParseFailure::kNone) {
+          RemoveFileOnly(file.filename);
+          const std::lock_guard merge_lock(merge_mutex);
+          events.push_back(
+              {.action = ContinuationDiskEventAction::kRemoved,
+               .reason = parse_failure == ParseFailure::kChecksum
+                             ? ContinuationDiskEventReason::kChecksumMismatch
+                             : ContinuationDiskEventReason::kCorrupt,
+               .file_bytes = file.file_bytes});
+          continue;
+        }
+        const std::string digest =
+            HashKey(parsed.persistence, parsed.tokens);
+        std::error_code access_error;
+        auto last_access =
+            std::filesystem::last_write_time(options.directory / file.filename,
+                                             access_error);
+        if (access_error) {
+          last_access = std::filesystem::file_time_type::min();
+        }
+        const std::lock_guard merge_lock(merge_mutex);
+        results.push_back({.kind = StartupResult::Kind::kVerified,
+                           .filename = std::move(file.filename),
+                           .file_bytes = file.file_bytes,
+                           .last_access = last_access,
+                           .parsed = std::move(parsed),
+                           .digest = std::move(digest)});
       }
-      const std::string digest = HashKey(parsed.persistence, parsed.tokens);
+    };
+    for (std::size_t worker_id = 0; worker_id < worker_count; ++worker_id) {
+      workers.emplace_back(worker);
+    }
+    workers.clear();
+    // Serial merge: emit the collected events, account the skipped files,
+    // then index the verified survivors oldest-access first so duplicate
+    // resolution keeps the newer copy, exactly as a serial startup would.
+    for (const auto& event : events) {
+      Emit(event.action, event.reason, event.file_bytes, event.payload_bytes,
+           event.token_count);
+    }
+    std::ranges::sort(results, {}, [](const StartupResult& result) {
+      return std::pair{result.kind, result.last_access};
+    });
+    for (auto& result : results) {
+      if (result.kind == StartupResult::Kind::kAccounted) {
+        entries.push_back({.filename = std::move(result.filename),
+                           .key_hash = {},
+                           .persistence = {},
+                           .tokens = {},
+                           .file_bytes = result.file_bytes,
+                           .last_access = result.last_access});
+        retained += result.file_bytes;
+        retained_entries.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      const auto last_access = result.last_access;
+      const std::string digest = result.digest;
       const EntryIterator duplicate =
-          FindExact(digest, parsed.persistence, parsed.tokens);
+          FindExact(digest, result.parsed.persistence, result.parsed.tokens);
       if (duplicate != entries.end()) {
         if (duplicate->last_access >= last_access) {
-          RemoveFileOnly(filename);
+          RemoveFileOnly(result.filename);
           Emit(ContinuationDiskEventAction::kRemoved,
-               ContinuationDiskEventReason::kExactReplacement, image.size(),
-               parsed.payload_bytes, parsed.tokens.size());
+               ContinuationDiskEventReason::kExactReplacement,
+               result.file_bytes, result.parsed.payload_bytes,
+               result.parsed.tokens.size());
           continue;
         }
         RemoveEntry(duplicate, ContinuationDiskEventReason::kExactReplacement);
       }
       entries.push_back({
-          .filename = filename,
+          .filename = std::move(result.filename),
           .key_hash = digest,
-          .persistence = std::move(parsed.persistence),
-          .tokens = std::move(parsed.tokens),
-          .file_bytes = image.size(),
-          .payload_bytes = parsed.payload_bytes,
+          .persistence = std::move(result.parsed.persistence),
+          .tokens = std::move(result.parsed.tokens),
+          .file_bytes = result.file_bytes,
+          .payload_bytes = result.parsed.payload_bytes,
           .last_access = last_access,
       });
       const EntryIterator added = std::prev(entries.end());
