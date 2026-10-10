@@ -6,12 +6,15 @@
 #include <cstring>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "src/core/sampling.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+
+void LimitReportedDeviceFree(std::size_t bytes);
 
 namespace qfn = gufo::models::qwen38_flash_next;
 namespace sampling = gufo::sampling;
@@ -305,6 +308,47 @@ void CheckCheckpointRetention(const std::shared_ptr<qfn::Model>& model,
             << " short prefix exact\n";
 }
 
+/// Without device headroom for snapshot storage, captures and rewinds keep
+/// checkpoints in their host payloads instead of failing the request.
+void CheckDeviceExhaustion(const std::shared_ptr<qfn::Model>& model,
+                           std::span<const std::int32_t> prompt,
+                           gufo::core::SessionMode mode) {
+  struct Unlimit {
+    ~Unlimit() {
+      LimitReportedDeviceFree(std::numeric_limits<std::size_t>::max());
+    }
+  } unlimit;
+  std::string error;
+  auto source = model->CreateSession(mode, 8192, &error);
+  Require(source && source->Sync(prompt, &error), error);
+  // Read the bytes through another capture: reading this one would move it
+  // to the host before the rewind.
+  const auto expected = Payload(*source);
+  auto borrowed = source->SaveSnapshot(&error);
+  Require(borrowed != nullptr, error);
+  Require(borrowed->DeviceBytes() != 0, "capture did not borrow");
+
+  LimitReportedDeviceFree(0);
+  source->Reset();
+  Require(source->Sync(prompt.subspan(20, 32), &error), error);
+  Require(borrowed->DeviceBytes() == 0,
+          "exhausted rewind kept checkpoint rows on the device");
+  Require(Payload(*borrowed) == expected,
+          "exhausted rewind lost overwritten checkpoint rows");
+  auto owned = source->SaveSnapshot(&error);
+  Require(owned != nullptr, error);
+  Require(owned->DeviceBytes() == 0,
+          "exhausted capture allocated device storage");
+  const auto branch = Payload(*owned);
+  Require(source->RestoreSnapshot(*borrowed, &error), error);
+  Require(Payload(*source) == expected,
+          "exhausted restore differs from its checkpoint");
+  Require(source->RestoreSnapshot(*owned, &error), error);
+  Require(Payload(*source) == branch, "host capture differs after restore");
+  std::cout << "device exhaustion mode=" << static_cast<int>(mode)
+            << " host fallback exact\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -359,6 +403,9 @@ int main(int argc, char** argv) {
                              gufo::core::SessionMode::kAutoregressive);
     CheckCheckpointRetention(model, prompt,
                              gufo::core::SessionMode::kSpeculative);
+    CheckDeviceExhaustion(model, prompt,
+                          gufo::core::SessionMode::kAutoregressive);
+    CheckDeviceExhaustion(model, prompt, gufo::core::SessionMode::kSpeculative);
     const sampling::SamplingConfig config{
         .temperature = 0.8F, .top_k = 40, .top_p = 0.9F, .seed = 7};
     constexpr std::size_t kTokens = 48;
