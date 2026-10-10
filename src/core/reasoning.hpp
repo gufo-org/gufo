@@ -1,6 +1,7 @@
 #ifndef GUFO_CORE_REASONING_HPP_
 #define GUFO_CORE_REASONING_HPP_
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -22,6 +23,8 @@ struct ReasoningOptions {
   std::optional<bool> enabled;
   std::optional<ReasoningEffort> effort;
   std::optional<bool> preserve_thinking;
+  /// Reasoning tokens before the end of thinking is forced (#266).
+  std::optional<std::size_t> budget_tokens;
 };
 
 }  // namespace gufo

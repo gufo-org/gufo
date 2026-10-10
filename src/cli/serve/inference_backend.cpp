@@ -3846,6 +3846,18 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
         request, max_tokens, sampling_config, is_cancelled, stream_output);
   }
 
+  const auto initial =
+      state->scheduler->runner().InitialOutputState(effective_request);
+  if (request.reasoning.budget_tokens &&
+      initial == TextGenerationBackend::InitialOutputState::kReasoning) {
+    // A single-token end of thinking can be forced by the sampler (#266).
+    const auto end = state->scheduler->runner().Tokenize("</think>");
+    if (end.size() == 1) {
+      effective_sampling.reasoning_budget = *request.reasoning.budget_tokens;
+      effective_sampling.reasoning_end =
+          static_cast<sampling::TokenId>(end.front());
+    }
+  }
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   auto scheduled_request = state->scheduler->Submit(
@@ -3862,9 +3874,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .return_progress = request.return_progress,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
-      state, std::move(scheduled_request),
-      state->scheduler->runner().InitialOutputState(effective_request),
-      tool_format);
+      state, std::move(scheduled_request), initial, tool_format);
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);
