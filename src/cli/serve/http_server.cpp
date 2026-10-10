@@ -688,12 +688,17 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
                  "invalid_request_error", "model_not_found");
   }
   for (const std::string field : {"stream", "echo", "store", "background"}) {
-    if (const auto* value = body.find(field);
-        value != nullptr &&
-        (!value->is_bool() ||
-         (value->as_bool() && !(allowances.stream && field == "stream")))) {
-      return InvalidCompatibilityRequest("'" + field + "' must be false");
+    const auto* value = body.find(field);
+    if (value == nullptr)
+      continue;
+    if (field == "stream" && allowances.stream) {
+      // As on Chat Completions, null leaves streaming off.
+      if (!value->is_null() && !value->is_bool())
+        return InvalidCompatibilityRequest("'stream' must be a boolean");
+      continue;
     }
+    if (!value->is_bool() || value->as_bool())
+      return InvalidCompatibilityRequest("'" + field + "' must be false");
   }
   for (const std::string field : {"n", "best_of"}) {
     if (const auto* value = body.find(field);
