@@ -6,6 +6,7 @@
 #include <initializer_list>
 
 #include "src/core/hip/weight_upload.hpp"
+#include "src/models/qwen38_flash_next/expert_stream.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -190,7 +191,40 @@ struct Uploader {
     return {Copy(m.norm), Copy(m.down), Copy(m.up), Copy(m.inject)};
   }
 
-  DeviceLayer Layer(const LayerWeights& l) {
+  /// Reserves a streamed-expert slab set for one layer: `slots` experts in
+  /// each matrix's native encoding plus the tail margin the quantized GEMM
+  /// tier's over-read needs. Returns false when allocation fails.
+  bool Stream(ExpertStreamLayer& s, const TensorRef& gate, const TensorRef& up,
+              const TensorRef& down, std::uint32_t slots) {
+    if (!ok) {
+      return false;
+    }
+    s.slots = slots;
+    s.gate_bytes = gate.ExpertBytes();
+    s.up_bytes = up.ExpertBytes();
+    s.down_bytes = down.ExpertBytes();
+    const auto alloc = [&](void** out, std::size_t size) {
+      if (hipMalloc(out, size * slots + kTailMargin) != hipSuccess) {
+        Fail("expert streaming slab allocation failed");
+        return false;
+      }
+      allocations.push_back(*out);
+      bytes += size * slots + kTailMargin;
+      return true;
+    };
+    if (!alloc(&s.gate, s.gate_bytes) || !alloc(&s.up, s.up_bytes) ||
+        !alloc(&s.down, s.down_bytes)) {
+      return false;
+    }
+    // The payload pointers index the mmap'd GGUF directly: expert e of a
+    // stacked tensor starts at e * expert stride from the tensor base.
+    s.src_gate = static_cast<const std::uint8_t*>(gate.data);
+    s.src_up = static_cast<const std::uint8_t*>(up.data);
+    s.src_down = static_cast<const std::uint8_t*>(down.data);
+    return true;
+  }
+
+  DeviceLayer Layer(const LayerWeights& l, std::uint32_t expert_slots = 0) {
     DeviceLayer d;
     d.linear = l.linear;
     d.hc_attn = Mixer(l.hc_attn);
@@ -241,9 +275,35 @@ struct Uploader {
     d.ple_norm_conv = Copy(l.ple_norm_conv);
     d.ple_conv1d = Copy(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
-    d.ffn_gate_exps = Copy(l.ffn_gate_exps);
-    d.ffn_up_exps = Copy(l.ffn_up_exps);
-    d.ffn_down_exps = Copy(l.ffn_down_exps);
+    if (expert_slots > 0) {
+      // Routed experts stream from the mapped GGUF through resident slabs:
+      // the device tensors describe the slabs (their expert dimension is
+      // the slot count), and the Executor's routing pass keeps the slots
+      // holding the experts the current batch routes to. Every expert
+      // kernel indexes weights through the routing ids, so a remapped id
+      // buffer addresses this shape unchanged.
+      ExpertStreamLayer& s = d.stream;
+      if (!Stream(s, l.ffn_gate_exps, l.ffn_up_exps, l.ffn_down_exps,
+                  expert_slots)) {
+        return d;
+      }
+      const auto slab = [&](void* data, const TensorRef& t) {
+        DeviceTensor d_t;
+        d_t.data = data;
+        d_t.type = t.type;
+        d_t.cols = static_cast<std::uint32_t>(t.cols);
+        d_t.rows = static_cast<std::uint32_t>(t.rows);
+        d_t.experts = expert_slots;
+        return d_t;
+      };
+      d.ffn_gate_exps = slab(s.gate, l.ffn_gate_exps);
+      d.ffn_up_exps = slab(s.up, l.ffn_up_exps);
+      d.ffn_down_exps = slab(s.down, l.ffn_down_exps);
+    } else {
+      d.ffn_gate_exps = Copy(l.ffn_gate_exps);
+      d.ffn_up_exps = Copy(l.ffn_up_exps);
+      d.ffn_down_exps = Copy(l.ffn_down_exps);
+    }
     d.shexp_gate = Copy(l.shexp_gate);
     d.shexp_up = Copy(l.shexp_up);
     d.shexp_down = Copy(l.shexp_down);
@@ -267,7 +327,7 @@ DeviceModel::~DeviceModel() {
 std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
-    std::string* error_msg) {
+    std::string* error_msg, std::size_t expert_cache_bytes) {
   // The CPU reference also reads Q6_K, but the production embedding, dense
   // and routed kernels do not. Reject it before allocating device weights.
   const auto supported = [&](const TensorRef& t) {
@@ -286,8 +346,28 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
       (mtp != nullptr && !layer_supported(mtp->block))) {
     return nullptr;
   }
+  // Streaming plan (issue #427): one size class owns the cache; layers in
+  // other classes (the UD Q5_K/Q8 outliers, an MTP block in another class)
+  // upload in full. See PlanExpertStreaming for the class choice.
+  const auto plan = PlanExpertStreaming(
+      w.layers, mtp != nullptr ? &mtp->block : nullptr, w.config.num_experts,
+      w.config.num_experts_used, expert_cache_bytes, error_msg);
+  if (expert_cache_bytes > 0 && !plan.enabled()) {
+    return nullptr;  // `plan` carried the reason into error_msg
+  }
   std::unique_ptr<DeviceModel> m(new DeviceModel());
   m->config_ = w.config;
+  if (plan.enabled()) {
+    m->stream_layers_ = plan.layers;
+    m->stream_slots_ = plan.slots_per_layer;
+    m->stream_expert_bytes_ = plan.expert_bytes;
+  }
+  const auto streams = [&](const LayerWeights& l) {
+    return plan.enabled() && ExpertStreamSupported(l) &&
+                   ExpertBytes(l) == plan.expert_bytes
+               ? plan.slots_per_layer
+               : 0U;
+  };
   const auto regions = reader.GetMappedRegions();
   std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
   const auto shard_count = static_cast<std::uint32_t>(shards.size());
@@ -313,16 +393,17 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   m->hc_head_ = up.Mixer(w.hc_head);
   m->layers_.reserve(w.layers.size());
   for (const auto& l : w.layers) {
-    m->layers_.push_back(up.Layer(l));
+    m->layers_.push_back(up.Layer(l, streams(l)));
     if (!up.ok) {
       return nullptr;
     }
   }
   if (mtp != nullptr) {
     // The sidecar has its own shard index; reuse the target's readers and
-    // staging pool.
+    // staging pool. Its block streams only when it shares the dominant
+    // size class (the draft is usually small and stays resident).
     up.shard_base = shard_count;
-    m->mtp_ = up.Layer(mtp->block);
+    m->mtp_ = up.Layer(mtp->block, streams(mtp->block));
     m->has_mtp_ = true;
   }
   if (!up.ok || !stager->Finish(error_msg)) {

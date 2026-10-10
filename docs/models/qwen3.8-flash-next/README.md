@@ -35,6 +35,29 @@ for explicit effort/thinking overrides. Native context is 262144; YaRN extension
 is unsupported. Memory grows with used context and selected rollback depth;
 admission reserves the configured capacity before creating sessions.
 
+### Memory-bounded expert cache
+
+`serve llm --expert-cache <BYTES>` (e.g. `4G`, `512M`) caps the device bytes
+held by the routed experts (issue #427). Without it — the default — all 512
+experts per layer stay resident, exactly as before. With it, the layers in
+the artifact's dominant per-expert size class (UD-Q4_K_XL: 43 of 48 trunk
+layers at Q4_K gate/up + Q5_1 down, 2.93 MiB per expert) keep `slots` experts
+in resident slabs sized from the budget, and read the rest through the OS
+page cache from the mapped GGUF, like ds4's SSD expert streaming. A
+per-layer LRU resolves each forward's routed ids on the host into slot
+numbers, and the existing expert kernels run on the slabs with the same
+weight bytes and reduction order: decode is bit-exact against the
+fully-resident build for the same expert selections. Streamed layers run
+the vector expert route at every pass width, so their prefill can round
+differently from the resident build's tiled route (streamed layers'
+prefill only; decode arithmetic is the same route). Size-class outliers (the UD Q8_0-down layers, the Q8_0
+MTP block) stay fully resident. While streaming, decode graph replay is
+off (routing resolves on the host); budgets covering all 512 experts are
+rejected because full residency is then cheaper. Expect lower decode
+throughput than the fully-resident build in exchange for far less resident
+memory; load reports the plan under `--log-level=info`
+(`event=expert_streaming layers=… slots_per_layer=…`).
+
 ## Images
 
 Use this model's `mmproj-BF16.gguf`, discovered beside the target or selected

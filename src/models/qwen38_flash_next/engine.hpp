@@ -46,6 +46,12 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  /// Memory-bounded routed-expert streaming (issue #427): the resident
+  /// expert-cache budget in bytes. 0 keeps every routed expert fully
+  /// resident, exactly the pre-feature behaviour. When non-zero, layers in
+  /// the artifact's dominant routed-expert size class stream from disk
+  /// through resident slabs sized from this budget.
+  std::size_t expert_cache_bytes = 0;
 };
 
 class Session;
@@ -88,6 +94,9 @@ public:
     return *tokenizer_;
   }
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
+  /// Human-readable routed-expert streaming state (issue #427): empty
+  /// when fully resident; otherwise the streamed layer/slot/byte plan.
+  [[nodiscard]] std::string ExpertStreamSummary() const;
   /// Worst-case private device state, including the configured rollback cap.
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
                                          std::uint32_t context) const noexcept;

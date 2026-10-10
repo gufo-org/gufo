@@ -20,6 +20,7 @@
 
 #include "qfn_mmq.h"
 #include "src/core/hip/snapshot_transfer.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/expert_stream_runtime.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
@@ -863,10 +864,13 @@ Executor::~Executor() {
         static_cast<void*>(tokens_host_), static_cast<void*>(logits_host_),
         static_cast<void*>(mtp_token_host_), static_cast<void*>(counts_host_),
         static_cast<void*>(mtp_candidates_host_),
-        static_cast<void*>(tiles_host_)}) {
+        static_cast<void*>(tiles_host_), static_cast<void*>(ids_host_)}) {
     if (p != nullptr) {
       (void)hipHostFree(p);
     }
+  }
+  if (ids_ready_ != nullptr) {
+    (void)hipEventDestroy(ids_ready_);
   }
   if (blas_ != nullptr) {
     (void)hipblasDestroy(blas_);
@@ -912,6 +916,36 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   e->blaslt_ = BlasLt::Create(e->stream_, error_msg);
   if (e->blaslt_ == nullptr) {
     return nullptr;
+  }
+  // Memory-bounded expert streaming (issue #427): when the model reserved
+  // streamed-expert slabs, build the runtime and the pinned host copy of
+  // the routing ids the streaming MoE route round-trips.
+  bool any_stream = false;
+  for (const auto& l : model.layers()) {
+    any_stream = any_stream || l.stream.slots > 0;
+  }
+  if (model.has_mtp()) {
+    any_stream = any_stream || model.mtp().stream.slots > 0;
+  }
+  if (any_stream) {
+    void* ids_pinned = nullptr;
+    if (!Check(hipHostMalloc(&ids_pinned, std::size_t{e->options_.max_batch} *
+                                              c.num_experts_used *
+                                              sizeof(std::int32_t)),
+               "pinned streaming routing ids", error_msg)) {
+      return nullptr;
+    }
+    e->ids_host_ = static_cast<std::int32_t*>(ids_pinned);
+    e->stream_group_seen_.assign(c.num_experts, 0);
+    if (!Check(hipEventCreateWithFlags(&e->ids_ready_, hipEventDisableTiming),
+               "streaming routing ids event", error_msg)) {
+      return nullptr;
+    }
+    e->expert_stream_ = std::make_unique<ExpertStreamCache>(model, e->stream_);
+    if (!e->expert_stream_->ok()) {
+      AssignError(error_msg, e->expert_stream_->error());
+      return nullptr;
+    }
   }
   const std::size_t hc_dim = c.HcDim();
   const std::size_t hidden = c.hidden_size;
@@ -2371,6 +2405,14 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
 bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
                    std::uint32_t n_tokens, std::string* error_msg,
                    bool last_only) const {
+  if (expert_stream_ != nullptr && expert_stream_->enabled(l.stream)) {
+    // Streaming layers resolve the router's ids to resident cache slots on
+    // the host; `last_only` keeps its meaning (only the final row's output
+    // is read afterwards) but streaming computes every row, whose inputs
+    // are defined, and discards the rest the same way.
+    (void)last_only;
+    return MoeStream(l, x, out, n_tokens, error_msg);
+  }
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   // Router logits and the shared-expert gate come out of one GEMM.
@@ -2539,6 +2581,134 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                          stream_);
     }
   } else if (MatrixRows(n_tokens)) {
+    MoeEpilogueVec4(s_.down_e, s_.weights, s_.shexp_out,
+                    s_.router + c.num_experts, c.num_experts + 1, out, n_tokens,
+                    used, c.hidden_size, stream_);
+  } else {
+    MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
+                c.num_experts + 1, out, n_tokens, used, c.hidden_size, stream_);
+  }
+  return true;
+}
+
+bool Executor::MoeStream(const DeviceLayer& l, const float* x, float* out,
+                         std::uint32_t n_tokens, std::string* error_msg,
+                         bool) const {
+  // Streaming route for the routed experts of one MoE pass. Router,
+  // shared expert and epilogue run exactly as in Moe(); between them the
+  // router's ids are downloaded once, resolved to resident cache slots
+  // (LRU, misses loaded from the mapped GGUF onto this same stream) and
+  // uploaded back, so the expert kernels read identical weight bytes
+  // through the existing vector routes: decode output is bit-exact vs the
+  // fully-resident build. Groups of at most kStreamGroupTokens rows keep
+  // every launch on the vector expert paths (ids resolve per group).
+  const Config& c = config();
+  const std::uint32_t used = c.num_experts_used;
+  if (n_tokens == 0) {
+    return true;
+  }
+  if (!Dense(l.router, x, s_.router, n_tokens, error_msg)) {
+    return false;
+  }
+  RouterTopK(s_.router, c.num_experts + 1, s_.ids, s_.weights, n_tokens,
+             c.num_experts, used, stream_);
+  const auto ids_bytes =
+      static_cast<std::size_t>(n_tokens) * used * sizeof(std::int32_t);
+  if (!Check(hipMemcpyAsync(ids_host_, s_.ids, ids_bytes, hipMemcpyDeviceToHost,
+                            stream_),
+             "streaming routing ids download", error_msg) ||
+      !Check(hipEventRecord(ids_ready_, stream_), "streaming routing ids",
+             error_msg)) {
+    return false;
+  }
+  // The shared expert does not depend on routing (same queue as Moe()).
+  shexp_half_ready_ = false;
+  if (!GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, n_tokens,
+                  &l.shexp_down, error_msg)) {
+    return false;
+  }
+  if (shexp_half_ready_) {
+    shexp_half_ready_ = false;
+    if (!DenseF16Gemm(l.shexp_down.data, s_.shexp_half, s_.shexp_out, n_tokens,
+                      l.shexp_down.rows, l.shexp_down.cols, stream_)) {
+      AssignError(error_msg, "shared expert F16 GEMM failed");
+      return false;
+    }
+  } else if (!Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens,
+                    error_msg)) {
+    return false;
+  }
+  if (!Check(hipEventSynchronize(ids_ready_), "streaming routing ids",
+             error_msg)) {
+    return false;
+  }
+  // Groups run the exact vector expert routes: at most
+  // kStreamGroupTokens rows, and never more distinct experts than the
+  // cache has slots (a group's misses need victims the group doesn't
+  // hold). With skewed routing a group often packs wider than
+  // slots / used, which keeps shared activations across more rows.
+  const std::uint32_t width_cap = std::min(kStreamGroupTokens, n_tokens);
+  // The epilogue choice mirrors the resident route's for this width; both
+  // variants share the per-slot reduction order.
+  const bool wide = MatrixRows(n_tokens);
+  {
+    // Keep the vector expert routes for the streamed groups regardless of
+    // the pass phase; the shared expert above already ran the phase's own
+    // arithmetic.
+    PrefillPhase vec_phase(false);
+    for (std::uint32_t first = 0; first < n_tokens;) {
+      // Greedy pack: extend while the group's distinct routed ids stay
+      // within the cache slots (at least one token always leaves).
+      ++stream_group_stamp_;
+      std::uint32_t count = 0;
+      std::uint32_t distinct = 0;
+      for (; first + count < n_tokens && count < width_cap; ++count) {
+        bool fits = true;
+        for (std::uint32_t u = 0; u < used; ++u) {
+          const std::int32_t id = ids_host_[(first + count) * used + u];
+          if (id < 0 || stream_group_seen_[id] == stream_group_stamp_) {
+            continue;
+          }
+          if (distinct + 1 > l.stream.slots) {
+            fits = false;
+            break;
+          }
+          stream_group_seen_[id] = stream_group_stamp_;
+          ++distinct;
+        }
+        if (!fits) {
+          break;
+        }
+      }
+      if (count == 0) {
+        count = 1;  // A single token's routed set always fits by plan.
+      }
+      const std::uint32_t ids_offset = first * used;
+      if (!expert_stream_->PrepareGroup(l.stream, ids_host_, ids_offset,
+                                        count * used, s_.ids)) {
+        if (error_msg != nullptr && expert_stream_->error().empty()) {
+          AssignError(error_msg, "expert slot preparation failed");
+        }
+        return false;
+      }
+      const auto* xg = x + static_cast<std::size_t>(first) * c.hidden_size;
+      auto* gate_g =
+          s_.gate_e + static_cast<std::size_t>(ids_offset) * c.expert_ff;
+      auto* ids_g = s_.ids + ids_offset;
+      if (!GatedExperts(l.ffn_gate_exps, l.ffn_up_exps, xg, ids_g, gate_g,
+                        count, used, error_msg)) {
+        return false;
+      }
+      if (!Experts(
+              l.ffn_down_exps, gate_g, ids_g,
+              s_.down_e + static_cast<std::size_t>(ids_offset) * c.hidden_size,
+              count * used, 1, count, error_msg)) {
+        return false;
+      }
+      first += count;
+    }
+  }
+  if (wide) {
     MoeEpilogueVec4(s_.down_e, s_.weights, s_.shexp_out,
                     s_.router + c.num_experts, c.num_experts + 1, out, n_tokens,
                     used, c.hidden_size, stream_);
@@ -2756,11 +2926,14 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   const std::uint32_t pool_grid =
       sparse && complete > session.blocks_ ? complete - session.blocks_ : 0;
   // Decode-sized batches replay as graphs; a pooling backlog (the first
-  // batch past the budget) needs the wider eager grid.
+  // batch past the budget) needs the wider eager grid. Streaming layers
+  // resolve routing through the host between queued kernels, which cannot
+  // live inside a capture.
   const std::uint32_t graph_pool_grid = n / std::max(c.compress_ratio, 1u) + 1;
-  const bool graph = !prefill_phase && n <= kVecBatch &&
-                     pool_grid <= graph_pool_grid &&
-                     session.position_ >= session.VisionLayout().PrefixLength();
+  const bool graph =
+      !prefill_phase && n <= kVecBatch && pool_grid <= graph_pool_grid &&
+      session.position_ >= session.VisionLayout().PrefixLength() &&
+      !Streaming();
   const std::uint64_t key = static_cast<std::uint64_t>(n) |
                             (static_cast<std::uint64_t>(n_logits) << 16) |
                             (static_cast<std::uint64_t>(speculative) << 32) |
@@ -3875,7 +4048,8 @@ bool Executor::MtpForward(Session& session,
   const auto graph_pool = n / c.compress_ratio + 1;
   const bool graph = output.trace == nullptr && hidden_source == nullptr &&
                      n <= kVecBatch && pool <= graph_pool &&
-                     pos + 1 >= session.VisionLayout().PrefixLength();
+                     pos + 1 >= session.VisionLayout().PrefixLength() &&
+                     !Streaming();
   const std::uint64_t key =
       static_cast<std::uint64_t>(n) |
       (static_cast<std::uint64_t>(hidden_row < 0) << 32) |

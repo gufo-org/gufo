@@ -57,6 +57,10 @@ struct TensorRef {
   [[nodiscard]] std::size_t SizeBytes() const noexcept {
     return RowBytes() * rows * experts;
   }
+  /// Encoded bytes of one stacked expert matrix (`rows` rows).
+  [[nodiscard]] std::size_t ExpertBytes() const noexcept {
+    return RowBytes() * rows;
+  }
   /// Base address of one stacked expert matrix.
   [[nodiscard]] const std::uint8_t* Expert(std::uint64_t e) const noexcept {
     return static_cast<const std::uint8_t*>(data) + RowBytes() * rows * e;

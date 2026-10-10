@@ -251,6 +251,9 @@ add_executable(gufo
   src/eval/http_client.cpp
 )
 target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+# The serve CLI parses the expert-streaming byte budget with the model
+# library's shared parser; the library's CPU sources need no HIP runtime.
+target_link_libraries(gufo PRIVATE gufo_qwen38_flash_next)
 target_compile_definitions(gufo PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
   GUFO_REVISION="${GUFO_REVISION}"

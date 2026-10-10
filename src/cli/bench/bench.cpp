@@ -25,6 +25,7 @@
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen38_flash_next/expert_stream.hpp"
 #include "src/testing/compare/logit_comparator.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -204,6 +205,11 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
   parser.AddOption("", "--mtp-model", "PATH",
                    "Path to quantized Qwen MTP draft head GGUF file",
                    "Speculative", &opt.mtp_model_path);
+  parser.AddOption(
+      "", "--expert-cache", "BYTES",
+      "Qwen3.8-Flash-Next only: resident routed-expert cache budget "
+      "(e.g. 4G, 512M; 0 = all experts resident, the default)",
+      "Model", &opt.expert_cache_text);
   parser.AddCustomOption(
       "", "--draft-tokens", "N",
       "Maximum speculative draft tokens per verification step (default: 7)",
@@ -924,12 +930,24 @@ int RunQwen38FlashNextBenchmark(
   }
 
   std::string error;
+  std::size_t expert_cache_bytes = 0;
+  if (!options.expert_cache_text.empty()) {
+    const auto parsed = qfn::ParseByteSize(options.expert_cache_text);
+    if (!parsed) {
+      std::cerr << "Error: --expert-cache: invalid byte size '"
+                << options.expert_cache_text
+                << "' (plain bytes or a K/M/G suffix, e.g. 512M)\n";
+      return 2;
+    }
+    expert_cache_bytes = *parsed;
+  }
   auto model = qfn::Model::Load(
       options.model_path,
       qfn::ModelOptions{
           .max_context = static_cast<std::uint32_t>(required_context),
           .mtp_model_path = mtp ? options.mtp_model_path : "",
           .max_draft_tokens = std::max<std::uint32_t>(1, options.draft_tokens),
+          .expert_cache_bytes = expert_cache_bytes,
       },
       &error);
   if (model == nullptr) {

@@ -21,6 +21,7 @@
 #include "src/models/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/expert_stream_runtime.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
@@ -688,6 +689,24 @@ private:
   MtpCandidateLogits* mtp_candidates_host_{nullptr};
   /// The model geometry allows the wide mixer route (see Combine).
   bool wide_mixer_{false};
+  /// Memory-bounded routed-expert streaming (issue #427). Non-null when
+  /// the DeviceModel reserved streamed-expert slabs; forwards then resolve
+  /// router ids through the host-side LRU before the expert projections.
+  std::unique_ptr<ExpertStreamCache> expert_stream_;
+  /// Pinned host copy of s_.ids for the routing round-trip of streamed
+  /// layers (max_batch * num_experts_used entries).
+  std::int32_t* ids_host_{nullptr};
+  hipEvent_t ids_ready_{nullptr};
+  /// Per-pass distinct-id marks for the streaming group packer (sized to
+  /// the artifact's expert count when the streaming runtime is built).
+  mutable std::uint64_t stream_group_stamp_{0};
+  mutable std::vector<std::uint64_t> stream_group_seen_;
+  [[nodiscard]] bool Streaming() const noexcept {
+    return expert_stream_ != nullptr;
+  }
+  [[nodiscard]] bool MoeStream(const DeviceLayer& l, const float* x, float* out,
+                               std::uint32_t n_tokens, std::string* error_msg,
+                               bool last_only = false) const;
   /// Set by Moe when its epilogue is left for the combine that follows.
   mutable bool moe_pending_{false};
   /// Set by GatedDense when s_.shexp_half holds the SwiGLU rows its F16

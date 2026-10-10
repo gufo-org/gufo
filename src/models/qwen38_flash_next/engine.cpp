@@ -134,9 +134,9 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
     m->mtp_weights_ = std::make_unique<MtpWeights>(std::move(*mtp));
   }
-  m->device_ = rocm::DeviceModel::Upload(*m->weights_, *m->reader_,
-                                         m->mtp_weights_.get(),
-                                         m->mtp_reader_.get(), error_msg);
+  m->device_ = rocm::DeviceModel::Upload(
+      *m->weights_, *m->reader_, m->mtp_weights_.get(), m->mtp_reader_.get(),
+      error_msg, options.expert_cache_bytes);
   if (!m->device_) {
     return nullptr;
   }
@@ -224,6 +224,15 @@ const Config& Model::config() const noexcept {
 
 std::size_t Model::ResidentBytes() const noexcept {
   return device_->resident_bytes() + (vision_ ? vision_->ResidentBytes() : 0);
+}
+
+std::string Model::ExpertStreamSummary() const {
+  if (device_->stream_layers() == 0) {
+    return {};
+  }
+  return "expert_stream layers=" + std::to_string(device_->stream_layers()) +
+         " slots_per_layer=" + std::to_string(device_->stream_slots()) +
+         " expert_bytes=" + std::to_string(device_->stream_expert_bytes());
 }
 
 std::size_t Model::SessionBytes(core::SessionMode mode,

@@ -36,6 +36,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
+#include "src/models/qwen38_flash_next/expert_stream.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
@@ -610,6 +611,7 @@ void PrintServeHelp(std::string_view program_name,
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
     std::string trace_path;
+    std::string expert_cache;
 
     gufo::cli::ArgParser parser(
         std::string(program_name) + " serve llm",
@@ -628,6 +630,13 @@ void PrintServeHelp(std::string_view program_name,
         "-c", "--context", "N",
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
+    parser.AddOption(
+        "", "--expert-cache", "BYTES",
+        "Qwen3.8-Flash-Next only: resident routed-expert cache budget "
+        "(e.g. 4G, 512M; 0 = all experts resident, the default). Layers "
+        "in the artifact's dominant expert size class stream the rest from "
+        "disk.",
+        "Model", &expert_cache);
 
     // Sampling Defaults
     parser.AddOption(
@@ -1148,6 +1157,7 @@ int RunServe(std::span<const char* const> args) {
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
     std::string trace_path;
+    std::string expert_cache;
 
     gufo::cli::ArgParser llm_parser(
         "gufo serve llm",
@@ -1165,6 +1175,13 @@ int RunServe(std::span<const char* const> args) {
         "-c", "--context", "N",
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
+    llm_parser.AddOption(
+        "", "--expert-cache", "BYTES",
+        "Qwen3.8-Flash-Next only: resident routed-expert cache budget "
+        "(e.g. 4G, 512M; 0 = all experts resident, the default). Layers "
+        "in the artifact's dominant expert size class stream the rest from "
+        "disk.",
+        "Model", &expert_cache);
     llm_parser.AddOption(
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
@@ -1373,6 +1390,19 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     std::string err;
+    std::size_t expert_cache_bytes = 0;
+    if (!expert_cache.empty()) {
+      if (const auto parsed =
+              models::qwen38_flash_next::ParseByteSize(expert_cache);
+          !parsed) {
+        std::cerr << "Error: --expert-cache: invalid byte size '"
+                  << expert_cache
+                  << "' (plain bytes or a K/M/G suffix, e.g. 512M)\n";
+        return 2;
+      } else {
+        expert_cache_bytes = *parsed;
+      }
+    }
     ModelLoadLog load_log("text", model);
     backend = std::make_shared<server::InferenceBackend>();
     if (!backend->load(model, &err, max_context, session_count,
@@ -1402,8 +1432,9 @@ int RunServe(std::span<const char* const> args) {
                            .model_artifact_fingerprint = {},
                        },
                        vision_model_path,
-                       server::TextRunnerRamCacheOptions{
-                           .capacity_bytes = cache_ram_bytes})) {
+                       server::TextRunnerRamCacheOptions{.capacity_bytes =
+                                                             cache_ram_bytes},
+                       expert_cache_bytes)) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
       return 1;
     }

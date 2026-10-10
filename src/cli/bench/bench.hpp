@@ -23,6 +23,11 @@ struct BenchOptions {
   std::size_t validate_prefill_tokens{0};
   std::string speculative_backend{""};
   std::string mtp_model_path;
+  /// Memory-bounded routed-expert streaming for Qwen3.8 Flash-Next
+  /// (issue #427): CLI text ("4G") and its parsed byte budget. Empty /
+  /// 0 = fully resident.
+  std::string expert_cache_text;
+  std::size_t expert_cache_bytes = 0;
   std::string dflash_model_path;
   std::string draft_policy;
   std::string dspark_model_path;

@@ -3108,7 +3108,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const TextSpeculativeConfig& speculative_config,
                             const TextDiskCacheConfig& disk_cache_config,
                             const std::string& vision_model_path,
-                            TextRunnerRamCacheOptions ram_cache_config) {
+                            TextRunnerRamCacheOptions ram_cache_config,
+                            std::size_t expert_cache_bytes) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -3230,12 +3231,16 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .vision_model_path = vision_model_path,
             .decode_concurrency = static_cast<std::uint32_t>(
                 std::clamp<std::size_t>(session_count, 1, 8)),
+            .expert_cache_bytes = expert_cache_bytes,
         },
         &load_error);
     if (model == nullptr) {
       SetError(error,
                "Failed to create Qwen3.8-Flash-Next model: " + load_error);
       return false;
+    }
+    if (const auto stream = model->ExpertStreamSummary(); !stream.empty()) {
+      Logger::Info("loader", "event=expert_streaming " + stream);
     }
     if (DiskCacheEnabled(resolved_disk_cache_config) &&
         resolved_disk_cache_config.model_artifact_fingerprint.empty() &&

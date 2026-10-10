@@ -33,6 +33,23 @@ struct DeviceMixer {
   DeviceTensor inject;
 };
 
+/// One streamed routed-expert cache: device slabs sized for `slots` experts
+/// in the artifact encodings, plus the mapped source addresses of expert 0
+/// in the GGUF payload. The Executor's streaming cache owns the runtime;
+/// DeviceModel only reserves and describes the slabs.
+struct ExpertStreamLayer {
+  void* gate{nullptr};
+  void* up{nullptr};
+  void* down{nullptr};
+  const std::uint8_t* src_gate{nullptr};
+  const std::uint8_t* src_up{nullptr};
+  const std::uint8_t* src_down{nullptr};
+  std::size_t gate_bytes{0};  ///< Encoded bytes of one expert's gate matrix.
+  std::size_t up_bytes{0};
+  std::size_t down_bytes{0};
+  std::uint32_t slots{0};
+};
+
 struct DeviceLayer {
   bool linear{false};
   DeviceMixer hc_attn;
@@ -56,6 +73,9 @@ struct DeviceLayer {
   DeviceTensor router;
   DeviceTensor ffn_gate_exps, ffn_up_exps, ffn_down_exps, shexp_gate, shexp_up,
       shexp_down;
+  /// Non-empty when this layer's routed experts stream from disk: the
+  /// resident slabs replace ffn_gate_exps/ffn_up_exps/ffn_down_exps.
+  ExpertStreamLayer stream;
   DeviceTensor nextn_enorm, nextn_hnorm, nextn_fc_embedding, nextn_fc_hidden;
   DeviceMixer nextn_head;
 };
@@ -69,10 +89,14 @@ public:
   DeviceModel& operator=(const DeviceModel&) = delete;
 
   /// Streams tensors from the same open files used to bind their metadata.
+  /// `expert_cache_bytes` bounds the resident routed-expert cache: when
+  /// non-zero, layers in the dominant per-expert size class stream their
+  /// routed experts from disk through resident slabs of that budget
+  /// (see ExpertStreamCache); every other tensor uploads fully as before.
   [[nodiscard]] static std::unique_ptr<DeviceModel> Upload(
       const ModelWeights& weights, const core::GgufReader& reader,
       const MtpWeights* mtp, const core::GgufReader* mtp_reader,
-      std::string* error_msg = nullptr);
+      std::string* error_msg = nullptr, std::size_t expert_cache_bytes = 0);
 
   const Config& config() const noexcept { return config_; }
   const DeviceTensor& token_embd() const noexcept { return token_embd_; }
@@ -82,6 +106,18 @@ public:
   [[nodiscard]] bool has_mtp() const noexcept { return has_mtp_; }
   const DeviceLayer& mtp() const noexcept { return mtp_; }
   [[nodiscard]] std::size_t resident_bytes() const noexcept { return bytes_; }
+  /// Layers whose routed experts stream (0 when fully resident), plus the
+  /// resident slot count each holds and the streamed layer's per-expert
+  /// byte size — for load-time reporting.
+  [[nodiscard]] std::size_t stream_layers() const noexcept {
+    return stream_layers_;
+  }
+  [[nodiscard]] std::uint32_t stream_slots() const noexcept {
+    return stream_slots_;
+  }
+  [[nodiscard]] std::size_t stream_expert_bytes() const noexcept {
+    return stream_expert_bytes_;
+  }
   /// Widest K among the BF16/F16 matrices (activation staging for hipBLAS).
   [[nodiscard]] std::size_t max_half_cols() const noexcept {
     return max_half_cols_;
@@ -103,6 +139,9 @@ private:
   bool has_mtp_{false};
   std::vector<void*> allocations_;
   std::size_t bytes_{0};
+  std::size_t stream_layers_{0};
+  std::uint32_t stream_slots_{0};
+  std::size_t stream_expert_bytes_{0};
   std::size_t max_half_cols_{1};
   std::size_t max_q8_cols_{32};
 };

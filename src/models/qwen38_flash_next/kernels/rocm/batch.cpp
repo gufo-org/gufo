@@ -612,6 +612,12 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
     return Moe(l, x, out, rows, error);
   const auto& c = config();
   const Scratch base = s_;
+  if (Streaming() && expert_stream_->enabled(l.stream)) {
+    // Streaming resolves whole passes (its own id round-trip covers every
+    // row); the per-chain row slicing of the other routes would re-enter
+    // PrepareGroup on already-remapped ids.
+    return MoeStream(l, x, out, rows, error, false);
+  }
   if (!DenseBatch(l.router, x, base.router, rows, error))
     return false;
   RouterTopK(base.router, c.num_experts + 1, base.ids, base.weights, rows,
