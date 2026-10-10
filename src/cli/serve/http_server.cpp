@@ -1174,6 +1174,9 @@ std::optional<HttpResponse> ReadAnthropicChat(
     const json::Value& body, TextGenerationBackend& b, ChatRequest* chat,
     std::size_t* max_tokens, sampling::SamplingConfig* sampling_config) {
   chat->reasoning = b.reasoning_defaults();
+  // Claude Code adds a system message after each turn and keeps it in later
+  // requests; hoisting it would put new text before the whole history.
+  chat->system_messages_in_place = true;
   if (body.is_object()) {
     if (auto error = ReadThinking(body, &chat->reasoning))
       return error;

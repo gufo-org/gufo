@@ -104,6 +104,10 @@ struct ChatTemplateOptions {
   bool preserve_thinking{true};
   bool add_vision_id{false};
   bool require_tool_call{false};
+  /// Join later system/developer messages to the leading system turn. When
+  /// false they render in place, so a client that adds one per turn and keeps
+  /// it in history only appends to the previous prompt (#522).
+  bool hoist_system_messages{true};
   std::size_t max_output_bytes{1024ULL * 1024ULL};  ///< 1 MiB upper bound
 };
 

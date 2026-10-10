@@ -113,6 +113,9 @@ struct ChatRequest {
   bool parallel_tool_calls{true};
   ReasoningOptions reasoning;
   bool add_vision_id{false};
+  /// Render later system messages where the client placed them instead of in
+  /// the leading system turn. Anthropic Messages clients add one per turn.
+  bool system_messages_in_place{false};
   /// Bypass prompt reuse for this request; its completed state may be retained.
   bool cache_prompt{true};
   /// Optional streaming prompt progress; never changes prompt or cache

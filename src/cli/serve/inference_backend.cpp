@@ -75,6 +75,7 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
                                                       request.add_vision_id);
   options.require_tool_call =
       request.tool_choice == ChatRequest::ToolChoice::kRequired;
+  options.hoist_system_messages = !request.system_messages_in_place;
   // gufo #285: the rendered prompt may be as long as the context can hold.
   options.max_output_bytes =
       tokenization::RenderedPromptBoundBytes(max_context);

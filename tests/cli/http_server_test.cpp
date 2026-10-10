@@ -136,11 +136,13 @@ public:
       const gufo::server::ChatRequest& request) const override {
     counted_messages = request.messages.size();
     counted_tools = request.tools.size();
+    counted_in_place = request.system_messages_in_place;
     return chat_token_count;
   }
   std::optional<std::size_t> chat_token_count;
   mutable std::size_t counted_messages{0};
   mutable std::size_t counted_tools{0};
+  mutable bool counted_in_place{false};
   Result complete(
       std::string_view prompt, std::size_t limit,
       const gufo::sampling::SamplingConfig& sampling,
@@ -1133,8 +1135,10 @@ void TestCompatibilityRequests() {
       "tools":[{"name":"look","input_schema":{"type":"object"}}]})"));
   assert(counted.find("input_tokens") != nullptr &&
          counted.find("input_tokens")->as_double() == 1234.0);
+  // Counted like Messages renders it: system entries stay in place.
   assert(server.backend->counted_messages == 2 &&
-         server.backend->counted_tools == 1);
+         server.backend->counted_tools == 1 &&
+         server.backend->counted_in_place);
   assert(server.backend->calls == calls);
   for (const auto* invalid :
        {R"({"stream":true,"messages":[{"role":"user","content":"hi"}]})",
@@ -1391,6 +1395,20 @@ void TestCompatibilityRequests() {
           "max_tokens":2})"));
   assert(anthropic.member_str("stop_reason") == "end_turn");
   assert(server.backend->LastCall().chat.messages[0].content == "Be concise.");
+  assert(server.backend->LastCall().chat.system_messages_in_place);
+
+  // Claude Code adds a system message after each turn and keeps it in later
+  // requests. Messages keeps it in place; the other endpoints still hoist.
+  response_body(server.Post("/v1/messages", R"({"messages":[
+      {"role":"user","content":"hi"},
+      {"role":"system","content":"Turn context."}],"max_tokens":2})"));
+  const auto injected = server.backend->LastCall().chat;
+  assert(injected.system_messages_in_place && injected.messages.size() == 2 &&
+         injected.messages[1].role == gufo::tokenization::ChatRole::kSystem &&
+         injected.messages[1].content == "Turn context.");
+  response_body(server.Post("/v1/chat/completions", R"({"model":"test",
+      "messages":[{"role":"user","content":"hi"}]})"));
+  assert(!server.backend->LastCall().chat.system_messages_in_place);
 
   // Messages reports reasoning in its own block and restores replayed blocks
   // as the assistant thought.

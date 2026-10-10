@@ -421,7 +421,8 @@ std::optional<std::string> QwenChatTemplate::Render(
            message.role == ChatRole::kDeveloper;
   };
   std::vector<ChatMessage> hoisted;
-  if (std::any_of(std::find_if_not(messages.begin(), messages.end(), is_system),
+  if (options.hoist_system_messages &&
+      std::any_of(std::find_if_not(messages.begin(), messages.end(), is_system),
                   messages.end(), is_system)) {
     hoisted.assign(messages.begin(), messages.end());
     std::stable_partition(hoisted.begin(), hoisted.end(), is_system);
