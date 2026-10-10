@@ -132,10 +132,10 @@ build/release/src/cache/cache_tiered_bench /tmp
 
 All samples are retained in [13-gfx1151.csv](../measurements/13-gfx1151.csv).
 After ten warmups, 100 lookups through 1,000 matching durable boundaries,
-including acquisition/release of every candidate's pin, had median **0.304605
-ms**, range **0.296440–0.525031 ms**. Retiring one checkpoint with a still-shared
-dependency took **0.760766 ms**; one with an unshared dependency took **1.335950
-ms**. Each crossed three directory sync barriers. The eviction catalog sizes
+including acquisition/release of every candidate's pin, had median **0.366598
+ms**, range **0.331145–0.510994 ms** at `17703771`. Retiring one checkpoint
+with a still-shared dependency took **0.694962 ms**; one with an unshared
+dependency took **1.232860 ms**. Each crossed three directory sync barriers. The eviction catalog sizes
 were 1,003 and 1,002, including the fixture's additional records; lookup retained
 1,000 candidates. These are warmed metadata lookups and tiny synthetic 8/32-byte
 payload files, not full-model disk-transfer timings. No speedup is claimed.
@@ -144,3 +144,8 @@ The second independent review found that replacing a quarantined publication
 before catalog reconciliation could shed its marker from an old RAM record.
 `Track` now honors both catalog and disk quarantine when replacing an epoch;
 a direct retire/republish regression proves the old RAM record stays excluded.
+
+The CSV also retains the original `aca631cd` and first-review-fix `59062b47`
+baselines. These are separate step observations, without a matched performance
+gain or regression claim; the final source numbers above include immediate
+quarantine-marker checks and caller-boundary reconciliation.
