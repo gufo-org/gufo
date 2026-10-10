@@ -2776,6 +2776,9 @@ public:
     step.draft_rounds = stats_after.cycles - stats_before.cycles;
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
+    step.lookup_tokens = stats_after.lookup - stats_before.lookup;
+    step.lookup_accepted_tokens =
+        stats_after.lookup_accepted - stats_before.lookup_accepted;
     return step;
   }
 
@@ -3131,6 +3134,11 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     max_context = static_cast<std::uint32_t>(native);
   }
+  if (speculative_config.prompt_lookup &&
+      reader->GetMetadataString("general.architecture") != "qwen4exp") {
+    SetError(error, "--prompt-lookup supports only Qwen3.8-Flash-Next");
+    return false;
+  }
 
   if (reader->GetMetadataString("general.architecture") == "deepseek4") {
     if (!vision_model_path.empty()) {
@@ -3230,6 +3238,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .vision_model_path = vision_model_path,
             .decode_concurrency = static_cast<std::uint32_t>(
                 std::clamp<std::size_t>(session_count, 1, 8)),
+            .prompt_lookup = speculative_config.prompt_lookup,
         },
         &load_error);
     if (model == nullptr) {

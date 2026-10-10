@@ -165,6 +165,9 @@ inline std::string GenerationLogDetails(
   if (result.draft_tokens > 0)
     out << " acceptance_pct="
         << 100.0 * result.draft_accepted_tokens / result.draft_tokens;
+  if (result.lookup_tokens > 0)
+    out << " lookup_accepted=" << result.lookup_accepted_tokens
+        << " lookup_proposed=" << result.lookup_tokens;
   if (result.cache_snapshot_bytes > 0)
     out << " cache_snapshot_bytes=" << result.cache_snapshot_bytes;
   if (result.cache_disk_queued_bytes > 0)
@@ -204,6 +207,10 @@ inline json::Value GenerationTimings(
   timings["draft_rounds"] = result.draft_rounds;
   timings["draft_n"] = result.draft_tokens;
   timings["draft_n_accepted"] = result.draft_accepted_tokens;
+  if (result.lookup_tokens > 0) {
+    timings["lookup_n"] = result.lookup_tokens;
+    timings["lookup_n_accepted"] = result.lookup_accepted_tokens;
+  }
   return timings;
 }
 

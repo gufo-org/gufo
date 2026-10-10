@@ -593,6 +593,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
+    bool prompt_lookup = false;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
@@ -676,6 +677,10 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--min-draft-tokens", "N",
                      "Adaptive draft floor (default: 1)", "Speculative",
                      &min_draft_tokens);
+    parser.AddFlag("", "--prompt-lookup",
+                   "Qwen3.8-Flash-Next MTP: after a draft, propose the tokens "
+                   "that followed a 12+ token match earlier in the context",
+                   "Speculative", &prompt_lookup);
     parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
@@ -1130,6 +1135,7 @@ int RunServe(std::span<const char* const> args) {
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
+    bool prompt_lookup = false;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
@@ -1208,6 +1214,11 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--min-draft-tokens", "N",
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
+    llm_parser.AddFlag(
+        "", "--prompt-lookup",
+        "Qwen3.8-Flash-Next MTP: after a draft, propose the tokens that "
+        "followed a 12+ token match earlier in the context",
+        "Speculative", &prompt_lookup);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
@@ -1368,6 +1379,12 @@ int RunServe(std::span<const char* const> args) {
         static_cast<std::uint32_t>(draft_tokens);
     speculative_config.min_draft_tokens =
         static_cast<std::uint32_t>(min_draft_tokens);
+    if (prompt_lookup &&
+        speculative_config.backend != server::TextSpeculativeBackend::kMtp) {
+      std::cerr << "Error: --prompt-lookup requires --speculative mtp\n";
+      return 2;
+    }
+    speculative_config.prompt_lookup = prompt_lookup;
     if (model.empty()) {
       std::cerr << "Error: --model <PATH> is required\n";
       return 2;
@@ -1451,6 +1468,7 @@ int RunServe(std::span<const char* const> args) {
         " sessions=" + std::to_string(session_count) + " context_tokens=" +
         std::to_string(backend->max_context()) + " speculative=" + speculation +
         " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
+        (speculative_config.prompt_lookup ? " prompt_lookup=on" : "") +
         " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled"));
   }
 
