@@ -81,6 +81,34 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
   return options;
 }
 
+std::optional<std::size_t> CountQwenPromptTokens(
+    const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
+    const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
+    std::uint32_t max_context) {
+  const auto options = QwenChatOptions(request, max_context);
+  const auto tools =
+      request.tool_choice == ChatRequest::ToolChoice::kNone
+          ? std::span<const tokenization::ChatTool>{}
+          : std::span<const tokenization::ChatTool>{request.tools};
+  if (std::ranges::none_of(request.messages,
+                           [](const auto& m) { return !m.images.empty(); })) {
+    const auto tokens = tokenization::QwenChatTemplate::RenderAndTokenize(
+        tokenizer, request.messages, tools, options);
+    if (!tokens)
+      return std::nullopt;
+    return tokens->size();
+  }
+  // Reuse generation's CPU image preparation, including resize, token
+  // expansion and projector validation. Counting does not encode images on
+  // the GPU or admit the prompt to an execution context. Keep only the shared
+  // layout's signed position limit so oversized prompts can still be sized.
+  return models::qwen::vision::Prepare(
+             tokenizer, request.messages, tools, options,
+             encoder ? encoder->identity() : std::string_view{},
+             std::numeric_limits<std::int32_t>::max())
+      .tokens.size();
+}
+
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
@@ -1011,6 +1039,12 @@ public:
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->GetTokenizer(),
                              model_->VisionEncoder(), max_context_);
+  }
+
+  [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
+      const ChatRequest& request) const override {
+    return CountQwenPromptTokens(request, model_->GetTokenizer(),
+                                 model_->VisionEncoder(), max_context_);
   }
 
   void SetPromptContext(
@@ -2524,6 +2558,12 @@ public:
                              model_->VisionEncoder(), max_context_);
   }
 
+  [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
+      const ChatRequest& request) const override {
+    return CountQwenPromptTokens(request, model_->tokenizer(),
+                                 model_->VisionEncoder(), max_context_);
+  }
+
   void SetPromptContext(
       TextRunnerState& state,
       std::shared_ptr<const TextPromptContext> context) const override {
@@ -3904,15 +3944,7 @@ std::optional<std::size_t> InferenceBackend::count_chat_tokens(
   auto constrained =
       ConstrainChatRequest(request, state->scheduler->runner(), &sampling);
   const auto& effective_request = constrained ? *constrained : request;
-  // Messages accepts text only. Count it before context admission so callers
-  // can size an oversized prompt before trimming it, as with llama.cpp.
-  // Generation still enforces the execution context limit.
-  const auto tokens =
-      state->scheduler->runner().RenderAndTokenize(effective_request);
-  if (!tokens.has_value()) {
-    return std::nullopt;
-  }
-  return tokens->size();
+  return state->scheduler->runner().CountPromptTokens(effective_request);
 #else
   (void)request;
   return std::nullopt;

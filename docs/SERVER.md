@@ -639,14 +639,16 @@ under the same limits and model requirements as Chat Completions images;
 images in assistant turns, `file` sources and `document` blocks are rejected.
 Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
-`POST /v1/messages/count_tokens` accepts the same text, system, thinking and
+`POST /v1/messages/count_tokens` accepts the same text, images, system, thinking and
 tool history as Messages and returns `{"input_tokens": N}` after rendering the
 model's chat template. `max_tokens` is optional; `stream: true` is rejected.
 The count includes cached prompt tokens and does not generate, prefill or
 change the conversation cache. Prompts may exceed the configured execution
 context so clients can size them before trimming; generation still enforces
-the context limit. Images are unsupported, as on Messages. Backends without
-chat counting support return 501. `/infill` still returns 501 because
+the context limit. Images use the same resizing and visual token expansion as
+generation, without running the vision encoder; the matching projector must
+be loaded. Models without image support reject image counts with 400.
+Backends without chat counting support return 501. `/infill` still returns 501 because
 suffix-conditioned infill is not implemented.
 
 Raw Completions accepts `stream: true` and
