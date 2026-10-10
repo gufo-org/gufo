@@ -148,7 +148,7 @@ def messages_result(client, body):
         "blocks": blocks, "tools": [],
         "finish": {"end_turn": "stop", "max_tokens": "length"}.get(
             response["stop_reason"], response["stop_reason"]),
-        "usage": {"prompt_tokens": usage["input_tokens"],
+        "usage": {"prompt_tokens": usage["input_tokens"] + usage["cache_read_input_tokens"],
                   "cached_tokens": usage["cache_read_input_tokens"],
                   "completion_tokens": usage["output_tokens"],
                   "gufo": {"prefill_tokens": timings["prompt_n"]}},

@@ -551,7 +551,8 @@ class FunctionalRunnerTest(unittest.TestCase):
                             "signature": ""}] if thinking else [])
                 return {"content": blocks + [{"type": "text", "text": "BETA"}],
                         "stop_reason": "end_turn",
-                        "usage": {"input_tokens": total, "cache_read_input_tokens": cached,
+                        "usage": {"input_tokens": total - cached,
+                                  "cache_read_input_tokens": cached,
                                   "output_tokens": 8},
                         "timings": {"prompt_n": total - cached}}
 
@@ -1082,14 +1083,14 @@ class FunctionalRunnerTest(unittest.TestCase):
         request = {"model": "fixture", "max_tokens": 2, "temperature": 0, "seed": 31,
                    "stop_sequences": ["END", "HALT"],
                    "messages": [{"role": "user", "content": "Reply BETA."}]}
-        # Buffered Messages uses input_tokens including cached work, no total_tokens,
+        # Buffered Messages reports cache reads apart from input_tokens, no total_tokens,
         # ordered content blocks, and the separate GenerationTimings object.
         response = {"id": "msg_fixture", "type": "message", "role": "assistant",
                     "model": "fixture", "content": [
                         {"type": "thinking", "thinking": "The code is BETA.", "signature": ""},
                         {"type": "text", "text": "BETA"}],
                     "stop_reason": "end_turn", "stop_sequence": None,
-                    "usage": {"input_tokens": 10, "output_tokens": 2,
+                    "usage": {"input_tokens": 4, "output_tokens": 2,
                               "cache_creation_input_tokens": 0, "cache_read_input_tokens": 6},
                     "timings": {"prompt_n": 4, "prompt_ms": 2, "prompt_per_token_ms": .5,
                                 "prompt_per_second": 2000, "predicted_n": 2, "predicted_ms": 3,
