@@ -1,0 +1,14 @@
+From 2868bcf8a340ecd4c564c1bd3210753fbd6aad8c Mon Sep 17 00:00:00 2001
+From: Robin Voetter <rvoetter@amd.com>
+Date: Sun, 5 Apr 2026 15:14:12 +0000
+Subject: [PATCH] [rocprofiler-sdk] rename consumer-test for dependent change
+
+This target has been renamed on the develop branch in
+https://github.com/ROCm/rocm-systems/commit/a2288eb50bd805e5d6d7dfa98834972083e4356a,
+however, that commit requires additional commits in order to apply properly. For now
+it is easier to fix this by renaming this target so that the other patch applies
+cleanly.
+---
+ .../lib/rocprofiler-sdk/counters/tests/CMakeLists.txt     | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+

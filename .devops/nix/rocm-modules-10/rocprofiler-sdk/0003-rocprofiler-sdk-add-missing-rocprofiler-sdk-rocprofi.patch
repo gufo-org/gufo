@@ -1,0 +1,31 @@
+From c767eafb393294214e9d25142a9eebebf234892b Mon Sep 17 00:00:00 2001
+From: Robin Voetter <rvoetter@amd.com>
+Date: Sat, 4 Apr 2026 21:20:32 +0000
+Subject: [PATCH] [rocprofiler-sdk] add missing
+ rocprofiler-sdk::rocprofiler-sdk-amd-comgr dependencies
+
+These targets, mostly tests, were missing dependencies on amd comgr.
+---
+ .../lib/att-tool/waitcnt/tests/CMakeLists.txt |  1 +
+ source/lib/python/utilities.cmake             |  3 ++-
+ .../counters/tests/CMakeLists.txt             | 13 +++++++++---
+ .../pc_sampling/parser/tests/CMakeLists.txt   | 20 ++++++++++++++-----
+ .../pc_sampling/tests/CMakeLists.txt          |  4 +++-
+ .../lib/rocprofiler-sdk/tests/CMakeLists.txt  |  2 ++
+ .../thread_trace/tests/CMakeLists.txt         |  1 +
+ 7 files changed, 34 insertions(+), 10 deletions(-)
+
+diff --git a/source/lib/python/utilities.cmake b/source/lib/python/utilities.cmake
+index 8f51fe971b..e527278f38 100644
+--- a/source/lib/python/utilities.cmake
++++ b/source/lib/python/utilities.cmake
+@@ -211,7 +211,8 @@ function(rocprofiler_rocpd_python_bindings _VERSION)
+                 rocprofiler-sdk::rocprofiler-sdk-gotcha
+                 rocprofiler-sdk::rocprofiler-sdk-dw
+                 rocprofiler-sdk::rocprofiler-sdk-static-library
+-                rocprofiler-sdk::rocprofiler-sdk-rocpd-library)
++                rocprofiler-sdk::rocprofiler-sdk-rocpd-library
++                rocprofiler-sdk::rocprofiler-sdk-amd-comgr)
+ 
+     # if "Development" is specified instead of "Development.Module", we need to link to
+     # python libraries
