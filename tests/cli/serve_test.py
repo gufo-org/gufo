@@ -169,6 +169,12 @@ def main():
                  ["--max-pending-per-client", "0"], ["--max-pending", "0"]):
         check(["serve", "llm", *args], 2,
               "sampling and scheduling limits are invalid")
+    for value in ("0", "60000"):
+        check(["serve", "llm", "--model", "missing.gguf",
+               "--stall-timeout-ms", value], 1, "Error loading model")
+    for value in ("1", "59999"):
+        check(["serve", "llm", "--stall-timeout-ms", value], 2,
+              "sampling and scheduling limits are invalid")
     for flag, value in (("--temperature", "2.01"), ("--presence-penalty", "2.01"),
                         ("--frequency-penalty", "-2.01")):
         check(["serve", "llm", flag, value], 2,

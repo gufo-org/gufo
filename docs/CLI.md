@@ -115,6 +115,9 @@ seed. Speed depends on acceptance and verification cost.
   `maxPending`; set it lower so one client cannot hog the whole queue.
 - `requestTimeoutMs` — requests are killed after this many milliseconds. In
   practice: prevents stuck requests from holding GPU sessions forever.
+- `stallTimeoutMs` — the server exits as `device_lost` when generation makes
+  no progress for this many milliseconds, so the service manager restarts
+  it. Off unless set; at least 60000.
 - `maxOutputBytes` — maximum response size per request.
 - `maxBufferedOutputBytes` — maximum generated-but-not-yet-delivered output
   buffered for one request; protects against slow clients.

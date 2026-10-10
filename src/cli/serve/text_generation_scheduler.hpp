@@ -50,6 +50,10 @@ struct TextSchedulerPolicy {
   std::size_t max_buffered_output_bytes_total{
       kDefaultMaxBufferedOutputBytesTotal};
   std::chrono::milliseconds request_timeout{0};
+  /// A scheduler that has work but starts no work unit and completes no
+  /// pending capture for this long is reported as a lost device. Zero
+  /// disables it.
+  std::chrono::milliseconds stall_timeout{0};
   bool log_progress{false};
 };
 

@@ -65,6 +65,7 @@
   maxPending ? null,
   maxPendingPerClient ? null,
   requestTimeoutMs ? null,
+  stallTimeoutMs ? null,
   maxOutputBytes ? null,
   maxBufferedOutputBytes ? null,
   maxBufferedOutputTotal ? null,
@@ -256,6 +257,10 @@ let
       ++ lib.optionals (requestTimeoutMs != null) [
         "--request-timeout-ms"
         (toString requestTimeoutMs)
+      ]
+      ++ lib.optionals (stallTimeoutMs != null) [
+        "--stall-timeout-ms"
+        (toString stallTimeoutMs)
       ]
       ++ lib.optionals (maxOutputBytes != null) [
         "--max-output-bytes"

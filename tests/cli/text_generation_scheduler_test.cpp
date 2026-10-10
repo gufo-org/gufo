@@ -2052,6 +2052,102 @@ void TestIdleDeviceProbe() {
          "confirmed idle loss increments the counter once");
 }
 
+void TestStallMonitor() {
+  const auto stall_timeout = std::chrono::milliseconds(500);
+  const auto before = gufo::server::detail::DeviceLostTotal().load();
+  {
+    auto control = std::make_shared<FakeControl>();
+    control->block_prefill_label = 1;
+    auto scheduler = MakeScheduler(control, 1);
+    auto request = scheduler->Submit({1}, 2, 0.0F);
+    control->WaitForPrefill(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    Expect(!scheduler->device_lost(),
+           "a blocked work unit is not reported without a stall timeout");
+    control->ReleasePrefill();
+    Expect(request.Wait().tokens == ExpectedTokens(1, 2),
+           "the blocked request completes once released");
+  }
+  auto control = std::make_shared<FakeControl>();
+  TextSchedulerPolicy policy{.stall_timeout = stall_timeout};
+  auto scheduler = MakeScheduler(control, 1, {}, policy);
+  std::this_thread::sleep_for(stall_timeout + stall_timeout / 2);
+  Expect(!scheduler->device_lost(), "an idle scheduler is never stalled");
+  auto healthy = scheduler->Submit({8, 80}, 2, 0.0F);
+  Expect(healthy.Wait().tokens == ExpectedTokens(8, 2) &&
+             !scheduler->device_lost(),
+         "a progressing request is not reported");
+
+  control->block_prefill_label = 1;
+  auto stalled = scheduler->Submit({1}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  const auto deadline = TextGenerationScheduler::Clock::now() + kTestTimeout;
+  while (!scheduler->device_lost() &&
+         TextGenerationScheduler::Clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  Expect(scheduler->device_lost(),
+         "a work unit that never returns is reported as a lost device");
+  Expect(gufo::server::detail::DeviceLostTotal() == before + 1,
+         "a stall increments the loss counter once");
+  bool rejected = false;
+  try {
+    (void)scheduler->Submit({8, 80}, 2, 0.0F);
+  } catch (const TextGenerationError& error) {
+    rejected = error.code() == TextGenerationErrorCode::kDeviceLost;
+  }
+  Expect(rejected, "submissions after a stall fail before admission");
+  // Let the fake work unit return so the scheduler thread can be joined.
+  control->ReleasePrefill();
+  bool failed = false;
+  try {
+    (void)stalled.Wait();
+  } catch (const TextGenerationError& error) {
+    failed = error.code() == TextGenerationErrorCode::kDeviceLost;
+  }
+  Expect(failed, "the stalled request reports device_lost");
+
+  // A shared checkpoint capture that never completes. It runs on its own
+  // thread, so the scheduler loop keeps turning and serves a peer, but the
+  // requests parked on the capture make no progress.
+  auto capture_control = SharedPrefixControl(true);
+  capture_control->block_prefill_label = 1;
+  std::binary_semaphore entered(0), release(0);
+  std::atomic<unsigned> captures{0};
+  capture_control->snapshot_callback = [&] {
+    if (captures.fetch_add(1) == 0) {
+      entered.release();
+      (void)release.try_acquire_for(2 * kTestTimeout);
+    }
+  };
+  auto capturing = MakeScheduler(capture_control, 3, {}, policy);
+  const auto shared_prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = capturing->Submit(shared_prompt, 2, 0.0F);
+  capture_control->WaitForPrefill(1);
+  auto follower = capturing->Submit(shared_prompt, 2, 0.0F);
+  capture_control->ReleasePrefill();
+  Expect(entered.try_acquire_for(kTestTimeout),
+         "the shared checkpoint capture starts");
+  Expect(capturing->Submit({2, 20}, 2, 0.0F).Wait().tokens ==
+                 ExpectedTokens(2, 2) &&
+             !capturing->device_lost(),
+         "the scheduler serves a peer while the capture is pending");
+  const auto capture_deadline =
+      TextGenerationScheduler::Clock::now() + kTestTimeout;
+  while (!capturing->device_lost() &&
+         TextGenerationScheduler::Clock::now() < capture_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  Expect(capturing->device_lost(),
+         "a capture that never completes is reported as a lost device");
+  release.release();
+  for (auto* parked : {&leader, &follower}) {
+    try {
+      (void)parked->Wait();
+    } catch (const TextGenerationError&) {
+      // Either outcome is fine; the request must not hang.
+    }
+  }
+}
+
 void TestDeviceLossIsStickyAndReported() {
   auto control = std::make_shared<FakeControl>();
   control->throw_advance_label = 9;
@@ -2883,6 +2979,7 @@ int main() {
   TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement();
   TestDeviceLossIsStickyAndReported();
   TestIdleDeviceProbe();
+  TestStallMonitor();
   Expect(
       gufo::server::detail::RequestsProcessing().load() == 0 &&
           gufo::server::detail::RequestsDeferred().load() == 0,
