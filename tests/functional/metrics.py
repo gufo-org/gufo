@@ -330,6 +330,10 @@ def summarize(parts, streaming, ended, contract=None):
             if alternative in usage:
                 measured[key] = usage[alternative]
                 break
+    if "cache_read_input_tokens" in usage:
+        # Messages input_tokens excludes cache reads and writes; the prompt is their sum.
+        measured["prompt_tokens"] = sum(usage.get(field, 0) for field in (
+            "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
     measured["cached_tokens"] = usage.get("cached_tokens", usage.get("cache_read_input_tokens",
         usage.get("prompt_tokens_details", usage.get("input_tokens_details", {})).get("cached_tokens", 0)))
     if first_output_ms is not None:

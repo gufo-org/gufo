@@ -1046,6 +1046,9 @@ void TestCompatibilityRequests() {
       assert(output.find("usage")->contains("input_tokens_details"));
     } else if (std::string_view(endpoint.path) == "/v1/messages") {
       assert(output.member_str("stop_reason") == "max_tokens");
+      // input_tokens excludes cache reads; together they cover the prompt.
+      assert(output.find("usage")->member_size("input_tokens") == 2 &&
+             output.find("usage")->member_size("cache_read_input_tokens") == 8);
     } else if (std::string_view(endpoint.path) == "/completion") {
       assert(output.find("stopped_length")->as_bool());
       assert(!output.find("stopped_eos")->as_bool());
@@ -1653,7 +1656,7 @@ void TestCompatibilityRequests() {
   const auto& text_done = text_events[text_events.size() - 2];
   assert(text_done.member_str("type") == "message_delta" &&
          text_done.find("delta")->member_str("stop_reason") == "end_turn" &&
-         text_done.find("usage")->member_size("input_tokens") == 10 &&
+         text_done.find("usage")->member_size("input_tokens") == 2 &&
          text_done.find("usage")->member_size("cache_read_input_tokens") == 8);
   assert(std::ranges::count(types, "content_block_start") == 2 &&
          std::ranges::count(types, "content_block_stop") == 2);

@@ -3508,7 +3508,11 @@ public:
                                     ? json::Value(result.stop_sequence)
                                     : json::Value();
     auto usage = json::Value::object();
-    usage["input_tokens"] = result.prompt_tokens;
+    // Anthropic reports cache reads separately; input_tokens counts only the
+    // uncached prompt, so the three input fields add up to the prompt length.
+    usage["input_tokens"] =
+        result.prompt_tokens -
+        std::min(result.cached_prompt_tokens, result.prompt_tokens);
     usage["output_tokens"] = result.completion_tokens;
     usage["cache_creation_input_tokens"] = 0;
     usage["cache_read_input_tokens"] = result.cached_prompt_tokens;

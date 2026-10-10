@@ -161,7 +161,7 @@ class CacheWorkloadsTest(unittest.TestCase):
             blocks = [{"type": "tool_use", "id": f"call-{turn}", "name": "read_archive",
                        "input": {"turn": turn}}] if call else [{"type": "text", "text": "BETA"}]
             return {"blocks": blocks, "finish": "tool_use" if call else "end_turn",
-                    "usage": {"input_tokens": total, "cache_read_input_tokens": cached,
+                    "usage": {"input_tokens": total - cached, "cache_read_input_tokens": cached,
                               "output_tokens": 12 if call else 2}}
 
         def cold(client, body):

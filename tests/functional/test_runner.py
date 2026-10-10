@@ -551,7 +551,8 @@ class FunctionalRunnerTest(unittest.TestCase):
                             "signature": ""}] if thinking else [])
                 return {"content": blocks + [{"type": "text", "text": "BETA"}],
                         "stop_reason": "end_turn",
-                        "usage": {"input_tokens": total, "cache_read_input_tokens": cached,
+                        "usage": {"input_tokens": total - cached,
+                                  "cache_read_input_tokens": cached,
                                   "output_tokens": 8},
                         "timings": {"prompt_n": total - cached}}
 
@@ -1082,14 +1083,14 @@ class FunctionalRunnerTest(unittest.TestCase):
         request = {"model": "fixture", "max_tokens": 2, "temperature": 0, "seed": 31,
                    "stop_sequences": ["END", "HALT"],
                    "messages": [{"role": "user", "content": "Reply BETA."}]}
-        # Buffered Messages uses input_tokens including cached work, no total_tokens,
+        # Buffered Messages reports cache reads apart from input_tokens, no total_tokens,
         # ordered content blocks, and the separate GenerationTimings object.
         response = {"id": "msg_fixture", "type": "message", "role": "assistant",
                     "model": "fixture", "content": [
                         {"type": "thinking", "thinking": "The code is BETA.", "signature": ""},
                         {"type": "text", "text": "BETA"}],
                     "stop_reason": "end_turn", "stop_sequence": None,
-                    "usage": {"input_tokens": 10, "output_tokens": 2,
+                    "usage": {"input_tokens": 4, "output_tokens": 2,
                               "cache_creation_input_tokens": 0, "cache_read_input_tokens": 6},
                     "timings": {"prompt_n": 4, "prompt_ms": 2, "prompt_per_token_ms": .5,
                                 "prompt_per_second": 2000, "predicted_n": 2, "predicted_ms": 3,
@@ -1673,6 +1674,64 @@ class ClaudeCodeAgentTest(unittest.TestCase):
         events.append({"type": "result", "subtype": "success", "is_error": False, "result": "Done"})
         with self.assertRaises(AssertionError):
             validate_task("tools", Path("."), events)
+
+    @staticmethod
+    def validate_usage(usage, streaming):
+        from claude_code_agent import validate_requests
+
+        with tempfile.TemporaryDirectory() as directory:
+            body = Path(directory) / "request.json"
+            body.write_text(json.dumps({"tools": [{"name": "Read"}]}))
+            log = Path(directory) / "server.log"
+            log.write_text("event=completed request=r1 outcome=completed prompt_tokens=10 "
+                           "queue_ms=0 ttft_ms=1 duration_ms=2\n")
+            row = {"path": "/v1/messages", "status": 200, "request_id": "r1",
+                   "wall_ms": 3, "body": str(body)}
+            if streaming:
+                # The recording proxy extracts streamed usage into the row.
+                row["usage"] = usage
+            else:
+                body.with_suffix(".sse").write_text(json.dumps({"usage": usage}))
+            validate_requests([row], log)
+
+    def test_messages_usage_accepts_cache_reads_and_writes(self):
+        for streaming in (False, True):
+            for uncached, cached, created in ((10, 0, 0), (2, 8, 0),
+                                              (0, 10, 0), (0, 0, 10)):
+                with self.subTest(streaming=streaming, uncached=uncached,
+                                  cached=cached, created=created):
+                    self.validate_usage({
+                        "input_tokens": uncached, "cache_read_input_tokens": cached,
+                        "cache_creation_input_tokens": created, "output_tokens": 2,
+                    }, streaming)
+
+    def test_messages_usage_rejects_invalid_counts(self):
+        valid = {"input_tokens": 0, "cache_read_input_tokens": 10,
+                 "cache_creation_input_tokens": 0, "output_tokens": 2}
+        invalid = (
+            {"input_tokens": -1, "cache_read_input_tokens": 11},
+            {"input_tokens": 11, "cache_read_input_tokens": -1},
+            {"input_tokens": 1, "cache_creation_input_tokens": -1},
+            {"input_tokens": 0.0},
+            {"input_tokens": False},
+            {"cache_read_input_tokens": 0},
+            {"output_tokens": 0},
+        )
+        for streaming in (False, True):
+            for overrides in invalid:
+                with self.subTest(streaming=streaming, overrides=overrides):
+                    with self.assertRaises(AssertionError):
+                        self.validate_usage({**valid, **overrides}, streaming)
+
+    def test_messages_usage_must_match_server_prompt_total(self):
+        # The old double-counted usage is positive but describes 18 tokens
+        # for the server's actual ten-token prompt.
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                with self.assertRaises(AssertionError):
+                    self.validate_usage({"input_tokens": 10, "cache_read_input_tokens": 8,
+                                         "cache_creation_input_tokens": 0, "output_tokens": 2},
+                                        streaming)
 
 if __name__ == "__main__":
     unittest.main()
