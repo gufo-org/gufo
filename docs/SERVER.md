@@ -625,6 +625,9 @@ native equivalent, so the effort stays the server's unless
 before the `text` block, with an empty `signature`, for every accepted
 `thinking.display` (`summarized`, `omitted` or `updates`). Replay assistant
 `thinking` blocks unchanged so later turns reuse the cached prompt.
+`system` entries inside `messages` stay where the client put them, unlike Chat
+Completions and Responses: Claude Code adds one after each turn and keeps it,
+so with Qwen each request only appends to the previous prompt.
 `output_config.effort` (`low`, `medium`, `high`, `xhigh` or `max`) sets the
 reasoning effort used while thinking is on; it never enables thinking. Other
 `output_config` members are rejected. Messages maps custom `tools`
