@@ -425,6 +425,22 @@ void TestHuggingFaceRenderedGoldens() {
                rendered->find("Be concise.\nLate instructions<|im_end|>") !=
                    std::string::npos,
            "Late system/developer messages join the leading system turn");
+    // In place, a request that keeps the late message only appends to the
+    // previous prompt, so its rendered tokens remain reusable.
+    auto in_place = options;
+    in_place.hoist_system_messages = false;
+    const std::vector<ChatMessage> earlier{
+        late[0], history[0], {role, "Late instructions"}};
+    const std::vector<ChatMessage> later{earlier[0], earlier[1], earlier[2],
+                                         history[1], history[2]};
+    auto shorter = in_place;
+    shorter.add_generation_prompt = false;
+    const auto kept = QwenChatTemplate::Render(later, tools, in_place);
+    const auto previous = QwenChatTemplate::Render(earlier, tools, shorter);
+    Expect(kept && previous && kept->starts_with(*previous) &&
+               kept->find("<|im_end|>\n<|im_start|>system\nLate "
+                          "instructions<|im_end|>\n") != std::string::npos,
+           "Late system/developer messages can render in place");
   }
   for (const auto role : {ChatRole::kSystem, ChatRole::kDeveloper,
                           ChatRole::kAssistant, ChatRole::kTool}) {
