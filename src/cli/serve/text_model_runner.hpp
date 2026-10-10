@@ -111,6 +111,9 @@ struct TextRunnerCapabilities {
   std::size_t batched_multi_token_decode_max_width{0};
   bool prefix_reuse{true};
   bool in_pass_checkpoint{false};
+  /// A completed prefill step leaves a consistent state, so a cancelled
+  /// request can keep it as a live prefix for a superseding request.
+  bool partial_prefill_retention{false};
 };
 
 /// Model-owned compatibility identity for restart-safe snapshots.

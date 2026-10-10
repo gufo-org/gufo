@@ -2452,6 +2452,7 @@ public:
                 .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
+                .partial_prefill_retention = true,
             },
         .persistence = persistence_,
     };
