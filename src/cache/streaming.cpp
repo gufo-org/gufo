@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -88,6 +89,13 @@ bool SameJob(const DiskManifest& a, const DiskManifest& b) {
       return false;
   }
   return true;
+}
+bool Extends(const DiskManifest& next, const DiskManifest& prior) {
+  return next.compatibility == prior.compatibility &&
+         next.input == prior.input &&
+         prior.tokens.size() < next.tokens.size() &&
+         std::equal(prior.tokens.begin(), prior.tokens.end(),
+                    next.tokens.begin());
 }
 }  // namespace
 
@@ -395,6 +403,7 @@ struct PersistenceQueue::Impl {
   std::unique_ptr<PersistenceJob> active;
   PersistenceQueueStats stats;
   bool stopped{};
+  std::uint64_t sequence{};
   std::jthread worker;
   Impl(ResourceReservation reservation, StreamedStore& streams,
        std::size_t depth, std::size_t bytes, std::function<bool()> model_idle,
@@ -416,8 +425,12 @@ struct PersistenceQueue::Impl {
           wake.wait(guard, [&] { return stopped || stats.pending != 0; });
           if (stopped)
             return;
-          auto it = std::find_if(pending.begin(), pending.end(),
-                                 [](const auto& job) { return bool(job); });
+          auto it = std::min_element(
+              pending.begin(), pending.end(), [](const auto& a, const auto& b) {
+                if (!a)
+                  return false;
+                return !b || a->submitted_ < b->submitted_;
+              });
           active = std::move(*it);
         }
         bool succeeded{};
@@ -476,7 +489,7 @@ PersistenceQueue::~PersistenceQueue() {
   Stop();
 }
 bool PersistenceQueue::TrySubmit(PersistenceJob job) {
-  std::lock_guard guard(impl_->mutex);
+  std::unique_lock guard(impl_->mutex);
   if (impl_->stopped) {
     ++impl_->stats.skipped;
     return false;
@@ -489,30 +502,86 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
     ++impl_->stats.coalesced;
     return false;
   }
-  if (impl_->stats.pending == impl_->pending.size() ||
-      job.pinned_bytes_ > impl_->max_bytes - impl_->stats.pinned_bytes) {
-    ++impl_->stats.skipped;
-    return false;
-  }
   auto slot = std::find_if(impl_->pending.begin(), impl_->pending.end(),
                            [](auto& item) { return !item; });
-  try {
-    for (auto& source : job.sources_)
-      source.pin_ = source.charge_.PinPersistence();
-    *slot = std::make_unique<PersistenceJob>(std::move(job));
-  } catch (const std::bad_alloc&) {
+  auto replacement = std::find_if(
+      impl_->pending.begin(), impl_->pending.end(), [&](const auto& other) {
+        if (!other || other->manifest_.purpose == CheckpointPurpose::kLearned ||
+            !Extends(job.manifest_, other->manifest_))
+          return false;
+        // Keep the first pending boundary until its write starts. A busy
+        // writer may belong to another conversation; replacing this anchor
+        // would leave only a deep checkpoint after graceful shutdown.
+        return (impl_->active &&
+                Extends(other->manifest_, impl_->active->manifest_)) ||
+               std::any_of(impl_->pending.begin(), impl_->pending.end(),
+                           [&](const auto& earlier) {
+                             return earlier && earlier.get() != other.get() &&
+                                    Extends(other->manifest_,
+                                            earlier->manifest_);
+                           });
+      });
+  const bool redundant = replacement != impl_->pending.end();
+  if (!redundant &&
+      (impl_->stats.pending == impl_->pending.size() ||
+       job.pinned_bytes_ > impl_->max_bytes - impl_->stats.pinned_bytes)) {
+    for (auto it = impl_->pending.begin(); it != impl_->pending.end(); ++it) {
+      if (!*it || ((*it)->manifest_.purpose == CheckpointPurpose::kLearned &&
+                   job.manifest_.purpose != CheckpointPurpose::kLearned))
+        continue;
+      if (replacement == impl_->pending.end() ||
+          (*it)->submitted_ < (*replacement)->submitted_)
+        replacement = it;
+    }
+  }
+  const auto released =
+      replacement == impl_->pending.end() ? 0 : (*replacement)->pinned_bytes_;
+  if ((impl_->stats.pending == impl_->pending.size() && !released) ||
+      job.pinned_bytes_ >
+          impl_->max_bytes - (impl_->stats.pinned_bytes - released)) {
     ++impl_->stats.skipped;
     return false;
   }
-  ++impl_->stats.accepted;
-  ++impl_->stats.pending;
-  impl_->stats.pinned_bytes += (*slot)->pinned_bytes_;
-  impl_->stats.peak_pending =
-      std::max(impl_->stats.peak_pending, impl_->stats.pending);
-  impl_->stats.peak_pinned_bytes =
-      std::max(impl_->stats.peak_pinned_bytes, impl_->stats.pinned_bytes);
+  std::optional<CheckpointId> superseded;
+  bool accepted = false;
+  try {
+    // Allocate job metadata before discarding anything. Release the old pins
+    // before admitting new pins, including on a subsequent admission failure.
+    auto next = std::make_unique<PersistenceJob>(std::move(job));
+    if (replacement != impl_->pending.end()) {
+      superseded = (*replacement)->manifest_.checkpoint;
+      impl_->stats.pinned_bytes -= released;
+      --impl_->stats.pending;
+      ++impl_->stats.superseded;
+      if (redundant)
+        ++impl_->stats.coalesced;
+      replacement->reset();
+      slot = replacement;
+    }
+    for (auto& source : next->sources_)
+      source.pin_ = source.charge_.PinPersistence();
+    next->submitted_ = ++impl_->sequence;
+    *slot = std::move(next);
+    ++impl_->stats.accepted;
+    ++impl_->stats.pending;
+    impl_->stats.pinned_bytes += (*slot)->pinned_bytes_;
+    impl_->stats.peak_pending =
+        std::max(impl_->stats.peak_pending, impl_->stats.pending);
+    impl_->stats.peak_pinned_bytes =
+        std::max(impl_->stats.peak_pinned_bytes, impl_->stats.pinned_bytes);
+    accepted = true;
+  } catch (const std::bad_alloc&) {
+    ++impl_->stats.skipped;
+  }
+  guard.unlock();
+  if (superseded && impl_->completed) {
+    try {
+      impl_->completed(*superseded, false);
+    } catch (...) {
+    }
+  }
   impl_->wake.notify_all();
-  return true;
+  return accepted;
 }
 void PersistenceQueue::Drain() {
   std::unique_lock guard(impl_->mutex);

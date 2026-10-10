@@ -140,8 +140,10 @@ while an execution lease is active.
 | Serving EOS | Scalar/concurrent MTP, exact zero-prefill replay and per-request ignore-EOS policy pass |
 | Serving sampling | All 25 strategies pass AR/MTP replay, C2 interleaving and short output budgets; actual drafts checked |
 | Independent MTP numerical audit | Full-width normalization, split projections, attention, recursive carry and Q8 head pass |
-| End-to-end functional and matched timing matrix | R4/R6 measurements retained; correctness failures prevent qualification; R7 running |
-| Pressure, bridge, lifecycle, long Pi replay and standard speed benchmark | Pending |
+| Core RAM functional histories | R7 passes growth, depth, edits, shared-prefix, rotation, concurrency, state-edges, long-context and cancellation in AR/MTP |
+| Disk lifecycle | R8 AR passes all four cases; R11 MTP running |
+| Disk reload and spacing | R7 misses recent queued histories; R8 restores all requested histories but drops the first spacing boundary; R11 passes the full focused cache suite in AR/MTP |
+| RAM pressure, bridge, long Pi replay and standard speed benchmark | Pending; fresh matched standard RAM table measured |
 
 Raw logs, production binaries, source patches and hashes are retained outside
 Git at `/home/mixer/gufo-qualification/pr543-followup`. The initial measured
@@ -255,6 +257,94 @@ restorable; existing branch, restart and corruption checks also pass.
 The revised production build is `candidate-r7-gufo`, SHA-256
 `ae09ee54a37ef2ea1e6595709445428bce45ce560fb76c8f5f64b2a98739e432`.
 Its AR/MTP model sampling and EOS replay checks pass, including all 25
-strategies, concurrent interleaving and short output budgets. The complete
-functional histories and external RAM/HIP sampling are running; this build
-is not yet functionally or timing qualified.
+strategies, concurrent interleaving and short output budgets. The complete RAM-side functional histories pass in both modes at the original
+8 GiB limit. The four disk-reload checks fail because the bounded persistence
+queue retains old histories while later requests keep the writer yielding.
+The overall reports remain failed; timings are not qualified.
+
+
+### R7 RAM and hit-rate observations
+
+The R7 core run uses the same settings and immutable main controls as R4.
+All original failures remain in the artifact directory.
+
+| Mode | Main RSS high-water (GiB) | R7 RSS high-water (GiB) | Difference (GiB) | Main global HIP peak (GiB) | R7 global HIP peak (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 8.640 | 9.401 | +0.761 | 94.181 | 92.422 |
+| MTP | 8.744 | 9.398 | +0.655 | 97.588 | 95.515 |
+
+RAM-ledger peaks are 7736760420 bytes in AR and 7737002784 bytes in MTP
+(about 7.21 GiB), plus the separate 1 GiB staging allocation. The same
+RSS/HIP overlap and main AR startup-sampling limitation described above apply.
+The main/candidate reports have unequal whole-run request coverage, so their
+overall hit rates must not be compared. In the identical growth history,
+24 of 30 normal requests hit in each mode on both builds: 80% request hit
+rate and about 78.65% of prompt tokens reused. Cold controls are excluded.
+
+### Fresh matched RAM benchmark
+
+A separate fresh standard `memory` table compares main `665fc182` with
+`candidate-r8-gufo`, SHA-256
+`0ab38a58aed6715d92adc92649f152f40366c099be2a2e176c4818a701f1e86e`.
+Both use AR, C1, context 133121, 8 GiB cache RAM, no disk/staging, the same
+weights, pinned production toolchain and standard HTTP harness. Source
+manifests, commands, raw requests, external startup samples and per-workload
+HIP polling are retained in `main-standard-r8-memory` and
+`candidate-standard-r8-memory`.
+
+| Memory measurement | Main (GiB) | R8 (GiB) | Difference (GiB) |
+| --- | ---: | ---: | ---: |
+| Process RSS high-water across the table | 0.824 | 8.258 | +7.434 |
+| Global HIP peak, pp2048/tg128 at depth 0 | 86.18 | 92.83 | +6.65 |
+| Global HIP peak, pp4096/tg128 after a 16K prefix | 87.34 | 92.83 | +5.49 |
+
+The new cache commits its backing pool at startup. Main grows allocations
+with cache history. Consequently the smaller RSS difference in the long core
+history does **not** imply lower memory use on lighter workloads. Process RSS
+and global HIP memory overlap on UMA and must not be added. These measurements
+qualify the memory observation only; they do not establish performance gates.
+
+### Persistence follow-up
+
+The queue now chooses pending writes by submission order, keeps the first
+pending boundary of a history, and coalesces later pending ancestors into the
+latest descendant. At capacity, eligible old pending jobs can yield to recent
+work; learned pending checkpoints are protected from ordinary replacements.
+Active writes are never replaced. Superseded callbacks run outside queue and
+serving locks, and old source pins are released before new pins are admitted.
+The serving queue allows eight jobs under the existing RAM pin limit.
+
+Independent tests cover first/latest retention beside an unrelated active
+writer, learned checkpoints, failed pin admission, callback reentrancy,
+strict peak pin limits and exact restored recurrent state. The existing
+streaming and serving lifecycle CPU targets pass, including first-prompt
+publication after a RAM grid and learned near-tail disk branch recovery. Per-request reports expose
+cumulative global queue counts, source-capacity pin gauges, write bytes and
+I/O costs; source capacities can overlap between jobs, while ledger pin bytes
+count physical allocations once.
+
+R8's focused AR/MTP histories pass all eight request-level cache checks,
+including each disk hit and exact cold control, but the aggregate spacing
+assertion fails because its first boundary was coalesced away. R9 protects the first pending anchor, but exposed a separate spacing defect:
+an intermediate grid consumed the first complete turn's disk allowance.
+R10 keeps grid captures in RAM and persists semantic prompt/learned boundaries;
+its first and long turns are correctly spaced, but a near-tail learned branch
+is missing after restart. R11 retains disk shared-prefix configuration and
+learns that near-tail boundary despite the ordinary spacing gate. A dedicated
+CPU restart test checks exact recurrent state; the full focused AR cache run
+now passes in AR and MTP. Duplicate submission rejection releases only
+its own serving handle, preserving an accepted job with the same checkpoint.
+The R8 standalone AR lifecycle passes all four cases, including a checkpoint
+larger than 1 MiB staging and SIGKILL during an unfinished write. No partial
+checkpoint is executed after restart. Pressure, bridge, MTP lifecycle,
+100K+ durability, actual long Pi tool sessions and standard timing qualification
+remain required before calling this draft complete.
+
+
+The R11 AR cache comparison retains all 479 per-request/phase observations:
+452 pass and 27 need confirmation under the unchanged 5% / 3 ms gates.
+Disk restore is the main flagged phase (for example, 119.84 ms on main versus
+268.75 ms on R11 for the final spacing history). One pair is insufficient
+for confirmation; no clean timing gate is claimed. The lifecycle runner can
+now require a measured 100K seed/publication/restore depth instead of inferring
+it from background line count. Its existing 12 CPU workload/gate tests pass.

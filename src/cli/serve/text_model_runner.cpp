@@ -621,6 +621,11 @@ struct TextRunnerPool::Impl {
       component_cache = std::make_unique<ComponentTextCache>(
           validated.runner, state_count, std::min(requested, available),
           disk_cache_options);
+      if (disk_cache_options) {
+        shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
+        shared_prefix_max_boundaries =
+            disk_cache_options->shared_prefix_max_boundaries;
+      }
       return;
     }
     cache = std::make_unique<ContinuationCache>(
@@ -1874,7 +1879,10 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
           request.prompt(), request.impl_->context.get(), true);
       if (common >=
               request.prefill_position() + Request::kSharedPrefixMinTokens &&
-          common + Request::kSharedCheckpointSlack < request.prompt_tokens())
+          (common + Request::kSharedCheckpointSlack < request.prompt_tokens() ||
+           (impl_->shared_prefix_max_boundaries &&
+            common >= impl_->shared_prefix_min_tokens &&
+            common < request.prompt_tokens())))
         (void)request.ShareCheckpoint(common);
     }
     return request;

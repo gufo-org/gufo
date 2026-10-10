@@ -1,8 +1,9 @@
 # Flash-Next continuation adapter (card 14)
 
 `ContinuationAdapter` owns the public model `Session` used by the runner.
-Serving still uses the legacy cache. Its sessions leave both hook pointers null;
-card 19 will attach the adapter and remove the legacy borrowed snapshots.
+The draft card 19 branch attaches it to the new component cache for Flash-Next
+AR and MTP serving. Other models and legacy snapshot APIs remain pending the
+final switch-over.
 
 ## State representation
 
@@ -100,5 +101,6 @@ including slab slack, and select suitable precommitted block classes for the
 
 Measured capacity and timings are recorded in [card 14 Results](../../cache-redesign/cards/14-flash-next-adapter.md#results-2026-10-10-draft).
 The C=8 probe is a short-history row; eight long histories remain excluded.
-Early HTTP integration of the new adapter requires card 19; no card 19 branch
-is available yet. Existing HTTP qualification checks the inactive hooks only.
+The draft HTTP integration, functional results, numerical checks and matched
+RAM observations are recorded in [card 19 Results](../../cache-redesign/cards/19-switch-over.md#results-flash-next-draft-integration-october-10-2026).
+That early Flash-Next branch does not establish the final all-model switch-over.

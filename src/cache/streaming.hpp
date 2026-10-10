@@ -99,9 +99,11 @@ private:
   DiskManifest manifest_;
   std::vector<PersistenceSource> sources_;
   std::size_t pinned_bytes_{};
+  std::uint64_t submitted_{};
 };
 struct PersistenceQueueStats {
-  std::uint64_t accepted{}, skipped{}, coalesced{}, completed{}, failed{};
+  std::uint64_t accepted{}, skipped{}, coalesced{}, superseded{}, completed{},
+      failed{};
   std::size_t pending{}, pinned_bytes{}, peak_pending{}, peak_pinned_bytes{};
   TransferTiming timing;
 };
@@ -110,6 +112,10 @@ struct PersistenceQueueStats {
 // joins. Callbacks must be thread-safe, nonblocking and outlive the queue.
 // Model idle is checked between pieces, without holding metadata or
 // device-source locks.
+// Keep the first pending boundary and coalesce later pending ancestors into
+// their newest descendant. Under pressure, recent jobs
+// may replace the oldest pending non-learned job; active writes are untouched.
+// Completion reports false for superseded work, outside the queue lock.
 class PersistenceQueue {
 public:
   PersistenceQueue(ResourceLedger&, StreamedStore&, std::size_t max_depth,

@@ -310,6 +310,13 @@ request, then SIGKILLs that child. Restart may restore only previously published
 boundaries. The helper is disarmed for initial publication and is covered by
 CPU process tests. Every case owns an 8 GiB disk budget, checks free space and
 deletes its cache on completion/failure. Reports and logs remain outside Git.
+For the 100K+ case, use `--seed-lines 7300 --minimum-published-tokens 100000`
+with context 133760, selecting `oversized` and `crash`. Actual prompt usage,
+publication and disk restoration must meet that depth; line count alone is
+not evidence. `--publication-timeout 300` allows the large checkpoint to finish
+before the deliberate crash without changing request timing gates. The
+oversized case waits for the deep publication before graceful shutdown and
+still uses 1 MiB staging. Keep the same explicit RAM limit in both modes.
 Known cache-work failures exit nonzero and retain controls/evidence; they are
 not skipped, marked as expected passes, or fixed in this test-only card.
 

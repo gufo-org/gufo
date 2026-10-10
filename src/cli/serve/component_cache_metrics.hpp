@@ -3,9 +3,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "src/cache/ledger.hpp"
+#include "src/cache/streaming.hpp"
 #include "src/core/json.hpp"
 
 namespace gufo::server {
@@ -17,6 +19,7 @@ struct ComponentCacheMetrics {
   std::size_t disk_queued_bytes{};
   double disk_enqueue_ms{};
   cache::ResourceSnapshot ledger;
+  std::optional<cache::PersistenceQueueStats> persistence;
 };
 inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
   auto result = json::Value::object();
@@ -53,6 +56,28 @@ inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
     categories[names[i]] = std::move(gauge);
   }
   result["global_categories"] = std::move(categories);
+  if (value.persistence) {
+    const auto& stats = *value.persistence;
+    auto queue = json::Value::object();
+    queue["accepted_jobs"] = stats.accepted;
+    queue["coalesced_jobs"] = stats.coalesced;
+    queue["superseded_jobs"] = stats.superseded;
+    queue["skipped_jobs"] = stats.skipped;
+    queue["published_jobs"] = stats.completed;
+    queue["failed_jobs"] = stats.failed;
+    queue["pending_jobs"] = stats.pending;
+    queue["peak_pending_jobs"] = stats.peak_pending;
+    // Queue capacities sum source ownership per job. The ledger above counts
+    // shared physical allocations once across all persistence pins.
+    queue["pinned_source_capacity_bytes"] = stats.pinned_bytes;
+    queue["peak_pinned_source_capacity_bytes"] = stats.peak_pinned_bytes;
+    queue["transferred_bytes"] = stats.timing.bytes;
+    queue["yield_ms"] = stats.timing.yield_ns / 1e6;
+    queue["filesystem_ms"] = stats.timing.filesystem_ns / 1e6;
+    queue["fsync_ms"] = stats.timing.fsync_ns / 1e6;
+    queue["checksum_ms"] = stats.timing.checksum_ns / 1e6;
+    result["global_persistence"] = std::move(queue);
+  }
   return result;
 }
 }  // namespace gufo::server

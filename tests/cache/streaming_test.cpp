@@ -55,10 +55,10 @@ struct Fixture {
   std::vector<Captured> buffers;
   std::uint64_t hash;
   explicit Fixture(ResourceLedger& ledger, unsigned checkpoint = 1,
-                   unsigned file_base = 0) {
-    std::vector<Token> tokens(40);
+                   unsigned file_base = 0, unsigned target = 40) {
+    std::vector<Token> tokens(target);
     std::iota(tokens.begin(), tokens.end(), 7);
-    adapter.Append(*source, tokens, std::span(tokens).first(36));
+    adapter.Append(*source, tokens, std::span(tokens).first(target - 4));
     hash = adapter.RecurrentHash(*source);
     manifest.checkpoint = {checkpoint};
     manifest.lineage = {1};
@@ -343,11 +343,13 @@ void QueueBoundsAndYield() {
       PersistenceJob(ledger, Id(101), first.manifest, first.Sources())));
   assert(queue.TrySubmit(
       PersistenceJob(ledger, Id(102), second.manifest, second.Sources())));
-  assert(!queue.TrySubmit(
+  assert(queue.TrySubmit(
       PersistenceJob(ledger, Id(103), third.manifest, third.Sources())));
   auto stats = queue.Stats();
   assert(stats.pending == 2 && stats.pinned_bytes == 672);
-  assert(stats.coalesced == 1 && stats.skipped == 1 && !copied);
+  assert(stats.coalesced == 1 && stats.superseded == 1 && !stats.skipped &&
+         !copied);
+  assert(stats.accepted == 3);
   // The writer may yield indefinitely, but committed source ownership doesn't
   // hold live slot readers or the disk metadata lock.
   auto lookup = std::async(std::launch::async, [&] { return disk.Open({99}); });
@@ -364,6 +366,7 @@ void QueueBoundsAndYield() {
   assert(stats.peak_pending == 2 && stats.peak_pinned_bytes == 672);
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
   assert(disk.Entries().size() == 2);
+  assert(disk.Open({3}));  // The recent job survives a full optional queue.
   assert(ledger.Snapshot().peak_persistence_pinned_bytes == 672);
   idle = false;
   assert(queue.TrySubmit(
@@ -371,6 +374,107 @@ void QueueBoundsAndYield() {
   queue.Stop();
   assert(queue.Stats().pending == 0 && queue.Stats().pinned_bytes == 0);
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+}
+void NewestPendingFrontierSurvives() {
+  for (const bool learned : {false, true}) {
+    for (const bool pin_failure : {false, true}) {
+      Directory dir;
+      ResourceLedger ledger{{1 << 22, 1 << 21, 16, pin_failure ? 780U : 8192U}};
+      DiskStore disk(ledger, dir.path, 1 << 20);
+      StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+      Fixture active(ledger), prior(ledger, 2, 30, 48), next(ledger, 3, 60, 56);
+      if (learned)
+        prior.manifest.purpose = CheckpointPurpose::kLearned;
+      std::atomic<bool> idle{}, started{}, discarded{};
+      PersistenceQueue* query{};
+      PersistenceQueue queue(
+          ledger, streams, 2, 800,
+          [&] {
+            started = true;
+            return idle.load();
+          },
+          [&](CheckpointId id, bool succeeded) {
+            if (id == CheckpointId{2} && !succeeded) {
+              // Replacement callbacks may query the queue and release serving
+              // ownership; neither operation may run under the queue lock.
+              assert(query->Stats().pending <= 2);
+              discarded = true;
+            }
+          });
+      query = &queue;
+      assert(queue.TrySubmit(
+          PersistenceJob(ledger, Id(100), active.manifest, active.Sources())));
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (!started && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+      assert(started);
+      assert(queue.TrySubmit(
+          PersistenceJob(ledger, Id(101), prior.manifest, prior.Sources())));
+      assert(queue.TrySubmit(PersistenceJob(ledger, Id(102), next.manifest,
+                                            next.Sources())) ==
+             (!learned && !pin_failure));
+      assert(discarded == !learned);
+      assert(queue.Stats().pinned_bytes == (learned       ? 736
+                                            : pin_failure ? 336
+                                                          : 800));
+      assert(ledger.Snapshot().peak_persistence_pinned_bytes <=
+             (pin_failure ? 780 : 800));
+      idle = true;
+      queue.Drain();
+      assert(disk.Open({1}));
+      assert(bool(disk.Open({2})) == learned);
+      assert(bool(disk.Open({3})) == (!learned && !pin_failure));
+      assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+      if (!learned && !pin_failure) {
+        auto destination = next.adapter.CreateSlot(next.guard);
+        TransferTiming timing;
+        assert(streams.Restore({3}, next.manifest.compatibility, next.adapter,
+                               *destination, timing));
+        assert(next.adapter.RecurrentHash(*destination) == next.hash);
+      }
+    }
+  }
+}
+void FirstPendingAnchorSurvivesCoalescing() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  Fixture active(ledger, 1, 120), anchor(ledger, 2, 30),
+      middle(ledger, 3, 60, 48), latest(ledger, 4, 90, 56);
+  active.manifest.compatibility[1] = 1;
+  std::atomic<bool> idle{}, started{};
+  PersistenceQueue queue(ledger, streams, 3, 1136, [&] {
+    started = true;
+    return idle.load();
+  });
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1000), active.manifest, active.Sources())));
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!started && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  assert(started);
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1001), anchor.manifest, anchor.Sources())));
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1002), middle.manifest, middle.Sources())));
+  assert(!queue.Stats().superseded);
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1003), latest.manifest, latest.Sources())));
+  assert(queue.Stats().superseded == 1 && queue.Stats().coalesced == 1);
+  assert(queue.Stats().pending == 3 && queue.Stats().pinned_bytes == 1136);
+  assert(ledger.Snapshot().peak_persistence_pinned_bytes <= 1136);
+  idle = true;
+  queue.Drain();
+  assert(disk.Open({1}) && disk.Open({2}) && disk.Open({4}));
+  assert(!disk.Open({3}));
+  auto destination = latest.adapter.CreateSlot(latest.guard);
+  TransferTiming timing;
+  assert(streams.Restore({4}, latest.manifest.compatibility, latest.adapter,
+                         *destination, timing));
+  assert(latest.adapter.RecurrentHash(*destination) == latest.hash);
 }
 void AdmissionFailures() {
   Directory dir;
@@ -606,6 +710,8 @@ int main() {
   RoundTripAndFailures();
   CancelRestore();
   QueueBoundsAndYield();
+  NewestPendingFrontierSurvives();
+  FirstPendingAnchorSurvivesCoalescing();
   AdmissionFailures();
   FailedSubmission();
   RestorePreemptsYield();

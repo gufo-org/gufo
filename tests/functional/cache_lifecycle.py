@@ -43,12 +43,19 @@ def wait_until(predicate, description, timeout=30):
 
 
 class Lifecycle:
-    def __init__(self, command, output, timeout, library):
+    def __init__(self, command, output, timeout, library, seed_lines=160,
+                 minimum_published_tokens=0, publication_timeout=30):
         self.command, self.output, self.timeout, self.library = command, output, timeout, library
+        self.seed_lines = seed_lines
+        self.minimum_published_tokens = minimum_published_tokens
+        self.publication_timeout = publication_timeout
         self.model = option(command, "--served-model-name", "cache-lifecycle")
         self.mode = option(command, "--speculative", "off")
         self.report = {**provenance(), "command": command,
                        "binary": str(Path(command[0]).resolve()),
+                       "seed_lines": seed_lines,
+                       "minimum_published_tokens": minimum_published_tokens,
+                       "publication_timeout": publication_timeout,
                        "status": "running", "cases": {}}
         source = hashlib.sha256()
         source.update(self.report["harness_sha256"].encode())
@@ -87,6 +94,8 @@ class Lifecycle:
             self.row["failures"].append(f"{label}: {detail}")
 
     def chat(self, label, messages, floor=0, ceiling=None, disk=False, cold=False):
+        if disk:
+            floor = max(floor, self.minimum_published_tokens)
         body = dict(model=self.model, messages=deepcopy(messages), temperature=0, seed=31,
                     max_completion_tokens=16, reasoning_effort="none", cache_prompt=not cold)
         raw = continuation.call(f"http://127.0.0.1:{self.port}", body)
@@ -96,6 +105,10 @@ class Lifecycle:
                   "tools": choice["message"].get("tool_calls") or [],
                   "finish": choice["finish_reason"], "usage": raw["usage"]}
         total, cached, prefilled = work(result)
+        if label == "seed":
+            assert total >= self.minimum_published_tokens, (
+                "unqualified: seed is below the required depth", total,
+                self.minimum_published_tokens)
         assert result["text"].strip() == "ALPHA" and not result["reasoning"] \
             and not result["tools"] and result["finish"] == "stop", result
         passed = cached >= floor and (ceiling is None or cached <= ceiling) \
@@ -132,7 +145,7 @@ class Lifecycle:
             self.port = reserve.getsockname()[1]
         if shutil.disk_usage(root).free < 2 * DISK_BYTES:
             raise AssertionError("unqualified: disk lifecycle needs 16 GiB free")
-        seed = history("lifecycle_" + name, 160)
+        seed = history("lifecycle_" + name, self.seed_lines)
         try:
             if name == "crash":
                 self.crash_case(seed, root)
@@ -142,6 +155,11 @@ class Lifecycle:
                     first = self.chat("seed", seed)
                     long = continue_history(seed, first, ARCHIVE_LINE * 800 + "Reply with only ALPHA.")
                     deep = self.chat("append", long, work(first)[0] - 16)
+                    if self.minimum_published_tokens:
+                        wait_until(lambda: max(published_tokens(
+                            (self.stage_path / "server.log").read_text()), default=0)
+                            >= max(self.minimum_published_tokens, work(deep)[0] - 16),
+                            "a published deep checkpoint", self.publication_timeout)
                 stored = published_tokens((root / "initial/server.log").read_text())
                 self.row["published_tokens"] = stored
                 boundary = max((n for n in stored if n <= work(deep)[0]),
@@ -185,8 +203,10 @@ class Lifecycle:
         with self.stage("initial", environment=environment) as process:
             try:
                 first = self.chat("seed", seed)
-                wait_until(lambda: published_tokens((self.stage_path / "server.log").read_text()),
-                           "a published seed checkpoint")
+                wait_until(lambda: max(published_tokens(
+                    (self.stage_path / "server.log").read_text()), default=0)
+                    >= max(1, self.minimum_published_tokens),
+                    "a published seed checkpoint", self.publication_timeout)
                 (gate / "armed").touch()
                 long = continue_history(seed, first, ARCHIVE_LINE * 800 + "Reply with only ALPHA.")
                 deep = self.chat("queued_append", long, work(first)[0] - 16)
@@ -219,8 +239,17 @@ def main():
     parser.add_argument("--fault-library", type=Path, required=True)
     parser.add_argument("--case", action="append", choices=CASES)
     parser.add_argument("--startup-timeout", type=float, default=240)
+    parser.add_argument("--seed-lines", type=int, default=160,
+                        help="Background lines in the initial history")
+    parser.add_argument("--minimum-published-tokens", type=int, default=0,
+                        help="Require this actual seed and disk-restoration depth")
+    parser.add_argument("--publication-timeout", type=float, default=30,
+                        help="Seconds to await publication before a deliberate crash")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.seed_lines <= 0 or args.minimum_published_tokens < 0 \
+            or args.publication_timeout <= 0:
+        parser.error("seed lines and publication timeout must be positive; depth must be nonnegative")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1:3] != ["serve", "llm"]:
         parser.error("pass a gufo serve llm command after --")
@@ -237,7 +266,8 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     if option(command, "--served-model-name") is None:
         command += ["--served-model-name", "cache-lifecycle"]
-    runner = Lifecycle(command, args.output, args.startup_timeout, args.fault_library)
+    runner = Lifecycle(command, args.output, args.startup_timeout, args.fault_library,
+                       args.seed_lines, args.minimum_published_tokens, args.publication_timeout)
     runner.report["fault_library_sha256"] = hashlib.file_digest(
         args.fault_library.open("rb"), "sha256").hexdigest()
     try:

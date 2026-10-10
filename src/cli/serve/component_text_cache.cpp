@@ -157,7 +157,11 @@ struct ComponentTextCache::Impl {
   std::unique_ptr<cache::DiskCatalog> catalog;
   std::unique_ptr<cache::StreamedStore> streaming;
   std::unique_ptr<cache::PersistenceQueue> queue;
-  std::array<std::shared_ptr<const cache::Checkpoint>, 4> pending;
+  static constexpr std::size_t kPersistenceDepth = 8;
+  // Queue ownership plus transient submissions before superseded callbacks
+  // release their serving handles. No callback runs under the serving mutex.
+  std::array<std::shared_ptr<const cache::Checkpoint>, 2 * kPersistenceDepth>
+      pending;
   std::size_t disk_capacity{}, disk_step{};
   cache::ResourceCharge metadata;
 
@@ -214,7 +218,7 @@ struct ComponentTextCache::Impl {
       disk_step = options->min_checkpoint_step_tokens;
       disk->ReclaimOrphans();
       queue = std::make_unique<cache::PersistenceQueue>(
-          ledger, *streaming, pending.size(), ram,
+          ledger, *streaming, kPersistenceDepth, ram,
           [this] {
             const std::lock_guard lock(mutex);
             return std::ranges::none_of(
@@ -228,7 +232,7 @@ struct ComponentTextCache::Impl {
             if (!success) {
               Logger::Info(
                   "cache",
-                  "schema=component-cache-v1 event=persistence_failed");
+                  "schema=component-cache-v1 event=persistence_incomplete");
               return;
             }
             catalog->Track(id);
@@ -297,7 +301,10 @@ struct ComponentTextCache::Impl {
     return file;
   }
   std::size_t Persist(std::shared_ptr<const cache::Checkpoint> checkpoint) {
-    if (!queue)
+    // Grid captures support RAM edits during prefill. Persist semantic prompt
+    // and learned boundaries: an early grid must not consume the spacing
+    // allowance of the first complete turn.
+    if (!queue || checkpoint->Purpose() == cache::CheckpointPurpose::kGrid)
       return 0;
     {
       const std::lock_guard lock(mutex);
@@ -387,13 +394,19 @@ struct ComponentTextCache::Impl {
     }
     auto job = cache::PersistenceJob(ledger, File(1, private_id), manifest,
                                      std::move(sources));
-    const std::lock_guard lock(mutex);
-    auto position = std::find(pending.begin(), pending.end(), nullptr);
-    if (position == pending.end())
-      return 0;
-    *position = checkpoint;
+    std::size_t pending_slot;
+    {
+      const std::lock_guard lock(mutex);
+      auto position = std::find(pending.begin(), pending.end(), nullptr);
+      if (position == pending.end())
+        return 0;
+      pending_slot = position - pending.begin();
+      *position = checkpoint;
+    }
     if (!queue->TrySubmit(std::move(job))) {
-      position->reset();
+      const std::lock_guard lock(mutex);
+      if (pending[pending_slot] == checkpoint)
+        pending[pending_slot].reset();
       return 0;
     }
     return bytes;
@@ -937,6 +950,8 @@ std::vector<std::size_t> ServingCacheLease::PlannedCaptures(
 ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
   auto report = impl_->metrics;
   report.ledger = impl_->cache->ledger.Snapshot();
+  if (impl_->cache->queue)
+    report.persistence = impl_->cache->queue->Stats();
   return report;
 }
 std::optional<ComponentCacheMetrics> ServingCacheLease::Metrics() const {

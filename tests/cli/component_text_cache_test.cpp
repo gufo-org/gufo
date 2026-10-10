@@ -307,10 +307,92 @@ void DiskBudgetEvictsAnUnpinnedConversation() {
   }
   std::filesystem::remove_all(directory);
 }
+void GridDoesNotSuppressFirstDiskPrompt() {
+  char pattern[] = "/tmp/gufo-component-spacing-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 7};
+  std::vector<TextRunnerToken> prompt(42);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  std::uint64_t hash;
+  {
+    auto runner = std::make_shared<Runner>();
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, std::span(prompt).first(40),
+                            std::span(prompt).first(40));
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), 40, true,
+                                     SnapshotPurpose::kHistory, {}));
+    assert(lease->PublishSnapshot({prompt.begin(), prompt.begin() + 40},
+                                  lease->Capture(), false));
+    assert(lease->HasSnapshotFor(std::span(prompt).first(40)));
+    assert(!lease->Metrics().disk_queued_bytes);
+    runner->adapter->Append(state.slot, std::span(prompt).last(2),
+                            std::span(prompt).last(2));
+    hash = runner->adapter->RecurrentHash(state.slot);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), 42, false,
+                                     SnapshotPurpose::kContinuation, {}));
+    assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+    assert(lease->Metrics().disk_queued_bytes > 0);
+    lease->Invalidate();
+  }
+  {
+    auto runner = std::make_shared<Runner>();
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(lease->restored_from_disk() && lease->cached_tokens() == 42);
+    auto& state = dynamic_cast<State&>(lease->state());
+    assert(runner->adapter->RecurrentHash(state.slot) == hash);
+  }
+  std::filesystem::remove_all(directory);
+}
+void NearTailDiskBranchSurvivesRestart() {
+  char pattern[] = "/tmp/gufo-component-branch-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 7};
+  std::vector<TextRunnerToken> seed(1100);
+  std::iota(seed.begin(), seed.end(), 10);
+  auto branch = seed;
+  branch.resize(800);
+  branch.back() = 9999;
+  {
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 1, disk);
+    auto first = pool.Acquire(seed);
+    Prefill(first);
+    (void)Generate(first);
+    (void)first.Commit();
+    auto fork = pool.Acquire(branch);
+    Prefill(fork);
+    (void)Generate(fork);
+    (void)fork.Commit();
+  }
+  {
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 1, disk);
+    branch.back() = 8888;
+    auto restored = pool.Acquire(branch);
+    assert(restored.cache_disk_hit());
+    assert(restored.cached_prompt_tokens() == 799);
+    Prefill(restored);
+    const auto token = Generate(restored);
+    restored.Invalidate();
+    auto cold = pool.Acquire(branch, sampling::SamplingConfig{}, {}, {}, false);
+    Prefill(cold);
+    assert(Generate(cold) == token);
+  }
+  std::filesystem::remove_all(directory);
+}
 }  // namespace
 int main() {
   ReuseAndBranches();
   RestartAndCorruption();
   FailedCaptureKeepsPublishedBoundary();
   DiskBudgetEvictsAnUnpinnedConversation();
+  GridDoesNotSuppressFirstDiskPrompt();
+  NearTailDiskBranchSurvivesRestart();
 }
