@@ -1926,7 +1926,15 @@ void HttpServer::handle_connection(int client_fd) {
           const std::string_view header_line(headers.data() + cursor,
                                              line_end - cursor);
           const std::size_t colon = header_line.find(':');
-          if (colon != std::string_view::npos && colon > 0) {
+          // RFC 9112 5.1: reject whitespace before the colon and obsolete
+          // line folding instead of storing a name no lookup would match.
+          const auto token = [](char c) {
+            return std::isalnum(static_cast<unsigned char>(c)) != 0 ||
+                   std::string_view("!#$%&'*+-.^_`|~").find(c) !=
+                       std::string_view::npos;
+          };
+          if (colon != std::string_view::npos && colon > 0 &&
+              std::ranges::all_of(header_line.substr(0, colon), token)) {
             std::string name(header_line.substr(0, colon));
             std::string_view raw_value = header_line.substr(colon + 1);
             while (!raw_value.empty() &&
