@@ -71,6 +71,8 @@ QwenGpuExecutor::QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
 }
 
 QwenGpuExecutor::~QwenGpuExecutor() {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeRelease();
   (void)hipStreamSynchronize(arena_.stream);
   for (const auto event : prefill_events_) {
     if (event)
@@ -128,6 +130,13 @@ QwenGpuMemoryUsage QwenGpuExecutor::GetMemoryUsage() const {
 }
 
 void QwenGpuExecutor::Reset() noexcept {
+  try {
+    if (continuation_hooks_)
+      continuation_hooks_->BeforeReset();
+  } catch (...) {
+    reset_failure_ = std::current_exception();
+    return;
+  }
   replaying_ssm_state_ = false;
   next_token_.reset();
   h_prompt_hidden_.clear();
@@ -138,6 +147,8 @@ void QwenGpuExecutor::Reset() noexcept {
   last_hidden_offset_ = 0;
   try {
     arena_.Reset();
+    if (continuation_hooks_)
+      continuation_hooks_->AfterReset();
     reset_failure_ = nullptr;
   } catch (...) {
     reset_failure_ = std::current_exception();
@@ -167,6 +178,7 @@ void QwenGpuExecutor::ConfigureVision(
 
 void QwenGpuExecutor::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
   CheckReset();
+  models::qwen::ContinuationRestore restore(continuation_hooks_);
   replaying_ssm_state_ = false;
   next_token_.reset();
   h_prompt_hidden_.clear();
@@ -178,12 +190,14 @@ void QwenGpuExecutor::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
   arena_.RestoreSnapshot(snapshot);
   vision_input_.RestoreLayout(snapshot.vision_layout_, arena_.stream);
   graph_executor_.Reset();
+  restore.Commit(snapshot.ValidContext());
 }
 
 void QwenGpuExecutor::RestoreCompactSnapshot(
     std::span<const std::uint8_t> payload,
     std::uint32_t expected_valid_context) {
   CheckReset();
+  models::qwen::ContinuationRestore restore(continuation_hooks_);
   replaying_ssm_state_ = false;
   next_token_.reset();
   h_prompt_hidden_.clear();
@@ -196,6 +210,7 @@ void QwenGpuExecutor::RestoreCompactSnapshot(
   vision_input_.RestoreLayout(QwenGpuSnapshot::ReadRopeLayout(payload),
                               arena_.stream);
   graph_executor_.Reset();
+  restore.Commit(expected_valid_context);
 }
 
 void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
@@ -205,19 +220,27 @@ void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
   if (arena_.BeginSsmReplayCapture()) {
     graph_executor_.Reset();
   }
+  if (continuation_hooks_)
+    continuation_hooks_->AfterSaveState();
 }
 
 void QwenGpuExecutor::RestoreState() {
   CheckReset();
+  models::qwen::ContinuationRestore restore(continuation_hooks_);
   if (arena_.IsSsmReplayCaptureActive())
     arena_.DisableSsmReplayCapture();
   arena_.RestoreState();
   replaying_ssm_state_ = true;
+  restore.Commit(arena_.saved_context_);
+  if (continuation_hooks_)
+    continuation_hooks_->AfterSaveState();
 }
 
 void QwenGpuExecutor::FinishVerification() {
   CheckReset();
   arena_.DisableSsmReplayCapture();
+  if (continuation_hooks_)
+    continuation_hooks_->AfterFinishVerification();
 }
 
 void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
@@ -303,6 +326,8 @@ tokenization::TokenId QwenGpuExecutor::SampleCachedLogits(
   HIP_CHECK(hipMemcpyAsync(scratch.decode.logits.data(), logits.data(),
                            logits.size_bytes(), hipMemcpyHostToDevice,
                            arena_.stream));
+  if (continuation_hooks_)
+    continuation_hooks_->AfterLogits();
   return SampleLastLogits(sampler);
 }
 
@@ -467,7 +492,6 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::Generate(
     const models::GenerationOptions& options,
     const std::function<bool(tokenization::TokenId, std::string_view)>&
         on_token) {
-  next_token_.reset();
   Reset();
   return GenerateFromPrefix(prompt_tokens, 0, options, on_token);
 }

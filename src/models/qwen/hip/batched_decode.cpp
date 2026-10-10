@@ -177,6 +177,12 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   }
 
   bool capture_replay = false;
+  std::array<models::qwen::ContinuationWrite, kMaxDecodeBatch> writes;
+  for (std::size_t i = 0; i < items.size(); ++i)
+    if (auto* hooks = items[i].executor->continuation_hooks_)
+      hooks->BeforeWrite(items[i].position, items[i].position + 1);
+  for (std::size_t i = 0; i < items.size(); ++i)
+    writes[i].Arm(items[i].executor->continuation_hooks_);
   for (const auto& item : items) {
     auto& executor = *item.executor;
     if (executor.replaying_ssm_state_) {
@@ -409,6 +415,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
 
   for (std::size_t row = 0; row < batch_size; ++row)
     (void)CheckedSampleToken(host_frontiers[row], vocab_size);
+  for (std::size_t i = 0; i < items.size(); ++i)
+    writes[i].Commit(items[i].position + 1, true);
   return {host_frontiers.begin(),
           host_frontiers.begin() + static_cast<std::ptrdiff_t>(batch_size)};
 }
@@ -476,6 +484,14 @@ QwenGpuExecutor::ForwardVerificationBatch(
     throw std::length_error(
         "Qwen verification exceeds coordinator scratch capacity");
   }
+  std::array<models::qwen::ContinuationWrite, kMaxDecodeBatch> writes;
+  for (std::size_t i = 0; i < items.size(); ++i)
+    if (auto* hooks = items[i].executor->continuation_hooks_)
+      hooks->BeforeWrite(items[i].position,
+                         items[i].position + static_cast<std::uint32_t>(
+                                                 items[i].tokens.size()));
+  for (std::size_t i = 0; i < items.size(); ++i)
+    writes[i].Arm(items[i].executor->continuation_hooks_);
   for (const auto& item : items) {
     auto& executor = *item.executor;
     if (&executor != &coordinator)
@@ -827,6 +843,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
         host_predictions.begin() + offsets[index],
         host_predictions.begin() + offsets[index] + item.tokens.size());
   }
+  for (std::size_t i = 0; i < items.size(); ++i)
+    writes[i].Commit(
+        items[i].position + static_cast<std::uint32_t>(items[i].tokens.size()),
+        false);
   return predictions;
 }
 
