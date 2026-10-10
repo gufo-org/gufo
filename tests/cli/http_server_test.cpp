@@ -132,6 +132,15 @@ public:
   std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
+  std::optional<std::size_t> count_chat_tokens(
+      const gufo::server::ChatRequest& request) const override {
+    counted_messages = request.messages.size();
+    counted_tools = request.tools.size();
+    return chat_token_count;
+  }
+  std::optional<std::size_t> chat_token_count;
+  mutable std::size_t counted_messages{0};
+  mutable std::size_t counted_tools{0};
   Result complete(
       std::string_view prompt, std::size_t limit,
       const gufo::sampling::SamplingConfig& sampling,
@@ -1113,6 +1122,30 @@ void TestCompatibilityRequests() {
                            R"({"messages":[{"role":"user","content":"hi"}]})"),
                501);
   assert(server.backend->calls == calls);
+
+  // With a backend that can count, count_tokens reports the prompt size of
+  // the same parsed request Messages would generate from, without generating.
+  server.backend->chat_token_count = 1234;
+  const auto counted = response_body(
+      server.Post("/v1/messages/count_tokens", R"({"system":"Be brief.",
+      "messages":[{"role":"user","content":[
+        {"type":"text","text":"what is it?"}]}],
+      "tools":[{"name":"look","input_schema":{"type":"object"}}]})"));
+  assert(counted.find("input_tokens") != nullptr &&
+         counted.find("input_tokens")->as_double() == 1234.0);
+  assert(server.backend->counted_messages == 2 &&
+         server.backend->counted_tools == 1);
+  assert(server.backend->calls == calls);
+  for (const auto* invalid :
+       {R"({"stream":true,"messages":[{"role":"user","content":"hi"}]})",
+        R"({"messages":[]})",
+        R"({"messages":[{"role":"user","content":"hi"}],"thinking":true})"})
+    ExpectStatus(server.Post("/v1/messages/count_tokens", invalid), 400);
+  ExpectStatus(server.Post("/v1/messages/count_tokens",
+                           R"({"model":"other","messages":[
+                             {"role":"user","content":"hi"}]})"),
+               404);
+  server.backend->chat_token_count.reset();
 
   for (const auto& [url, expected] :
        {std::pair{"data:image/gif;base64,AA==", "image/gif"},

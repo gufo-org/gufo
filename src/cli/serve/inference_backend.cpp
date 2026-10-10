@@ -3891,4 +3891,32 @@ std::size_t InferenceBackend::count_tokens(std::string_view text) const {
 #endif
 }
 
+std::optional<std::size_t> InferenceBackend::count_chat_tokens(
+    const ChatRequest& request) const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  // The same preparation as chat(): constrained tool or format requests add
+  // prompt text before the template is rendered.
+  auto sampling = sampling::SamplingConfig{};
+  auto constrained =
+      ConstrainChatRequest(request, state->scheduler->runner(), &sampling);
+  const auto& effective_request = constrained ? *constrained : request;
+  // Messages accepts text only. Count it before context admission so callers
+  // can size an oversized prompt before trimming it, as with llama.cpp.
+  // Generation still enforces the execution context limit.
+  const auto tokens =
+      state->scheduler->runner().RenderAndTokenize(effective_request);
+  if (!tokens.has_value()) {
+    return std::nullopt;
+  }
+  return tokens->size();
+#else
+  (void)request;
+  return std::nullopt;
+#endif
+}
+
 }  // namespace gufo::server

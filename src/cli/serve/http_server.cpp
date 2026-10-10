@@ -1168,38 +1168,30 @@ std::optional<HttpResponse> ReadMessagesOutputConfig(
   return {};
 }
 
-HttpResponse AnthropicMessages(const HttpRequest& req,
-                               TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  chat.reasoning = b.reasoning_defaults();
+// The request fields Messages and count_tokens share: sampling and reasoning
+// controls, tools, system text and the turns.
+std::optional<HttpResponse> ReadAnthropicChat(
+    const json::Value& body, TextGenerationBackend& b, ChatRequest* chat,
+    std::size_t* max_tokens, sampling::SamplingConfig* sampling_config) {
+  chat->reasoning = b.reasoning_defaults();
   if (body.is_object()) {
-    if (auto error = ReadThinking(body, &chat.reasoning))
-      return std::move(*error);
-    if (auto error = ReadMessagesOutputConfig(body, &chat.reasoning))
-      return std::move(*error);
+    if (auto error = ReadThinking(body, &chat->reasoning))
+      return error;
+    if (auto error = ReadMessagesOutputConfig(body, &chat->reasoning))
+      return error;
   }
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
   if (auto error =
-          ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                   &sampling_config, chat.reasoning.enabled,
+          ReadCompatibilityOptions(body, b, "max_tokens", max_tokens,
+                                   sampling_config, chat->reasoning.enabled,
                                    {.stop_field = "stop_sequences",
                                     .stream = true,
                                     .thinking = true,
                                     .output_config = true,
                                     .tools = true})) {
-    return std::move(*error);
+    return error;
   }
-  if (auto error = ParseAnthropicToolControls(body, &chat))
-    return std::move(*error);
+  if (auto error = ParseAnthropicToolControls(body, chat))
+    return error;
 
   std::vector<tokenization::ChatMessage> messages;
   if (const auto* system = body.find("system")) {
@@ -1218,15 +1210,67 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
     return InvalidCompatibilityRequest(messages_error);
   }
 
-  chat.messages = std::move(messages);
-  chat.client_id = req.client_id;
+  chat->messages = std::move(messages);
   if (const auto error = ParseStopSequences(body.find("stop_sequences"),
                                             StopSequenceFormat::kAnthropic,
-                                            &chat.stop_sequences))
+                                            &chat->stop_sequences))
     return InvalidCompatibilityRequest(*error);
+  return std::nullopt;
+}
+
+HttpResponse AnthropicMessages(const HttpRequest& req,
+                               TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+
+  ChatRequest chat;
+  std::size_t max_tokens = 0;
+  sampling::SamplingConfig sampling_config;
+  if (auto error =
+          ReadAnthropicChat(body, b, &chat, &max_tokens, &sampling_config))
+    return std::move(*error);
+  chat.client_id = req.client_id;
   return CreateAnthropicMessage(
       req, b, chat, max_tokens, sampling_config,
       body.find("stream") != nullptr && body.find("stream")->as_bool());
+} catch (const std::length_error& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "context_length_exceeded");
+} catch (const std::invalid_argument& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "invalid_prompt");
+}
+
+// The prompt size a Messages request would have, without generating.
+HttpResponse AnthropicCountTokens(const HttpRequest& req,
+                                  TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+
+  ChatRequest chat;
+  std::size_t max_tokens = 0;
+  sampling::SamplingConfig sampling_config;
+  if (auto error =
+          ReadAnthropicChat(body, b, &chat, &max_tokens, &sampling_config))
+    return std::move(*error);
+  if (body.find("stream") != nullptr && body.find("stream")->as_bool())
+    return InvalidCompatibilityRequest("'stream' must be false");
+  const auto tokens = b.count_chat_tokens(chat);
+  if (!tokens)
+    return NotImplemented(req, b);
+  json::Value resp = json::Value::object();
+  resp["input_tokens"] = *tokens;
+  return Ok(resp);
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1526,7 +1570,7 @@ void HttpServer::register_routes() {
 
   // ---- Anthropic ----
   add("POST", "/v1/messages", AnthropicMessages);
-  add("POST", "/v1/messages/count_tokens", NotImplemented);
+  add("POST", "/v1/messages/count_tokens", AnthropicCountTokens);
 
   // ---- llama-server ----
   add("POST", "/v1/rerank", NotImplemented);

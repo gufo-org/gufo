@@ -42,6 +42,7 @@ from cache_messages_loop import check_cache_messages_loop
 from system_injection import check_system_injection
 from cache_growth import check_cache_growth
 from messages_tools import check_messages_tools
+from messages_count_tokens import check_messages_count_tokens
 from cache_depth import check_cache_depth
 from cache_rotation import check_cache_rotation
 from prefill_scheduling import check_prefill_scheduling
@@ -2528,7 +2529,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
     assert proposed > 0 if speculative != "off" else proposed == 0, final
 
 
-SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
+SDK_SUITES = ("discovery", "messages-count-tokens", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
               "tool-reasoning", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
@@ -2608,6 +2609,8 @@ def main():
                                      "response": [recorder.response_hook]}
     )) as client:
         suites = {
+            "messages-count-tokens": lambda: check_messages_count_tokens(
+                client, args.model, checks, args.context),
             "discovery": lambda: check_discovery(
                 client, args.model, checks, args.context,
                 args.expected_input_modalities.split(",")),

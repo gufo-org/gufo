@@ -366,6 +366,13 @@ public:
 
   [[nodiscard]] virtual std::size_t count_tokens(
       std::string_view text) const = 0;
+
+  /// Prompt tokens a chat request would use after template rendering, without
+  /// generating. Empty when the backend cannot tell.
+  [[nodiscard]] virtual std::optional<std::size_t> count_chat_tokens(
+      const ChatRequest&) const {
+    return std::nullopt;
+  }
 };
 
 inline std::shared_ptr<TextGenerationBackend::GenerationRequest>

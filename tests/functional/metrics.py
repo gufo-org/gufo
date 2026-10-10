@@ -32,16 +32,18 @@ def canonical(value):
             return item
         protocol = item.get("type") in (
             "function", "function_call", "function_call_output",
+            "tool_use", "tool_result",
             "message", "reasoning", "item_reference") or item.get("role") in (
                 "assistant", "tool") or item.get("object") in (
                     "response", "chat.completion", "chat.completion.chunk", "text_completion")
         result = {}
         for key, child in sorted(item.items()):
-            if (protocol and key in ("id", "call_id", "tool_call_id")
+            if (protocol and key in ("id", "call_id", "tool_call_id", "tool_use_id")
                     or key == "previous_response_id") \
                     and isinstance(child, str):
                 child = identifiers.setdefault(child, f"identifier-{len(identifiers)}")
-            result[key] = child if key in payloads else visit(child)
+            opaque = key in payloads or item.get("type") == "tool_use" and key == "input"
+            result[key] = child if opaque else visit(child)
         return result
 
     return json.dumps(visit(value), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -307,6 +309,14 @@ def summarize(parts, streaming, ended, contract=None):
         usage["gufo"] = {aliases.get(key, key): value for key, value in timings.items()}
     if contract:
         validate_response(events, *contract, ended, usage, output, choices)
+        if contract[0] == "/v1/messages/count_tokens":
+            assert ended and not streaming and len(events) == 1, "incomplete count response"
+            value = events[0]
+            if contract[2] == 200:
+                assert set(value) == {"input_tokens"}, value
+                assert type(value["input_tokens"]) is int and value["input_tokens"] >= 0, value
+                return {"prompt_tokens": value["input_tokens"]}, digest(value)
+            return {}, digest(value)
         if contract[0] in DISCOVERY_ENDPOINTS:
             assert ended and not streaming and len(events) == 1, "incomplete discovery response"
             value = events[0]
