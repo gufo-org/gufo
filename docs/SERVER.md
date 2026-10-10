@@ -635,8 +635,15 @@ constraints and cache reuse match Chat Completions. Calls are returned as
 the following `tool_result` blocks. Server tools such as `web_search` are
 rejected. Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
-`/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
-and template-aware message counting are not implemented.
+`POST /v1/messages/count_tokens` accepts the same text, system, thinking and
+tool history as Messages and returns `{"input_tokens": N}` after rendering the
+model's chat template. `max_tokens` is optional; `stream: true` is rejected.
+The count includes cached prompt tokens and does not generate, prefill or
+change the conversation cache. Prompts may exceed the configured execution
+context so clients can size them before trimming; generation still enforces
+the context limit. Images are unsupported, as on Messages. Backends without
+chat counting support return 501. `/infill` still returns 501 because
+suffix-conditioned infill is not implemented.
 
 Raw Completions accepts `stream: true` and
 `stream_options: {"include_usage": true}`. The final usage event reports prompt,

@@ -25,6 +25,7 @@ from metrics import (CaseComplete, Recorder, canonical, compare, join_server_tim
 from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit, assert_terminal_call, assert_no_envelope_framing
 from discovery import assert_model_listing
+from messages_count_tokens import assert_count_response, assert_prompt_count
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
@@ -41,6 +42,53 @@ from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_messages_tool_ids_preserve_links_and_argument_data(self):
+        def history(identifier):
+            return {"messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": identifier, "name": "read",
+                     "input": {"type": "message", "id": "user-data"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": identifier, "content": "ok"}]}]}
+
+        first, renamed = history("call_a"), history("call_b")
+        self.assertEqual(canonical(first), canonical(renamed))
+        broken_link = deepcopy(first)
+        broken_link["messages"][1]["content"][0]["tool_use_id"] = "missing_call"
+        self.assertNotEqual(canonical(first), canonical(broken_link))
+        changed_argument = deepcopy(first)
+        changed_argument["messages"][0]["content"][0]["input"]["id"] = "changed-data"
+        self.assertNotEqual(canonical(first), canonical(changed_argument))
+
+    def test_messages_count_tokens_contract(self):
+        body = {"input_tokens": 318}
+        measured, fingerprint = summarize([(1, json.dumps(body).encode())], False, True,
+                                          ("/v1/messages/count_tokens", {}, 200))
+        self.assertEqual(measured, {"prompt_tokens": 318})
+        self.assertIsNotNone(fingerprint)
+        self.assertEqual(assert_count_response(body), 318)
+        for invalid in ({}, {"input_tokens": True}, {"input_tokens": -1},
+                        {"input_tokens": 3.5}, {"input_tokens": 318, "output_tokens": 0}):
+            with self.subTest(invalid=invalid), self.assertRaises(AssertionError):
+                summarize([(1, json.dumps(invalid).encode())], False, True,
+                          ("/v1/messages/count_tokens", {}, 200))
+        with self.assertRaises(AssertionError):
+            summarize([(1, json.dumps(body).encode())], False, False,
+                      ("/v1/messages/count_tokens", {}, 200))
+
+    def test_messages_count_tokens_includes_cached_prompt(self):
+        for usage in ({"input_tokens": 318},
+                      {"input_tokens": 18, "cache_read_input_tokens": 300},
+                      {"input_tokens": 0, "cache_read_input_tokens": 318},
+                      {"input_tokens": 18, "cache_creation_input_tokens": 300}):
+            with self.subTest(usage=usage):
+                assert_prompt_count(318, usage)
+                with self.assertRaises(AssertionError):
+                    assert_prompt_count(317, usage)
+        for value in (-1, True, 1.5, "318"):
+            with self.subTest(value=value), self.assertRaises(AssertionError):
+                assert_prompt_count(318, {"input_tokens": value})
+
     def test_harness_hash_covers_imported_modules(self):
         # Baselines are matched by harness_sha256, so modules reached only
         # through imports must change the hash too.

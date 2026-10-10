@@ -3904,12 +3904,15 @@ std::optional<std::size_t> InferenceBackend::count_chat_tokens(
   auto constrained =
       ConstrainChatRequest(request, state->scheduler->runner(), &sampling);
   const auto& effective_request = constrained ? *constrained : request;
-  const auto prompt =
-      state->scheduler->runner().PreparePrompt(effective_request);
-  if (!prompt.has_value()) {
+  // Messages accepts text only. Count it before context admission so callers
+  // can size an oversized prompt before trimming it, as with llama.cpp.
+  // Generation still enforces the execution context limit.
+  const auto tokens =
+      state->scheduler->runner().RenderAndTokenize(effective_request);
+  if (!tokens.has_value()) {
     return std::nullopt;
   }
-  return prompt->tokens.size();
+  return tokens->size();
 #else
   (void)request;
   return std::nullopt;
