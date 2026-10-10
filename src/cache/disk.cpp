@@ -510,10 +510,12 @@ struct DiskStore::Impl {
     // new write could otherwise fill their missing dependencies and resurrect
     // conflicting checkpoint identities on the next restart.
     recovery_required = stats.rejected_manifests != 0;
-    // A process abort may leave a complete manifest rename in the kernel's
-    // cache before the publishing process synced its directory. Make surviving
-    // entries durable before startup exposes them; no payload reads are needed.
-    SyncFd(manifests.Get());
+    // A process abort can leave unsynced renames or deletions in any managed
+    // namespace. Persist the discovered namespace before exposing entries or
+    // spending deletion credits; no payload reads or orphan cleanup are needed.
+    for (int fd :
+         {manifests.Get(), chunks.Get(), private_files.Get(), temporary.Get()})
+      SyncFd(fd);
     std::sort(entries.begin(), entries.end(),
               [](const auto& a, const auto& b) { return a.file_ < b.file_; });
   }

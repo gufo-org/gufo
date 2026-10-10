@@ -214,3 +214,12 @@ reconciliation succeed. Regressions inject all three retirement sync failures
 and all four reclamation sync failures, checking fresh-ID writes stay blocked
 until successful recovery. The audit used a modeled crash namespace, not a
 physical power-loss test.
+
+The follow-up audit reproduced the same deletion-credit risk across a process
+restart: startup counted the current payload namespace but synced only manifests.
+Startup now syncs all four managed directories before returning, making surviving
+renames and deletions durable before any freed capacity can be reused. The test
+restarts after every retirement sync failure, independently observes all four
+startup directory syncs, and rejects construction when any of those syncs fails.
+The review probe modeled 2,048 surviving bytes at a 1,192-byte budget; it did not
+claim physical power-loss testing.

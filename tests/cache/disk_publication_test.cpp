@@ -373,6 +373,45 @@ void ReclamationSyncFailures() {
     CheckPublished(store, dir.path);
   }
 }
+void RestartDeletionCredits() {
+  for (int retirement_sync : {0, 1, 2}) {
+    Directory dir;
+    Fixture f;
+    const auto budget = EncodeManifest(f.manifest).size() + 28;
+    {
+      DiskStore store(ledger, dir.path, budget);
+      store.Publish(Id(100), f.manifest, f.buffers);
+      fail_sync = retirement_sync;
+      Reject([&] { (void)store.Retire({1}); });
+      fail_sync = -1;
+    }
+    events.clear();
+    record_io = true;
+    {
+      DiskStore reopened(ledger, dir.path, budget);
+      assert(reopened.Entries().empty());
+      assert(reopened.Stats().managed_bytes == Managed(dir.path));
+    }
+    record_io = false;
+    const auto count = events.size();
+    assert(count >= 4);
+    std::size_t i = count - 4;
+    for (auto directory : {"manifests", "chunks", "private", "tmp"})
+      assert(events[i++] == "sync:" + (dir.path / "v2" / directory).string());
+    // Failure to persist any namespace must prevent a usable store, including
+    // after the previous process reported deletion and released its budget.
+    for (std::size_t step = count - 4; step < count; ++step) {
+      fail_sync = step;
+      Reject([&] { DiskStore reopened(ledger, dir.path, budget); });
+      fail_sync = -1;
+    }
+    DiskStore reopened(ledger, dir.path, budget);
+    reopened.ReclaimOrphans();
+    reopened.WaitForReclamation();
+    reopened.Publish(Id(101), f.manifest, f.buffers);
+    CheckPublished(reopened, dir.path);
+  }
+}
 void RecoveryAndUnknowns() {
   Directory dir;
   Fixture f;
@@ -548,6 +587,7 @@ int main() {
   RetirementFailure();
   RetirementUnlinkFailure();
   ReclamationSyncFailures();
+  RestartDeletionCredits();
   UncertainManifestBarrier();
   RejectedStartupBarrier();
   RecoveryAndUnknowns();
