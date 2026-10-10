@@ -816,24 +816,25 @@ void Session::Reset() {
   mtp_.residual_valid = false;
   mtp_.blocks = 0;
   const Config& c = owner_->config();
+  const auto zero = [&](void* pointer, std::size_t bytes) {
+    const auto result = hipMemsetAsync(pointer, 0, bytes, owner_->stream());
+    // Adapter invalidation may report success only after every zero fill was
+    // submitted and completed. Keep legacy cleanup's error policy unchanged.
+    if (result != hipSuccess && continuation_hooks_)
+      throw std::runtime_error(hipGetErrorString(result));
+  };
   for (auto& l : linear_) {
     if (l.state != nullptr) {
-      (void)hipMemsetAsync(l.conv_state, 0,
-                           static_cast<std::size_t>(c.ssm_conv_kernel - 1) *
-                               c.SsmConvChannels() * sizeof(float),
-                           owner_->stream());
-      (void)hipMemsetAsync(l.state, 0,
-                           static_cast<std::size_t>(c.ssm_num_v_heads) *
-                               c.ssm_head_dim * c.ssm_head_dim * sizeof(float),
-                           owner_->stream());
+      zero(l.conv_state, static_cast<std::size_t>(c.ssm_conv_kernel - 1) *
+                             c.SsmConvChannels() * sizeof(float));
+      zero(l.state, static_cast<std::size_t>(c.ssm_num_v_heads) *
+                        c.ssm_head_dim * c.ssm_head_dim * sizeof(float));
     }
   }
   blocks_ = 0;
   if (ple_history_ != nullptr) {
-    (void)hipMemsetAsync(ple_history_, 0,
-                         static_cast<std::size_t>(c.PleConvHistory()) *
-                             c.HcDim() * sizeof(float),
-                         owner_->stream());
+    zero(ple_history_, static_cast<std::size_t>(c.PleConvHistory()) *
+                           c.HcDim() * sizeof(float));
   }
 }
 
@@ -2621,6 +2622,13 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   } pinned_inputs{stream_};
   // Start the disk rows before protecting checkpoint rows, which can commit
   // device pages: layer 0 alone cannot hide the whole read.
+  if (session.continuation_hooks_) {
+    const auto end =
+        session.position_ + static_cast<std::uint32_t>(tokens.size());
+    session.continuation_hooks_->BeforeWrite(
+        false, session.position_, end, session.blocks_,
+        end > c.indexer_top_k ? end / c.compress_ratio : session.blocks_);
+  }
   const auto ngram = session.ngram_;
   if (c.ple_layer >= 0) {
     if (ngram_ == nullptr) {
@@ -2895,6 +2903,12 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
   if (n == 0 || keep == 0 || keep > n) {
     AssignError(error_msg, "rollback outside the pending speculative batch");
     return false;
+  }
+  if (session.continuation_hooks_ && keep < n) {
+    const auto end = session.spec_base_ + keep;
+    session.continuation_hooks_->BeforeWrite(
+        false, end, session.position_,
+        std::min(session.blocks_, end / c.compress_ratio), session.blocks_);
   }
   session.spec_tokens_ = 0;
   if (logits != nullptr &&
@@ -3761,6 +3775,11 @@ bool Executor::MtpForward(Session& session,
     AssignError(error_msg, "MTP context is full");
     return false;
   }
+  if (session.continuation_hooks_)
+    session.continuation_hooks_->BeforeWrite(
+        true, pos, pos + n, session.mtp_.blocks,
+        pos + n > config().indexer_top_k ? (pos + n) / config().compress_ratio
+                                         : session.mtp_.blocks);
   session.PreserveSnapshots(session.position_, session.mtp_.position);
   ++session.mutation_epoch_;
   session.mtp_.residual_valid = false;

@@ -28,6 +28,8 @@ struct ModelWeights;
 struct MtpWeights;
 class NgramTable;
 struct MtpCandidateLogits;
+class ContinuationAdapter;
+class ContinuationHooks;
 namespace rocm {
 class DeviceModel;
 class Executor;
@@ -113,6 +115,7 @@ private:
   MtpBatchController batch_policy_;
 
   friend class Session;
+  friend class ContinuationAdapter;
 };
 
 /// One conversation's context. Sync feeds a prompt (reusing whatever prefix
@@ -195,7 +198,7 @@ public:
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
   void ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt);
   /// A new request reusing cached context starts its own acceptance history.
-  void ResetDraftPolicy() noexcept { draft_length_.Reset(); }
+  void ResetDraftPolicy();
 
   struct SpeculativeStats {
     std::uint64_t cycles{0};
@@ -232,6 +235,7 @@ public:
 
 private:
   friend class Model;
+  friend class ContinuationAdapter;
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
 
   bool Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
@@ -288,6 +292,7 @@ private:
   [[nodiscard]] std::span<const std::uint8_t> ImageIdentity(
       std::size_t token_count) const;
   bool valid_{true};
+  ContinuationHooks* continuation_hooks_{nullptr};
   [[nodiscard]] bool MtpEnabled() const noexcept;
 };
 

@@ -2,7 +2,7 @@
 
 **Milestone:** Adapters · **Depends on:** 02, 06, 08 · **Size:** L (split:
 inventory, then AR, then MTP) · **Affects:** nothing served until card 19 ·
-**Status:** proposed
+**Status:** draft implementation; qualification in progress
 
 ## Goal
 
@@ -100,3 +100,82 @@ required (see the README).
 
 ## Review notes
 
+
+## Results (2026-10-10, draft)
+
+The model-local [inventory and mutation audit](../../models/qwen3.8-flash-next/CONTINUATION-ADAPTER.md)
+record 124 AR / 130 MTP components, private recurrent/ring state and independent
+target/draft/pool frontiers. Serving still uses the legacy cache.
+
+Environment: homelab, Linux 7.2.9, gfx1151, 124 GiB HIP-visible memory,
+performance platform profile, pinned Nix GCC 15.3.0 / ROCm 7.2.3. Production
+CMake release builds compare with clean main `92aaed5d30cd82e5730e43be3501775b77c26e5e`.
+Weights are the retained four-shard UD-Q4_K_XL target and shared Q8_0 predictor
+from [model identities](../../models/qwen3.8-flash-next/artifacts/model-identities.json).
+
+CPU geometry passes. The earlier candidate passed AR/MTP exact component and
+next-step checks, seeded rejection and carried residual/controller replay, empty
+state, reset/release, peer-stream overlap, shorter/edit restore and image input
+identity/layout. Legacy snapshot checks and independent GDN numerical checks
+pass. Hosted CPU checks passed 54/54; the geometry test has since been added to
+the hosted target and needs the final 55-test check. The final prefill-tail
+planner and injected reset-submission failure checks are awaiting their rerun.
+
+Production adapter baselines use serial transfers into packed, precommitted
+64 MiB slabs, with 4 GiB total backing committed before prefill. Times exclude
+model loading, backing allocation and byte-verification copies. Restore includes
+`BeginRestore`, all component loads and `Validate`. Both destination bytes and
+next-step logits/drafts are checked exactly.
+
+| Mode | Tokens | Private bytes | Append bytes | Private capture ms | Full materialization ms | Cross-slot restore ms | Assigned slab bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| AR | 32,768 | 131,614,880 | 830,603,264 | 8.35 | 19.89 | 12.68 | 1,006,632,960 |
+| AR | 100,000 | 131,614,880 | 2,534,800,000 | 8.04 | 40.21 | 33.26 | 2,684,354,560 |
+| MTP | 32,768 | 133,032,096 | 899,806,976 | 8.67 | 21.64 | 13.61 | 1,073,741,824 |
+
+MTP 100k qualification is still running. The 32k/100k cross-slot probes use
+slot capacities 32,896/100,128 so the restored next step fits. AR C1 at capacity
+100k and AR C8 at capacity 8,192 also fit with every live slot prefilled, four
+decode cycles, 4 GiB physically committed backing and conservative remaining
+rollback/vision/scratch claims. These measurements qualify the adapter and
+physical memory envelope, not card 19's checkpoint-store allocation policy.
+Eight long histories remain excluded.
+
+The initial inactive-hook speed gate passes at d0/32k for pp2048/tg128 AR and
+MTP mixed/repetitive: counts, completion hashes, proposed drafts and acceptance
+are exact. Per-phase time changes are within 2.79% prefill and 0.97% decode;
+there is no averaging across requests. All setup observations were retained: the
+first candidate had stale build dependencies, and one fresh MTP 32k observation
+overlapped a test rebuild. Those timings are unqualified; clean matched repeats
+pass. The final reset-error hardening still needs its production rerun.
+
+Candidate HTTP `long-context` and `cache` correctness passes in AR (zero drafts)
+and MTP (298 actual drafts, 210 accepted). Individual request/phase timing flags
+in snapshot copies, restore, cancellation and queueing remain **inconclusive and
+unqualified**; unchanged-main controls and the final candidate rerun are pending.
+The new cache's HTTP path remains deferred until card 19 exists and attaches it.
+
+Reproduction (select a mode and depth explicitly):
+
+```sh
+nix develop -c cmake --build --preset gpu-test \
+  --target qwen38_flash_next_continuation_adapter_test
+build/gpu-test/tests/models/qwen38_flash_next/qwen38_flash_next_continuation_adapter_test \
+  --model /persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  --mtp-model /persist/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
+
+nix develop -c cmake --preset release -DGUFO_BUILD_TOOLS=ON
+nix develop -c cmake --build --preset release \
+  --target qwen38_flash_next_continuation_probe
+build/release/src/models/qwen38_flash_next/qwen38_flash_next_continuation_probe \
+  --model /persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  --mtp-model /persist/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf \
+  --mode mtp --context 100000 --sessions 2 --round-trip
+```
+
+Raw logs, commands, JSON request measurements and failed/inconclusive runs are
+retained outside the repository under `/tmp/gufo-card14-*`; they will be copied
+to persistent qualification storage before final review. Benchmark `source`
+metadata identifies the harness checkout, so binary hashes and the clean main
+workspace/source patch are recorded separately. No standalone measurement JSON
+is added to this repository.
