@@ -1840,6 +1840,42 @@ void TestRawCompletionStreaming() {
       400);
 }
 
+// A generic failure keeps its cause in the server log, not only in the
+// client's response, whether it happens before or after streaming starts.
+void TestGenerationFailureLogsCause() {
+  std::ostringstream output;
+  auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+  {
+    RunningServer server;
+    for (const int failure : {1, 6}) {
+      server.backend->failure = failure;
+      for (const auto* path :
+           {"/v1/completions", "/v1/chat/completions", "/v1/responses"}) {
+        const std::string body =
+            std::string_view(path) == "/v1/chat/completions"
+                ? R"({"model":"test","messages":[{"role":"user","content":"hello"}],"stream":true})"
+            : std::string_view(path) == "/v1/responses"
+                ? R"({"input":"hello","stream":true})"
+                : R"({"prompt":"hello","stream":true})";
+        ExpectStatus(server.Post(path, body), failure == 6 ? 200 : 500);
+      }
+    }
+  }
+  std::clog.rdbuf(previous_sink);
+  const std::string log = output.str();
+  const auto count = [&log](std::string_view needle) {
+    std::size_t found = 0;
+    for (auto at = log.find(needle); at != std::string::npos;
+         at = log.find(needle, at + 1))
+      ++found;
+    return found;
+  };
+  // Before streaming, the HTTP handler logs the cause with the request ID.
+  assert(count("event=server_exception reason=context exceeded") == 3);
+  // After streaming starts, each endpoint logs it once beside its stable code.
+  assert(count("[ERROR] [chat] context exceeded") == 3);
+}
+
 void TestDeviceLoss() {
   std::atomic<int> hook_calls{0};
   RunningServer server({.on_device_lost = [&] { ++hook_calls; }});
@@ -2444,6 +2480,7 @@ int main() {
   TestResponsesToolImages();
   TestModelInputModalities();
   TestRawCompletionStreaming();
+  TestGenerationFailureLogsCause();
   TestDeviceLoss();
   TestDeviceLossWhileWriterBlocked();
   TestRawCompletionPromptProgress();

@@ -2162,8 +2162,11 @@ void HttpServer::handle_connection(int client_fd) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
-    HttpResponse resp = Err(500, "Internal Server Error",
-                            *e.what() ? e.what() : "generation failed",
+    const char* message = *e.what() ? e.what() : "generation failed";
+    // Retain the cause in logs alongside the client's stable code.
+    Logger::Error("http", "request=" + req.request_id +
+                              " event=server_exception reason=" + message);
+    HttpResponse resp = Err(500, "Internal Server Error", message,
                             "internal_error", "server_exception");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     Logger::LogRequest(req.request_id, req.method, req.path,
