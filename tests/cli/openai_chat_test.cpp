@@ -17,6 +17,7 @@
 
 #include "src/core/json.hpp"
 #include "src/core/json_constraint.hpp"
+#include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 
 using gufo::tokenization::kImEnd;
@@ -1503,6 +1504,103 @@ void TestFlatToolFieldsReachTemplate() {
         backend.last_request.messages, backend.last_request.tools, options);
     Expect(flat_prompt.has_value() && nested_prompt == flat_prompt,
            "Flat and nested tools produce identical Qwen prompts");
+  }
+}
+
+// Each dialect's renderer and parser describe one wire format. Render a
+// historical call through the model's own chat template, hand exactly those
+// bytes back as generated text, and require every string argument to return
+// unchanged (#290).
+void TestToolCallRenderParseRoundTrip() {
+  const std::vector<std::string> values = {
+      "plain",
+      "ends with a newline\n",
+      "  indented first line\n    and a second\n",
+      "",
+      "\nstarts with a newline",
+      "blank\n\nlines\n\n",
+      "tab\tand trailing space ",
+      "quoted <b>markup</b> and \"quotes\"",
+  };
+  for (const bool deepseek : {false, true}) {
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      const auto& value = values[index];
+      std::string text;
+      if (deepseek) {
+        gufo::models::deepseek_v4_flash::ChatMessage call;
+        call.role = "assistant";
+        call.tool_calls.push_back(
+            {.name = "record",
+             .arguments = {{.name = "text", .value = value},
+                           {.name = "other", .value = "x"}},
+             .id = "call_0"});
+        const auto rendered = gufo::models::deepseek_v4_flash::RenderChat(
+            std::vector<gufo::models::deepseek_v4_flash::ChatMessage>{
+                {.role = "user", .content = "go"}, call});
+        const auto begin = rendered.find("<｜DSML｜tool_calls>");
+        const auto end_tag = std::string_view("</｜DSML｜tool_calls>");
+        const auto end = rendered.find(end_tag);
+        Expect(begin != std::string::npos && end != std::string::npos,
+               "DeepSeek renders a historical call");
+        text = rendered.substr(begin, end + end_tag.size() - begin);
+      } else {
+        gufo::tokenization::ChatMessage call;
+        call.role = gufo::tokenization::ChatRole::kAssistant;
+        call.tool_calls.push_back(
+            {.id = "call_0",
+             .name = "record",
+             .arguments = {{.name = "text", .value = value},
+                           {.name = "other", .value = "x"}}});
+        std::vector<gufo::tokenization::ChatMessage> history = {
+            {gufo::tokenization::ChatRole::kUser, "go"}, call};
+        gufo::tokenization::ChatTemplateOptions options;
+        options.enable_thinking = false;
+        const auto rendered =
+            gufo::tokenization::QwenChatTemplate::Render(history, {}, options);
+        Expect(rendered.has_value(), "Qwen renders a historical call");
+        const auto begin = rendered->find("<tool_call>");
+        const auto end_tag = std::string_view("</tool_call>");
+        const auto end = rendered->find(end_tag);
+        Expect(begin != std::string::npos && end != std::string::npos,
+               "Qwen renders a historical call envelope");
+        text = rendered->substr(begin, end + end_tag.size() - begin);
+      }
+
+      FakeBackend backend;
+      backend.pieces = {text};
+      const auto response = gufo::server::HandleOpenAiChat(Request(R"({
+        "model":"test-model",
+        "messages":[{"role":"user","content":"record"}],
+        "tools":[{"type":"function","function":{"name":"record",
+          "parameters":{"type":"object","properties":{
+            "text":{"type":"string"},"other":{"type":"string"}}}}}],
+        "stream":false
+      })"),
+                                                           backend);
+      const std::string label = std::string(deepseek ? "DeepSeek" : "Qwen") +
+                                " case " + std::to_string(index);
+      Expect(response.status == 200, label + ": request is accepted");
+      const auto body = gufo::json::parse(response.body);
+      const auto* choices = body.find("choices");
+      const auto* message = choices != nullptr && !choices->items().empty()
+                                ? choices->items()[0].find("message")
+                                : nullptr;
+      const auto* calls =
+          message != nullptr ? message->find("tool_calls") : nullptr;
+      Expect(calls != nullptr && calls->items().size() == 1,
+             label + ": the rendered call parses back as one call");
+      const auto* function = calls->items()[0].find("function");
+      Expect(function != nullptr, label + ": the call has a function");
+      const auto arguments =
+          gufo::json::parse(function->member_str("arguments"));
+      const auto* text_argument = arguments.find("text");
+      Expect(text_argument != nullptr && text_argument->is_string() &&
+                 text_argument->get_str() == value &&
+                 arguments.member_str("other") == "x",
+             label +
+                 ": string arguments survive the round trip byte for "
+                 "byte");
+    }
   }
 }
 
@@ -5090,6 +5188,7 @@ void TestBracketDenseContent() {
 }
 
 int main() {
+  TestToolCallRenderParseRoundTrip();
   TestHistoricalTypedArgumentsUseTojson();
   TestStreamingPromptProgress();
   TestResponsesPromptProgress();
