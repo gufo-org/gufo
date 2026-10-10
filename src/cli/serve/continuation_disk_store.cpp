@@ -1297,7 +1297,8 @@ struct ContinuationDiskStore::Impl {
       std::span<const TextRunnerToken> prompt,
       std::span<const std::uint8_t> input_identity,
       std::size_t stable_prefix_tokens,
-      std::span<const ContinuationInputPrefix> input_prefixes) {
+      std::span<const ContinuationInputPrefix> input_prefixes,
+      std::size_t min_prefix_tokens) {
     const auto descriptor = DescriptorForInput(runner, input_identity);
     if (!descriptor.persistence.has_value()) {
       Emit(ContinuationDiskEventAction::kMiss,
@@ -1311,6 +1312,14 @@ struct ContinuationDiskStore::Impl {
       if (candidate == entries.end()) {
         Emit(ContinuationDiskEventAction::kMiss,
              ContinuationDiskEventReason::kNotFound, 0, 0, 0);
+        return {};
+      }
+      if (candidate->tokens.size() <= min_prefix_tokens) {
+        // The caller already holds a cache prefix at least this long; a
+        // restore would regress it. The state is not touched (#411).
+        Emit(ContinuationDiskEventAction::kMiss,
+             ContinuationDiskEventReason::kNotLonger, candidate->file_bytes,
+             candidate->payload_bytes, candidate->tokens.size());
         return {};
       }
       if (stable_prefix_tokens != 0 &&
@@ -1373,7 +1382,10 @@ struct ContinuationDiskStore::Impl {
         Emit(ContinuationDiskEventAction::kMiss,
              ContinuationDiskEventReason::kRestoreFailure, file_bytes,
              payload_bytes, token_count);
-        return {};
+        // The restore mutated state before failing and the artifact is gone.
+        // Say so: a caller holding a shorter RAM hit must not keep reusing
+        // its metrics against this invalidated state.
+        return {.state_invalidated = true};
       }
 
       TouchEntry(candidate);
@@ -1589,7 +1601,8 @@ ContinuationDiskStore::RestoreLongestPrefix(
     std::span<const TextRunnerToken> prompt,
     std::span<const std::uint8_t> input_identity,
     std::size_t stable_prefix_tokens,
-    std::span<const ContinuationInputPrefix> input_prefixes) {
+    std::span<const ContinuationInputPrefix> input_prefixes,
+    std::size_t min_prefix_tokens) {
   if (stable_prefix_tokens > prompt.size())
     throw std::invalid_argument("stable cache prefix exceeds prompt length");
   const ScopedOperationPermit permit(impl_->operation_gate, false);
@@ -1599,7 +1612,8 @@ ContinuationDiskStore::RestoreLongestPrefix(
     return {};
   }
   return impl_->RestoreLongestPrefix(runner, state, prompt, input_identity,
-                                     stable_prefix_tokens, input_prefixes);
+                                     stable_prefix_tokens, input_prefixes,
+                                     min_prefix_tokens);
 }
 
 std::vector<std::size_t> ContinuationDiskStore::SharedPrefixBoundaries(

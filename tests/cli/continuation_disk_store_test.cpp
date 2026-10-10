@@ -447,6 +447,65 @@ void TestLongestPrefixAndForcedHashCollision() {
          "forced collision without exact tokens remains a miss");
 }
 
+void TestMinPrefixRestoresOnlyLongerCheckpoints() {
+  // #411: a caller holding a shorter RAM-cache hit consults the disk tier
+  // with min_prefix_tokens set to its cached count; the disk tier restores
+  // only a stored checkpoint that extends past it, and never touches the
+  // state otherwise.
+  TemporaryDirectory directory;
+  const FakeRunner runner("extend-past-cached");
+  ContinuationDiskStore store(StoreOptions(directory.path()));
+
+  auto short_snapshot = MakeSnapshot(runner, 11, 6143);
+  auto long_snapshot = MakeSnapshot(runner, 22, 7657);
+  std::vector<TextRunnerToken> prompt(7658);
+  for (std::size_t i = 0; i < prompt.size(); ++i)
+    prompt[i] = static_cast<TextRunnerToken>(i);
+  Expect(store.Save(runner, std::span<const TextRunnerToken>(prompt).first(6144),
+                    *short_snapshot).stored,
+         "short checkpoint stored");
+  Expect(store.Save(runner, prompt, *long_snapshot).stored,
+         "long checkpoint stored");
+
+  // The #411 shape: the caller already holds the first 6144 tokens in the
+  // RAM tier; the disk tier's longer checkpoint extends the cache.
+  auto state = runner.CreateState();
+  const auto extended =
+      store.RestoreLongestPrefix(runner, *state, prompt, {}, 0, {}, 6144);
+  Expect(extended.restored && extended.token_count == 7658 &&
+             RequireFakeState(*state).value == 22 &&
+             RequireFakeState(*state).position == 7657,
+         "a longer disk checkpoint extends a short RAM-cache hit");
+
+  // Nothing longer than the hit exists: the disk tier must not touch the
+  // state and must not regress it.
+  const auto not_longer =
+      store.RestoreLongestPrefix(runner, *state, prompt, {}, 0, {}, 7658);
+  Expect(!not_longer.restored && RequireFakeState(*state).value == 22 &&
+             RequireFakeState(*state).position == 7657,
+         "no longer checkpoint: miss without touching the state");
+
+  // A short prompt whose only stored checkpoint equals its own length
+  // cannot be extended either.
+  auto other_state = runner.CreateState();
+  RequireFakeState(*other_state).value = 77;
+  Expect(!store
+              .RestoreLongestPrefix(
+                  runner, *other_state,
+                  std::span<const TextRunnerToken>(prompt).first(6144), {}, 0,
+                  {}, 6144)
+              .restored,
+         "short prompt: its own checkpoint is not longer than the hit");
+  Expect(RequireFakeState(*other_state).value == 77,
+         "short prompt miss leaves the state untouched");
+
+  // Default (min 0) behavior is unchanged: the longest checkpoint wins.
+  auto fresh_state = runner.CreateState();
+  const auto longest = store.RestoreLongestPrefix(runner, *fresh_state, prompt);
+  Expect(longest.restored && longest.token_count == 7658,
+         "default restore still picks the longest checkpoint");
+}
+
 void TestCorruptionBecomesDeterministicMissAndRemoval() {
   TemporaryDirectory directory;
   const FakeRunner runner("corruption-model");
@@ -1212,6 +1271,7 @@ int main() {
   TestSha256KnownVector();
   TestRestartRestoreAndCompatibilityIdentity();
   TestLongestPrefixAndForcedHashCollision();
+  TestMinPrefixRestoresOnlyLongerCheckpoints();
   TestCorruptionBecomesDeterministicMissAndRemoval();
   TestByteAndStagingLimits();
   TestAutomaticStagingAndAdmissionDiagnostics();

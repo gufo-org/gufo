@@ -6,6 +6,7 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -184,6 +185,47 @@ void TestColdMissThenExactExtensionHit() {
     Expect(invalidations[0] == 0, "hit does not invalidate retained state");
     lease.Commit(extension);
   }
+}
+
+void TestLeaseAdoptsLongerDiskRestoreOverRamHit() {
+  // #411: a short RAM-cache hit lease may adopt a strictly longer
+  // lower-tier restore; re-adoption and non-extending adoption stay invalid.
+  std::vector<std::size_t> invalidations(1);
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); });
+
+  const std::vector<gufo::server::ContinuationToken> seed{1, 2, 3};
+  {
+    auto lease = cache.Acquire(seed);
+    lease.Commit(seed);
+  }
+  const std::vector<gufo::server::ContinuationToken> long_prompt{1, 2, 3, 4,
+                                                                 5, 6, 7, 8, 9};
+  auto lease = cache.Acquire(long_prompt);
+  Expect(lease.cache_hit() && lease.cached_tokens() == 3,
+         "seeded RAM hit covers the shared prefix");
+
+  bool threw = false;
+  try {
+    lease.AdoptRestoredPrefix(3, 100, 0.5);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  Expect(threw, "non-extending adoption is rejected");
+
+  lease.AdoptRestoredPrefix(7, 100, 0.5);
+  Expect(lease.cache_hit() && lease.cached_tokens() == 7 &&
+             lease.restored_from_disk(),
+         "strictly longer disk restore deepens the RAM hit");
+
+  threw = false;
+  try {
+    lease.AdoptRestoredPrefix(9, 100, 0.5);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  Expect(threw, "re-adoption after a disk restore is rejected");
+  lease.Commit(long_prompt);
 }
 
 void TestDivergenceInvalidatesOldState() {
@@ -1367,6 +1409,7 @@ int main() {
   TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
   TestColdMissThenExactExtensionHit();
+  TestLeaseAdoptsLongerDiskRestoreOverRamHit();
   TestDivergenceInvalidatesOldState();
   TestUncommittedLeaseIsInvalidated();
   TestLongestAvailablePrefixWins();

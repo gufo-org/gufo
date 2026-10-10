@@ -628,6 +628,7 @@ void TestInPassFailureRetainsOnlyCompletedCheckpoints() {
 class PersistentSnapshotRunner final : public SnapshotRunner {
 public:
   std::function<void()> before_serialize;
+  std::function<void(TextRunnerState&)> after_restore;
   PersistentSnapshotRunner(std::shared_ptr<FakeStats> stats,
                            std::string identity,
                            std::size_t retained_snapshot_capacity_bytes = 256,
@@ -699,6 +700,8 @@ public:
                                   static_cast<TextRunnerToken>(fields[3]))
                             : std::nullopt;
     ++stats_->snapshot_restores;
+    if (after_restore)
+      after_restore(state);
   }
 
 private:
@@ -1061,6 +1064,75 @@ void TestPersistentSnapshotRestoresAcrossPools() {
   Expect(!miss.cache_hit() && !miss.cache_disk_hit(),
          "changed compatibility identity is a cold miss");
   miss.Invalidate();
+}
+
+void TestFailedDiskUpgradeRetainsAValidPrefix(
+    std::size_t expected_restore_attempts) {
+  TemporaryDirectory directory;
+  const TextRunnerDiskCacheOptions disk_cache{
+      .directory = directory.path(),
+      .capacity_bytes = 8192,
+      .staging_capacity_bytes = 4096,
+      .min_checkpoint_step_tokens = 0};
+  {
+    auto writer = std::make_shared<PersistentSnapshotRunner>(
+        std::make_shared<FakeStats>(), "artifact-A");
+    TextRunnerPool pool(writer, 1, disk_cache);
+    auto seed = pool.Acquire({1, 2, 3, 4, 5, 6}, {}, {}, {}, true, 2);
+    while (!seed.prefill_complete())
+      (void)seed.Prefill(64);
+    Expect(seed.Commit().disk_queued_bytes > 0,
+           "failure fixture queues its disk checkpoints");
+  }
+
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentSnapshotRunner>(
+      stats, "artifact-A", 256);
+  TextRunnerPool reader(runner, 1, disk_cache);
+  {
+    auto short_prefix = reader.Acquire({1, 2});
+    Expect(short_prefix.cache_disk_hit() &&
+               short_prefix.cached_prompt_tokens() == 2,
+           "failure fixture first restores the short prefix");
+    Expect(short_prefix.Commit().disk_queued_bytes == 0,
+           "failure fixture warmup queues no competing write");
+  }
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 4, 5, 6, 7};
+  Expect(reader.CachedPrefixTokens(prompt, nullptr) == 2,
+         "exact short RAM prefix exists before the failed disk upgrade");
+
+  std::size_t restore_attempts = 0;
+  runner->after_restore = [&](TextRunnerState& state) {
+    ++restore_attempts;
+    Expect(RequireFakeState(state).position == 6,
+           "failure occurs after the longer disk state was installed");
+    std::cout << "installed_disk_position=6 restore_attempts="
+              << restore_attempts << '\n';
+    throw std::runtime_error("injected persistent restore failure");
+  };
+  const auto states_created = stats->states_created;
+  auto extension =
+      reader.Acquire(prompt, {}, [] { return false; }, {}, true, 2);
+  Expect(restore_attempts == expected_restore_attempts,
+         "exact expected disk attempt count, without a recovery retry");
+  Expect(!extension.cache_disk_hit() && extension.cache_hit() &&
+             extension.cached_prompt_tokens() == 2,
+         "failure recovers the retained RAM checkpoint and its exact metrics");
+  Expect(stats->states_created == states_created,
+         "recovery reuses the state slot without a backup allocation");
+  std::size_t prefilled = 0;
+  while (!extension.prefill_complete())
+    prefilled += extension.Prefill(64).consumed_tokens;
+  Expect(prefilled == 5 && extension.SelectNext().token == 90,
+         "recovered state processes exactly the remaining input and decodes");
+  extension.Invalidate();
+  runner->after_restore = {};
+  auto next = reader.Acquire({8, 9});
+  Expect(!next.cache_hit() && next.Prefill(64).consumed_tokens == 2 &&
+             next.SelectNext().token == 90,
+         "a subsequent unrelated request remains healthy");
+  next.Invalidate();
+  std::cout << "safe_cached=2 prefilled=5 next_request_healthy=true\n";
 }
 
 void TestPromptReuseCanBeDisabledPerRequest() {
@@ -2300,6 +2372,7 @@ int main() {
   TestMeminfoAvailableExcludesFreeCma();
   TestSnapshotStartupReportsSelectedLimits();
   TestPersistentSnapshotRestoresAcrossPools();
+  TestFailedDiskUpgradeRetainsAValidPrefix(1);
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
   TestRamLearnsDivergenceBoundaries();
   TestLearnedBoundarySurvivesExactRepublication();
