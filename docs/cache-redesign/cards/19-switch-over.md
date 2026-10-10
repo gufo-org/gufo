@@ -100,3 +100,93 @@ card 01 scenarios with their `main` results. All of this feeds card 20.
 
 ## Review notes
 
+### Minimum pass length at capture boundaries
+
+Context: this note comes from an out-of-tree model port that uses exact
+recurrent checkpoints.
+
+Some models select kernels by the size of a prefill chunk. One example is a port
+of Ling-3.0-flash (bailingmoe3). It has 35 KDA linear-attention layers and 7 MLA
+layers. In the port, the model has two numeric families:
+
+- The decode family: a chunk of 1 to 8 tokens uses decode kernels. The kernels
+  process each token as a single-token step.
+- The prefill family: a chunk of more than 8 tokens uses prefill kernels.
+
+In the port, every split inside one family gives bit-identical results. Between
+the two families, the results differ. The difference is about 1e-3 per layer.
+The whole-model logits differ by up to about 2e-2 relative L2. The top-1 token is
+usually the same. In some cases it differs.
+
+A recurrent checkpoint needs an exact pass end at its boundary (RFC.md:467).
+Assume two boundaries are 1 to 8 tokens apart. The tokens between them then run
+in the decode family. A cold run of the same prompt runs these tokens in the
+prefill family. A boundary that is 1 to 8 tokens before the prompt end causes
+the same effect. A cached request and an uncached request with the same prompt
+then give different logits. Sometimes they give different greedy tokens.
+
+`PlanCaptures` (`src/cache/retention.cpp:21-84`) does not prevent this
+condition. These are its rules at `9024101b`:
+
+- A grid point needs `position - r.reused >= 2048` and
+  `r.prompt - position > 128` (lines 66-67). It moves down to a pass end that is
+  within 128 tokens and at least 2048 tokens past `r.reused` (lines 62-65).
+- A learned point needs `r.common - r.reused >= 512` and
+  `r.prompt - r.common > 64` (lines 71-72). It moves down to a planned capture
+  that is within 64 tokens. It looks only at planned captures at or below its
+  own position (lines 75-79).
+- Required boundaries `r.reused`, `r.stable` and `r.prompt` never move
+  (lines 54-56, RFC.md:472).
+- No rule sets a minimum distance between two boundaries.
+
+The RFC already has one such rule. It skips grid points within 128 tokens of the
+prompt end because they split the final pass (RFC.md:474-478). This request
+makes that gap per model. It applies the gap between any two boundaries. The
+change lands in `PlanCaptures` (card 07) and the `Capabilities` record
+(card 02). Card 19 is where capture at policy boundaries is wired in.
+
+This case is reachable with the fake adapter and its default pass plan. Use
+`prompt=5000`, `reused=0`, `common=4090` and `learn=true`. The grid is
+`(5000 - 1) / 2048 = 2`, so `count = 2`. The grid points are 2048 and 4096.
+The learned point 4090 sees only the planned capture 2048. That capture is 2042
+tokens below it. The point does not move. The result is `2048 4090 4096 5000`.
+The pass from 4090 to 4096 has 6 tokens. A required `r.stable` at 4996 gives a
+4-token final pass in the same way.
+
+The RFC lists identical output as a non-goal (RFC.md:90-91): "Guaranteeing
+identical sampled output between a fresh computation and a restored prefix
+computed with a different floating-point execution shape." This note does not
+ask to change that non-goal. It asks for an opt-in capability. The capability
+does not promise identical output for every model.
+
+The port enforces one rule itself: `min_checkpoint_tail_tokens`, at least 9
+tokens after each planned checkpoint. The port added this limit after a
+bit-exact cache test found a 4-token tail defect.
+
+Request: add a per-model capability, with default 0, for example
+`min_pass_rows` in the `Capabilities` record. Models that set 0 do not change.
+Alternatively, add an adapter query that filters the optional candidates after
+`PlanCaptures` builds them. For a value N above 0:
+
+1. Skip or merge an optional boundary that is closer than N tokens to another
+   boundary.
+2. Skip or merge an optional boundary that is closer than N tokens to the prompt
+   end.
+3. Prefer to keep a learned point and drop the grid point near it. A grid point
+   has no follower that needs its exact position. Drop an optional point that
+   is within N tokens of a required boundary.
+4. Keep required boundaries exact. The caller that sets `r.stable` is
+   responsible for its distance to `r.prompt`.
+5. Optionally, let lookup prefer a checkpoint that leaves at least N tokens to
+   replay. This relates to card 13.
+
+This agrees with the RFC guidance to avoid small split passes (RFC.md:471-472):
+"Prefer candidates aligned with planned prefill passes; coalesce nearby optional
+boundaries." A 6-token pass also adds a synchronization point for little work
+(RFC.md:468-469).
+
+Benefits:
+
+- Cached and uncached runs stay identical for such models.
+- Cache tests can compare a cached run to a cold run bit for bit. In the port,
+  this comparison found a snapshot capture race and the tail defect.
