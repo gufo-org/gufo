@@ -280,10 +280,9 @@ struct PrefixIndex::Impl {
     }
     return bytes;
   }
-  bool CheckpointResident(const Tree& tree,
+  bool CheckpointCoherent(const Tree& tree,
                           const Checkpoint& checkpoint) const {
-    if (!checkpoint.IsValid() ||
-        checkpoint.Components().size() != tree.descriptors.size())
+    if (checkpoint.Components().size() != tree.descriptors.size())
       return false;
     for (const auto& d : tree.descriptors) {
       auto c = std::ranges::find_if(
@@ -295,6 +294,10 @@ struct PrefixIndex::Impl {
         return false;
     }
     return true;
+  }
+  bool CheckpointResident(const Tree& tree,
+                          const Checkpoint& checkpoint) const {
+    return checkpoint.IsValid() && CheckpointCoherent(tree, checkpoint);
   }
   std::shared_ptr<const CandidateAvailability> Availability(
       std::vector<ComponentAvailability> components) {
@@ -358,19 +361,26 @@ struct PrefixIndex::Impl {
       result.live = r.live->location;
       return result;
     }
-    const bool ram = r.checkpoint && CheckpointResident(tree, *r.checkpoint);
-    bool need_disk{}, use_ram{};
+    if (r.durable && r.durable->Quarantined())
+      return {};
+    const bool ram = r.checkpoint && CheckpointCoherent(tree, *r.checkpoint);
+    bool need_disk{}, use_ram{}, resolve_plan{};
     for (const auto& descriptor : tree.descriptors) {
       auto availability =
           std::ranges::find(r.availability->components, descriptor.id,
                             &ComponentAvailability::id);
       if (availability == r.availability->components.end())
         return {};
-      if (ram && availability->resident)
+      const auto component =
+          ram ? std::ranges::find(r.checkpoint->Components(), descriptor.id,
+                                  [](const auto& c) { return c.descriptor.id; })
+              : std::span<const CheckpointComponent>::iterator{};
+      if (ram && availability->resident && component->IsValid())
         use_ram = true;
-      else if (r.durable && availability->durable)
+      else if (r.durable && availability->durable) {
         need_disk = true;
-      else
+        resolve_plan |= availability->resident;
+      } else
         return {};
     }
     if (need_disk) {
@@ -382,6 +392,24 @@ struct PrefixIndex::Impl {
     if (use_ram)
       result.checkpoint = r.checkpoint;
     result.availability = r.availability;
+    if (resolve_plan && use_ram) {
+      auto admission =
+          ledger->Reserve(ResourceCategory::kMetadata,
+                          Add(sizeof(CandidateAvailability) + 64,
+                              Bytes(r.availability->components.size(),
+                                    sizeof(ComponentAvailability))));
+      auto plan = std::make_shared<CandidateAvailability>();
+      plan->metadata = admission.Convert();
+      plan->components.reserve(r.availability->components.size());
+      for (auto component : r.availability->components) {
+        const auto payload =
+            std::ranges::find(r.checkpoint->Components(), component.id,
+                              [](const auto& c) { return c.descriptor.id; });
+        component.resident = component.resident && payload->IsValid();
+        plan->components.push_back(component);
+      }
+      result.availability = std::move(plan);
+    }
     for (const auto& descriptor : tree.descriptors) {
       const auto rows =
           r.checkpoint

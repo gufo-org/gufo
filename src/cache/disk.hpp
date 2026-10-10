@@ -54,6 +54,9 @@ struct DiskManifest {
 [[nodiscard]] DiskManifest DecodeManifest(std::span<const std::uint8_t>);
 [[nodiscard]] std::string DiskFileName(DiskFileId);
 
+namespace detail {
+struct DiskAvailability;
+}
 class DurableEntry {
 public:
   DurableEntry() = default;
@@ -79,6 +82,7 @@ private:
   bool durable_{true};
   bool payload_verified_{false};
   bool available_{true};
+  std::shared_ptr<detail::DiskAvailability> availability_;
   std::uint64_t epoch_{};
 };
 struct DiskStartupStats {
@@ -140,11 +144,15 @@ public:
   [[nodiscard]] std::uint64_t Epoch() const { return epoch_; }
   [[nodiscard]] DiskStore& Store() const { return *store_; }
   [[nodiscard]] DiskReadPin Pin() const;
+  // Quarantine survives physical retirement; ordinary eviction does not poison
+  // a coherent RAM copy bound to this publication. Safe on worker threads.
+  [[nodiscard]] bool Quarantined() const;
 
 private:
   friend class DiskStore;
   ResourceCharge metadata_;
   DiskManifest manifest_;
+  std::shared_ptr<detail::DiskAvailability> availability_;
   DiskStore* store_{};
   std::uint64_t epoch_{};
 };

@@ -83,7 +83,9 @@ RAM retention removal drops its checkpoint owner while leaving a complete
 durable description in the tree. The fake W2 test proves the former checkpoint
 object expires, restores target 40 / draft 36 into another slot, checks every
 component byte, and compares continued execution with the uninterrupted slot.
-Mixed-source plans remain stable across availability changes. Digest/layout
+Mixed-source plans remain stable across availability changes. Payload validity
+is checked for each selected RAM component; an invalid unused RAM component
+can still be supplied from disk alongside healthy RAM components. Digest/layout
 mismatches and all catalog reserve/convert fault points fail without leakage.
 
 `DiskCatalog` keeps global LRU across all discovered disk identities, including
@@ -101,6 +103,18 @@ late quarantine retains the inherited recovery gate until its unindexed manifest
 has been durably reclaimed. Tests exercise invalidation during verification,
 after dependency sync, and after the manifest barriers. Physical cleanup remains
 caller-scheduled at an idle boundary after reader pins settle.
+
+Reused-dependency verification during publication and restore quarantine at the
+point of detection, raising a typed dependency error. An admitted atomic marker
+shared by a publication's descriptions makes even its RAM-bound lookup record
+unusable immediately, without worker mutation of the caller-serialized index.
+`DiskCatalog::Reconcile` removes these records at a serialized caller boundary;
+eviction and invalid-entry reclamation also reconcile automatically. Ordinary
+retirement leaves coherent RAM copies usable. Conflicting caller claims are
+rejected before verification and never quarantine a healthy publication.
+The first independent review found the publication-verification and mixed RAM
+validity gaps; regressions now cover synchronous and queued corruption plus
+failed borrowed-target preservation with healthy draft/private RAM state.
 
 These are common-cache and fake-adapter checks. Real model state and serving
 integration remain the following cards; no model quality or HTTP speed claim is

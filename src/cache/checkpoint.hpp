@@ -114,6 +114,7 @@ private:
   RowPin rows_pin_;
 };
 struct CheckpointComponent {
+  [[nodiscard]] bool IsValid() const;
   ComponentDescriptor descriptor;
   ComponentPosition position;
   std::vector<ChunkReference> chunks;

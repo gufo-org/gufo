@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -20,6 +21,12 @@
 #include <stdexcept>
 
 namespace gufo::cache {
+namespace detail {
+struct DiskAvailability {
+  ResourceCharge metadata;
+  std::atomic<bool> quarantined{false};
+};
+}  // namespace detail
 namespace {
 template<class F>
 struct Finally {
@@ -788,9 +795,57 @@ struct DiskStore::Impl {
       IoError("stat publication destination");
     return false;
   }
+  void Quarantine(bool private_file, DiskFileId file) {
+    std::lock_guard guard(index_mutex);
+    for (auto& entry : entries)
+      for (const auto& component : entry.manifest_.components) {
+        bool matches{};
+        if (private_file) {
+          for (const auto& payload : {component.tail, component.private_state})
+            matches |= payload && payload->file == file;
+        } else {
+          for (const auto& payload : component.chunks)
+            matches |= payload.file == file;
+        }
+        if (matches) {
+          entry.available_ = false;
+          entry.availability_->quarantined.store(true);
+        }
+      }
+  }
+  [[noreturn]] void DependencyFailure(bool private_file, DiskFileId file) {
+    Quarantine(private_file, file);
+    throw DiskDependencyError(private_file, file);
+  }
+  std::shared_ptr<detail::DiskAvailability> NewAvailability() {
+    auto admission = ledger->Reserve(ResourceCategory::kMetadata,
+                                     sizeof(detail::DiskAvailability) + 64);
+    auto result = std::make_shared<detail::DiskAvailability>();
+    result->metadata = admission.Convert();
+    return result;
+  }
   void Verify(int directory, const DiskPayload& payload,
               std::span<std::uint8_t> staging = {},
               const DiskStagingAccess* access = nullptr) {
+    // Reject a caller's conflicting claim without poisoning existing owners.
+    // Only a failure against the store's attested checksum/length quarantines.
+    {
+      std::lock_guard guard(index_mutex);
+      for (const auto& entry : entries)
+        for (const auto& component : entry.manifest_.components) {
+          if (directory == private_files.Get()) {
+            for (const auto& existing :
+                 {component.tail, component.private_state})
+              if (existing && existing->file == payload.file &&
+                  *existing != payload)
+                Invalid();
+          } else {
+            for (const auto& existing : component.chunks)
+              if (existing.file == payload.file && existing != payload)
+                Invalid();
+          }
+        }
+    }
     int descriptor;
     struct stat st{};
     {
@@ -806,7 +861,7 @@ struct DiskStore::Impl {
     }
     if (fd.Get() < 0 || status < 0 || !Regular(st) ||
         std::uint64_t(st.st_size) != payload.bytes)
-      Invalid();
+      DependencyFailure(directory == private_files.Get(), payload.file);
     ResourceReservation charge;
     std::vector<std::uint8_t> allocated;
     if (staging.empty()) {
@@ -831,15 +886,27 @@ struct DiskStore::Impl {
       if (n < 0 && errno == EINTR)
         continue;
       if (n <= 0)
-        Invalid();
+        DependencyFailure(directory == private_files.Get(), payload.file);
       {
         CostTimer timer(publication_stats.checksum_ns);
         crc = DiskChecksum(staging.first(n), crc);
       }
       remaining -= n;
     }
-    if (crc != payload.checksum)
-      Invalid();
+    struct stat after{};
+    int final_status;
+    {
+      CostTimer timer(publication_stats.filesystem_ns);
+      final_status = fstat(fd.Get(), &after);
+    }
+    if (crc != payload.checksum || final_status < 0 || !Regular(after) ||
+        st.st_dev != after.st_dev || st.st_ino != after.st_ino ||
+        st.st_size != after.st_size ||
+        st.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        st.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        st.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        st.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
+      DependencyFailure(directory == private_files.Get(), payload.file);
   }
   void Publish(DiskFileId file, const DiskManifest& m,
                std::span<const DiskWriteBuffer> buffers,
@@ -867,6 +934,7 @@ struct DiskStore::Impl {
     candidate.manifest_ = DecodeManifest(bytes);
     candidate.file_ = file;
     candidate.durable_ = false;
+    candidate.availability_ = NewAvailability();
     auto pin_reservation =
         ledger->Reserve(ResourceCategory::kMetadata, sizeof(ResourceCharge));
     candidate.pin_ =
@@ -1178,6 +1246,7 @@ struct DiskStore::Impl {
             : ResourceReservation{};
     DurableEntry entry;
     entry.manifest_ = DecodeManifest(bytes);
+    entry.availability_ = NewAvailability();
     // Decoding explicitly reserves exact capacities with the pinned library.
     std::size_t actual =
         entry.manifest_.input.capacity() +
@@ -1212,6 +1281,7 @@ DurableEntry& DurableEntry::operator=(DurableEntry&& other) noexcept {
     durable_ = other.durable_;
     payload_verified_ = other.payload_verified_;
     available_ = other.available_;
+    availability_ = std::move(other.availability_);
     epoch_ = other.epoch_;
     metadata_ = std::move(other.metadata_);
     pin_ = std::move(other.pin_);
@@ -1333,7 +1403,7 @@ DiskReadStats DiskStore::ReadPayload(
   struct stat before{}, after{};
   if (file.Get() < 0 || fstat(file.Get(), &before) < 0 || !Regular(before) ||
       std::uint64_t(before.st_size) != payload.bytes)
-    throw DiskDependencyError(private_file, payload.file);
+    impl_->DependencyFailure(private_file, payload.file);
   const Impl::FileIdentity identity{before.st_dev,  before.st_ino,
                                     before.st_size, before.st_mtim,
                                     before.st_ctim, payload.checksum};
@@ -1356,7 +1426,7 @@ DiskReadStats DiskStore::ReadPayload(
       if (n < 0 && errno == EINTR)
         continue;
       if (n <= 0)
-        throw DiskDependencyError(private_file, payload.file);
+        impl_->DependencyFailure(private_file, payload.file);
       filled += n;
     }
     stats.filesystem_ns += elapsed(begin);
@@ -1375,7 +1445,7 @@ DiskReadStats DiskStore::ReadPayload(
                                      after.st_mtim, after.st_ctim,
                                      payload.checksum} ||
       (!stats.verification_cached && checksum != payload.checksum))
-    throw DiskDependencyError(private_file, payload.file);
+    impl_->DependencyFailure(private_file, payload.file);
   stats.filesystem_ns += elapsed(begin);
   if (!stats.verification_cached) {
     std::lock_guard guard(impl_->verification_mutex);
@@ -1464,23 +1534,13 @@ DiskRetireResult DiskStore::TryRetire(CheckpointId id, std::uint64_t epoch) {
 void DiskStore::Invalidate(CheckpointId id, std::uint64_t epoch) {
   std::lock_guard guard(impl_->index_mutex);
   for (auto& entry : impl_->entries)
-    if (entry.manifest_.checkpoint == id && entry.epoch_ == epoch)
+    if (entry.manifest_.checkpoint == id && entry.epoch_ == epoch) {
       entry.available_ = false;
+      entry.availability_->quarantined.store(true);
+    }
 }
 void DiskStore::InvalidateDependency(bool private_file, DiskFileId file) {
-  std::lock_guard guard(impl_->index_mutex);
-  for (auto& entry : impl_->entries)
-    for (const auto& component : entry.manifest_.components) {
-      if (private_file) {
-        for (const auto& payload : {component.tail, component.private_state})
-          if (payload && payload->file == file)
-            entry.available_ = false;
-      } else {
-        for (const auto& payload : component.chunks)
-          if (payload.file == file)
-            entry.available_ = false;
-      }
-    }
+  impl_->Quarantine(private_file, file);
 }
 std::shared_ptr<const DiskDescription> DiskStore::Describe(CheckpointId id) {
   std::lock_guard guard(impl_->index_mutex);
@@ -1495,10 +1555,14 @@ std::shared_ptr<const DiskDescription> DiskStore::Describe(CheckpointId id) {
     description->manifest_ = entry.manifest_;
     description->store_ = this;
     description->epoch_ = entry.epoch_;
+    description->availability_ = entry.availability_;
     description->metadata_ = reservation.Convert();
     return description;
   }
   return {};
+}
+bool DiskDescription::Quarantined() const {
+  return availability_->quarantined.load();
 }
 DiskReadPin DiskDescription::Pin() const {
   return store_->Pin(manifest_.checkpoint, epoch_);

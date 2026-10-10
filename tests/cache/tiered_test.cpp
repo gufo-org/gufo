@@ -186,6 +186,123 @@ void MixedSourcesAndCompatibility() {
   }
   assert(rejected);
 }
+void PublicationCorruptionQuarantinesImmediately() {
+  for (bool queued : {false, true}) {
+    TieredFixture f;
+    f.Append(16, 12);
+    auto checkpoint = f.Capture();
+    auto description = f.Publish(*checkpoint);
+    auto entry = f.index.Insert(checkpoint, f.Resident());
+    f.index.AttachDurable(entry, description);
+    f.Append(8, 8);
+    auto second = f.Capture();
+    auto other = f.Publish(*second);
+    (void)f.index.Insert(f.adapter.CompatibilityIdentity(), other);
+    auto manifest = description->Manifest();
+    manifest.checkpoint = {999};
+    manifest.components.resize(1);
+    const auto chunk = manifest.components[0].chunks[0];
+    auto conflicting = manifest;
+    conflicting.components[0].chunks[0].checksum ^= 1;
+    TransferTiming conflict_timing;
+    bool rejected{};
+    try {
+      f.streams.Write(TieredFile(4, 999), conflicting, {}, conflict_timing);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected && !description->Quarantined());
+    assert(description->Pin() && f.index.Lookup(f.Query()).selected);
+
+    {
+      std::fstream file(
+          f.directory.path / "v2/chunks" / DiskFileName(chunk.file),
+          std::ios::binary | std::ios::in | std::ios::out);
+      file.put('\xff');
+    }
+    if (queued) {
+      PersistenceQueue queue(f.ledger, f.streams, 1, 1, [] { return true; });
+      assert(queue.TrySubmit(
+          PersistenceJob(f.ledger, TieredFile(4, 999), manifest, {})));
+      queue.Drain();
+      assert(queue.Stats().failed == 1);
+    } else {
+      TransferTiming timing;
+      bool failed{};
+      try {
+        f.streams.Write(TieredFile(4, 999), manifest, {}, timing);
+      } catch (const DiskDependencyError& error) {
+        failed = !error.private_file && error.file == chunk.file;
+      }
+      assert(failed);
+    }
+    assert(description->Quarantined() && other->Quarantined());
+    assert(!description->Pin() && !other->Pin());
+    assert(!f.disk.Open(checkpoint->Id()) && !f.disk.Open(second->Id()));
+    assert(!f.catalog.Find(checkpoint->Id()));
+    assert(!f.index.Lookup(f.Query()).selected);
+    // No worker mutates the caller-serialized prefix index/catalog. Cleanup
+    // reconciles retained descriptions even after disk-layer invalidation.
+    f.catalog.Reconcile();
+    assert(f.catalog.ReclaimInvalid() == 2);
+    assert(f.disk.Stats().managed_bytes == 0);
+    assert(description->Quarantined());
+  }
+}
+void InvalidUnusedRAMComponentStillSelectsMixed() {
+  TieredFixture f;
+  LeasedSlot local(f.ledger, f.adapter, f.stream, SlotId{55});
+  auto lease = local.Acquire();
+  f.tokens = {1, 2, 3, 4, 5, 6, 7, 8};
+  f.drafts = {1, 2, 3, 4};
+  f.adapter.Append(lease.Execution(), f.tokens, f.drafts);
+  auto checkpoint = f.history.Capture(
+      {f.tokens, InputIdentity(f.tokens.size()),
+       f.adapter.Positions(lease.Execution()), CheckpointPurpose::kPrompt, 1},
+      [&](const PayloadRequest& request) {
+        auto admission =
+            f.ledger.Reserve(ResourceCategory::kBackingFree, request.bytes);
+        auto bytes = std::make_shared<std::vector<std::byte>>(request.bytes);
+        auto pool = admission.Convert();
+        auto assigned = pool.ReserveBacking(request.category);
+        if (request.component == kTarget)
+          return Payload::Borrowed(
+              lease.Borrow(request.component, request.first, request.end,
+                           std::move(assigned), bytes, *bytes));
+        auto copy =
+            request.category == ResourceCategory::kPrivateState
+                ? f.adapter.CapturePrivate(lease.Execution(), request.component,
+                                           *bytes, f.stream)
+                : f.adapter.CopyRowsOut(lease.Execution(), request.component,
+                                        request.first, request.end, *bytes,
+                                        f.stream);
+        assert(copy.Wait() == TransferResult::kSucceeded);
+        return Payload::Committed(assigned.Convert(), bytes);
+      });
+  auto description = f.Publish(*checkpoint, true, &lease.Execution());
+  auto entry = f.index.Insert(checkpoint, f.Resident());
+  f.index.AttachDurable(entry, description);
+  f.index.SetAvailability(
+      entry, {{{1}, false, true}, {{2}, true, false}, {{3}, true, false}});
+  assert(f.index.Lookup(f.Query()).selected);
+  f.adapter.FailNextTransfer();
+  lease.Reset();
+  assert(!checkpoint->IsValid());
+  assert(checkpoint->Components()[1].IsValid());
+  assert(checkpoint->Components()[2].IsValid());
+  auto lookup = f.index.Lookup(f.Query());
+  assert(lookup.reason == SelectionReason::kDeepestMixedCheckpoint);
+  assert(lookup.selected->UsesDisk(kTarget));
+  assert(!lookup.selected->UsesDisk(kDraft));
+  assert(!lookup.selected->UsesDisk({3}));
+  // Also resolve a resident-preferred component to disk when its RAM payload
+  // alone becomes invalid; the healthy resident components retain preference.
+  f.index.SetAvailability(
+      entry, {{{1}, true, true}, {{2}, true, false}, {{3}, true, false}});
+  auto fallback = f.index.Lookup(f.Query());
+  assert(fallback.selected && fallback.selected->UsesDisk(kTarget));
+  assert(!fallback.selected->UsesDisk(kDraft));
+}
 void CatalogAdmissionFailures() {
   for (auto step : {LedgerStep::kReserve, LedgerStep::kConvert}) {
     TieredFixture f;
@@ -291,6 +408,8 @@ int main() {
   CorruptionInvalidatesAllDependents();
   GlobalLRUAndSharedFiles();
   MixedSourcesAndCompatibility();
+  PublicationCorruptionQuarantinesImmediately();
+  InvalidUnusedRAMComponentStillSelectsMixed();
   CatalogAdmissionFailures();
   EvictionDoesNotWaitForYieldingWriter();
   QuarantineRacingPublication();

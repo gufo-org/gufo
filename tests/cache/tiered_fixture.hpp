@@ -84,8 +84,9 @@ struct TieredFixture {
           return Payload::Committed(assigned.Convert(), bytes);
         });
   }
-  std::shared_ptr<const DiskDescription> Publish(const Checkpoint& checkpoint,
-                                                 bool track = true) {
+  std::shared_ptr<const DiskDescription> Publish(
+      const Checkpoint& checkpoint, bool track = true,
+      const Slot* borrowed_source = nullptr) {
     DiskManifest manifest;
     manifest.checkpoint = checkpoint.Id();
     manifest.lineage = checkpoint.Lineage();
@@ -94,11 +95,33 @@ struct TieredFixture {
     manifest.tokens.assign(checkpoint.Tokens().begin(),
                            checkpoint.Tokens().end());
     std::vector<DiskWriteBuffer> buffers;
+    std::vector<Payload> copies;
     for (const auto& c : checkpoint.Components()) {
       DiskComponent component{c.descriptor, c.position, {}, {}, {}};
-      auto add = [&](const Payload& payload, bool private_file, DiskFileId id) {
-        auto owner = std::static_pointer_cast<const std::vector<std::byte>>(
-            payload.Owner());
+      auto add = [&](const Payload& payload, bool private_file, DiskFileId id,
+                     Rows first = 0, Rows end = 0) {
+        auto owner =
+            payload.BorrowedFrom()
+                ? std::shared_ptr<const std::vector<std::byte>>{}
+                : std::static_pointer_cast<const std::vector<std::byte>>(
+                      payload.Owner());
+        if (!owner) {
+          assert(borrowed_source);
+          auto pin = payload.PinRows();
+          assert(pin.Location());
+          auto admission =
+              ledger.Reserve(ResourceCategory::kBackingFree, payload.Bytes());
+          auto copy = std::make_shared<std::vector<std::byte>>(payload.Bytes());
+          auto pool = admission.Convert();
+          auto assigned = pool.ReserveBacking(payload.Category());
+          const auto location = payload.BorrowedFrom();
+          assert(location);
+          auto completion = adapter.CopyRowsOut(
+              *borrowed_source, c.descriptor.id, first, end, *copy, stream);
+          assert(completion.Wait() == TransferResult::kSucceeded);
+          copies.push_back(Payload::Committed(assigned.Convert(), copy));
+          owner = std::move(copy);
+        }
         auto bytes =
             std::span(reinterpret_cast<const std::uint8_t*>(owner->data()),
                       owner->size());
@@ -106,12 +129,16 @@ struct TieredFixture {
         return DiskPayload{id, bytes.size(), DiskChecksum(bytes)};
       };
       for (const auto& chunk : c.chunks)
-        component.chunks.push_back(
-            add(chunk.Storage(), false, TieredFile(1, chunk.Id().value)));
+        component.chunks.push_back(add(chunk.Storage(), false,
+                                       TieredFile(1, chunk.Id().value),
+                                       chunk.First(), chunk.End()));
       if (c.tail)
         component.tail =
             add(*c.tail, true,
-                TieredFile(2, checkpoint.Id().value, c.descriptor.id.value));
+                TieredFile(2, checkpoint.Id().value, c.descriptor.id.value),
+                c.position.valid_rows / c.descriptor.rows_per_chunk *
+                    c.descriptor.rows_per_chunk,
+                c.position.valid_rows);
       if (c.private_state)
         component.private_state =
             add(*c.private_state, true,

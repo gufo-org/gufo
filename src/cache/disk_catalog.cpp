@@ -167,6 +167,7 @@ void DiskCatalog::Touch(CheckpointId id) {
   impl_->lru.insert(std::move(node));
 }
 bool DiskCatalog::EvictOne() {
+  Reconcile();
   for (auto it = impl_->lru.begin(); it != impl_->lru.end();) {
     auto record = impl_->records.find(it->second);
     ++it;
@@ -199,7 +200,17 @@ void DiskCatalog::Invalidate(bool private_file, DiskFileId file) {
     impl_->index->RemoveDurable(description, true);
   }
 }
+void DiskCatalog::Reconcile() {
+  for (auto& [id, record] : impl_->records) {
+    (void)id;
+    if (!record.invalid && record.description->Quarantined()) {
+      record.invalid = true;
+      impl_->index->RemoveDurable(*record.description, true);
+    }
+  }
+}
 std::size_t DiskCatalog::ReclaimInvalid() {
+  Reconcile();
   std::size_t retired{};
   for (auto it = impl_->records.begin(); it != impl_->records.end();) {
     auto current = it++;

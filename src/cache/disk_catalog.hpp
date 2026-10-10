@@ -24,6 +24,9 @@ public:
   // Reverse dependency quarantine is immediate, with no I/O-lock wait. Retire
   // quarantined manifests at a later idle boundary after reader pins settle.
   void Invalidate(bool private_file, DiskFileId);
+  // Reconcile worker-discovered quarantine at a serialized caller boundary.
+  // Lookup rejects quarantined descriptions immediately, even before this.
+  void Reconcile();
   std::size_t ReclaimInvalid();
   [[nodiscard]] std::size_t Size() const;
 

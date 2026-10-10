@@ -131,15 +131,17 @@ RowPin Payload::PinRows(std::stop_token stop) const {
 bool Payload::IsValid() const {
   return rows_ ? rows_->IsValid() : bool(owner_);
 }
-bool Checkpoint::IsValid() const {
-  for (const auto& c : components_) {
-    for (const auto& chunk : c.chunks)
-      if (!chunk.Storage().IsValid())
-        return false;
-    if ((c.tail && !c.tail->IsValid()) ||
-        (c.private_state && !c.private_state->IsValid()))
+bool CheckpointComponent::IsValid() const {
+  for (const auto& chunk : chunks)
+    if (!chunk.Storage().IsValid())
       return false;
-  }
+  return (!tail || tail->IsValid()) &&
+         (!private_state || private_state->IsValid());
+}
+bool Checkpoint::IsValid() const {
+  for (const auto& component : components_)
+    if (!component.IsValid())
+      return false;
   return true;
 }
 Payload& Payload::operator=(Payload&& other) noexcept {
