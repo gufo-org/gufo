@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -184,7 +185,7 @@ public:
       DiskFileId, const DiskManifest&, std::span<const DiskWriteSource>,
       std::span<std::uint8_t> staging,
       DiskPublicationStats* observation = nullptr,
-      const DiskStagingAccess* access = nullptr);
+      const DiskStagingAccess* access = nullptr, std::stop_token stop = {});
   [[nodiscard]] std::optional<DiskSnapshot> Open(CheckpointId) const;
   // Reads one dependency, invokes consume only with complete pieces, and
   // checks its CRC and stable file identity before returning. Consumers must

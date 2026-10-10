@@ -73,6 +73,14 @@ required (see the README).
 
 ## Review notes
 
+Fresh reviews found and fixed two cancellation issues. Interrupted staging
+waits now retain their elapsed timing. Streamed publication checks cancellation
+while acquiring the disk I/O lock, so stopping a queue does not wait for another
+writer that is indefinitely yielding. Regression tests hold the staging piece
+and the publication lock separately, then cancel the competing operation.
+The retained transfer samples below precede this cancellation-aware lock change;
+they do not qualify concurrent queue shutdown or serving interference.
+
 
 ## Implementation
 

@@ -434,7 +434,7 @@ struct DiskStore::Impl {
   std::uint64_t budget_bytes;
   DiskPublicationStats publication_stats;
   bool recovery_required{};
-  mutable std::mutex mutex;
+  mutable std::timed_mutex mutex;
   mutable std::mutex index_mutex;
   mutable std::mutex stats_mutex;
   struct FileIdentity {
@@ -1218,13 +1218,25 @@ void DiskStore::Publish(DiskFileId file, const DiskManifest& manifest,
 DiskPublicationStats DiskStore::PublishStream(
     DiskFileId file, const DiskManifest& manifest,
     std::span<const DiskWriteSource> sources, std::span<std::uint8_t> staging,
-    DiskPublicationStats* observation, const DiskStagingAccess* access) {
+    DiskPublicationStats* observation, const DiskStagingAccess* access,
+    std::stop_token stop) {
   if (staging.empty())
     throw std::invalid_argument("empty streamed publication staging");
   if (access && (!access->acquire || !access->release))
     throw std::invalid_argument("incomplete disk staging lease");
   auto begin = std::chrono::steady_clock::now();
-  std::lock_guard guard(impl_->mutex);
+  std::unique_lock guard(impl_->mutex, std::defer_lock);
+  Finally wait_observation{[&] {
+    if (!guard.owns_lock() && observation)
+      observation->io_lock_ns +=
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - begin)
+              .count();
+  }};
+  do {
+    if (stop.stop_requested())
+      throw std::runtime_error("cache publication cancelled");
+  } while (!guard.try_lock_for(std::chrono::milliseconds(2)));
   const auto before = impl_->publication_stats;
   Finally observe{[&] {
     if (observation)
@@ -1234,6 +1246,8 @@ DiskPublicationStats DiskStore::PublishStream(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now() - begin)
           .count();
+  if (stop.stop_requested())
+    throw std::runtime_error("cache publication cancelled");
   impl_->Publish(file, manifest, {}, sources, staging, access);
   return Difference(impl_->publication_stats, before);
 }

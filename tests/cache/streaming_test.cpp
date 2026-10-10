@@ -484,6 +484,44 @@ void CancelledStagingWait() {
   writer.get();
   assert(disk.Retire({1}) && disk.Retire({2}));
 }
+void CancelledPublicationWait() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}, true};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  Fixture first(ledger), second(ledger, 2, 30);
+  std::promise<void> yielding;
+  std::atomic<bool> observed{};
+  PersistenceQueue blocked(ledger, streams, 1, 336, [&] {
+    if (!observed.exchange(true))
+      yielding.set_value();
+    return false;
+  });
+  PersistenceQueue cancelled(ledger, streams, 1, 336, [] { return true; });
+  assert(blocked.TrySubmit(
+      PersistenceJob(ledger, Id(100), first.manifest, first.Sources())));
+  yielding.get_future().wait();
+  PersistenceJob second_job(ledger, Id(101), second.manifest, second.Sources());
+  const auto reserves =
+      ledger.LockCosts()[static_cast<std::size_t>(LedgerStep::kReserve)].calls;
+  assert(cancelled.TrySubmit(std::move(second_job)));
+  // Admission in Write proves the second worker has taken its job. Stopping
+  // now must succeed without resuming the first writer's indefinite yield.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (ledger.LockCosts()[static_cast<std::size_t>(LedgerStep::kReserve)]
+             .calls == reserves) {
+    assert(std::chrono::steady_clock::now() < deadline);
+    std::this_thread::yield();
+  }
+  auto stopped = std::async(std::launch::async, [&] { cancelled.Stop(); });
+  assert(stopped.wait_for(std::chrono::seconds(2)) ==
+         std::future_status::ready);
+  stopped.get();
+  assert(cancelled.Stats().failed == 1);
+  blocked.Stop();
+  assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+}
 }  // namespace
 int main() {
   RoundTripAndFailures();
@@ -493,4 +531,5 @@ int main() {
   FailedSubmission();
   RestorePreemptsYield();
   CancelledStagingWait();
+  CancelledPublicationWait();
 }

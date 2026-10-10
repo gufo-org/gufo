@@ -253,7 +253,7 @@ void StreamedStore::Write(DiskFileId file, const DiskManifest& manifest,
     timing.io_lock_ns += costs.io_lock_ns;
   }};
   (void)impl_->disk->PublishStream(file, manifest, writes, impl_->staging.bytes,
-                                   &costs, &access);
+                                   &costs, &access, stop);
 }
 bool StreamedStore::Restore(CheckpointId id, CompatibilityDigest compatibility,
                             Adapter& adapter, Slot& slot,
