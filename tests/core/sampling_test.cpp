@@ -39,12 +39,15 @@ void TestReasoningBudgetForcesTheEnd() {
   SamplerState sampler(config);
   Expect(!config.can_use_unmodified_argmax(),
          "a budget keeps requests off the unmodified argmax path");
-  Expect(!sampler.ForcedToken() && sampler.CanSelectArgmax(1),
+  Expect(!sampler.ForcedToken() && sampler.CanSelectArgmax(1) &&
+             !sampler.NeedsConstraintMask(),
          "the budget does not restrict reasoning before it is spent");
   sampler.Accept(sampler.Sample(Logits(1)));
   sampler.Accept(sampler.Sample(Logits(2)));
   Expect(sampler.ForcedToken() == TokenId{3},
          "two reasoning tokens exhaust a budget of two");
+  Expect(sampler.NeedsConstraintMask(),
+         "GPU sampling paths defer the forced end to the host sampler");
   Expect(!sampler.CanSelectArgmax(1) && sampler.CanSelectArgmax(3),
          "only the reasoning end is a selectable argmax");
   Expect(sampler.Sample(Logits(1)) == 3 &&
@@ -56,7 +59,8 @@ void TestReasoningBudgetForcesTheEnd() {
          "compact distributions index the forced end among their IDs");
   auto copy = sampler;
   copy.Accept(3);
-  Expect(!copy.ForcedToken() && sampler.ForcedToken(),
+  Expect(!copy.ForcedToken() && !copy.NeedsConstraintMask() &&
+             sampler.ForcedToken(),
          "copies advance independently, as speculative verification needs");
   Expect(copy.Sample(Logits(6)) == 6, "the answer is sampled normally");
   copy.ResetHistory({});
