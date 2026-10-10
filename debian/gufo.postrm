@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "purge" ]; then
+  # Drop the "was running" marker if the package never reached postinst.
+  rm -f /run/gufo.service.was-active
+  # Remove the dedicated system user; the home directory
+  # (/var/lib/gufo) is kept in case it holds model weights.
+  if getent passwd gufo > /dev/null 2>&1; then
+    deluser --system gufo || true
+  fi
+  # Remove the shared group only if no other member remains; the
+  # shared cache directory itself is kept (shared data).
+  if getent group llm-servers > /dev/null 2>&1; then
+    delgroup --system llm-servers || true
+  fi
+fi
+
+#DEBHELPER#
+
+exit 0

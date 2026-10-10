@@ -1,0 +1,82 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+  # Shared group for LLM server services. Members (gufo, lemonade, ...)
+  # share the model cache below.
+  if ! getent group llm-servers > /dev/null 2>&1; then
+    addgroup --system llm-servers
+  fi
+  # Dedicated system user for the Gufo server. Runtime state lives in
+  # the user's home directory (/var/lib/gufo).
+  if ! getent passwd gufo > /dev/null 2>&1; then
+    adduser --system --ingroup llm-servers --home /var/lib/gufo \
+      --shell /usr/sbin/nologin gufo
+  fi
+  # GPU device access: /dev/kfd and /dev/dri/renderD* require membership
+  # in the video and render groups. The render group is defined by the
+  # udev package's sysusers configuration; create it if missing (minimal
+  # systems and containers). Match the group of an existing device node
+  # so mounted devices stay accessible (rootful containers).
+  if ! getent group render > /dev/null 2>&1; then
+    render_gid=$(stat -c '%g' /dev/kfd 2>/dev/null || true)
+    case "$render_gid" in
+      ""|0|65534)
+        addgroup --system render
+        ;;
+      *)
+        addgroup --system --gid "$render_gid" render 2>/dev/null \
+          || addgroup --system render
+        ;;
+    esac
+  fi
+  usermod -a -G video,render gufo
+  # Shared Hugging Face cache for model weights. Group-owned with the
+  # setgid bit so new files inherit the llm-servers group; any member
+  # (gufo, lemonade, ...) can read and download models. Survives purge
+  # (shared data). An existing directory may be a read-only mount
+  # (containers), so ownership and mode are best-effort there.
+  if [ -d /var/lib/huggingface/hub ]; then
+    chown gufo:llm-servers /var/lib/huggingface/hub 2>/dev/null || true
+    chmod 2775 /var/lib/huggingface/hub 2>/dev/null || true
+  else
+    install -d -o gufo -g llm-servers -m 2775 /var/lib/huggingface/hub
+  fi
+  # Register the ROCm runtime libraries with the dynamic linker. The
+  # AMD ROCm runtime packages do not install an ld.so.conf.d entry, so
+  # without this the loader cannot find libhipblas/librocblas/libamdhip64
+  # and the server fails to start (exit 127).
+  if command -v ldconfig > /dev/null 2>&1; then
+    ldconfig
+  fi
+  # Restart the service if it was running before this dpkg run. prerm records
+  # that fact, because a same-version reinstall arrives as "remove" and the unit
+  # is already stopped by the time this runs; an upgrade leaves it running and
+  # needs a restart to pick up the new binary. A first install carries no marker,
+  # so the service keeps its "admin starts it after configuring" behaviour.
+  if [ -e /run/gufo.service.was-active ]; then
+    rm -f /run/gufo.service.was-active
+    if [ -d /run/systemd/system ] && command -v systemctl > /dev/null 2>&1; then
+      action=start
+      if systemctl is-active --quiet gufo.service 2>/dev/null; then
+        action=restart
+      fi
+      if command -v deb-systemd-invoke > /dev/null 2>&1; then
+        if ! deb-systemd-invoke "$action" gufo.service > /dev/null 2>&1; then
+          echo "gufo: warning: could not $action gufo.service; start it manually" >&2
+        fi
+      fi
+    fi
+  fi
+  # Sync the systemd manager with the packaged unit file after installs
+  # and upgrades. dh_installsystemd --no-enable --no-start skips its own
+  # daemon-reload, so without this the manager keeps a stale cached unit
+  # and warns on the next restart.
+  if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+  fi
+fi
+
+#DEBHELPER#
+
+exit 0

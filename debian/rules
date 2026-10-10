@@ -1,0 +1,71 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		-G Ninja \
+		-DCMAKE_BUILD_TYPE=RelWithDebInfo \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DGUFO_RELEASE_VERSION=$(shell cat version.txt) \
+		-DGUFO_REVISION=$(shell git describe --always --dirty 2>/dev/null || echo unknown)
+
+override_dh_auto_build:
+	dh_auto_build --parallel
+
+override_dh_auto_install:
+	dh_auto_install --destdir=debian/gufo
+
+# The project's test suite is not part of the package build; hosted CI
+# covers it separately.
+override_dh_auto_test:
+
+# debian/changelog is the authority for the package version, while version.txt
+# stays canonical. The release workflow keeps the two aligned: it runs
+# debian/gen-changelog.sh on the release pull request and commits the result
+# before that pull request merges (.github/workflows/release-please.yml).
+#
+# A build does not write to the source tree. Regenerating here would leave every
+# clean checkout modified, and because GUFO_REVISION comes from
+# `git describe --dirty`, every binary an unsuspecting packager builds would
+# advertise a dirtiness they never caused. Default is verify-only: it fails with
+# both versions when they drift, which only happens on a tree that moved past its
+# last release without the generated entry (ordinary pull requests must not touch
+# the version, the changelog or the release manifest).
+#
+# A packager who means to build such a tree opts in with
+# DEB_BUILD_OPTIONS=gufo-changelog-regen, which regenerates the top entry from
+# version.txt before dh_gencontrol reads it. That run does modify the working
+# tree, so restore debian/changelog afterwards and leave committing a regenerated
+# entry to the release workflow.
+execute_before_dh_gencontrol:
+ifneq (,$(filter gufo-changelog-regen,$(DEB_BUILD_OPTIONS)))
+	debian/gen-changelog.sh
+else
+	@changelog_version=$$(dpkg-parsechangelog -SVersion | sed 's/-[^-]*$$//'); \
+	version=$$(cat version.txt); \
+	if [ "$$changelog_version" != "$$version" ]; then \
+		echo "debian/rules: debian/changelog is at $$changelog_version but version.txt is at $$version." >&2; \
+		echo "debian/rules: release automation generates this entry. To build this tree anyway, re-run with DEB_BUILD_OPTIONS=gufo-changelog-regen." >&2; \
+		exit 1; \
+	fi
+endif
+
+# dwz cannot process the DWARF5 debug sections emitted by the ROCm clang
+# toolchain; skip the debug-info deduplication step.
+override_dh_dwz:
+
+# The AMD ROCm packages do not ship shlibs metadata; their runtime
+# dependencies are declared explicitly in debian/control.
+override_dh_shlibdeps:
+	dh_shlibdeps -- --ignore-missing-info
+
+# The service needs a model configured in /etc/gufo/gufo.env before it
+# can run; do not enable or start it on install, otherwise it enters a
+# restart loop until configured. Start it explicitly after configuring:
+#   sudo systemctl enable --now gufo
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start

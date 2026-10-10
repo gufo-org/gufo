@@ -81,6 +81,38 @@ run follows the same process and is available for recovery. Do not edit the
 version, changelog or release manifest in an ordinary feature or fix pull
 request.
 
+### Debian packaging
+
+The `debian/` tree builds Gufo's Debian packages. Their version comes from the
+top `debian/changelog` entry, while `version.txt` stays canonical, so the release
+workflow keeps the two aligned: after Release Please opens or updates the release
+pull request, it runs `debian/gen-changelog.sh` on that branch and commits the
+result before the pull request is merged. The script rewrites the top changelog
+entry from `version.txt` and the matching `CHANGELOG.md` section, preserving the
+existing maintainer and reusing the Debian revision when the upstream version is
+unchanged. Do not edit `debian/changelog` by hand: it is generated, and would
+otherwise drift from `version.txt`.
+
+The package build only checks it. `debian/rules` compares the upstream part of the
+changelog version with `version.txt` before `dh_gencontrol` reads it, and fails
+naming both values when they differ. It never writes to the source tree:
+regenerating there would leave a clean checkout modified and stamp
+`git describe --dirty` into `GUFO_REVISION`, so every binary would advertise a
+dirtiness its builder never caused. To build a tree that is deliberately ahead of
+its last generated entry, pass `DEB_BUILD_OPTIONS=gufo-changelog-regen`, which
+regenerates the top entry from `version.txt` first; that run does modify the
+working tree, so restore `debian/changelog` afterwards. Note that
+`dpkg-buildpackage` fixes the `.changes` and `.buildinfo` file names when it
+starts, so generate *before* the build when those names must carry the new
+version as well as the package itself.
+The hook sits after `dh_auto_configure`, which stamps the revision from
+`git describe --always --dirty`, so that the regenerated file cannot mark the
+build dirty. `DEB_BUILD_OPTIONS=no-changelog-regen` builds against the checked-in
+entry. Because `dpkg-buildpackage` reads the version before it invokes
+`debian/rules`, the file names of the `.changes` and `.buildinfo` written by the
+first build of a new version still carry the previous entry; a release build from
+a `vX.Y.Z` tag, where the two already match, is unaffected.
+
 Nix keeps release identity and source identity separate. The default package is
 a development build and reports `gufo version development (<revision>)`.
 Official artifacts build the `release` package from a `vX.Y.Z` tag and report

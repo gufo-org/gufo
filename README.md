@@ -202,6 +202,143 @@ The same source, compiler flags and install rules serve both builds. Nix pins
 the complete toolchain for reproducible comparisons; changing the compiler or
 math libraries requires the affected model's quality checks.
 
+### Debian package
+
+The `debian/` directory builds two packages with `dpkg-buildpackage`:
+
+- `gufo` — the binary, runtime data and license notices.
+- `gufo-rocm-repo` — registers the AMD ROCm apt repository and signing key,
+  because the ROCm libraries Gufo needs (hipblaslt, rocwmma and the HIP
+  runtime) are not available in the Debian or Ubuntu repositories.
+
+Build the packages on a Debian or Ubuntu machine with the ROCm development
+packages installed from the AMD repository:
+
+```sh
+sudo apt install dpkg-dev debhelper cmake ninja-build pkg-config \
+  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev \
+  libwebp-dev
+# ROCm development packages from the AMD repository (see below).
+sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \
+  hipcub-dev rocprim-dev rocwmma-dev
+dpkg-buildpackage -b
+```
+
+This produces `gufo_<version>_amd64.deb` and `gufo-rocm-repo_<version>_all.deb`
+in the parent directory. `debhelper` also emits
+`gufo-dbgsym_<version>_amd64.deb` when the toolchain records a GNU build ID:
+Debian's GCC and BFD `ld` do by default, a HIP build linked with ROCm's
+`ld.lld` does not. The package is optional (`gufo` does not depend on it, and
+`tools/deploy/install-gufo-deb.sh` ignores it); build without it with
+`DEB_BUILD_OPTIONS=noautodbgsym`.
+
+The build host and the target machines must use the
+same ROCm line: the binary links the runtime by soname and carries no ROCm
+RPATH, so the target needs a compatible ROCm with `/opt/rocm/lib` on the
+dynamic linker path (the package registers it via
+`/etc/ld.so.conf.d/rocm.conf`).
+
+On a target machine, install the repository package first, then Gufo. Use
+`tools/deploy/install-gufo-deb.sh` from the directory containing the `.deb`
+files; it installs with `--no-install-recommends` so the AMD ROCm runtime
+packages do not pull their `-dev` counterparts (which would install the ROCm
+compiler and the GCC toolchain). Package paths default to `gufo_*.deb` and
+`gufo-rocm-repo_*.deb`, so new versions need no script changes:
+
+```sh
+scp gufo_*.deb gufo-rocm-repo_*.deb target:~/debs/
+ssh target 'cd ~/debs && ./install-gufo-deb.sh'
+```
+
+Or manually:
+
+```sh
+sudo apt install ./gufo-rocm-repo_*.deb
+sudo apt update
+sudo apt install --no-install-recommends ./gufo_*.deb
+```
+
+The install creates a dedicated `gufo` system user and a `gufo.service`
+systemd unit that runs the LLM server from the user's home directory
+(`/var/lib/gufo`). The service is **not started on install**: it needs a
+model configured first, otherwise it would restart-loop. Configure
+`/etc/gufo/gufo.env`, then start it:
+
+```sh
+sudo systemctl enable --now gufo
+```
+
+Model weights live in a shared Hugging Face cache at
+`/var/lib/huggingface/hub`, owned by the `llm-servers` group, so other
+LLM servers on the machine can reuse the same downloads. Download a model
+as the `gufo` user and point the service at it:
+
+```sh
+sudo -u gufo hf download unsloth/Qwen3.8-27B-GGUF \
+  Qwen3.8-27B-UD-Q8_K_XL.gguf \
+  --revision 4ca720788d1e01f1bff70c033e0d0028fd02e502 \
+  --repo-type model
+sudo sed -i 's|^GUFO_MODEL=.*|GUFO_MODEL=/var/lib/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf|' \
+  /etc/gufo/gufo.env
+sudo systemctl restart gufo
+```
+
+After changing `/etc/gufo/gufo.env` or a unit drop-in, run
+`sudo systemctl daemon-reload && sudo systemctl restart gufo` (a plain
+restart alone keeps the previously loaded unit configuration).
+
+The service listens on port 8080; check it with `systemctl status gufo` and
+`journalctl -u gufo`. The target machine needs an AMD Strix Halo GPU
+(`gfx1151`), the amdgpu kernel driver with gfx1151 support, and read/write
+access to `/dev/kfd` and `/dev/dri` for the `gufo` user (the package adds it
+to the `video` and `render` groups). Model weights are acquired separately.
+
+### Speculative decoding (MTP) and context size
+
+The packaged unit serves the model with its native context (262144 for
+Qwen3.8 Flash-Next) and no speculative decoding. To enable MTP or cap the
+context, add a systemd drop-in (machine-specific configuration, survives
+package upgrades):
+
+```sh
+sudo mkdir -p /etc/systemd/system/gufo.service.d
+sudo tee /etc/systemd/system/gufo.service.d/mtp.conf > /dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/gufo serve --host 0.0.0.0 --port 8080 llm --model ${GUFO_MODEL} --speculative mtp --mtp-model ${GUFO_MTP_MODEL} --sessions 2 --context 131072
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart gufo
+```
+
+Set `GUFO_MTP_MODEL` in `/etc/gufo/gufo.env` to the MTP draft GGUF path
+inside the cache. See the model's `docs/models/<model>/README.md` for the
+supported speculative modes and context limits.
+
+To let another LLM server on the machine share the cache, add its service
+user to the `llm-servers` group (the cache directory is setgid, so new
+downloads inherit the group):
+
+```sh
+sudo usermod -a -G llm-servers <service-user>
+sudo systemctl restart <service>
+```
+
+To reuse an existing cache instead of downloading again, point
+`HF_HUB_CACHE` in `/etc/gufo/gufo.env` at it and give the `gufo` user
+read access to those directories. The cache survives `apt purge gufo`.
+
+To copy the model cache to another machine instead of downloading there,
+use `tools/deploy/sync-model-cache.sh` (transfers with root on both
+sides, fixes ownership to `gufo:llm-servers` and the setgid bit):
+
+```sh
+./tools/deploy/sync-model-cache.sh user@target
+```
+
+Never remove the ROCm `-dev` packages with apt on a machine that also has
+xrt or dkms installed: AMD's dependency graph is entangled and removal
+cascades into unrelated packages (including the Gufo runtime itself).
+
 ## License
 
 Gufo's original code is [MIT licensed](LICENSE). Adapted code and dependencies
