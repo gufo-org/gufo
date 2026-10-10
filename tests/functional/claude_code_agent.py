@@ -112,9 +112,14 @@ def validate_requests(rows, server_log):
         assert row.get("status") == 200 and not row.get("error"), row
         # The proxy reads usage from SSE; a buffered response carries it in its body.
         usage = row.get("usage") or json.loads(Path(row["body"]).with_suffix(".sse").read_text())["usage"]
-        assert usage["input_tokens"] > 0 and usage["output_tokens"] > 0, row
+        # Uncached input can be zero when the whole prompt is reused.
+        inputs = (usage["input_tokens"], usage.get("cache_read_input_tokens", 0),
+                  usage.get("cache_creation_input_tokens", 0))
+        assert all(type(count) is int and count >= 0 for count in inputs), row
+        assert sum(inputs) > 0 and usage["output_tokens"] > 0, row
         fields = completed[row["request_id"]]
         assert fields["outcome"] == "completed", fields
+        assert sum(inputs) == int(fields["prompt_tokens"]), (usage, fields)
         for field in ("queue_ms", "ttft_ms", "duration_ms"):
             value = float(fields[field])
             assert math.isfinite(value) and value >= 0, (field, fields)
