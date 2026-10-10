@@ -448,6 +448,8 @@ bool IsPublicImageAddress(std::span<const std::uint8_t> address) noexcept {
 
 std::vector<std::uint8_t> ReadImageUrl(std::string_view url,
                                        ImageReadBudget& budget) {
+  if (!budget.accepts_images)
+    throw std::invalid_argument("model does not support image input");
   const auto remaining_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(
           budget.deadline - std::chrono::steady_clock::now())

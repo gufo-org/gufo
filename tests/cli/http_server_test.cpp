@@ -924,6 +924,7 @@ void TestLlamaSlotsAndMetrics() {
 
 void TestResponsesToolImages() {
   RunningServer server;
+  server.backend->image_support = true;
   using gufo::json::parse;
   using gufo::tokenization::ChatRole;
   server.backend->SetOutput("red");
@@ -989,8 +990,41 @@ void TestResponsesToolImages() {
   assert(server.backend->calls == calls_before);
 }
 
+// A text-only model refuses image blocks before any image is read, so a
+// client cannot make the server fetch a URL for a request that cannot succeed.
+void TestTextOnlyBackendRefusesImagesBeforeReading() {
+  RunningServer server;
+  server.backend->image_support = false;
+  const int calls = server.backend->calls;
+  // An unresolvable host or invalid base64 would produce a different error
+  // if the image were fetched or decoded.
+  for (const auto* url : {"https://image-fetch-must-not-happen.invalid/x.png",
+                          "data:image/png;base64,!!!not-base64!!!"}) {
+    const std::string messages =
+        std::string(R"({"messages":[{"role":"user","content":[{"type":"image",)"
+                    R"("source":{"type":"url","url":")") +
+        url + R"("}}]}]})";
+    const std::string responses =
+        std::string(
+            R"({"input":[{"role":"user","content":[{"type":"input_image",)"
+            R"("image_url":")") +
+        url + R"("}]}]})";
+    for (const auto& [path, body] :
+         {std::pair<std::string, std::string>{"/v1/messages", messages},
+          {"/v1/messages/count_tokens", messages},
+          {"/v1/responses", responses}}) {
+      const auto rejected = server.Post(path, body);
+      ExpectStatus(rejected, 400);
+      assert(rejected.find("does not support image input") !=
+             std::string::npos);
+    }
+  }
+  assert(server.backend->calls == calls);
+}
+
 void TestCompatibilityRequests() {
   RunningServer server;
+  server.backend->image_support = true;
   using gufo::json::parse;
   const auto response_body = [](const std::string& response) {
     ExpectStatus(response, 200);
@@ -2589,6 +2623,7 @@ int main() {
   TestFallbackBackendMetrics();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
+  TestTextOnlyBackendRefusesImagesBeforeReading();
   TestResponsesToolImages();
   TestModelInputModalities();
   TestRawCompletionStreaming();

@@ -28,6 +28,9 @@ struct Image {
     const std::filesystem::path& path);
 /// Shared across all messages of one HTTP request.
 struct ImageReadBudget {
+  /// False when the loaded model takes no image input; reading is refused
+  /// before any data URL is decoded or any URL is fetched.
+  bool accepts_images{true};
   std::size_t remaining_bytes{kMaxEncodedImageBytes};
   std::chrono::steady_clock::time_point deadline{
       std::chrono::steady_clock::now() + std::chrono::seconds(15)};

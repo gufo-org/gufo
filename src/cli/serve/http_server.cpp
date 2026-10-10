@@ -521,9 +521,10 @@ bool ReadTextContent(const json::Value* content, std::string* out,
 
 bool ReadTextMessages(const json::Value* input,
                       std::vector<tokenization::ChatMessage>* messages,
-                      bool responses = false,
+                      bool images_supported, bool responses = false,
                       std::string* parse_error = nullptr) {
   core::ImageReadBudget image_budget;
+  image_budget.accepts_images = images_supported;
   if (input == nullptr || !input->is_array() || input->empty())
     return false;
   // Responses replays one assistant turn as several reasoning, message and
@@ -1112,7 +1113,8 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
       "items, function calls or function outputs";
   if (input != nullptr && input->is_string() && !input->str().empty()) {
     messages.push_back({tokenization::ChatRole::kUser, input->str(), "", ""});
-  } else if (!ReadTextMessages(input, &messages, true, &input_error)) {
+  } else if (!ReadTextMessages(input, &messages, b.supports_images(), true,
+                               &input_error)) {
     return InvalidCompatibilityRequest(input_error);
   }
 
@@ -1227,8 +1229,8 @@ std::optional<HttpResponse> ReadAnthropicChat(
   std::string messages_error =
       "'messages' must contain text, image, thinking, tool_use or tool_result "
       "blocks";
-  if (!ReadTextMessages(body.find("messages"), &messages, false,
-                        &messages_error)) {
+  if (!ReadTextMessages(body.find("messages"), &messages, b.supports_images(),
+                        false, &messages_error)) {
     return InvalidCompatibilityRequest(messages_error);
   }
 
