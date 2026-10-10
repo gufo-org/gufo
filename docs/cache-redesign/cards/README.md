@@ -62,7 +62,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [15](15-qwen27b-ar-adapter.md) | Qwen 27B AR adapter | Adapters | 02, 06, 08 | L | proposed |
 | [16](16-qwen27b-dflash2.md) | Qwen 27B DFlash2 draft state | Adapters | 15 | M | proposed |
 | [17](17-deepseek-adapter.md) | DeepSeek V4 Flash adapter | Adapters | 02, 06, 08 | L | proposed |
-| [18](18-non-continuation-records.md) | Capability records for non-continuation models | Adapters | 02 | S | agreed |
+| [18](18-non-continuation-records.md) | Capability records for non-continuation models | Adapters | 02 | S | done |
 | [19](19-switch-over.md) | Switch serving to the new cache | Switch-over | 01, 07, 09, 12–18 | L (stack) | proposed |
 | [20](20-e2e-baseline-and-qualification.md) | End-to-end baseline and qualification | After switch-over | 19 | evidence | proposed |
 

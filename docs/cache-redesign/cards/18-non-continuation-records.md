@@ -1,7 +1,7 @@
 # 18 · Capability records for non-continuation models
 
 **Milestone:** Adapters · **Depends on:** 02 · **Size:** S ·
-**Affects:** nothing user-visible · **Status:** agreed
+**Affects:** nothing user-visible · **Status:** done
 
 ## Goal
 
@@ -33,7 +33,14 @@ None: declarations only.
 
 ## Done when
 
-- [ ] Every family has a record and the test passes.
+- [x] Every family has a record and the test passes.
+
+Each `src/models/<family>/cache_capabilities.hpp` holds the record, and
+`cache_model_capabilities_test` matches the records against the model
+directories. Neither ASR nor TTS reuses state across requests: each request
+prefills its own prompt, live ASR sessions transcribe every committed buffer
+independently, and streamed TTS segments are separate requests. No separate
+capability is recorded.
 
 ## RFC
 
