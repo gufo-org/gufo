@@ -8,6 +8,7 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
@@ -573,7 +574,28 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     region.pieces = {{host_metadata.data(), 0, host_metadata.size(), true}};
   return Transfer(
       state, false, stream, [&](gufo::hip::TransferStream& transfer) {
-        std::ranges::fill(bytes, std::byte{});
+        // Pieces overwrite their ranges. Clear only uncovered bytes, which
+        // serialize as zeros: clearing the whole recycled copy on the host
+        // dominated capture time.
+        std::vector<std::pair<std::size_t, std::size_t>> covered;
+        covered.reserve(region.pieces.size());
+        for (const auto& piece : region.pieces) {
+          const auto first = std::max(offset, piece.offset);
+          const auto end =
+              std::min(offset + bytes.size(), piece.offset + piece.bytes);
+          if (first < end)
+            covered.emplace_back(first - offset, end - offset);
+        }
+        std::ranges::sort(covered);
+        std::size_t cleared = 0;
+        for (const auto& [first, end] : covered) {
+          if (first > cleared)
+            std::fill(bytes.begin() + cleared, bytes.begin() + first,
+                      std::byte{});
+          cleared = std::max(cleared, end);
+        }
+        std::fill(bytes.begin() + std::min(cleared, bytes.size()), bytes.end(),
+                  std::byte{});
         for (const auto& piece : region.pieces) {
           const auto first = std::max(offset, piece.offset);
           const auto end =
