@@ -2476,7 +2476,7 @@ public:
     const auto plan = adapter->BackingPlan(ram);
     result->adapter = std::move(adapter);
     auto backing = std::make_shared<Backing>();
-    result->transfer_batch_size = 4;
+    result->transfer_batch_size = 16;
     const auto rounded = [](std::size_t bytes) {
       return (bytes + 4095) / 4096 * 4096;
     };

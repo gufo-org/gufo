@@ -36,8 +36,9 @@ struct ComponentCacheResources {
   cache::StreamLease stream;
   std::function<ComponentCaptureBuffer(const cache::PayloadRequest&)> allocate;
   cache::StagingAllocator staging;
-  // The provider guarantees this many concurrent leases per execution slot,
-  // in addition to preservation and disk work. One keeps generic providers
+  // At most this many transfers of one capture/restore are in flight before
+  // waiting (16 at most). When the shared pool is momentarily exhausted, the
+  // batch settles its own leases and retries. One keeps generic providers
   // usable without a pool-capacity contract.
   std::size_t transfer_batch_size{1};
 };

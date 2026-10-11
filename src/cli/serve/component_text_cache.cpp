@@ -85,11 +85,20 @@ public:
     if (!capacity || capacity > jobs_.size())
       throw std::invalid_argument("invalid cache transfer batch size");
   }
+  // Acquire returns null when the shared pool is momentarily exhausted. Settle
+  // this batch's own leases before retrying, so a wide batch never fails a
+  // transfer that a narrower one would have completed.
   template<class Acquire, class Submit>
   void Add(Acquire acquire, Submit submit) {
     if (size_ == capacity_)
       Finish();
     auto stream = acquire();
+    if (!stream && size_) {
+      Finish();
+      stream = acquire();
+    }
+    if (!stream)
+      throw std::runtime_error("component cache transfer pool exhausted");
     auto completion = submit(*stream);
     jobs_[size_++].emplace(Job{std::move(stream), std::move(completion)});
   }
@@ -108,7 +117,7 @@ private:
     std::unique_ptr<cache::Stream> stream;
     cache::Completion completion;
   };
-  std::array<std::optional<Job>, 4> jobs_;
+  std::array<std::optional<Job>, 16> jobs_;
   std::size_t capacity_, size_{};
 };
 class Events final : public cache::RetentionEventSink {
@@ -576,7 +585,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
               const std::span<const std::byte> buffer(pin.Bytes().data(),
                                                       bytes);
               transfers.Add(
-                  [&] { return impl_->Stream(); },
+                  [&] { return impl_->resources->stream(); },
                   [&](cache::Stream& stream) {
                     return c.descriptor.kind ==
                                    cache::ComponentKind::kPrivateState
@@ -893,7 +902,7 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
                 }
               const std::span<std::byte> buffer(buffers[i].bytes.data(), bytes);
               transfers.Add(
-                  [&] { return cache.Stream(); },
+                  [&] { return cache.resources->stream(); },
                   [&](cache::Stream& stream) {
                     return payload.category ==
                                    cache::ResourceCategory::kPrivateState
