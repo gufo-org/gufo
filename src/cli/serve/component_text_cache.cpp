@@ -3,6 +3,7 @@
 #include <sys/random.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -539,6 +540,10 @@ struct ComponentTextCache::Lease::Impl {
   double restore_time{};
   bool disk_hit{}, active{true}, preserve_source{};
   cache::CheckpointId source{};
+  std::array<cache::CheckpointId, cache::RetentionPolicy::kRecordLimit>
+      edit_boundaries{};
+  std::size_t edit_boundary_count{};
+  cache::ResourceCharge edit_metadata;
   SnapshotPurpose purpose{SnapshotPurpose::kContinuation};
   std::vector<cache::Token> capture_tokens;
   ContinuationLookup lookup_result;
@@ -553,7 +558,11 @@ struct ComponentTextCache::Lease::Impl {
                                                 this->slot.Execution())),
         input(std::move(input)),
         prompt(prompt.begin(), prompt.end()),
-        stable(stable) {}
+        stable(stable),
+        edit_metadata(cache->ledger
+                          .Reserve(cache::ResourceCategory::kMetadata,
+                                   sizeof(edit_boundaries))
+                          .Convert()) {}
   cache::RetentionRequest Retain(std::span<const cache::Token> tokens) const {
     return {.tokens = tokens,
             .compatibility = cache->identity,
@@ -563,7 +572,9 @@ struct ComponentTextCache::Lease::Impl {
             .source = source,
             .preserve_source = preserve_source,
             .new_payload_bytes = entry->history->NewPayloadBytes(
-                cache->resources->adapter->Positions(slot.Execution()))};
+                cache->resources->adapter->Positions(slot.Execution())),
+            .protected_checkpoints =
+                std::span(edit_boundaries).first(edit_boundary_count)};
   }
   std::unique_ptr<TextRunnerSnapshot> CaptureDurable();
 };
@@ -1281,6 +1292,12 @@ std::size_t ComponentTextCache::Lease::PublishSnapshot(
   }
   if (!admitted)
     return 0;
+  if (retain.purpose == cache::RetentionPurpose::kHistory) {
+    if (impl_->edit_boundary_count == impl_->edit_boundaries.size())
+      throw std::logic_error("too many edit boundaries in one turn");
+    impl_->edit_boundaries[impl_->edit_boundary_count++] =
+        component->checkpoint->Id();
+  }
   try {
     const auto started = Clock::now();
     impl_->metrics.disk_queued_bytes +=

@@ -919,3 +919,28 @@ is not treated as proof that a historical reproduction is fixed. Unsupported
 features, renderer defects, legacy-model behavior and unfinished performance
 checks remain explicit. Production qualification of the new edit-admission
 policy and the deep side-traffic regression continues separately.
+
+
+### Review follow-up: edit-boundary admission (October 11)
+
+[Card 21](21-edit-boundary-admission.md) records an explicit change from the
+original retention-policy port: history byte admission can reclaim old families,
+and each execution lease protects its admitted histories from later captures
+in that turn. Retry ranks, full-record optional guards and LRU within ranks
+remain unchanged. Protection ends with the lease.
+
+The actual four-block serving regression fails without protection, then restores
+both edited boundaries with independent cold-state agreement after the fix.
+All 57 repository contracts and shared formatting pass. Production C2/context
+32768/RAM 8 GiB passes growth, depth, shared prefix, rotation, concurrency and
+edits in both AR and MTP, with the same accumulated history that failed edits
+on the prior policy. Last-user/older-tool/rewind edits restore 2048 tokens and
+prefill 1199/1656/1199; cold outputs match. MTP proposes 1506 drafts, accepting
+871. The constrained 2 GiB pressure replay and affected matched timings remain
+open; this is an edit-reuse correctness result, not a latency qualification.
+
+Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+`grid-functional-summary.json`, `grid-core-{off,mtp}`, `grid-protection-red.log`,
+`grid-protection-green.log`, `grid-pr-final.log`, `grid-format-after-control.log`.
+Production binary SHA-256:
+`def206c3bb6a37af4cb6eaed2a914209252ca9781d1321cfb4c45f47062442f7`.

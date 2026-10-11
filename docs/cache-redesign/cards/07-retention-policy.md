@@ -30,8 +30,10 @@ it changes behavior, so card 19 reports it separately from storage effects.
 
 ## Not in this PR
 
-Any new policy: rank changes, a cost-aware shorter restore, density tuning.
-Each needs its own card with measurements.
+The original port excludes new policy: rank changes, a cost-aware shorter
+restore and density tuning. Each needs its own card with measurements.
+[Card 21](21-edit-boundary-admission.md) records the switch-over review's explicit
+edit-boundary byte-admission change and its qualification.
 
 ## Test first
 

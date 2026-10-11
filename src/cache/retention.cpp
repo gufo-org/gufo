@@ -161,7 +161,17 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
                                     bool record_pressure) const {
   const auto source = Find(r.source);
   const auto eligible = [&](std::size_t i) {
-    return records_[i].checkpoint && Priority(i, &r) <= MaxRank(r.purpose);
+    // Byte admission for an edit boundary must not starve behind last copies
+    // of older families. Record-pressure guards and retry admission retain
+    // their existing rank limits. LRU still breaks ties within each rank.
+    const auto maximum =
+        !record_pressure && r.purpose == RetentionPurpose::kHistory
+            ? 3
+            : MaxRank(r.purpose);
+    return records_[i].checkpoint && Priority(i, &r) <= maximum &&
+           std::ranges::find(r.protected_checkpoints,
+                             records_[i].checkpoint->Id()) ==
+               r.protected_checkpoints.end();
   };
   // Full-record publication first replaces an incompatible edited tail of the
   // leased source's family, as the current cache does.
@@ -338,7 +348,11 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
     } catch (const ResourceExhausted&) {
       auto target = limit_;
       if (exact != limit_ && records_[exact].checkpoint &&
-          (records_[exact].checkpoint->Id() != r.source || !r.preserve_source))
+          (records_[exact].checkpoint->Id() != r.source ||
+           !r.preserve_source) &&
+          std::ranges::find(r.protected_checkpoints,
+                            records_[exact].checkpoint->Id()) ==
+              r.protected_checkpoints.end())
         target = exact;
       else
         target = Victim(r, false);

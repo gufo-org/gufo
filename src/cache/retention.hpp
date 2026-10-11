@@ -92,6 +92,9 @@ struct RetentionRequest {
   // bound on newly owned payload capacity. An impossible payload refuses
   // without evicting. Shared complete chunks contribute zero.
   std::size_t new_payload_bytes{};
+  // Keep edit boundaries captured by this turn available until it commits.
+  // This protects them from the turn's later captures, without changing ranks.
+  std::span<const CheckpointId> protected_checkpoints{};
 };
 // Caller serializes policy, index and history operations. Ledger and index
 // outlive this object; sink, if present, does too. Callbacks/sinks cannot

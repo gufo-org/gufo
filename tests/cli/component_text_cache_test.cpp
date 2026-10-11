@@ -27,6 +27,7 @@ public:
   mutable std::size_t captures{};
   bool defer_idle{};
   bool in_pass{};
+  std::size_t private_blocks{128};
   mutable std::size_t through_calls{};
   bool UsesComponentCache() const override { return true; }
   TextRunnerDescriptor Descriptor() const override {
@@ -72,8 +73,9 @@ public:
     auto blocks = std::make_shared<std::vector<Block>>();
     // Physical backing commits once, before any request; assigned owner tokens
     // account for the entire block including unused bytes.
-    auto data = std::make_shared<std::array<std::byte, 2048 * 16 + 128 * 64>>();
-    for (std::size_t i = 0; i < 2048 + 128; ++i) {
+    auto data = std::make_shared<std::vector<std::byte>>(2048 * 16 +
+                                                         private_blocks * 64);
+    for (std::size_t i = 0; i < 2048 + private_blocks; ++i) {
       const auto size = i < 2048 ? 16ULL : 64ULL;
       const auto offset = i < 2048 ? i * 16 : 2048 * 16 + (i - 2048) * 64;
       auto reservation =
@@ -384,6 +386,58 @@ void ReuseAndBranches() {
   assert(Generate(cold) == edited);
   cold.Invalidate();
 }
+void EditBoundariesSurviveActualBackingPressure() {
+  auto runner = std::make_shared<Runner>();
+  runner->private_blocks = 4;
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const auto capture = [](auto& lease, const auto& tokens,
+                          SnapshotPurpose purpose) {
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), tokens.size(),
+                                     false, purpose, {}));
+    assert(lease->PublishSnapshot(tokens, lease->Capture(), false));
+  };
+  for (TextRunnerToken family = 100; family < 104; ++family) {
+    std::vector<TextRunnerToken> tokens(12, family);
+    auto lease = cache.Acquire(tokens, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, tokens, tokens);
+    capture(lease, tokens, SnapshotPurpose::kContinuation);
+    (void)lease->Commit({}, {}, tokens);
+  }
+  std::vector<TextRunnerToken> prompt(12);
+  std::iota(prompt.begin(), prompt.end(), 1);
+  {
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    for (std::size_t end : {4U, 8U, 12U}) {
+      const auto piece = std::span(prompt).subspan(end - 4, 4);
+      runner->adapter->Append(state.slot, piece, piece);
+      std::vector<TextRunnerToken> prefix(prompt.begin(), prompt.begin() + end);
+      capture(lease, prefix,
+              end == prompt.size() ? SnapshotPurpose::kContinuation
+                                   : SnapshotPurpose::kHistory);
+    }
+    (void)lease->Commit({}, {}, prompt);
+  }
+  for (std::size_t edit : {5U, 9U}) {
+    auto branch = prompt;
+    branch[edit] += 1000;
+    auto lease = cache.Acquire(branch, {}, {}, true, 0, true);
+    const auto cached = edit < 8 ? 4U : 8U;
+    assert(lease->cached_tokens() == cached);
+    auto& state = dynamic_cast<State&>(lease->state());
+    const auto tail = std::span(branch).subspan(cached);
+    runner->adapter->Append(state.slot, tail, tail);
+    const auto restored_hash = runner->adapter->RecurrentHash(state.slot);
+    auto cold_runner = std::make_shared<Runner>();
+    ComponentTextCache cold(cold_runner, 1, 1 << 22, {});
+    auto control = cold.Acquire(branch, {}, {}, false, 0, true);
+    auto& control_state = dynamic_cast<State&>(control->state());
+    cold_runner->adapter->Append(control_state.slot, branch, branch);
+    assert(restored_hash ==
+           cold_runner->adapter->RecurrentHash(control_state.slot));
+  }
+}
 void RestartAndCorruption() {
   char pattern[] = "/tmp/gufo-component-serving-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
@@ -669,6 +723,7 @@ int main() {
   RestoreFromBusyBorrowedSource();
   ColdAssignmentPrefersPreservedSlot();
   ReuseAndBranches();
+  EditBoundariesSurviveActualBackingPressure();
   RestartAndCorruption();
   FailedCaptureKeepsPublishedBoundary();
   DiskBudgetEvictsAnUnpinnedConversation();

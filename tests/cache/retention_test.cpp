@@ -202,6 +202,44 @@ void ShortPeersDoNotCoverHistory() {
     assert(f.policy.Rank(history) == 3);  // different inputs cannot cover it
   }
 }
+void HistoryBytePressureCanReplaceOldFamilies() {
+  Fixture f(4);
+  const auto old = f.Add({9, 9});
+  f.Add({8, 8});
+  std::vector<Token> history{1, 2};
+  unsigned attempts = 0;
+  assert(f.policy.Admit({history, {1}, {}, RetentionPurpose::kHistory}, [&] {
+    if (!attempts++)
+      throw ResourceExhausted();
+    return IndexCheckpoint(f.ledger, history);
+  }));
+  assert(attempts == 2 && f.Cached({1, 2, 3}) == 2);
+  assert(f.Cached({9, 9, 1}) == 0 && f.Cached({8, 8, 1}) == 2);
+  assert(f.log.events[f.log.events.size() - 2].checkpoint == old);
+  assert(f.log.events[f.log.events.size() - 2].reason ==
+         RetentionReason::kByteCapacity);
+}
+void CurrentTurnKeepsItsEditBoundaries() {
+  Fixture f(4);
+  const auto old = f.Add({9, 9});
+  const auto early = f.Add({1, 2}, RetentionPurpose::kHistory);
+  const auto later = f.Add({1, 2, 3, 4}, RetentionPurpose::kHistory);
+  const auto source = f.Add({1, 2, 3, 4, 5});
+  std::array protected_ids{early, later};
+  std::vector<Token> incoming{1, 2, 3, 4, 5, 6};
+  RetentionRequest request{
+      incoming, {1}, {}, RetentionPurpose::kContinuation, 0, source, true};
+  request.protected_checkpoints = protected_ids;
+  assert(f.policy.Reclaim(request));
+  assert(f.log.events.back().checkpoint == old);
+  assert(f.Cached({1, 2, 7}) == 2 && f.Cached({1, 2, 3, 4, 7}) == 4);
+  // Protection lasts for the current turn only; a later independent turn may
+  // reclaim these lower-ranked histories under the same finite capacity.
+  request.protected_checkpoints = {};
+  assert(f.policy.Reclaim(request));
+  assert(f.log.events.back().checkpoint == early);
+  assert(f.Cached({1, 2, 7}) == 0 && f.Cached({1, 2, 3, 4, 7}) == 4);
+}
 void RecordSourceReplacement() {
   for (const bool preserve : {true, false}) {
     Fixture f(1);
@@ -548,6 +586,8 @@ int main() {
   Branches();
   RanksAndSources();
   ShortPeersDoNotCoverHistory();
+  HistoryBytePressureCanReplaceOldFamilies();
+  CurrentTurnKeepsItsEditBoundaries();
   RecordSourceReplacement();
   FullOptionalExactReplacement();
   FailureAndReplay();
