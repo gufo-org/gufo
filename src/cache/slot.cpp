@@ -300,89 +300,10 @@ struct LeaseState final : MutationGuard {
       Preserve(r, release);
     }
   }
-  // Foreground reassignment owns the slot. Copy whole remaining ranges on
-  // independent pooled streams before waiting, instead of one synchronous
-  // piece per range. Best effort: a range without a stream or with a failed
-  // copy stays borrowed for Preserve's ordinary synchronous path.
-  void OverlapCopies(std::span<const std::shared_ptr<RowState>> all) {
-    constexpr std::size_t kInFlight = 8;
-    struct Job {
-      std::shared_ptr<RowState> rows;
-      std::unique_ptr<Stream> stream;
-      std::optional<Completion> copy;
-      Rows count{};
-      std::size_t bytes{};
-      Clock::time_point start;
-    };
-    std::vector<Job> jobs;
-    jobs.reserve(kInFlight);
-    const auto settle = [&](Job& job) noexcept {
-      const bool copied = job.copy->Wait() == TransferResult::kSucceeded;
-      std::lock_guard lock(job.rows->mutex);
-      if (copied) {
-        {
-          std::lock_guard metrics_lock(metrics_mutex);
-          metrics.foreground_bytes += job.bytes;
-          metrics.foreground_copy_ns += Nanoseconds(job.start);
-        }
-        job.rows->copied += job.count;
-      }
-      --job.rows->readers;
-      job.rows->changed.notify_all();
-    };
-    try {
-      for (const auto& r : all) {
-        if (jobs.size() == kInFlight) {
-          for (auto& job : jobs)
-            settle(job);
-          jobs.clear();
-        }
-        Rows first, end;
-        std::span<std::byte> buffer;
-        {
-          std::lock_guard lock(r->mutex);
-          if (r->materialized || r->retired || r->copied == r->end - r->first)
-            continue;
-          first = r->first + r->copied;
-          end = r->end;
-          buffer = r->buffer.subspan(r->copied * r->row_bytes,
-                                     (end - first) * r->row_bytes);
-          std::lock_guard source_lock(source->mutex);
-          if (!source->alive || source->generation != r->location.generation)
-            continue;
-          ++r->readers;
-        }
-        Job job{r,           spill->acquire_stream(), {},
-                end - first, buffer.size(),           Clock::now()};
-        if (job.stream) {
-          try {
-            job.copy.emplace(adapter.CopyRowsOut(*raw, r->component, first, end,
-                                                 buffer, *job.stream));
-          } catch (...) {
-            job.stream.reset();
-          }
-        }
-        if (!job.copy) {
-          std::lock_guard lock(r->mutex);
-          --r->readers;
-          r->changed.notify_all();
-          break;
-        }
-        jobs.push_back(std::move(job));
-      }
-    } catch (...) {
-      for (auto& job : jobs)
-        settle(job);
-      throw;
-    }
-    for (auto& job : jobs)
-      settle(job);
-  }
   void PrepareReassignment() {
     CheckStop();
     // Acquisition can refuse/cancel without mutating the old live frontier.
     // Actual adapter release remains nonthrowing and may retire on failure.
-    std::vector<std::shared_ptr<RowState>> pending;
     for (auto it = rows.begin(); it != rows.end();) {
       auto r = it->rows.lock();
       if (!r) {
@@ -390,13 +311,8 @@ struct LeaseState final : MutationGuard {
         continue;
       }
       ++it;
-      pending.push_back(std::move(r));
-    }
-    if (spill)
-      OverlapCopies(pending);
-    // Converts completed ranges, copies any remainder and waits for readers.
-    for (const auto& r : pending)
       Preserve(r, false);
+    }
     // Every registered range is now preserved; later guards need no scan.
     borrowed_end.clear();
     CheckStop();
