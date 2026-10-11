@@ -713,6 +713,13 @@ state, needs an adapter protocol change and is not implemented.
   follow-ups prefills only 19–129 tokens, with 173–354 ms TTFT. Pi 0.87.0 was
   installed from `@earendil-works/pi-coding-agent`, because the system Pi is
   0.99.2 and the harness pins 0.87.0.
+- MTP passes `long-context`, `state-edges`, the full `cache` suite and
+  `cache-bridge`. AR and MTP both pass `cache-transforms`.
+- The MTP Pi replay passes on its second attempt. It records 465 actual drafts
+  (372 accepted); follow-ups prefill 19–478 tokens with 178–651 ms TTFT.
+  Its only tool error is the bugfix task's intended first run of the failing
+  test, which the agent then fixes (`ok`). The first attempt is retained: Pi
+  sent no request within 300 s, and the server log shows none received.
 
 Not yet qualified: retention-rank starvation; Issue #542's history deeper than
 the RAM pool (rows must fit committed backing before publication); the
