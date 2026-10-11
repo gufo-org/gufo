@@ -907,3 +907,15 @@ starvation or constrained-RAM pressure is fixed.
 
 Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
 `rank-red.log`, `rank-pr.log`, `rank-format-final.log`, `rank-functional-summary.json`.
+
+
+### Review follow-up: open and closed cache issue audit (October 11)
+
+[The issue audit](../review-543-issues.md) records 106 cache search matches and
+160 unique issues after expanding to checkpoint, prefill and continuation
+(139 closed, 21 open). Fifty directly related assessments name the evidence and
+its limits; other matches remain outside checkpoint qualification. Closed state
+is not treated as proof that a historical reproduction is fixed. Unsupported
+features, renderer defects, legacy-model behavior and unfinished performance
+checks remain explicit. Production qualification of the new edit-admission
+policy and the deep side-traffic regression continues separately.
