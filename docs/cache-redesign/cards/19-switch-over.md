@@ -689,9 +689,34 @@ about 2% slower (310–370 ms on 16 s), within the 5% gate. The gate is still
 not met. The final candidate binary SHA-256 is
 `69b5343618643ef168b73ae49f37a2c3dac94c32b4a27ad02ca55a537471932d`.
 
+A same-slot RAM restore still reloads rows that are already resident. For
+example, a 2,927-token restore copies 206 MB, of which 74 MB are those rows.
+Such requests show 4.8–6.6 ms of queue time, versus 0.6–1.0 ms for live
+reuse. Restoring in place, by keeping resident rows and loading only private
+state, needs an adapter protocol change and is not implemented.
+
+**Further functional checks on the final candidate.**
+
+- AR `long-context`, `state-edges` and the full `cache` suite pass (cancelled
+  text/thinking/tool histories, disk restart and spacing), at C2, context
+  32768 and 8 GiB.
+- AR `cache-bridge` passes at a 2 GiB RAM budget.
+- The 100K MTP lifecycle passes restart, tiered, oversized (3,248,448,596-byte
+  checkpoint through 1 MiB staging) and crash. The 113K disk restores take
+  2.03–2.13 s, with TTFT 2.24–2.42 s; the crash case restores only the
+  published 102,231 boundary.
+- A real Pi 0.87.0 session (`pi_agent.py`, AR, one session, context 133760,
+  about 102K tokens of background context; cases tools, edit and bugfix) passes
+  all three cases with nine tool calls and no tool errors. The inspected tool
+  results are actual file writes/reads, a passing edited-code run (`ok`) and
+  shell output. After the cold first turn (64.8 s TTFT), each of the 11
+  follow-ups prefills only 19–129 tokens, with 173–354 ms TTFT. Pi 0.87.0 was
+  installed from `@earendil-works/pi-coding-agent`, because the system Pi is
+  0.99.2 and the harness pins 0.87.0.
+
 Not yet qualified: retention-rank starvation; Issue #542's history deeper than
 the RAM pool (rows must fit committed backing before publication); the
-remaining queue and concurrency TTFT flags; reassignment latency; Pi replay;
+remaining queue and concurrency TTFT flags; reassignment latency;
 the standard speed benchmark; a lower physical RAM footprint. Evidence,
 commands and binaries are retained at
 `/home/mixer/gufo-qualification/pr543-claude-2026-10-11`. The gap-clearing
