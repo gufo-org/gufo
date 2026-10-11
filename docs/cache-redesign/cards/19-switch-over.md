@@ -857,3 +857,33 @@ Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
 `group-format-final.log`, `group-harness.log`, `group-adapter-gpu.log`.
 Production binary SHA-256:
 `d3adf7c18714505e4ec924613143a589557c4140f5f67065ee62b99f95ea64fc`.
+
+
+### Review follow-up: native disk checksums (October 11)
+
+CRC-64/ECMA updates use four carry-less multiplication lanes on supporting
+x86-64 CPUs, retaining the existing polynomial, streaming seeds and v2 disk
+format. The table implementation remains the fallback. Bounded filesystem
+read-ahead hints cover at most 8 MiB and 32 future chunk files; hints never
+validate a dependency or allocate another payload buffer. Actual reads retain
+identity checks and independent checksum validation before restored execution.
+
+Independent bitwise checks cover three seeds, sixteen alignments, ragged sizes
+and streaming splits. Integration tests cover short reads, EINTR, a multi-piece
+payload and corruption after a read-ahead hint. Four focused CPU checks,
+all 57 repository contracts and the shared formatter pass.
+
+The same single-seed MTP history (C1/context 262144, 8 GiB RAM, 6 GiB staging)
+restores 175,032 tokens and prefills seven, with the same ALPHA answer and actual
+drafts. Restore falls from 6,861 ms to 4,299 ms; checksum time falls from
+1,817 ms to 883 ms. Read-ahead alone took 7,195 ms and is not claimed as a
+latency gain. The matched main restore is 3,141 ms: the remaining 37% regression
+fails the strict timing gate. These runs omit cold controls and establish a
+matched timing observation, not full lifecycle correctness. No inference
+benchmark or numerical-quality claim changes.
+
+Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+`fold-deep-seed-timing`, `prefetch-deep-seed-timing`, `main-deep-seed-timing`,
+`fold-cpu.log`, `fold-pr-contract.log`, `fold-format-final.log`.
+Production binary SHA-256:
+`66d1c04b485fac662bab7e4f41d80dc82dba0ae83207589755157b30aff10aeb`.

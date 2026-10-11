@@ -478,8 +478,29 @@ bool StreamedStore::Restore(
             flush();
         }
       };
-      for (const auto& chunk : c.chunks)
-        read(false, chunk, false);
+      std::size_t prefetched{};
+      for (std::size_t i = 0; i < c.chunks.size(); ++i) {
+        CheckStop(stop);
+        const auto started = Clock::now();
+        // Individual chunk files otherwise serialize cold storage latency.
+        // Hint only the next bounded window, without another payload buffer.
+        const auto budget = std::min<std::size_t>(rows.size(), 8 << 20);
+        std::size_t wanted{};
+        for (auto next = i; next < c.chunks.size() && next - i < 32; ++next) {
+          const auto bytes =
+              std::min<std::uint64_t>(c.chunks[next].bytes, budget - wanted);
+          if (next >= prefetched) {
+            impl_->disk->PrefetchPayload(*snapshot, false, c.chunks[next],
+                                         bytes);
+            prefetched = next + 1;
+          }
+          wanted += bytes;
+          if (wanted == budget)
+            break;
+        }
+        timing.filesystem_ns += Elapsed(started);
+        read(false, c.chunks[i], false);
+      }
       if (c.tail)
         read(true, *c.tail, false);
       if (c.private_state)

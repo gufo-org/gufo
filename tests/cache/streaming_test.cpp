@@ -137,6 +137,50 @@ struct Fixture {
     return result;
   }
 };
+void PrefetchDoesNotValidateOrAdmitPayload() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 35, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 35, Allocate, Lease);
+  Fixture fixture(ledger);
+  auto sources = fixture.Sources();
+  TransferTiming written;
+  streams.Write(Id(100), fixture.manifest, sources, written);
+  auto snapshot = disk.Open({1});
+  assert(snapshot);
+  const auto payload = snapshot->Manifest().components[0].chunks[0];
+  const auto before = ledger.Snapshot().total_bytes;
+  disk.PrefetchPayload(*snapshot, false, payload, 1);
+  disk.PrefetchPayload(*snapshot, false, payload, 0);
+  assert(ledger.Snapshot().total_bytes == before);
+  auto foreign = payload;
+  foreign.file = Id(999);
+  bool refused = false;
+  try {
+    disk.PrefetchPayload(*snapshot, false, foreign, foreign.bytes);
+  } catch (const std::invalid_argument&) {
+    refused = true;
+  }
+  assert(refused);
+  std::array<std::uint8_t, 16> staging{};
+  auto read =
+      disk.ReadPayload(*snapshot, false, payload, staging, [](auto, auto) {});
+  assert(!read.verification_cached && read.bytes == payload.bytes);
+  disk.PrefetchPayload(*snapshot, false, payload, payload.bytes);
+  {
+    std::fstream corrupt(dir.path / "v2/chunks" / DiskFileName(payload.file),
+                         std::ios::in | std::ios::out | std::ios::binary);
+    corrupt.put('\xff');
+  }
+  bool invalid = false;
+  try {
+    (void)disk.ReadPayload(*snapshot, false, payload, staging,
+                           [](auto, auto) {});
+  } catch (const DiskDependencyError& error) {
+    invalid = !error.private_file && error.file == payload.file;
+  }
+  assert(invalid);
+}
 void RestoreGroupsAdjacentFilesWithinStaging() {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 35, 4096}};
@@ -929,6 +973,7 @@ void ConcurrentStop() {
 }
 }  // namespace
 int main() {
+  PrefetchDoesNotValidateOrAdmitPayload();
   RestoreGroupsAdjacentFilesWithinStaging();
   LiveRowsStreamWithoutWholeHistoryBacking();
   BorrowedSourcesWaitWithoutBlockingForeground();

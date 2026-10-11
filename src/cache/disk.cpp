@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <immintrin.h>
 #include <linux/fs.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -304,9 +305,17 @@ std::optional<DiskFileId> ParseName(const std::string& name) {
 bool Regular(const struct stat& st) {
   return S_ISREG(st.st_mode) && st.st_size >= 0 && st.st_nlink == 1;
 }
-}  // namespace
-std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
-                           std::uint64_t crc) {
+bool Contains(const DiskManifest& manifest, bool private_file,
+              const DiskPayload& payload) {
+  for (const auto& c : manifest.components)
+    if (private_file ? c.tail == payload || c.private_state == payload
+                     : std::find(c.chunks.begin(), c.chunks.end(), payload) !=
+                           c.chunks.end())
+      return true;
+  return false;
+}
+std::uint64_t ChecksumTable(std::span<const std::uint8_t> bytes,
+                            std::uint64_t crc) {
   static constexpr auto table = [] {
     std::array<std::array<std::uint64_t, 256>, 8> t{};
     for (unsigned i = 0; i < 256; ++i) {
@@ -339,6 +348,69 @@ std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
   for (auto b : bytes)
     crc = (crc << 8) ^ table[0][(crc >> 56) ^ b];
   return crc;
+}
+constexpr std::uint64_t CrcPower(unsigned exponent) {
+  std::uint64_t result = 1;
+  while (exponent--)
+    result = (result << 1) ^ ((result >> 63) ? 0x42f0e1eba9ea3693ULL : 0);
+  return result;
+}
+__attribute__((target("pclmul,ssse3"))) inline __m128i CrcLoad(
+    const std::uint8_t* bytes) {
+  // Treat the big-endian byte sequence as a polynomial with its low limb in
+  // the low SIMD lane. Loads remain unaligned and never pass the input end.
+  return _mm_shuffle_epi8(
+      _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes)),
+      _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
+}
+__attribute__((target("pclmul,ssse3"))) inline __m128i CrcFold(__m128i previous,
+                                                               __m128i powers,
+                                                               __m128i next) {
+  return _mm_xor_si128(
+      _mm_xor_si128(_mm_clmulepi64_si128(previous, powers, 0x00),
+                    _mm_clmulepi64_si128(previous, powers, 0x11)),
+      next);
+}
+__attribute__((target("pclmul,ssse3"))) std::uint64_t ChecksumFold(
+    std::span<const std::uint8_t> bytes, std::uint64_t crc) {
+  // Fold in GF(2), modulo the same ECMA polynomial. A low limb advances by
+  // x^128 (or x^512); its high limb advances another 64 bits. Four independent
+  // lanes hide carry-less multiply latency. Their final merge restores byte
+  // order before the unchanged table reduction and partial-byte suffix.
+  const auto powers = _mm_set_epi64x(CrcPower(192), CrcPower(128));
+  const auto wide_powers = _mm_set_epi64x(CrcPower(576), CrcPower(512));
+  auto a = _mm_xor_si128(CrcLoad(bytes.data()), _mm_set_epi64x(crc, 0));
+  auto b = CrcLoad(bytes.data() + 16);
+  auto c = CrcLoad(bytes.data() + 32);
+  auto d = CrcLoad(bytes.data() + 48);
+  bytes = bytes.subspan(64);
+  while (bytes.size() >= 64) {
+    a = CrcFold(a, wide_powers, CrcLoad(bytes.data()));
+    b = CrcFold(b, wide_powers, CrcLoad(bytes.data() + 16));
+    c = CrcFold(c, wide_powers, CrcLoad(bytes.data() + 32));
+    d = CrcFold(d, wide_powers, CrcLoad(bytes.data() + 48));
+    bytes = bytes.subspan(64);
+  }
+  a = CrcFold(CrcFold(CrcFold(a, powers, b), powers, c), powers, d);
+  while (bytes.size() >= 16) {
+    a = CrcFold(a, powers, CrcLoad(bytes.data()));
+    bytes = bytes.subspan(16);
+  }
+  std::array<std::uint8_t, 16> remainder;
+  _mm_storeu_si128(
+      reinterpret_cast<__m128i*>(remainder.data()),
+      _mm_shuffle_epi8(a, _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5,
+                                        4, 3, 2, 1, 0)));
+  return ChecksumTable(bytes, ChecksumTable(remainder, 0));
+}
+}  // namespace
+std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
+                           std::uint64_t crc) {
+  static const bool folding =
+      __builtin_cpu_supports("pclmul") && __builtin_cpu_supports("ssse3");
+  if (folding && bytes.size() >= 256)
+    return ChecksumFold(bytes, crc);
+  return ChecksumTable(bytes, crc);
 }
 std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
   Validate(m);
@@ -1425,6 +1497,25 @@ std::optional<DiskSnapshot> DiskStore::Open(CheckpointId id) const {
   }
   return {};
 }
+void DiskStore::PrefetchPayload(const DiskSnapshot& snapshot, bool private_file,
+                                const DiskPayload& payload,
+                                std::uint64_t bytes) const {
+  if (snapshot.store_ != impl_.get() || !snapshot.pin_ ||
+      !Contains(snapshot.manifest_, private_file, payload) ||
+      bytes > std::uint64_t(std::numeric_limits<off_t>::max()))
+    throw std::invalid_argument("invalid disk prefetch dependency");
+  bytes = std::min(bytes, payload.bytes);
+  if (!bytes)
+    return;
+  const int directory =
+      private_file ? impl_->private_files.Get() : impl_->chunks.Get();
+  Fd file(openat(directory, DiskFileName(payload.file).c_str(),
+                 O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
+  struct stat status{};
+  if (file.Get() >= 0 && fstat(file.Get(), &status) == 0 && Regular(status))
+    (void)posix_fadvise(file.Get(), 0, static_cast<off_t>(bytes),
+                        POSIX_FADV_WILLNEED);
+}
 DiskReadStats DiskStore::ReadPayload(
     const DiskSnapshot& snapshot, bool private_file, const DiskPayload& payload,
     std::span<std::uint8_t> staging,
@@ -1434,15 +1525,7 @@ DiskReadStats DiskStore::ReadPayload(
   if (snapshot.store_ != impl_.get() || !snapshot.pin_ || staging.empty() ||
       !consume)
     throw std::invalid_argument("invalid disk read lease or staging");
-  bool belongs{};
-  for (const auto& c : snapshot.manifest_.components) {
-    if (private_file)
-      belongs |= c.tail == payload || c.private_state == payload;
-    else
-      belongs |= std::find(c.chunks.begin(), c.chunks.end(), payload) !=
-                 c.chunks.end();
-  }
-  if (!belongs)
+  if (!Contains(snapshot.manifest_, private_file, payload))
     throw std::invalid_argument("payload outside disk snapshot");
   using Clock = std::chrono::steady_clock;
   const auto elapsed = [](auto start) {

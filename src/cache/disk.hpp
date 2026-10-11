@@ -231,6 +231,10 @@ public:
       const DiskStagingAccess* access = nullptr, std::stop_token stop = {});
   [[nodiscard]] std::optional<DiskSnapshot> Open(CheckpointId) const;
   [[nodiscard]] std::shared_ptr<const DiskDescription> Describe(CheckpointId);
+  // Optional bounded page-cache hint for an owned dependency. Does not attest
+  // bytes or identity; ReadPayload must still validate the actual read.
+  void PrefetchPayload(const DiskSnapshot&, bool private_file,
+                       const DiskPayload&, std::uint64_t bytes) const;
   // Reads one dependency, invokes consume only with complete pieces, and
   // checks its CRC and stable file identity before returning. Consumers must
   // keep their destination non-executable until every dependency has passed.

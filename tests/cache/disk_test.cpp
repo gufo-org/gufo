@@ -194,13 +194,16 @@ void ChecksumReference() {
   };
   for (std::size_t offset = 0; offset < 16; ++offset)
     for (const std::size_t length :
-         {0, 1, 7, 8, 9, 15, 16, 17, 255, 256, 4095, 4096, 4097, 65536}) {
+         {0,   1,   7,   8,   9,   15,   16,   17,   31,
+          32,  33,  63,  64,  65,  127,  128,  129,  255,
+          256, 257, 511, 512, 513, 4095, 4096, 4097, 65536}) {
       const auto bytes = std::span(storage).subspan(offset, length);
       for (const auto seed :
            std::array<std::uint64_t, 3>{0, UINT64_MAX, 0x1a3875eb2cf049d6ULL}) {
         const auto expected = reference(bytes, seed);
         assert(DiskChecksum(bytes, seed) == expected);
-        for (const std::size_t split : {0, 1, 7, 8, 9, 257}) {
+        for (const std::size_t split :
+             {0, 1, 7, 8, 9, 63, 64, 65, 255, 256, 257}) {
           const auto first = std::min(length, split);
           assert(DiskChecksum(bytes.subspan(first),
                               DiskChecksum(bytes.first(first), seed)) ==
@@ -208,6 +211,57 @@ void ChecksumReference() {
         }
       }
     }
+}
+void LargePieceReadAndCorruption() {
+  Directory directory;
+  DiskStore disk(ledger, directory.path, 100000);
+  auto manifest = Manifest();
+  std::array<std::uint8_t, 8> chunk{1, 2, 3};
+  std::array<std::uint8_t, 4> tail{4, 5, 6};
+  std::vector<std::uint8_t> state(1025);
+  for (std::size_t i = 0; i < state.size(); ++i)
+    state[i] = i * 131;
+  manifest.components[0].chunks[0].checksum = DiskChecksum(chunk);
+  manifest.components[0].tail->checksum = DiskChecksum(tail);
+  auto& component = manifest.components[1];
+  component.descriptor.state_bytes = state.size();
+  component.private_state =
+      DiskPayload{Id(3), state.size(), DiskChecksum(state)};
+  const std::array<DiskWriteBuffer, 3> writes{
+      {{false, Id(1), chunk}, {true, Id(2), tail}, {true, Id(3), state}}};
+  disk.Publish(Id(7), manifest, writes);
+  auto snapshot = disk.Open({7});
+  assert(snapshot);
+  const auto payload = *snapshot->Manifest().components[1].private_state;
+  std::array<std::uint8_t, 513> staging{};
+  std::size_t copied{};
+  interrupt_next_read = true;
+  shorten_reads = true;
+  const auto read = disk.ReadPayload(
+      *snapshot, true, payload, staging, [&](auto offset, auto bytes) {
+        assert(offset == copied &&
+               std::ranges::equal(
+                   bytes, std::span(state).subspan(offset, bytes.size())));
+        copied += bytes.size();
+      });
+  shorten_reads = false;
+  assert(copied == state.size() && read.bytes == state.size() &&
+         !read.verification_cached);
+  disk.PrefetchPayload(*snapshot, true, payload, payload.bytes);
+  {
+    std::fstream corrupt(directory.path / "v2/private" / DiskFileName(Id(3)),
+                         std::ios::in | std::ios::out | std::ios::binary);
+    corrupt.seekp(513);
+    corrupt.put('\xff');
+  }
+  bool invalid = false;
+  try {
+    (void)disk.ReadPayload(*snapshot, true, payload, staging,
+                           [](auto, auto) {});
+  } catch (const DiskDependencyError& error) {
+    invalid = error.private_file && error.file == payload.file;
+  }
+  assert(invalid);
 }
 void Ownership() {
   Directory d;
@@ -476,6 +530,7 @@ void BudgetAndDirectories() {
 int main() {
   Format();
   ChecksumReference();
+  LargePieceReadAndCorruption();
   Ownership();
   Index();
   Conflicts();
