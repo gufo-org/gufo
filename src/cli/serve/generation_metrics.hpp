@@ -212,6 +212,8 @@ inline json::Value GenerationTimings(
   timings["draft_rounds"] = result.draft_rounds;
   timings["draft_n"] = result.draft_tokens;
   timings["draft_n_accepted"] = result.draft_accepted_tokens;
+  if (result.component_cache)
+    timings["component_cache"] = ComponentCacheJson(*result.component_cache);
   return timings;
 }
 

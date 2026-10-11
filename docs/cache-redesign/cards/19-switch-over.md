@@ -483,3 +483,24 @@ complete card 19 or make the PR ready to merge.
 Commands, immutable binaries, patches, source/harness hashes and raw results,
 including the initial expanded test's context-configuration failure, are retained
 at `/home/mixer/gufo-qualification/pr543-borrowed-2026-10-11`.
+
+
+The frozen `36cacfb6` serving candidate passes RAM `cache-growth` (54
+responses) and `cache-depth` (16 responses) in each of AR and MTP, at C2,
+32768 context and 8 GiB RAM with disk disabled. Loaded-mode logs attest `off`
+and `mtp`; normalized Chat observations record zero AR drafts and 1,229 MTP
+drafts. Messages cases also pass their strict prompt/prefill/reuse controls.
+These are correctness observations, recorded without matched timing controls;
+they do not qualify the remaining workload matrix or a latency gain.
+
+Review of cold assignment then found that serving still picked the first idle
+slot even when another slot had completed preservation. It now prefers an
+already preserved slot, matching the package's assignment policy. A deterministic
+CPU test makes idle streams unavailable and verifies that an unrelated request
+performs zero foreground preservation while the preceding history remains
+borrowed. Shared Chat/Responses/Messages timing objects now also carry the
+versioned component-cache metrics. Both focused serving/protocol targets and
+all 57 hosted checks pass after these changes; the production build passes.
+The earlier HTTP observations remain attached to the immutable pre-selection
+candidate. The revised candidate still needs its affected HTTP histories and
+fresh matched main controls.

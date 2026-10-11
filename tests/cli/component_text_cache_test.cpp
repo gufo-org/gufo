@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <numeric>
+#include <thread>
 
 #include "src/cli/serve/text_model_runner.hpp"
 #include "tests/cache/fake_adapter.hpp"
@@ -23,6 +24,7 @@ class Runner final : public TextModelRunner {
 public:
   mutable FakeAdapter* adapter{};
   mutable std::size_t captures{};
+  bool defer_idle{};
   bool UsesComponentCache() const override { return true; }
   TextRunnerDescriptor Descriptor() const override {
     return {.model_id = "component-fake",
@@ -80,7 +82,12 @@ public:
     resources->adapter = std::make_unique<FakeAdapter>();
     adapter = dynamic_cast<FakeAdapter*>(resources->adapter.get());
     resources->owner = blocks;
-    resources->stream = [] { return std::make_unique<FakeStream>(true); };
+    resources->stream = [this, foreground = std::this_thread::get_id()]()
+        -> std::unique_ptr<cache::Stream> {
+      if (defer_idle && std::this_thread::get_id() != foreground)
+        return {};
+      return std::make_unique<FakeStream>(true);
+    };
     resources->transfer_batch_size = 4;
     resources->allocate = [this, blocks,
                            data](const cache::PayloadRequest& request) {
@@ -191,6 +198,31 @@ void RestoreFromBusyBorrowedSource() {
   assert(gauges.reserved_bytes[static_cast<unsigned>(
              cache::ResourceCategory::kBackingAssigned)] == 0);
   assert(runner->adapter->RecurrentHash(restored.slot) == hash);
+}
+void ColdAssignmentPrefersPreservedSlot() {
+  auto runner = std::make_shared<Runner>();
+  runner->defer_idle = true;
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto source = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(source->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(source->TryReserveSnapshot(source->CaptureBytes(), prompt.size(),
+                                    false, SnapshotPurpose::kContinuation, {}));
+  std::shared_ptr<const TextRunnerSnapshot> snapshot = source->Capture();
+  assert(source->PublishSnapshot(prompt, snapshot, false));
+  (void)source->Commit(prompt, {}, prompt);
+  // Idle streams are unavailable. Replacing the first slot would require
+  // foreground preservation; the untouched second slot needs no copy.
+  auto unrelated = prompt;
+  unrelated.front() = 999;
+  auto replacement = cache.Acquire(unrelated, {}, {}, true, 0, false);
+  assert(!replacement->cache_hit());
+  const auto metrics = replacement->Metrics();
+  assert(metrics.spill.foreground_bytes == 0);
+  assert(metrics.ledger.reserved_bytes[static_cast<unsigned>(
+             cache::ResourceCategory::kBackingAssigned)] == 320);
 }
 void ReuseAndBranches() {
   auto runner = std::make_shared<Runner>();
@@ -429,6 +461,7 @@ void NearTailDiskBranchSurvivesRestart() {
 }  // namespace
 int main() {
   RestoreFromBusyBorrowedSource();
+  ColdAssignmentPrefersPreservedSlot();
   ReuseAndBranches();
   RestartAndCorruption();
   FailedCaptureKeepsPublishedBoundary();

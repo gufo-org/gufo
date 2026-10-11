@@ -499,11 +499,16 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       }
     }
     if (!entry)
-      for (auto& candidate : impl_->entries)
-        if (!candidate->busy) {
-          entry = candidate.get();
+      for (const bool complete : {true, false}) {
+        for (auto& candidate : impl_->entries)
+          if (!candidate->busy &&
+              (!complete || candidate->slot->PreservationComplete())) {
+            entry = candidate.get();
+            break;
+          }
+        if (entry)
           break;
-        }
+      }
     if (!entry)
       throw cache::SlotBusy();
     entry->busy = true;

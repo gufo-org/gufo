@@ -518,6 +518,14 @@ void TestCachedPrefillMetrics() {
   cached.prefill_ms = 0;
   Expect(gufo::server::PrefillTokensPerSecond(cached) == 0,
          "Untimed work does not divide by zero");
+  cached.component_cache.emplace();
+  cached.component_cache->borrowed_capacity_bytes = 4096;
+  const auto component_timings = gufo::server::GenerationTimings(cached);
+  const auto* component = component_timings.find("component_cache");
+  Expect(component &&
+             component->member_str("schema") == "component-cache-v1" &&
+             component->member_size("borrowed_capacity_bytes") == 4096,
+         "Shared Chat/Responses/Messages timings retain component cache work");
 
   backend.cache_miss_reason = "prefix_changed";
   const auto miss = gufo::server::HandleOpenAiChat(
