@@ -70,6 +70,8 @@ private:
   void Preserve(std::uint32_t position, std::uint32_t mtp_position,
                 std::uint32_t blocks, std::uint32_t mtp_blocks,
                 bool detach = true) const;
+  /// Materialize with the registry mutex already held.
+  void MaterializeLocked() const;
   std::shared_ptr<SnapshotRegistry> registry_;
   std::shared_ptr<const SnapshotLineage> lineage_;
   std::shared_ptr<void> storage_;

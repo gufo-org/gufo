@@ -252,8 +252,11 @@ tail, preserving earlier shared checkpoints. Optional history/retry copies
 are skipped rather than removing another prefix family's last useful copy.
 Retry copies cannot displace earlier history or stable boundaries either.
 An unchanged retry then restores the stable boundary and prefills only the
-assistant opening, such as `<|im_start|>assistant\n<think>\n`, again; the
-server logs `event=snapshot action=skipped` with that prompt's length.
+assistant opening, such as `<|im_start|>assistant\n<think>\n`, again. If
+the prompt ends with a text-only user turn after a tool result or another user
+turn, Qwen templates place the stable boundary before that turn, so the retry
+prefills it too. The server logs `event=snapshot action=skipped` with that
+prompt's length.
 A new stable boundary can replace its own older boundary when that avoids
 removing another family's last copy. Sources are rechecked before replacement
 because another request may have changed the record.
@@ -453,8 +456,8 @@ These do **not** invalidate reuse **(measured)**: changing `temperature`,
 `top_p`, `seed`, `max_tokens`, penalties or `stop` between turns; streaming
 versus not, which reuse identically and interoperate within one conversation.
 
-`cache_prompt: false` bypasses lookup for a single request. The result can
-still populate the cache.
+`cache_prompt: false` on `/v1/chat/completions` or `/v1/responses` bypasses
+lookup for a single request. The result can still populate the cache.
 
 ## Observing it
 

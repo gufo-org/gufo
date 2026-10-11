@@ -185,6 +185,8 @@ public:
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
+  [[nodiscard]] bool supports_images() const override { return image_support; }
+  bool image_support{true};
 
   bool WaitForFirstPiece() {
     std::unique_lock<std::mutex> lock(mutex);
@@ -2108,6 +2110,26 @@ void TestImagePartsRetainOrderAndIdentity() {
        R"({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"file:///tmp/image.png"}}]}]})"}) {
     Expect(gufo::server::HandleOpenAiChat(Request(body), backend).status == 400,
            "unsupported image role, policy and URL are rejected");
+  }
+}
+
+void TestTextOnlyBackendRefusesImagesBeforeReading() {
+  FakeBackend backend;
+  backend.image_support = false;
+  // An unresolvable HTTPS host would fail differently if it were fetched, and
+  // a data URL would fail differently if it were decoded.
+  for (const auto* url : {"https://image-fetch-must-not-happen.invalid/x.png",
+                          "data:image/png;base64,!!!not-base64!!!"}) {
+    const auto body =
+        std::string(R"({"model":"test-model","messages":[{"role":"user",)"
+                    R"("content":[{"type":"image_url","image_url":{"url":")") +
+        url + R"("}}]}]})";
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body), backend);
+    Expect(response.status == 400 &&
+               response.body.find("does not support image input") !=
+                   std::string::npos,
+           "a text-only model refuses images before reading them");
   }
 }
 
@@ -5252,6 +5274,7 @@ int main() {
   TestClientIdentityReachesBackend();
   TestStreamingOverloadIsRejectedBeforeHeaders();
   TestImagePartsRetainOrderAndIdentity();
+  TestTextOnlyBackendRefusesImagesBeforeReading();
   TestImageCountAndByteBudget();
   TestToolImagesRetainOrderAndIdentity();
   std::cout << "All OpenAI chat protocol tests passed\n";

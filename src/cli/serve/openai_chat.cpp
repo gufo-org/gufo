@@ -855,6 +855,7 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                  "missing_messages");
   }
   core::ImageReadBudget image_budget;
+  image_budget.accepts_images = backend.supports_images();
   for (const auto& item : messages->items()) {
     tokenization::ChatMessage message;
     std::string parse_error;

@@ -91,7 +91,7 @@ available memory.
 Text sampling follows each model's recommended defaults in `serve`, `prompt`
 and `chat`. Explicit request values override explicit server options, which
 otherwise inherit the effective thinking preset. Null request values inherit
-where supported; explicit zero values are preserved (`top_p` must remain positive).
+where supported; explicit zero values, including `top_p: 0`, are preserved.
 The startup sampling log reports server defaults; requests can override each
 setting independently, including when changing thinking mode.
 
