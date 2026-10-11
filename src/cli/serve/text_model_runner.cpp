@@ -613,14 +613,12 @@ struct TextRunnerPool::Impl {
               ? ram_cache_options.capacity_bytes
               : std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
                          automatic);
-      // Sessions have not allocated yet. Their claim and metadata headroom
-      // must fit alongside the initialization-time host page commitment.
-      const auto states =
-          resources.per_request_state_bytes.value_or(0) * state_count;
-      const auto available = ceiling > states ? ceiling - states : 0;
+      // This is an upper bound. Providers commit backing only after their
+      // slots allocate and the cache observes remaining host capacity. The
+      // state claim includes lazy image/rollback storage, not startup usage.
       component_cache = std::make_unique<ComponentTextCache>(
-          validated.runner, state_count, std::min(requested, available),
-          disk_cache_options);
+          validated.runner, state_count, std::min(requested, ceiling),
+          disk_cache_options, !ram_cache_options.capacity_bytes);
       if (disk_cache_options) {
         shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
         shared_prefix_max_boundaries =

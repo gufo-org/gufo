@@ -27,7 +27,7 @@ struct LedgerState {
   explicit LedgerState(ResourceLimits limits, bool timing)
       : limits(limits), timing(timing) {}
   std::mutex mutex;
-  const ResourceLimits limits;
+  ResourceLimits limits;
   const bool timing;
   ResourceSnapshot snapshot;
   std::array<std::optional<std::size_t>, kLedgerStepCount> faults{};
@@ -183,6 +183,21 @@ struct PinToken {
 
 ResourceLedger::ResourceLedger(ResourceLimits limits, bool timing)
     : state_(std::make_shared<detail::LedgerState>(limits, timing)) {}
+void ResourceLedger::ConstrainLimits(ResourceLimits limits) {
+  const detail::Lock lock(*state_, LedgerStep::kReserve);
+  const auto& old = state_->limits;
+  const auto& s = state_->snapshot;
+  if (limits.total_bytes > old.total_bytes ||
+      limits.ram_bytes > old.ram_bytes ||
+      limits.staging_bytes > old.staging_bytes ||
+      limits.persistence_pinned_bytes > old.persistence_pinned_bytes)
+    throw std::invalid_argument("ledger limits may only decrease");
+  if (limits.total_bytes < s.total_bytes || limits.ram_bytes < s.ram_bytes ||
+      limits.staging_bytes < s.bytes[Index(Staging)] ||
+      limits.persistence_pinned_bytes < s.persistence_pinned_bytes)
+    throw ResourceExhausted();
+  state_->limits = limits;
+}
 ResourceReservation::ResourceReservation(
     std::shared_ptr<detail::ChargeToken> token)
     : token_(std::move(token)) {}
@@ -355,6 +370,7 @@ PersistencePin ResourceReservation::PinPersistence() const {
   return PersistencePin(Pin(token_));
 }
 ResourceLimits ResourceLedger::Limits() const {
+  const std::lock_guard lock(state_->mutex);
   return state_->limits;
 }
 ResourceSnapshot ResourceLedger::Snapshot() const {

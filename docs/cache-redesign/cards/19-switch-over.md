@@ -752,3 +752,32 @@ commands and binaries are retained at
 `/home/mixer/gufo-qualification/pr543-claude-2026-10-11`. The gap-clearing
 candidate binary SHA-256 is
 `6c1cc173fe0c1c193a444c5021151081b49de3bb760fd70bbbf756c8e0262409`.
+
+### Review follow-up: MTP startup budget (October 11)
+
+The reported `6 × 131072`, MTP, seven drafts, 2 GiB RAM configuration fails
+on `05f6ec2a` on this host too. Before allocating slots, serving subtracts
+31,616,116,728 bytes of worst-case state from a 26,797,985,792-byte host
+ceiling and passes zero to `BackingPlan`. The state claim includes lazy
+image embeddings and rollback capacity; it is not the startup footprint.
+
+Serving now creates the adapter's execution slots first, observes remaining
+host RAM, lowers the ledger's initialization limits, then commits its backing
+pages. Automatic sizing uses the post-slot half-available observation;
+explicit requests remain capped by the post-slot ceiling. The ledger refuses
+limit increases or reductions below admitted metadata/reservations/pins.
+
+The two focused CPU regression targets pass, as do all 57 hosted contracts
+and the shared formatter. Production GPU load and 48-token generation pass
+for MTP at `6 × 131072 / 2 GiB`, `3 × 262144 / automatic`, and the
+`1 × 32768 / automatic` control. Actual drafts are required and observed.
+This establishes startup/generation, not deep durability or a cache timing
+pass. The initial load-only client used an incorrect served model name and
+received HTTP 404; those attempts are retained separately and excluded from
+generation evidence.
+
+Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+`base-load-c6.log`, `diagnose-load-c6.log`, `load-generation.json`,
+`*-generation.log`, `check-pr-budget.log`.
+Production binary SHA-256:
+`74b29924fa41b618829897bd2c7585057e99b9940a891c87e8b2f113602a4f02`.

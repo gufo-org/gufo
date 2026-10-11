@@ -277,6 +277,27 @@ void LimitsAndFaults() {
   Throws<std::invalid_argument>(
       [&] { ledger.FailAfter(LedgerStep::kRelease, 0); });
 }
+void ConstrainedStartupLimits() {
+  ResourceLedger ledger({256, 192, 64, 128});
+  auto metadata = ledger.Reserve(Metadata, 32).Convert();
+  auto backing = ledger.Reserve(Free, 64).Convert();
+  auto assigned = backing.ReserveBacking(Private).Convert();
+  auto pin = assigned.PinPersistence();
+  const auto snapshot = ledger.Snapshot();
+  Throws<std::invalid_argument>(
+      [&] { ledger.ConstrainLimits({257, 192, 64, 128}); });
+  for (const auto limits :
+       {ResourceLimits{95, 96, 64, 64}, ResourceLimits{160, 95, 64, 64},
+        ResourceLimits{160, 96, 64, 63}})
+    Throws<ResourceExhausted>([&] { ledger.ConstrainLimits(limits); });
+  assert(ledger.Limits().total_bytes == 256);
+  assert(ledger.Snapshot() == snapshot);
+  ledger.ConstrainLimits({160, 96, 64, 64});
+  assert(ledger.Limits().ram_bytes == 96);
+  Throws<ResourceExhausted>([&] { (void)ledger.Reserve(Metadata, 1); });
+  auto staging = ledger.Reserve(Staging, 64).Convert();
+  Throws<ResourceExhausted>([&] { ledger.ConstrainLimits({160, 96, 63, 64}); });
+}
 
 // Independent model: each record represents one physical allocation, regardless
 // of copied handles. Pin references overlay it; spill states partition backing.
@@ -571,6 +592,7 @@ int main() {
   BackingAndPins();
   GroupedBacking();
   LimitsAndFaults();
+  ConstrainedStartupLimits();
   RandomSequences();
   ContentionAndLifetime();
   AdmissionRace();

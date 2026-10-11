@@ -2473,7 +2473,7 @@ public:
             use_mtp_ ? core::SessionMode::kSpeculative
                      : core::SessionMode::kAutoregressive,
             max_context_, component_identity_);
-    const auto plan = adapter->BackingPlan(ram);
+    (void)ram;  // Backing sizing follows actual slot allocation below.
     result->adapter = std::move(adapter);
     auto backing = std::make_shared<Backing>();
     result->transfer_batch_size = 16;
@@ -2488,14 +2488,21 @@ public:
     }
     // The remainder belongs to index, histories, disk catalog and queue
     // metadata. The pools charge their own per-block allocator headroom.
-    if (plan.size() != 1)
-      throw std::invalid_argument("insufficient component backing budget");
-    const auto& allocation = plan.front();
-    backing->pool = std::make_unique<hip::CommittedBackingPool>(
-        ledger, hip::BackingPoolConfig{
-                    allocation.blocks * allocation.block_bytes +
-                        allocation.metadata_bytes,
-                    allocation.block_bytes, allocation.metadata_bytes});
+    result->commit_backing = [backing, &ledger,
+                              adapter =
+                                  result->adapter.get()](std::size_t budget) {
+      const auto plan =
+          static_cast<models::qwen38_flash_next::ContinuationAdapter*>(adapter)
+              ->BackingPlan(budget);
+      if (plan.size() != 1)
+        throw std::invalid_argument("insufficient component backing budget");
+      const auto& allocation = plan.front();
+      backing->pool = std::make_unique<hip::CommittedBackingPool>(
+          ledger, hip::BackingPoolConfig{
+                      allocation.blocks * allocation.block_bytes +
+                          allocation.metadata_bytes,
+                      allocation.block_bytes, allocation.metadata_bytes});
+    };
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
       return backing->streams.TryAcquire();

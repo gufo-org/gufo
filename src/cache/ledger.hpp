@@ -166,6 +166,10 @@ public:
   [[nodiscard]] ResourceReservation Reserve(ResourceCategory, std::size_t);
   [[nodiscard]] ResourceSnapshot Snapshot() const;
   [[nodiscard]] ResourceLimits Limits() const;
+  // Initialization only, before workers start: lower limits after execution
+  // slots allocate, retaining the charges already admitted for their metadata.
+  // Reject increases or limits below current reservations/charges atomically.
+  void ConstrainLimits(ResourceLimits);
   // Atomic end/start of a global reporting window. The returned snapshot keeps
   // the ending peaks; next-window peaks start at the current charges/pins.
   // Overlapping request-local attribution belongs to card 19, not this reset.

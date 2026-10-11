@@ -176,7 +176,8 @@ struct ComponentTextCache::Impl {
 
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
        std::size_t ram,
-       const std::optional<TextRunnerDiskCacheOptions>& options)
+       const std::optional<TextRunnerDiskCacheOptions>& options,
+       bool automatic_ram)
       : runner(std::move(runner)),
         ledger({ram + (options ? (options->staging_capacity_bytes
                                       ? options->staging_capacity_bytes
@@ -214,6 +215,18 @@ struct ComponentTextCache::Impl {
                                        [](const auto& e) { return e->busy; });
                                  }});
       entries.push_back(std::move(entry));
+    }
+    if (resources->commit_backing) {
+      const auto claim = this->runner->ResourceClaim();
+      const auto automatic = claim.retained_snapshot_capacity_bytes.value_or(0);
+      const auto ceiling =
+          claim.retained_snapshot_ceiling_bytes.value_or(automatic);
+      ram = std::min(ram, ceiling);
+      if (automatic_ram)
+        ram = std::min(ram, automatic);
+      const auto staging = ledger.Limits().staging_bytes;
+      ledger.ConstrainLimits({ram + staging, ram, staging, ram});
+      resources->commit_backing(ram);
     }
     if (options) {
       disk = std::make_unique<cache::DiskStore>(ledger, options->directory,
@@ -475,8 +488,9 @@ struct ComponentTextCache::Lease::Impl {
 
 ComponentTextCache::ComponentTextCache(
     std::shared_ptr<TextModelRunner> runner, std::size_t count, std::size_t ram,
-    const std::optional<TextRunnerDiskCacheOptions>& disk)
-    : impl_(std::make_unique<Impl>(std::move(runner), count, ram, disk)) {}
+    const std::optional<TextRunnerDiskCacheOptions>& disk, bool automatic_ram)
+    : impl_(std::make_unique<Impl>(std::move(runner), count, ram, disk,
+                                   automatic_ram)) {}
 ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();

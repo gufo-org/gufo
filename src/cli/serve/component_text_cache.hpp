@@ -36,6 +36,9 @@ struct ComponentCacheResources {
   cache::StreamLease stream;
   std::function<ComponentCaptureBuffer(const cache::PayloadRequest&)> allocate;
   cache::StagingAllocator staging;
+  // Optional initialization step after slots allocate. The provider leaves
+  // payload backing uncommitted until serving selects the post-slot budget.
+  std::function<void(std::size_t)> commit_backing;
   // At most this many transfers of one capture/restore are in flight before
   // waiting (16 at most). When the shared pool is momentarily exhausted, the
   // batch settles its own leases and retries. One keeps generic providers
@@ -84,7 +87,8 @@ public:
   };
   ComponentTextCache(std::shared_ptr<TextModelRunner>, std::size_t,
                      std::size_t ram_bytes,
-                     const std::optional<TextRunnerDiskCacheOptions>&);
+                     const std::optional<TextRunnerDiskCacheOptions>&,
+                     bool automatic_ram = false);
   ~ComponentTextCache();
   [[nodiscard]] std::unique_ptr<Lease> Acquire(
       std::span<const ContinuationToken>,

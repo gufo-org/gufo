@@ -20,7 +20,7 @@ struct State final : TextRunnerState {
       : adapter(adapter), slot(slot) {}
   void Invalidate() noexcept override { (void)adapter.Invalidate(slot); }
 };
-class Runner final : public TextModelRunner {
+class Runner : public TextModelRunner {
 public:
   mutable FakeAdapter* adapter{};
   mutable std::size_t captures{};
@@ -190,6 +190,42 @@ public:
     return s.adapter.Positions(s.slot).front().valid_rows;
   }
 };
+void BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim() {
+  class BudgetRunner final : public Runner {
+  public:
+    mutable std::size_t committed{};
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      claim.state_capacity_bytes = 4ULL << 30;
+      // Capacity includes image storage allocated only when requested. It is
+      // much larger than remaining memory, but these text slots fit.
+      claim.per_request_state_bytes = 1ULL << 30;
+      claim.temporary_scratch_bytes = 0;
+      claim.retained_snapshot_capacity_bytes = adapter ? 1 << 20 : 2 << 20;
+      claim.retained_snapshot_ceiling_bytes = adapter ? 2 << 20 : 4 << 20;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->commit_backing = [this, &ledger](std::size_t budget) {
+        assert(ledger.Limits().ram_bytes == budget);
+        committed = budget;
+      };
+      return resources;
+    }
+  };
+  for (const auto requested : {0ULL, 3ULL << 20}) {
+    auto runner = std::make_shared<BudgetRunner>();
+    TextRunnerPool pool(runner, 2, {}, {.capacity_bytes = requested});
+    assert(runner->committed == (requested ? 2ULL << 20 : 1ULL << 20));
+    std::vector<TextRunnerToken> prompt{10, 11, 12, 13};
+    auto request = pool.Acquire(prompt);
+    while (!request.prefill_complete())
+      (void)request.Prefill(8);
+    assert(request.SelectNext().token != 0);
+  }
+}
 void Prefill(TextRunnerPool::Request& request) {
   while (!request.prefill_complete())
     (void)request.Prefill(8);
@@ -534,6 +570,7 @@ void NearTailDiskBranchSurvivesRestart() {
 }
 }  // namespace
 int main() {
+  BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
   RestoreFromBusyBorrowedSource();
   ColdAssignmentPrefersPreservedSlot();
