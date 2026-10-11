@@ -41,8 +41,12 @@ public:
 
   /// Indexes committed tokens appended since the last call. `committed`
   /// must extend what was indexed before (Clear() after anything else).
+  /// A shorter history, or one whose last indexed token changed, restarts
+  /// the index; proposals are verified anyway, so this only keeps a missed
+  /// Clear() from proposing stale copies.
   void Extend(std::span<const std::int32_t> committed) {
-    if (committed.size() < prev_.size()) {
+    if (committed.size() < prev_.size() ||
+        (!prev_.empty() && committed[prev_.size() - 1] != last_)) {
       Clear();
     }
     for (std::size_t end = prev_.size(); end < committed.size(); ++end) {
@@ -58,6 +62,9 @@ public:
         }
       }
       prev_.push_back(previous);
+    }
+    if (!prev_.empty()) {
+      last_ = committed[prev_.size() - 1];
     }
     // The newest key (ending at committed.size()) has no continuation yet;
     // it is indexed once the next token commits.
@@ -119,6 +126,7 @@ private:
 
   std::unordered_map<std::uint64_t, std::uint32_t> head_;
   std::vector<std::uint32_t> prev_;
+  std::int32_t last_{0};  ///< committed[prev_.size() - 1] when indexed
 };
 
 }  // namespace gufo::models::qwen38_flash_next

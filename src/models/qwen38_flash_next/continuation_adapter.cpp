@@ -421,6 +421,8 @@ void ContinuationAdapter::BeginRestore(
   state.metadata.fill(std::byte{});
   state.restoring = true;
   state.session->valid_ = false;
+  // The restore rewrites the tokens in place, not through RestoreSnapshot.
+  state.session->lookup_.Clear();
   state.session->tokens_.resize(target);
   state.session->ForgetDraftVocab();
   state.session->logits_.resize(model_->VocabSize());
