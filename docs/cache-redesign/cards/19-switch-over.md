@@ -823,3 +823,37 @@ Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
 `deep-cpu-tail-final.log`, `deep-focused-final.log`, `deep-pr-contract.log`,
 `deep-format-final.log`. Candidate production binary SHA-256:
 `14333e03b1c8bc83667d5d9270ba4d47c88b0cf65120b60c374e368589d72971`.
+
+
+### Review follow-up: grouped disk restores (October 11)
+
+Streamed restore gathers adjacent, individually validated row files in its
+existing admitted staging allocation, then submits one contiguous native
+transfer. Large files retain bounded streaming; private state settles before
+staging is reused. Checksum or identity failures invalidate the whole restore.
+A new regression checks odd staging alignment, partial tails, next-append state
+and corruption after an earlier group transferred. The lifecycle runner now
+records a configurable staging budget for restart, tiered and crash controls.
+
+The two focused CPU targets, all 57 hosted contracts, shared formatter and
+12 lifecycle/workload harness tests pass. Native GPU AR/MTP adapter oracles
+pass for in-pass frozen bytes, guards, restoration, earlier edits and images.
+A single-seed production MTP restart at C1/context 262144, 8 GiB RAM and
+6 GiB staging restores 175,032 tokens and prefills seven, matching the seed's
+ALPHA answer. It uses 130 transfers and takes 6,861 ms: filesystem reads
+4,753 ms, checksums 1,817 ms, transfer waits 121 ms. This is a diagnostic
+sample, not a matched latency pass; the main control and disk profiling follow.
+
+The earlier append timing attempt used an 8 GiB disk/queue limit: an active
+4.94 GB write prevented admission of the 5.25 GB deeper checkpoint. It was
+interrupted while awaiting that unavailable publication and remains recorded
+as unqualified. The earlier SIGKILL test reached the correct published-only
+restore, but a competing GPU-test build OOM-killed its final cold control;
+the kernel evidence is retained and an isolated rerun is required.
+
+Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+`group-deep-seed-timing`, `group-deep-timing`, `deep-crash-mtp`,
+`deep-crash-build-oom.log`, `group-cpu4.log`, `group-pr-contract.log`,
+`group-format-final.log`, `group-harness.log`, `group-adapter-gpu.log`.
+Production binary SHA-256:
+`d3adf7c18714505e4ec924613143a589557c4140f5f67065ee62b99f95ea64fc`.

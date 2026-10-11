@@ -319,6 +319,9 @@ not evidence. `--publication-timeout 300` allows the large checkpoint to finish
 before the deliberate crash without changing request timing gates. The
 oversized case waits for the deep publication before graceful shutdown and
 still uses 1 MiB staging. Keep the same explicit RAM limit in both modes.
+Use `--staging-bytes` to match the staging budget of a reported restart,
+tiered or crash workload (default: 2 GiB). This value is recorded in the
+report; the oversized case always keeps its 1 MiB staging allocation.
 For checkpoints larger than committed RAM, use `--require-over-ram` with
 `--case oversized`. For example, Flash-Next at context 262144 with
 `--seed-lines 12500 --minimum-published-tokens 174000` and

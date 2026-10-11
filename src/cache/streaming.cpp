@@ -405,12 +405,38 @@ bool StreamedStore::Restore(
     adapter.BeginRestore(slot, positions);
     for (const auto& c : manifest.components) {
       Rows first{};
+      std::size_t staged{};
+      auto rows = impl_->staging.bytes;
+      if (c.descriptor.kind == ComponentKind::kAppendRows)
+        rows = rows.first(rows.size() / c.descriptor.row_bytes *
+                          c.descriptor.row_bytes);
+      const auto flush = [&] {
+        if (!staged)
+          return;
+        CheckStop(stop);
+        auto stream = impl_->Lease(timing);
+        Settle(
+            adapter.CopyRowsIn(slot, c.descriptor.id,
+                               first - staged / c.descriptor.row_bytes, first,
+                               std::as_bytes(rows.first(staged)), *stream),
+            timing);
+        ++timing.pieces;
+        timing.bytes += staged;
+        staged = 0;
+        CheckStop(stop);
+      };
       auto read = [&](bool private_file, const DiskPayload& payload,
                       bool private_state) {
-        auto piece = impl_->staging.bytes;
-        if (!private_state)
-          piece = piece.first(piece.size() / c.descriptor.row_bytes *
-                              c.descriptor.row_bytes);
+        if (private_state || payload.bytes > rows.size() - staged)
+          flush();
+        const bool collect = !private_state && payload.bytes <= rows.size();
+        // Validate each file independently, while gathering adjacent native
+        // rows in the already admitted staging allocation. Large files keep
+        // the bounded streaming path. Never reuse staging before its transfer
+        // completes, or execute state before all dependencies validate.
+        auto piece = private_state ? impl_->staging.bytes
+                     : collect     ? rows.subspan(staged, payload.bytes)
+                                   : rows;
         DiskReadStats costs;
         Finally observe{[&] {
           timing.filesystem_ns += costs.filesystem_ns;
@@ -421,6 +447,8 @@ bool StreamedStore::Restore(
               *snapshot, private_file, payload, piece,
               [&](std::uint64_t offset, auto bytes) {
                 CheckStop(stop);
+                if (collect)
+                  return;
                 auto stream = impl_->Lease(timing);
                 auto completion =
                     private_state ? adapter.LoadPrivatePiece(
@@ -442,8 +470,13 @@ bool StreamedStore::Restore(
           failed = {error.private_file, error.file};
           throw;
         }
-        if (!private_state)
+        if (!private_state) {
+          if (collect)
+            staged += payload.bytes;
           first += payload.bytes / c.descriptor.row_bytes;
+          if (staged == rows.size())
+            flush();
+        }
       };
       for (const auto& chunk : c.chunks)
         read(false, chunk, false);
@@ -451,6 +484,7 @@ bool StreamedStore::Restore(
         read(true, *c.tail, false);
       if (c.private_state)
         read(true, *c.private_state, true);
+      flush();
     }
     CheckStop(stop);
     if (!adapter.Validate(slot, positions))

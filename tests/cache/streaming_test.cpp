@@ -1,5 +1,6 @@
 #include "src/cache/streaming.hpp"
 
+#include <algorithm>
 #include <barrier>
 #include <cassert>
 #include <cstring>
@@ -70,11 +71,13 @@ struct Fixture {
     for (std::size_t i = 0; i < adapter.Components().size(); ++i) {
       const auto descriptor = adapter.Components()[i];
       DiskComponent component{descriptor, positions[i], {}, {}, {}};
-      auto capture = [&](Rows first, Rows end, bool private_state) {
+      auto capture = [&](Rows first, Rows end, bool private_state,
+                         bool private_file = false) {
         const auto bytes = private_state ? descriptor.state_bytes
                                          : (end - first) * descriptor.row_bytes;
-        const auto category = private_state
-                                  ? ResourceCategory::kPrivateState
+        const auto category = private_state ? ResourceCategory::kPrivateState
+                              : private_file
+                                  ? ResourceCategory::kPrivateTail
                                   : ResourceCategory::kBackingAssigned;
         auto pool_admission =
             ledger.Reserve(ResourceCategory::kBackingFree, bytes);
@@ -88,18 +91,26 @@ struct Fixture {
                                       *owner, stream);
         assert(completion.Wait() == TransferResult::kSucceeded);
         const auto file = Id(next++);
-        buffers.push_back({admission.Convert(), owner, private_state, file,
+        buffers.push_back({admission.Convert(), owner,
+                           private_state || private_file, file,
                            private_state ? 1 : descriptor.row_bytes});
         // New streamed files compute CRC; no pre-serialization checksum pass.
         return DiskPayload{file, bytes, 0};
       };
       if (descriptor.kind == ComponentKind::kPrivateState)
         component.private_state = capture(0, 0, true);
-      else
-        for (Rows first = 0; first < positions[i].valid_rows;
+      else {
+        const auto complete = positions[i].valid_rows /
+                              descriptor.rows_per_chunk *
+                              descriptor.rows_per_chunk;
+        for (Rows first = 0; first < complete;
              first += descriptor.rows_per_chunk)
           component.chunks.push_back(
               capture(first, first + descriptor.rows_per_chunk, false));
+        if (complete != positions[i].valid_rows)
+          component.tail =
+              capture(complete, positions[i].valid_rows, false, true);
+      }
       manifest.components.push_back(std::move(component));
     }
   }
@@ -126,6 +137,45 @@ struct Fixture {
     return result;
   }
 };
+void RestoreGroupsAdjacentFilesWithinStaging() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 35, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 35, Allocate, Lease);
+  Fixture fixture(ledger, 1, 0, 43);
+  auto sources = fixture.Sources();
+  TransferTiming written;
+  streams.Write(Id(100), fixture.manifest, sources, written);
+  auto destination = fixture.adapter.CreateSlot(fixture.guard);
+  TransferTiming restored;
+  assert(streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                         *destination, restored));
+  // 19 row chunks and two partial tails become eleven row-aligned transfers,
+  // plus one private-state transfer, without expanding the 35-byte buffer.
+  assert(restored.pieces == 12 && restored.bytes == 360);
+  assert(fixture.adapter.RecurrentHash(*destination) == fixture.hash);
+  const std::array<Token, 2> next{88, 91};
+  fixture.adapter.Append(*destination, next, next);
+  fixture.adapter.Append(*fixture.source, next, next);
+  assert(fixture.adapter.RecurrentHash(*destination) ==
+         fixture.adapter.RecurrentHash(*fixture.source));
+  assert(ledger.Snapshot().peak_bytes[static_cast<std::size_t>(
+             ResourceCategory::kTransferStaging)] == 35);
+  // The second file of a group must still validate independently. No partial
+  // group, nor an earlier successful group, may leave partially restored state.
+  const auto file = fixture.manifest.components[0].chunks[3].file;
+  {
+    std::fstream corrupt(dir.path / "v2/chunks" / DiskFileName(file),
+                         std::ios::in | std::ios::out | std::ios::binary);
+    corrupt.put('\xff');
+  }
+  TransferTiming failed;
+  assert(!streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                          *destination, failed));
+  const auto positions = fixture.adapter.Positions(*destination);
+  assert(
+      std::ranges::all_of(positions, [](auto p) { return p.valid_rows == 0; }));
+}
 void RoundTripAndFailures() {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 11, 4096}};
@@ -879,6 +929,7 @@ void ConcurrentStop() {
 }
 }  // namespace
 int main() {
+  RestoreGroupsAdjacentFilesWithinStaging();
   LiveRowsStreamWithoutWholeHistoryBacking();
   BorrowedSourcesWaitWithoutBlockingForeground();
   StopWaitingBorrowedPublication(false);

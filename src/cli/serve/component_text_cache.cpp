@@ -951,6 +951,20 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           if (restored) {
             request.disk_hit = true;
             request.restored = timing.bytes;
+            Logger::Info(
+                "cache",
+                "schema=component-cache-v1 event=disk_restore tokens=" +
+                    std::to_string(candidate.boundary) +
+                    " bytes=" + std::to_string(timing.bytes) + " pieces=" +
+                    std::to_string(timing.pieces) + " stream_acquire_ms=" +
+                    std::to_string(timing.stream_acquire_ns / 1e6) +
+                    " stream_wait_ms=" +
+                    std::to_string(timing.stream_wait_ns / 1e6) +
+                    " filesystem_ms=" +
+                    std::to_string(timing.filesystem_ns / 1e6) +
+                    " checksum_ms=" + std::to_string(timing.checksum_ns / 1e6) +
+                    " staging_wait_ms=" +
+                    std::to_string(timing.staging_wait_ns / 1e6));
             entry->history = std::make_unique<cache::ExecutionHistory>(
                 cache::ExecutionHistory::RestoredUnshared(
                     impl_->ledger, impl_->resources->adapter->Components(),

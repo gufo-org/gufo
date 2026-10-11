@@ -45,12 +45,13 @@ def wait_until(predicate, description, timeout=30):
 class Lifecycle:
     def __init__(self, command, output, timeout, library, seed_lines=160,
                  minimum_published_tokens=0, publication_timeout=30,
-                 require_over_ram=False):
+                 require_over_ram=False, staging_bytes=STAGING_BYTES):
         self.command, self.output, self.timeout, self.library = command, output, timeout, library
         self.seed_lines = seed_lines
         self.minimum_published_tokens = minimum_published_tokens
         self.publication_timeout = publication_timeout
         self.require_over_ram = require_over_ram
+        self.staging_bytes = staging_bytes
         self.model = option(command, "--served-model-name", "cache-lifecycle")
         self.mode = option(command, "--speculative", "off")
         self.report = {**provenance(), "command": command,
@@ -59,6 +60,7 @@ class Lifecycle:
                        "minimum_published_tokens": minimum_published_tokens,
                        "publication_timeout": publication_timeout,
                        "require_over_ram": require_over_ram,
+                       "staging_bytes": staging_bytes,
                        "status": "running", "cases": {}}
         source = hashlib.sha256()
         source.update(self.report["harness_sha256"].encode())
@@ -69,7 +71,9 @@ class Lifecycle:
         write_json(output / "report.json", self.report)
 
     @contextmanager
-    def stage(self, name, staging=STAGING_BYTES, environment=None):
+    def stage(self, name, staging=None, environment=None):
+        if staging is None:
+            staging = self.staging_bytes
         self.stage_path = self.output / self.case / name
         self.stage_path.mkdir()
         command = [*self.command, "--host", "127.0.0.1", "--port", str(self.port),
@@ -153,7 +157,7 @@ class Lifecycle:
             if name == "crash":
                 self.crash_case(seed, root)
             else:
-                staging = 1024**2 if name == "oversized" else STAGING_BYTES
+                staging = 1024**2 if name == "oversized" else self.staging_bytes
                 with self.stage("initial", staging):
                     first = self.chat("seed", seed)
                     long = continue_history(seed, first, ARCHIVE_LINE * 800 + "Reply with only ALPHA.")
@@ -258,11 +262,14 @@ def main():
                         help="Seconds to await publication before a deliberate crash")
     parser.add_argument("--require-over-ram", action="store_true",
                         help="Require oversized publication to exceed actual committed RAM backing")
+    parser.add_argument("--staging-bytes", type=int, default=STAGING_BYTES,
+                        help="Staging budget for restart, tiered and crash (oversized always uses 1 MiB)")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.seed_lines <= 0 or args.minimum_published_tokens < 0 \
-            or args.publication_timeout <= 0:
-        parser.error("seed lines and publication timeout must be positive; depth must be nonnegative")
+            or args.publication_timeout <= 0 or args.staging_bytes <= 0:
+        parser.error("seed lines, publication timeout and staging bytes must be positive; "
+                     "depth must be nonnegative")
     if args.require_over_ram and args.case and "oversized" not in args.case:
         parser.error("--require-over-ram requires --case oversized")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -283,7 +290,7 @@ def main():
         command += ["--served-model-name", "cache-lifecycle"]
     runner = Lifecycle(command, args.output, args.startup_timeout, args.fault_library,
                        args.seed_lines, args.minimum_published_tokens, args.publication_timeout,
-                       args.require_over_ram)
+                       args.require_over_ram, args.staging_bytes)
     runner.report["fault_library_sha256"] = hashlib.file_digest(
         args.fault_library.open("rb"), "sha256").hexdigest()
     try:

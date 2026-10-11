@@ -14,6 +14,10 @@ exceed the timing gate. Historical llama.cpp MTP values are retained as requeste
 a separate check of that pin did not match its own AR output, so this review
 does not requalify those comparisons. [Review evidence](artifacts/decode-kernels-review.json).
 
+PR #543's component-cache disk timings remain separately qualified in the
+[serving record](../../cache-redesign/cards/19-switch-over.md#review-follow-up-grouped-disk-restores-october-11);
+they do not update the inference tables below.
+
 ## Single user, autoregressive
 
 Approximately pp2048 / tg128; depth is the cached prefix in tokens.
