@@ -8,6 +8,7 @@
 #include <list>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace gufo::cache {
@@ -42,6 +43,10 @@ struct LeaseState final : MutationGuard {
   struct Entry {
     ResourceCharge metadata;
     std::weak_ptr<RowState> rows;
+    // Immutable copies of the registration, so mutation guards reject
+    // unrelated ranges without locking every weak handle per step.
+    ComponentId component;
+    Rows first{}, end{};
   };
   ResourceCharge metadata;
   ResourceLedger& ledger;
@@ -50,6 +55,9 @@ struct LeaseState final : MutationGuard {
   std::shared_ptr<SlotState> source;
   std::mutex mutex;
   std::list<Entry> rows;
+  // Conservative per-component upper bound of registered ends. Appends at
+  // or beyond it skip the registry scan on every execution step.
+  std::unordered_map<std::uint32_t, Rows> borrowed_end;
   bool leased{false}, live{false}, spilling{false}, idle_failed{false};
   bool idle_pending{false};
   std::condition_variable_any changed;
@@ -272,24 +280,109 @@ struct LeaseState final : MutationGuard {
       throw std::invalid_argument("reversed mutation range");
     if (!release)
       CheckStop();
+    if (const auto bound = borrowed_end.find(component.value);
+        bound == borrowed_end.end() || bound->second <= first)
+      return;
     // Iterate without allocating a request-time snapshot. Leased execution
     // serializes Borrow and mutation; readers never change this registry.
     auto it = rows.begin();
     while (it != rows.end()) {
+      if (it->component != component || end <= it->first || it->end <= first) {
+        ++it;
+        continue;
+      }
       auto r = it->rows.lock();
       if (!r) {
         it = rows.erase(it);
         continue;
       }
       ++it;
-      if (r->component == component && first < r->end && r->first < end)
-        Preserve(r, release);
+      Preserve(r, release);
     }
+  }
+  // Foreground reassignment owns the slot. Copy whole remaining ranges on
+  // independent pooled streams before waiting, instead of one synchronous
+  // piece per range. Best effort: a range without a stream or with a failed
+  // copy stays borrowed for Preserve's ordinary synchronous path.
+  void OverlapCopies(std::span<const std::shared_ptr<RowState>> all) {
+    constexpr std::size_t kInFlight = 8;
+    struct Job {
+      std::shared_ptr<RowState> rows;
+      std::unique_ptr<Stream> stream;
+      std::optional<Completion> copy;
+      Rows count{};
+      std::size_t bytes{};
+      Clock::time_point start;
+    };
+    std::vector<Job> jobs;
+    jobs.reserve(kInFlight);
+    const auto settle = [&](Job& job) noexcept {
+      const bool copied = job.copy->Wait() == TransferResult::kSucceeded;
+      std::lock_guard lock(job.rows->mutex);
+      if (copied) {
+        {
+          std::lock_guard metrics_lock(metrics_mutex);
+          metrics.foreground_bytes += job.bytes;
+          metrics.foreground_copy_ns += Nanoseconds(job.start);
+        }
+        job.rows->copied += job.count;
+      }
+      --job.rows->readers;
+      job.rows->changed.notify_all();
+    };
+    try {
+      for (const auto& r : all) {
+        if (jobs.size() == kInFlight) {
+          for (auto& job : jobs)
+            settle(job);
+          jobs.clear();
+        }
+        Rows first, end;
+        std::span<std::byte> buffer;
+        {
+          std::lock_guard lock(r->mutex);
+          if (r->materialized || r->retired || r->copied == r->end - r->first)
+            continue;
+          first = r->first + r->copied;
+          end = r->end;
+          buffer = r->buffer.subspan(r->copied * r->row_bytes,
+                                     (end - first) * r->row_bytes);
+          std::lock_guard source_lock(source->mutex);
+          if (!source->alive || source->generation != r->location.generation)
+            continue;
+          ++r->readers;
+        }
+        Job job{r,           spill->acquire_stream(), {},
+                end - first, buffer.size(),           Clock::now()};
+        if (job.stream) {
+          try {
+            job.copy.emplace(adapter.CopyRowsOut(*raw, r->component, first, end,
+                                                 buffer, *job.stream));
+          } catch (...) {
+            job.stream.reset();
+          }
+        }
+        if (!job.copy) {
+          std::lock_guard lock(r->mutex);
+          --r->readers;
+          r->changed.notify_all();
+          break;
+        }
+        jobs.push_back(std::move(job));
+      }
+    } catch (...) {
+      for (auto& job : jobs)
+        settle(job);
+      throw;
+    }
+    for (auto& job : jobs)
+      settle(job);
   }
   void PrepareReassignment() {
     CheckStop();
     // Acquisition can refuse/cancel without mutating the old live frontier.
     // Actual adapter release remains nonthrowing and may retire on failure.
+    std::vector<std::shared_ptr<RowState>> pending;
     for (auto it = rows.begin(); it != rows.end();) {
       auto r = it->rows.lock();
       if (!r) {
@@ -297,8 +390,15 @@ struct LeaseState final : MutationGuard {
         continue;
       }
       ++it;
-      Preserve(r, false);
+      pending.push_back(std::move(r));
     }
+    if (spill)
+      OverlapCopies(pending);
+    // Converts completed ranges, copies any remainder and waits for readers.
+    for (const auto& r : pending)
+      Preserve(r, false);
+    // Every registered range is now preserved; later guards need no scan.
+    borrowed_end.clear();
     CheckStop();
   }
   void BeforeOverwrite(ComponentId c, Rows first, Rows end) override {
@@ -522,8 +622,12 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
   rows->bytes = info.bytes;
   rows->category = info.category;
   rows->metadata = metadata.Convert();
+  // Raise the guard bound before registration: a failure afterwards may only
+  // leave it conservatively high, never hide a registered range.
+  auto& bound = state_->borrowed_end[c.value];
+  bound = std::max(bound, end);
   auto result = std::shared_ptr<BorrowedRows>(new BorrowedRows(rows));
-  state_->rows.push_back({rows->metadata, rows});
+  state_->rows.push_back({rows->metadata, rows, c, first, end});
   return result;
 }
 void SlotLease::Reset() {
