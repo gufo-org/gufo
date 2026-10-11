@@ -720,10 +720,27 @@ state, needs an adapter protocol change and is not implemented.
   Its only tool error is the bugfix task's intended first run of the failing
   test, which the agent then fixes (`ok`). The first attempt is retained: Pi
   sent no request within 300 s, and the server log shows none received.
+- Standard single-user benchmark (`tools/bench/model-bench.py`, pp2048/tg128)
+  run in the order main, candidate, main again. Main drifted between its own
+  runs (AR d0 prefill 1694.6, then 1594.2 tok/s), so the result is
+  inconclusive. Against the later main run, candidate prefill is −3.4%/−4.4%
+  at depth 0, +0.6%/−1.2% at 32K and −1.3%/−2.7% at 128K (AR/MTP), and decode
+  differs by at most 0.4%. That is inside the 5% gate but consistently lower
+  at depth 0; it needs repeated alternating runs.
+
+| Depth | Mode | main pp/tg | candidate pp/tg | main again pp/tg |
+| ---: | --- | ---: | ---: | ---: |
+| 0 | AR | 1694.6 / 28.25 | 1540.7 / 28.20 | 1594.2 / 28.23 |
+| 32,768 | AR | 1500.5 / 28.14 | 1413.3 / 28.07 | 1404.2 / 28.11 |
+| 131,072 | AR | 1347.4 / 27.15 | 1284.4 / 27.09 | 1301.5 / 27.10 |
+| 0 | MTP | 1568.1 / 33.87 | 1454.6 / 33.45 | 1521.8 / 33.75 |
+| 32,768 | MTP | 1400.8 / 35.66 | 1350.5 / 35.18 | 1366.3 / 35.65 |
+| 131,072 | MTP | 1298.8 / 36.64 | 1257.4 / 36.29 | 1292.3 / 36.64 |
 
 Not yet qualified: retention-rank starvation; Issue #542's history deeper than
 the RAM pool (rows must fit committed backing before publication); the
-remaining queue and concurrency TTFT flags; reassignment latency;
+remaining queue and concurrency TTFT flags; the inconclusive depth-0 prefill
+benchmark; reassignment latency;
 the standard speed benchmark; a lower physical RAM footprint. Evidence,
 commands and binaries are retained at
 `/home/mixer/gufo-qualification/pr543-claude-2026-10-11`. The gap-clearing
