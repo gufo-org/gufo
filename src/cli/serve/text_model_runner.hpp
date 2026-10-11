@@ -283,6 +283,17 @@ public:
       return std::nullopt;
     return TextPreparedPrompt{std::move(*tokens), {}};
   }
+  /// Size a prompt without execution-context admission or inference. Image
+  /// runners override this to include their model's visual token expansion.
+  [[nodiscard]] virtual std::optional<std::size_t> CountPromptTokens(
+      const ChatRequest& request) const {
+    // Use the text-only preparation here, including its capability check,
+    // without constructing a derived runner's cache metadata.
+    const auto prompt = TextModelRunner::PreparePrompt(request);
+    if (!prompt)
+      return std::nullopt;
+    return prompt->tokens.size();
+  }
   /// Called before cache restoration, prefill or selection, including
   /// a complete prefix hit. Must replace, never inherit, the previous request.
   virtual void SetPromptContext(

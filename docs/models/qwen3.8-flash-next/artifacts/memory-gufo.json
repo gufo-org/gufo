@@ -22,7 +22,7 @@
     "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-09",
+  "measuredOn": "2026-10-10",
   "mode": null,
   "model": {
     "id": "Qwen3.8-Flash-Next",
@@ -35,13 +35,13 @@
   "referenceName": "llama.cpp",
   "rows": {
     "16K prefix, pp4096 + tg128": {
-      "command": "gufo serve --port 39097 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 86.71,
+      "command": "gufo serve --port 49485 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 87.34,
       "idle_gib": 2.38
     },
     "pp2048 + tg128": {
-      "command": "gufo serve --port 39097 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 85.56,
+      "command": "gufo serve --port 49485 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 86.18,
       "idle_gib": 2.38
     }
   },
@@ -51,7 +51,7 @@
       "gufo",
       "serve",
       "--port",
-      "39097",
+      "49485",
       "--sessions",
       "1",
       "llm",
@@ -69,8 +69,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "50900eb717925cc8e85ed952e1a75e522958a7f6"
+    "dirty": false,
+    "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe"
   },
   "table": "memory",
   "target": "gufo"

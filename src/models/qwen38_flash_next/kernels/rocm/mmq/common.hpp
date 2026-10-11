@@ -179,22 +179,97 @@ struct ggml_hip_unroll<1> {
     }
 };
 
-template<int width = WARP_SIZE>
-static __device__ __forceinline__ int warp_reduce_sum(int x) {
-#pragma unroll
-    for (int offset = width/2; offset > 0; offset >>= 1) {
-        x += __shfl_xor(x, offset, width);
+// Lane i receives lane (i ^ offset)'s value, as __shfl_xor does for a full
+// wave. On gfx1151 this is a DPP row_xmask (offsets below 16) or
+// v_permlanex16 (16): a register move, not a round trip through the LDS
+// crossbar (ds_bpermute). Only the transport differs, so sums stay bitwise.
+template<int offset>
+static __device__ __forceinline__ int xor_lane(int x) {
+#if defined(__gfx1151__)
+    if constexpr (offset < 16) {
+        return __builtin_amdgcn_update_dpp(0, x, 0x160 | offset, 0xF, 0xF, false);
+    } else if constexpr (offset == 16) {
+        return __builtin_amdgcn_permlanex16(x, x, 0x76543210, 0xfedcba98, false, false);
     }
+#endif
+    return __shfl_xor(x, offset, WARP_SIZE);
+}
+
+template<int offset>
+static __device__ __forceinline__ float xor_lane(float x) {
+    return __builtin_bit_cast(float, xor_lane<offset>(__builtin_bit_cast(int, x)));
+}
+
+// The butterfly in the shuffle loop's order (width/2 down to 1).
+template<int width, typename T>
+static __device__ __forceinline__ T xor_reduce_sum(T x) {
+    static_assert(width <= 32, "xor_lane covers offsets up to 16");
+    if constexpr (width >= 32) x += xor_lane<16>(x);
+    if constexpr (width >= 16) x += xor_lane<8>(x);
+    if constexpr (width >= 8) x += xor_lane<4>(x);
+    if constexpr (width >= 4) x += xor_lane<2>(x);
+    if constexpr (width >= 2) x += xor_lane<1>(x);
     return x;
 }
 
 template<int width = WARP_SIZE>
+static __device__ __forceinline__ int warp_reduce_sum(int x) {
+    return xor_reduce_sum<width>(x);
+}
+
+template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
+    return xor_reduce_sum<width>(x);
+}
+
+// Reduce-scatter levels for n sums: the first levels of the wave butterfly
+// each halve the sums a lane carries.
+constexpr int ScatterLevels(int n) { return n <= 1 ? 0 : n <= 2 ? 1 : n <= 4 ? 2 : 3; }
+
+// One butterfly level that keeps half of `count` sums: the lane on the
+// `offset` side keeps the upper half and sends the lower, its partner the
+// reverse, so each kept sum adds the partner's copy of the same sum.
+template<int offset, int count>
+static __device__ __forceinline__ void scatter_level(float* s, int lane) {
+    const bool upper = (lane & offset) != 0;
 #pragma unroll
-    for (int offset = width/2; offset > 0; offset >>= 1) {
-        x += __shfl_xor(x, offset, width);
+    for (int i = 0; i < count / 2; ++i) {
+        const float keep = upper ? s[count / 2 + i] : s[i];
+        const float send = upper ? s[i] : s[count / 2 + i];
+        s[i] = keep + xor_lane<offset>(send);
     }
-    return x;
+}
+
+// warp_reduce_sum<32> over n sums at once: the same pairs (16, 8, 4, 2, 1)
+// and operands as the full butterfly, which leaves every lane with identical
+// bits, but lane l only finishes sum l >> (5 - ScatterLevels(n)).
+template<int n>
+static __device__ __forceinline__ float scatter_reduce_sum(const float (&v)[n], int lane) {
+    constexpr int levels = ScatterLevels(n);
+    float s[1 << levels];
+#pragma unroll
+    for (int j = 0; j < (1 << levels); ++j)
+        s[j] = j < n ? v[j] : 0.0f;
+    if constexpr (levels == 3) {
+        scatter_level<16, 8>(s, lane);
+        scatter_level<8, 4>(s, lane);
+        scatter_level<4, 2>(s, lane);
+    } else if constexpr (levels == 2) {
+        scatter_level<16, 4>(s, lane);
+        scatter_level<8, 2>(s, lane);
+        s[0] += xor_lane<4>(s[0]);
+    } else if constexpr (levels == 1) {
+        scatter_level<16, 2>(s, lane);
+        s[0] += xor_lane<8>(s[0]);
+        s[0] += xor_lane<4>(s[0]);
+    } else {
+        s[0] += xor_lane<16>(s[0]);
+        s[0] += xor_lane<8>(s[0]);
+        s[0] += xor_lane<4>(s[0]);
+    }
+    s[0] += xor_lane<2>(s[0]);
+    s[0] += xor_lane<1>(s[0]);
+    return s[0];
 }
 
 template<int width = WARP_SIZE>

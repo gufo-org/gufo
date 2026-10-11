@@ -1075,7 +1075,8 @@ private:
         constant && !EqualValue(value, *constant))
       return {};
     if (value.is_string() || value.is_number()) {
-      auto& check = value_checks_[&schema];
+      // An untyped schema can admit both strings and numbers; cache each kind.
+      auto& check = value_checks_[{&schema, value.is_string()}];
       if (!check)
         check = value.is_string()
                     ? JsonSchemaLexeme::String(StringPredicate(schema))
@@ -1677,7 +1678,8 @@ private:
   std::map<std::size_t, std::uint32_t> generic_values_;
   std::map<const json::Value*, std::uint32_t> compiled_;
   std::deque<json::Value> derived_;
-  std::map<const json::Value*, std::shared_ptr<const JsonSchemaLexeme>>
+  std::map<std::pair<const json::Value*, bool>,
+           std::shared_ptr<const JsonSchemaLexeme>>
       value_checks_;
   std::size_t properties_{0}, enum_values_{0}, string_characters_{0};
 };

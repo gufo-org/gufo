@@ -39,7 +39,8 @@ def chat_messages(system, messages):
 
 def normalize(streamed):
     blocks, usage = streamed["blocks"], streamed["usage"]
-    total, cached = usage["input_tokens"], usage["cache_read_input_tokens"]
+    cached = usage["cache_read_input_tokens"]
+    total = usage["input_tokens"] + cached
     return {"text": "".join(b["text"] for b in blocks if b["type"] == "text"),
             "reasoning": "", "tools": [b for b in blocks if b["type"] == "tool_use"],
             "finish": {"tool_use": "tool_calls", "end_turn": "stop"}.get(

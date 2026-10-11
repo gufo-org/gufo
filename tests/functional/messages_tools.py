@@ -25,7 +25,7 @@ def messages_tool_result(client, body):
         "blocks": blocks,
         "tools": [b for b in blocks if b["type"] == "tool_use"],
         "finish": response["stop_reason"],
-        "usage": {"prompt_tokens": usage["input_tokens"],
+        "usage": {"prompt_tokens": usage["input_tokens"] + usage["cache_read_input_tokens"],
                   "cached_tokens": usage["cache_read_input_tokens"],
                   "completion_tokens": usage["output_tokens"],
                   "gufo": {"prefill_tokens": timings["prompt_n"]}},
@@ -142,4 +142,6 @@ def check_messages_tools(client, model, checks, chat_result):
     assert streamed_answer["finish"] == "end_turn", streamed_answer
     assert "".join(b.get("text", "") for b in streamed_answer["blocks"]) == \
         answer["text"], (streamed_answer, answer)
-    assert streamed_answer["usage"]["input_tokens"] == total, streamed_answer
+    streamed_usage = streamed_answer["usage"]
+    assert streamed_usage["input_tokens"] + streamed_usage["cache_read_input_tokens"] == total, \
+        streamed_answer

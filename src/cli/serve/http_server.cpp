@@ -477,7 +477,10 @@ tokenization::ChatRole RoleFrom(const std::string& r) {
 // Messages replays assistant reasoning as thinking blocks. Restore it as the
 // turn's thought so the prompt reproduces the generated tokens.
 bool ReadTextContent(const json::Value* content, std::string* out,
-                     std::string* thought = nullptr) {
+                     std::string* thought = nullptr,
+                     tokenization::ChatMessage* image_message = nullptr,
+                     core::ImageReadBudget* image_budget = nullptr,
+                     std::string* error = nullptr) {
   if (content == nullptr)
     return false;
   if (content->is_string()) {
@@ -490,6 +493,16 @@ bool ReadTextContent(const json::Value* content, std::string* out,
         if (thinking == nullptr || !thinking->is_string())
           return false;
         *thought += thinking->str();
+        continue;
+      }
+      // Messages images ride along with the text of a user turn; `out` is
+      // that message's content, so the image lands at its current end.
+      if (image_message != nullptr && part.is_object() &&
+          part.member_str("type") == "image") {
+        std::string ignored;
+        if (!ParseAnthropicImage(part, image_message, *image_budget,
+                                 error != nullptr ? error : &ignored))
+          return false;
         continue;
       }
       const auto* text = part.find("text");
@@ -533,7 +546,7 @@ bool ReadTextMessages(const json::Value* input,
                                       part.member_str("type") == "tool_result");
                             })) {
       std::string error;
-      if (!ParseAnthropicToolMessage(item, messages, &error)) {
+      if (!ParseAnthropicToolMessage(item, messages, image_budget, &error)) {
         if (parse_error && !error.empty())
           *parse_error = std::move(error);
         return false;
@@ -601,12 +614,21 @@ bool ReadTextMessages(const json::Value* input,
           *parse_error = std::move(error);
         return false;
       }
-    } else if (!ReadTextContent(
-                   item.find("content"), &message.content,
-                   message.role == tokenization::ChatRole::kAssistant
-                       ? &message.thought
-                       : nullptr))
-      return false;
+    } else {
+      std::string error;
+      if (!ReadTextContent(item.find("content"), &message.content,
+                           message.role == tokenization::ChatRole::kAssistant
+                               ? &message.thought
+                               : nullptr,
+                           message.role == tokenization::ChatRole::kUser
+                               ? &message
+                               : nullptr,
+                           &image_budget, &error)) {
+        if (parse_error && !error.empty())
+          *parse_error = std::move(error);
+        return false;
+      }
+    }
     if (responses &&
         (message.role == tokenization::ChatRole::kSystem ||
          message.role == tokenization::ChatRole::kDeveloper) &&
@@ -1168,38 +1190,30 @@ std::optional<HttpResponse> ReadMessagesOutputConfig(
   return {};
 }
 
-HttpResponse AnthropicMessages(const HttpRequest& req,
-                               TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  chat.reasoning = b.reasoning_defaults();
+// The request fields Messages and count_tokens share: sampling and reasoning
+// controls, tools, system text and the turns.
+std::optional<HttpResponse> ReadAnthropicChat(
+    const json::Value& body, TextGenerationBackend& b, ChatRequest* chat,
+    std::size_t* max_tokens, sampling::SamplingConfig* sampling_config) {
+  chat->reasoning = b.reasoning_defaults();
   if (body.is_object()) {
-    if (auto error = ReadThinking(body, &chat.reasoning))
-      return std::move(*error);
-    if (auto error = ReadMessagesOutputConfig(body, &chat.reasoning))
-      return std::move(*error);
+    if (auto error = ReadThinking(body, &chat->reasoning))
+      return error;
+    if (auto error = ReadMessagesOutputConfig(body, &chat->reasoning))
+      return error;
   }
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
   if (auto error =
-          ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                   &sampling_config, chat.reasoning.enabled,
+          ReadCompatibilityOptions(body, b, "max_tokens", max_tokens,
+                                   sampling_config, chat->reasoning.enabled,
                                    {.stop_field = "stop_sequences",
                                     .stream = true,
                                     .thinking = true,
                                     .output_config = true,
                                     .tools = true})) {
-    return std::move(*error);
+    return error;
   }
-  if (auto error = ParseAnthropicToolControls(body, &chat))
-    return std::move(*error);
+  if (auto error = ParseAnthropicToolControls(body, chat))
+    return error;
 
   std::vector<tokenization::ChatMessage> messages;
   if (const auto* system = body.find("system")) {
@@ -1211,22 +1225,74 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
         {tokenization::ChatRole::kSystem, std::move(text), "", ""});
   }
   std::string messages_error =
-      "'messages' must contain text, thinking, tool_use or tool_result "
-      "blocks; use /v1/chat/completions for images";
+      "'messages' must contain text, image, thinking, tool_use or tool_result "
+      "blocks";
   if (!ReadTextMessages(body.find("messages"), &messages, false,
                         &messages_error)) {
     return InvalidCompatibilityRequest(messages_error);
   }
 
-  chat.messages = std::move(messages);
-  chat.client_id = req.client_id;
+  chat->messages = std::move(messages);
   if (const auto error = ParseStopSequences(body.find("stop_sequences"),
                                             StopSequenceFormat::kAnthropic,
-                                            &chat.stop_sequences))
+                                            &chat->stop_sequences))
     return InvalidCompatibilityRequest(*error);
+  return std::nullopt;
+}
+
+HttpResponse AnthropicMessages(const HttpRequest& req,
+                               TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+
+  ChatRequest chat;
+  std::size_t max_tokens = 0;
+  sampling::SamplingConfig sampling_config;
+  if (auto error =
+          ReadAnthropicChat(body, b, &chat, &max_tokens, &sampling_config))
+    return std::move(*error);
+  chat.client_id = req.client_id;
   return CreateAnthropicMessage(
       req, b, chat, max_tokens, sampling_config,
       body.find("stream") != nullptr && body.find("stream")->as_bool());
+} catch (const std::length_error& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "context_length_exceeded");
+} catch (const std::invalid_argument& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "invalid_prompt");
+}
+
+// The prompt size a Messages request would have, without generating.
+HttpResponse AnthropicCountTokens(const HttpRequest& req,
+                                  TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+
+  ChatRequest chat;
+  std::size_t max_tokens = 0;
+  sampling::SamplingConfig sampling_config;
+  if (auto error =
+          ReadAnthropicChat(body, b, &chat, &max_tokens, &sampling_config))
+    return std::move(*error);
+  if (body.find("stream") != nullptr && body.find("stream")->as_bool())
+    return InvalidCompatibilityRequest("'stream' must be false");
+  const auto tokens = b.count_chat_tokens(chat);
+  if (!tokens)
+    return NotImplemented(req, b);
+  json::Value resp = json::Value::object();
+  resp["input_tokens"] = *tokens;
+  return Ok(resp);
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1526,7 +1592,7 @@ void HttpServer::register_routes() {
 
   // ---- Anthropic ----
   add("POST", "/v1/messages", AnthropicMessages);
-  add("POST", "/v1/messages/count_tokens", NotImplemented);
+  add("POST", "/v1/messages/count_tokens", AnthropicCountTokens);
 
   // ---- llama-server ----
   add("POST", "/v1/rerank", NotImplemented);
@@ -1926,7 +1992,15 @@ void HttpServer::handle_connection(int client_fd) {
           const std::string_view header_line(headers.data() + cursor,
                                              line_end - cursor);
           const std::size_t colon = header_line.find(':');
-          if (colon != std::string_view::npos && colon > 0) {
+          // RFC 9112 5.1: reject whitespace before the colon and obsolete
+          // line folding instead of storing a name no lookup would match.
+          const auto token = [](char c) {
+            return std::isalnum(static_cast<unsigned char>(c)) != 0 ||
+                   std::string_view("!#$%&'*+-.^_`|~").find(c) !=
+                       std::string_view::npos;
+          };
+          if (colon != std::string_view::npos && colon > 0 &&
+              std::ranges::all_of(header_line.substr(0, colon), token)) {
             std::string name(header_line.substr(0, colon));
             std::string_view raw_value = header_line.substr(colon + 1);
             while (!raw_value.empty() &&
@@ -2162,8 +2236,11 @@ void HttpServer::handle_connection(int client_fd) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
-    HttpResponse resp = Err(500, "Internal Server Error",
-                            *e.what() ? e.what() : "generation failed",
+    const char* message = *e.what() ? e.what() : "generation failed";
+    // Retain the cause in logs alongside the client's stable code.
+    Logger::Error("http", "request=" + req.request_id +
+                              " event=server_exception reason=" + message);
+    HttpResponse resp = Err(500, "Internal Server Error", message,
                             "internal_error", "server_exception");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     Logger::LogRequest(req.request_id, req.method, req.path,

@@ -136,6 +136,7 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                           std::string* error) const {
   const auto& c = config();
   xn_half_ = false;
+  DropReadyQ8();  // the batched route rewrites xn and mixed unfused
   if (!normed)
     RmsNormRows(res, m.norm.f32(), s_.xn, rows, c.HcDim(), c.hc_count,
                 c.rms_eps, stream_);
@@ -164,6 +165,7 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
 void Executor::CombineBatch(float* res, const float* gamma,
                             std::uint32_t rows) const {
   const auto& c = config();
+  DropReadyQ8();
   HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, rows,
             c.hidden_size, c.hc_count, c.rms_eps, stream_, true);
 }
@@ -171,6 +173,7 @@ void Executor::CombineBatch(float* res, const float* gamma,
 bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                                std::string* error) const {
   const Config& c = config();
+  DropReadyQ8();
   if (!has_mtp() || items.empty() || items.size() > kBatchSessions) {
     return Fail(error, "invalid MTP body batch");
   }
@@ -209,6 +212,16 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
   if (items.size() == 1) {
     const auto& item = items.front();
     return MtpForward(*item.session, item.tokens, item.hidden_row, {}, error);
+  }
+  for (const auto& item : items) {
+    auto& session = *item.session;
+    if (!session.Cancelled() && session.continuation_hooks_) {
+      const auto end = session.mtp_.position +
+                       static_cast<std::uint32_t>(item.tokens.size());
+      session.continuation_hooks_->BeforeWrite(
+          true, session.mtp_.position, end, session.mtp_.blocks,
+          end > c.indexer_top_k ? end / c.compress_ratio : session.mtp_.blocks);
+    }
   }
   for (const auto& item : items)
     if (!item.session->Cancelled())
@@ -651,6 +664,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
 bool Executor::ForwardBatch(std::span<const BatchItem> items,
                             std::string* error) const {
   selected_logits_ = nullptr;
+  DropReadyQ8();
   const Config& c = config();
   if (items.empty() || items.size() > kBatchSessions) {
     return Fail(error, "decode batch must contain 1..8 sessions");
@@ -693,6 +707,16 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   }
   if (!AnyActive(items))
     return true;
+  for (const auto& item : items) {
+    auto& session = *item.session;
+    if (!session.Cancelled() && session.continuation_hooks_) {
+      const auto end =
+          session.position_ + static_cast<std::uint32_t>(item.tokens.size());
+      session.continuation_hooks_->BeforeWrite(
+          false, session.position_, end, session.blocks_,
+          end > c.indexer_top_k ? end / c.compress_ratio : session.blocks_);
+    }
+  }
   for (const auto& item : items) {
     if (!item.session->Cancelled())
       item.session->PreserveSnapshots(item.session->position_,

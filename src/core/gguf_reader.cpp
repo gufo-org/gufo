@@ -593,14 +593,27 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
             values.push_back(value);
           }
           meta_val.value = std::move(values);
-        } else if (item_type == GgufValueType::kUint32 ||
+        } else if (item_type == GgufValueType::kUint8 ||
+                   item_type == GgufValueType::kUint16 ||
+                   item_type == GgufValueType::kUint32 ||
                    item_type == GgufValueType::kBool ||
                    item_type == GgufValueType::kUint64) {
+          // Writers pick the narrowest integer type; widen every width.
           std::vector<std::uint64_t> u_arr;
           u_arr.reserve(array_len);
           for (std::uint64_t a = 0; a < array_len; ++a) {
             std::uint64_t val = 0;
-            if (item_type == GgufValueType::kUint32) {
+            if (item_type == GgufValueType::kUint8) {
+              std::uint8_t val8 = 0;
+              if (!ReadPod(data_, size_, offset, val8))
+                return false;
+              val = val8;
+            } else if (item_type == GgufValueType::kUint16) {
+              std::uint16_t val16 = 0;
+              if (!ReadPod(data_, size_, offset, val16))
+                return false;
+              val = val16;
+            } else if (item_type == GgufValueType::kUint32) {
               std::uint32_t val32 = 0;
               if (!ReadPod(data_, size_, offset, val32)) {
                 return false;
@@ -619,13 +632,25 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
             u_arr.push_back(val);
           }
           meta_val.value = std::move(u_arr);
-        } else if (item_type == GgufValueType::kInt32 ||
+        } else if (item_type == GgufValueType::kInt8 ||
+                   item_type == GgufValueType::kInt16 ||
+                   item_type == GgufValueType::kInt32 ||
                    item_type == GgufValueType::kInt64) {
           std::vector<std::int64_t> i_arr;
           i_arr.reserve(array_len);
           for (std::uint64_t a = 0; a < array_len; ++a) {
             std::int64_t val = 0;
-            if (item_type == GgufValueType::kInt32) {
+            if (item_type == GgufValueType::kInt8) {
+              std::int8_t val8 = 0;
+              if (!ReadPod(data_, size_, offset, val8))
+                return false;
+              val = val8;
+            } else if (item_type == GgufValueType::kInt16) {
+              std::int16_t val16 = 0;
+              if (!ReadPod(data_, size_, offset, val16))
+                return false;
+              val = val16;
+            } else if (item_type == GgufValueType::kInt32) {
               std::int32_t val32 = 0;
               if (!ReadPod(data_, size_, offset, val32)) {
                 return false;
@@ -638,24 +663,9 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
           }
           meta_val.value = std::move(i_arr);
         } else {
-          // Skip other array types cleanly
-          std::size_t item_size = 4;
-          if (item_type == GgufValueType::kUint8 ||
-              item_type == GgufValueType::kInt8 ||
-              item_type == GgufValueType::kBool) {
-            item_size = 1;
-          } else if (item_type == GgufValueType::kUint16 ||
-                     item_type == GgufValueType::kInt16) {
-            item_size = 2;
-          } else if (item_type == GgufValueType::kUint64 ||
-                     item_type == GgufValueType::kInt64 ||
-                     item_type == GgufValueType::kFloat64) {
-            item_size = 8;
-          }
-          if (offset > size_ || array_len > (size_ - offset) / item_size) {
-            return false;
-          }
-          offset += (array_len * item_size);
+          // Every scalar item type is decoded above; never store an array
+          // entry without its values.
+          return false;
         }
         break;
       }

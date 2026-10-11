@@ -31,15 +31,15 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "libwebp",
     "DS4",
     "h3.c",
-    "ccv",
-    "llama.cpp",
+    "ccv TensorOps ancestry",
+    "llama.cpp / ggml",
     "ICU",
-    "curl",
+    "curl / libcurl",
     "FFmpeg",
 }
 
 REQUIRED_EVALUATION_COMPONENTS = {
-    "PyTorch",
+    "PyTorch ROCm",
     "Torchvision",
     "LPIPS",
     "ROCprofiler SDK / ROCTx",
@@ -85,18 +85,22 @@ def verify_dependencies(
     errors: List[str] = []
     components = parse_third_party_notices(notices_file)
 
-    # 1. Check that all required shipped components are present in inventory
+    # 1. Check that all required components have their own inventory rows.
+    # Exact names: a substring would also match rows such as "DS4 GB10/GX10 fork".
     for req in REQUIRED_SHIPPED_COMPONENTS:
-        if not any(req.lower() in name.lower() for name in components):
+        if req not in components:
             errors.append(f"Required shipped dependency '{req}' is missing from {notices_file.name}")
     for req in REQUIRED_EVALUATION_COMPONENTS:
-        if not any(req.lower() in name.lower() for name in components):
+        if req not in components:
             errors.append(
                 f"Required evaluation dependency '{req}' is missing from "
                 f"{notices_file.name}"
             )
 
     # 2. Check package.nix inputs consistency
+    for nix_file in (package_nix_file, flake_nix_file):
+        if not nix_file.is_file():
+            errors.append(f"Dependency source {nix_file} does not exist")
     if package_nix_file.is_file():
         pkg_content = package_nix_file.read_text(encoding="utf-8")
         # Check the runtime inputs required by the shipped GPU package.

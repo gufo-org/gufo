@@ -7,6 +7,7 @@ No weights are downloaded. Model checks are manual, not hosted CI workloads.
 """
 
 import argparse
+import ast
 import contextlib
 import http.client
 import hashlib
@@ -28,7 +29,7 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
+SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
           "tool-reasoning", "reasoning-separator",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection", "cache")
@@ -46,13 +47,41 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
                      "expected_input_modalities")
 
 
-def provenance():
-    source = hashlib.sha256()
-    for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
+HARNESS_ROOTS = ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
                  "tool_reasoning.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
                  "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py",
-                 "cache_disk_spacing.py", "tool_images.py"):
-        source.update((TESTS / name).read_bytes())
+                 "cache_disk_spacing.py", "tool_images.py")
+
+
+def harness_files():
+    """The harness modules and every local module they import, transitively."""
+    search = (TESTS, TESTS.parents[1] / "tools")
+    pending, found = [TESTS / name for name in HARNESS_ROOTS], set()
+    while pending:
+        path = pending.pop()
+        if path in found:
+            continue
+        found.add(path)
+        for node in ast.walk(ast.parse(path.read_text(), str(path))):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+                modules = [node.module]
+            else:
+                continue
+            for module in modules:
+                for base in search:
+                    candidate = base.joinpath(*module.split(".")).with_suffix(".py")
+                    if candidate.is_file():
+                        pending.append(candidate)
+                        break
+    return sorted(found)
+
+
+def provenance():
+    source = hashlib.sha256()
+    for path in harness_files():
+        source.update(path.read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
     kernel_command = Path("/proc/cmdline")
     return {
@@ -229,8 +258,8 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- ./result/bin/gufo serve llm --model PATH [server options]")
     args = parser.parse_args()
-    if ("discovery" in args.suite or "all" in args.suite) and args.expected_input_modalities is None:
-        parser.error("discovery requires --expected-input-modalities text or text,image")
+    if set(args.suite) & {"discovery", "messages-image-counts", "all"} and args.expected_input_modalities is None:
+        parser.error("discovery and messages-image-counts require --expected-input-modalities text or text,image")
     if args.allow_missing_progress and not args.record_baseline:
         parser.error("--allow-missing-progress is only for --record-baseline")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command

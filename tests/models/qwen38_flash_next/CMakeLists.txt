@@ -13,6 +13,7 @@ function(add_qwen38_flash_next_test name library labels)
 endfunction()
 
 add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
+add_qwen38_flash_next_test(continuation_layout gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(mtp_sampling gufo_core "cpu")
 
@@ -39,8 +40,17 @@ if (ENGINE_ENABLE_HIP)
   add_executable(qwen38_flash_next_snapshot_test EXCLUDE_FROM_ALL snapshot_test.cpp)
   target_link_libraries(qwen38_flash_next_snapshot_test PRIVATE
     gufo_qwen38_flash_next)
+  add_executable(qwen38_flash_next_continuation_adapter_test EXCLUDE_FROM_ALL
+    continuation_adapter_test.cpp reset_submission_fault.cpp)
+  target_link_libraries(qwen38_flash_next_continuation_adapter_test PRIVATE
+    gufo_qwen38_flash_next ${CMAKE_DL_LIBS})
+  add_executable(qwen38_flash_next_continuation_probe EXCLUDE_FROM_ALL
+    continuation_probe.cpp)
+  target_link_libraries(qwen38_flash_next_continuation_probe PRIVATE
+    gufo_qwen38_flash_next)
   add_custom_target(qwen38_flash_next_model_tests
-    DEPENDS qwen38_flash_next_session_test qwen38_flash_next_snapshot_test)
+    DEPENDS qwen38_flash_next_session_test qwen38_flash_next_snapshot_test
+      qwen38_flash_next_continuation_adapter_test)
 
   add_executable(qwen38_flash_next_dense_gemm_bench EXCLUDE_FROM_ALL
     dense_gemm_bench.cpp)

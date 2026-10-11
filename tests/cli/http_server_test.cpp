@@ -132,6 +132,15 @@ public:
   std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
+  std::optional<std::size_t> count_chat_tokens(
+      const gufo::server::ChatRequest& request) const override {
+    counted_messages = request.messages.size();
+    counted_tools = request.tools.size();
+    return chat_token_count;
+  }
+  std::optional<std::size_t> chat_token_count;
+  mutable std::size_t counted_messages{0};
+  mutable std::size_t counted_tools{0};
   Result complete(
       std::string_view prompt, std::size_t limit,
       const gufo::sampling::SamplingConfig& sampling,
@@ -700,7 +709,8 @@ void TestFramingAndMetrics() {
        {"Content-Length: nope", "Content-Length: -1", "Content-Length: 4junk",
         "Content-Length: 18446744073709551616",
         "Content-Length: 4\r\nContent-Length: 3", "Transfer-Encoding: chunked",
-        "broken-header"}) {
+        "broken-header", "Transfer-Encoding : chunked", "Content-Length\t: 5",
+        "X-Test: one\r\n folded", "Bad Name: x"}) {
     ExpectStatus(server.Send("POST /echo HTTP/1.1\r\n" + header + "\r\n\r\n"),
                  400);
   }
@@ -1046,6 +1056,9 @@ void TestCompatibilityRequests() {
       assert(output.find("usage")->contains("input_tokens_details"));
     } else if (std::string_view(endpoint.path) == "/v1/messages") {
       assert(output.member_str("stop_reason") == "max_tokens");
+      // input_tokens excludes cache reads; together they cover the prompt.
+      assert(output.find("usage")->member_size("input_tokens") == 2 &&
+             output.find("usage")->member_size("cache_read_input_tokens") == 8);
     } else if (std::string_view(endpoint.path) == "/completion") {
       assert(output.find("stopped_length")->as_bool());
       assert(!output.find("stopped_eos")->as_bool());
@@ -1110,6 +1123,30 @@ void TestCompatibilityRequests() {
                            R"({"messages":[{"role":"user","content":"hi"}]})"),
                501);
   assert(server.backend->calls == calls);
+
+  // With a backend that can count, count_tokens reports the prompt size of
+  // the same parsed request Messages would generate from, without generating.
+  server.backend->chat_token_count = 1234;
+  const auto counted = response_body(
+      server.Post("/v1/messages/count_tokens", R"({"system":"Be brief.",
+      "messages":[{"role":"user","content":[
+        {"type":"text","text":"what is it?"}]}],
+      "tools":[{"name":"look","input_schema":{"type":"object"}}]})"));
+  assert(counted.find("input_tokens") != nullptr &&
+         counted.find("input_tokens")->as_double() == 1234.0);
+  assert(server.backend->counted_messages == 2 &&
+         server.backend->counted_tools == 1);
+  assert(server.backend->calls == calls);
+  for (const auto* invalid :
+       {R"({"stream":true,"messages":[{"role":"user","content":"hi"}]})",
+        R"({"messages":[]})",
+        R"({"messages":[{"role":"user","content":"hi"}],"thinking":true})"})
+    ExpectStatus(server.Post("/v1/messages/count_tokens", invalid), 400);
+  ExpectStatus(server.Post("/v1/messages/count_tokens",
+                           R"({"model":"other","messages":[
+                             {"role":"user","content":"hi"}]})"),
+               404);
+  server.backend->chat_token_count.reset();
 
   for (const auto& [url, expected] :
        {std::pair{"data:image/gif;base64,AA==", "image/gif"},
@@ -1571,6 +1608,81 @@ void TestCompatibilityRequests() {
        })
     ExpectStatus(server.Post("/v1/messages", invalid), 400);
   assert(server.backend->calls == calls_before);
+  // Image blocks in a user turn and in a tool result reach the backend as
+  // images at their place in the text, from a base64 source.
+  server.backend->SetOutput("seen");
+  response_body(server.Post("/v1/messages", R"({"max_tokens":8,"messages":[
+      {"role":"user","content":[
+        {"type":"text","text":"look: "},
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+          "data":"AQID"}},
+        {"type":"text","text":"what is it?"}]}]})"));
+  {
+    const auto sent = server.backend->LastCall().chat.messages.back();
+    assert(sent.role == gufo::tokenization::ChatRole::kUser &&
+           sent.content == "look: what is it?" && sent.images.size() == 1 &&
+           sent.images[0].offset == 6 &&
+           *sent.images[0].bytes == std::vector<std::uint8_t>({1, 2, 3}));
+  }
+  response_body(server.Post("/v1/messages", R"({"max_tokens":8,"messages":[
+      {"role":"user","content":"read it"},
+      {"role":"assistant","content":[{"type":"tool_use","id":"toolu_1",
+        "name":"read","input":{}}]},
+      {"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_1","content":[
+          {"type":"text","text":"swatch.png"},
+          {"type":"image","source":{"type":"base64","media_type":"image/jpeg",
+            "data":"BAUG"}}]},
+        {"type":"text","text":"which color?"}]}]})"));
+  {
+    const auto sent = server.backend->LastCall().chat.messages;
+    assert(sent.size() == 4 &&
+           sent[2].role == gufo::tokenization::ChatRole::kTool &&
+           sent[2].tool_call_id == "toolu_1" &&
+           sent[2].content == "swatch.png" && sent[2].images.size() == 1 &&
+           sent[2].images[0].offset == 10 &&
+           *sent[2].images[0].bytes == std::vector<std::uint8_t>({4, 5, 6}) &&
+           sent[3].role == gufo::tokenization::ChatRole::kUser &&
+           sent[3].images.empty() && sent[3].content == "which color?");
+  }
+  // The streamed path takes the same parsed turn.
+  const auto streamed_image = server.Post("/v1/messages", R"({"stream":true,
+      "max_tokens":8,"messages":[{"role":"user","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+          "data":"AQID"}},
+        {"type":"text","text":"what is it?"}]}]})");
+  ExpectStatus(streamed_image, 200);
+  assert(streamed_image.find("event: message_start\n") != std::string::npos);
+  {
+    const auto sent = server.backend->LastCall().chat.messages.back();
+    assert(sent.content == "what is it?" && sent.images.size() == 1 &&
+           sent.images[0].offset == 0);
+  }
+  // Unsupported spellings stay errors that name the problem.
+  const auto calls_before_images = server.backend->calls.load();
+  for (const auto& [body, expected] :
+       {std::pair<std::string, std::string>{
+            R"({"messages":[{"role":"user","content":[{"type":"image",
+                 "source":{"type":"base64","media_type":"image/gif",
+                 "data":"AA=="}}]}]})",
+            "image/gif"},
+        {R"({"messages":[{"role":"user","content":[{"type":"image",
+              "source":{"type":"url","url":"file:///tmp/x.png"}}]}]})",
+         "HTTPS"},
+        {R"({"messages":[{"role":"user","content":[{"type":"image",
+              "source":{"type":"file","file_id":"f"}}]}]})",
+         "base64 or url source"},
+        {R"({"messages":[{"role":"assistant","content":[{"type":"image",
+              "source":{"type":"base64","media_type":"image/png",
+              "data":"AQID"}}]}]})",
+         "'messages' must contain"}}) {
+    const auto rejected = server.Post("/v1/messages", body);
+    ExpectStatus(rejected, 400);
+    const auto error = parse(rejected.substr(rejected.find("\r\n\r\n") + 4));
+    assert(error.find("error")->member_str("message").find(expected) !=
+           std::string::npos);
+  }
+  assert(server.backend->calls == calls_before_images);
   // A turn cut by max_tokens reports the cut, as Chat finish_reason does,
   // even when a complete call precedes it.
   server.backend->SetOutput(
@@ -1653,7 +1765,7 @@ void TestCompatibilityRequests() {
   const auto& text_done = text_events[text_events.size() - 2];
   assert(text_done.member_str("type") == "message_delta" &&
          text_done.find("delta")->member_str("stop_reason") == "end_turn" &&
-         text_done.find("usage")->member_size("input_tokens") == 10 &&
+         text_done.find("usage")->member_size("input_tokens") == 2 &&
          text_done.find("usage")->member_size("cache_read_input_tokens") == 8);
   assert(std::ranges::count(types, "content_block_start") == 2 &&
          std::ranges::count(types, "content_block_stop") == 2);
@@ -1838,6 +1950,42 @@ void TestRawCompletionStreaming() {
           "/v1/chat/completions",
           R"({"model":"test","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"ignore_eos":true})"),
       400);
+}
+
+// A generic failure keeps its cause in the server log, not only in the
+// client's response, whether it happens before or after streaming starts.
+void TestGenerationFailureLogsCause() {
+  std::ostringstream output;
+  auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+  {
+    RunningServer server;
+    for (const int failure : {1, 6}) {
+      server.backend->failure = failure;
+      for (const auto* path :
+           {"/v1/completions", "/v1/chat/completions", "/v1/responses"}) {
+        const std::string body =
+            std::string_view(path) == "/v1/chat/completions"
+                ? R"({"model":"test","messages":[{"role":"user","content":"hello"}],"stream":true})"
+            : std::string_view(path) == "/v1/responses"
+                ? R"({"input":"hello","stream":true})"
+                : R"({"prompt":"hello","stream":true})";
+        ExpectStatus(server.Post(path, body), failure == 6 ? 200 : 500);
+      }
+    }
+  }
+  std::clog.rdbuf(previous_sink);
+  const std::string log = output.str();
+  const auto count = [&log](std::string_view needle) {
+    std::size_t found = 0;
+    for (auto at = log.find(needle); at != std::string::npos;
+         at = log.find(needle, at + 1))
+      ++found;
+    return found;
+  };
+  // Before streaming, the HTTP handler logs the cause with the request ID.
+  assert(count("event=server_exception reason=context exceeded") == 3);
+  // After streaming starts, each endpoint logs it once beside its stable code.
+  assert(count("[ERROR] [chat] context exceeded") == 3);
 }
 
 void TestDeviceLoss() {
@@ -2444,6 +2592,7 @@ int main() {
   TestResponsesToolImages();
   TestModelInputModalities();
   TestRawCompletionStreaming();
+  TestGenerationFailureLogsCause();
   TestDeviceLoss();
   TestDeviceLossWhileWriterBlocked();
   TestRawCompletionPromptProgress();

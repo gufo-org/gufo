@@ -10,6 +10,7 @@
 #include <type_traits>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -263,6 +264,12 @@ Session::Session(std::shared_ptr<Model> model,
 
 Session::~Session() = default;
 
+void Session::ResetDraftPolicy() {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
+  draft_length_.Reset();
+}
+
 std::uint32_t Session::Position() const noexcept {
   return session_->position();
 }
@@ -271,12 +278,16 @@ std::uint32_t Session::ContextSize() const noexcept {
 }
 
 void Session::Reset() {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeReset();
   valid_ = false;
   session_->Reset();
   tokens_.clear();
   hidden_base_ = 0;
   draft_length_.Reset();
   model_->executor_->MtpRewind(*session_, 0);
+  if (continuation_hooks_)
+    continuation_hooks_->AfterReset();
   valid_ = true;
 }
 
@@ -286,6 +297,8 @@ void Session::SetCancellationCheck(std::function<bool()> check) {
 
 void Session::ConfigureVision(
     std::shared_ptr<const qwen::vision::Prompt> prompt) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
   const auto identity = prompt ? prompt->IdentityForPrefix(tokens_.size())
                                : std::span<const std::uint8_t>{};
   if (!tokens_.empty() &&
@@ -387,6 +400,8 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshotImpl(
 
 bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
                               std::string* error_msg) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeRestore();
   return RestoreSnapshotImpl({snapshot.data_.get(), snapshot.size_},
                              snapshot.deferred_.get(), error_msg);
 }
@@ -401,6 +416,8 @@ std::uint64_t SessionSnapshot::DeviceBytes() const {
 
 bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
                               std::string* error_msg) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeRestore();
   return RestoreSnapshotImpl(payload, nullptr, error_msg);
 }
 
@@ -640,6 +657,8 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
 
 bool Session::Sync(std::span<const std::int32_t> prompt, std::string* error_msg,
                    std::span<const std::int32_t> next) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
   return SyncImpl(prompt, error_msg, 0, nullptr, nullptr, next);
 }
 
@@ -647,6 +666,8 @@ bool Session::SyncThrough(std::span<const std::int32_t> prompt,
                           std::uint32_t boundary,
                           std::unique_ptr<SessionSnapshot>* checkpoint,
                           std::string* error_msg, double* capture_ms) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
   if (!checkpoint || boundary == 0 || boundary > prompt.size() ||
       prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
     AssignError(error_msg,
@@ -695,6 +716,8 @@ bool Session::SyncImpl(std::span<const std::int32_t> prompt,
 }
 
 bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
   if (!valid_) {
     AssignError(error_msg,
                 "session needs a successful Sync after a failed operation");
@@ -954,6 +977,8 @@ bool Session::FinishDecode(const DecodeRequest& request,
 bool Session::DecodeStep(std::size_t max_tokens,
                          sampling::SamplerState& sampler, DecodeResult* result,
                          std::string* error_msg, bool stop_at_eos) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
   if (!valid_) {
     AssignError(error_msg,
                 "session needs a successful Sync after a failed operation");
@@ -1024,6 +1049,13 @@ bool Session::RunIsolatedBatch(std::span<const Request> requests,
       valid = false;
     if (!valid) {
       outcome.error = "invalid or non-independent batch request";
+      continue;
+    }
+    try {
+      if (r.session->continuation_hooks_)
+        r.session->continuation_hooks_->BeforeExecution();
+    } catch (const std::exception& exception) {
+      outcome.error = exception.what();
       continue;
     }
     if (!r.session->session_->CheckCancellation(&outcome.error))

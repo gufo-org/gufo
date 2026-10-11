@@ -169,6 +169,10 @@ public:
   /// Token count of raw text (no generation).
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override;
 
+  /// Prompt tokens of a chat request as generation would prepare them.
+  [[nodiscard]] std::optional<std::size_t> count_chat_tokens(
+      const ChatRequest& request) const override;
+
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
