@@ -241,7 +241,7 @@ matching input identities, not a client-supplied conversation ID.
 When space is needed, RAM retention prefers removing:
 
 1. A full-prompt retry copy with a stable fallback still retained.
-2. An intermediate copy with a related stable continuation retained.
+2. An intermediate copy that a retained stable continuation extends.
 3. An older stable boundary covered by a newer one. A checkpoint that two
    retained conversations extend and then diverge after is the prefix they
    share, not an older turn, and never counts as covered.

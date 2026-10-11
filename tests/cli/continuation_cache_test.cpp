@@ -489,6 +489,67 @@ void TestRestoredSharedPrefixOutlivesFrozenFrontiers() {
   }
 }
 
+void TestBranchPointPrefixDoesNotMarkDeepHistoryRedundant() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  using gufo::server::SnapshotPurpose;
+  // Issue #542: a long conversation keeps only an in-pass history checkpoint
+  // because its final checkpoint exceeds the budget. Restoring the shared
+  // system prompt makes that prompt a branch point. A shorter continuation
+  // does not cover the deeper history, so a short conversation must replace
+  // an older checkpoint instead of the long conversation's only copy.
+  std::vector<std::size_t> invalidations(3);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      3, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](gufo::server::ContinuationState&,
+                     const gufo::server::ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{19}; },
+       .on_event = {}},
+      128);
+  const Tokens shared{1, 2, 3, 4};
+  std::size_t reply = 900;
+  const auto request = [&](const Tokens& prompt, std::size_t grid,
+                           std::size_t grid_bytes, std::size_t final_bytes) {
+    auto lease = cache.Acquire(prompt);
+    const std::size_t cached = lease.cached_tokens();
+    if (cached < grid && lease.TryReserveSnapshot(grid_bytes, grid, true,
+                                                  SnapshotPurpose::kHistory))
+      lease.PublishSnapshot(Tokens(prompt.begin(), prompt.begin() + grid),
+                            std::make_unique<FakeSnapshot>(grid, grid_bytes),
+                            true);
+    Tokens live = prompt;
+    live.push_back(reply++);
+    if (lease.TryReserveSnapshot(final_bytes, prompt.size(), false,
+                                 SnapshotPurpose::kContinuation, prompt))
+      lease.Commit(prompt, std::make_unique<FakeSnapshot>(1, final_bytes),
+                   live);
+    else
+      lease.Commit(prompt, nullptr, live);
+    return cached;
+  };
+  const Tokens first_side{1, 2, 3, 4, 100, 5};
+  const Tokens second_side{1, 2, 3, 4, 101, 5};
+  Tokens deep = shared;
+  deep.insert(deep.end(), 36, 7);
+  const std::size_t deep_grid = 30;
+
+  Expect(request(first_side, shared.size(), 1, 2) == 0,
+         "the first conversation starts cold");
+  Expect(request(deep, deep_grid, 15, 25) == shared.size(),
+         "the long conversation restores the shared system prompt");
+  Expect(cache.CachedPrefixTokens(deep) == deep_grid,
+         "the long conversation keeps its in-pass history checkpoint");
+  Expect(request(second_side, shared.size(), 1, 2) == shared.size(),
+         "a short conversation restores the shared branch point");
+  Expect(cache.CachedPrefixTokens(deep) == deep_grid,
+         "a short conversation does not replace the deep checkpoint");
+  Expect(cache.CachedPrefixTokens(first_side) == shared.size(),
+         "the oldest short conversation yields under byte pressure");
+  deep.push_back(60);
+  Expect(request(deep, deep_grid, 15, 25) == deep_grid,
+         "the long conversation still resumes from its deep checkpoint");
+}
+
 void TestSnapshotCanBranchIntoTwoIndependentStateSlots() {
   std::vector<std::size_t> invalidations(2);
   std::size_t next_id = 0;
@@ -1381,6 +1442,7 @@ int main() {
   TestLearnedBranchPointOutlivesItsOlderBranch();
   TestDeeperLearnedBranchPointSupersedesShallower();
   TestRestoredSharedPrefixOutlivesFrozenFrontiers();
+  TestBranchPointPrefixDoesNotMarkDeepHistoryRedundant();
   TestByteCapacityEvictsBeforeSnapshotAllocation();
   TestConcurrentReservationsCannotOvercommitBudget();
   TestImpossibleReservationPreservesRetainedEntries();

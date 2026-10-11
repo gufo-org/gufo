@@ -172,6 +172,13 @@ void RanksAndSources() {
     g.Add({1, 2, 3}, RetentionPurpose::kContinuation, 0, {}, true, {2});
     assert(g.policy.Rank(a) == 3);  // image identities never cover each other
   }
+  {
+    // Issue #542: a shorter branch point does not cover deeper history.
+    Fixture g(4);
+    g.Add({1, 2}, RetentionPurpose::kBranchPoint);
+    const auto deep = g.Add({1, 2, 3, 4, 5}, RetentionPurpose::kHistory);
+    assert(g.policy.Rank(deep) == 3);
+  }
 }
 void RecordSourceReplacement() {
   for (const bool preserve : {true, false}) {

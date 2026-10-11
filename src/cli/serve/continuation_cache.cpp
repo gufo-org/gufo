@@ -181,8 +181,7 @@ struct ContinuationCache::Impl {
           IsPrefix(peer.tokens, entry.tokens))
         return 0;
       if (entry.purpose == SnapshotPurpose::kHistory &&
-          (IsPrefix(entry.tokens, peer.tokens) ||
-           IsPrefix(peer.tokens, entry.tokens)))
+          IsPrefix(entry.tokens, peer.tokens))
         return 1;
       if (IsContinuation(entry.purpose) &&
           peer.tokens.size() > entry.tokens.size() &&
