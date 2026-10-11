@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -74,6 +75,8 @@ struct ContinuationCache::Entry {
   SnapshotPurpose purpose{SnapshotPurpose::kContinuation};
   std::uint64_t state_last_used{0};
   std::uint64_t snapshot_last_used{0};
+  // Retention floor at the last use plus the tokens a miss would prefill.
+  std::size_t retention_value{0};
   bool available{true};
   bool valid{false};
   bool dirty{false};
@@ -86,6 +89,9 @@ struct ContinuationCache::Impl {
   mutable std::mutex mutex;
   std::condition_variable condition;
   std::uint64_t clock{0};
+  // Rises to each byte-pressure victim's retention value, so checkpoints
+  // left unused age out however many tokens they cover.
+  std::size_t retention_floor{0};
   std::size_t snapshot_capacity_bytes{0};
   std::size_t retained_snapshot_bytes{0};
   std::size_t reserved_snapshot_bytes{0};
@@ -612,6 +618,8 @@ ContinuationCache::Lease ContinuationCache::Acquire(
           auto& source_entry = *impl_->entries[source];
           snapshot = source_entry.snapshot;
           source_entry.snapshot_last_used = ++impl_->clock;
+          source_entry.retention_value =
+              impl_->retention_floor + source_entry.tokens.size();
           if (impl_->RestoreDiverges(source, prompt))
             source_entry.purpose = SnapshotPurpose::kBranchPoint;
         }
@@ -837,8 +845,9 @@ bool ContinuationCache::ReserveSnapshot(
     } else {
       const auto oldest_snapshot = [&](bool allow_source) {
         std::size_t selected = impl_->entries.size();
-        std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
         int priority = 4;
+        auto order = std::tuple(true, std::numeric_limits<std::size_t>::max(),
+                                std::numeric_limits<std::uint64_t>::max());
         for (std::size_t candidate = impl_->state_count;
              candidate < impl_->entries.size(); ++candidate) {
           const auto& entry = *impl_->entries[candidate];
@@ -849,11 +858,16 @@ bool ContinuationCache::ReserveSnapshot(
           const int rank = priority_for(candidate);
           if (rank > max_priority)
             continue;
+          // Within a rank, keep branch points, then the checkpoints a miss
+          // would cost the most to prefill again, until they go unused.
+          const auto candidate_order =
+              std::tuple(impl_->IsBranchPoint(candidate), entry.retention_value,
+                         entry.snapshot_last_used);
           if (rank < priority ||
-              (rank == priority && entry.snapshot_last_used < oldest)) {
+              (rank == priority && candidate_order < order)) {
             selected = candidate;
             priority = rank;
-            oldest = entry.snapshot_last_used;
+            order = candidate_order;
           }
         }
         return selected;
@@ -912,18 +926,24 @@ bool ContinuationCache::ReserveSnapshot(
           continue;
         }
         std::size_t target = oldest_snapshot(false);
+        bool advances_source = false;
         // Advance this family before sacrificing another family's last copy,
         // unless the source is a branch point other prompts still diverge at.
         // Verify the source: another lease may have replaced its record.
         if (can_replace_source() &&
-            (target == impl_->entries.size() || priority_for(target) == 3))
+            (target == impl_->entries.size() || priority_for(target) == 3)) {
           target = source_index;
+          advances_source = true;
+        }
         if (target == impl_->entries.size() && !preserve_source) {
           target = oldest_snapshot(true);
         }
         if (target == impl_->entries.size()) {
           break;
         }
+        if (!advances_source)
+          impl_->retention_floor = std::max(
+              impl_->retention_floor, impl_->entries[target]->retention_value);
         remove(target, SnapshotEventReason::kByteCapacity);
       }
 
@@ -1161,6 +1181,8 @@ std::size_t ContinuationCache::Commit(
                 learned ? SnapshotPurpose::kBranchPoint : purpose;
             snapshot_entry.valid = !snapshot_entry.tokens.empty();
             snapshot_entry.snapshot_last_used = ++impl_->clock;
+            snapshot_entry.retention_value =
+                impl_->retention_floor + snapshot_entry.tokens.size();
             impl_->retained_snapshot_bytes += snapshot_bytes;
             retained_bytes = snapshot_bytes;
             if (published_index)

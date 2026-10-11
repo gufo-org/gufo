@@ -245,7 +245,14 @@ When space is needed, RAM retention prefers removing:
 3. An older stable boundary covered by a newer one. A checkpoint that two
    retained conversations extend and then diverge after is the prefix they
    share, not an older turn, and never counts as covered.
-4. Remaining checkpoints, oldest-used first within each priority.
+4. Remaining checkpoints.
+
+Within each priority, entry pressure removes the oldest-used checkpoint
+first. Byte pressure keeps shared branch points longest, then removes the
+lowest retention value: a floor taken at the checkpoint's last use plus the
+tokens a miss would prefill. The floor rises to each removed checkpoint's
+value, so a long conversation in use outlives short ones and ages out once it
+stops (#542).
 
 Under entry pressure, an edited branch can first replace its incompatible
 tail, preserving earlier shared checkpoints. Optional history/retry copies
