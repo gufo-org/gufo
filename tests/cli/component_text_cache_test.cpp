@@ -1,6 +1,7 @@
 #include "src/cli/serve/component_text_cache.hpp"
 
 #include <cassert>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -123,6 +124,13 @@ public:
     resources->staging = [](std::size_t size) {
       auto data = std::make_shared<std::vector<std::uint8_t>>(size);
       return cache::StagingAllocation{data, *data};
+    };
+    resources->copy_observed_rows = [](auto source, auto destination,
+                                       cache::Stream& stream) {
+      return dynamic_cast<FakeStream&>(stream).Submit([source, destination] {
+        std::memcpy(destination.data(), source.data(), destination.size());
+        return cache::TransferResult::kSucceeded;
+      });
     };
     return resources;
   }
@@ -568,6 +576,92 @@ void NearTailDiskBranchSurvivesRestart() {
   }
   std::filesystem::remove_all(directory);
 }
+void UnbackedDeepRowsSurviveDiskRestart() {
+  char pattern[] = "/tmp/gufo-component-deep-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 8,
+                                        .min_checkpoint_step_tokens = 1};
+  std::vector<TextRunnerToken> prompt(5001);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  std::uint64_t hash;
+  {
+    auto runner = std::make_shared<Runner>();
+    ComponentTextCache cache(runner, 1, 1 << 24, disk);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, prompt, prompt);
+    hash = runner->adapter->RecurrentHash(state.slot);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     prompt));
+    // Over 40,000 logical row bytes exceed the 32,768-byte row pool.
+    auto snapshot = lease->Capture();
+    assert(snapshot);
+    assert(lease->PublishSnapshot(prompt, std::move(snapshot), false) == 0);
+    assert(lease->Metrics().disk_queued_bytes > 40000);
+    (void)lease->Commit(prompt, {}, prompt);
+  }
+  {
+    const auto seed_size = prompt.size();
+    std::vector<TextRunnerToken> appended(63);
+    std::iota(appended.begin(), appended.end(), 8000);
+    prompt.insert(prompt.end(), appended.begin(), appended.end());
+    auto runner = std::make_shared<Runner>();
+    ComponentTextCache cache(runner, 1, 1 << 24, disk);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(lease->restored_from_disk() && lease->cached_tokens() == seed_size);
+    auto& state = dynamic_cast<State&>(lease->state());
+    assert(runner->adapter->RecurrentHash(state.slot) == hash);
+    runner->adapter->Append(state.slot, appended, appended);
+    hash = runner->adapter->RecurrentHash(state.slot);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     prompt));
+    auto snapshot = lease->Capture();
+    assert(snapshot);
+    assert(lease->PublishSnapshot(prompt, std::move(snapshot), false) == 0);
+    assert(lease->Metrics().disk_queued_bytes > 40000);
+    (void)lease->Commit(prompt, {}, prompt);
+  }
+  {
+    cache::ResourceLedger ledger({1 << 24, 1 << 24, 0, 0});
+    cache::DiskStore store(ledger, directory, disk.capacity_bytes);
+    assert(store.Entries().size() == 2);
+    const cache::DiskManifest* parent = nullptr;
+    const cache::DiskManifest* child = nullptr;
+    for (const auto& entry : store.Entries()) {
+      if (entry.Manifest().tokens.size() == 5001)
+        parent = &entry.Manifest();
+      else if (entry.Manifest().tokens.size() == prompt.size())
+        child = &entry.Manifest();
+    }
+    assert(parent && child);
+    for (std::size_t i = 0; i < parent->components.size(); ++i) {
+      const auto& before = parent->components[i];
+      const auto& after = child->components[i];
+      for (std::size_t j = 0; j < before.chunks.size(); ++j)
+        assert(before.chunks[j].file == after.chunks[j].file);
+      if (before.private_state)
+        assert(before.private_state->file != after.private_state->file);
+      if (before.tail) {
+        assert(after.chunks.size() > before.chunks.size());
+        assert(before.tail->file != after.chunks[before.chunks.size()].file);
+      }
+    }
+  }
+  {
+    auto runner = std::make_shared<Runner>();
+    ComponentTextCache cache(runner, 1, 1 << 24, disk);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(lease->restored_from_disk() &&
+           lease->cached_tokens() == prompt.size());
+    auto& state = dynamic_cast<State&>(lease->state());
+    assert(runner->adapter->RecurrentHash(state.slot) == hash);
+  }
+  std::filesystem::remove_all(directory);
+}
 }  // namespace
 int main() {
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
@@ -580,4 +674,5 @@ int main() {
   DiskBudgetEvictsAnUnpinnedConversation();
   GridDoesNotSuppressFirstDiskPrompt();
   NearTailDiskBranchSurvivesRestart();
+  UnbackedDeepRowsSurviveDiskRestart();
 }

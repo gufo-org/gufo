@@ -302,6 +302,73 @@ void RoundTripAndFailures() {
   assert(!cancellable.Restore({1}, fixture.manifest.compatibility,
                               fixture.adapter, *destination, timing));
 }
+void LiveRowsStreamWithoutWholeHistoryBacking() {
+  for (const bool retire : {false, true}) {
+    Directory dir;
+    ResourceLedger ledger{{1 << 22, 1 << 21, 8, 4096}};
+    DiskStore disk(ledger, dir.path, 1 << 20);
+    StreamedStore streams(ledger, disk, 8, Allocate, Lease);
+    Fixture fixture(ledger);
+    std::erase_if(fixture.buffers,
+                  [](const auto& b) { return !b.private_file; });
+    FakeStream execution;
+    LeasedSlot slot(ledger, fixture.adapter, execution, SlotId{1});
+    auto lease = slot.Acquire();
+    fixture.adapter.Append(lease.Execution(), fixture.manifest.tokens,
+                           std::span(fixture.manifest.tokens).first(36));
+    auto sources = fixture.Sources();
+    const auto before = ledger.Snapshot();
+    for (const auto& component : fixture.manifest.components) {
+      const auto& d = component.descriptor;
+      if (d.kind != ComponentKind::kAppendRows)
+        continue;
+      auto rows = lease.Observe(
+          d.id, 0, component.position.valid_rows,
+          fixture.adapter.BorrowRowsView(lease.Execution(), d.id, 0,
+                                         component.position.valid_rows));
+      std::size_t first = 0;
+      for (const auto& chunk : component.chunks) {
+        sources.emplace_back(
+            false, chunk.file, chunk.bytes, d.row_bytes, rows, first,
+            [](auto source, auto destination, Stream& stream) {
+              return dynamic_cast<FakeStream&>(stream).Submit(
+                  [source, destination] {
+                    std::memcpy(destination.data(), source.data(),
+                                destination.size());
+                    return TransferResult::kSucceeded;
+                  });
+            });
+        first += chunk.bytes;
+      }
+    }
+    const auto after = ledger.Snapshot();
+    // Observations cost metadata only, with no assignment/spill payload.
+    for (const auto category :
+         {ResourceCategory::kBackingFree, ResourceCategory::kBackingAssigned,
+          ResourceCategory::kBackingMaterialized})
+      assert(before.bytes[static_cast<std::size_t>(category)] ==
+             after.bytes[static_cast<std::size_t>(category)]);
+    if (retire)
+      fixture.adapter.GuardRows(lease.Execution(), kTarget, 0, 40);
+    TransferTiming timing;
+    if (retire) {
+      bool failed = false;
+      try {
+        streams.Write(Id(100), fixture.manifest, sources, timing);
+      } catch (const std::exception&) {
+        failed = true;
+      }
+      assert(failed && !disk.Open({1}));
+    } else {
+      streams.Write(Id(100), fixture.manifest, sources, timing);
+      auto restored = fixture.adapter.CreateSlot(fixture.guard);
+      assert(streams.Restore({1}, fixture.manifest.compatibility,
+                             fixture.adapter, *restored, timing));
+      assert(fixture.adapter.RecurrentHash(*restored) == fixture.hash);
+    }
+    assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+  }
+}
 void BorrowedSourcesWaitWithoutBlockingForeground() {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 11, 4096}};
@@ -812,6 +879,7 @@ void ConcurrentStop() {
 }
 }  // namespace
 int main() {
+  LiveRowsStreamWithoutWholeHistoryBacking();
   BorrowedSourcesWaitWithoutBlockingForeground();
   StopWaitingBorrowedPublication(false);
   StopWaitingBorrowedPublication(true);

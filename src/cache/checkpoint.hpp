@@ -202,6 +202,8 @@ public:
   // Startup discovery calls this before creating histories. IDs of retained
   // durable checkpoints cannot be reused after a process restart.
   static void ObserveDurableId(CheckpointId);
+  // Disk-only capture uses the same process/restart-safe identifier space.
+  [[nodiscard]] static CheckpointId AllocateCheckpointId();
   ExecutionHistory(ExecutionHistory&&) noexcept = default;
   ExecutionHistory& operator=(ExecutionHistory&&) noexcept = delete;
   ExecutionHistory(const ExecutionHistory&) = delete;

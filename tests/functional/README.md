@@ -319,6 +319,12 @@ not evidence. `--publication-timeout 300` allows the large checkpoint to finish
 before the deliberate crash without changing request timing gates. The
 oversized case waits for the deep publication before graceful shutdown and
 still uses 1 MiB staging. Keep the same explicit RAM limit in both modes.
+For checkpoints larger than committed RAM, use `--require-over-ram` with
+`--case oversized`. For example, Flash-Next at context 262144 with
+`--seed-lines 12500 --minimum-published-tokens 174000` and
+`--cache-ram-bytes 4593364992` exercises a 175K seed and a 186K continuation.
+The assertion compares the published payload with the server's actual
+post-allocation RAM budget; a queued job alone does not qualify the case.
 Known cache-work failures exit nonzero and retain controls/evidence; they are
 not skipped, marked as expected passes, or fixed in this test-only card.
 

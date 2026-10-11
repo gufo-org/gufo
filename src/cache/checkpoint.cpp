@@ -113,7 +113,7 @@ Payload Payload::Committed(ResourceCharge charge,
   return result;
 }
 Payload Payload::Borrowed(std::shared_ptr<BorrowedRows> rows) {
-  if (!rows || !rows->IsValid())
+  if (!rows || !rows->IsValid() || !rows->HasBacking())
     throw std::invalid_argument("invalid managed borrowed rows");
   Payload result;
   result.bytes_ = rows->Bytes();
@@ -284,6 +284,9 @@ ExecutionHistory ExecutionHistory::RestoredUnshared(
     ResourceLedger& ledger, std::span<const ComponentDescriptor> descriptors,
     Identity compatibility) {
   return Cold(ledger, descriptors, std::move(compatibility));
+}
+CheckpointId ExecutionHistory::AllocateCheckpointId() {
+  return {NextId()};
 }
 void ExecutionHistory::ObserveDurableId(CheckpointId id) {
   if (id.value == std::numeric_limits<std::uint64_t>::max())

@@ -781,3 +781,45 @@ Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
 `*-generation.log`, `check-pr-budget.log`.
 Production binary SHA-256:
 `74b29924fa41b618829897bd2c7585057e99b9940a891c87e8b2f113602a4f02`.
+
+
+### Review follow-up: checkpoints exceeding RAM (October 11)
+
+Semantic checkpoints can now persist when completed append rows exceed the
+committed RAM pool. Disk-only capture copies private state, partial tails and
+movable host token rows into admitted backing; fixed native append allocations
+are observed under the existing mutation guards. Each staging piece pins its
+source until the transfer completes. Mutation/reassignment retires unread
+observations and drains only current readers, so an abandoned job cannot
+publish partial state or force an entire-history foreground spill. Observations
+cannot enter retained RAM payloads and carry no payload backing obligation.
+
+Published full chunks may be inherited only from a validated disk restore or
+a completed capture on the same uninterrupted execution branch. The ancestor
+publication is pinned, its immutable lineage is retained, and private state and
+tails always get new files. Token-prefix equality alone does not establish
+chunk provenance. CPU regressions cover mutation while a reader is active,
+abandoned publication, a history larger than the physical pool, two restarts,
+full-chunk sharing and partial-tail promotion.
+
+The opt-in lifecycle runner adds `--require-over-ram`: publication must exceed
+the server's actual post-slot RAM budget, rather than merely exceed staging or
+appear in a queue. Flash MTP, three sessions, context 262144, requested RAM
+4,593,364,992 bytes and 1 MiB staging passes oversized publication/restart with
+actual RAM 4,419,084,288 bytes. It publishes a 5,247,536,596-byte checkpoint,
+restores 186,253 tokens and prefills seven. All three cold controls match and
+actual MTP drafts execute. The four focused CPU checks and all 57 hosted
+contracts pass; the shared formatter passes.
+
+This is a durability correctness result, not a latency pass: disk restore is
+18,631 ms. The earlier run restored the same deep boundary but its second cold
+control timed out at 180 seconds; it remains a failed qualification run, with
+a lower effective RAM budget. The successful repeat does not establish that
+the lower-budget stall is fixed. Crash recovery and transfer latency remain
+follow-up work.
+
+Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+`deep-oversized-mtp-final/report.json`, `deep-oversized-mtp/report.json`,
+`deep-cpu-tail-final.log`, `deep-focused-final.log`, `deep-pr-contract.log`,
+`deep-format-final.log`. Candidate production binary SHA-256:
+`14333e03b1c8bc83667d5d9270ba4d47c88b0cf65120b60c374e368589d72971`.

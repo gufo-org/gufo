@@ -2545,6 +2545,12 @@ public:
       return cache::StagingAllocation{
           std::move(owner), {static_cast<std::uint8_t*>(data), bytes}};
     };
+    result->copy_observed_rows = [](auto source, auto destination,
+                                    cache::Stream& stream) {
+      return dynamic_cast<hip::TransferStream&>(stream).Copy(
+          destination.data(), source.data(), destination.size(),
+          hip::CopyDirection::kDeviceToHost, destination.size());
+    };
     return result;
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(

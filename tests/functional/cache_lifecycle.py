@@ -44,11 +44,13 @@ def wait_until(predicate, description, timeout=30):
 
 class Lifecycle:
     def __init__(self, command, output, timeout, library, seed_lines=160,
-                 minimum_published_tokens=0, publication_timeout=30):
+                 minimum_published_tokens=0, publication_timeout=30,
+                 require_over_ram=False):
         self.command, self.output, self.timeout, self.library = command, output, timeout, library
         self.seed_lines = seed_lines
         self.minimum_published_tokens = minimum_published_tokens
         self.publication_timeout = publication_timeout
+        self.require_over_ram = require_over_ram
         self.model = option(command, "--served-model-name", "cache-lifecycle")
         self.mode = option(command, "--speculative", "off")
         self.report = {**provenance(), "command": command,
@@ -56,6 +58,7 @@ class Lifecycle:
                        "seed_lines": seed_lines,
                        "minimum_published_tokens": minimum_published_tokens,
                        "publication_timeout": publication_timeout,
+                       "require_over_ram": require_over_ram,
                        "status": "running", "cases": {}}
         source = hashlib.sha256()
         source.update(self.report["harness_sha256"].encode())
@@ -171,6 +174,14 @@ class Lifecycle:
                     assert sizes and max(sizes) > staging, (
                         "unqualified: checkpoint did not exceed staging", sizes, staging)
                     self.row["oversized_bytes"] = max(sizes)
+                    if self.require_over_ram:
+                        capacities = [int(n) for n in re.findall(
+                            r"schema=component-cache-v1 event=configured .*?\bcapacity_bytes=(\d+)",
+                            log)]
+                        assert capacities and max(sizes) > max(capacities), (
+                            "unqualified: checkpoint did not exceed committed RAM backing",
+                            sizes, capacities)
+                        self.row["ram_capacity_bytes"] = max(capacities)
                     self.require("oversized_publication", bool(stored),
                                  "checkpoint larger than staging was not published")
                 else:
@@ -245,11 +256,15 @@ def main():
                         help="Require this actual seed and disk-restoration depth")
     parser.add_argument("--publication-timeout", type=float, default=30,
                         help="Seconds to await publication before a deliberate crash")
+    parser.add_argument("--require-over-ram", action="store_true",
+                        help="Require oversized publication to exceed actual committed RAM backing")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.seed_lines <= 0 or args.minimum_published_tokens < 0 \
             or args.publication_timeout <= 0:
         parser.error("seed lines and publication timeout must be positive; depth must be nonnegative")
+    if args.require_over_ram and args.case and "oversized" not in args.case:
+        parser.error("--require-over-ram requires --case oversized")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1:3] != ["serve", "llm"]:
         parser.error("pass a gufo serve llm command after --")
@@ -267,7 +282,8 @@ def main():
     if option(command, "--served-model-name") is None:
         command += ["--served-model-name", "cache-lifecycle"]
     runner = Lifecycle(command, args.output, args.startup_timeout, args.fault_library,
-                       args.seed_lines, args.minimum_published_tokens, args.publication_timeout)
+                       args.seed_lines, args.minimum_published_tokens, args.publication_timeout,
+                       args.require_over_ram)
     runner.report["fault_library_sha256"] = hashlib.file_digest(
         args.fault_library.open("rb"), "sha256").hexdigest()
     try:

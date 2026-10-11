@@ -52,9 +52,17 @@ std::size_t PayloadBytes(const cache::DiskManifest& manifest) {
   }
   return bytes;
 }
+struct DurableCapture {
+  cache::ResourceCharge metadata;
+  std::shared_ptr<const void> branch;
+  cache::DiskReadPin ancestor_pin;
+  cache::DiskManifest manifest;
+  std::vector<cache::PersistenceSource> sources;
+};
 class ComponentSnapshot final : public TextRunnerSnapshot {
 public:
   std::shared_ptr<const cache::Checkpoint> checkpoint;
+  std::shared_ptr<DurableCapture> durable;
   std::size_t bytes{};
   std::size_t PayloadBytes() const noexcept override { return bytes; }
 };
@@ -147,6 +155,10 @@ struct ComponentTextCache::Impl {
     std::unique_ptr<cache::LeasedSlot> slot;
     std::optional<cache::IndexEntryId> live;
     std::unique_ptr<cache::ExecutionHistory> history;
+    // Identity of uninterrupted native execution; token equality alone does
+    // not establish that a durable chunk belongs to this execution.
+    std::shared_ptr<const void> branch;
+    std::shared_ptr<const cache::DiskDescription> durable;
     bool busy{};
   };
   std::shared_ptr<TextModelRunner> runner;
@@ -171,6 +183,8 @@ struct ComponentTextCache::Impl {
   // release their serving handles. No callback runs under the serving mutex.
   std::array<std::shared_ptr<const cache::Checkpoint>, 2 * kPersistenceDepth>
       pending;
+  std::array<std::shared_ptr<DurableCapture>, 2 * kPersistenceDepth>
+      pending_durable;
   std::size_t disk_capacity{}, disk_step{};
   cache::ResourceCharge metadata;
 
@@ -257,6 +271,12 @@ struct ComponentTextCache::Impl {
             for (auto& checkpoint : pending)
               if (checkpoint && checkpoint->Id() == id)
                 checkpoint.reset();
+            std::shared_ptr<DurableCapture> completed;
+            for (auto& capture : pending_durable)
+              if (capture && capture->manifest.checkpoint == id) {
+                completed = capture;
+                capture.reset();
+              }
             if (!success) {
               Logger::Info(
                   "cache",
@@ -265,6 +285,13 @@ struct ComponentTextCache::Impl {
             }
             catalog->Track(id);
             if (const auto description = catalog->Find(id)) {
+              if (completed)
+                for (auto& entry : entries)
+                  if (entry->branch == completed->branch &&
+                      (!entry->durable ||
+                       entry->durable->Manifest().tokens.size() <
+                           description->Manifest().tokens.size()))
+                    entry->durable = description;
               auto found = index.Lookup(
                   {identity, description->Manifest().tokens,
                    cache::InputIdentity(description->Manifest().tokens.size(),
@@ -357,6 +384,10 @@ struct ComponentTextCache::Impl {
           if (queued && compatible_prefix(queued->Tokens(), queued->Input()))
             prior =
                 std::max(prior, static_cast<std::size_t>(queued->Boundary()));
+        for (const auto& queued : pending_durable)
+          if (queued && compatible_prefix(queued->manifest.tokens,
+                                          queued->manifest.input))
+            prior = std::max(prior, queued->manifest.tokens.size());
         if (prior && checkpoint->Boundary() - prior < disk_step) {
           Logger::Info("cache",
                        "schema=component-cache-v1 event=persistence_refused "
@@ -445,6 +476,56 @@ struct ComponentTextCache::Impl {
     }
     return bytes;
   }
+  bool WithinDiskStep(std::span<const cache::Token> tokens,
+                      const cache::Identity& input) {
+    const std::lock_guard lock(mutex);
+    auto found = index.Lookup(
+        {identity, tokens, cache::InputIdentity(tokens.size(), input)});
+    std::size_t prior = 0;
+    for (const auto& candidate : found.candidates)
+      if (candidate.durable)
+        prior = std::max(prior, static_cast<std::size_t>(candidate.boundary));
+    const auto compatible = [&](auto prefix, const auto& prefix_input) {
+      return prefix_input == input && prefix.size() <= tokens.size() &&
+             std::equal(prefix.begin(), prefix.end(), tokens.begin());
+    };
+    for (const auto& checkpoint : pending)
+      if (checkpoint && compatible(checkpoint->Tokens(), checkpoint->Input()))
+        prior =
+            std::max(prior, static_cast<std::size_t>(checkpoint->Boundary()));
+    for (const auto& capture : pending_durable)
+      if (capture &&
+          compatible(capture->manifest.tokens, capture->manifest.input))
+        prior = std::max(prior, capture->manifest.tokens.size());
+    return prior && tokens.size() - prior < disk_step;
+  }
+  std::size_t Persist(std::shared_ptr<DurableCapture> capture) {
+    if (capture->sources.empty())
+      return 0;
+    if (WithinDiskStep(capture->manifest.tokens, capture->manifest.input) &&
+        capture->manifest.purpose != cache::CheckpointPurpose::kLearned)
+      return 0;
+    auto job = cache::PersistenceJob(
+        ledger, File(1, capture->manifest.checkpoint.value), capture->manifest,
+        std::move(capture->sources));
+    std::size_t pending_slot;
+    {
+      const std::lock_guard lock(mutex);
+      const auto position =
+          std::find(pending_durable.begin(), pending_durable.end(), nullptr);
+      if (position == pending_durable.end())
+        return 0;
+      pending_slot = position - pending_durable.begin();
+      *position = capture;
+    }
+    if (!queue->TrySubmit(std::move(job))) {
+      const std::lock_guard lock(mutex);
+      if (pending_durable[pending_slot] == capture)
+        pending_durable[pending_slot].reset();
+      return 0;
+    }
+    return PayloadBytes(capture->manifest);
+  }
 };
 
 struct ComponentTextCache::Lease::Impl {
@@ -484,7 +565,190 @@ struct ComponentTextCache::Lease::Impl {
             .new_payload_bytes = entry->history->NewPayloadBytes(
                 cache->resources->adapter->Positions(slot.Execution()))};
   }
+  std::unique_ptr<TextRunnerSnapshot> CaptureDurable();
 };
+
+std::unique_ptr<TextRunnerSnapshot>
+ComponentTextCache::Lease::Impl::CaptureDurable() {
+  if (!cache->queue || !cache->resources->copy_observed_rows ||
+      purpose == SnapshotPurpose::kHistory)
+    throw cache::ResourceExhausted();
+  const auto capture_input = At(input, capture_tokens.size());
+  if (purpose != SnapshotPurpose::kBranchPoint &&
+      cache->WithinDiskStep(capture_tokens, capture_input))
+    return {};
+  const auto positions = cache->resources->adapter->Positions(slot.Execution());
+  const auto descriptors = cache->resources->adapter->Components();
+  struct Copy {
+    cache::PayloadRequest request;
+    ComponentCaptureBuffer buffer;
+    cache::DiskFileId file;
+    bool private_file;
+  };
+  std::size_t pieces = 0;
+  for (const auto& d : descriptors) {
+    const auto p =
+        std::ranges::find(positions, d.id, &cache::ComponentPosition::id);
+    if (p == positions.end())
+      throw std::logic_error("incomplete durable capture positions");
+    pieces += d.kind == cache::ComponentKind::kPrivateState
+                  ? 1
+                  : p->valid_rows / d.rows_per_chunk +
+                        bool(p->valid_rows % d.rows_per_chunk);
+  }
+  // Admit metadata before vectors/owners. No append payload allocation is
+  // admitted for the native rows: observations may be retired at any guard.
+  auto admission = cache->ledger.Reserve(
+      cache::ResourceCategory::kMetadata,
+      sizeof(DurableCapture) + sizeof(ComponentSnapshot) +
+          capture_tokens.size() * sizeof(cache::Token) + capture_input.size() +
+          descriptors.size() * sizeof(cache::DiskComponent) +
+          pieces * (sizeof(cache::DiskPayload) +
+                    sizeof(cache::PersistenceSource) + sizeof(Copy) + 256));
+  auto durable = std::make_shared<DurableCapture>();
+  durable->metadata = admission.Convert();
+  std::shared_ptr<const cache::DiskDescription> ancestor;
+  {
+    const std::lock_guard lock(cache->mutex);
+    durable->branch = entry->branch;
+    ancestor = entry->durable;
+  }
+  if (ancestor) {
+    const auto& previous = ancestor->Manifest();
+    if (previous.tokens.size() > capture_tokens.size() ||
+        !std::equal(previous.tokens.begin(), previous.tokens.end(),
+                    capture_tokens.begin()) ||
+        previous.input != At(input, previous.tokens.size()))
+      ancestor.reset();
+    else {
+      durable->ancestor_pin = ancestor->Pin();
+      if (!durable->ancestor_pin)
+        ancestor.reset();
+    }
+  }
+  auto& manifest = durable->manifest;
+  manifest.checkpoint = cache::ExecutionHistory::AllocateCheckpointId();
+  manifest.lineage =
+      ancestor ? ancestor->Manifest().lineage : entry->history->Lineage();
+  manifest.compatibility = cache->digest;
+  manifest.input = capture_input;
+  manifest.tokens = capture_tokens;
+  manifest.purpose = purpose == SnapshotPurpose::kBranchPoint
+                         ? cache::CheckpointPurpose::kLearned
+                         : cache::CheckpointPurpose::kPrompt;
+  manifest.components.reserve(descriptors.size());
+  durable->sources.reserve(pieces);
+  std::vector<Copy> copies;
+  copies.reserve(pieces);
+  for (const auto& d : descriptors) {
+    const auto p =
+        std::ranges::find(positions, d.id, &cache::ComponentPosition::id);
+    cache::DiskComponent component{.descriptor = d, .position = *p};
+    const auto completed =
+        d.kind == cache::ComponentKind::kAppendRows
+            ? p->valid_rows / d.rows_per_chunk * d.rows_per_chunk
+            : 0;
+    cache::Rows inherited = 0;
+    if (completed && ancestor) {
+      const auto& components = ancestor->Manifest().components;
+      const auto previous = std::ranges::find_if(
+          components, [&](const auto& c) { return c.descriptor.id == d.id; });
+      if (previous != components.end()) {
+        const auto chunks = std::min<std::size_t>(previous->chunks.size(),
+                                                  completed / d.rows_per_chunk);
+        component.chunks.assign(previous->chunks.begin(),
+                                previous->chunks.begin() + chunks);
+        inherited = chunks * d.rows_per_chunk;
+      }
+    }
+    std::shared_ptr<cache::BorrowedRows> rows;
+    if (completed) {
+      if (inherited != completed) {
+        auto view = cache->resources->adapter->BorrowRowsView(
+            slot.Execution(), d.id, inherited, completed);
+        if (!view.empty())
+          rows = slot.Observe(d.id, inherited, completed, view);
+      }
+      component.chunks.reserve(completed / d.rows_per_chunk);
+    }
+    const auto capture = [&](cache::Rows first, cache::Rows end,
+                             bool private_file) {
+      const auto bytes = d.kind == cache::ComponentKind::kPrivateState
+                             ? d.state_bytes
+                             : (end - first) * d.row_bytes;
+      const auto file =
+          cache->File(0, cache::ExecutionHistory::AllocateCheckpointId().value);
+      if (rows && !private_file) {
+        durable->sources.emplace_back(false, file, bytes, d.row_bytes, rows,
+                                      (first - inherited) * d.row_bytes,
+                                      cache->resources->copy_observed_rows);
+      } else {
+        const cache::PayloadRequest request{
+            d.id,
+            d.kind == cache::ComponentKind::kPrivateState
+                ? cache::ResourceCategory::kPrivateState
+            : private_file ? cache::ResourceCategory::kPrivateTail
+                           : cache::ResourceCategory::kBackingAssigned,
+            first, end, bytes};
+        copies.push_back(
+            {request, cache->resources->allocate(request), file, private_file});
+      }
+      return cache::DiskPayload{file, bytes, 0};
+    };
+    if (d.kind == cache::ComponentKind::kPrivateState)
+      component.private_state = capture(0, 0, true);
+    else {
+      for (cache::Rows first = inherited; first < completed;
+           first += d.rows_per_chunk)
+        component.chunks.push_back(
+            capture(first, first + d.rows_per_chunk, false));
+      if (completed != p->valid_rows)
+        component.tail = capture(completed, p->valid_rows, true);
+    }
+    manifest.components.push_back(std::move(component));
+  }
+  TransferBatch transfers(cache->resources->transfer_batch_size);
+  for (auto& copy : copies) {
+    const auto& r = copy.request;
+    transfers.Add([&] { return cache->resources->stream(); },
+                  [&](cache::Stream& stream) {
+                    return r.category == cache::ResourceCategory::kPrivateState
+                               ? cache->resources->adapter->CapturePrivate(
+                                     slot.Execution(), r.component,
+                                     copy.buffer.bytes.first(r.bytes), stream)
+                               : cache->resources->adapter->CopyRowsOut(
+                                     slot.Execution(), r.component, r.first,
+                                     r.end, copy.buffer.bytes.first(r.bytes),
+                                     stream);
+                  });
+  }
+  transfers.Finish();
+  for (auto& copy : copies) {
+    auto payload = copy.buffer.finish();
+    auto owner = payload.Owner();
+    metrics.captured_bytes += payload.Bytes();
+    metrics.copied_payload_bytes += copy.request.bytes;
+    durable->sources.emplace_back(
+        copy.private_file, copy.file, copy.request.bytes,
+        copy.request.category == cache::ResourceCategory::kPrivateState
+            ? 1
+            : std::ranges::find(descriptors, copy.request.component,
+                                &cache::ComponentDescriptor::id)
+                  ->row_bytes,
+        payload.CommittedCharge(), owner,
+        [owner](auto offset, auto destination, cache::Stream&) {
+          std::memcpy(destination.data(),
+                      static_cast<const std::byte*>(owner.get()) + offset,
+                      destination.size());
+          return cache::Completion(std::make_unique<SettledSignal>());
+        });
+  }
+  ++metrics.captures;
+  auto snapshot = std::make_unique<ComponentSnapshot>();
+  snapshot->bytes = entry->history->NewPayloadBytes(positions);
+  snapshot->durable = std::move(durable);
+  return snapshot;
+}
 
 ComponentTextCache::ComponentTextCache(
     std::shared_ptr<TextModelRunner> runner, std::size_t count, std::size_t ram,
@@ -535,6 +799,10 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     if (!entry)
       throw cache::SlotBusy();
     entry->busy = true;
+    if (!live) {
+      entry->branch = std::make_shared<const std::uint8_t>(0);
+      entry->durable.reset();
+    }
     if (entry->live) {
       impl_->index.Erase(*entry->live);
       entry->live.reset();
@@ -691,8 +959,11 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             impl_->catalog->Touch(id);
           }
         }
-        if (restored)
+        if (restored) {
           request.cached = candidate.boundary;
+          const std::lock_guard lock(impl_->mutex);
+          entry->durable = candidate.durable;
+        }
       } catch (...) {
         if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
           throw;
@@ -801,7 +1072,8 @@ bool ComponentTextCache::Lease::TryReserveSnapshot(
     std::size_t bytes, std::size_t boundary, bool preserve,
     SnapshotPurpose purpose, std::span<const ContinuationToken> tokens) {
   if (!boundary || boundary > impl_->prompt.size() ||
-      bytes > impl_->cache->ledger.Limits().ram_bytes)
+      (bytes > impl_->cache->ledger.Limits().ram_bytes &&
+       (!impl_->cache->queue || purpose == SnapshotPurpose::kHistory)))
     return false;
   impl_->capture_boundary = boundary;
   if (tokens.empty())
@@ -840,6 +1112,8 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
       cache.resources->adapter->Positions(request.slot.Execution());
   const auto bytes = CaptureBytes();
   const auto retain = request.Retain(request.capture_tokens);
+  if (bytes > cache.ledger.Limits().ram_bytes)
+    return request.CaptureDurable();
   std::shared_ptr<const cache::Checkpoint> checkpoint;
   std::size_t captured_capacity = 0;
   std::size_t borrowed_capacity = 0, copied_payload = 0;
@@ -935,8 +1209,14 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
           });
       break;
     } catch (const cache::ResourceExhausted&) {
-      const std::lock_guard lock(cache.mutex);
-      if (!cache.retention.Reclaim(retain)) {
+      bool reclaimed;
+      {
+        const std::lock_guard lock(cache.mutex);
+        reclaimed = cache.retention.Reclaim(retain);
+      }
+      if (!reclaimed) {
+        if (cache.queue && request.purpose != SnapshotPurpose::kHistory)
+          return request.CaptureDurable();
         Logger::Info("cache",
                      "schema=component-cache-v1 event=capture_refused "
                      "reason=byte_capacity tokens=" +
@@ -966,6 +1246,15 @@ std::size_t ComponentTextCache::Lease::PublishSnapshot(
     std::shared_ptr<const ContinuationSnapshot> snapshot, bool preserve) {
   const auto* component =
       dynamic_cast<const ComponentSnapshot*>(snapshot.get());
+  if (component && component->durable) {
+    const auto started = Clock::now();
+    impl_->metrics.disk_queued_bytes +=
+        impl_->cache->Persist(component->durable);
+    impl_->metrics.disk_enqueue_ms +=
+        std::chrono::duration<double, std::milli>(Clock::now() - started)
+            .count();
+    return 0;
+  }
   if (!component || !component->checkpoint)
     return 0;
   auto retain = impl_->Retain(tokens);
@@ -1024,6 +1313,8 @@ void ComponentTextCache::Lease::Invalidate() noexcept {
     impl_->slot = {};
     impl_->entry->history.reset();
     const std::lock_guard lock(impl_->cache->mutex);
+    impl_->entry->branch.reset();
+    impl_->entry->durable.reset();
     impl_->entry->busy = false;
   } catch (...) {
   }

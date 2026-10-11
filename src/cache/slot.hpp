@@ -63,6 +63,7 @@ public:
   [[nodiscard]] std::size_t Bytes() const;
   [[nodiscard]] ResourceCategory Category() const;
   [[nodiscard]] PersistencePin PinPersistence() const;
+  [[nodiscard]] bool HasBacking() const;
 
 private:
   friend class SlotLease;
@@ -87,6 +88,13 @@ public:
       ComponentId, Rows first, Rows end, ResourceReservation,
       std::shared_ptr<const void> backing_owner, std::span<std::byte> backing,
       std::span<const std::byte> source = {});
+  // Optional durable capture only. No spill obligation or payload backing:
+  // mutation/reassignment retires this view and drains only current readers.
+  // Each disk piece must acquire a fresh pin; a retired source fails the job.
+  // It cannot become a retained RAM Payload. Source addresses are stable
+  // under the adapter's ordinary mutation/release guards.
+  [[nodiscard]] std::shared_ptr<BorrowedRows> Observe(
+      ComponentId, Rows first, Rows end, std::span<const std::byte> source);
   void Reset();
   // Validate successful execution/restore before retaining the live frontier.
   // Commit releases this lease; no further execution is allowed through it.

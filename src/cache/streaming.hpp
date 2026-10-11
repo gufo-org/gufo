@@ -39,6 +39,15 @@ public:
                     std::shared_ptr<const void> owner, Copy);
   PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
                     std::size_t alignment, std::shared_ptr<BorrowedRows>);
+  // Discardable live rows, for histories exceeding RAM. Reads pin exactly
+  // one staging piece through completion; mutation retires unread sources.
+  // Private state/tails remain immutable committed copies. No publication
+  // completes with unread retired rows, and no full-history backing is assigned.
+  using CopyRows = std::function<Completion(std::span<const std::byte>,
+                                            std::span<std::byte>, Stream&)>;
+  PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
+                    std::size_t alignment, std::shared_ptr<BorrowedRows>,
+                    std::size_t first_byte, CopyRows);
   PersistenceSource(PersistenceSource&&) noexcept = default;
   PersistenceSource& operator=(PersistenceSource&&) = delete;
   PersistenceSource(const PersistenceSource&) = delete;

@@ -53,6 +53,17 @@ public:
   bool Ready() const noexcept override { return true; }
   TransferResult Wait() noexcept override { return TransferResult::kSucceeded; }
 };
+class PinnedRowSignal final : public CompletionSignal {
+public:
+  PinnedRowSignal(RowPin pin, Completion completion)
+      : pin_(std::move(pin)), completion_(std::move(completion)) {}
+  bool Ready() const noexcept override { return completion_.Ready(); }
+  TransferResult Wait() noexcept override { return completion_.Wait(); }
+
+private:
+  RowPin pin_;
+  Completion completion_;
+};
 void CheckStop(std::stop_token stop) {
   if (stop.stop_requested())
     throw Cancelled();
@@ -140,8 +151,8 @@ PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
       file_(file),
       bytes_(bytes),
       alignment_(alignment) {
-  if (!rows_ || !rows_->IsValid() || !alignment_ || bytes_ % alignment_ ||
-      bytes_ > rows_->Bytes())
+  if (!rows_ || !rows_->IsValid() || !rows_->HasBacking() || !alignment_ ||
+      bytes_ % alignment_ || bytes_ > rows_->Bytes())
     throw std::invalid_argument("invalid borrowed persistence source");
   copy_ = [rows = rows_](std::uint64_t offset, std::span<std::byte> destination,
                          Stream&) {
@@ -156,11 +167,38 @@ PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
     return Completion(std::make_unique<SettledSignal>());
   };
 }
+PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
+                                     std::uint64_t bytes, std::size_t alignment,
+                                     std::shared_ptr<BorrowedRows> rows,
+                                     std::size_t first_byte, CopyRows copy)
+    : rows_(std::move(rows)),
+      private_file_(private_file),
+      file_(file),
+      bytes_(bytes),
+      alignment_(alignment) {
+  if (!rows_ || !rows_->IsValid() || rows_->HasBacking() || !copy ||
+      !alignment || bytes % alignment || first_byte > rows_->Bytes() ||
+      bytes > rows_->Bytes() - first_byte)
+    throw std::invalid_argument("invalid observed persistence source");
+  copy_ = [rows = rows_, first_byte, bytes, copy = std::move(copy)](
+              std::uint64_t offset, std::span<std::byte> destination,
+              Stream& stream) {
+    if (offset > bytes || destination.size() > bytes - offset)
+      throw std::invalid_argument("invalid observed persistence piece");
+    auto pin = rows->Pin();
+    const auto source =
+        pin.Bytes().subspan(first_byte + offset, destination.size());
+    auto completion = copy(source, destination, stream);
+    return Completion(std::make_unique<PinnedRowSignal>(std::move(pin),
+                                                        std::move(completion)));
+  };
+}
 PersistencePin PersistenceSource::Pin() const {
   return rows_ ? rows_->PinPersistence() : charge_.PinPersistence();
 }
 std::size_t PersistenceSource::Capacity() const {
-  return rows_ ? rows_->Bytes() : charge_.Info().bytes;
+  return rows_ ? (rows_->HasBacking() ? rows_->Bytes() : 0)
+               : charge_.Info().bytes;
 }
 struct StreamedStore::Impl {
   ResourceLedger* ledger;
@@ -241,7 +279,7 @@ void StreamedStore::Write(DiskFileId file, const DiskManifest& manifest,
   // source pin while waiting. Foreground restore can therefore preempt us.
   const auto preservation_start = Clock::now();
   for (const auto& source : sources) {
-    if (!source.rows_)
+    if (!source.rows_ || !source.rows_->HasBacking())
       continue;
     std::mutex wait_mutex;
     std::condition_variable_any wake;

@@ -186,6 +186,14 @@ struct LeaseState final : MutationGuard {
   }
   void Preserve(const std::shared_ptr<RowState>& r, bool release) {
     std::unique_lock lock(r->mutex);
+    if (r->buffer.empty()) {
+      // A discardable disk source promises no RAM preservation. Closing it
+      // rejects future pieces; the one already reading must finish before the
+      // adapter can overwrite/free its allocation.
+      r->retired = true;
+      r->closing = false;
+      r->changed.notify_all();
+    }
     if (!r->materialized && !r->retired) {
       r->closing = true;
       lock.unlock();
@@ -238,7 +246,7 @@ struct LeaseState final : MutationGuard {
         }
         ++it;
         std::lock_guard row_lock(r->mutex);
-        if (!r->materialized && !r->retired) {
+        if (!r->buffer.empty() && !r->materialized && !r->retired) {
           candidate = std::move(r);
           break;
         }
@@ -450,10 +458,15 @@ ResourceCategory BorrowedRows::Category() const {
 }
 PersistencePin BorrowedRows::PinPersistence() const {
   std::lock_guard lock(state_->mutex);
+  if (state_->buffer.empty())
+    return {};
   if (state_->retired)
     throw std::runtime_error("borrowed rows retired");
   return state_->materialized ? state_->charge.PinPersistence()
                               : state_->reservation.PinPersistence();
+}
+bool BorrowedRows::HasBacking() const {
+  return !state_->buffer.empty();
 }
 SlotLease::SlotLease(std::shared_ptr<detail::LeaseState> state)
     : state_(std::move(state)) {}
@@ -540,6 +553,40 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
   rows->metadata = metadata.Convert();
   // Raise the guard bound before registration: a failure afterwards may only
   // leave it conservatively high, never hide a registered range.
+  auto& bound = state_->borrowed_end[c.value];
+  bound = std::max(bound, end);
+  auto result = std::shared_ptr<BorrowedRows>(new BorrowedRows(rows));
+  state_->rows.push_back({rows->metadata, rows, c, first, end});
+  return result;
+}
+std::shared_ptr<BorrowedRows> SlotLease::Observe(
+    ComponentId c, Rows first, Rows end, std::span<const std::byte> source) {
+  auto& slot = Execution();
+  const auto descriptors = state_->adapter.Components();
+  const auto d = std::ranges::find(descriptors, c, &ComponentDescriptor::id);
+  const auto positions = state_->adapter.Positions(slot);
+  const auto p = std::ranges::find(positions, c, &ComponentPosition::id);
+  if (!slot.IsValid() || d == descriptors.end() ||
+      d->kind != ComponentKind::kAppendRows || p == positions.end() ||
+      first >= end || end > p->valid_rows || !d->row_bytes ||
+      end - first > std::numeric_limits<std::size_t>::max() / d->row_bytes ||
+      source.size() != (end - first) * d->row_bytes)
+    throw std::invalid_argument("invalid observed row description");
+  auto metadata = state_->ledger.Reserve(
+      ResourceCategory::kMetadata,
+      sizeof(detail::RowState) + sizeof(BorrowedRows) +
+          sizeof(detail::LeaseState::Entry) + 2 * sizeof(void*));
+  auto rows = std::make_shared<detail::RowState>();
+  rows->source_bytes = source;
+  rows->slot = state_->source;
+  rows->location = Location();
+  rows->component = c;
+  rows->row_bytes = d->row_bytes;
+  rows->first = first;
+  rows->end = end;
+  rows->bytes = source.size();
+  rows->category = ResourceCategory::kBackingAssigned;
+  rows->metadata = metadata.Convert();
   auto& bound = state_->borrowed_end[c.value];
   bound = std::max(bound, end);
   auto result = std::shared_ptr<BorrowedRows>(new BorrowedRows(rows));
