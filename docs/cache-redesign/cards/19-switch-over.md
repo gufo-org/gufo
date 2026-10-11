@@ -561,3 +561,93 @@ identity are unchanged. Six focused CPU targets, all 57 hosted checks,
 formatting and the production build pass, including removal while a reader
 keeps the checkpoint pinned and sharing after unordered-descriptor restoration
 and pruning. Its profile and HTTP timing qualification remain pending.
+
+### Shared backing pages and deep disk qualification, October 11, 2026
+
+The Flash-Next pool now commits one set of 64 KiB pages shared by private
+state, rows and tails. A payload takes a contiguous page group with one ledger
+owner; slack is charged. This replaces fixed per-component classes, which could
+refuse captures while more than 5 GiB of other classes stayed free. The
+change ports the previously unpushed R13 allocator onto `8ada5989`, including
+borrowed rows. Ten focused CPU targets (ledger, backing, checkpoint, slot,
+retention, disk, streaming, component serving, runner, layout) and the shared
+formatter pass. The candidate binary SHA-256 is
+`fdc2878760419f544b9baf04e23bf5677400dc4cf43c5a2dc881f5bfb2c12c76`.
+
+**Deep disk delivery, AR, context 133760, one session, 8 GiB RAM.** The
+standalone lifecycle runner seeds about 102K tokens, appends to about 113K and
+requires a published checkpoint of at least 100K tokens.
+
+| Case | Main `3323e7c7` | Candidate |
+| --- | --- | --- |
+| restart | Fails: no deep publication | Passes: restores 113,451 tokens from disk, 7 prefilled |
+| tiered | Fails: no deep publication | Passes: deeper disk boundary selected |
+| oversized (1 MiB staging) | Fails: no deep publication | Passes: 3,007,420,756-byte checkpoint published |
+| crash (SIGKILL at fsync) | Fails: no published seed | Passes: only the published 102,231 boundary restores |
+
+Main skips each deep write with `reason=staging_capacity`: the 2.71 GB and
+3.00 GB images exceed its 2 GiB staging. The candidate streams them in bounded
+pieces. After restart, each 113K restore takes 1.89–1.99 s and TTFT is
+2.16–2.27 s; the matched 113K cold controls take 75.8–77.2 s TTFT. Every restored answer
+matches its cold control.
+
+Disk payload sharing is measured on the same history. Each initial stage
+publishes 102K and 113K checkpoints with 5.73 GB (5.34 GiB) of logical
+full-copy payload; the server processes physically wrote 3.71–3.79 GiB,
+29–31% less. The peak cache directory size was 5.14 GiB. Main wrote no deep
+checkpoint, so this is not a matched main write-volume comparison. Process
+RSS high-water is about 10.3 GiB, including the 8 GiB committed pool.
+
+**Core RAM histories, C2, context 32768, 8 GiB RAM.** Growth, depth,
+shared-prefix, rotation and concurrency pass in AR and MTP. History edits fail
+in both modes on the first older-tool edit: 111 AR and 113 MTP captures are
+refused. The cause is retention rank, not page stranding. History grids may
+evict only retry/history ranks, while earlier suites leave rank-2
+continuations and rank-3 branch points that never age out. A continuation then
+evicts its own covered 2,048-token grid, the edit's only usable boundary. Main
+fails the same suite in both modes with the same inherited ranks. With fixed
+classes, MTP passed by chance of capacity; it no longer does. The RFC keeps
+eviction-priority changes in separately measured review.
+
+**RAM pressure, AR, 2 GiB.** Three reuse assertions fail: compacted history,
+child fork and parent resume. The fixed-class candidate failed five and main
+six on the same history. This is a partial improvement, not a pass.
+
+**Capture clearing.** Private capture zero-filled each complete destination
+on the host before its copy: about 132 MB per AR checkpoint. A 132 MB
+device-to-host copy alone takes 1.6–2.1 ms into coherent, non-coherent or
+default pinned memory. Capture now clears only bytes no source piece covers;
+those still serialize as zeros. The default, in-pass and guard adapter GPU
+oracles pass in AR and MTP, including every private byte at 2,047 and 8,203
+tokens and every frozen in-pass byte. Temporary phase timers in one AR growth
+run put `Capture` itself at 4.1 ms median (11.4 ms p90, 112 captures). The
+reported `cache_snapshot_ms` median falls from 28.6 to 21.4 ms; it is the wall
+time of an asynchronous post-token capture that overlaps decode, not added
+request latency by itself.
+
+**Latency against main, identical work only.** Of the five passing core suites,
+137 AR and 140 MTP requests have identical prompt/reuse/prefill work. The
+candidate still regresses user-visible phases; the per-request 5% / 3 ms
+gate fails:
+
+| Revision | Mode | Queue Δ median / p90 (ms) | TTFT Δ median / p90 (ms) | Mean inter-token Δ median / p90 (ms) |
+| --- | --- | ---: | ---: | ---: |
+| `3064a01e` (fixed classes) | AR | +7.1 / +22.3 | +226.7 / +763.7 | +4.2 / +15.6 |
+| shared pages + gap clearing | AR | +10.6 / +37.6 | +104.6 / +517.9 | +5.5 / +13.1 |
+| `3064a01e` (fixed classes) | MTP | +6.2 / +17.9 | +121.3 / +330.2 | +5.9 / +20.5 |
+| shared pages + gap clearing | MTP | +11.0 / +38.4 | +12.1 / +54.5 | +6.5 / +23.7 |
+
+Main's medians are 0.8/3.5 ms queue and 35.6/56.9 ms mean inter-token gap
+(AR/MTP). These are single runs with no alternating controls, so
+individual flags are not confirmed. The decode and queue regressions predate
+this follow-up and remain unexplained. Likely areas are foreground
+preservation of borrowed rows at slot reuse and work that overlaps decode.
+
+Not yet qualified: retention-rank starvation; Issue #542's history deeper than
+the RAM pool (rows must fit committed backing before publication); the queue,
+TTFT and decode regressions above; reassignment latency; Pi replay; the
+standard speed benchmark; a lower physical RAM footprint. Evidence, commands
+and binaries are retained at
+`/home/mixer/gufo-qualification/pr543-claude-2026-10-11`. The gap-clearing
+candidate binary SHA-256 is
+`6c1cc173fe0c1c193a444c5021151081b49de3bb760fd70bbbf756c8e0262409`.
