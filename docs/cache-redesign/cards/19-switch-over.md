@@ -640,14 +640,60 @@ gate fails:
 Main's medians are 0.8/3.5 ms queue and 35.6/56.9 ms mean inter-token gap
 (AR/MTP). These are single runs with no alternating controls, so
 individual flags are not confirmed. The decode and queue regressions predate
-this follow-up and remain unexplained. Likely areas are foreground
-preservation of borrowed rows at slot reuse and work that overlaps decode.
+this follow-up.
+
+**Guard, reassignment and batch follow-up.** Three causes were found and fixed:
+
+- Every mutation guard walked the slot's whole borrowed-row registry, locking
+  one weak handle per entry. This ran for every component on every decode
+  step. Entries now keep their component and range. Each component also keeps
+  an upper bound of its borrowed ends, so appends past it skip the registry.
+  The bound rises before a range is registered and clears only after
+  reassignment has preserved every range.
+- Reassignment preserved borrowed rows one synchronous 256 KiB chunk at a
+  time. It now submits whole ranges on up to eight pooled streams before
+  waiting. Anything not copied falls back to the existing synchronous path.
+- Capture and restore waited after every four transfers. Batches now reach 16;
+  when the shared stream pool is momentarily empty, a batch settles its own
+  transfers and retries instead of failing.
+
+The ten focused CPU targets and the adapter guard GPU oracle pass in AR and
+MTP. A fresh unchanged-main control shows that the earlier main runs had
+drifted: fresh main AR prefill is 75 ms slower at the median than in the
+morning. The table therefore compares against fresh main controls of the same
+core suites, on identical prompt/reuse/prefill work only:
+
+| Candidate | Mode | Queue Δ | TTFT Δ | Prefill Δ | Decode Δ | Mean inter-token Δ |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| before follow-up (`79e24777`) | AR | +9.3 / +29.3 | +3.1 / +37.4 | −9.2 / +18.0 | +8.1 / +27.0 | +4.7 / +12.8 |
+| this follow-up | AR | +3.3 / +11.7 | −4.3 / +30.6 | −7.2 / +16.4 | +0.5 / +1.5 | +1.5 / +6.8 |
+| before follow-up (`79e24777`) | MTP | +11.5 / +43.3 | +28.8 / +136.7 | +12.3 / +76.8 | +8.4 / +24.8 | +2.1 / +20.5 |
+| this follow-up | MTP | +4.3 / +20.3 | +25.5 / +196.1 | +16.7 / +167.4 | −0.2 / +11.5 | +0.1 / +7.6 |
+
+Values are median / p90 in milliseconds over 137 AR and 140 MTP requests.
+Strict 5% / 3 ms flags against fresh main fall as follows:
+
+| Phase | AR before | AR after | MTP before | MTP after |
+| --- | ---: | ---: | ---: | ---: |
+| Decode | 85 | 1 | 70 | 27 |
+| Queue | 104 | 71 | 107 | 82 |
+| Maximum gap | 81 | 54 | 63 | 42 |
+| TTFT | 32 | 17 | 44 | 39 |
+| Wall | 27 | 12 | 42 | 38 |
+
+The remaining queue excess is about 3–4 ms at the median. In the
+concurrency suite, roughly half of it is reassignment wait, and the rest is
+not attributed. MTP's largest TTFT flags are concurrency `long_tasks`
+requests: +409 and +632 ms on about 5–6.6 s. The long cold MTP prefills are
+about 2% slower (310–370 ms on 16 s), within the 5% gate. The gate is still
+not met. The final candidate binary SHA-256 is
+`69b5343618643ef168b73ae49f37a2c3dac94c32b4a27ad02ca55a537471932d`.
 
 Not yet qualified: retention-rank starvation; Issue #542's history deeper than
-the RAM pool (rows must fit committed backing before publication); the queue,
-TTFT and decode regressions above; reassignment latency; Pi replay; the
-standard speed benchmark; a lower physical RAM footprint. Evidence, commands
-and binaries are retained at
+the RAM pool (rows must fit committed backing before publication); the
+remaining queue and concurrency TTFT flags; reassignment latency; Pi replay;
+the standard speed benchmark; a lower physical RAM footprint. Evidence,
+commands and binaries are retained at
 `/home/mixer/gufo-qualification/pr543-claude-2026-10-11`. The gap-clearing
 candidate binary SHA-256 is
 `6c1cc173fe0c1c193a444c5021151081b49de3bb760fd70bbbf756c8e0262409`.
