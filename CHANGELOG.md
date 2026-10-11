@@ -4,6 +4,34 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.12.0](https://github.com/gufo-org/gufo/compare/v0.11.0...v0.12.0) (2026-10-11)
+
+
+### Features
+
+* **cache:** add Flash-Next continuation adapter ([#536](https://github.com/gufo-org/gufo/issues/536)) ([95d7619](https://github.com/gufo-org/gufo/commit/95d76191e9d2cd434bc13defb971bf26e3c9e3f0))
+* **serve:** accept image blocks in Messages user turns and tool results ([#510](https://github.com/gufo-org/gufo/issues/510)) ([6a1b136](https://github.com/gufo-org/gufo/commit/6a1b136aba5982e5a35c628824f2380280766d46))
+* **serve:** implement /v1/messages/count_tokens ([#512](https://github.com/gufo-org/gufo/issues/512)) ([8ca0c4a](https://github.com/gufo-org/gufo/commit/8ca0c4a0b06310b522cb045a0ed820e635204845))
+
+
+### Bug Fixes
+
+* **json:** keep mixed string and number enum values reachable ([#535](https://github.com/gufo-org/gufo/issues/535)) ([d8efa54](https://github.com/gufo-org/gufo/commit/d8efa542cf5a991bf5fd293cba2602e8605529ac))
+* **qwen:** keep Flash-Next snapshots within device headroom ([#549](https://github.com/gufo-org/gufo/issues/549)) ([eada056](https://github.com/gufo-org/gufo/commit/eada0564b000a8e630118d10dbdd5bfcd6dc13d7))
+* **serve:** exclude cache reads from Messages input_tokens ([#530](https://github.com/gufo-org/gufo/issues/530)) ([2a3b09e](https://github.com/gufo-org/gufo/commit/2a3b09e187208c3895eee7391ca0a6a3179a2efc))
+* **serve:** keep listening WebSocket clients connected past the idle timeout ([#527](https://github.com/gufo-org/gufo/issues/527)) ([15ecb0c](https://github.com/gufo-org/gufo/commit/15ecb0c2ce5d98e49423a2cab7eb148754488d44))
+* **serve:** name max_completion_tokens in its Chat validation error ([#545](https://github.com/gufo-org/gufo/issues/545)) ([fc760f2](https://github.com/gufo-org/gufo/commit/fc760f2075cf6b812089794b69feaa66597cd8af))
+* **serve:** refuse images before reading when model is text-only ([#550](https://github.com/gufo-org/gufo/issues/550)) ([3323e7c](https://github.com/gufo-org/gufo/commit/3323e7c789e7cdf56466602e032e24e8c01df0a8))
+* **serve:** reject HTTP header names that are not tokens ([#533](https://github.com/gufo-org/gufo/issues/533)) ([da827bd](https://github.com/gufo-org/gufo/commit/da827bd244fe277913bd9f98801b0117e02748ac))
+* **serve:** report non-string models and documented reasoning efforts in Chat errors ([#546](https://github.com/gufo-org/gufo/issues/546)) ([8fa2369](https://github.com/gufo-org/gufo/commit/8fa2369f3de015a2281f86428b4b1eac30078c50))
+* **serve:** stream native tool-call arguments incrementally ([#534](https://github.com/gufo-org/gufo/issues/534)) ([0377339](https://github.com/gufo-org/gufo/commit/037733911b8526b45ddcdf35df96508eea4fe25b))
+
+
+### Documentation
+
+* **cache:** note the final user turn an unchanged retry prefills ([#552](https://github.com/gufo-org/gufo/issues/552)) ([d03c8fc](https://github.com/gufo-org/gufo/commit/d03c8fcc8309e949357f9bba8d6a5fc1a1eebd3f))
+* **server:** allow top_p zero and scope cache_prompt to its endpoints ([#548](https://github.com/gufo-org/gufo/issues/548)) ([d0f7c3a](https://github.com/gufo-org/gufo/commit/d0f7c3a023a11af81161264eeb24e9a97aa7498a))
+
 ## [0.11.0](https://github.com/gufo-org/gufo/compare/v0.10.0...v0.11.0) (2026-10-10)
 
 
