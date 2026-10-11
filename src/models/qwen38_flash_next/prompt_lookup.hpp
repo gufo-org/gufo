@@ -53,9 +53,9 @@ public:
       // prev_[end] chains occurrences of the key ending just before `end`.
       std::uint32_t previous = kNone;
       if (end >= kKeyTokens) {
-        previous = head_.Exchange(
-            Key(committed.subspan(end - kKeyTokens, kKeyTokens)),
-            static_cast<std::uint32_t>(end));
+        previous =
+            head_.Exchange(Key(committed.subspan(end - kKeyTokens, kKeyTokens)),
+                           static_cast<std::uint32_t>(end));
       }
       prev_.push_back(previous);
     }
@@ -156,8 +156,7 @@ private:
 
     [[nodiscard]] std::size_t Slot(std::uint64_t key) const {
       // Fibonacci hashing: the multiply's top bits index the table.
-      return static_cast<std::size_t>((key * 0x9E3779B97F4A7C15ULL) >>
-                                      shift_);
+      return static_cast<std::size_t>((key * 0x9E3779B97F4A7C15ULL) >> shift_);
     }
 
     void Grow() {
