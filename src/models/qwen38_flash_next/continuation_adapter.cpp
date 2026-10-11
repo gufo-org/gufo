@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "src/models/qwen38_flash_next/cache_capabilities.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 
@@ -242,7 +243,7 @@ Session& ContinuationAdapter::GetSession(cache::Slot& slot) {
   return *state.session;
 }
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
-  return {.continuation = true, .persistent_encoding = true};
+  return kCacheCapabilities;
 }
 std::span<const cache::ComponentDescriptor> ContinuationAdapter::Components()
     const {

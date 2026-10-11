@@ -5,9 +5,10 @@
 
 namespace gufo::models::qwen38_flash_next {
 
-// Served through the continuation cache. The adapter (cache redesign card 14)
-// returns this record and decides persistent encoding when it lands.
-inline constexpr cache::Capabilities kCacheCapabilities{.continuation = true};
+// Served through the continuation cache. ContinuationAdapter::GetCapabilities()
+// returns this record, so the two cannot disagree.
+inline constexpr cache::Capabilities kCacheCapabilities{
+    .continuation = true, .persistent_encoding = true};
 
 }  // namespace gufo::models::qwen38_flash_next
 
