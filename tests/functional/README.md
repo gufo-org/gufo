@@ -270,9 +270,11 @@ not a real client's summary generation or retention under RAM/disk pressure.
 The [card 01 results](../../docs/cache-redesign/cards/01-functional-coverage.md#results)
 record all scenario families, including failures on the legacy cache.
 
-Run `cache-transforms` with a roomy RAM budget in its own invocation. The
-tool-bearing template can have a longer assistant opening than the plain
-conversation; the suite checks zero-prefill retries without adding pressure.
+Run `cache-transforms` with a roomy RAM budget in its own invocation. Its
+retried prompts end with a user turn after a tool result, and Qwen templates
+place the stable boundary before such a turn, so under pressure an unchanged
+retry prefills that turn as well as the assistant opening. The suite therefore
+checks zero-prefill retries without adding pressure.
 `cache-pressure` instead runs explicitly with `--cache-ram-bytes 2147483648`,
 `--context 32768`, and `--sessions 2` (also supports one session, with sequential
 children). It verifies that background requests published at least twice the
