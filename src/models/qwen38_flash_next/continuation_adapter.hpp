@@ -54,6 +54,9 @@ public:
   [[nodiscard]] cache::Completion CopyRowsOut(
       const cache::Slot&, cache::ComponentId, cache::Rows first,
       cache::Rows end, std::span<std::byte>, cache::Stream&) override;
+  [[nodiscard]] std::span<const std::byte> BorrowRowsView(
+      const cache::Slot&, cache::ComponentId, cache::Rows,
+      cache::Rows) const override;
   [[nodiscard]] cache::Completion CopyRowsIn(cache::Slot&, cache::ComponentId,
                                              cache::Rows first, cache::Rows end,
                                              std::span<const std::byte>,

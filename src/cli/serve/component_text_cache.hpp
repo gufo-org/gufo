@@ -25,6 +25,10 @@ struct ComponentCaptureBuffer {
   // Identity of one underlying allocation, for joining adjacent byte spans.
   // Null providers always transfer each buffer separately.
   const void* allocation{};
+  // Consume assigned backing without copying completed append rows. The
+  // source view is backend-native and kept immutable by the slot guard.
+  std::function<cache::Payload(cache::SlotLease&, std::span<const std::byte>)>
+      borrow;
 };
 struct ComponentCacheResources {
   std::shared_ptr<void> owner;

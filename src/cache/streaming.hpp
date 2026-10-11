@@ -11,6 +11,7 @@
 #include "src/cache/disk.hpp"
 
 namespace gufo::cache {
+class BorrowedRows;
 inline constexpr std::size_t kDefaultDiskStagingBytes = 1ULL << 20;
 struct StagingAllocation {
   std::shared_ptr<void> owner;
@@ -25,10 +26,10 @@ struct TransferTiming {
   std::uint64_t yield_ns{}, bytes{}, pieces{};
   std::uint64_t staging_wait_ns{}, io_lock_ns{};
 };
-// The owner and charge describe committed immutable source storage, not a live
-// execution slot. A borrowed source must have completed preservation first.
-// Copy settles via Completion on a leased stream. Its callback and owner must
-// retain all source-specific metadata; no capture occurs in the queue worker.
+// Sources retain either committed immutable storage or assigned, committed
+// spill backing. Borrowed sources wait for slot preservation before any disk
+// publication, staging or stream acquisition. The queue never captures live
+// execution state. Copy settles via Completion on a leased stream.
 class PersistenceSource {
 public:
   using Copy =
@@ -36,6 +37,8 @@ public:
   PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
                     std::size_t alignment, ResourceCharge,
                     std::shared_ptr<const void> owner, Copy);
+  PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
+                    std::size_t alignment, std::shared_ptr<BorrowedRows>);
   PersistenceSource(PersistenceSource&&) noexcept = default;
   PersistenceSource& operator=(PersistenceSource&&) = delete;
   PersistenceSource(const PersistenceSource&) = delete;
@@ -44,9 +47,12 @@ private:
   friend class StreamedStore;
   friend class PersistenceJob;
   friend class PersistenceQueue;
+  [[nodiscard]] PersistencePin Pin() const;
+  [[nodiscard]] std::size_t Capacity() const;
   ResourceCharge charge_;
   PersistencePin pin_;
   std::shared_ptr<const void> owner_;
+  std::shared_ptr<BorrowedRows> rows_;
   Copy copy_;
   bool private_file_;
   DiskFileId file_;

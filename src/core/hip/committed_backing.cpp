@@ -81,13 +81,14 @@ cache::Payload BackingBlock::TakePayload() && {
 }
 std::shared_ptr<cache::BorrowedRows> BackingBlock::Borrow(
     cache::SlotLease& lease, cache::ComponentId component, cache::Rows first,
-    cache::Rows end, std::size_t payload_bytes) && {
+    cache::Rows end, std::size_t payload_bytes,
+    std::span<const std::byte> source) && {
   auto buffer = Bytes();
   if (!reservation_ || payload_bytes > buffer.size())
     throw std::invalid_argument("invalid borrowed backing block");
   auto owner = std::shared_ptr<const void>(std::move(state_), buffer.data());
   return lease.Borrow(component, first, end, std::move(reservation_),
-                      std::move(owner), buffer.first(payload_bytes));
+                      std::move(owner), buffer.first(payload_bytes), source);
 }
 BackingPin BackingBlock::PinPersistence() const {
   return BackingPin(state_, reservation_ ? reservation_.PinPersistence()

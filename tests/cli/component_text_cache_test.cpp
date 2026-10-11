@@ -92,12 +92,19 @@ public:
           auto reservation = std::make_shared<cache::ResourceReservation>(
               block.pool.ReserveBacking(request.category));
           ++captures;
-          return ComponentCaptureBuffer{block.data,
-                                        [reservation, owner = block.owner] {
-                                          return cache::Payload::Committed(
-                                              reservation->Convert(), owner);
-                                        },
-                                        data.get()};
+          return ComponentCaptureBuffer{
+              block.data,
+              [reservation, owner = block.owner] {
+                return cache::Payload::Committed(reservation->Convert(), owner);
+              },
+              data.get(),
+              [reservation, owner = block.owner, bytes = block.data, request](
+                  cache::SlotLease& lease, auto source) {
+                return cache::Payload::Borrowed(
+                    lease.Borrow(request.component, request.first, request.end,
+                                 std::move(*reservation), owner,
+                                 bytes.first(request.bytes), source));
+              }};
         } catch (const std::bad_alloc&) {
         }
       }
@@ -152,6 +159,38 @@ TextRunnerToken Generate(TextRunnerPool::Request& request) {
   const auto token = request.SelectNext().token;
   request.Advance();
   return token;
+}
+void RestoreFromBusyBorrowedSource() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto source = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(source->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  const auto hash = runner->adapter->RecurrentHash(state.slot);
+  assert(source->TryReserveSnapshot(source->CaptureBytes(), prompt.size(),
+                                    false, SnapshotPurpose::kContinuation, {}));
+  std::shared_ptr<const TextRunnerSnapshot> snapshot = source->Capture();
+  assert(source->PublishSnapshot(prompt, snapshot, false));
+  auto gauges = source->Metrics().ledger;
+  assert(gauges.reserved_bytes[static_cast<unsigned>(
+             cache::ResourceCategory::kBackingAssigned)] == 320);
+  auto peer = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(peer->cached_tokens() == prompt.size());
+  auto& restored = dynamic_cast<State&>(peer->state());
+  assert(runner->adapter->RecurrentHash(restored.slot) == hash);
+  // Reading the prefix neither takes the source execution lease nor forces
+  // it to materialize. Subsequent overwrite is still guarded.
+  gauges = source->Metrics().ledger;
+  assert(gauges.reserved_bytes[static_cast<unsigned>(
+             cache::ResourceCategory::kBackingAssigned)] == 320);
+  const std::array<cache::Token, 1> next{999};
+  runner->adapter->Append(state.slot, next, next);
+  gauges = source->Metrics().ledger;
+  assert(gauges.reserved_bytes[static_cast<unsigned>(
+             cache::ResourceCategory::kBackingAssigned)] == 0);
+  assert(runner->adapter->RecurrentHash(restored.slot) == hash);
 }
 void ReuseAndBranches() {
   auto runner = std::make_shared<Runner>();
@@ -389,6 +428,7 @@ void NearTailDiskBranchSurvivesRestart() {
 }
 }  // namespace
 int main() {
+  RestoreFromBusyBorrowedSource();
   ReuseAndBranches();
   RestartAndCorruption();
   FailedCaptureKeepsPublishedBoundary();

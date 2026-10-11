@@ -49,6 +49,9 @@ public:
   // Managed borrowed rows require this pin for every source transfer. Keep it
   // until Completion settles. Owner() is available only after preservation.
   [[nodiscard]] RowPin PinRows(std::stop_token = {}) const;
+  [[nodiscard]] std::shared_ptr<BorrowedRows> BorrowedStorage() const {
+    return rows_;
+  }
   [[nodiscard]] bool IsValid() const;
   // Allocation capacity, not logical range size. Retain the owning checkpoint
   // or chunk handle throughout each access to Owner(); a bare buffer is no pin.

@@ -611,6 +611,29 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
                                hipMemcpyDeviceToHost, transfer.Native()));
       });
 }
+std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
+    const cache::Slot& slot, cache::ComponentId id, Rows first,
+    Rows end) const {
+  const auto& state = As(slot);
+  const auto& component = Component(id);
+  // The host token vector can move when execution appends. Device append
+  // allocations stay fixed for the session and are guarded before mutation.
+  if (component.part == ContinuationPart::kTokens)
+    return {};
+  if (!state.IsValid() ||
+      component.descriptor.kind != cache::ComponentKind::kAppendRows)
+    throw std::logic_error("cannot borrow invalid Flash-Next rows");
+  const auto positions = Positions(slot);
+  const auto position =
+      std::ranges::find(positions, id, &cache::ComponentPosition::id);
+  const auto row = component.descriptor.row_bytes;
+  if (position == positions.end() || first >= end || end > position->valid_rows)
+    throw std::invalid_argument("invalid Flash-Next borrowed range");
+  return {static_cast<const std::byte*>(
+              RowData(const_cast<State&>(state), component)) +
+              first * row,
+          (end - first) * row};
+}
 cache::Completion ContinuationAdapter::CopyRowsIn(
     cache::Slot& slot, cache::ComponentId id, Rows first, Rows end,
     std::span<const std::byte> bytes, cache::Stream& stream) {
@@ -637,7 +660,7 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
             std::memcpy(destination, bytes.data(), bytes.size());
           else if (!bytes.empty())
             Check(hipMemcpyAsync(destination, bytes.data(), bytes.size(),
-                                 hipMemcpyHostToDevice, transfer.Native()));
+                                 hipMemcpyDefault, transfer.Native()));
         });
   } catch (...) {
     state.failed = true;

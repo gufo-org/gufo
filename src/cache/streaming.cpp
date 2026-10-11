@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
+
+#include "src/cache/slot.hpp"
 
 namespace gufo::cache {
 namespace {
@@ -44,6 +47,11 @@ std::size_t ManifestCapacity(const DiskManifest& manifest) {
 class Cancelled : public std::runtime_error {
 public:
   Cancelled() : std::runtime_error("cache transfer cancelled") {}
+};
+class SettledSignal final : public CompletionSignal {
+public:
+  bool Ready() const noexcept override { return true; }
+  TransferResult Wait() noexcept override { return TransferResult::kSucceeded; }
 };
 void CheckStop(std::stop_token stop) {
   if (stop.stop_requested())
@@ -124,6 +132,36 @@ PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
       category != ResourceCategory::kPrivateTail)
     throw std::invalid_argument("persistence source is not committed payload");
 }
+PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
+                                     std::uint64_t bytes, std::size_t alignment,
+                                     std::shared_ptr<BorrowedRows> rows)
+    : rows_(std::move(rows)),
+      private_file_(private_file),
+      file_(file),
+      bytes_(bytes),
+      alignment_(alignment) {
+  if (!rows_ || !rows_->IsValid() || !alignment_ || bytes_ % alignment_ ||
+      bytes_ > rows_->Bytes())
+    throw std::invalid_argument("invalid borrowed persistence source");
+  copy_ = [rows = rows_](std::uint64_t offset, std::span<std::byte> destination,
+                         Stream&) {
+    // Write waits for preservation before entering disk publication. Owner
+    // refuses retired or still-live rows, so this never reads a live slot.
+    const auto owner = rows->Owner();
+    if (!owner)
+      throw std::runtime_error("borrowed persistence source retired");
+    std::memcpy(destination.data(),
+                static_cast<const std::byte*>(owner.get()) + offset,
+                destination.size());
+    return Completion(std::make_unique<SettledSignal>());
+  };
+}
+PersistencePin PersistenceSource::Pin() const {
+  return rows_ ? rows_->PinPersistence() : charge_.PinPersistence();
+}
+std::size_t PersistenceSource::Capacity() const {
+  return rows_ ? rows_->Bytes() : charge_.Info().bytes;
+}
 struct StreamedStore::Impl {
   ResourceLedger* ledger;
   DiskStore* disk;
@@ -198,6 +236,29 @@ void StreamedStore::Write(DiskFileId file, const DiskManifest& manifest,
                           TransferTiming& timing, std::stop_token stop,
                           const std::function<bool()>& model_idle) {
   CheckStop(stop);
+  // Preservation runs independently through slot guards/idle workers. Never
+  // hold staging, a transfer stream, filesystem publication locks or a live
+  // source pin while waiting. Foreground restore can therefore preempt us.
+  const auto preservation_start = Clock::now();
+  for (const auto& source : sources) {
+    if (!source.rows_)
+      continue;
+    std::mutex wait_mutex;
+    std::condition_variable_any wake;
+    std::unique_lock wait_guard(wait_mutex);
+    while (true) {
+      CheckStop(stop);
+      if (!source.rows_->IsValid())
+        throw std::runtime_error("borrowed persistence source retired");
+      if (source.rows_->PreservationFailed())
+        throw std::runtime_error("borrowed persistence source spill failed");
+      if (!source.rows_->Location())
+        break;
+      wake.wait_for(wait_guard, stop, std::chrono::milliseconds(1),
+                    [] { return false; });
+    }
+  }
+  timing.yield_ns += Elapsed(preservation_start);
   const auto start = Clock::now();
   bool allocation_recorded{};
   Finally allocation_observation{[&] {
@@ -232,7 +293,7 @@ void StreamedStore::Write(DiskFileId file, const DiskManifest& manifest,
   std::vector<PersistencePin> pins;
   pins.reserve(sources.size());
   for (auto& source : sources)
-    pins.push_back(source.charge_.PinPersistence());
+    pins.push_back(source.Pin());
   std::vector<DiskWriteSource> writes;
   writes.reserve(sources.size());
   for (auto& source : sources) {
@@ -381,7 +442,7 @@ PersistenceJob::PersistenceJob(ResourceLedger& ledger, DiskFileId file,
     manifest_ = manifest;
     sources_ = std::move(sources);
     for (const auto& source : sources_)
-      pinned_bytes_ = Add(pinned_bytes_, source.charge_.Info().bytes);
+      pinned_bytes_ = Add(pinned_bytes_, source.Capacity());
     metadata_ = reservation.Convert();
   } catch (...) {
     manifest_ = {};
@@ -559,7 +620,7 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
       slot = replacement;
     }
     for (auto& source : next->sources_)
-      source.pin_ = source.charge_.PinPersistence();
+      source.pin_ = source.Pin();
     next->submitted_ = ++impl_->sequence;
     *slot = std::move(next);
     ++impl_->stats.accepted;

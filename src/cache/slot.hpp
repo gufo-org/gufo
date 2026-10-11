@@ -35,6 +35,7 @@ public:
   [[nodiscard]] const std::shared_ptr<const void>& Owner() const {
     return owner_;
   }
+  [[nodiscard]] std::span<const std::byte> Bytes() const { return bytes_; }
 
 private:
   friend class BorrowedRows;
@@ -46,6 +47,7 @@ private:
   std::optional<BorrowedLocation> location_;
   ResourceCharge charge_;
   std::shared_ptr<const void> owner_;
+  std::span<const std::byte> bytes_;
 };
 // Stable indirection shared by a checkpoint payload and its guard. Preservation
 // fills already reserved backing. It never changes checkpoint/chunk topology.
@@ -55,6 +57,9 @@ public:
   [[nodiscard]] std::optional<BorrowedLocation> Location() const;
   [[nodiscard]] std::shared_ptr<const void> Owner() const;
   [[nodiscard]] bool IsValid() const;
+  // An idle copy failed; foreground preservation may retry. Optional durable
+  // jobs must fail rather than wait indefinitely for an idle worker to resume.
+  [[nodiscard]] bool PreservationFailed() const;
   [[nodiscard]] std::size_t Bytes() const;
   [[nodiscard]] ResourceCategory Category() const;
   [[nodiscard]] PersistencePin PinPersistence() const;
@@ -80,7 +85,8 @@ public:
   // block.
   [[nodiscard]] std::shared_ptr<BorrowedRows> Borrow(
       ComponentId, Rows first, Rows end, ResourceReservation,
-      std::shared_ptr<const void> backing_owner, std::span<std::byte> backing);
+      std::shared_ptr<const void> backing_owner, std::span<std::byte> backing,
+      std::span<const std::byte> source = {});
   void Reset();
   // Validate successful execution/restore before retaining the live frontier.
   // Commit releases this lease; no further execution is allowed through it.

@@ -513,6 +513,19 @@ bool FakeAdapter::Invalidate(Slot& slot) noexcept {
   state.guard_.AfterReset();
   return true;
 }
+std::span<const std::byte> FakeAdapter::BorrowRowsView(const Slot& slot,
+                                                       ComponentId component,
+                                                       Rows first,
+                                                       Rows end) const {
+  const auto& state = AsSlot(slot);
+  RequireCapture(state);
+  const auto& rows = RowArray(state, component);
+  if (first >= end || end > rows.size())
+    throw std::invalid_argument("invalid borrowed fake range");
+  // Append, restore and release guard the old allocation before replacing
+  // the vector, so views stay fixed even though this fixture moves storage.
+  return std::as_bytes(std::span(rows).subspan(first, end - first));
+}
 void FakeAdapter::Append(Slot& slot, std::span<const Token> target,
                          std::span<const Token> draft) {
   auto& state = AsSlot(slot);

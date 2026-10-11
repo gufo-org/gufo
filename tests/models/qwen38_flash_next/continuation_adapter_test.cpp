@@ -86,7 +86,8 @@ Checkpoint Capture(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
 }
 void Load(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
           const Checkpoint& checkpoint, gufo::hip::TransferPool& streams,
-          bool omit_last = false) {
+          bool omit_last = false,
+          const std::vector<cache::RowPin>* native_rows = nullptr) {
   adapter.BeginRestore(slot, checkpoint.positions);
   Require(!slot.IsValid(), "BeginRestore exposed executable state");
   Reject([&] { (void)adapter.GetSession(slot); });
@@ -110,7 +111,9 @@ void Load(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
   };
   for (std::size_t i = adapter.Components().size(); i-- > 0;) {
     const auto& component = adapter.Components()[i];
-    const auto& bytes = checkpoint.bytes[i];
+    const auto bytes = native_rows && !(*native_rows)[i].Bytes().empty()
+                           ? (*native_rows)[i].Bytes()
+                           : std::span<const std::byte>(checkpoint.bytes[i]);
     if (component.row_bytes) {
       const auto rows = checkpoint.positions[i].valid_rows;
       for (cache::Rows end = rows; end;) {
@@ -218,7 +221,7 @@ void CheckTransferAndGuardLifetime(const std::shared_ptr<qfn::Model>& model,
       model,
       mtp ? gufo::core::SessionMode::kSpeculative
           : gufo::core::SessionMode::kAutoregressive,
-      64, {'l', 'i', 'f', 'e'});
+      16384, {'l', 'i', 'f', 'e'});
   gufo::hip::TransferPool streams(2);
   Guard source_guard, destination_guard;
   auto source = adapter.CreateSlot(source_guard);
@@ -253,7 +256,7 @@ void CheckTransferAndGuardLifetime(const std::shared_ptr<qfn::Model>& model,
   // The real slot guard leases a new independent transfer for every piece.
   // The idle worker is kept dormant so each foreground mutation is the oracle.
   for (const int path : {0, 1, 2, 3, 4}) {
-    cache::ResourceLedger ledger({8 << 20, 8 << 20, 8 << 20, 8 << 20});
+    cache::ResourceLedger ledger({1 << 30, 1 << 30, 1 << 30, 1 << 30});
     IncompatibleStream unused;
     cache::LeasedSlot leased(
         ledger, adapter, unused, {1},
@@ -266,7 +269,8 @@ void CheckTransferAndGuardLifetime(const std::shared_ptr<qfn::Model>& model,
     auto lease = leased.Acquire();
     auto& session = adapter.GetSession(lease.Execution());
     std::string error;
-    Require(session.Sync(prompt.first(17), &error), error);
+    const auto depth = path == 0 ? 2047u : path == 1 ? 8203u : 17u;
+    Require(session.Sync(prompt.first(depth), &error), error);
     const auto positions = adapter.Positions(lease.Execution());
     auto legacy = session.SaveSnapshot(&error);
     Require(bool(legacy), error);
@@ -289,8 +293,32 @@ void CheckTransferAndGuardLifetime(const std::shared_ptr<qfn::Model>& model,
       auto assigned =
           charge.ReserveBacking(cache::ResourceCategory::kBackingAssigned);
       charges.push_back(charge);
-      borrowed.push_back(lease.Borrow(component.id, 0, rows,
-                                      std::move(assigned), backing, *backing));
+      borrowed.push_back(lease.Borrow(
+          component.id, 0, rows, std::move(assigned), backing, *backing,
+          adapter.BorrowRowsView(lease.Execution(), component.id, 0, rows)));
+    }
+    {
+      const auto saved = Capture(adapter, lease.Execution(), streams);
+      std::vector<cache::RowPin> pins(adapter.Components().size());
+      std::size_t next = 0;
+      for (const auto& component : adapter.Components()) {
+        const auto rows = positions[component.id.value - 1].valid_rows;
+        if (component.row_bytes && rows)
+          pins[component.id.value - 1] = borrowed[next++]->Pin();
+      }
+      Guard destination_guard;
+      auto destination = adapter.CreateSlot(destination_guard);
+      Load(adapter, *destination, saved, streams, false, &pins);
+      Require(adapter.Validate(*destination, saved.positions),
+              "pinned native rows did not validate");
+      Require(Capture(adapter, *destination, streams).bytes == saved.bytes,
+              "pinned native rows changed the restored checkpoint");
+      Require(std::ranges::any_of(pins,
+                                  [](const auto& pin) {
+                                    return pin.Location() &&
+                                           !pin.Bytes().empty();
+                                  }),
+              "native borrowed restore did not read a live device range");
     }
     if (path == 0)
       session.Reset();

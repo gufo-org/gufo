@@ -132,8 +132,8 @@ public:
 
 struct ComponentTextCache::Impl {
   struct Entry {
-    // Streams are only guard fallbacks. Committed captures do not borrow rows;
-    // every capture/load itself obtains a fresh one-completion stream lease.
+    // Guard fallbacks outlive their slots. Idle pieces and capture/load work
+    // obtain fresh one-completion leases from the shared transfer pool.
     std::unique_ptr<cache::Stream> preservation;
     std::unique_ptr<cache::LeasedSlot> slot;
     std::optional<cache::IndexEntryId> live;
@@ -197,7 +197,13 @@ struct ComponentTextCache::Impl {
       entry->preservation = Stream();
       entry->slot = std::make_unique<cache::LeasedSlot>(
           ledger, *resources->adapter, *entry->preservation,
-          cache::SlotId{i + 1});
+          cache::SlotId{i + 1},
+          cache::IdleSpillConfig{1ULL << 20, resources->stream, [this] {
+                                   const std::lock_guard lock(mutex);
+                                   return std::ranges::none_of(
+                                       entries,
+                                       [](const auto& e) { return e->busy; });
+                                 }});
       entries.push_back(std::move(entry));
     }
     if (options) {
@@ -279,6 +285,8 @@ struct ComponentTextCache::Impl {
     // Settle immutable-source readers before slots/resources/index unwind.
     if (queue)
       queue->Drain();
+    for (auto& entry : entries)
+      entry->slot->StopIdleSpill();
   }
   std::unique_ptr<cache::Stream> Stream() {
     auto stream = resources->stream();
@@ -348,6 +356,10 @@ struct ComponentTextCache::Impl {
     std::uint64_t private_id = checkpoint->Id().value;
     auto append = [&](const cache::Payload& payload, std::size_t bytes,
                       bool private_file, cache::DiskFileId file) {
+      if (auto rows = payload.BorrowedStorage()) {
+        sources.emplace_back(private_file, file, bytes, 1, std::move(rows));
+        return cache::DiskPayload{file, bytes, 0};
+      }
       auto owner = payload.Owner();
       if (!owner)
         throw std::logic_error("persistence source is not immutable");
@@ -526,20 +538,38 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             positions.push_back(c.position);
           impl_->resources->adapter->BeginRestore(request.slot.Execution(),
                                                   positions);
-          TransferBatch transfers(impl_->resources->transfer_batch_size);
+          // Every pin outlives all submitted loads, including failure drain.
+          // Borrowed views name immutable native rows; materialized views name
+          // assigned host backing. No source slot execution lease is needed.
+          std::size_t pin_count = 0;
+          for (const auto& c : checkpoint.Components())
+            pin_count += c.chunks.size() + bool(c.tail) + bool(c.private_state);
+          auto pin_metadata =
+              impl_->ledger.Reserve(cache::ResourceCategory::kMetadata,
+                                    pin_count * sizeof(cache::RowPin));
+          std::vector<cache::RowPin> pins;
+          pins.reserve(pin_count);
           for (const auto& c : checkpoint.Components()) {
-            auto load = [&](const cache::Payload& payload, cache::Rows first,
+            if (c.private_state)
+              pins.push_back(c.private_state->PinRows());
+            for (const auto& chunk : c.chunks)
+              pins.push_back(chunk.Storage().PinRows());
+            if (c.tail)
+              pins.push_back(c.tail->PinRows());
+          }
+          TransferBatch transfers(impl_->resources->transfer_batch_size);
+          std::size_t base = 0;
+          for (const auto& c : checkpoint.Components()) {
+            auto load = [&](const cache::RowPin& pin, cache::Rows first,
                             cache::Rows end) {
-              const auto pin = payload.PinRows();
-              if (pin.Location())
-                throw std::logic_error("unpreserved RAM source");
-              auto owner = pin.Owner() ? pin.Owner() : payload.Owner();
               const auto bytes =
                   c.descriptor.kind == cache::ComponentKind::kPrivateState
                       ? c.descriptor.state_bytes
                       : (end - first) * c.descriptor.row_bytes;
-              const std::span<const std::byte> buffer(
-                  static_cast<const std::byte*>(owner.get()), bytes);
+              if (pin.Bytes().empty())
+                throw std::logic_error("RAM source has no readable view");
+              const std::span<const std::byte> buffer(pin.Bytes().data(),
+                                                      bytes);
               transfers.Add(
                   [&] { return impl_->Stream(); },
                   [&](cache::Stream& stream) {
@@ -555,40 +585,50 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
               request.restored += bytes;
             };
             if (c.private_state)
-              load(*c.private_state, 0, 0);
+              load(pins[base++], 0, 0);
+            auto same_source = [](const cache::RowPin& a,
+                                  const cache::RowPin& b) {
+              if (a.Location() || b.Location())
+                return a.Location() == b.Location();
+              return SameOwner(a.Owner(), b.Owner());
+            };
             bool loaded_tail = false;
             for (std::size_t i = 0; i < c.chunks.size();) {
               const auto& chunk = c.chunks[i];
               auto end = chunk.End();
-              const auto owner = chunk.Storage().Owner();
-              const auto* data = static_cast<const std::byte*>(owner.get());
+              const auto& pin = pins[base + i];
+              const auto* data = pin.Bytes().data();
               auto next = i + 1;
               while (data && next < c.chunks.size() &&
                      c.chunks[next].First() == end &&
-                     SameOwner(owner, c.chunks[next].Storage().Owner()) &&
-                     c.chunks[next].Storage().Owner().get() ==
+                     same_source(pin, pins[base + next]) &&
+                     pins[base + next].Bytes().data() ==
                          data +
                              (end - chunk.First()) * c.descriptor.row_bytes) {
                 end = c.chunks[next].End();
                 ++next;
               }
               if (data && next == c.chunks.size() && c.tail &&
-                  SameOwner(owner, c.tail->Owner()) &&
+                  same_source(pin, pins[base + c.chunks.size()]) &&
                   end == c.position.valid_rows / c.descriptor.rows_per_chunk *
                              c.descriptor.rows_per_chunk &&
-                  c.tail->Owner().get() ==
+                  pins[base + c.chunks.size()].Bytes().data() ==
                       data + (end - chunk.First()) * c.descriptor.row_bytes) {
                 end = c.position.valid_rows;
                 loaded_tail = true;
               }
-              load(chunk.Storage(), chunk.First(), end);
+              load(pin, chunk.First(), end);
               i = next;
             }
-            if (c.tail && !loaded_tail)
-              load(*c.tail,
-                   c.position.valid_rows / c.descriptor.rows_per_chunk *
-                       c.descriptor.rows_per_chunk,
-                   c.position.valid_rows);
+            base += c.chunks.size();
+            if (c.tail) {
+              if (!loaded_tail)
+                load(pins[base],
+                     c.position.valid_rows / c.descriptor.rows_per_chunk *
+                         c.descriptor.rows_per_chunk,
+                     c.position.valid_rows);
+              ++base;
+            }
           }
           transfers.Finish();
           if (!impl_->resources->adapter->Validate(request.slot.Execution(),
@@ -768,11 +808,14 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   const auto retain = request.Retain(request.capture_tokens);
   std::shared_ptr<const cache::Checkpoint> checkpoint;
   std::size_t captured_capacity = 0;
+  std::size_t borrowed_capacity = 0, copied_payload = 0;
   while (true) {
     try {
       captured_capacity = 0;
+      borrowed_capacity = copied_payload = 0;
       cache::ResourceReservation buffer_metadata;
       std::vector<ComponentCaptureBuffer> buffers;
+      std::vector<std::span<const std::byte>> borrowed;
       std::size_t next_buffer = 0;
       checkpoint = request.entry->history->Capture(
           {request.capture_tokens,
@@ -785,26 +828,47 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
                : cache::CheckpointPurpose::kPrompt,
            0},
           [&](const cache::PayloadRequest&) {
-            auto& buffer = buffers.at(next_buffer++);
-            auto storage = buffer.finish();
+            const auto i = next_buffer++;
+            auto& buffer = buffers.at(i);
+            auto storage = borrowed[i].empty()
+                               ? buffer.finish()
+                               : buffer.borrow(request.slot, borrowed[i]);
             captured_capacity += storage.Bytes();
+            if (!borrowed[i].empty())
+              borrowed_capacity += storage.Bytes();
             return storage;
           },
           [&](std::span<const cache::PayloadRequest> payloads) {
             buffer_metadata = cache.ledger.Reserve(
                 cache::ResourceCategory::kMetadata,
-                payloads.size() * sizeof(ComponentCaptureBuffer));
+                payloads.size() * (sizeof(ComponentCaptureBuffer) +
+                                   sizeof(std::span<const std::byte>)));
             buffers.reserve(payloads.size());
-            for (const auto& payload : payloads)
+            borrowed.reserve(payloads.size());
+            for (const auto& payload : payloads) {
               buffers.push_back(cache.resources->allocate(payload));
+              borrowed.push_back(
+                  buffers.back().borrow &&
+                          payload.category ==
+                              cache::ResourceCategory::kBackingAssigned
+                      ? cache.resources->adapter->BorrowRowsView(
+                            request.slot.Execution(), payload.component,
+                            payload.first, payload.end)
+                      : std::span<const std::byte>{});
+            }
             TransferBatch transfers(cache.resources->transfer_batch_size);
             for (std::size_t i = 0; i < payloads.size();) {
+              if (!borrowed[i].empty()) {
+                ++i;
+                continue;
+              }
               const auto& payload = payloads[i];
               auto end = payload.end;
               auto bytes = payload.bytes;
               auto next = i + 1;
               if (payload.category != cache::ResourceCategory::kPrivateState)
                 while (buffers[i].allocation && next < payloads.size() &&
+                       borrowed[next].empty() &&
                        buffers[next].allocation == buffers[i].allocation &&
                        payloads[next].component == payload.component &&
                        payloads[next].category !=
@@ -830,6 +894,7 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
                                      payload.component, payload.first, end,
                                      buffer, stream);
                   });
+              copied_payload += bytes;
               i = next;
             }
             transfers.Finish();
@@ -855,6 +920,8 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   }
   ++request.metrics.captures;
   request.metrics.captured_bytes += captured_capacity;
+  request.metrics.borrowed_capacity_bytes += borrowed_capacity;
+  request.metrics.copied_payload_bytes += copied_payload;
   auto snapshot = std::make_unique<ComponentSnapshot>();
   snapshot->checkpoint = std::move(checkpoint);
   snapshot->bytes = bytes;
@@ -952,6 +1019,17 @@ ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
   report.ledger = impl_->cache->ledger.Snapshot();
   if (impl_->cache->queue)
     report.persistence = impl_->cache->queue->Stats();
+  for (const auto& entry : impl_->cache->entries) {
+    const auto spill = entry->slot->Metrics();
+    report.spill.idle_bytes += spill.idle_bytes;
+    report.spill.foreground_bytes += spill.foreground_bytes;
+    report.spill.idle_copy_ns += spill.idle_copy_ns;
+    report.spill.foreground_copy_ns += spill.foreground_copy_ns;
+    report.spill.stream_wait_ns += spill.stream_wait_ns;
+    report.spill.residual_wait_ns += spill.residual_wait_ns;
+    report.spill.reassignments += spill.reassignments;
+    report.spill.idle_failures += spill.idle_failures;
+  }
   return report;
 }
 std::optional<ComponentCacheMetrics> ServingCacheLease::Metrics() const {

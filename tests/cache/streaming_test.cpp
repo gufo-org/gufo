@@ -302,6 +302,111 @@ void RoundTripAndFailures() {
   assert(!cancellable.Restore({1}, fixture.manifest.compatibility,
                               fixture.adapter, *destination, timing));
 }
+void BorrowedSourcesWaitWithoutBlockingForeground() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 11, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 10, Allocate, Lease);
+  Fixture fixture(ledger);
+  FakeStream preservation;
+  LeasedSlot slot(ledger, fixture.adapter, preservation, {1});
+  auto lease = slot.Acquire();
+  fixture.adapter.Append(lease.Execution(), fixture.manifest.tokens,
+                         std::span(fixture.manifest.tokens).first(36));
+  auto allocation = std::make_shared<std::array<std::byte, 16>>();
+  auto pool = ledger.Reserve(ResourceCategory::kBackingFree, 16).Convert();
+  auto rows = lease.Borrow(
+      kTarget, 0, 4, pool.ReserveBacking(ResourceCategory::kBackingAssigned),
+      allocation, *allocation);
+  auto committed = fixture.Sources();
+  std::vector<PersistenceSource> sources;
+  sources.emplace_back(false, fixture.buffers.front().file, 16, 4, rows);
+  for (std::size_t i = 1; i < committed.size(); ++i)
+    sources.push_back(std::move(committed[i]));
+  {
+    PersistenceQueue queue(ledger, streams, 2, 4096, [] { return true; });
+    assert(queue.TrySubmit(
+        PersistenceJob(ledger, Id(100), fixture.manifest, std::move(sources))));
+    // An assigned reservation is pinned before materialization, without a
+    // second physical charge or a reader pin blocking the source's mutation.
+    assert(ledger.Snapshot().persistence_pinned_bytes == 336);
+    assert(rows->Location());
+    assert(!disk.Open({1}));
+    Fixture foreground(ledger, 2, 100);
+    auto foreground_sources = foreground.Sources();
+    TransferTiming foreground_timing;
+    streams.Write(Id(200), foreground.manifest, foreground_sources,
+                  foreground_timing);
+    assert(disk.Open({2}));
+    assert(!disk.Open({1}));
+    // Cold reassignment preserves before invalidation. The worker then reads
+    // that immutable backing and publishes the original complete frontier.
+    lease.Commit();
+    auto replacement = slot.Acquire();
+    assert(!rows->Location());
+    queue.Drain();
+    assert(queue.Stats().completed == 1);
+    assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+    Guard guard;
+    auto restored = fixture.adapter.CreateSlot(guard);
+    TransferTiming timing;
+    assert(streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                           *restored, timing));
+    assert(fixture.adapter.RecurrentHash(*restored) == fixture.hash);
+    std::array<std::byte, 16> restored_rows;
+    auto capture = fixture.adapter.CopyRowsOut(*restored, kTarget, 0, 4,
+                                               restored_rows, preservation);
+    assert(capture.Wait() == TransferResult::kSucceeded);
+    assert(restored_rows == *allocation);
+  }
+}
+void StopWaitingBorrowedPublication(bool fail_idle) {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 11, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 10, Allocate, Lease);
+  Fixture fixture(ledger);
+  FakeStream preservation;
+  LeasedSlot slot(
+      ledger, fixture.adapter, preservation, {1},
+      IdleSpillConfig{16, Lease, [fail_idle] { return fail_idle; }});
+  auto lease = slot.Acquire();
+  fixture.adapter.Append(lease.Execution(), fixture.manifest.tokens,
+                         std::span(fixture.manifest.tokens).first(36));
+  auto allocation = std::make_shared<std::array<std::byte, 16>>();
+  auto pool = ledger.Reserve(ResourceCategory::kBackingFree, 16).Convert();
+  auto rows = lease.Borrow(
+      kTarget, 0, 4, pool.ReserveBacking(ResourceCategory::kBackingAssigned),
+      allocation, *allocation);
+  auto committed = fixture.Sources();
+  std::vector<PersistenceSource> sources;
+  sources.emplace_back(false, fixture.buffers.front().file, 16, 4, rows);
+  for (std::size_t i = 1; i < committed.size(); ++i)
+    sources.push_back(std::move(committed[i]));
+  PersistenceQueue queue(ledger, streams, 2, 4096, [] { return true; });
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(100), fixture.manifest, std::move(sources))));
+  if (fail_idle) {
+    fixture.adapter.FailNextTransfer();
+    lease.Commit();
+    queue.Drain();
+    assert(queue.Stats().failed == 1);
+    assert(rows->PreservationFailed());
+  } else {
+    queue.Stop();
+  }
+  assert(!disk.Open({1}));
+  assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+  // Cancellation does not retire retained source rows or consume their
+  // reservation. The original live execution can still preserve them later.
+  assert(rows->Location());
+  assert(rows->IsValid());
+  if (!fail_idle)
+    lease.Commit();
+  auto replacement = slot.Acquire();
+  assert(!rows->Location());
+  assert(!rows->PreservationFailed());
+}
 void CancelRestore() {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 16, 4096}};
@@ -707,6 +812,9 @@ void ConcurrentStop() {
 }
 }  // namespace
 int main() {
+  BorrowedSourcesWaitWithoutBlockingForeground();
+  StopWaitingBorrowedPublication(false);
+  StopWaitingBorrowedPublication(true);
   RoundTripAndFailures();
   CancelRestore();
   QueueBoundsAndYield();

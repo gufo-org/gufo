@@ -93,6 +93,17 @@ public:
                                                Rows first, Rows end,
                                                std::span<std::byte>,
                                                Stream&) = 0;
+  // Optional immutable view of a completed append range. Obtain it only
+  // during exclusive execution; retain a RowPin for every later transfer.
+  // The address must remain stable until the mutation/release guard drains
+  // its readers. CopyRowsIn must accept these backend-native source bytes as
+  // well as host buffers. Empty means this component cannot be borrowed.
+  [[nodiscard]] virtual std::span<const std::byte> BorrowRowsView(const Slot&,
+                                                                  ComponentId,
+                                                                  Rows,
+                                                                  Rows) const {
+    return {};
+  }
   [[nodiscard]] virtual Completion CopyRowsIn(Slot&, ComponentId, Rows first,
                                               Rows end,
                                               std::span<const std::byte>,

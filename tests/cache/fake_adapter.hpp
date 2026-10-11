@@ -58,6 +58,9 @@ public:
                                           Stream&) override;
   [[nodiscard]] Completion CopyRowsOut(const Slot&, ComponentId, Rows, Rows,
                                        std::span<std::byte>, Stream&) override;
+  [[nodiscard]] std::span<const std::byte> BorrowRowsView(const Slot&,
+                                                          ComponentId, Rows,
+                                                          Rows) const override;
   [[nodiscard]] Completion CopyRowsIn(Slot&, ComponentId, Rows, Rows,
                                       std::span<const std::byte>,
                                       Stream&) override;

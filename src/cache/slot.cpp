@@ -24,6 +24,7 @@ struct RowState {
   ResourceCharge charge;
   std::shared_ptr<const void> owner;
   std::span<std::byte> buffer;
+  std::span<const std::byte> source_bytes;
   std::shared_ptr<SlotState> slot;
   BorrowedLocation location;
   ComponentId component;
@@ -35,6 +36,7 @@ struct RowState {
   std::condition_variable_any changed;
   std::size_t readers{};
   bool closing{false}, materialized{false}, retired{false};
+  bool idle_copy_failed{false};
 };
 struct LeaseState final : MutationGuard {
   struct Entry {
@@ -168,6 +170,7 @@ struct LeaseState final : MutationGuard {
       r->charge = std::move(charge);
       r->category = r->charge.Info().category;
       r->materialized = true;
+      r->idle_copy_failed = false;
       r->closing = false;
       r->changed.notify_all();
     }
@@ -247,6 +250,11 @@ struct LeaseState final : MutationGuard {
         }
       } catch (...) {
         failed = true;
+        {
+          std::lock_guard row_lock(candidate->mutex);
+          candidate->idle_copy_failed = true;
+          candidate->changed.notify_all();
+        }
         std::lock_guard metrics_lock(metrics_mutex);
         ++metrics.idle_failures;
       }
@@ -323,7 +331,8 @@ RowPin::RowPin(RowPin&& other) noexcept
     : state_(std::move(other.state_)),
       location_(std::exchange(other.location_, {})),
       charge_(std::move(other.charge_)),
-      owner_(std::move(other.owner_)) {}
+      owner_(std::move(other.owner_)),
+      bytes_(std::exchange(other.bytes_, {})) {}
 RowPin& RowPin::operator=(RowPin&& other) noexcept {
   if (this != &other) {
     Release();
@@ -331,6 +340,7 @@ RowPin& RowPin::operator=(RowPin&& other) noexcept {
     location_ = std::exchange(other.location_, {});
     charge_ = std::move(other.charge_);
     owner_ = std::move(other.owner_);
+    bytes_ = std::exchange(other.bytes_, {});
   }
   return *this;
 }
@@ -340,6 +350,7 @@ RowPin RowPin::Clone() const {
   result.location_ = location_;
   result.charge_ = charge_;
   result.owner_ = owner_;
+  result.bytes_ = bytes_;
   if (result.state_ && result.location_) {
     std::lock_guard lock(result.state_->mutex);
     ++result.state_->readers;
@@ -353,6 +364,7 @@ void RowPin::Release() noexcept {
     state_->changed.notify_all();
   }
   owner_.reset();
+  bytes_ = {};
   charge_ = {};
   location_.reset();
   state_.reset();
@@ -371,6 +383,7 @@ RowPin BorrowedRows::Pin(std::stop_token stop) const {
   pin.state_ = state_;
   if (r.materialized) {
     pin.owner_ = r.owner;
+    pin.bytes_ = r.buffer;
   } else {
     std::lock_guard source_lock(r.slot->mutex);
     const bool valid =
@@ -380,6 +393,7 @@ RowPin BorrowedRows::Pin(std::stop_token stop) const {
       throw std::logic_error("borrowed slot generation mismatch");
     ++r.readers;
     pin.location_ = r.location;
+    pin.bytes_ = r.source_bytes;
   }
   return pin;
 }
@@ -409,6 +423,10 @@ bool BorrowedRows::IsValid() const {
 }
 std::size_t BorrowedRows::Bytes() const {
   return state_->bytes;
+}
+bool BorrowedRows::PreservationFailed() const {
+  std::lock_guard lock(state_->mutex);
+  return !state_->materialized && state_->idle_copy_failed;
 }
 ResourceCategory BorrowedRows::Category() const {
   std::lock_guard lock(state_->mutex);
@@ -463,7 +481,8 @@ BorrowedLocation SlotLease::Location() const {
 }
 std::shared_ptr<BorrowedRows> SlotLease::Borrow(
     ComponentId c, Rows first, Rows end, ResourceReservation reservation,
-    std::shared_ptr<const void> owner, std::span<std::byte> backing) {
+    std::shared_ptr<const void> owner, std::span<std::byte> backing,
+    std::span<const std::byte> source) {
   // Local ownership fixes teardown order even if validation/admission fails.
   auto held = std::move(reservation);
   auto retained_owner = std::move(owner);
@@ -482,7 +501,8 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
       !d->row_bytes ||
       end - first > std::numeric_limits<std::size_t>::max() / d->row_bytes ||
       backing.size() != (end - first) * d->row_bytes ||
-      backing.size() > info.bytes)
+      backing.size() > info.bytes ||
+      (!source.empty() && source.size() != backing.size()))
     throw std::invalid_argument("invalid borrowed row description");
   auto metadata = state_->ledger.Reserve(
       ResourceCategory::kMetadata,
@@ -492,6 +512,7 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
   rows->reservation = std::move(held);
   rows->owner = std::move(retained_owner);
   rows->buffer = backing;
+  rows->source_bytes = source;
   rows->slot = state_->source;
   rows->location = Location();
   rows->component = c;

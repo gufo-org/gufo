@@ -7,6 +7,7 @@
 #include <string>
 
 #include "src/cache/ledger.hpp"
+#include "src/cache/slot.hpp"
 #include "src/cache/streaming.hpp"
 #include "src/core/json.hpp"
 
@@ -16,10 +17,12 @@ struct ComponentCacheMetrics {
   std::uint32_t selection_reason{};
   std::size_t deepest_live{}, deepest_ram{}, deepest_disk{}, selected{};
   std::size_t restored_bytes{}, prefilled{}, captures{}, captured_bytes{};
+  std::size_t borrowed_capacity_bytes{}, copied_payload_bytes{};
   std::size_t disk_queued_bytes{};
   double disk_enqueue_ms{};
   cache::ResourceSnapshot ledger;
   std::optional<cache::PersistenceQueueStats> persistence;
+  cache::SpillMetrics spill;
 };
 inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
   auto result = json::Value::object();
@@ -34,6 +37,18 @@ inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
   result["prefilled_tokens"] = value.prefilled;
   result["captures"] = value.captures;
   result["captured_capacity_bytes"] = value.captured_bytes;
+  result["borrowed_capacity_bytes"] = value.borrowed_capacity_bytes;
+  result["copied_payload_bytes"] = value.copied_payload_bytes;
+  auto spill = json::Value::object();
+  spill["idle_bytes"] = value.spill.idle_bytes;
+  spill["foreground_bytes"] = value.spill.foreground_bytes;
+  spill["idle_copy_ms"] = value.spill.idle_copy_ns / 1e6;
+  spill["foreground_copy_ms"] = value.spill.foreground_copy_ns / 1e6;
+  spill["stream_wait_ms"] = value.spill.stream_wait_ns / 1e6;
+  spill["residual_wait_ms"] = value.spill.residual_wait_ns / 1e6;
+  spill["reassignments"] = value.spill.reassignments;
+  spill["idle_failures"] = value.spill.idle_failures;
+  result["global_spill"] = std::move(spill);
   // These are contemporaneous global gauges, not request-local attribution.
   result["global_ledger_bytes"] = value.ledger.total_bytes;
   result["global_ram_bytes"] = value.ledger.ram_bytes;

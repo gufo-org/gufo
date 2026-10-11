@@ -435,3 +435,51 @@ that reservation. Qualification must account for both the live allocation and
 retained backing, compare useful retained boundaries as well as matched requests,
 and pass latency and reuse gates. No physical RAM reduction versus main is
 established, and the PR remains draft.
+
+
+### Borrowed serving rows and idle spill, October 11, 2026
+
+The follow-up merges main `3323e7c7`, retaining its device-headroom snapshot
+coverage and text-only image rejection. Flash-Next serving now borrows full
+completed device append chunks against assigned, precommitted backing. Host
+token rows, private state and partial tails are copied. Mutation guards preserve
+borrowers before overwrite, reset, restore or release. Each idle slot spills in
+bounded 1 MiB pieces on independent pooled streams, yielding before each piece
+when a serving request holds an execution lease.
+
+A row pin now carries the immutable native byte view captured during exclusive
+execution. RAM restoration keeps all source pins until its asynchronous loads
+settle, including failure drain. It can read a busy peer's completed prefix
+without acquiring that peer's execution lease or forcing preservation; device
+loads accept both host backing and pinned device views. Adjacent compatible
+views still coalesce into bounded transfer batches.
+
+Disk jobs pin assigned backing at submission and wait for preservation before
+filesystem publication, staging or stream acquisition. The queue never captures
+live state. Cancellation releases its pins while retaining the original rows.
+An idle transfer failure fails the optional disk job rather than hanging its
+drain; a later foreground preservation can retry the retained rows. Shutdown
+drains durable jobs, then stops every idle worker before destroying slots.
+
+Five focused CPU cache/serving targets and all 57 hosted PR checks pass. The
+serving fixture restores from a source still holding its execution lease and
+checks that the source remains borrowed until overwrite. Streamed-store tests
+cover assigned pin accounting, foreground publication while another job waits,
+cancellation and failed idle spill with a successful foreground retry. Shared
+formatting checks all 568 C++ files; the pinned production release build passes.
+The real GPU adapter guard checks pass in AR and MTP, including complete
+byte-for-byte checkpoint restoration through pinned native views at 2,047 and
+8,203 tokens, plus short mutation, reset, restore and release cases.
+
+Request metrics expose copied logical payload bytes, borrowed backing capacity
+and cumulative global idle/foreground spill bytes and waits. These distinguish
+capture work from assigned storage and subsequent preservation. The backing
+pool's eager physical commitment is unchanged: no Flash-Next physical RAM saving
+is claimed. HTTP histories and matched latency, pressure, deep disk/restart,
+bridge, Pi and standard-speed qualification remain open. This supersedes the
+earlier statement that borrowed rows and idle spill were unwired; it does not
+complete card 19 or make the PR ready to merge.
+
+Commands, immutable binaries, patches, source/harness hashes and raw results,
+including the initial expanded test's context-configuration failure, are retained
+at `/home/mixer/gufo-qualification/pr543-borrowed-2026-10-11`.

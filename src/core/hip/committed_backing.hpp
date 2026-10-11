@@ -48,7 +48,7 @@ public:
   // The row handle retains the slab after this block/pool facade is destroyed.
   [[nodiscard]] std::shared_ptr<cache::BorrowedRows> Borrow(
       cache::SlotLease&, cache::ComponentId, cache::Rows first, cache::Rows end,
-      std::size_t payload_bytes) &&;
+      std::size_t payload_bytes, std::span<const std::byte> source = {}) &&;
   [[nodiscard]] BackingPin PinPersistence() const;
 
 private:

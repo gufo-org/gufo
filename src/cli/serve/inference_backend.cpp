@@ -2512,12 +2512,18 @@ public:
       if (!block)
         throw cache::ResourceExhausted();
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
-      return ComponentCaptureBuffer{owner->Bytes(),
-                                    [owner] {
-                                      owner->Convert();
-                                      return std::move(*owner).TakePayload();
-                                    },
-                                    pool->second.get()};
+      return ComponentCaptureBuffer{
+          owner->Bytes(),
+          [owner] {
+            owner->Convert();
+            return std::move(*owner).TakePayload();
+          },
+          pool->second.get(),
+          [owner, request](cache::SlotLease& lease, auto source) {
+            return cache::Payload::Borrowed(std::move(*owner).Borrow(
+                lease, request.component, request.first, request.end,
+                request.bytes, source));
+          }};
     };
     result->staging = [](std::size_t bytes) {
       void* data = nullptr;

@@ -127,6 +127,7 @@ RowPin Payload::PinRows(std::stop_token stop) const {
   RowPin pin;
   pin.charge_ = charge_;
   pin.owner_ = owner_;
+  pin.bytes_ = {static_cast<const std::byte*>(owner_.get()), bytes_};
   return pin;
 }
 bool Payload::IsValid() const {
