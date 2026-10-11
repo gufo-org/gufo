@@ -141,9 +141,10 @@ while an execution lease is active.
 | Serving sampling | All 25 strategies pass AR/MTP replay, C2 interleaving and short output budgets; actual drafts checked |
 | Independent MTP numerical audit | Full-width normalization, split projections, attention, recursive carry and Q8 head pass |
 | Core RAM functional histories | R7 passes growth, depth, edits, shared-prefix, rotation, concurrency, state-edges, long-context and cancellation in AR/MTP |
-| Disk lifecycle | R8 AR passes all four cases; R11 MTP running |
+| Disk lifecycle | R8 AR and R11 MTP each pass all four cases |
 | Disk reload and spacing | R7 misses recent queued histories; R8 restores all requested histories but drops the first spacing boundary; R11 passes the full focused cache suite in AR/MTP |
-| RAM pressure, bridge, long Pi replay and standard speed benchmark | Pending; fresh matched standard RAM table measured |
+| RAM pressure | R11 AR fails five reuse assertions; unpushed R13 allocator reduces this to three; main fails six |
+| Bridge, long Pi replay and standard speed benchmark | Pending; matched standard RAM table measured, with an unresolved RAM regression |
 
 Raw logs, production binaries, source patches and hashes are retained outside
 Git at `/home/mixer/gufo-qualification/pr543-followup`. The initial measured
@@ -370,10 +371,67 @@ overall performance pass. The R11 MTP lifecycle passes all four cases.
 The separate R11 AR pressure history at 2 GiB fails five reuse assertions,
 while every generated answer matches its cold control. Private-state pools
 fill while row backing remains free; the fixed class allocation strands
-capacity. The pressure report remains failed. Main is being measured under
-that same pressure history before selecting the allocator correction.
+capacity. The pressure report remains failed. The subsequent main control under
+the same history also fails six assertions. Its timing is excluded because a
+build overlapped that control. This does not waive candidate reuse assertions.
 
 The measured main control remains `665fc182`; current main `d0f7c3a0` differs
 only in server/cache documentation and has identical production sources,
 toolchain lock and functional harness. The R8 matched RAM observations above
 remain applicable to the allocation plan, which R12 does not change.
+
+### RAM regression and rejected working-set provisioning
+
+**RAM qualification remains failed.** The RFC's 83.2% retained-payload estimate
+compares identical checkpoint boundaries for 27B DFlash2, which copies whole
+snapshots. It explicitly excludes live storage, alignment, staging and temporary
+publication, and says Flash Next already shares physical RAM. It is not evidence
+of a Flash Next RAM saving. The existing Flash integration still commits roughly
+7.2 GiB of backing at startup with an 8 GiB cache ceiling and eagerly copies rows
+into that backing. Main borrows live rows and delays commitment of their
+preservation storage. Pool reservations are correctly charged once, but correct
+accounting does not make this extra physical storage disappear.
+
+R13, an unpushed allocator experiment, lets private state, rows and tails share
+64 KiB pages rather than stranding capacity in separate component classes.
+Independent grouped-charge/fault tests, the GPU backing tests, all 57 hosted
+checks and shared formatting pass. The 2 GiB AR pressure history still fails
+three strict reuse assertions: compaction, continuation after volatile input and
+parent resume. It is not a pressure or RAM-saving pass.
+
+R14 tested a smaller initial backing pool, growing it only when all execution
+leases were idle before admission. Capture itself continued to use committed
+pages. The frozen experiment used the same standard memory table, C1 AR,
+context 133121, 8 GiB RAM ceiling, no disk/staging, weights and production
+toolchain as the R8 controls. A fresh main run reproduced both earlier main
+global HIP peaks exactly. All five requests match prompt, prefill, cached and
+generated token counts, including 16242 cached and 4077 prefilled tokens in the
+deep continuation. Identical retained checkpoint sets have not been established.
+
+| Measurement | Fresh main (GiB) | R14 experiment (GiB) | Difference (GiB) |
+| --- | ---: | ---: | ---: |
+| Process RSS high-water across the table | 0.824 | 3.791 | +2.967 |
+| Global HIP peak, pp2048/tg128 at depth 0 | 86.18 | 86.73 | +0.55 |
+| Global HIP peak, pp4096/tg128 after a 16K prefix | 87.34 | 88.35 | +1.01 |
+
+These are overlapping measurements on UMA, not additive RAM categories. The
+global counter includes other HIP users; idle is 2.3767 GiB in all four retained
+memory runs. R14 reduces the earlier candidate footprint but still uses more
+memory than main. Admission-time commitment also produces queue times of
+122.5, 22.8, 333.9 and 107.1 ms, versus 0.9, 0.8, 1.8 and 1.9 ms in the fresh
+main control. All four fail the unchanged 5% and 3 ms per-phase gates.
+
+**R14 is rejected and its code has been removed from the working tree.** Its
+binary, complete patch, successful focused CPU checks, failed timing comparison
+and raw memory samples remain retained. It was never pushed. The remaining R13
+allocator work is separate and unpushed. [Source manifests, hashes, commands,
+memory observations and individual queue gates](../../models/qwen3.8-flash-next/artifacts/cache-ram-review.json)
+make the experiment reviewable without presenting it as the current PR.
+
+Borrowed-row capture and idle spill still need serving integration and real
+reassignment qualification. They can reduce eager capture work, but the RFC
+requires their spill backing to be committed; borrowing alone cannot remove
+that reservation. Qualification must account for both the live allocation and
+retained backing, compare useful retained boundaries as well as matched requests,
+and pass latency and reuse gates. No physical RAM reduction versus main is
+established, and the PR remains draft.
