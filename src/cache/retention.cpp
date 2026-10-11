@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <tuple>
 
 namespace gufo::cache {
 namespace {
@@ -182,13 +183,19 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
     if (tail != limit_)
       return tail;
   }
+  // Within a rank, byte pressure keeps branch points, then the checkpoints a
+  // miss would cost the most to prefill again, until they go unused.
+  const auto order = [&](std::size_t i) {
+    return std::tuple(!record_pressure && Branch(i),
+                      record_pressure ? 0 : records_[i].value,
+                      records_[i].last_used);
+  };
   std::size_t target = limit_;
   for (std::size_t i = 0; i < limit_; ++i) {
     if (!eligible(i) || i == source)
       continue;
     if (target == limit_ || Priority(i, &r) < Priority(target, &r) ||
-        (Priority(i, &r) == Priority(target, &r) &&
-         records_[i].last_used < records_[target].last_used))
+        (Priority(i, &r) == Priority(target, &r) && order(i) < order(target)))
       target = i;
   }
   // preserve_source protects byte admission while capture is incomplete. At
@@ -318,6 +325,7 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
         ++target;
       auto& e = records_[target];
       e = {std::move(checkpoint), entry, purpose, r.stable, ++clock_};
+      e.value = floor_ + e.checkpoint->Boundary();
       ++size_;
       Emit(RetentionAction::kAdmitted, RetentionReason::kCaptured,
            e.checkpoint->Id(), e.checkpoint->Boundary(), purpose,
@@ -332,6 +340,8 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
         target = Victim(r, false);
       if (target == limit_)
         return refuse(RetentionReason::kByteCapacity);
+      if (target != exact && target != Find(r.source))
+        floor_ = std::max(floor_, records_[target].value);
       Erase(target,
             target == exact ? RetentionReason::kExactReplacement
                             : RetentionReason::kByteCapacity,
@@ -377,6 +387,7 @@ void RetentionPolicy::Touch(CheckpointId id) {
     throw std::invalid_argument("unknown retained checkpoint");
   auto& e = records_[i];
   e.last_used = ++clock_;
+  e.value = floor_ + e.checkpoint->Boundary();
   Emit(RetentionAction::kTouched, RetentionReason::kExplicit, id,
        e.checkpoint->Boundary(), e.purpose, Priority(i), e.last_used);
 }

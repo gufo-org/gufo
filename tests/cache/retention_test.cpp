@@ -412,6 +412,32 @@ void CapacityAndSharing() {
          f.log.events[f.log.events.size() - 2].checkpoint == first);
   assert(f.log.events[f.log.events.size() - 2].reason ==
          RetentionReason::kByteCapacity);
+  // Issue #542: byte pressure removes cheaper checkpoints before a deeper,
+  // older one, and the deeper one still ages out once it goes unused.
+  Fixture g(8);
+  const std::vector<Token> deep{1, 2, 3, 4, 5, 6, 7, 8};
+  g.Add(deep);
+  const auto under_pressure = [&](std::vector<Token> tokens) {
+    bool exhausted = false;
+    assert(g.policy.Admit({tokens, {1}, {}}, [&] {
+      if (!exhausted) {
+        exhausted = true;
+        throw ResourceExhausted();
+      }
+      return IndexCheckpoint(g.ledger, tokens);
+    }));
+  };
+  g.Add({9, 0});
+  g.Add({9, 1});
+  under_pressure({9, 2});
+  under_pressure({9, 3});
+  assert(g.Cached(deep) == deep.size());
+  bool aged = false;
+  for (Token k = 4; k < 20 && !aged; ++k) {
+    under_pressure({9, k});
+    aged = g.Cached(deep) == 0;
+  }
+  assert(aged);
 }
 void InvalidInventoriesPreserveReplacement() {
   for (int fault = 0; fault < 5; ++fault) {

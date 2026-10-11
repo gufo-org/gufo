@@ -129,6 +129,8 @@ private:
     RetentionPurpose purpose{};
     Rows stable{};
     std::uint64_t last_used{};
+    // Retention floor at the last use plus the rows a miss would prefill.
+    std::size_t value{};
   };
   std::size_t Find(CheckpointId) const;
   bool Branch(std::size_t) const;
@@ -144,6 +146,8 @@ private:
   ResourceCharge metadata_;
   std::array<Record, kRecordLimit> records_;
   std::size_t limit_, size_{};
+  // Rises to each byte-pressure victim's value, so idle checkpoints age out.
+  std::size_t floor_{};
   std::uint64_t clock_{}, sequence_{};
 };
 }  // namespace gufo::cache
