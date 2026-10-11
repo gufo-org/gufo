@@ -26,10 +26,10 @@ struct TransferTiming {
   std::uint64_t yield_ns{}, bytes{}, pieces{};
   std::uint64_t staging_wait_ns{}, io_lock_ns{};
 };
-// Sources retain either committed immutable storage or assigned, committed
-// spill backing. Borrowed sources wait for slot preservation before any disk
-// publication, staging or stream acquisition. The queue never captures live
-// execution state. Copy settles via Completion on a leased stream.
+// Sources retain immutable storage, assigned spill backing or discardable
+// observations. Backed borrowers wait for preservation before disk work;
+// observations pin one native piece until its leased transfer completes.
+// Capture supplies private state/tails before submitting a job to the queue.
 class PersistenceSource {
 public:
   using Copy =
@@ -42,7 +42,7 @@ public:
   // Discardable live rows, for histories exceeding RAM. Reads pin exactly
   // one staging piece through completion; mutation retires unread sources.
   // Private state/tails remain immutable committed copies. No publication
-  // completes with unread retired rows, and no full-history backing is assigned.
+  // completes with unread retired rows. No full-history backing is assigned.
   using CopyRows = std::function<Completion(std::span<const std::byte>,
                                             std::span<std::byte>, Stream&)>;
   PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
