@@ -3086,6 +3086,11 @@ public:
       step.draft_rounds = stats.cycles - before[i].cycles;
       step.draft_tokens = stats.drafted - before[i].drafted;
       step.draft_accepted_tokens = stats.accepted - before[i].accepted;
+      // A request whose peers dropped out runs a single-session step,
+      // which can use prompt lookup.
+      step.lookup_tokens = stats.lookup - before[i].lookup;
+      step.lookup_accepted_tokens =
+          stats.lookup_accepted - before[i].lookup_accepted;
     }
     return steps;
   }

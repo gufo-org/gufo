@@ -56,6 +56,14 @@ inline std::atomic<std::uint64_t>& TotalDraftAcceptedTokens() {
   static std::atomic<std::uint64_t> count{0};
   return count;
 }
+inline std::atomic<std::uint64_t>& TotalLookupTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
+inline std::atomic<std::uint64_t>& TotalLookupAcceptedTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
 inline std::atomic<double>& LastPromptSpeed() {
   static std::atomic<double> val{0.0};
   return val;
@@ -112,6 +120,10 @@ inline void RecordRequestMetrics(const TextGenerationBackend::Result& result) {
                                        std::memory_order_relaxed);
   detail::TotalDraftAcceptedTokens().fetch_add(result.draft_accepted_tokens,
                                                std::memory_order_relaxed);
+  detail::TotalLookupTokens().fetch_add(result.lookup_tokens,
+                                        std::memory_order_relaxed);
+  detail::TotalLookupAcceptedTokens().fetch_add(result.lookup_accepted_tokens,
+                                                std::memory_order_relaxed);
   const double prompt_per_second = PrefillTokensPerSecond(result);
   const double tok_per_sec =
       (result.decode_ms > 0.0 && result.completion_tokens > 0)

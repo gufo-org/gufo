@@ -921,6 +921,11 @@ void TestLlamaSlotsAndMetrics() {
   assert(metrics.find("# TYPE gufo_device_lost_total counter\n") !=
          std::string::npos);
   assert(metrics.find("gufo_device_lost_total 0\n") != std::string::npos);
+  for (const std::string counter : {"gufo_spec_lookup_tokens_total",
+                                    "gufo_spec_lookup_accepted_tokens_total"}) {
+    assert(metrics.find("# TYPE " + counter + " counter\n") !=
+           std::string::npos);
+  }
   const std::string ratio_prefix = "llamacpp:kv_cache_usage_ratio ";
   const auto ratio_pos = metrics.find("\n" + ratio_prefix);
   assert(ratio_pos != std::string::npos);
