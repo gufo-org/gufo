@@ -302,7 +302,7 @@ nix develop -c python3 tests/functional/cache_lifecycle.py \
   --context 32768 --sessions 1 --think off --speculative off
 ```
 
-Repeat `--case restart|tiered|oversized|crash` to select cases. `restart` models
+Repeat `--case restart|tiered|oversized|crash|side-traffic` to select cases. `restart` models
 llama-swap stopping and starting a server between turns. `tiered` first warms a
 short RAM prefix after restart, then requests a history with a deeper published
 disk checkpoint. `oversized` uses 1 MiB staging beneath an observed larger
@@ -323,11 +323,19 @@ Use `--staging-bytes` to match the staging budget of a reported restart,
 tiered or crash workload (default: 2 GiB). This value is recorded in the
 report; the oversized case always keeps its 1 MiB staging allocation.
 For checkpoints larger than committed RAM, use `--require-over-ram` with
-`--case oversized`. For example, Flash-Next at context 262144 with
+`--case oversized` or `--case side-traffic`. For example, Flash-Next at context 262144 with
 `--seed-lines 12500 --minimum-published-tokens 174000` and
 `--cache-ram-bytes 4593364992` exercises a 175K seed and a 186K continuation.
 The assertion compares the published payload with the server's actual
 post-allocation RAM budget; a queued job alone does not qualify the case.
+`side-traffic` keeps the system prompt at at most 256 background lines and
+places the remaining seed in the user history. After publishing the deep append
+and restarting, it alternates four short conversations sharing that system with
+one further deep turn, for three rounds. Every deep turn must retain at least
+the last published boundary; each new deep publication must advance before the
+next round. Cold output controls run after all warm traffic. This covers the
+short-peer/deep-history pattern reported in #542; the system-only oversized
+fixture cannot establish that behavior.
 Known cache-work failures exit nonzero and retain controls/evidence; they are
 not skipped, marked as expected passes, or fixed in this test-only card.
 
