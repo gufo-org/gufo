@@ -2,6 +2,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <stdexcept>
@@ -44,10 +45,11 @@ BackingPin& BackingPin::operator=(BackingPin&& other) noexcept {
   return *this;
 }
 BackingBlock::BackingBlock(std::shared_ptr<detail::BackingState> state,
-                           std::size_t index,
+                           std::size_t index, std::size_t blocks,
                            cache::ResourceReservation reservation)
     : state_(std::move(state)),
       index_(index),
+      blocks_(blocks),
       reservation_(std::move(reservation)) {}
 BackingBlock& BackingBlock::operator=(BackingBlock&& other) noexcept {
   if (this != &other) {
@@ -55,6 +57,7 @@ BackingBlock& BackingBlock::operator=(BackingBlock&& other) noexcept {
     charge_ = {};
     state_ = std::move(other.state_);
     index_ = other.index_;
+    blocks_ = other.blocks_;
     reservation_ = std::move(other.reservation_);
     charge_ = std::move(other.charge_);
   }
@@ -64,7 +67,7 @@ std::span<std::byte> BackingBlock::Bytes() const {
   if (!state_)
     throw std::logic_error("empty backing block");
   return {static_cast<std::byte*>(state_->data) + index_ * state_->block_bytes,
-          state_->block_bytes};
+          blocks_ * state_->block_bytes};
 }
 cache::ResourceAllocationInfo BackingBlock::Info() const {
   return reservation_ ? reservation_.Info() : charge_.Info();
@@ -145,36 +148,39 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
   state_ = std::move(state);
 }
 std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
-    cache::ResourceCategory category) {
-  // Validate even for an empty pool.
+    cache::ResourceCategory category, std::size_t payload_bytes) {
   if (category != cache::ResourceCategory::kBackingAssigned &&
       category != cache::ResourceCategory::kPrivateState &&
       category != cache::ResourceCategory::kPrivateTail)
     throw std::invalid_argument("invalid backing assignment category");
   const auto count = state_->blocks.size();
-  if (!count)
+  const auto blocks =
+      payload_bytes ? 1 + (payload_bytes - 1) / state_->block_bytes : 1;
+  if (blocks > count)
     return std::nullopt;
-  // Continue after the last assignment instead of rescanning its occupied
-  // prefix for every block in a capture. The ledger remains the exclusive
-  // owner check; this relaxed hint may race without affecting correctness.
   auto i = state_->next.load(std::memory_order_relaxed);
-  for (std::size_t tried = 0; tried < count; ++tried) {
-    // Exhausted size classes are expected under retention pressure. Avoid
-    // allocating an assignment token and unwinding an exception for every
-    // occupied block. ReserveBacking still resolves any race after this hint.
-    if (state_->blocks[i].Info().category !=
-        cache::ResourceCategory::kBackingFree) {
-      i = i + 1 == count ? 0 : i + 1;
-      continue;
+  for (std::size_t tried = 0; tried < count;) {
+    // An occupied page rules out every candidate run that crosses it. Skip
+    // without allocating assignment bookkeeping, including full exhaustion.
+    std::size_t free = 0;
+    while (free < blocks && i + free < count &&
+           state_->blocks[i + free].Info().category ==
+               cache::ResourceCategory::kBackingFree)
+      ++free;
+    if (free == blocks) {
+      try {
+        auto reservation = cache::ResourceCharge::ReserveBacking(
+            std::span(state_->blocks).subspan(i, blocks), category);
+        state_->next.store(i + blocks == count ? 0 : i + blocks,
+                           std::memory_order_relaxed);
+        return BackingBlock(state_, i, blocks, std::move(reservation));
+      } catch (const std::bad_alloc&) {
+        // A racing assignment or injected bookkeeping failure is atomic.
+      }
     }
-    try {
-      auto reservation = state_->blocks[i].ReserveBacking(category);
-      state_->next.store(i + 1 == count ? 0 : i + 1, std::memory_order_relaxed);
-      return BackingBlock(state_, i, std::move(reservation));
-    } catch (const std::bad_alloc&) {
-      // No payload allocation on exhaustion or an assignment race.
-    }
-    i = i + 1 == count ? 0 : i + 1;
+    const auto step = free < blocks ? std::min(free + 1, count - i) : 1;
+    tried += step;
+    i = i + step >= count ? 0 : i + step;
   }
   return std::nullopt;
 }

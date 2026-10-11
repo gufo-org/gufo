@@ -53,10 +53,11 @@ public:
 
 private:
   friend class CommittedBackingPool;
-  BackingBlock(std::shared_ptr<detail::BackingState>, std::size_t,
+  BackingBlock(std::shared_ptr<detail::BackingState>, std::size_t, std::size_t,
                cache::ResourceReservation);
   std::shared_ptr<detail::BackingState> state_;
   std::size_t index_;
+  std::size_t blocks_;
   cache::ResourceReservation reservation_;
   cache::ResourceCharge charge_;
 };
@@ -75,7 +76,8 @@ public:
   // allocates and touches all payload pages. No refill or resize API exists.
   CommittedBackingPool(cache::ResourceLedger&, BackingPoolConfig);
   // Thread safe. Races/bad_alloc try other blocks, then decline capture.
-  [[nodiscard]] std::optional<BackingBlock> TryAcquire(cache::ResourceCategory);
+  [[nodiscard]] std::optional<BackingBlock> TryAcquire(
+      cache::ResourceCategory, std::size_t payload_bytes = 0);
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;
   [[nodiscard]] std::size_t PageCommitAllocations() const noexcept;

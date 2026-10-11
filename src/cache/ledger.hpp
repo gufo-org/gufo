@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <span>
 
 namespace gufo::cache {
 
@@ -130,6 +131,10 @@ public:
   // it and the pool should try another block or decline capture. Invalid pool
   // handles throw logic_error. No request-path page commitment is required.
   [[nodiscard]] ResourceReservation ReserveBacking(ResourceCategory) const;
+  // Atomically assign adjacent physical blocks as one payload owner. Every
+  // input is a distinct original free pool handle from the same ledger.
+  [[nodiscard]] static ResourceReservation ReserveBacking(
+      std::span<const ResourceCharge>, ResourceCategory);
   // Only retained payload (assigned spill, chunks, private state/tails) counts
   // as persistence-pinned bytes. Staging and metadata use their own admission
   // categories; retain their charges directly for queued-job lifetimes.

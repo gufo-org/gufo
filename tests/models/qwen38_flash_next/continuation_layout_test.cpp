@@ -108,14 +108,16 @@ void CheckBacking(bool mtp, std::uint32_t context, std::uint32_t concurrency,
                   std::size_t independent_rows) {
   const auto c = ProductionGeometry();
   const qfn::ContinuationLayout layout(c, mtp, context, 8);
-  std::map<std::size_t, std::size_t> available, required;
+  std::size_t available = 0, required = 0;
   std::size_t bytes = 0;
   for (const auto& allocation : layout.BackingPlan(ram, concurrency)) {
     Require(allocation.block_bytes % 4096 == 0 && allocation.blocks != 0,
             "invalid physical backing class");
     Require(allocation.metadata_bytes >= 4096 + allocation.blocks * 1024,
             "backing plan omitted allocator headroom");
-    available[allocation.block_bytes] = allocation.blocks;
+    Require(allocation.block_bytes == 65536,
+            "backing pages cannot serve all components");
+    available += allocation.blocks;
     bytes +=
         allocation.block_bytes * allocation.blocks + allocation.metadata_bytes;
   }
@@ -126,25 +128,24 @@ void CheckBacking(bool mtp, std::uint32_t context, std::uint32_t concurrency,
     const auto payload = d.kind == cache::ComponentKind::kPrivateState
                              ? d.state_bytes
                              : d.rows_per_chunk * d.row_bytes;
-    const auto capacity = (payload + 4095) / 4096 * 4096;
+    const auto pages = (payload + 65535) / 65536;
     if (d.kind == cache::ComponentKind::kPrivateState)
-      required[capacity] += checkpoints;
+      required += pages * checkpoints;
     else {
       const bool pooled =
           component.part == qfn::ContinuationPart::kPooledKeys ||
           component.part == qfn::ContinuationPart::kDraftPooledKeys;
       const auto rows =
           pooled ? independent_rows / c.compress_ratio : independent_rows;
-      required[capacity] +=
-          (rows + d.rows_per_chunk - 1) / d.rows_per_chunk + checkpoints;
+      required += pages * ((rows + d.rows_per_chunk - 1) / d.rows_per_chunk +
+                           checkpoints);
     }
   }
   // Independent physical demands, including shared-class collisions and a
   // partial tail per checkpoint. A row-heavy pool must not strand most of its
   // budget while private state already refuses feasible histories.
-  for (const auto& [capacity, count] : required)
-    Require(available[capacity] >= count,
-            "feasible capture envelope does not fit its classes");
+  Require(available >= required,
+          "feasible capture envelope does not fit committed pages");
   Require(layout.BackingPlan(1 << 20, concurrency).empty(),
           "tiny budgets should leave cache metadata headroom");
   Reject([&] { (void)layout.BackingPlan(ram, 0); });

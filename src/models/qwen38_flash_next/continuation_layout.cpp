@@ -121,61 +121,17 @@ std::vector<ContinuationBackingClass> ContinuationLayout::BackingPlan(
     std::size_t ram, std::uint32_t concurrency) const {
   if (!concurrency || concurrency > 8)
     throw std::invalid_argument("invalid continuation backing concurrency");
-  constexpr std::size_t page = 4096, per_block = 1024;
-  const auto payload_budget =
-      ram > (4ULL << 20) ? (ram - (4ULL << 20)) / 10 * 9 : 0;
-  struct Class {
-    std::size_t private_components{}, rows{}, tails{};
-  };
-  std::map<std::size_t, Class> classes;
-  std::size_t private_bytes = 0, row_bytes = 0, tail_bytes = 0;
-  for (const auto& component : components_) {
-    const auto& d = component.descriptor;
-    const auto bytes = d.kind == cache::ComponentKind::kPrivateState
-                           ? d.state_bytes
-                           : d.row_bytes * d.rows_per_chunk;
-    const auto capacity = (bytes + page - 1) / page * page;
-    auto& allocation = classes[capacity];
-    if (d.kind == cache::ComponentKind::kPrivateState) {
-      ++allocation.private_components;
-      private_bytes += capacity + per_block;
-    } else {
-      const auto rows = IsPool(component.part) ? context_ / ratio_ : context_;
-      const auto chunks = (rows + d.rows_per_chunk - 1) / d.rows_per_chunk;
-      const auto count = std::max(2U, concurrency) * chunks;
-      allocation.rows += count;
-      ++allocation.tails;
-      row_bytes += count * (capacity + per_block);
-      tail_bytes += capacity + per_block;
-    }
-  }
-  const auto headers = classes.size() * page;
-  if (headers >= payload_budget)
+  // Private frontiers, rows and tails share the same committed pages. Fixed
+  // per-component classes can exhaust private backing while rows remain free.
+  // Contiguous page groups retain one payload owner and charge all slack.
+  constexpr std::size_t page = 65536, per_block = 1024, header = 4096;
+  const auto budget = ram > (4ULL << 20) ? (ram - (4ULL << 20)) / 10 * 9 : 0;
+  if (budget <= header)
     return {};
-  const auto budget = payload_budget - headers;
-  // Eight private frontiers cover a cold pass's four grids, stable/prompt
-  // copies and subsequent continuation work. At smaller budgets, cache
-  // admission still refuses checkpoints that cannot fit their complete plan.
-  auto frames = std::min<std::size_t>(8, budget / (private_bytes + tail_bytes));
-  if (budget >= row_bytes &&
-      (budget - row_bytes) / (private_bytes + tail_bytes) >= frames)
-    frames = (budget - row_bytes) / (private_bytes + tail_bytes);
-  const auto remaining = budget - frames * private_bytes;
-  const auto row_weight = row_bytes + frames * tail_bytes;
-  std::vector<ContinuationBackingClass> result;
-  for (const auto& [bytes, allocation] : classes) {
-    const auto rows = allocation.rows + frames * allocation.tails;
-    const auto share =
-        row_weight
-            ? static_cast<std::size_t>(static_cast<long double>(remaining) *
-                                       rows * (bytes + per_block) / row_weight)
-            : 0;
-    const auto blocks =
-        frames * allocation.private_components + share / (bytes + per_block);
-    if (blocks)
-      result.push_back({bytes, blocks, page + blocks * per_block});
-  }
-  return result;
+  const auto blocks = (budget - header) / (page + per_block);
+  if (!blocks)
+    return {};
+  return {{page, blocks, header + blocks * per_block}};
 }
 
 std::size_t ContinuationLayout::RowBytes(std::uint32_t target,

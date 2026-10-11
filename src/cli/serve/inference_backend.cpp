@@ -2463,7 +2463,7 @@ public:
                                 std::size_t ram) const override {
     struct Backing {
       hip::TransferPool streams{64};
-      std::map<std::size_t, std::unique_ptr<hip::CommittedBackingPool>> pools;
+      std::unique_ptr<hip::CommittedBackingPool> pool;
       std::map<std::uint32_t, std::size_t> component_classes;
     };
     auto result = std::make_unique<ComponentCacheResources>();
@@ -2488,33 +2488,29 @@ public:
     }
     // The remainder belongs to index, histories, disk catalog and queue
     // metadata. The pools charge their own per-block allocator headroom.
-    for (const auto& allocation : plan) {
-      backing->pools.emplace(
-          allocation.block_bytes,
-          std::make_unique<hip::CommittedBackingPool>(
-              ledger, hip::BackingPoolConfig{
-                          allocation.blocks * allocation.block_bytes +
-                              allocation.metadata_bytes,
-                          allocation.block_bytes, allocation.metadata_bytes}));
-    }
+    if (plan.size() != 1)
+      throw std::invalid_argument("insufficient component backing budget");
+    const auto& allocation = plan.front();
+    backing->pool = std::make_unique<hip::CommittedBackingPool>(
+        ledger, hip::BackingPoolConfig{
+                    allocation.blocks * allocation.block_bytes +
+                        allocation.metadata_bytes,
+                    allocation.block_bytes, allocation.metadata_bytes});
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
       return backing->streams.TryAcquire();
     };
     result->allocate = [backing](const cache::PayloadRequest& request) {
-      // Tails use their component's full chunk size class. Slack is charged.
+      // Bound the logical capture, then assign whole shared backing pages.
       const auto capacity =
           backing->component_classes.at(request.component.value);
       if (request.bytes > capacity)
         throw std::logic_error("component capture exceeds its backing class");
-      auto pool = backing->pools.find(capacity);
-      if (pool == backing->pools.end())
-        throw cache::ResourceExhausted();
       const auto category =
           request.category == cache::ResourceCategory::kBackingAssigned
               ? cache::ResourceCategory::kBackingAssigned
               : request.category;
-      auto block = pool->second->TryAcquire(category);
+      auto block = backing->pool->TryAcquire(category, request.bytes);
       if (!block)
         throw cache::ResourceExhausted();
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
@@ -2524,7 +2520,7 @@ public:
             owner->Convert();
             return std::move(*owner).TakePayload();
           },
-          pool->second.get(),
+          backing->pool.get(),
           [owner, request](cache::SlotLease& lease, auto source) {
             return cache::Payload::Borrowed(std::move(*owner).Borrow(
                 lease, request.component, request.first, request.end,
