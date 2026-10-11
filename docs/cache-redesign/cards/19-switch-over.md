@@ -650,9 +650,11 @@ this follow-up.
   an upper bound of its borrowed ends, so appends past it skip the registry.
   The bound rises before a range is registered and clears only after
   reassignment has preserved every range.
-- Reassignment preserved borrowed rows one synchronous 256 KiB chunk at a
-  time. It now submits whole ranges on up to eight pooled streams before
-  waiting. Anything not copied falls back to the existing synchronous path.
+- An experiment overlapped reassignment preservation on up to eight pooled
+  streams. It barely moved queue time (+10.6 to +10.3 ms median). It also
+  broke the bounded-cancellation contract of `cache_idle_spill_test`, which
+  hosted CI caught on `d9fa9dfb`–`4c638417`. `b060a2f0` restores bounded
+  synchronous pieces.
 - Capture and restore waited after every four transfers. Batches now reach 16;
   when the shared stream pool is momentarily empty, a batch settles its own
   transfers and retries instead of failing.
@@ -683,7 +685,11 @@ Strict 5% / 3 ms flags against fresh main fall as follows:
 
 The remaining queue excess is about 3–4 ms at the median. In the
 concurrency suite, roughly half of it is reassignment wait, and the rest is
-not attributed. MTP's largest TTFT flags are concurrency `long_tasks`
+not attributed. The final code (`b060a2f0`, SHA-256
+`6025a4299c74f74603aab59c2f31b4d194cb828871fc1c0b28ca3b27c8ac5076`) remeasures
+within noise of the table. Medians: AR queue +3.2, TTFT −0.5, decode +0.6 and
+mean inter-token +1.9 ms, with 2 decode flags. MTP queue +4.6, TTFT +20.5,
+decode −0.9 and mean inter-token +0.1 ms. MTP's largest TTFT flags are concurrency `long_tasks`
 requests: +409 and +632 ms on about 5–6.6 s. The long cold MTP prefills are
 about 2% slower (310–370 ms on 16 s), within the 5% gate. The gate is still
 not met. The final candidate binary SHA-256 is
