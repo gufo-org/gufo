@@ -522,8 +522,7 @@ void TestCachedPrefillMetrics() {
   cached.component_cache->borrowed_capacity_bytes = 4096;
   const auto component_timings = gufo::server::GenerationTimings(cached);
   const auto* component = component_timings.find("component_cache");
-  Expect(component &&
-             component->member_str("schema") == "component-cache-v1" &&
+  Expect(component && component->member_str("schema") == "component-cache-v1" &&
              component->member_size("borrowed_capacity_bytes") == 4096,
          "Shared Chat/Responses/Messages timings retain component cache work");
 
