@@ -534,7 +534,9 @@ public:
   TextPrefillStep PrefillThrough(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t budget, std::size_t boundary,
-      std::unique_ptr<TextRunnerSnapshot>* checkpoint) const override {
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
+      const std::function<std::unique_ptr<TextRunnerSnapshot>()>&)
+      const override {
     ++stats_->snapshot_captures;
     *checkpoint = std::make_unique<FakeSnapshot>(boundary, 0, 90);
     auto step = FakeRunner::Prefill(state, prompt, offset, budget);

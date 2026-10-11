@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -211,6 +212,87 @@ void SameLogits(const qfn::Session& a, const qfn::Session& b) {
               std::memcmp(a.Logits().data(), b.Logits().data(),
                           a.Logits().size_bytes()) == 0,
           "restored next-step logits differ");
+}
+void CheckInPass(const std::shared_ptr<qfn::Model>& model, bool mtp,
+                 std::span<const std::int32_t> prompt) {
+  gufo::hip::TransferPool streams(2);
+  qfn::ContinuationAdapter adapter(
+      model,
+      mtp ? gufo::core::SessionMode::kSpeculative
+          : gufo::core::SessionMode::kAutoregressive,
+      16384, {'i', 'n', 'p', 'a', 's', 's'});
+  Guard source_guard, reference_guard;
+  auto source = adapter.CreateSlot(source_guard);
+  auto reference = adapter.CreateSlot(reference_guard);
+  auto& a = adapter.GetSession(*source);
+  auto& b = adapter.GetSession(*reference);
+  std::string error;
+  for (const auto boundary : {2047U, 8192U, 8203U}) {
+    const auto predicted =
+        adapter.PrefillCheckpointPositions(*source, boundary);
+    Checkpoint frozen;
+    bool called = false;
+    adapter.PrefillThrough(*source, prompt.first(boundary + 5), boundary, [&] {
+      called = true;
+      Require(adapter.Positions(*source) == predicted,
+              "in-pass positions differ from admission prediction");
+      Reject([&] { (void)adapter.GetSession(*source); });
+      Reject([&] { (void)a.Sync(prompt.first(boundary + 5), &error); });
+      Reject([&] { a.Reset(); });
+      Require(!adapter.Invalidate(*source),
+              "in-pass consumer invalidated its capture frontier");
+      frozen = Capture(adapter, *source, streams);
+    });
+    Require(called && a.Position() == boundary + 5,
+            "in-pass capture changed the completed live frontier");
+    std::unique_ptr<qfn::SessionSnapshot> native;
+    Require(
+        b.SyncThrough(prompt.first(boundary + 5), boundary, &native, &error),
+        error);
+    SameLogits(a, b);
+    Require(b.RestoreSnapshot(*native, &error), error);
+    const auto independent = Capture(adapter, *reference, streams);
+    Require(frozen.positions == independent.positions &&
+                frozen.bytes == independent.bytes,
+            "component in-pass bytes differ from native boundary restore");
+    Load(adapter, *source, frozen, streams);
+    Require(adapter.Validate(*source, frozen.positions),
+            "component in-pass restore rejected");
+    SameLogits(a, b);
+    Require(Decode(a, 24, mtp) == Decode(b, 24, mtp),
+            "in-pass sampled continuation differs");
+    SameLogits(a, b);
+    if (mtp)
+      Require(a.Statistics().drafted > 0, "in-pass MTP ran no drafts");
+    Require(adapter.Invalidate(*source) && adapter.Invalidate(*reference),
+            "in-pass reset failed");
+  }
+  const auto component =
+      std::ranges::find_if(adapter.Components(), [](const auto& c) {
+        return c.kind == cache::ComponentKind::kPrivateState;
+      });
+  Require(component != adapter.Components().end(), "missing private component");
+  for (const bool throw_consumer : {false, true}) {
+    auto stream = streams.TryAcquire();
+    Require(bool(stream), "in-pass failure stream exhausted");
+    std::vector<std::byte> bytes(
+        std::min<std::size_t>(64, component->state_bytes));
+    std::optional<cache::Completion> pending;
+    Reject([&] {
+      adapter.PrefillThrough(*source, prompt.first(2052), 2047, [&] {
+        pending.emplace(adapter.CapturePrivatePiece(*source, component->id, 0,
+                                                    bytes, *stream));
+        if (throw_consumer)
+          throw std::runtime_error("rejected in-pass consumer");
+      });
+    });
+    Require(pending && pending->Ready() &&
+                pending->Wait() == cache::TransferResult::kSucceeded,
+            "failed in-pass consumer left a transfer reading retired scratch");
+    Require(adapter.Invalidate(*source),
+            "failed in-pass transfer did not drain");
+  }
+  std::cout << (mtp ? "MTP" : "AR") << ",in_pass,PASS\n";
 }
 void CheckTransferAndGuardLifetime(const std::shared_ptr<qfn::Model>& model,
                                    bool mtp,
@@ -711,11 +793,14 @@ int main(int argc, char** argv) {
       argc == 6 && std::string_view(argv[5]) == "--guard-only";
   const bool image_only =
       argc == 6 && std::string_view(argv[5]) == "--image-only";
-  if ((argc != 5 && !guard_only && !image_only) ||
+  const bool in_pass_only =
+      argc == 6 && std::string_view(argv[5]) == "--in-pass-only";
+  if ((argc != 5 && !guard_only && !image_only && !in_pass_only) ||
       std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
-    std::cerr << "Usage: continuation_adapter_test --model FIRST.gguf "
-                 "--mtp-model MTP.gguf [--guard-only|--image-only]\n";
+    std::cerr
+        << "Usage: continuation_adapter_test --model FIRST.gguf "
+           "--mtp-model MTP.gguf [--guard-only|--image-only|--in-pass-only]\n";
     return 77;
   }
   try {
@@ -730,11 +815,17 @@ int main(int argc, char** argv) {
     std::vector<std::int32_t> prompt(10000);
     for (std::size_t i = 0; i < prompt.size(); ++i)
       prompt[i] = pattern[i % pattern.size()];
-    if (!image_only) {
+    if (!image_only && !in_pass_only) {
       CheckTransferAndGuardLifetime(model, false, prompt);
       CheckTransferAndGuardLifetime(model, true, prompt);
     }
     if (guard_only)
+      return 0;
+    if (!image_only) {
+      CheckInPass(model, false, prompt);
+      CheckInPass(model, true, prompt);
+    }
+    if (in_pass_only)
       return 0;
     if (!image_only) {
       Check(model, false, prompt);

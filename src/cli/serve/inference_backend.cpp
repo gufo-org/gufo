@@ -2381,6 +2381,12 @@ public:
   }
 
   [[nodiscard]] QwenFlashNextSession& session() const { return *session_; }
+  [[nodiscard]] models::qwen38_flash_next::ContinuationAdapter& adapter()
+      const {
+    return dynamic_cast<models::qwen38_flash_next::ContinuationAdapter&>(
+        *adapter_);
+  }
+  [[nodiscard]] cache::Slot& slot() const { return *slot_; }
   [[nodiscard]] std::size_t position() const noexcept { return position_; }
   void set_position(std::size_t position) noexcept { position_ = position; }
 
@@ -2566,7 +2572,7 @@ public:
                 .batched_multi_token_decode = use_mtp_,
                 .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
                 .prefix_reuse = true,
-                .in_pass_checkpoint = false,
+                .in_pass_checkpoint = true,
             },
         .persistence = persistence_,
     };
@@ -2719,6 +2725,60 @@ public:
         .consumed_tokens = consumed,
         .decode_ready = next_position == prompt.size(),
     };
+  }
+
+  [[nodiscard]] std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::size_t boundary) const override {
+    const auto& qfn = RequireQwenFlashNextState(state);
+    const auto consumed = std::min<std::size_t>(
+        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
+    if (boundary <= offset + 1 || boundary >= offset + consumed ||
+        offset + consumed - boundary > 8)
+      return std::nullopt;
+    const auto bytes = qfn.session().PrefillCheckpointBytes(
+        static_cast<std::uint32_t>(boundary));
+    return bytes ? std::optional<std::size_t>(bytes) : std::nullopt;
+  }
+
+  [[nodiscard]] TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary,
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
+      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& capture)
+      const override {
+    auto& qfn = RequireQwenFlashNextState(state);
+    if (!checkpoint || !capture || offset != qfn.position())
+      throw std::logic_error("invalid component in-pass checkpoint request");
+    const auto consumed = std::min<std::size_t>(
+        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
+    const auto next_position = offset + consumed;
+    const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
+    double capture_ms = 0;
+    try {
+      qfn.adapter().PrefillThrough(
+          qfn.slot(), prefix, static_cast<std::uint32_t>(boundary), [&] {
+            const auto started = std::chrono::steady_clock::now();
+            try {
+              *checkpoint = capture();
+            } catch (...) {
+              // Optional retention may refuse; the complete live prefill is
+              // valid.
+              checkpoint->reset();
+            }
+            capture_ms += std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - started)
+                              .count();
+          });
+    } catch (...) {
+      qfn.set_position(0);
+      throw;
+    }
+    qfn.set_position(next_position);
+    return {.consumed_tokens = consumed,
+            .decode_ready = next_position == prompt.size(),
+            .checkpoint_ms = capture_ms};
   }
 
   // The engine stops before committing EOS when the request enables it.

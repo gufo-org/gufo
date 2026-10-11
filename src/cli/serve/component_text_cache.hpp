@@ -71,6 +71,7 @@ public:
                        std::vector<ContinuationToken>);
     void Invalidate() noexcept;
     [[nodiscard]] std::size_t CaptureBytes() const;
+    [[nodiscard]] std::size_t CaptureBytes(std::size_t boundary) const;
     [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Capture();
     [[nodiscard]] ComponentCacheMetrics Metrics() const;
     [[nodiscard]] std::vector<std::size_t> PlannedCaptures(
@@ -133,6 +134,7 @@ public:
                      std::vector<ContinuationToken> = {});
   void Invalidate() noexcept;
   [[nodiscard]] std::size_t CaptureBytes() const;
+  [[nodiscard]] std::size_t CaptureBytes(std::size_t boundary) const;
   [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Capture();
   [[nodiscard]] std::optional<ComponentCacheMetrics> Metrics() const;
   [[nodiscard]] std::vector<std::size_t> PlannedCaptures(

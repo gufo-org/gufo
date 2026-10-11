@@ -804,6 +804,12 @@ std::size_t ComponentTextCache::Lease::CaptureBytes() const {
   return impl_->entry->history->NewPayloadBytes(
       impl_->cache->resources->adapter->Positions(impl_->slot.Execution()));
 }
+std::size_t ComponentTextCache::Lease::CaptureBytes(
+    std::size_t boundary) const {
+  return impl_->entry->history->NewPayloadBytes(
+      impl_->cache->resources->adapter->PrefillCheckpointPositions(
+          impl_->slot.Execution(), boundary));
+}
 std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   auto& request = *impl_;
   auto& cache = *request.cache;
@@ -1083,6 +1089,9 @@ void ServingCacheLease::AdoptRestoredPrefix(std::size_t tokens,
 }
 std::size_t ServingCacheLease::CaptureBytes() const {
   return component_->CaptureBytes();
+}
+std::size_t ServingCacheLease::CaptureBytes(std::size_t boundary) const {
+  return component_->CaptureBytes(boundary);
 }
 std::unique_ptr<TextRunnerSnapshot> ServingCacheLease::Capture() {
   return component_->Capture();

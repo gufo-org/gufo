@@ -1347,10 +1347,12 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
       impl_->prefill_offset < snapshot_position &&
       snapshot_position < impl_->prompt.size() &&
       impl_->runner->Descriptor().capabilities.in_pass_checkpoint) {
-    const auto bytes = impl_->runner->PrefillCheckpointBytes(
+    auto bytes = impl_->runner->PrefillCheckpointBytes(
         state, impl_->prompt, impl_->prefill_offset, max_input_tokens,
         snapshot_position);
     if (bytes) {
+      if (impl_->lease.component())
+        bytes = impl_->lease.CaptureBytes(snapshot_position);
       in_pass = impl_->lease.TryReserveSnapshot(
           *bytes, snapshot_position,
           impl_->retain_fallback && impl_->fallback_position == 0,
@@ -1380,10 +1382,15 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
   std::unique_ptr<TextRunnerSnapshot> captured;
+  const std::function<std::unique_ptr<TextRunnerSnapshot>()> capture =
+      in_pass && impl_->lease.component()
+          ? std::function<std::unique_ptr<TextRunnerSnapshot>()>(
+                [&] { return impl_->lease.Capture(); })
+          : std::function<std::unique_ptr<TextRunnerSnapshot>()>{};
   auto step =
       in_pass ? impl_->runner->PrefillThrough(
                     state, model_prompt, impl_->prefill_offset,
-                    max_input_tokens, snapshot_position, &captured)
+                    max_input_tokens, snapshot_position, &captured, capture)
               : impl_->runner->Prefill(state, model_prompt,
                                        impl_->prefill_offset, max_input_tokens);
   const std::size_t maximum_consumed = std::min(remaining, max_input_tokens);

@@ -35,6 +35,7 @@ class DeviceModel;
 class Executor;
 class Session;
 class SnapshotState;
+struct PrefillCheckpoint;
 }  // namespace rocm
 
 struct ModelOptions {
@@ -238,16 +239,22 @@ private:
   friend class ContinuationAdapter;
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
 
+  using PrefillCapture = std::function<void(const rocm::PrefillCheckpoint&)>;
+  bool SyncThroughComponents(std::span<const std::int32_t>, std::uint32_t,
+                             const PrefillCapture&, std::string*);
+
   bool Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
             bool prefill = false, std::uint32_t boundary = 0,
             std::unique_ptr<SessionSnapshot>* checkpoint = nullptr,
             double* capture_ms = nullptr,
-            std::span<const std::int32_t> after = {});
+            std::span<const std::int32_t> after = {},
+            const PrefillCapture& capture = {});
   bool SyncImpl(std::span<const std::int32_t> prompt, std::string* error_msg,
                 std::uint32_t boundary,
                 std::unique_ptr<SessionSnapshot>* checkpoint,
                 double* capture_ms = nullptr,
-                std::span<const std::int32_t> next = {});
+                std::span<const std::int32_t> next = {},
+                const PrefillCapture& capture = {});
   std::unique_ptr<SessionSnapshot> SaveSnapshotImpl(
       const rocm::Session& state, std::span<const std::int32_t> tokens,
       std::span<const float> logits, std::uint32_t hidden_rows,

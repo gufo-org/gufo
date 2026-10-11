@@ -357,9 +357,13 @@ public:
       std::size_t, std::size_t) const {
     return std::nullopt;
   }
+  /// Component runners invoke the consumer synchronously while the coherent
+  /// boundary is readable. It must drain captures before execution resumes.
+  /// Native snapshot runners leave the consumer empty.
   [[nodiscard]] virtual TextPrefillStep PrefillThrough(
       TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
-      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*) const {
+      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*,
+      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& = {}) const {
     throw std::logic_error("runner does not support in-pass checkpoints");
   }
   [[nodiscard]] virtual TextDecodeSelection SelectNext(

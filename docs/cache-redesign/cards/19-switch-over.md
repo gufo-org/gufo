@@ -504,3 +504,30 @@ all 57 hosted checks pass after these changes; the production build passes.
 The earlier HTTP observations remain attached to the immutable pre-selection
 candidate. The revised candidate still needs its affected HTTP histories and
 fresh matched main controls.
+
+The matched core-history run freezes `3064a01e` (the later `8ea0d99c` changes
+only assertion formatting) and main `3323e7c7`, using the same pinned toolchain,
+model, C2, 32768 context, 8 GiB RAM, sampling and suite order. Growth, depth,
+shared-prefix, rotation and concurrency functional checks pass in both modes
+on both builds. The candidate also passes all three MTP edited-history cases,
+reusing 2048 tokens in each, with 1506 actual MTP drafts over the complete run.
+Main fails edited-history reuse in both modes, and the candidate's AR
+older-tool edit loses its retained boundary and fails. The comparator rejects
+these failed runs; they establish no matched latency gain. Every raw request,
+failed report and diagnostic comparison remains retained alongside the binaries.
+
+The AR failure exposes stranded free capacity between fixed backing classes:
+the candidate can refuse captures while reporting more than 5 GiB of free
+backing. Capture/prefill timing flags also require investigation. Flash serving
+disabled its existing coherent in-pass checkpoint capability, adding a separate
+five-token prefill tail. Restoring that capability through the component adapter
+is under qualification, including an independent native boundary serialization
+oracle and transfer-drain failure checks. No result is claimed for that pending
+change.
+
+[Issue #542's PR reproduction](https://github.com/gufo-org/gufo/issues/542#issuecomment-6105542426)
+adds a deep pressure/restart gate: with a roughly 174K-token history and a RAM
+budget smaller than its full checkpoint, an earlier PR build retained only the
+system prefix while main eventually resumed the deep disk checkpoint. That
+external observation is preserved and needs a matched local reproduction;
+passing the shorter RAM histories does not qualify it.

@@ -25,6 +25,8 @@ public:
   mutable FakeAdapter* adapter{};
   mutable std::size_t captures{};
   bool defer_idle{};
+  bool in_pass{};
+  mutable std::size_t through_calls{};
   bool UsesComponentCache() const override { return true; }
   TextRunnerDescriptor Descriptor() const override {
     return {.model_id = "component-fake",
@@ -34,7 +36,8 @@ public:
                              .snapshot = true,
                              .fork = true,
                              .final_token_advance_required = false,
-                             .prefix_reuse = true}};
+                             .prefix_reuse = true,
+                             .in_pass_checkpoint = in_pass}};
   }
   TextRunnerResourceClaim ResourceClaim() const override {
     return {.state_capacity_bytes = 1ULL << 30,
@@ -142,6 +145,35 @@ public:
                      prompt.subspan(offset, count));
     return {count, offset + count == prompt.size()};
   }
+  std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState&, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::size_t boundary) const override {
+    const auto end = offset + std::min(budget, prompt.size() - offset);
+    return boundary > offset && boundary < end && end - boundary <= 8
+               ? std::optional<std::size_t>(1)
+               : std::nullopt;
+  }
+  TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary,
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
+      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& capture)
+      const override {
+    ++through_calls;
+    auto& s = dynamic_cast<State&>(state);
+    const auto count = std::min(budget, prompt.size() - offset);
+    const auto head = prompt.subspan(offset, boundary - offset);
+    s.adapter.Append(s.slot, head, head);
+    try {
+      *checkpoint = capture();
+    } catch (...) {
+      checkpoint->reset();
+    }
+    const auto tail = prompt.subspan(boundary, offset + count - boundary);
+    s.adapter.Append(s.slot, tail, tail);
+    return {count, offset + count == prompt.size()};
+  }
   TextDecodeSelection SelectNext(TextRunnerState& state,
                                  sampling::SamplerState&) const override {
     auto& s = dynamic_cast<State&>(state);
@@ -166,6 +198,48 @@ TextRunnerToken Generate(TextRunnerPool::Request& request) {
   const auto token = request.SelectNext().token;
   request.Advance();
   return token;
+}
+void InPassCapturePreservesBoundaryAndLiveTail() {
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto cold_runner = std::make_shared<Runner>();
+  TextRunnerPool cold_pool(cold_runner, 1);
+  auto cold =
+      cold_pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, false);
+  Prefill(cold);
+  const auto expected = Generate(cold);
+  cold.Invalidate();
+  for (const bool fail : {false, true}) {
+    auto runner = std::make_shared<Runner>();
+    runner->in_pass = true;
+    TextRunnerPool pool(runner, 2);
+    auto seed =
+        pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);
+    if (fail)
+      runner->adapter->FailNextTransfer();
+    const auto step = seed.Prefill(64);
+    assert(step.consumed_tokens == 40 && step.decode_ready);
+    assert(runner->through_calls == 1);
+    assert(Generate(seed) == expected);
+    if (fail) {
+      seed.Invalidate();
+      continue;
+    }
+    (void)seed.Commit();
+    auto branch = prompt;
+    branch.back() = 999;
+    auto restored =
+        pool.Acquire(branch, sampling::SamplingConfig{}, {}, {}, true, 35);
+    assert(restored.cached_prompt_tokens() == 35);
+    Prefill(restored);
+    const auto resumed = Generate(restored);
+    restored.Invalidate();
+    auto independent =
+        cold_pool.Acquire(branch, sampling::SamplingConfig{}, {}, {}, false);
+    Prefill(independent);
+    assert(Generate(independent) == resumed);
+    independent.Invalidate();
+  }
 }
 void RestoreFromBusyBorrowedSource() {
   auto runner = std::make_shared<Runner>();
@@ -460,6 +534,7 @@ void NearTailDiskBranchSurvivesRestart() {
 }
 }  // namespace
 int main() {
+  InPassCapturePreservesBoundaryAndLiveTail();
   RestoreFromBusyBorrowedSource();
   ColdAssignmentPrefersPreservedSlot();
   ReuseAndBranches();
