@@ -303,3 +303,14 @@ review's old/new scratch reproductions and the branch-loss example are retained
 under `/tmp/gufo-pr503-r3-*`. The fixed policy is validated with the focused
 ordinary/sanitizer test, production library rebuild and the final hosted suite.
 The archived baseline stays below its 128-record limit and is unaffected.
+
+
+## Review correction (October 11, PR #543)
+
+The reverse-prefix history coverage check inherited from the old cache is
+incorrect: a shorter system/branch checkpoint cannot restore a deeper history.
+The new module now assigns history rank 1 only when a compatible continuation
+covers the history's complete prefix. The regression fails before the fix and
+checks actual eviction/reuse as well as ranks. This is the #553 bug correction,
+not a cost/density policy. [Card 19](19-switch-over.md#review-follow-up-uncovered-history-retention-october-11)
+records validation and the still-open grid/pressure qualification.

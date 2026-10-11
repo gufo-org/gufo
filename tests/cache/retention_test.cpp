@@ -173,6 +173,35 @@ void RanksAndSources() {
     assert(g.policy.Rank(a) == 3);  // image identities never cover each other
   }
 }
+void ShortPeersDoNotCoverHistory() {
+  for (const auto purpose :
+       {RetentionPurpose::kContinuation, RetentionPurpose::kBranchPoint}) {
+    Fixture f(3);
+    const auto root = f.Add({1, 2}, purpose);
+    const auto short_tail = f.Add({1, 2, 7});
+    const auto history = f.Add({1, 2, 3, 4}, RetentionPurpose::kHistory);
+    // A shared system prefix cannot restore the deeper history's rows.
+    assert(f.policy.Rank(history) == 3);
+    f.Add({1, 2, 8}, RetentionPurpose::kContinuation, 0, root);
+    assert(f.log.events[f.log.events.size() - 2].checkpoint == short_tail);
+    assert(f.Cached({1, 2, 3, 4, 5}) == 4);
+    assert(f.Cached({1, 2, 8, 9}) == 3);
+    assert(f.Cached({1, 2, 7, 9}) == 2);
+  }
+  {
+    Fixture f(3);
+    const auto history = f.Add({1, 2, 3, 4}, RetentionPurpose::kHistory);
+    f.Add({1, 2, 3, 4, 5});
+    assert(f.policy.Rank(history) == 1);  // a deeper peer really covers it
+  }
+  {
+    Fixture f(3);
+    const auto history =
+        f.Add({1, 2, 3, 4}, RetentionPurpose::kHistory, 0, {}, true, {1});
+    f.Add({1, 2, 3, 4, 5}, RetentionPurpose::kContinuation, 0, {}, true, {2});
+    assert(f.policy.Rank(history) == 3);  // different inputs cannot cover it
+  }
+}
 void RecordSourceReplacement() {
   for (const bool preserve : {true, false}) {
     Fixture f(1);
@@ -518,6 +547,7 @@ int main() {
   Planning();
   Branches();
   RanksAndSources();
+  ShortPeersDoNotCoverHistory();
   RecordSourceReplacement();
   FullOptionalExactReplacement();
   FailureAndReplay();

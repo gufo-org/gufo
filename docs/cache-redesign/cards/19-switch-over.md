@@ -887,3 +887,23 @@ Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
 `fold-cpu.log`, `fold-pr-contract.log`, `fold-format-final.log`.
 Production binary SHA-256:
 `66d1c04b485fac662bab7e4f41d80dc82dba0ae83207589755157b30aff10aeb`.
+
+
+### Review follow-up: uncovered history retention (October 11)
+
+A shorter continuation or branch checkpoint no longer makes a deeper history
+redundant merely because it shares the history's leading prefix. A history is
+covered only when its complete tokens prefix a compatible continuation. This
+corrects the reverse-prefix defect described in #553 within the new module;
+legacy model caches are unchanged.
+
+The new regression fails on the previous implementation, then verifies both
+continuation/branch peers, actual record-pressure eviction and the remaining
+four-token reusable history. It also checks genuinely deeper coverage and input
+identity isolation. All 57 contracts and the shared formatter pass. Production
+AR/MTP growth, depth, shared-prefix, rotation, concurrency and edit replays are
+running separately. This rank correction does not establish that grid admission
+starvation or constrained-RAM pressure is fixed.
+
+Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+`rank-red.log`, `rank-pr.log`, `rank-format-final.log`, `rank-functional-summary.json`.

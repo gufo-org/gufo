@@ -148,8 +148,7 @@ std::uint32_t RetentionPolicy::Priority(
         Prefix(peer.checkpoint->Tokens(), e.checkpoint->Tokens()))
       return 0;
     if (e.purpose == RetentionPurpose::kHistory &&
-        (Prefix(e.checkpoint->Tokens(), peer.checkpoint->Tokens()) ||
-         Prefix(peer.checkpoint->Tokens(), e.checkpoint->Tokens())))
+        Prefix(e.checkpoint->Tokens(), peer.checkpoint->Tokens()))
       return 1;
     if (Continuation(e.purpose) &&
         peer.checkpoint->Boundary() > e.checkpoint->Boundary() &&
