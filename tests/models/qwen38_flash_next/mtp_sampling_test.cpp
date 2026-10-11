@@ -281,6 +281,33 @@ void CheckSampledOutputFrequencies() {
   }
 }
 
+// Prompt lookup proposes copied tokens as point masses. Whatever token is
+// copied, verification must reproduce the target frequencies: accept with
+// p(token), else resample from p without it.
+void CheckPointMassFrequencies() {
+  const std::array<float, 5> logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
+  constexpr unsigned trials = 100000;
+  for (const float temperature : {0.7F, 1.0F}) {
+    sampling::SamplerState sampler({.temperature = temperature, .seed = 29});
+    const auto p = sampler.Distribution(logits);
+    for (const sampling::TokenId copied : {2U, 4U}) {
+      qfn::MtpProposal proposal;
+      proposal.size = 1;
+      proposal.ids[0] = proposal.token = copied;
+      proposal.probabilities[0] = proposal.probability = 1;
+      std::array<unsigned, 5> counts{};
+      for (unsigned trial = 0; trial < trials; ++trial) {
+        ++counts[qfn::VerifyMtpProposal(logits, proposal, sampler).token];
+      }
+      for (unsigned token = 0; token < counts.size(); ++token) {
+        Require(std::abs(double(counts[token]) / trials -
+                         p.probability(token)) < 0.008,
+                "point-mass proposals distort target frequencies");
+      }
+    }
+  }
+}
+
 void CheckVerificationBoundaries() {
   const std::array<float, 3> logits{0, -1, -2};
   const std::array<sampling::TokenId, 3> history{1, 1, 2};
@@ -338,6 +365,7 @@ int main() {
     CheckBatchProfitability();
     CheckCompactProposals();
     CheckSampledOutputFrequencies();
+    CheckPointMassFrequencies();
     const std::array<float, 5> logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
     const std::array<sampling::TokenId, 4> history{2, 3, 2, 0};
     for (const auto& test : gufo::test::QwenSamplingCases()) {
