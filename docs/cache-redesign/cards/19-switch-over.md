@@ -531,3 +531,33 @@ budget smaller than its full checkpoint, an earlier PR build retained only the
 system prefix while main eventually resumed the deep disk checkpoint. That
 external observation is preserved and needs a matched local reproduction;
 passing the shorter RAM histories does not qualify it.
+
+The in-pass fix is frozen locally as `131db71c`. Four focused CPU targets,
+all 57 hosted checks, the shared formatter and the production release build
+pass. The new real GPU oracle passes AR/MTP at 2047, 8192 and 8203 tokens:
+predicted positions and every frozen byte match a native boundary restore,
+completed-live and restored logits are exact, and sampled continuations match
+with actual MTP drafts. Reentrant execution/reset/invalidation is rejected;
+failed consumers drain transfers before the native scratch arena is reused.
+The existing native snapshot suite also passes, including device-headroom
+fallback, source reset, borrowed/serialized replay and checkpoint retention.
+
+A fresh growth-only AR comparison has exact output and prompt/cache/prefill
+work, but timing remains inconclusive at the unchanged 5% / 3 ms per-phase
+gate. The extra five-token pass is removed; capture and other timing flags
+remain retained. A separate CPU profile of frozen `3064a01e` identifies
+retained-byte accounting, linear chunk lookup and buffer clearing as request
+overhead. The resulting bookkeeping changes are not yet qualified.
+
+The MTP growth-only run also passes all 54 functional responses, with 1298
+actual drafts. Its final Messages retry prefills zero tokens where main's
+capacity-refused retry prefills seven; the strict comparator rejects that work
+difference and retains the timing flags. This is not a matched speed result.
+
+The bookkeeping follow-up caches retained-byte totals across recency-only
+updates, resolves earlier component peers once per component, and orders
+history entries for binary chunk lookup. Private capacities and shared-chunk
+identity are unchanged. Six focused CPU targets, all 57 hosted checks,
+formatting and the production build pass, including removal while a reader
+keeps the checkpoint pinned and sharing after unordered-descriptor restoration
+and pruning. Its profile and HTTP timing qualification remain pending.

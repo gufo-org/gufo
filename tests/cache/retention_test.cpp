@@ -288,7 +288,10 @@ void FailureAndReplay() {
       const auto id = log.events.back().checkpoint;
       auto pin = index.Lookup({{1}, t, InputIdentity(t.size())});
       const auto before = ledger.Snapshot().total_bytes;
+      assert(policy.RetainedPayloadBytes() > 0);
       policy.Remove(id);
+      assert(policy.RetainedPayloadBytes() == 0);
+      assert(log.events.back().retained_payload_bytes == 0);
       assert(pin.selected && pin.selected->checkpoint->IsValid());
       assert(log.events.back().unique_bytes_freed ==
              before - ledger.Snapshot().total_bytes);
@@ -467,9 +470,15 @@ void RealCapacityAndUniqueAdmission() {
                   std::make_shared<int>(0));
             });
       }));
+      assert(policy.RetainedPayloadBytes() == end * 1024 + end / 4 * 32);
+      assert(log.events.back().retained_payload_bytes ==
+             policy.RetainedPayloadBytes());
     }
     assert(policy.Size() == 3);
     assert(policy.RetainedPayloadBytes() == 12 * 1024 + 3 * 32);
+    const auto latest = log.events.back().checkpoint;
+    policy.Touch(latest);
+    assert(log.events.back().retained_payload_bytes == 12 * 1024 + 3 * 32);
     assert(ledger.Snapshot().total_bytes <= 32768);
     // An independent large branch needs real reclamation, with no simulated
     // pressure exception. Full payload exceeds the old available capacity.

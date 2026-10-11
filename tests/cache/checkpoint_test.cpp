@@ -147,6 +147,33 @@ void SharingAndTeardown() {
   }
   assert(f.ledger.Snapshot().total_bytes == 0);
 }
+void UnorderedDescriptorsShareAcrossRestoreAndPrune() {
+  Fixture f;
+  const auto original = f.adapter.Components();
+  const std::array<ComponentDescriptor, 3> descriptors{original[2], original[1],
+                                                       original[0]};
+  auto history = ExecutionHistory::Cold(f.ledger, descriptors,
+                                        f.adapter.CompatibilityIdentity());
+  f.Append(8);
+  auto first = f.Capture(history);
+  assert(history.NewPayloadBytes(f.adapter.Positions(*f.slot)) == 32);
+  auto fork = ExecutionHistory::Restored(f.ledger, *first);
+  f.Append(4);
+  assert(fork.NewPayloadBytes(f.adapter.Positions(*f.slot)) == 64);
+  auto second = f.Capture(fork);
+  for (std::size_t i = 1; i < 3; ++i)
+    for (std::size_t n = 0; n < 2; ++n)
+      assert(first->Components()[i].chunks[n].Id() ==
+             second->Components()[i].chunks[n].Id());
+  first.reset();
+  second.reset();
+  fork.Prune();
+  // Removing expired keys must not hide a newly captured range or charge
+  // an expired range as shared storage.
+  assert(fork.NewPayloadBytes(f.adapter.Positions(*f.slot)) == 128);
+  auto fresh = f.Capture(fork);
+  assert(fork.NewPayloadBytes(f.adapter.Positions(*f.slot)) == 32);
+}
 void EmptyAndShortCheckpoints() {
   Fixture f;
   {
@@ -656,6 +683,7 @@ int main() {
   EmptyAndShortCheckpoints();
   PrivateOnlyCheckpoints();
   SharingAndTeardown();
+  UnorderedDescriptorsShareAcrossRestoreAndPrune();
   ColdPrefillsNeverShare();
   RestoredForksAndPrivateTails();
   FailedCapturesAreInvisible();

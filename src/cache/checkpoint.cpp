@@ -330,6 +330,7 @@ ExecutionHistory ExecutionHistory::Restored(ResourceLedger& ledger,
       Add(Add(Bytes(history.tokens_.capacity(), sizeof(Token)),
               Bytes(history.positions_.capacity(), sizeof(ComponentPosition))),
           history.input_.capacity());
+  std::ranges::sort(history.entries_, {}, &Entry::Key);
   if (history.entries_.capacity() > chunks || actual_token_bytes > token_bytes)
     throw std::logic_error("allocator exceeded reserved metadata capacity");
   if (entries_reservation)
@@ -450,12 +451,9 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
       const auto full_end = end - end % d.rows_per_chunk;
       component.chunks.reserve(end / d.rows_per_chunk);
       for (Rows first = 0; first < full_end; first += d.rows_per_chunk) {
-        std::shared_ptr<detail::Chunk> chunk;
-        for (const auto& e : entries)
-          if (e.component == d.id && e.first == first) {
-            chunk = e.chunk.lock();
-            break;
-          }
+        // Every descriptor/range occurs once in this capture, so only the
+        // published history can contain a shared predecessor.
+        auto chunk = FindChunk(d.id, first);
         if (!chunk) {
           const PayloadRequest r{d.id, ResourceCategory::kBackingAssigned,
                                  first, first + d.rows_per_chunk,
@@ -514,6 +512,7 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   auto entries_metadata =
       entries_reservation ? entries_reservation.Convert() : ResourceCharge{};
   auto tokens_metadata = tokens_reservation.Convert();
+  std::ranges::sort(entries, {}, &Entry::Key);
   // Publication is nonthrowing. No checkpoint or new history escapes earlier.
   entries_.swap(entries);
   tokens_.swap(tokens);
@@ -526,6 +525,13 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   entries_metadata_ = std::move(entries_metadata);
   tokens_metadata_ = std::move(tokens_metadata);
   return checkpoint;
+}
+std::shared_ptr<detail::Chunk> ExecutionHistory::FindChunk(ComponentId id,
+                                                           Rows first) const {
+  const auto key = std::pair{id.value, first};
+  const auto entry = std::ranges::lower_bound(entries_, key, {}, &Entry::Key);
+  return entry != entries_.end() && entry->Key() == key ? entry->chunk.lock()
+                                                        : nullptr;
 }
 std::size_t ExecutionHistory::NewPayloadBytes(
     std::span<const ComponentPosition> positions) const {
@@ -549,17 +555,10 @@ std::size_t ExecutionHistory::NewPayloadBytes(
     (void)Bytes(p.valid_rows, d.row_bytes);
     bytes = Add(bytes, Bytes(p.valid_rows - full, d.row_bytes));
     for (Rows first = 0; first < full; first += d.rows_per_chunk) {
-      bool shared = false;
-      for (const auto& e : entries_)
-        if (e.component == d.id && e.first == first) {
-          if (const auto chunk = e.chunk.lock()) {
-            if (!chunk->storage.IsValid())
-              throw std::invalid_argument("cannot estimate retired rows");
-            shared = true;
-          }
-          break;
-        }
-      if (!shared)
+      const auto chunk = FindChunk(d.id, first);
+      if (chunk && !chunk->storage.IsValid())
+        throw std::invalid_argument("cannot estimate retired rows");
+      if (!chunk)
         bytes = Add(bytes, Bytes(d.rows_per_chunk, d.row_bytes));
     }
   }

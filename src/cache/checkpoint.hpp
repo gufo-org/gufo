@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "src/cache/identity.hpp"
@@ -233,9 +234,12 @@ private:
     ComponentId component;
     Rows first;
     std::weak_ptr<detail::Chunk> chunk;
+    [[nodiscard]] auto Key() const { return std::pair{component.value, first}; }
   };
   ExecutionHistory(ResourceLedger&, std::span<const ComponentDescriptor>,
                    Identity, std::shared_ptr<const detail::Lineage>);
+  [[nodiscard]] std::shared_ptr<detail::Chunk> FindChunk(ComponentId,
+                                                         Rows first) const;
   bool capturing_{false};
   ResourceLedger* ledger_;
   ResourceCharge metadata_, entries_metadata_, tokens_metadata_;
@@ -244,6 +248,8 @@ private:
   Identity compatibility_, input_;
   std::vector<ComponentPosition> positions_;
   std::vector<Token> tokens_;
+  // Ordered by component and first row. Restored and newly captured entries
+  // are sorted before publication; pruning preserves the order.
   std::vector<Entry> entries_;
 };
 }  // namespace gufo::cache

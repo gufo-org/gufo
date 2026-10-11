@@ -239,6 +239,7 @@ void RetentionPolicy::Erase(std::size_t i, RetentionReason reason,
   index_.DropResident(e.entry);
   e = {};
   --size_;
+  retained_payload_bytes_.reset();
   const auto after = ledger_.Snapshot().total_bytes;
   Emit(RetentionAction::kRemoved, reason, id, boundary, purpose, rank, used,
        before > after ? before - after : 0);
@@ -330,6 +331,7 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       auto& e = records_[target];
       e = {std::move(checkpoint), entry, purpose, r.stable, ++clock_};
       ++size_;
+      retained_payload_bytes_.reset();
       Emit(RetentionAction::kAdmitted, RetentionReason::kCaptured,
            e.checkpoint->Id(), e.checkpoint->Boundary(), purpose,
            Priority(target), e.last_used);
@@ -353,6 +355,8 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
   }
 }
 std::size_t RetentionPolicy::RetainedPayloadBytes() const noexcept {
+  if (retained_payload_bytes_)
+    return *retained_payload_bytes_;
   std::size_t bytes = 0;
   for (std::size_t i = 0; i < limit_; ++i) {
     if (!records_[i].checkpoint)
@@ -362,24 +366,30 @@ std::size_t RetentionPolicy::RetainedPayloadBytes() const noexcept {
         bytes += c.private_state->Bytes();
       if (c.tail)
         bytes += c.tail->Bytes();
+      if (c.chunks.empty())
+        continue;
+      std::array<const CheckpointComponent*, kRecordLimit> peers;
+      std::size_t peer_count = 0;
+      for (std::size_t earlier = 0; earlier < i; ++earlier) {
+        if (!records_[earlier].checkpoint)
+          continue;
+        for (const auto& peer : records_[earlier].checkpoint->Components())
+          if (peer.descriptor.id == c.descriptor.id) {
+            peers[peer_count++] = &peer;
+            break;
+          }
+      }
       for (std::size_t n = 0; n < c.chunks.size(); ++n) {
         bool shared = false;
-        for (std::size_t earlier = 0; earlier < i && !shared; ++earlier) {
-          if (!records_[earlier].checkpoint)
-            continue;
-          for (const auto& peer : records_[earlier].checkpoint->Components())
-            if (peer.descriptor.id == c.descriptor.id &&
-                peer.chunks.size() > n &&
-                peer.chunks[n].Id() == c.chunks[n].Id()) {
-              shared = true;
-              break;
-            }
-        }
+        for (std::size_t peer = 0; peer < peer_count && !shared; ++peer)
+          shared = peers[peer]->chunks.size() > n &&
+                   peers[peer]->chunks[n].Id() == c.chunks[n].Id();
         if (!shared)
           bytes += c.chunks[n].Storage().Bytes();
       }
     }
   }
+  retained_payload_bytes_ = bytes;
   return bytes;
 }
 void RetentionPolicy::Touch(CheckpointId id) {

@@ -3,6 +3,7 @@
 
 #include <array>
 #include <functional>
+#include <optional>
 #include <stop_token>
 
 #include "src/cache/adapter.hpp"
@@ -148,6 +149,9 @@ private:
   std::array<Record, kRecordLimit> records_;
   std::size_t limit_, size_{};
   std::uint64_t clock_{}, sequence_{};
+  // Payload capacities are immutable. Only record membership changes this
+  // total; access recency and borrowed-row preservation do not.
+  mutable std::optional<std::size_t> retained_payload_bytes_;
 };
 }  // namespace gufo::cache
 #endif
