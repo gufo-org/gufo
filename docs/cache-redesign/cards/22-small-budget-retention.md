@@ -1,0 +1,140 @@
+# 22 · Retention under small RAM budgets
+
+**Milestone:** Switch-over review · **Depends on:** 07, 19, 21 · **Size:** M ·
+**Affects:** Flash-Next AR/MTP serving · **Status:** in progress
+
+## Problem
+
+Every Flash-Next checkpoint holds about 132 MB (AR) or 133 MB (MTP) of private
+state. A 2 GiB budget therefore holds only 12–13 checkpoints. The
+`cache-bridge` then `cache-pressure` history at 2 GiB restored zero tokens in
+four places in both AR and MTP on `def3763e`. The retention events show why:
+
+- **Compacted history:** each 11K-token turn captured four grid boundaries, so
+  one conversation filled more than half the budget. Rank-then-LRU removed the
+  abandoned conversation's 2048-token history boundary (rank 1) before older
+  150-token fill checkpoints (rank 3).
+- **Idle BETA resume:** six 87-token side requests were newer than BETA. LRU
+  among last copies removed BETA's only 11K-token checkpoint.
+- **After volatile traffic:** the abandoned-branch probe's captures removed
+  ALPHA's continuation, the oldest last copy, although ALPHA had just been
+  continued.
+- **After UI traffic:** three one-use 11.3K-token title/tag/follow-up requests
+  removed the conversation they summarize.
+
+## Policy change
+
+Record-capacity removal, retry admission's rank limit, card 21's history
+admission and per-turn edit-boundary protection are unchanged.
+
+1. **Grid density.** A turn plans at most `min(4, RAM budget / (12 × private
+   state bytes))` optional grid points, shallowest first. 2 GiB keeps one grid;
+   8 GiB keeps the existing four.
+2. **Byte-pressure order.** Removal takes, in order:
+   1. retry copies;
+   2. cheap checkpoints, whose private state exceeds eight times the rows they
+      restore (under about 600 Flash-Next tokens);
+   3. conversations not reused within one RAM-budget turnover, least recently
+      used first, where recency includes retained descendants;
+   4. reused conversations.
+
+   Within an unreused conversation, covered near-duplicates go first, then the
+   leaf, then shared boundaries: the shallowest history boundary, which other
+   prompts may reach, and forks. Within a reused conversation, covered records
+   go first, then leaves, then forks.
+3. **Reuse.** A turn that restored or continued a cached prefix marks the
+   checkpoints it admits; a RAM restore marks its source. The mark lasts until
+   admitted unique payload since that reuse exceeds the RAM budget, so a stale
+   conversation ages out like any other.
+4. **Forks.** A record that two retained continuations extend directly keeps
+   that status. Subagents sharing a parent turn diverge a few tokens after it,
+   so the parent is not an exact branch point.
+5. A redundant source still advances only when every eligible candidate is a
+   last copy, as in card 07's port.
+
+The policy caches the descendant relation per record, so a removal decision
+performs no token-prefix comparisons beyond the existing rank computation.
+
+## Design evidence
+
+A simulator replays the request structure with the retention ranks, the serving
+capture order, chunk sharing and sizes calibrated from the `def3763e` logs. It
+reproduces the four failures. Blind alternatives (GreedyDual-Size/Frequency,
+segmented LRU, second-chance and class/LRU mixes) flipped outcomes with
+single-checkpoint margins and are rejected. The retained design passes AR at
+0.9–1.1× and MTP at 0.95–1.2× the calibrated capacity; removing any one of the
+grid limit, cheap class, reuse protection or conversation order fails at least
+one scenario at every scale. Its constants sit on a plateau: ratio 4–8 and
+turnover 1–1.5 budgets pass equally.
+
+## Results
+
+Evidence: `/home/mixer/gufo-qualification/pr543-pressure-2026-10-12` (drivers,
+binaries, patches, simulator, every run). Both revisions ran the same
+`cache-bridge` then `cache-pressure` history with two sessions, context 32768
+and `--cache-ram-bytes 2147483648`, fresh `def3763e` controls first.
+
+| Request | Floor | `def3763e` AR / MTP reuse | Candidate AR / MTP reuse | TTFT AR, ms | TTFT MTP, ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `pressure_compacted` | 1 | 0 / 0 | 2048 / 2048 | 1601 → 370 | 1720 → 391 |
+| `pressure_idle_resume_BETA` | 11223 | 0 / 0 | 11232 / 11232 | 7127 → 157 | 7613 → 161 |
+| `pressure_after_volatile` | 11242 | 0 / 0 | 11251 / 11251 | 7096 → 156 | 7613 → 162 |
+| `pressure_after_ui` | 11263 | 0 / 0 | 11272 / 11272 | 7165 → 166 | 7620 → 161 |
+
+Every other reuse assertion and every cold-output comparison passes in both
+modes; the abandoned-branch probe stays under its ceiling (2048 AR, 0 MTP).
+`cache-bridge` passes, and its second turn now restores the remaining 2048
+grid (AR TTFT 4568 → 3150 ms). MTP proposes 318 drafts and accepts 146 across
+the pressure suite.
+
+The card 21 six-suite history at 8 GiB still passes growth, depth, shared
+prefix, rotation, concurrency and edits in AR and MTP. Last-user, older-tool and
+rewind edits restore 2048 tokens and prefill 1199/1656/1199, as before; MTP
+proposes 1506 drafts and accepts 871. Cache work changed on a few requests.
+Unchanged retries in growth (both modes) and edits (MTP) now restore their
+whole prompt instead of prefilling seven tokens, and an MTP concurrency turn
+restores 4096 tokens instead of none (TTFT 4215 → 1580 ms). The MTP concurrency
+warm probe lost its exact retry copy: it prefills seven tokens and its TTFT
+rises from 7.3 to 94.4 ms. Rotation and depth turns move by up to nine tokens
+in either direction.
+
+All 57 hosted contracts and shared formatting pass. Each new retention test
+fails when byte pressure uses the preceding order; the serving test fails when
+the turn's reuse mark is removed.
+
+**Timing is not qualified.** A host microbenchmark of victim selection and
+admission shows the same cost as the preceding order: about 0.1–0.2 ms at 12
+records and 3.7 ms at 64 Flash-sized records per removal. Both orders take about
+0.7 s per removal with 128 records along one 100K-token chain, an existing limit
+of the rank computation. Matched requests with identical cache work still carry
+5% and 3 ms flags in both directions:
+
+- Pressure, AR: 141 matched requests. Bridge turns 3–6 prefill 5.7–7.6% slower
+  (+45–69 ms) with identical restored and prefilled tokens; an earlier
+  candidate (`cand1`) matched the control within 2%, and MTP is within 2.6%.
+- Pressure, both modes: queue time moved between requests. The control paid
+  15.2 ms (AR) and 17.3 ms (MTP) reassignment preservation on the tag request;
+  the candidate pays 13.7 and 16.8 ms on the follow-up request instead.
+- Core history: AR 37 slower and 65 faster flags out of 151 matched requests;
+  MTP 36 slower and 69 faster out of 145. Most are asynchronous capture time.
+
+A second alternation of the affected histories is required before any timing
+claim.
+
+## Done when
+
+- [x] Each new retention rule has a regression that fails on the preceding
+  order; a serving regression fails without the turn's reuse mark.
+- [x] `cache-bridge` then `cache-pressure` at 2 GiB pass every reuse assertion
+  and cold-output comparison in AR and MTP on the final revision.
+- [x] The six-suite card 21 history still passes in AR and MTP.
+- [ ] Affected request timings meet the strict 5% / 3 ms gate against matched
+  `def3763e` controls, or each flag is explained by an alternated rerun.
+
+## References
+
+[Card 07](07-retention-policy.md) ports the original ranks; [card 21](21-edit-boundary-admission.md)
+adds edit-boundary admission. GreedyDual-Size (Cao and Irani, 1997), segmented
+LRU and CLOCK were evaluated and rejected. Marconi (Pan et al., 2024) motivates
+cost-aware retention for hybrid recurrent models. No code is copied from these
+works.

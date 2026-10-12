@@ -438,6 +438,34 @@ void EditBoundariesSurviveActualBackingPressure() {
            cold_runner->adapter->RecurrentHash(control_state.slot));
   }
 }
+void ReusedConversationOutlivesOneUseRequests() {
+  // Backing holds three private states. A continued conversation keeps its
+  // latest boundary while newer one-use requests replace each other.
+  auto runner = std::make_shared<Runner>();
+  runner->private_blocks = 3;
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const auto turn = [&](const std::vector<TextRunnerToken>& tokens) {
+    auto lease = cache.Acquire(tokens, {}, {}, true, 0, true);
+    const auto cached = lease->cached_tokens();
+    auto& state = dynamic_cast<State&>(lease->state());
+    const auto tail = std::span(tokens).subspan(cached);
+    runner->adapter->Append(state.slot, tail, tail);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), tokens.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     {}));
+    assert(lease->PublishSnapshot(tokens, lease->Capture(), false));
+    (void)lease->Commit({}, {}, tokens);
+    return cached;
+  };
+  std::vector<TextRunnerToken> conversation(12, 7);
+  assert(turn(conversation) == 0);
+  conversation.resize(16, 8);
+  assert(turn(conversation) == 12);
+  for (TextRunnerToken other = 100; other < 103; ++other)
+    assert(turn(std::vector<TextRunnerToken>(12, other)) == 0);
+  conversation.push_back(9);
+  assert(turn(conversation) == 16);
+}
 void RestartAndCorruption() {
   char pattern[] = "/tmp/gufo-component-serving-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
@@ -724,6 +752,7 @@ int main() {
   ColdAssignmentPrefersPreservedSlot();
   ReuseAndBranches();
   EditBoundariesSurviveActualBackingPressure();
+  ReusedConversationOutlivesOneUseRequests();
   RestartAndCorruption();
   FailedCaptureKeepsPublishedBoundary();
   DiskBudgetEvictsAnUnpinnedConversation();

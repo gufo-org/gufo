@@ -574,7 +574,8 @@ struct ComponentTextCache::Lease::Impl {
             .new_payload_bytes = entry->history->NewPayloadBytes(
                 cache->resources->adapter->Positions(slot.Execution())),
             .protected_checkpoints =
-                std::span(edit_boundaries).first(edit_boundary_count)};
+                std::span(edit_boundaries).first(edit_boundary_count),
+            .reused = cached != 0};
   }
   std::unique_ptr<TextRunnerSnapshot> CaptureDurable();
 };
@@ -1354,9 +1355,22 @@ void ComponentTextCache::Lease::Invalidate() noexcept {
 
 std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
     std::size_t stable) const {
+  const auto& adapter = *impl_->cache->resources->adapter;
+  std::size_t private_bytes = 0;
+  for (const auto& d : adapter.Components())
+    if (d.kind == cache::ComponentKind::kPrivateState)
+      private_bytes += d.state_bytes;
   const auto plan = cache::PlanCaptures(
-      *impl_->cache->resources->adapter, impl_->slot.Execution(),
-      {impl_->prompt.size(), impl_->cached, stable, 0, true, false, {}});
+      adapter, impl_->slot.Execution(),
+      {impl_->prompt.size(),
+       impl_->cached,
+       stable,
+       0,
+       true,
+       false,
+       {},
+       cache::GridLimit(impl_->cache->ledger.Limits().ram_bytes,
+                        private_bytes)});
   std::vector<std::size_t> boundaries;
   for (const auto& capture : plan)
     if (!capture.required &&

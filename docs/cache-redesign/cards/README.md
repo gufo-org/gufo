@@ -67,6 +67,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [19](19-switch-over.md) | Switch serving to the new cache | Switch-over | 01, 07, 09, 12–18 | L (stack) | proposed |
 | [20](20-e2e-baseline-and-qualification.md) | End-to-end baseline and qualification | After switch-over | 19 | evidence | proposed |
 | [21](21-edit-boundary-admission.md) | Edit-boundary admission under byte pressure | Switch-over review | 07, 19 | S | in progress |
+| [22](22-small-budget-retention.md) | Retention under small RAM budgets | Switch-over review | 07, 19, 21 | M | in progress |
 
 Cards 02–19 change no runtime behavior until card 19 wires them in and deletes
 the legacy cache (D1).

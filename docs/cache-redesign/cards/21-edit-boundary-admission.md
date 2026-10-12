@@ -60,7 +60,8 @@ Production binary SHA-256:
 - [x] Actual backing-pressure regression fails without protection and passes
   with it, including independent cold-state checks.
 - [x] Production AR/MTP edits and rotation pass after the preceding suites.
-- [ ] Constrained-RAM pressure is qualified.
+- [x] Constrained-RAM pressure passes; [card 22](22-small-budget-retention.md)
+  records the separate retention change it needed.
 - [ ] Affected request timings meet the strict 5% / 3 ms gate.
 
 ## References

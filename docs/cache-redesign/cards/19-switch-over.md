@@ -944,3 +944,13 @@ Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
 `grid-protection-green.log`, `grid-pr-final.log`, `grid-format-after-control.log`.
 Production binary SHA-256:
 `def206c3bb6a37af4cb6eaed2a914209252ca9781d1321cfb4c45f47062442f7`.
+
+### Review follow-up: small-budget retention (October 12)
+
+At 2 GiB the four `cache-pressure` reuse failures on `def3763e` came from
+retention policy, not capture correctness: four grid captures per long turn,
+rank order removing a stale conversation's shared boundary before tiny
+checkpoints, LRU letting short requests remove an idle conversation, and one-use
+requests displacing a reused conversation. [Card 22](22-small-budget-retention.md)
+records the bounded grid density and byte-pressure order that fix them, their
+regressions, the AR/MTP reuse results and the still-unqualified timing.
