@@ -17,6 +17,9 @@ namespace gufo::server {
 namespace {
 
 constexpr auto kCancellationPollInterval = std::chrono::milliseconds{10};
+// One prompt checkpoint interval: a free state whose capture would lose more
+// un-checkpointed tokens than the cheapest free state plus this is skipped.
+constexpr std::size_t kProtectedLiveTokens = 2048;
 
 bool IsPrefix(std::span<const ContinuationToken> prefix,
               std::span<const ContinuationToken> tokens) {
@@ -567,22 +570,47 @@ ContinuationCache::Lease ContinuationCache::Acquire(
     std::size_t evict_stable_prefix_tokens = 0;
     if ((impl_->snapshot_mode() && !live_hit) || !cache_hit) {
       selected = no_entry;
+      // Capturing a state loses its live frontier beyond the longest
+      // retained checkpoint of it. A long conversation often has no
+      // checkpoint at all (one would exceed the byte budget), so least
+      // recently used order alone hands its state to a short conversation
+      // and the next deep turn prefills everything again. Main's order is
+      // kept among the states that lose at most one checkpoint interval more
+      // than the cheapest free state.
+      const auto lost_tokens = [&](const Entry& entry) {
+        if (entry.live_tokens.empty() || IsPrefix(prompt, entry.live_tokens))
+          return std::size_t{0};
+        std::size_t kept = 0;
+        for (const auto& other : impl_->entries) {
+          if (other->valid && other->snapshot && other->tokens.size() > kept &&
+              IsPrefix(other->tokens, entry.live_tokens))
+            kept = other->tokens.size();
+        }
+        return entry.live_tokens.size() - kept;
+      };
+      std::size_t cheapest = std::numeric_limits<std::size_t>::max();
+      for (const auto& entry : impl_->entries) {
+        if (entry->available)
+          cheapest = std::min(cheapest, lost_tokens(*entry));
+      }
       std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
       for (std::size_t index = 0; index < impl_->entries.size(); ++index) {
         const auto& entry = *impl_->entries[index];
+        if (!entry.available ||
+            lost_tokens(entry) - cheapest > kProtectedLiveTokens)
+          continue;
         // Borrowed rows save the restore a copy, never another
         // conversation's live frontier, whose loss costs its whole prefill.
         // A prompt inside the frontier retries that conversation and
         // replaces the reply the frontier holds.
-        if (entry.available &&
-            (entry.live_tokens.empty() ||
+        if ((entry.live_tokens.empty() ||
              IsPrefix(prompt, entry.live_tokens)) &&
             cache_hit && impl_->entries[source]->snapshot &&
             impl_->entries[source]->snapshot->PrefersState(*entry.state)) {
           selected = index;
           break;
         }
-        if (entry.available && entry.state_last_used < oldest) {
+        if (entry.state_last_used < oldest) {
           selected = index;
           oldest = entry.state_last_used;
         }

@@ -1159,6 +1159,94 @@ void TestReplacedSourceDoesNotEvictAnotherBranchTail() {
 
 // The summarised cache lines stay at INFO/WARN; which candidate was rejected,
 // and by which guard, is only worth the bytes when the operator asked for it.
+// The reported #542 workload: a deep conversation whose checkpoint would not
+// fit the byte budget exists only as one state's live frontier. Short
+// conversations that miss must not take that state while a cheaper one is
+// free, or the next deep turn prefills everything again.
+void TestShortConversationsKeepUncheckpointedDeepFrontier() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](gufo::server::ContinuationState&,
+                     const gufo::server::ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{1024}; },
+       .on_event = {}});
+  Tokens deep(3000);
+  for (std::size_t index = 0; index < deep.size(); ++index)
+    deep[index] = static_cast<gufo::server::ContinuationToken>(index + 1);
+  Tokens deep_live = deep;
+  deep_live.push_back(5001);
+  gufo::server::ContinuationState* deep_state = nullptr;
+  {
+    auto lease = cache.Acquire(deep);
+    deep_state = &lease.state();
+    lease.Commit(deep, nullptr, deep_live);
+  }
+  for (const gufo::server::ContinuationToken first : {6001, 7001, 8001}) {
+    const Tokens prompt{first, first + 1};
+    auto lease = cache.Acquire(prompt);
+    Expect(&lease.state() != deep_state,
+           "a short conversation takes the state with the cheaper frontier");
+    lease.Commit(prompt, nullptr, {first, first + 1, first + 2});
+  }
+  Tokens next = deep_live;
+  next.push_back(5002);
+  auto lease = cache.Acquire(next);
+  Expect(lease.cache_hit() && lease.cached_tokens() == deep_live.size() &&
+             &lease.state() == deep_state,
+         "the next deep turn continues from its live frontier");
+  lease.Invalidate();
+}
+
+// A frontier covered by a retained checkpoint up to one interval is not
+// protected: least recently used order still decides, and the conversation
+// restores its checkpoint on the next turn.
+void TestCheckpointedFrontierKeepsLeastRecentlyUsedOrder() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](gufo::server::ContinuationState&,
+                     const gufo::server::ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{1024}; },
+       .on_event = {}});
+  Tokens deep(3000);
+  for (std::size_t index = 0; index < deep.size(); ++index)
+    deep[index] = static_cast<gufo::server::ContinuationToken>(index + 1);
+  Tokens deep_live = deep;
+  deep_live.push_back(5001);
+  gufo::server::ContinuationState* deep_state = nullptr;
+  {
+    auto lease = cache.Acquire(deep);
+    deep_state = &lease.state();
+    Expect(lease.TryReserveSnapshot(8, deep.size()),
+           "reserve the deep checkpoint");
+    lease.Commit(deep, std::make_unique<FakeSnapshot>(1, 8), deep_live);
+  }
+  {
+    const Tokens prompt{6001, 6002};
+    auto lease = cache.Acquire(prompt);
+    Expect(&lease.state() != deep_state, "the unused state is taken first");
+    lease.Commit(prompt, nullptr, {6001, 6002, 6003});
+  }
+  {
+    const Tokens prompt{7001, 7002};
+    auto lease = cache.Acquire(prompt);
+    Expect(&lease.state() == deep_state,
+           "a checkpointed frontier is taken in least recently used order");
+    lease.Commit(prompt, nullptr, {7001, 7002, 7003});
+  }
+  Tokens next = deep_live;
+  next.push_back(5002);
+  auto lease = cache.Acquire(next);
+  Expect(lease.cache_hit() && lease.cached_tokens() == deep.size(),
+         "the next deep turn restores its retained checkpoint");
+  lease.Invalidate();
+}
+
 void TestCacheCandidateDetailIsDebugTierOnly() {
   const auto run = [](gufo::server::LogLevel level) {
     std::vector<std::size_t> invalidations(1);
@@ -1455,6 +1543,8 @@ int main() {
   TestRetryDoesNotDisplaceEarlierHistory();
   TestEditedTailReplacementPreservesSharedCheckpoints();
   TestReplacedSourceDoesNotEvictAnotherBranchTail();
+  TestShortConversationsKeepUncheckpointedDeepFrontier();
+  TestCheckpointedFrontierKeepsLeastRecentlyUsedOrder();
   TestCacheCandidateDetailIsDebugTierOnly();
   TestWaitingAcquireReportsCandidateSkips();
   std::cout << "All continuation cache tests passed\n";

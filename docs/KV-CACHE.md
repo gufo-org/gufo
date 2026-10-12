@@ -91,6 +91,15 @@ just prompt tokens.
 A **snapshot** is an immutable retained checkpoint. Reusing one means restoring
 it into a session, which costs a copy.
 
+A restore or a miss needs a **free session**, and taking one discards its live
+frontier. The session that owns the snapshot's rows is tried first, then the
+least recently used one, but a session is skipped when it would lose more than
+2,048 tokens (one checkpoint interval) beyond the cheapest free session. Lost
+tokens are the live frontier past the longest retained snapshot of it. This
+keeps a long conversation whose checkpoint does not fit the RAM budget from
+being displaced by short ones. Its session stays protected while it is idle,
+so other conversations have one free session fewer.
+
 Both require an **exact prefix match**. The cache still computes the longest
 common prefix on a miss and reports it, which is why a miss can say "we agreed
 on 7,094 of your 7,103 tokens" and still re-prefill everything: it had no
