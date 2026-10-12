@@ -73,6 +73,8 @@ struct ResourceAllocationInfo {
   bool reserved;
   bool pool_backing;
   bool assigned_backing;
+  // A queued or active disk job holds this storage until its write ends.
+  bool persistence_pinned{};
 };
 class ResourceCharge;
 class PersistencePin;

@@ -66,6 +66,9 @@ public:
   [[nodiscard]] std::shared_ptr<const void> Owner() const {
     return rows_ ? rows_->Owner() : owner_;
   }
+  // Removing a checkpoint frees none of this storage while a disk job holds
+  // it.
+  [[nodiscard]] bool PersistencePinned() const;
   // Assigned immutable storage token, never the original pool handle. Keep
   // the checkpoint and physical owner alive throughout a persistence job.
   [[nodiscard]] ResourceCharge CommittedCharge() const {

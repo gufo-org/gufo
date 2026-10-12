@@ -4,8 +4,10 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <thread>
 
 #include "src/cache/checkpoint.hpp"
 #include "src/cache/ledger.hpp"
@@ -90,6 +92,10 @@ public:
   // pinned host memory on the calling thread.
   [[nodiscard]] std::optional<BackingBlock> TryAcquire(
       cache::ResourceCategory, std::size_t payload_bytes = 0);
+  // Starts committing the next on-demand segment on a background thread when
+  // less than one segment of free backing remains, so a later TryAcquire
+  // finds it ready instead of allocating on its own thread. Returns at once.
+  void GrowAhead();
   // Committed blocks and bytes; both grow with on-demand segments.
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;
@@ -97,6 +103,9 @@ public:
 
 private:
   std::shared_ptr<detail::BackingState> state_;
+  std::mutex ahead_mutex_;
+  // Joined before state_ is released; it keeps its own state reference.
+  std::jthread ahead_;
 };
 
 }  // namespace gufo::hip

@@ -159,6 +159,11 @@ Payload& Payload::operator=(Payload&& other) noexcept {
   }
   return *this;
 }
+bool Payload::PersistencePinned() const {
+  if (rows_)
+    return rows_->PersistencePinned();
+  return charge_ && charge_.Info().persistence_pinned;
+}
 PersistencePin Payload::PinPersistence() const {
   if (rows_)
     return rows_->PinPersistence();

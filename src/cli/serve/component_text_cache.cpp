@@ -470,7 +470,10 @@ struct ComponentTextCache::Impl {
     auto append = [&](const cache::Payload& payload, std::size_t bytes,
                       bool private_file, cache::DiskFileId file) {
       if (auto rows = payload.BorrowedStorage()) {
-        sources.emplace_back(private_file, file, bytes, 1, std::move(rows));
+        // Read rows still in a slot from there: idle preservation only runs
+        // while no request is busy, and a waiting job keeps its pins.
+        sources.emplace_back(private_file, file, bytes, 1, std::move(rows),
+                             resources->copy_observed_rows);
         return cache::DiskPayload{file, bytes, 0};
       }
       auto owner = payload.Owner();
@@ -842,12 +845,18 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   cache::PrefixLookup found;
   Impl::Entry* entry = nullptr;
   std::optional<cache::BorrowedLocation> live;
+  std::size_t common = 0;
   {
     const std::lock_guard lock(impl_->mutex);
     if (impl_->catalog)
       impl_->catalog->Reconcile();
     found =
         impl_->index.Lookup({impl_->identity, prompt, input, stable, reuse});
+    // A miss reports how far a stored prompt agreed, so an empty cache can
+    // be told apart from one holding only incompatible boundaries.
+    if (reuse && !found.selected)
+      common =
+          impl_->index.CommonPrefixTokens({impl_->identity, prompt, input});
     if (found.selected && found.selected->live) {
       const auto location = *found.selected->live;
       auto& selected_entry = *impl_->entries.at(location.slot.value - 1);
@@ -1087,9 +1096,15 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
                                              : request.metrics.deepest_disk;
       deepest = std::max(deepest, static_cast<std::size_t>(candidate.boundary));
     }
-    request.lookup_result = {
-        request.cached ? "" : (reuse ? "no_compatible_boundary" : "disabled"),
-        0, request.cached};
+    std::size_t nearest = 0;
+    for (const auto& candidate : found.candidates)
+      nearest = std::max(nearest, static_cast<std::size_t>(candidate.boundary));
+    request.lookup_result = {request.cached      ? ""
+                             : !reuse            ? "disabled"
+                             : common || nearest ? "no_compatible_boundary"
+                                                 : "no_checkpoint",
+                             request.cached ? 0 : common,
+                             request.cached ? request.cached : nearest};
     Logger::Info("cache",
                  "schema=component-cache-v1 event=acquire reuse=" +
                      std::string(live               ? "live"
@@ -1304,7 +1319,10 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
       }
       if (!reclaimed) {
         if (cache.queue && request.purpose != SnapshotPurpose::kHistory)
-          return request.CaptureDurable();
+          if (auto durable = request.CaptureDurable())
+            return durable;
+        // RAM refused the copy; the disk fallback, when there is one, already
+        // holds a checkpoint within its step of this boundary.
         Logger::Info("cache",
                      "schema=component-cache-v1 event=capture_refused "
                      "reason=byte_capacity tokens=" +

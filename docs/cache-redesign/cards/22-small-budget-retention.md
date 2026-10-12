@@ -33,7 +33,10 @@ admission and per-turn edit-boundary protection are unchanged.
 2. **Byte-pressure order.** Removal takes, in order:
    1. retry copies;
    2. cheap checkpoints, whose private state exceeds eight times the rows they
-      restore (under about 600 Flash-Next tokens);
+      restore (under about 600 Flash-Next tokens), unless reused within one
+      RAM-budget turnover: those go with the unreused conversations by
+      recency, so a short prompt restored one request ago survives its retry
+      (`state-edges`, #573);
    3. conversations not reused within one RAM-budget turnover, least recently
       used first, where recency includes retained descendants;
    4. reused conversations.

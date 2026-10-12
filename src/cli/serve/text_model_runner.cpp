@@ -744,8 +744,15 @@ struct TextRunnerPool::Request::Impl {
     const bool new_images =
         context && !std::ranges::equal(context->CacheIdentity(prefill_offset),
                                        context->CacheIdentity(count));
+    // A component capture copies the whole private state, so freezing a live
+    // frontier just before a nearby stable boundary doubles the synchronous
+    // cost of each tool-loop turn. Only an edit inside that gap would need
+    // the frontier; it falls back to an earlier boundary instead.
+    constexpr std::size_t kNearbyStableTokens = 64;
+    const bool nearby_stable = lease.component() && prefill_offset < count &&
+                               count - prefill_offset <= kNearbyStableTokens;
     if (retain_fallback && lease.cache_hit() && prefill_offset <= count &&
-        !new_images) {
+        !new_images && !nearby_stable) {
       // Freezing the reused frontier must not cost this turn its own stable
       // boundary. A client that rewrites the assistant turn, as one dropping
       // reasoning does, diverges after that boundary, so retaining only the

@@ -522,6 +522,67 @@ void BorrowedSourcesWaitWithoutBlockingForeground() {
     assert(restored_rows == *allocation);
   }
 }
+void LiveBorrowedSourcesPublishFromSlot() {
+  // With live reads, rows still in a leased slot are copied from there under
+  // a reader pin: the job neither waits for preservation nor materializes.
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 11, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 10, Allocate, Lease);
+  Fixture fixture(ledger);
+  FakeStream preservation;
+  LeasedSlot slot(ledger, fixture.adapter, preservation, {1});
+  auto lease = slot.Acquire();
+  fixture.adapter.Append(lease.Execution(), fixture.manifest.tokens,
+                         std::span(fixture.manifest.tokens).first(36));
+  std::array<std::byte, 16> native;
+  auto read = fixture.adapter.CopyRowsOut(lease.Execution(), kTarget, 0, 4,
+                                          native, preservation);
+  assert(read.Wait() == TransferResult::kSucceeded);
+  auto allocation = std::make_shared<std::array<std::byte, 16>>();
+  auto pool = ledger.Reserve(ResourceCategory::kBackingFree, 16).Convert();
+  auto rows = lease.Borrow(
+      kTarget, 0, 4, pool.ReserveBacking(ResourceCategory::kBackingAssigned),
+      allocation, *allocation, native);
+  struct Done final : CompletionSignal {
+    bool Ready() const noexcept override { return true; }
+    TransferResult Wait() noexcept override {
+      return TransferResult::kSucceeded;
+    }
+  };
+  unsigned live_reads{};
+  auto committed = fixture.Sources();
+  std::vector<PersistenceSource> sources;
+  sources.emplace_back(false, fixture.buffers.front().file, 16, 4, rows,
+                       [&](std::span<const std::byte> source,
+                           std::span<std::byte> destination, Stream&) {
+                         ++live_reads;
+                         std::memcpy(destination.data(), source.data(),
+                                     destination.size());
+                         return Completion(std::make_unique<Done>());
+                       });
+  for (std::size_t i = 1; i < committed.size(); ++i)
+    sources.push_back(std::move(committed[i]));
+  PersistenceQueue queue(ledger, streams, 2, 4096, [] { return true; });
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(100), fixture.manifest, std::move(sources))));
+  queue.Drain();
+  assert(queue.Stats().completed == 1 && live_reads != 0);
+  assert(rows->Location());
+  assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+  Guard guard;
+  auto restored = fixture.adapter.CreateSlot(guard);
+  TransferTiming timing;
+  assert(streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                         *restored, timing));
+  assert(fixture.adapter.RecurrentHash(*restored) == fixture.hash);
+  std::array<std::byte, 16> restored_rows;
+  auto capture = fixture.adapter.CopyRowsOut(*restored, kTarget, 0, 4,
+                                             restored_rows, preservation);
+  assert(capture.Wait() == TransferResult::kSucceeded);
+  assert(restored_rows == native);
+  lease.Commit();
+}
 void StopWaitingBorrowedPublication(bool fail_idle) {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 11, 4096}};
@@ -603,7 +664,9 @@ void QueueBoundsAndYield() {
   StreamedStore streams(ledger, disk, 16, Allocate, Lease);
   Fixture first(ledger), second(ledger, 2, 30), third(ledger, 3, 60);
   std::atomic<bool> idle{}, copied{};
-  PersistenceQueue queue(ledger, streams, 2, 672, [&] { return idle.load(); });
+  PersistenceQueue queue(
+      ledger, streams, 2, 672, [&] { return idle.load(); }, {}, {},
+      std::chrono::hours(1));
   assert(queue.TrySubmit(PersistenceJob(
       ledger, Id(100), first.manifest, first.Sources([&] { copied = true; }))));
   assert(!queue.TrySubmit(
@@ -617,8 +680,8 @@ void QueueBoundsAndYield() {
   assert(stats.coalesced == 1 && stats.superseded == 1 && !stats.skipped &&
          !copied);
   assert(stats.accepted == 3);
-  // The writer may yield indefinitely, but committed source ownership doesn't
-  // hold live slot readers or the disk metadata lock.
+  // While the writer yields, committed source ownership doesn't hold live
+  // slot readers or the disk metadata lock.
   auto lookup = std::async(std::launch::async, [&] { return disk.Open({99}); });
   assert(lookup.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
   assert(!lookup.get());
@@ -641,6 +704,23 @@ void QueueBoundsAndYield() {
   queue.Stop();
   assert(queue.Stats().pending == 0 && queue.Stats().pinned_bytes == 0);
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+}
+void BusyModelYieldIsBounded() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  Fixture fixture(ledger);
+  // A model that is never idle must not keep a job's pins forever.
+  PersistenceQueue queue(
+      ledger, streams, 1, 336, [] { return false; }, {}, {},
+      std::chrono::milliseconds(20));
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(100), fixture.manifest, fixture.Sources())));
+  queue.Drain();
+  assert(queue.Stats().completed == 1);
+  assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+  assert(disk.Open({1}));
 }
 void NewestPendingFrontierSurvives() {
   for (const bool learned : {false, true}) {
@@ -667,7 +747,8 @@ void NewestPendingFrontierSurvives() {
               assert(query->Stats().pending <= 2);
               discarded = true;
             }
-          });
+          },
+          {}, std::chrono::hours(1));
       query = &queue;
       assert(queue.TrySubmit(
           PersistenceJob(ledger, Id(100), active.manifest, active.Sources())));
@@ -712,10 +793,13 @@ void FirstPendingAnchorSurvivesCoalescing() {
       middle(ledger, 3, 60, 48), latest(ledger, 4, 90, 56);
   active.manifest.compatibility[1] = 1;
   std::atomic<bool> idle{}, started{};
-  PersistenceQueue queue(ledger, streams, 3, 1136, [&] {
-    started = true;
-    return idle.load();
-  });
+  PersistenceQueue queue(
+      ledger, streams, 3, 1136,
+      [&] {
+        started = true;
+        return idle.load();
+      },
+      {}, {}, std::chrono::hours(1));
   assert(queue.TrySubmit(
       PersistenceJob(ledger, Id(1000), active.manifest, active.Sources())));
   const auto deadline =
@@ -835,11 +919,14 @@ void RestorePreemptsYield() {
   streams.Write(Id(100), first.manifest, sources, write);
   std::promise<void> yielding;
   std::atomic<bool> observed{};
-  PersistenceQueue queue(ledger, streams, 1, 336, [&] {
-    if (!observed.exchange(true))
-      yielding.set_value();
-    return false;
-  });
+  PersistenceQueue queue(
+      ledger, streams, 1, 336,
+      [&] {
+        if (!observed.exchange(true))
+          yielding.set_value();
+        return false;
+      },
+      {}, {}, std::chrono::hours(1));
   assert(queue.TrySubmit(
       PersistenceJob(ledger, Id(101), second.manifest, second.Sources())));
   yielding.get_future().wait();
@@ -989,11 +1076,13 @@ int main() {
   RestoreGroupsAdjacentFilesWithinStaging();
   LiveRowsStreamWithoutWholeHistoryBacking();
   BorrowedSourcesWaitWithoutBlockingForeground();
+  LiveBorrowedSourcesPublishFromSlot();
   StopWaitingBorrowedPublication(false);
   StopWaitingBorrowedPublication(true);
   RoundTripAndFailures();
   CancelRestore();
   QueueBoundsAndYield();
+  BusyModelYieldIsBounded();
   NewestPendingFrontierSurvives();
   FirstPendingAnchorSurvivesCoalescing();
   AdmissionFailures();

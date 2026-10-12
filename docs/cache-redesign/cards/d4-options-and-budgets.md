@@ -190,6 +190,11 @@ at startup" and the rejected alternative above, for these measured reasons:
   was refused that the single pool had kept, and two cases prefilled 7 more
   tokens. Segments are now equal and about 1 GiB, at least two private
   states: an 8 GiB budget grows in eight steps.
+- Each capture that leaves less than one segment free starts the next
+  segment on a background thread, so a capture only pays for growth when it
+  outruns that thread. Before, steps 14 and 15 of a #573 run took 945 ms and
+  1,752 ms on the capturing thread and delayed peers through
+  `shared_prefix_wait_ms`.
 - Growth stops early while the host would keep less than 4 GiB available
   (`event=backing_limited`). A capture that finds no room in a growing pool
   reads the ledger's free backing first, and skips a scan of every committed

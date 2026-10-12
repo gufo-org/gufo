@@ -458,7 +458,11 @@ views still coalesce into bounded transfer batches.
 
 Disk jobs pin assigned backing at submission and wait for preservation before
 filesystem publication, staging or stream acquisition. The queue never captures
-live state. Cancellation releases its pins while retaining the original rows.
+live state. (Revised for #573: Flash-Next jobs now read rows still in a slot
+through the same per-piece row pin RAM restore uses, because idle preservation
+only runs while no request is busy. In a six-session run, queued jobs waited
+minutes for it, held 1.8 of 1.9 GB of cache RAM and published nothing, so RAM
+captures failed and later turns missed.) Cancellation releases its pins while retaining the original rows.
 An idle transfer failure fails the optional disk job rather than hanging its
 drain; a later foreground preservation can retry the retained rows. Shutdown
 drains durable jobs, then stops every idle worker before destroying slots.

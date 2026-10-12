@@ -22,6 +22,7 @@ struct BackingState {
   cache::ResourceLedger* ledger{};
   std::function<bool(std::size_t)> admit_segment;
   std::mutex growth;
+  std::atomic<bool> growing_ahead{};
   std::byte* Address(std::size_t index) const {
     return static_cast<std::byte*>(segments[index / segment_blocks]) +
            index % segment_blocks * block_bytes;
@@ -270,6 +271,32 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
     }
     if (!state_->Grow(count))
       return std::nullopt;
+  }
+}
+void CommittedBackingPool::GrowAhead() {
+  const auto committed = state_->committed.load(std::memory_order_acquire);
+  if (committed == state_->capacity)
+    return;
+  const auto free_bytes =
+      state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
+          cache::ResourceCategory::kBackingFree)];
+  if (free_bytes >= state_->segment_blocks * state_->block_bytes)
+    return;
+  const std::lock_guard lock(ahead_mutex_);
+  if (state_->growing_ahead.exchange(true))
+    return;
+  if (ahead_.joinable())
+    ahead_.join();
+  try {
+    ahead_ = std::jthread([state = state_, committed] {
+      try {
+        (void)state->Grow(committed);
+      } catch (...) {
+      }
+      state->growing_ahead.store(false);
+    });
+  } catch (...) {
+    state_->growing_ahead.store(false);
   }
 }
 std::size_t CommittedBackingPool::BlockCount() const noexcept {

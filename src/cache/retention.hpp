@@ -172,6 +172,7 @@ private:
   std::array<std::uint64_t, 4> PressureOrder(std::size_t,
                                              const RetentionRequest&) const;
   std::size_t UniqueBytes(std::size_t) const;
+  bool Persisting(std::size_t) const;
   std::size_t Victim(const RetentionRequest&, bool records) const;
   void Erase(std::size_t, RetentionReason, std::uint32_t rank);
   void Emit(RetentionAction, RetentionReason, CheckpointId, Rows,

@@ -63,7 +63,10 @@ public:
   [[nodiscard]] std::size_t Bytes() const;
   [[nodiscard]] ResourceCategory Category() const;
   [[nodiscard]] PersistencePin PinPersistence() const;
+  [[nodiscard]] bool PersistencePinned() const;
   [[nodiscard]] bool HasBacking() const;
+  // Bytes a pin of rows not yet preserved exposes from their slot.
+  [[nodiscard]] std::size_t SourceViewBytes() const;
 
 private:
   friend class SlotLease;

@@ -245,12 +245,14 @@ ResourceAllocationInfo Info(const std::shared_ptr<detail::ChargeToken>& token) {
   const auto& a = *token->allocation;
   const std::lock_guard lock(a.ledger->mutex);
   std::size_t bytes = 0;
+  bool pinned = false;
   token->Each([&](const detail::Allocation& block) {
     assert(block.category == a.category && block.reserved == a.reserved &&
            block.backing == a.backing);
     bytes += block.bytes;
+    pinned |= block.pins != 0;
   });
-  return {a.category, bytes, a.reserved, a.backing, token->pooled};
+  return {a.category, bytes, a.reserved, a.backing, token->pooled, pinned};
 }
 }  // namespace
 ResourceAllocationInfo ResourceReservation::Info() const {

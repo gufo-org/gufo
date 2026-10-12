@@ -540,7 +540,11 @@ Per-request outcomes appear in the completion log and in `usage.gufo`:
 `queue_ms`), plus
 `prompt_n` (newly processed) and `cache_n` (reused) in the llama.cpp-compatible
 `timings` object. Miss reasons are `no_checkpoint`, `prefix_changed`,
-`input_changed` and `disabled`.
+`input_changed` and `disabled`. Flash-Next reports `no_checkpoint` when no
+stored prompt shares a token with the request and `no_compatible_boundary`
+when one does but no restorable boundary covers it;
+`cache_common_prefix_tokens` is then the longest agreement and
+`cache_checkpoint_tokens` the deepest compatible boundary.
 
 Reading them:
 

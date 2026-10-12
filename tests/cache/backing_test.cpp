@@ -2,6 +2,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -427,6 +428,23 @@ void OnDemandBacking() {
   while (auto block = pool.TryAcquire(Category::kPrivateTail))
     all.push_back(std::move(*block));
   assert(all.size() == many && pool.PageCommitAllocations() == many / 8);
+  // Growing ahead commits the next segment off the capturing thread once
+  // less than a segment is free, and stops at capacity.
+  constexpr std::size_t ahead_capacity = 4 * block_bytes + headroom;
+  cache::ResourceLedger ahead_ledger(Limits(ahead_capacity));
+  hip::CommittedBackingPool ahead(
+      ahead_ledger,
+      {ahead_capacity, block_bytes, headroom, 2 * block_bytes, {}});
+  auto held = ahead.TryAcquire(Category::kPrivateTail);
+  assert(held && ahead.BlockCount() == 2);
+  ahead.GrowAhead();
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (ahead.BlockCount() != 4 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  assert(ahead.BlockCount() == 4 && ahead.PageCommitAllocations() == 2);
+  ahead.GrowAhead();
+  assert(ahead.BlockCount() == 4);
 }
 void Transfers() {
   cache::ResourceLedger ledger(Limits());

@@ -208,8 +208,10 @@ PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
 }
 PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
                                      std::uint64_t bytes, std::size_t alignment,
-                                     std::shared_ptr<BorrowedRows> rows)
+                                     std::shared_ptr<BorrowedRows> rows,
+                                     CopyRows read_live)
     : rows_(std::move(rows)),
+      live_reads_(read_live && rows_ && rows_->SourceViewBytes() >= bytes),
       private_file_(private_file),
       file_(file),
       bytes_(bytes),
@@ -217,6 +219,24 @@ PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
   if (!rows_ || !rows_->IsValid() || !rows_->HasBacking() || !alignment_ ||
       bytes_ % alignment_ || bytes_ > rows_->Bytes())
     throw std::invalid_argument("invalid borrowed persistence source");
+  if (live_reads_) {
+    copy_ = [rows = rows_, copy = std::move(read_live)](
+                std::uint64_t offset, std::span<std::byte> destination,
+                Stream& stream) {
+      // Preserved rows are read from their backing, the others from the
+      // slot. Either way the pin keeps the bytes until the copy completes.
+      auto pin = rows->Pin();
+      const auto source = pin.Bytes().subspan(offset, destination.size());
+      if (!pin.Location()) {
+        std::memcpy(destination.data(), source.data(), destination.size());
+        return Completion(std::make_unique<SettledSignal>());
+      }
+      auto completion = copy(source, destination, stream);
+      return Completion(std::make_unique<PinnedRowSignal>(
+          std::move(pin), std::move(completion)));
+    };
+    return;
+  }
   copy_ = [rows = rows_](std::uint64_t offset, std::span<std::byte> destination,
                          Stream&) {
     // Write waits for preservation before entering disk publication. Owner
@@ -342,7 +362,7 @@ void StreamedStore::Write(DiskFileId file, const DiskManifest& manifest,
   // source pin while waiting. Foreground restore can therefore preempt us.
   const auto preservation_start = Clock::now();
   for (const auto& source : sources) {
-    if (!source.rows_ || !source.rows_->HasBacking())
+    if (!source.rows_ || !source.rows_->HasBacking() || source.live_reads_)
       continue;
     std::mutex wait_mutex;
     std::condition_variable_any wake;
@@ -610,6 +630,7 @@ struct PersistenceQueue::Impl {
   std::function<bool()> idle;
   std::function<void(CheckpointId, bool)> completed;
   std::function<bool(const DiskManifest&)> reclaim;
+  std::chrono::milliseconds yield_limit;
   mutable std::mutex mutex;
   std::mutex stop_mutex;
   std::condition_variable wake;
@@ -622,13 +643,15 @@ struct PersistenceQueue::Impl {
   Impl(ResourceReservation reservation, StreamedStore& streams,
        std::size_t depth, std::size_t bytes, std::function<bool()> model_idle,
        std::function<void(CheckpointId, bool)> on_completed,
-       std::function<bool(const DiskManifest&)> on_reclaim)
+       std::function<bool(const DiskManifest&)> on_reclaim,
+       std::chrono::milliseconds limit)
       : metadata(reservation.Convert()),
         store(&streams),
         max_bytes(bytes),
         idle(std::move(model_idle)),
         completed(std::move(on_completed)),
         reclaim(std::move(on_reclaim)),
+        yield_limit(limit),
         pending(depth) {
     if (!depth || !bytes || !idle)
       throw std::invalid_argument("invalid persistence queue limits");
@@ -649,10 +672,17 @@ struct PersistenceQueue::Impl {
         }
         bool succeeded{};
         TransferTiming timing;
+        // Yield to the model only for a bounded time. Under continuous load
+        // the model is never idle, and a job that never starts keeps its
+        // sources pinned, so later captures fail for want of RAM.
+        const auto deadline = Clock::now() + yield_limit;
+        const std::function<bool()> idle_or_late = [&] {
+          return Clock::now() >= deadline || idle();
+        };
         while (!stop.stop_requested()) {
           try {
             store->Write(active->file_, active->manifest_, active->sources_,
-                         timing, stop, idle);
+                         timing, stop, idle_or_late);
             succeeded = true;
             break;
           } catch (const DiskCapacityExhausted&) {
@@ -693,12 +723,13 @@ PersistenceQueue::PersistenceQueue(
     ResourceLedger& ledger, StreamedStore& store, std::size_t depth,
     std::size_t bytes, std::function<bool()> model_idle,
     std::function<void(CheckpointId, bool)> completed,
-    std::function<bool(const DiskManifest&)> reclaim)
+    std::function<bool(const DiskManifest&)> reclaim,
+    std::chrono::milliseconds yield_limit)
     : impl_(std::make_unique<Impl>(
           ledger.Reserve(ResourceCategory::kMetadata,
                          Add(sizeof(Impl), Multiply(depth, sizeof(void*)))),
           store, depth, bytes, std::move(model_idle), std::move(completed),
-          std::move(reclaim))) {}
+          std::move(reclaim), yield_limit)) {}
 PersistenceQueue::~PersistenceQueue() {
   Stop();
 }

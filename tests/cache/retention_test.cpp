@@ -268,7 +268,7 @@ struct PressureFixture {
   Log log;
   RetentionPolicy policy;
   explicit PressureFixture(std::size_t ram = 1ULL << 30)
-      : ledger({ram, ram, 0, 0}), policy(ledger, index, &log) {
+      : ledger({ram, ram, 0, ram}), policy(ledger, index, &log) {
     index.Register({1}, kPressureComponents);
   }
   // Each conversation executes separately, so no two share chunks. Admission
@@ -317,6 +317,55 @@ void CheapCheckpointsGiveWayFirst() {
   assert(f.Reclaim() == copy);
   assert(f.Reclaim() == first && f.Reclaim() == second);
   assert(f.Reclaim() == idle);
+}
+void ReusedCheapCheckpointKeepsRecency() {
+  // A short checkpoint restored one request ago is not cheap any more: its
+  // next turn would be a full miss (state-edges). It competes by recency.
+  PressureFixture f;
+  const auto idle = f.Add(Conversation(1, 16));
+  const auto restored = f.Add(Conversation(2, 7));
+  const auto other = f.Add(Conversation(3, 7));
+  f.policy.Touch(restored);
+  assert(f.Reclaim() == other);
+  assert(f.Reclaim() == idle);
+  assert(f.Reclaim() == restored);
+}
+void PersistingCheckpointIsNotAVictim() {
+  // While a disk job writes a checkpoint, removing it frees none of its
+  // storage and only drops a restorable boundary from the index.
+  PressureFixture f;
+  const auto older = f.Add(Conversation(1, 16));
+  auto tokens = Conversation(2, 16);
+  std::vector<ResourceCharge> charges;
+  RetentionRequest request{tokens, {1}, {}, RetentionPurpose::kContinuation};
+  assert(f.policy.Admit(request, [&] {
+    auto history = ExecutionHistory::Cold(f.ledger, kPressureComponents, {1});
+    std::vector<ComponentPosition> positions;
+    for (const auto& d : kPressureComponents)
+      positions.push_back({d.id, tokens.size()});
+    return history.Capture(
+        {tokens, InputIdentity(tokens.size()), positions,
+         CheckpointPurpose::kPrompt, 1},
+        [&](const PayloadRequest& payload) {
+          auto pool =
+              f.ledger.Reserve(ResourceCategory::kBackingFree, payload.bytes)
+                  .Convert();
+          auto charge = pool.ReserveBacking(payload.category).Convert();
+          charges.push_back(charge);
+          return Payload::Committed(std::move(charge),
+                                    std::make_shared<int>(0));
+        });
+  }));
+  const auto written = f.log.events.back().checkpoint;
+  std::vector<PersistencePin> pins;
+  for (const auto& charge : charges)
+    pins.push_back(charge.PinPersistence());
+  // The written checkpoint is newer, so it would otherwise go second.
+  f.policy.Touch(older);
+  assert(f.Reclaim() == older);
+  assert(!f.policy.Reclaim({std::vector<Token>(9, 99), {1}, {}}));
+  pins.clear();
+  assert(f.Reclaim() == written);
 }
 void UnreusedConversationKeepsItsStem() {
   // Compaction keeps a stale conversation's system prompt (cache-pressure
@@ -747,6 +796,8 @@ int main() {
   HistoryBytePressureCanReplaceOldFamilies();
   CurrentTurnKeepsItsEditBoundaries();
   CheapCheckpointsGiveWayFirst();
+  ReusedCheapCheckpointKeepsRecency();
+  PersistingCheckpointIsNotAVictim();
   UnreusedConversationKeepsItsStem();
   ForkedParentOutlivesItsChildren();
   ReuseProtectionLastsOneTurnover();

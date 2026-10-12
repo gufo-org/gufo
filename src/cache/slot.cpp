@@ -465,8 +465,19 @@ PersistencePin BorrowedRows::PinPersistence() const {
   return state_->materialized ? state_->charge.PinPersistence()
                               : state_->reservation.PinPersistence();
 }
+bool BorrowedRows::PersistencePinned() const {
+  std::lock_guard lock(state_->mutex);
+  if (state_->buffer.empty() || state_->retired)
+    return false;
+  return state_->materialized ? state_->charge.Info().persistence_pinned
+                              : state_->reservation.Info().persistence_pinned;
+}
 bool BorrowedRows::HasBacking() const {
   return !state_->buffer.empty();
+}
+std::size_t BorrowedRows::SourceViewBytes() const {
+  std::lock_guard lock(state_->mutex);
+  return state_->source_bytes.size();
 }
 SlotLease::SlotLease(std::shared_ptr<detail::LeaseState> state)
     : state_(std::move(state)) {}

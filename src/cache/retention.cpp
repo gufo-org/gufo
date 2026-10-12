@@ -207,12 +207,16 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
       state += c.descriptor.state_bytes;
     else
       rows += c.position.valid_rows * c.descriptor.row_bytes;
-  if (rows * 8 < state)
-    return {1, e.last_used, 0, 0};
   const auto turnover = ledger_.Limits().ram_bytes;
   const auto fresh = [&](const Record& x) {
     return x.reused_at && admitted_bytes_ - *x.reused_at < turnover;
   };
+  // A short prompt is cheap to prefill again. Once reused it competes by
+  // recency with unreused conversations instead: evicting the checkpoint a
+  // retry restored one request ago turns its next turn into a full miss.
+  const bool cheap = rows * 8 < state;
+  if (cheap && !fresh(e))
+    return {1, e.last_used, 0, 0};
   bool rooted = false, reused = fresh(e);
   auto recency = e.last_used;
   const bool covered = e.below.any();
@@ -231,7 +235,7 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
                                 e.purpose == RetentionPurpose::kBranchPoint));
   const auto depth =
       std::numeric_limits<std::uint64_t>::max() - e.checkpoint->Boundary();
-  if (reused)
+  if (reused && !cheap)
     return {3, fork ? 2U : covered ? 0U : 1U, recency, depth};
   return {2, recency, shared ? 2U : covered ? 0U : 1U, depth};
 }
@@ -263,6 +267,15 @@ std::size_t RetentionPolicy::UniqueBytes(std::size_t i) const {
   }
   return bytes;
 }
+bool RetentionPolicy::Persisting(std::size_t i) const {
+  // A disk job pins every payload of the checkpoint it writes, including the
+  // private state. Removing the record then frees nothing until the write
+  // ends, and would only drop a restorable boundary from the index.
+  for (const auto& c : records_[i].checkpoint->Components())
+    if (c.private_state)
+      return c.private_state->PersistencePinned();
+  return false;
+}
 std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
                                     bool record_pressure) const {
   const auto source = Find(r.source);
@@ -274,7 +287,8 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
         !record_pressure && r.purpose == RetentionPurpose::kHistory
             ? 3
             : MaxRank(r.purpose);
-    return records_[i].checkpoint && Priority(i, &r) <= maximum &&
+    return records_[i].checkpoint && !Persisting(i) &&
+           Priority(i, &r) <= maximum &&
            std::ranges::find(r.protected_checkpoints,
                              records_[i].checkpoint->Id()) ==
                r.protected_checkpoints.end();
