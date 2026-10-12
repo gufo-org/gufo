@@ -179,24 +179,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          model_dir="$RUNNER_TEMP/gufo-flash-next"
-          mkdir -p "$model_dir"
-          # Quantization and revision linked from README.md (approximately 111 GB).
-          base_url=https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/38bb39ee97821de2c9009abb7e93950eec396e66/UD-Q4_K_XL
+          python3 -m venv "$RUNNER_TEMP/gufo-hf-cli"
+          "$RUNNER_TEMP/gufo-hf-cli/bin/python" -m pip install 'huggingface_hub[hf_xet]'
+          export HF_XET_HIGH_PERFORMANCE=1
+          export HF_HOME="$RUNNER_TEMP/gufo-hf-cache"
           df -h "$RUNNER_TEMP"
-          for shard in 00001 00002 00003 00004; do
-            file="Qwen3.8-Flash-Next-UD-Q4_K_XL-${shard}-of-00004.gguf"
-            curl --fail --location --retry 5 --retry-delay 5 \
-              --output "$model_dir/$file.part" "$base_url/$file"
-            mv "$model_dir/$file.part" "$model_dir/$file"
-          done
+          "$RUNNER_TEMP/gufo-hf-cli/bin/hf" download unsloth/Qwen3.8-Flash-Next-GGUF \
+            --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
+            --include 'UD-Q4_K_XL/*.gguf' \
+            --local-dir "$RUNNER_TEMP/gufo-flash-next"
 
       - name: Benchmark Flash-Next AR through 128K depth
         shell: bash
         run: |
           set -euo pipefail
           ./build/release/gufo bench \
-            --model "$RUNNER_TEMP/gufo-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf" \
+            --model "$RUNNER_TEMP/gufo-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf" \
             --speculative off --n-prompt 2048 --n-gen 128 \
             --n-depth 0,4096,8192,12288,16384,32768,65536,131072 \
             --repetitions 1 \
@@ -207,4 +205,4 @@ jobs:
       - name: Remove downloaded model weights
         if: always()
         shell: bash
-        run: rm -rf -- "$RUNNER_TEMP/gufo-flash-next"
+        run: rm -rf -- "$RUNNER_TEMP/gufo-flash-next" "$RUNNER_TEMP/gufo-hf-cli" "$RUNNER_TEMP/gufo-hf-cache"
