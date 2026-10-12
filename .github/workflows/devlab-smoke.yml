@@ -72,6 +72,44 @@ jobs:
           }
           printf -- '- Linux x86-64: verified\n- KFD/render device access: verified\n' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Report power profile and exposed limits
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '\n### Power configuration\n\n```text\n' >> "$GITHUB_STEP_SUMMARY"
+          report_file() {
+            local path="$1" value
+            if [[ -r "$path" ]] && value=$(cat "$path" 2>/dev/null); then
+              printf '%s: %s\n' "$path" "$value" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          report_file /sys/firmware/acpi/platform_profile
+          report_file /sys/firmware/acpi/platform_profile_choices
+          for path in /sys/class/platform-profile/*/profile \
+                      /sys/class/platform-profile/*/choices \
+                      /sys/devices/system/cpu/cpufreq/policy*/scaling_governor \
+                      /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference; do
+            report_file "$path"
+          done
+          for device in /sys/class/drm/card*/device; do
+            [[ -r "$device/vendor" ]] || continue
+            [[ "$(cat "$device/vendor")" == 0x1002 ]] || continue
+            report_file "$device/power_dpm_force_performance_level"
+            report_file "$device/pp_power_profile_mode"
+            for hwmon in "$device"/hwmon/hwmon*; do
+              report_file "$hwmon/name"
+              for metric in power1_cap power1_cap_default power1_cap_min power1_cap_max; do
+                path="$hwmon/$metric"
+                if [[ -r "$path" ]] && value=$(cat "$path" 2>/dev/null); then
+                  awk -v path="$path" -v value="$value" \
+                    'BEGIN { printf "%s: %.3f W\n", path, value / 1000000 }' \
+                    | tee -a "$GITHUB_STEP_SUMMARY"
+                fi
+              done
+            done
+          done
+          printf '```\n\nUnavailable interfaces are omitted. These readings do not establish the firmware APU TDP when it is not exposed to the runner.\n' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Verify gfx1151 and inventory available tools
         shell: bash
         run: |
