@@ -2,7 +2,10 @@
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target and
 shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.
-Gufo: October 10, 2026, production Nix review build `25cdb2a1` of PR #518.
+Gufo d0/d32K AR and MTP: October 13, 2026 (Europe/Paris), PR #571,
+kernel snapshot `ab889954` atop `f06f32b9`, production CMake release build
+with the pinned Nix toolchain. All other Gufo cells retain October 10's
+production Nix review build `25cdb2a1` of PR #518.
 Reference results remain unchanged from September 22–23.
 llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
 
@@ -14,6 +17,16 @@ exceed the timing gate. Historical llama.cpp MTP values are retained as requeste
 a separate check of that pin did not match its own AR output, so this review
 does not requalify those comparisons. [Review evidence](artifacts/decode-kernels-review.json).
 
+The paired-wave increment gains about 0.5% AR pp at d0 and 0.4–1.2% at d32K
+across two matched captures. One matched MTP capture gains 0.6–1.3% at d0
+and about 0.6% at d32K. All 12 measured candidate requests preserve outputs
+and token/cache/draft counts, with no prefill/decode phase exceeding 5% and
+3 ms. The focused ordered depths are `[0, 32768]`; calibration and MTP decode
+history differ from the older full sweep, so the matched previous-PR controls
+identify the increment. The earlier native candidate had an inconclusive
+d32K outlier and is excluded from these speeds.
+[Per-request timings, controls and numerical evidence](artifacts/paired-prefill-review.json).
+
 ## Single user, autoregressive
 
 Approximately pp2048 / tg128; depth is the cached prefix in tokens.
@@ -22,12 +35,12 @@ Context capacities differ between engines; see the measurement details.
 <!-- bench:single-ar -->
 | Flash-Next Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1702.93 | 489.59 | +247.8% | 27.98 | 22.20 | +26.0% |
+| 0 | 1727.91 ± 11.04 | 489.59 | +252.9% | 28.26 ± 0.07 | 22.20 | +27.3% |
 | 4,096 | 1624.56 | 455.24 | +256.9% | 28.27 | 21.21 | +33.3% |
 | 8,192 | 1619.43 | 428.85 | +277.6% | 28.26 | 20.40 | +38.5% |
 | 12,288 | 1606.91 | 400.21 | +301.5% | 28.21 | 19.64 | +43.6% |
 | 16,384 | 1589.06 | 375.89 | +322.7% | 28.16 | 18.95 | +48.6% |
-| 32,768 | 1556.91 | 301.31 | +416.7% | 28.02 | 16.54 | +69.4% |
+| 32,768 | 1567.42 ± 5.05 | 301.31 | +420.2% | 28.08 ± 0.06 | 16.54 | +69.8% |
 | 65,536 | 1464.69 | 221.94 | +559.9% | 27.76 | 11.62 | +138.9% |
 | 131,072 | 1430.01 | 144.78 | +887.7% | 27.13 | 7.98 | +240.0% |
 <!-- /bench -->
@@ -42,12 +55,12 @@ text, including Gufo predictor catch-up.
 <!-- bench:single-mtp -->
 | Flash-Next Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1627.98 | 468.76 | +247.3% | 33.80 | 31.73 | +6.5% | 65.25 | 48.12 | +35.6% |
+| 0 | 1682.97 | 468.76 | +259.0% | 33.87 | 31.73 | +6.7% | 65.56 | 48.12 | +36.2% |
 | 4,096 | 1583.15 | 423.79 | +273.6% | 35.57 | 34.48 | +3.2% | 62.41 | 45.71 | +36.5% |
 | 8,192 | 1575.39 | 394.98 | +298.9% | 35.08 | 32.20 | +8.9% | 52.98 | 44.31 | +19.6% |
 | 12,288 | 1550.63 | 365.91 | +323.8% | 37.50 | 32.32 | +16.0% | 45.36 | 43.53 | +4.2% |
 | 16,384 | 1504.60 | 341.98 | +340.0% | 38.01 | 32.07 | +18.5% | 54.12 | 43.66 | +24.0% |
-| 32,768 | 1485.94 | 277.61 | +435.3% | 36.88 | 25.41 | +45.1% | 48.38 | 39.28 | +23.2% |
+| 32,768 | 1520.04 | 277.61 | +447.5% | 35.66 | 25.41 | +40.3% | 44.98 | 39.28 | +14.5% |
 | 65,536 | 1412.16 | 208.04 | +578.8% | 36.29 | 19.65 | +84.7% | 47.23 | 27.75 | +70.2% |
 | 131,072 | 1396.97 | 135.42 | +931.6% | 35.77 | 14.63 | +144.5% | 47.95 | 20.96 | +128.8% |
 <!-- /bench -->

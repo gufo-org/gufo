@@ -1,5 +1,18 @@
 # Qwen3.8 Flash-Next quality
 
+**PR #571's paired-wave increment preserves the previous PR head's full logits:**
+99,328,000 F32 values are byte-exact after a 34,159-token code/prose prompt
+and 400 fixed continuation steps, batch 4096, capacity 65536. October 13, 2026
+(Europe/Paris), kernel snapshot `ab889954` versus `f06f32b9`, same pinned
+production toolchain. Independent FP64 routed checks, unsaturated activations,
+odd outputs and guarded partial tiles pass. Deferred residual, F16 norm and
+packed Q8 bytes match; inject partials also match an independent host FP32
+formula. All 12 measured AR/MTP HTTP completions at d0/d32K retain exact
+outputs and counts, with no per-request prefill/decode timing flag.
+[Captured evidence](artifacts/paired-prefill-review.json).
+These are regression checks; the older functional timing failures below remain
+unresolved, and upstream model/conversion accuracy is not requalified.
+
 **PR #518 retains main's full logits at 64K/128K:** 512 fixed code/prose token
 positions, each checked at verification widths 1–8; all 1,017,118,720 logit
 comparisons are byte-exact (KL/TV 0, top-1 agreement 100%). Prefill and 56
@@ -22,6 +35,7 @@ Concurrent setup and maximum-token-gap flags are also retained in the evidence.
 
 | Check | Result |
 | --- | --- |
+| Paired prefill, October 13 | Routed WMMA, MoE epilogue and HC mix operators pass without changing tolerances. Every paired tile width resets its output independently; F16 inputs end at their allocation boundary and odd output tails retain their guards. Full fixed-history logits are byte-exact. HTTP C1 pp2048/tg128, AR twice with two repetitions and mixed/repetitive MTP once: matched requests, outputs, cache/prefill work and actual draft counts. [Evidence](artifacts/paired-prefill-review.json). |
 | Decode-kernel review, October 10 | All 13 operator tests and native snapshot/session/deep-execution checks pass. Independent MTP formulas: worst relative RMS 0.0007655 (limit 0.002), 41 reported comparisons over eight text/image states. Sampled replay, cancellation, C2/4/6/8 and RAM/disk restoration pass. [Evidence](artifacts/decode-kernels-review.json). |
 | Focused HTTP regression, October 10 | `state-edges`, `tool-agent`, `long-context`, `cache`, Flash AR/MTP only. Two main/PR pairs plus unchanged-main controls; no output or expected cache/prefill-work changes. Timing failures remain visible above and in the [evidence](artifacts/decode-kernels-review.json). |
 | Concurrency, October 10 | All 63 tg128 requests match fresh AR completions: 21 AR, 21 mixed MTP and 21 repetitive MTP at C1/2/4/6/8. Prepared prefixes are reused; mixed/repetitive MTP propose 882/2170 drafts and accept 517/1959. [Evidence](artifacts/decode-kernels-review.json). |
@@ -88,6 +102,21 @@ formulas supply independent predictor checks; pinned Transformers ignores MTP
 weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
+
+The October 13 focused refresh uses PR #571's kernel snapshot `ab889954`
+against its previous head `f06f32b9`, production CMake release builds in the
+same pinned Nix environment. HTTP C1, capacity 133760, greedy, thinking off,
+ordered depths `[0, 32768]`, pp2048/tg128 after shape warm-up. AR has two
+repetitions in each of two captures plus a reverse control; each MTP workload
+has one matched capture. Each request's prefill/decode timing is checked at
+5% and 3 ms, with exact request/output hashes and all token/cache/draft counts.
+The card uses the last AR capture and the MTP capture, retaining older depths
+with per-row provenance. No reference refresh was run. The earlier native
+candidate's reverse-run failure and d32K outlier remain visibly inconclusive;
+they are not averaged into the retained HTTP speeds.
+[All retained samples and limitations](artifacts/paired-prefill-review.json).
+
+The historical full sweep follows:
 
 Gufo refreshed October 10, 2026 using production Nix build `25cdb2a1`,
 PR #518 rebased onto main `a41e88da` with all 16 patches unchanged.

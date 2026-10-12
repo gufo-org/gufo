@@ -13,16 +13,16 @@
       "gpuDriver": "amdgpu",
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
-      "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "kernelRelease": "7.2.9",
+      "memoryTotalBytes": 134309638144,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "eed32a3391cf24241ab05bb6e39dca0bc4d0a32a1e5f0ee3bb4487440003aaef",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-10",
+  "measuredOn": "2026-10-12",
   "mode": null,
   "model": {
     "id": "Qwen3.8-Flash-Next",
@@ -30,12 +30,14 @@
   },
   "notes": [
     "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
-    "synthetic text: 1.161 tokens/word, template overhead 12 tokens"
+    "synthetic text: 1.159 tokens/word, template overhead 12 tokens",
+    "Only d0/32768 refreshed on October13 Europe/Paris (October12 UTC); other rows retain October10 values and provenance.",
+    "Fixed ordered depths[0,32768] differ from the historical full sweep; matched previous-PR controls and per-request phase timings are in paired-prefill-review.json."
   ],
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "command": "gufo serve --port 60057 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo-candidate-v28 serve --port 47289 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 0,
@@ -44,13 +46,35 @@
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2040
+        },
+        {
+          "cache_n": 0,
+          "completion_sha256": "10f9c034267f93a411054f63d4d233135dba64bb6fd2c985a314f0422b766aa2",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2032
         }
       ],
-      "pp": 1702.93,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 27.98,
-      "tg_sd": null,
+      "pp": 1727.91,
+      "pp_sd": 11.04,
+      "provenance": {
+        "evidence": "paired-prefill-review.json",
+        "measuredOn": "2026-10-12",
+        "orderedDepths": [
+          0,
+          32768
+        ],
+        "source": {
+          "baseRevision": "f06f32b9d2d23a5a6389abf975b5d9d1b5e9f9e4",
+          "binarySha256": "e7f9a0e8106e9892940b695c5eaf1d6f98759a2093eaea7d4d018f38b233ccb9",
+          "build": "CMake release preset in pinned nix develop; no compiler or competing GPU job during timing",
+          "kernelSha256": "ab889954a80fcae27bbd076ac01d50787537d6b5a09a46f31c7cafa6b4096c51"
+        }
+      },
+      "samples": 2,
+      "tg": 28.26,
+      "tg_sd": 0.07,
       "workload": "prose"
     },
     "12288": {
@@ -67,6 +91,24 @@
       ],
       "pp": 1606.91,
       "pp_sd": null,
+      "provenance": {
+        "measuredOn": "2026-10-10",
+        "orderedDepths": [
+          0,
+          4096,
+          8192,
+          12288,
+          16384,
+          32768,
+          65536,
+          131072
+        ],
+        "source": {
+          "buildMode": "nix-release",
+          "dirty": false,
+          "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe"
+        }
+      },
       "samples": 1,
       "tg": 28.21,
       "tg_sd": null,
@@ -86,6 +128,24 @@
       ],
       "pp": 1430.01,
       "pp_sd": null,
+      "provenance": {
+        "measuredOn": "2026-10-10",
+        "orderedDepths": [
+          0,
+          4096,
+          8192,
+          12288,
+          16384,
+          32768,
+          65536,
+          131072
+        ],
+        "source": {
+          "buildMode": "nix-release",
+          "dirty": false,
+          "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe"
+        }
+      },
       "samples": 1,
       "tg": 27.13,
       "tg_sd": null,
@@ -105,28 +165,68 @@
       ],
       "pp": 1589.06,
       "pp_sd": null,
+      "provenance": {
+        "measuredOn": "2026-10-10",
+        "orderedDepths": [
+          0,
+          4096,
+          8192,
+          12288,
+          16384,
+          32768,
+          65536,
+          131072
+        ],
+        "source": {
+          "buildMode": "nix-release",
+          "dirty": false,
+          "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe"
+        }
+      },
       "samples": 1,
       "tg": 28.16,
       "tg_sd": null,
       "workload": "prose"
     },
     "32768": {
-      "command": "gufo serve --port 60057 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo-candidate-v28 serve --port 47289 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
-          "cache_n": 32718,
-          "completion_sha256": "dd75440f01c4ae6baa82078076db815d0d62b81265814bd7eb65218795c045cd",
+          "cache_n": 32764,
+          "completion_sha256": "3cd83363b334b0de8631b42ec65925291f7e76fbaf4b63b167ef099660a1b4ec",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
-          "prompt_n": 2029
+          "prompt_n": 2060
+        },
+        {
+          "cache_n": 32764,
+          "completion_sha256": "ae95e83d01610033b3827101069e58caa8fdc6d3a1a0684a986eef3d1b446002",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2070
         }
       ],
-      "pp": 1556.91,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 28.02,
-      "tg_sd": null,
+      "pp": 1567.42,
+      "pp_sd": 5.05,
+      "provenance": {
+        "evidence": "paired-prefill-review.json",
+        "measuredOn": "2026-10-12",
+        "orderedDepths": [
+          0,
+          32768
+        ],
+        "source": {
+          "baseRevision": "f06f32b9d2d23a5a6389abf975b5d9d1b5e9f9e4",
+          "binarySha256": "e7f9a0e8106e9892940b695c5eaf1d6f98759a2093eaea7d4d018f38b233ccb9",
+          "build": "CMake release preset in pinned nix develop; no compiler or competing GPU job during timing",
+          "kernelSha256": "ab889954a80fcae27bbd076ac01d50787537d6b5a09a46f31c7cafa6b4096c51"
+        }
+      },
+      "samples": 2,
+      "tg": 28.08,
+      "tg_sd": 0.06,
       "workload": "prose"
     },
     "4096": {
@@ -143,6 +243,24 @@
       ],
       "pp": 1624.56,
       "pp_sd": null,
+      "provenance": {
+        "measuredOn": "2026-10-10",
+        "orderedDepths": [
+          0,
+          4096,
+          8192,
+          12288,
+          16384,
+          32768,
+          65536,
+          131072
+        ],
+        "source": {
+          "buildMode": "nix-release",
+          "dirty": false,
+          "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe"
+        }
+      },
       "samples": 1,
       "tg": 28.27,
       "tg_sd": null,
@@ -162,6 +280,24 @@
       ],
       "pp": 1464.69,
       "pp_sd": null,
+      "provenance": {
+        "measuredOn": "2026-10-10",
+        "orderedDepths": [
+          0,
+          4096,
+          8192,
+          12288,
+          16384,
+          32768,
+          65536,
+          131072
+        ],
+        "source": {
+          "buildMode": "nix-release",
+          "dirty": false,
+          "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe"
+        }
+      },
       "samples": 1,
       "tg": 27.76,
       "tg_sd": null,
@@ -181,6 +317,24 @@
       ],
       "pp": 1619.43,
       "pp_sd": null,
+      "provenance": {
+        "measuredOn": "2026-10-10",
+        "orderedDepths": [
+          0,
+          4096,
+          8192,
+          12288,
+          16384,
+          32768,
+          65536,
+          131072
+        ],
+        "source": {
+          "buildMode": "nix-release",
+          "dirty": false,
+          "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe"
+        }
+      },
       "samples": 1,
       "tg": 28.26,
       "tg_sd": null,
@@ -190,10 +344,10 @@
   "schemaVersion": 1,
   "server": {
     "command": [
-      "gufo",
+      "gufo-candidate-v28",
       "serve",
       "--port",
-      "60057",
+      "47289",
       "--sessions",
       "1",
       "llm",
@@ -211,8 +365,14 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": false,
-    "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe"
+    "dirty": true,
+    "inferenceSnapshot": {
+      "baseRevision": "f06f32b9d2d23a5a6389abf975b5d9d1b5e9f9e4",
+      "binarySha256": "e7f9a0e8106e9892940b695c5eaf1d6f98759a2093eaea7d4d018f38b233ccb9",
+      "build": "CMake release preset in pinned nix develop; no compiler or competing GPU job during timing",
+      "kernelSha256": "ab889954a80fcae27bbd076ac01d50787537d6b5a09a46f31c7cafa6b4096c51"
+    },
+    "revision": "f06f32b9d2d23a5a6389abf975b5d9d1b5e9f9e4"
   },
   "table": "single-ar",
   "target": "gufo"
