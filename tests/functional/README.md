@@ -3,6 +3,48 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+The cluster workflow uses [impact.json](impact.json) to select suites from changed
+paths. Inspect a plan locally without running Gufo:
+
+```sh
+python3 tests/functional/impact.py --model flash-next-q4 \
+  src/models/qwen38_flash_next/continuation_adapter.cpp
+```
+
+`--repo PATH --base SHA --head SHA` reads a Git diff instead. Renames retain both
+old and new ownership. Rules with the highest explicit priority apply; equal
+priority rules contribute a union. Unknown paths expand to all compatible
+coverage. Suite metadata must cover every name in `run.py`; dependencies are
+deliberately conservative, so even narrow source rules can select many suites.
+
+`Devlab functional checks` starts when a maintainer applies `ci:functional` to a
+PR, or manually dispatches it with a PR number. The label event uses trusted base
+workflow code (`pull_request_target`); only Maintain/Admin senders and rerun
+actors authorize execution. The event's exact PR head must still be current.
+Later commits do not inherit approval: remove and reapply the label to approve
+another revision. It pins the PR head and merge base on `main`, plans on a hosted runner,
+and allocates the cluster only for affected Flash-Next AR/MTP coverage (or an
+explicit benchmark request). The workflow and harness come from the trusted
+workflow revision; only the production binary is built from the approved PR.
+It fetches the pinned Q4 shards, MTP sidecar and vision projector into a persistent
+cache, and retains reports and selection reasons as artifacts. Weight reuse
+depends on the cluster preserving that user's cache on the allocated machine.
+
+`cluster.py` executes each configuration group with a fresh server/cache history
+and continues to other groups after a failure. Candidate correctness uses
+`--record-baseline` to capture observations; this does **not** qualify timing
+regressions. Failures fail the cluster job. Deferred cache rollout suites,
+other-model coverage, numerical checks and agent-client replays remain named
+qualification obligations rather than being counted as passes. This workflow
+currently covers only Flash-Next, including for shared changes.
+
+Planner and executor checks are CPU-only:
+
+```sh
+python3 -m unittest discover -s tests/functional -p test_impact.py
+```
+
+
 Device-loss process tests use a separate opt-in runner because each lost-device
 case must terminate its server. Build its CMake-owned preload helper, then run
 against a production binary and one explicitly selected model/mode:

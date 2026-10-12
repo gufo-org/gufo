@@ -1,4 +1,4 @@
-# Gufo: the Strix Halo inference engine
+# Gufo: The ***Open Source*** Strix Halo AI engine 
 
 <p align="center">
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">

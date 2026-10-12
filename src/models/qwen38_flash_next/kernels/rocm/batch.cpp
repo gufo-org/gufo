@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "qfn_mmq.h"
+#include "src/core/hip/managed_alloc.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
@@ -129,7 +130,7 @@ bool Executor::AllocateBatch(std::string* error) const {
   const std::size_t bytes = static_cast<std::size_t>(kBatchSessions) *
                             std::min(kDecodeRows, options_.max_logit_rows) *
                             config().vocab_size * sizeof(float);
-  if (!Check(hipMalloc(&batch_logits_, bytes), error)) {
+  if (!Check(hip::AllocateDevice(&batch_logits_, bytes), error)) {
     return false;
   }
   RecordAllocation("batch-logits", batch_logits_, bytes);
