@@ -256,11 +256,26 @@ struct ComponentTextCache::Impl {
           claim.retained_snapshot_ceiling_bytes.value_or(automatic);
       automatic_bytes =
           std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
-      max_bytes = ceiling;
+      // Staging is pinned host memory too, so the host keeps its reserve
+      // only if both fit under the ceiling.
+      const auto staging = ledger.Limits().staging_bytes;
+      if (staging && staging >= ceiling)
+        throw std::invalid_argument(
+            "--cache-disk-staging-bytes " + std::to_string(staging) +
+            " leaves no cache RAM: at most " + std::to_string(ceiling) +
+            " bytes of host RAM may be pinned");
+      max_bytes = ceiling - staging;
       ram = std::min(ram, ceiling);
+      if (!automatic_ram && ram > max_bytes)
+        Logger::Warn("cache",
+                     "schema=component-cache-v1 event=ram_reduced "
+                     "reason=staging requested_bytes=" +
+                         std::to_string(ram) +
+                         " capacity_bytes=" + std::to_string(max_bytes) +
+                         " staging_capacity_bytes=" + std::to_string(staging));
+      ram = std::min(ram, max_bytes);
       if (automatic_ram)
         ram = std::min(ram, automatic);
-      const auto staging = ledger.Limits().staging_bytes;
       ledger.ConstrainLimits({ram + staging, ram, staging, ram});
       resources->commit_backing(ram);
     }

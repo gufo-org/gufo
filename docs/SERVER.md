@@ -183,8 +183,9 @@ movable pages, not GPU allocations. 27B also checks HIP free memory. A
 positive value sets a byte cap that may exceed the automatic budget, up to the
 available host RAM minus 4 GiB; the startup line reports both as
 `automatic_bytes` and `max_bytes`.
-Disk staging is separate from this RAM budget, as are the other models'
-temporary disk-save buffers.
+On Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
+`max_bytes` excludes it. Other models' disk staging and temporary disk-save
+buffers are separate from this RAM budget.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
 Qwen3.8-Flash-Next commits about 89% of its budget at startup as pinned
@@ -240,8 +241,8 @@ their checkpoint and temporary files too, including writes in progress.
 `--cache-disk-staging-bytes` is Flash-Next's disk transfer buffer. Writes and
 restores stream each checkpoint through it piece by piece, so it no longer
 limits checkpoint size. `0` (the default) allocates 1 MiB of pinned host memory
-at startup; larger values allocate that much and are not needed for deep
-checkpoints. It must hold one cache row (1,024 bytes); startup reports the
+at startup; larger values allocate that much, reduce the RAM budget by the
+same amount and are not needed for deep checkpoints. It must hold one cache row (1,024 bytes); startup reports the
 required size otherwise.
 
 For the other models, `--cache-disk-staging-bytes 0` (the default) selects the

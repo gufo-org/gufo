@@ -710,6 +710,49 @@ void StagingHoldsOneRow() {
   }
   std::filesystem::remove_all(directory);
 }
+void StagingCountsAgainstRamCeiling() {
+  class CeilingRunner final : public Runner {
+  public:
+    mutable std::size_t committed{};
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      claim.retained_snapshot_capacity_bytes = 2 << 20;
+      claim.retained_snapshot_ceiling_bytes = 4 << 20;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->commit_backing = [this](std::size_t budget) {
+        committed = budget;
+      };
+      return resources;
+    }
+  };
+  char pattern[] = "/tmp/gufo-component-ceiling-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  // Pinned staging and RAM share the ceiling: an explicit 4 MiB beside
+  // 1 MiB of staging commits 3 MiB.
+  TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                  .capacity_bytes = 1 << 20,
+                                  .staging_capacity_bytes = 1 << 20};
+  {
+    auto runner = std::make_shared<CeilingRunner>();
+    TextRunnerPool pool(runner, 1, disk, {.capacity_bytes = 4 << 20});
+    assert(runner->committed == 3 << 20);
+  }
+  disk.staging_capacity_bytes = 4 << 20;
+  std::string error;
+  try {
+    TextRunnerPool pool(std::make_shared<CeilingRunner>(), 1, disk,
+                        {.capacity_bytes = 4 << 20});
+  } catch (const std::invalid_argument& e) {
+    error = e.what();
+  }
+  assert(error.find("--cache-disk-staging-bytes 4194304 leaves no cache RAM") !=
+         std::string::npos);
+  std::filesystem::remove_all(directory);
+}
 void DiskDirectoryHasOneOwner() {
   class CommitRunner final : public Runner {
   public:
@@ -936,6 +979,7 @@ int main() {
   LoweredDiskBudgetEvictsOldestAtStartup();
   OrphansLeaveBeforeCheckpoints();
   StagingHoldsOneRow();
+  StagingCountsAgainstRamCeiling();
   DiskDirectoryHasOneOwner();
   GridDoesNotSuppressFirstDiskPrompt();
   NearTailDiskBranchSurvivesRestart();
