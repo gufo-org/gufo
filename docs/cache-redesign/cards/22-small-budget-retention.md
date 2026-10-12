@@ -102,24 +102,39 @@ All 57 hosted contracts and shared formatting pass. Each new retention test
 fails when byte pressure uses the preceding order; the serving test fails when
 the turn's reuse mark is removed.
 
-**Timing is not qualified.** A host microbenchmark of victim selection and
-admission shows the same cost as the preceding order: about 0.1–0.2 ms at 12
-records and 3.7 ms at 64 Flash-sized records per removal. Both orders take about
-0.7 s per removal with 128 records along one 100K-token chain, an existing limit
-of the rank computation. Matched requests with identical cache work still carry
-5% and 3 ms flags in both directions:
+**Timing is not qualified.** The policy itself is cheap: a host microbenchmark
+of victim selection and admission matches the preceding order (about 0.1–0.2 ms
+at 12 records and 3.7 ms at 64 Flash-sized records per removal), and a CPU
+profile of the whole AR six-suite history attributes 0.30% of process samples to
+retention admission and reclamation, versus 0.26% on `def3763e`. Both orders
+take about 0.7 s per removal with 128 records along one 100K-token chain, an
+existing limit of the rank computation.
 
-- Pressure, AR: 141 matched requests. Bridge turns 3–6 prefill 5.7–7.6% slower
-  (+45–69 ms) with identical restored and prefilled tokens; an earlier
-  candidate (`cand1`) matched the control within 2%, and MTP is within 2.6%.
-- Pressure, both modes: queue time moved between requests. The control paid
-  15.2 ms (AR) and 17.3 ms (MTP) reassignment preservation on the tag request;
-  the candidate pays 13.7 and 16.8 ms on the follow-up request instead.
-- Core history: AR 37 slower and 65 faster flags out of 151 matched requests;
-  MTP 36 slower and 69 faster out of 145. Most are asynchronous capture time.
+Two alternations ran both histories in AR and MTP, control first and then
+candidate first. Matched requests have identical prompt, restored and prefilled
+tokens; flags use the strict 5% and 3 ms gate per request and phase.
 
-A second alternation of the affected histories is required before any timing
-claim.
+- AR bridge turns 3–6 prefill 5.7–7.6% slower in the first alternation and
+  5.0–6.3% faster in the second: run-order drift, not the change.
+- Reassignment queue time moves between adjacent requests with the retained
+  set. The control pays 15.0–17.3 ms on the UI tag request and 2.5–4.3 ms on
+  the follow-up; the candidate pays 2.2–4.7 ms and 12.9–16.8 ms. A 38–39 ms wait
+  moves from the first shared-prefix cold control to the next, and `pressure_live_BETA` waits
+  3.1–3.4 ms longer in AR. These belong to the open reassignment-preservation
+  blocker; they are reproduced flags, not passes.
+- Fan-out `pressure_child_BETA` (AR) reaches a 267 ms token gap in both
+  alternations, versus 80 ms. The candidate admits its prompt-end retry copy,
+  which the control refused for lack of space; that synchronous post-token
+  capture overlaps the other children's restores.
+- `depth_unchanged` prefill is 7.3–7.6 ms slower in every candidate run in both
+  modes, and one MTP growth cold control is 9–10% slower in both final-binary
+  runs, each with identical cache events and pass chunking. The earlier binary
+  with the same policy matched the control on the growth request. Neither cause
+  is found; the profile excludes retention CPU time.
+- Asynchronous capture time and a few decode/token-gap phases also flag in both
+  directions; capture work differs where the retained set differs.
+
+No timing improvement or pass is claimed beyond the changed-work requests.
 
 ## Done when
 
@@ -129,7 +144,8 @@ claim.
   and cold-output comparison in AR and MTP on the final revision.
 - [x] The six-suite card 21 history still passes in AR and MTP.
 - [ ] Affected request timings meet the strict 5% / 3 ms gate against matched
-  `def3763e` controls, or each flag is explained by an alternated rerun.
+  `def3763e` controls. Two alternations are retained; the reproduced flags
+  above remain open.
 
 ## References
 
