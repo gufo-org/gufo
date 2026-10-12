@@ -437,6 +437,464 @@
       "table": "single-mtp-repetition"
     }
   ],
+  "postPublicationExperiments": {
+    "baselineCommit": "7e9e145acc5eff2870d7862b0c1da07d95939ef9",
+    "baselineProfile": {
+      "pairedKernels": [
+        {
+          "calls": 32,
+          "milliseconds": 142.417813,
+          "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+        },
+        {
+          "calls": 2,
+          "milliseconds": 9.422043,
+          "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+        },
+        {
+          "calls": 60,
+          "milliseconds": 320.305966,
+          "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>"
+        }
+      ],
+      "stageTotalsMs": {
+        "DenseF16": 728.419643,
+        "GdnRow": 139.233917,
+        "HcCombineMoe": 178.733107,
+        "RoutedF16": 883.125947
+      }
+    },
+    "baselineVariant": 28,
+    "conditions": "Same pinned production build and serial GPU work; no compiler overlapped profiles. Profile timings are diagnostics, not HTTP headline gains. Every capture retained.",
+    "measuredLocalDate": "2026-10-13",
+    "rawEvidenceDirectory": "/home/mixer/gufo-qualification/pr571-paired-waves-2026-10-12",
+    "unchangedPairedKernelControl": {
+      "machineCodeComparison": "SAME _ZN4gufo6models17qwen38_flash_next4rocm12_GLOBAL__N_119RoutedF16GEMMKernelILNS2_10WeightTypeE12ELi128ELi128ELi2ELb1EEEvPKvPK6__halfPKiSC_SC_SC_PKfPfPS8_mmS7_\nSAME _ZN4gufo6models17qwen38_flash_next4rocm12_GLOBAL__N_119RoutedF16GEMMKernelILNS2_10WeightTypeE13ELi128ELi128ELi2ELb1EEEvPKvPK6__halfPKiSC_SC_SC_PKfPfPS8_mmS7_\nSAME _ZN4gufo6models17qwen38_flash_next4rocm12_GLOBAL__N_119RoutedF16GEMMKernelILNS2_10WeightTypeE12ELi128ELi64ELi2ELb1EEEvPKvPK6__halfPKiSC_SC_SC_PKfPfPS8_mmS7_\nSAME _ZN4gufo6models17qwen38_flash_next4rocm12_GLOBAL__N_119RoutedF16GEMMKernelILNS2_10WeightTypeE13ELi128ELi64ELi2ELb1EEEvPKvPK6__halfPKiSC_SC_SC_PKfPfPS8_mmS7_\nall_functions_same 2633 total 2636 candidate 2636\n",
+      "profile": {
+        "pairedKernels": [
+          {
+            "calls": 32,
+            "milliseconds": 142.36316,
+            "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+          },
+          {
+            "calls": 2,
+            "milliseconds": 9.515393,
+            "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+          },
+          {
+            "calls": 60,
+            "milliseconds": 317.194263,
+            "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>"
+          }
+        ],
+        "stageTotalsMs": {
+          "DenseF16": 719.355658,
+          "GdnRow": 136.765765,
+          "HcCombineMoe": 178.255705,
+          "RoutedF16": 876.781147
+        }
+      },
+      "variant": 29
+    },
+    "variants": [
+      {
+        "binarySha256": "7a8b0893eb63f19ed2b205e4e000c7ef72a64dd1da9b66f61746674d45161e75",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Cache deferred prior weights",
+        "profile": {
+          "pairedKernels": [
+            {
+              "calls": 32,
+              "milliseconds": 142.36316,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 9.515393,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+            },
+            {
+              "calls": 60,
+              "milliseconds": 317.194263,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>"
+            }
+          ],
+          "stageTotalsMs": {
+            "DenseF16": 719.355658,
+            "GdnRow": 136.765765,
+            "HcCombineMoe": 178.255705,
+            "RoutedF16": 876.781147
+          }
+        },
+        "reason": "No clear gain in the affected HC stage against unchanged-stage drift.",
+        "resourceComparison": "0 worse, 0 better, 2629 same, 0 one side only; scratch increased in 0\n",
+        "sourceSnapshots": [
+          {
+            "file": "kernels-candidate-v29.hip.cpp",
+            "sha256": "d4a79c1b1fb828ac98c6ff936de2318937fc432ad29b237891cbbd0fed62e651"
+          }
+        ],
+        "variant": 29
+      },
+      {
+        "binarySha256": "4e7cee0f9e81f32e08fed7c463110ff7c0e75de1209a4094e4dfc410ad8016be",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Group paired tails into 48/64/128 launches",
+        "profile": {
+          "pairedKernels": [
+            {
+              "calls": 92,
+              "milliseconds": 253.455601,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 48, 2, true>"
+            },
+            {
+              "calls": 92,
+              "milliseconds": 172.230694,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>"
+            },
+            {
+              "calls": 32,
+              "milliseconds": 90.83639,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 2.759657,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 48, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 0.607629,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 64, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 6.614142,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+            }
+          ],
+          "stageTotalsMs": {
+            "DenseF16": 725.415703,
+            "GdnRow": 137.747344,
+            "HcCombineMoe": 178.046088,
+            "RoutedF16": 933.952607
+          }
+        },
+        "reason": "Q4 paired total +11.6%; independent uniform/mixed-offset operators pass.",
+        "resourceComparison": null,
+        "sourceSnapshots": [
+          {
+            "file": "v30-source/tests/models/qwen38_flash_next/routed_wmma_ops_test.cpp",
+            "sha256": "4352bb66d0202d9407f817df5cdcdf13e81d2796a672919f3089ae12d8405823"
+          },
+          {
+            "file": "v30-source/src/models/qwen38_flash_next/kernels/rocm/executor.cpp",
+            "sha256": "a0002b2857f3fb063b3355575271fd337c6e2b039a25824b7f41131db4cf8f19"
+          },
+          {
+            "file": "v30-source/src/models/qwen38_flash_next/kernels/rocm/executor.hpp",
+            "sha256": "09bf20555dd8bed18563fe8a23181b168d6b8367911ffabdad339dc9f7ddb945"
+          },
+          {
+            "file": "v30-source/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp",
+            "sha256": "778129bcc2ae384c70e80d91822a644b2bda49baa885f3b8e093bfa710451b1f"
+          },
+          {
+            "file": "v30-source/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp",
+            "sha256": "899e33b47cd5f0d0a5a5d06c1ba7f652ba69bdb31a021f3c942b8e87bf77179d"
+          }
+        ],
+        "variant": 30
+      },
+      {
+        "binarySha256": "cb153a4534271f0ae950b5513ec44d68e7699ad7b9b3a14d6623c98f04f2a262",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Uniform 48-row paired map",
+        "profile": {
+          "pairedKernels": [
+            {
+              "calls": 32,
+              "milliseconds": 143.016127,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 9.461845,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+            },
+            {
+              "calls": 60,
+              "milliseconds": 326.382998,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 48, 2, true>"
+            }
+          ],
+          "stageTotalsMs": {
+            "DenseF16": 717.064348,
+            "GdnRow": 136.844502,
+            "HcCombineMoe": 178.17815,
+            "RoutedF16": 887.67349
+          }
+        },
+        "reason": "Narrow Q4 is slower than the retained 64-row path; routed operators pass.",
+        "resourceComparison": null,
+        "sourceSnapshots": [
+          {
+            "file": "v31-source/tests/models/qwen38_flash_next/routed_wmma_ops_test.cpp",
+            "sha256": "1638e965c03806a0bf8f365c445bd52c20f9abcdf43aa0ac126df0b41b65ada2"
+          },
+          {
+            "file": "v31-source/src/models/qwen38_flash_next/kernels/rocm/executor.cpp",
+            "sha256": "6a5624437073ff204a9a7d9502c09ea85601e9e1864911376a332757973f2909"
+          },
+          {
+            "file": "v31-source/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp",
+            "sha256": "0b71c58eba8fd6f525bb093042adf1653afac1372e91ab5ca5af73cc1e7088e6"
+          },
+          {
+            "file": "v31-source/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp",
+            "sha256": "d4c6c2de7cea5708112ff5f961507d8cbe618adc71b0f125cceb80a3fbb2de6a"
+          }
+        ],
+        "variant": 31
+      },
+      {
+        "binarySha256": "eaee954895ffd6888a8f07910e9efee49c590e850f2bf0e30619bbd7f88f2490",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Non-temporal expert-code loads",
+        "profile": {
+          "pairedKernels": [
+            {
+              "calls": 32,
+              "milliseconds": 168.181765,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 10.558317,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+            },
+            {
+              "calls": 60,
+              "milliseconds": 431.431491,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>"
+            }
+          ],
+          "stageTotalsMs": {
+            "DenseF16": 716.708029,
+            "GdnRow": 137.119453,
+            "HcCombineMoe": 178.003685,
+            "RoutedF16": 1011.023449
+          }
+        },
+        "reason": "Narrow/wide Q4 kernel time rises 34.7%/18.1%; routed operators pass.",
+        "resourceComparison": "warning: Git tree '/home/mixer/.codex/worktrees/8988/gufo' is dirty\n0 worse, 0 better, 2629 same, 0 one side only; scratch increased in 0\n",
+        "sourceSnapshots": [
+          {
+            "file": "kernels-candidate-v32.hip.cpp",
+            "sha256": "edd9c0e17cea325ca4ea5bdbf36ccb5faa95210900fb5d760a4dbc2c8530dd7d"
+          }
+        ],
+        "variant": 32
+      },
+      {
+        "binarySha256": "8d61cf3a1bfd5a5607aee293d3687c1a7d9e7db1eab199ad6dc32a2f8a84f184",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Remove narrow fragment scheduling barrier",
+        "profile": {
+          "pairedKernels": [
+            {
+              "calls": 32,
+              "milliseconds": 142.88599,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 9.536515,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+            },
+            {
+              "calls": 60,
+              "milliseconds": 342.788813,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>"
+            }
+          ],
+          "stageTotalsMs": {
+            "DenseF16": 722.787627,
+            "GdnRow": 137.8267,
+            "HcCombineMoe": 178.29225,
+            "RoutedF16": 903.309983
+          }
+        },
+        "reason": "Narrow Q4 +7.0%; VGPR use rises from 127 to 176 and occupancy falls from 10 to 8 waves; routed operators pass.",
+        "resourceComparison": "127 vgpr    0 spill    0 B 10w  ->  176 vgpr    0 spill    0 B  8w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n136 vgpr    0 spill    0 B 10w  ->  185 vgpr    0 spill    0 B  8w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)13, 128, 64, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n2 worse, 0 better, 2627 same, 0 one side only; scratch increased in 0\n",
+        "sourceSnapshots": [
+          {
+            "file": "kernels-candidate-v33.hip.cpp",
+            "sha256": "20058a41aa34d67b4754e642ac313471face274963e91f0bbcf18dff8edd4afc"
+          }
+        ],
+        "variant": 33
+      },
+      {
+        "binarySha256": "08b26e7ad4d6fd4ebacce653cc01edb4614ae0ebf2a03dbcf3aefd8ac1b63fe8",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Interleave two token tiles low/low/high/high",
+        "profile": {
+          "pairedKernels": [
+            {
+              "calls": 32,
+              "milliseconds": 142.671578,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 9.170294,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+            },
+            {
+              "calls": 60,
+              "milliseconds": 320.210032,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>"
+            }
+          ],
+          "stageTotalsMs": {
+            "DenseF16": 763.640378,
+            "GdnRow": 135.771446,
+            "HcCombineMoe": 178.236334,
+            "RoutedF16": 879.208611
+          }
+        },
+        "reason": "Narrow Q4 320.210 versus 320.306 ms is flat; all kernel resources unchanged and operators pass.",
+        "resourceComparison": "0 worse, 0 better, 2629 same, 0 one side only; scratch increased in 0\n",
+        "sourceSnapshots": [
+          {
+            "file": "kernels-candidate-v34.hip.cpp",
+            "sha256": "7ea1b27283ab0577a405a7707951a9b2ca86fdd3df46cefd85a31a39a6c78020"
+          }
+        ],
+        "variant": 34
+      },
+      {
+        "binarySha256": "ce3cd7a271bdaf4d7605d6482769ee6817ff93b9bf3f3c6ed2bfab97b2363b25",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Direct fixed-index cache writes to LDS",
+        "profile": null,
+        "reason": "All four paired kernels acquire 80 B of private scratch; rejected before GPU checks/timing.",
+        "resourceComparison": "173 vgpr    0 spill    0 B  8w  ->  157 vgpr    0 spill   80 B  9w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n127 vgpr    0 spill    0 B 10w  ->  111 vgpr    0 spill   80 B 12w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n182 vgpr    0 spill    0 B  8w  ->  166 vgpr    0 spill   80 B  9w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n136 vgpr    0 spill    0 B 10w  ->  120 vgpr    0 spill   80 B 12w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)13, 128, 64, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n4 worse, 0 better, 2625 same, 0 one side only; scratch increased in 4\n",
+        "sourceSnapshots": [
+          {
+            "file": "kernels-candidate-v35.hip.cpp",
+            "sha256": "e898f1e09d01c0e36230c44b9179507ce55cbcbac78c5a2a77a36967b818d69f"
+          }
+        ],
+        "variant": 35
+      },
+      {
+        "binarySha256": "405946f7c4c94bdda2202f7fe5acfd1099dd7ff0c5b1492d57c3ceeb4e4548a6",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Template-constant direct cache stages",
+        "profile": null,
+        "reason": "All four paired kernels retain 80 B of private scratch; rejected before GPU checks/timing.",
+        "resourceComparison": "173 vgpr    0 spill    0 B  8w  ->  157 vgpr    0 spill   80 B  9w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n127 vgpr    0 spill    0 B 10w  ->  111 vgpr    0 spill   80 B 12w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n182 vgpr    0 spill    0 B  8w  ->  166 vgpr    0 spill   80 B  9w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n136 vgpr    0 spill    0 B 10w  ->  120 vgpr    0 spill   80 B 12w  void gufo::models::qwen38_flash_next::rocm::(anonymous namespace)::RoutedF16GEMMKernel<(gufo::models::qwen38_flash_next::rocm::WeightType)13, 128, 64, 2, true>(void const*, __half const*, int const*, int const*, int const*, int const*, float const*, float*, __half*, unsigned long, unsigned long, void const*)\n4 worse, 0 better, 2625 same, 0 one side only; scratch increased in 4\n",
+        "sourceSnapshots": [
+          {
+            "file": "kernels-candidate-v36.hip.cpp",
+            "sha256": "9c28134aca6dfa58056f1ce32859d6061158ae9972494012fed722c1508eacc3"
+          }
+        ],
+        "variant": 36
+      },
+      {
+        "binarySha256": "e884407d571f24932f593be305997d017ea5a13d8f13dc50f3cdbfb768df9c6c",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Four named cache vectors with direct LDS commit",
+        "profile": {
+          "pairedKernels": [
+            {
+              "calls": 32,
+              "milliseconds": 142.107811,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 9.423744,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+            },
+            {
+              "calls": 60,
+              "milliseconds": 317.141587,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>"
+            }
+          ],
+          "stageTotalsMs": {
+            "DenseF16": 717.217242,
+            "GdnRow": 136.994882,
+            "HcCombineMoe": 178.188529,
+            "RoutedF16": 878.078021
+          }
+        },
+        "reason": "No scratch; independent operators pass. Narrow Q4 317.142 ms matches the unchanged paired-kernel control at 317.194 ms, so no clear gain justifies added structure.",
+        "resourceComparison": "0 worse, 0 better, 2629 same, 0 one side only; scratch increased in 0\n",
+        "sourceSnapshots": [
+          {
+            "file": "kernels-candidate-v37.hip.cpp",
+            "sha256": "ea341018064c70f451d67595324c965f3abcfaea0f0abfc0c9d5c7824ac53030"
+          }
+        ],
+        "variant": 37
+      },
+      {
+        "binarySha256": "4851c34933141793f162cbbc12f1d43f48a8618eed6de29683aa54fce275677f",
+        "decision": "rejected",
+        "fullLogitAndHttpQualification": "not run; no retained improvement",
+        "mechanism": "Delay prior residual load until after expert sum",
+        "profile": {
+          "pairedKernels": [
+            {
+              "calls": 32,
+              "milliseconds": 142.382018,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 128, 2, true>"
+            },
+            {
+              "calls": 2,
+              "milliseconds": 9.83284,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)13, 128, 128, 2, true>"
+            },
+            {
+              "calls": 60,
+              "milliseconds": 316.630422,
+              "name": "models::qwen38_flash_next::rocm::RoutedF16GEMMKernel<(models::qwen38_flash_next::rocm::WeightType)12, 128, 64, 2, true>"
+            }
+          ],
+          "stageTotalsMs": {
+            "DenseF16": 720.4128,
+            "GdnRow": 136.800522,
+            "HcCombineMoe": 179.054671,
+            "RoutedF16": 878.232618
+          }
+        },
+        "reason": "Exact epilogue checks pass, but normalized VGPR use rises 98 to 101 and 104 to 108 with inject; HC stage stays flat at 179.055 ms.",
+        "resourceComparison": "0 worse, 0 better, 2629 same, 0 one side only; scratch increased in 0\n",
+        "sourceSnapshots": [
+          {
+            "file": "kernels-candidate-v38.hip.cpp",
+            "sha256": "a26c2a94c0dd7420622d469408942f0e210dee1df07a3af99f01612ece5dd487"
+          }
+        ],
+        "variant": 38
+      }
+    ]
+  },
   "profilesMs": {
     "baselineLate": {
       "dense": 718.462,
