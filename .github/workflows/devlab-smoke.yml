@@ -46,7 +46,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      # Only the maintainer-controlled smoke branch is checked out.
+      # The workflow is trusted; the source revision below was selected by a maintainer.
       - name: Verify platform and GPU device access
         shell: bash
         run: |
@@ -159,15 +159,18 @@ jobs:
           awk '/^MemTotal:/ { printf "Host-visible memory: %.1f GiB\n", $2 / 1048576 }' /proc/meminfo
           printf '\nThis probe verifies runner placement and GPU device access. It does not execute a model or qualify performance.\n' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Checkout repository
+      - name: Checkout PR 460 at approved revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          repository: dattrax/gufo
+          ref: c40564d2775eceb084ded63aeaa4675d8075b9e7
           persist-credentials: false
 
       - name: Build Gufo from source
         shell: bash
         run: |
           set -euo pipefail
+          printf 'Source: dattrax/gufo PR #460 at %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
           cmake --version
           c++ --version
           hipcc --version
