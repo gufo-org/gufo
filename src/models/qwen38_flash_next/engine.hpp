@@ -297,7 +297,8 @@ private:
   struct PendingDecode;
   bool PrepareDecode(const DecodeRequest& request, PendingDecode* pending,
                      std::string* error_msg, bool defer_head = false,
-                     std::optional<std::uint32_t> batch_drafts = {});
+                     std::optional<std::uint32_t> batch_drafts = {},
+                     std::uint32_t occupancy = 1);
   static void AppendDraft(PendingDecode& pending);
   /// Appends copies within the prepared budget, stopping at EOG when enabled.
   bool AppendLookup(PendingDecode& pending, bool stop_at_eos,

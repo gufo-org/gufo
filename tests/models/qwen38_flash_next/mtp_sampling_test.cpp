@@ -100,6 +100,25 @@ void CheckLengthController() {
           "conditional acceptance by depth was collapsed to one probability");
 }
 
+void CheckOccupancyOverride() {
+  // About half of the first drafts are accepted: one draft pays for itself at
+  // the C1 cost row but not at C8, where a lone request would fall back to AR.
+  qfn::MtpLengthController configured_8(7, 8), configured_1(7, 1), lone(7, 8);
+  for (unsigned i = 0; i < 12; ++i) {
+    const unsigned accepted = i % 2;
+    configured_8.Observe(accepted, 1);
+    configured_1.Observe(accepted, 1);
+    lone.Observe(accepted, 1, 0, 1);
+  }
+  Require(configured_8.Choose(7) == 0 && configured_1.Choose(7) > 0,
+          "the C8 cost row did not price out a half-accepted draft");
+  for (unsigned budget = 0; budget <= 8; ++budget) {
+    Require(lone.Choose(budget, 0, 1) == configured_1.Choose(budget),
+            "an occupancy override did not price like a configured lone "
+            "decoder");
+  }
+}
+
 void CheckCompactProposals() {
   const std::array<float, 5> target_logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
   const std::array<sampling::TokenId, 4> history{2, 3, 2, 0};
@@ -390,6 +409,7 @@ int main() {
   try {
     CheckVerificationBoundaries();
     CheckLengthController();
+    CheckOccupancyOverride();
     CheckCalibratedCosts();
     CheckBatchProfitability();
     CheckCompactProposals();
