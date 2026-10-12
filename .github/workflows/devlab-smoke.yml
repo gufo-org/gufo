@@ -164,42 +164,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compute CMake compiler cache key
-        id: ccache-key
-        shell: bash
-        run: echo "epoch-week=$(( $(date -u +%s) / 604800 ))" >> "$GITHUB_OUTPUT"
-
-      - name: Restore CMake compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /tmp/gufo-ccache
-          key: gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ steps.ccache-key.outputs.epoch-week }}
-          restore-keys: |
-            gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
-
-      - name: Prepare CMake compiler cache
+      - name: Build Gufo from source
         shell: bash
         run: |
-          mkdir -p /tmp/gufo-ccache
-          chmod -R a+rwX /tmp/gufo-ccache
-          chmod 1777 /tmp/gufo-ccache
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-        with:
-          determinate: false
-          extra-conf: |
-            extra-sandbox-paths = /tmp/gufo-ccache
-
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
-        with:
-          use-flakehub: false
-          use-gha-cache: true
-
-      - name: Build Gufo production package
-        shell: bash
-        run: nix build --print-build-logs
+          set -euo pipefail
+          cmake --version
+          c++ --version
+          hipcc --version
+          cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+          cmake --build --preset release --parallel 4
+          ./build/release/gufo diagnose
 
       - name: Download pinned Flash-Next Q4 weights
         shell: bash
@@ -221,7 +195,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./result/bin/gufo bench \
+          ./build/release/gufo bench \
             --model "$RUNNER_TEMP/gufo-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf" \
             --speculative off --n-prompt 2048 --n-gen 128 \
             --n-depth 0,4096,8192,12288,16384,32768,65536,131072 \
