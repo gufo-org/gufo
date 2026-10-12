@@ -182,12 +182,27 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/gufo-hf-cli"
           "$RUNNER_TEMP/gufo-hf-cli/bin/python" -m pip install 'huggingface_hub[hf_xet]'
           export HF_XET_HIGH_PERFORMANCE=1
+          export HF_HUB_DOWNLOAD_TIMEOUT=120
+          export HF_HUB_ETAG_TIMEOUT=60
+          printf 'Hugging Face endpoint: %s\n' "${HF_ENDPOINT:-https://huggingface.co}"
+          printf 'Xet disabled by runner: %s\n' "${HF_HUB_DISABLE_XET:-0}"
           export HF_HOME="$RUNNER_TEMP/gufo-hf-cache"
           df -h "$RUNNER_TEMP"
-          "$RUNNER_TEMP/gufo-hf-cli/bin/hf" download unsloth/Qwen3.8-Flash-Next-GGUF \
-            --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
-            --include 'UD-Q4_K_XL/*.gguf' \
-            --local-dir "$RUNNER_TEMP/gufo-flash-next"
+          downloaded=false
+          for attempt in 1 2 3; do
+            if "$RUNNER_TEMP/gufo-hf-cli/bin/hf" download unsloth/Qwen3.8-Flash-Next-GGUF \
+              --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
+              --include 'UD-Q4_K_XL/*.gguf' \
+              --local-dir "$RUNNER_TEMP/gufo-flash-next"; then
+              downloaded=true
+              break
+            fi
+            echo "::warning::Download attempt $attempt failed; retaining partial files for resume."
+          done
+          [[ "$downloaded" == true ]] || {
+            echo "::error::Flash-Next download failed after three attempts."
+            exit 1
+          }
 
       - name: Benchmark Flash-Next AR through 128K depth
         shell: bash
