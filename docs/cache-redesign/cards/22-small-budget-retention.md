@@ -101,6 +101,9 @@ in either direction.
 All 57 hosted contracts and shared formatting pass. Each new retention test
 fails when byte pressure uses the preceding order; the serving test fails when
 the turn's reuse mark is removed.
+Card 21's protection-lifetime test keeps its assertion that protection ends
+with the turn; once it ends, the deeper covered boundary is now reclaimed before
+the shallower one, which the preceding LRU order removed first.
 
 **Timing is not qualified.** The policy itself is cheap: a host microbenchmark
 of victim selection and admission matches the preceding order (about 0.1–0.2 ms
