@@ -745,12 +745,13 @@ __global__ void HcCombineKernel(float* res, const float* block_out,
 /// between the two passes, reduces the four stream norms in one block
 /// reduction, and quantizes each 32-wide block over its eight lanes with a
 /// four-code store. Rows of four streams up to 2,560 wide.
-template<typename XnT>
+template<typename XnT, bool kDefer = false>
 __global__ void HcCombineVec4Kernel(float* res, const float* block_out,
                                     const float* inject,
                                     std::uint32_t inject_parts,
                                     const float* gamma, XnT* xn, void* xn_q8,
-                                    std::uint32_t hidden, float eps) {
+                                    std::uint32_t hidden, float eps,
+                                    float* defer_w) {
   constexpr std::uint32_t kStreams = 4;
   constexpr std::uint32_t kMaxChunks = 10;  // 4 x 2560 / 4 / kThreads
   __shared__ float shared[kStreams][kThreads / 32];
@@ -766,6 +767,14 @@ __global__ void HcCombineVec4Kernel(float* res, const float* block_out,
                  p];
     }
     w[s] = 2.0f * SigmoidF(logit / static_cast<float>(kStreams));
+  }
+  // A deferred update leaves the residual as it was and keeps the stream
+  // weights; the next combine reapplies it (HcCombineMoeF16Kernel).
+  if constexpr (kDefer) {
+    if (threadIdx.x < kStreams) {
+      defer_w[static_cast<std::size_t>(t) * kStreams + threadIdx.x] =
+          w[threadIdx.x];
+    }
   }
   float* dst = res + static_cast<std::size_t>(t) * hc_dim;
   const float* src = block_out + static_cast<std::size_t>(t) * hidden;
@@ -784,7 +793,9 @@ __global__ void HcCombineVec4Kernel(float* res, const float* block_out,
       const float4 b = *reinterpret_cast<const float4*>(src + i);
       v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
                     r.w + b.w * ws};
-      *reinterpret_cast<float4*>(dst + e) = v[c];
+      if constexpr (!kDefer) {
+        *reinterpret_cast<float4*>(dst + e) = v[c];
+      }
       const float sq =
           v[c].x * v[c].x + v[c].y * v[c].y + v[c].z * v[c].z + v[c].w * v[c].w;
 #pragma unroll
@@ -878,13 +889,13 @@ __global__ void HcCombineVec4Kernel(float* res, const float* block_out,
 /// their weights and the gated shared expert (MoeEpilogueVec4Kernel), so the
 /// block output never round-trips memory. Threads own hidden lanes (up to
 /// three float4 each) across the four streams.
-template<bool kNormalize>
+template<bool kNormalize, bool kPrior = false>
 __global__ void HcCombineMoeF16Kernel(
     float* res, const __half* expert_out, const float* weights,
     const float* shared_out, const float* gate, std::uint32_t gate_stride,
     std::uint32_t used, const float* inject, std::uint32_t inject_parts,
     const float* gamma, __half* xn, void* xn_q8, std::uint32_t hidden,
-    float eps) {
+    float eps, const float* prior_out, const float* prior_w) {
   constexpr std::uint32_t kStreams = 4;
   constexpr std::uint32_t kMaxChunks = 3;  // 2560 / 4 / kThreads, rounded up
   __shared__ float shared[kStreams][kThreads / 32];
@@ -902,6 +913,32 @@ __global__ void HcCombineMoeF16Kernel(
     w[s] = 2.0f * SigmoidF(logit / static_cast<float>(kStreams));
   }
   float* dst = res + static_cast<std::size_t>(t) * hc_dim;
+  if constexpr (kPrior) {
+    // The previous combine's deferred update, stored as that combine would
+    // have stored it (one FMA, HcCombineVec4Kernel). Each lane rewrites the
+    // elements it reads below, so the lines are still cached when this
+    // combine overwrites them, and the memory clobber makes the code below
+    // reload them exactly as without a deferred update (fast-math would
+    // otherwise fold this FMA into that arithmetic).
+#pragma unroll
+    for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
+      const std::uint32_t i = (c * kThreads + threadIdx.x) * 4;
+      if (i < hidden) {
+        const float4 a = *reinterpret_cast<const float4*>(
+            prior_out + static_cast<std::size_t>(t) * hidden + i);
+#pragma unroll
+        for (std::uint32_t s = 0; s < kStreams; ++s) {
+          const float pw = prior_w[static_cast<std::size_t>(t) * kStreams + s];
+          float4* p = reinterpret_cast<float4*>(
+              dst + static_cast<std::size_t>(s) * hidden + i);
+          const float4 r = *p;
+          *p = float4{__fmaf_rn(a.x, pw, r.x), __fmaf_rn(a.y, pw, r.y),
+                      __fmaf_rn(a.z, pw, r.z), __fmaf_rn(a.w, pw, r.w)};
+        }
+      }
+    }
+    asm volatile("" ::: "memory");
+  }
   // The block output: sum of the weighted expert rows plus the gated shared
   // expert, per hidden chunk.
   const float g = SigmoidF(gate[static_cast<std::size_t>(t) * gate_stride]);
@@ -5153,7 +5190,7 @@ void HcCombine(float* res, const float* block_out, const float* inject,
       hidden <= 2560) {
     hipLaunchKernelGGL(HcCombineVec4Kernel<float>, dim3(n_tokens),
                        dim3(kThreads), 0, stream, res, block_out, inject,
-                       inject_parts, gamma, xn, nullptr, hidden, eps);
+                       inject_parts, gamma, xn, nullptr, hidden, eps, nullptr);
     return;
   }
   hipLaunchKernelGGL(HcCombineKernel<float>, dim3(n_tokens, streams),
@@ -5182,34 +5219,71 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
                      const float* inject, std::uint32_t inject_parts,
                      const float* gamma, __half* xn, void* xn_q8,
                      std::uint32_t n_tokens, std::uint32_t hidden,
-                     std::uint32_t streams, float eps, hipStream_t stream) {
+                     std::uint32_t streams, float eps, hipStream_t stream,
+                     const float* prior_out, const float* prior_w) {
   if (streams != 4 || hidden % 128 != 0 || hidden > 3 * 4 * kThreads ||
       (gamma != nullptr && xn_q8 == nullptr)) {
     return false;
   }
-  const auto combine =
-      gamma ? HcCombineMoeF16Kernel<true> : HcCombineMoeF16Kernel<false>;
+  const auto combine = prior_out != nullptr
+                           ? (gamma ? HcCombineMoeF16Kernel<true, true>
+                                    : HcCombineMoeF16Kernel<false, true>)
+                           : (gamma ? HcCombineMoeF16Kernel<true>
+                                    : HcCombineMoeF16Kernel<false>);
   hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
                      expert_out, weights, shared_out, gate, gate_stride, used,
-                     inject, inject_parts, gamma, xn, xn_q8, hidden, eps);
+                     inject, inject_parts, gamma, xn, xn_q8, hidden, eps,
+                     prior_out, prior_w);
   return true;
 }
 
-void HcCombineF16(float* res, const float* block_out, const float* inject,
+/// res[t][s][i] += block_out[t][i] * w[t][s], the update a deferring
+/// HcCombineVec4Kernel left out, in the same expression.
+__global__ void HcApplyDeferredKernel(float* res, const float* block_out,
+                                      const float* w, std::uint32_t hidden) {
+  constexpr std::uint32_t kStreams = 4;
+  const std::uint32_t t = blockIdx.x;
+  const std::size_t hc_dim = static_cast<std::size_t>(kStreams) * hidden;
+  float* dst = res + static_cast<std::size_t>(t) * hc_dim;
+  const float* src = block_out + static_cast<std::size_t>(t) * hidden;
+  for (std::uint32_t e = threadIdx.x * 4; e < hc_dim; e += kThreads * 4) {
+    const std::uint32_t s = e / hidden;
+    const std::uint32_t i = e - (s * hidden);
+    const float ws = w[static_cast<std::size_t>(t) * kStreams + s];
+    const float4 r = *reinterpret_cast<const float4*>(dst + e);
+    const float4 b = *reinterpret_cast<const float4*>(src + i);
+    *reinterpret_cast<float4*>(dst + e) =
+        float4{__fmaf_rn(b.x, ws, r.x), __fmaf_rn(b.y, ws, r.y),
+               __fmaf_rn(b.z, ws, r.z), __fmaf_rn(b.w, ws, r.w)};
+  }
+}
+
+void HcApplyDeferred(float* res, const float* block_out, const float* w,
+                     std::uint32_t n_tokens, std::uint32_t hidden,
+                     hipStream_t stream) {
+  hipLaunchKernelGGL(HcApplyDeferredKernel, dim3(n_tokens), dim3(kThreads), 0,
+                     stream, res, block_out, w, hidden);
+}
+
+bool HcCombineF16(float* res, const float* block_out, const float* inject,
                   std::uint32_t inject_parts, const float* gamma, __half* xn,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
-                  std::uint32_t streams, float eps, hipStream_t stream) {
+                  std::uint32_t streams, float eps, hipStream_t stream,
+                  float* defer_w) {
   // F16 prefill keeps the same reduction even for a one-token tail.
   if (streams == 4 && hidden % 128 == 0 && hidden <= 2560) {
-    hipLaunchKernelGGL(HcCombineVec4Kernel<__half>, dim3(n_tokens),
-                       dim3(kThreads), 0, stream, res, block_out, inject,
-                       inject_parts, gamma, xn, xn_q8, hidden, eps);
-    return;
+    const auto combine = defer_w != nullptr ? HcCombineVec4Kernel<__half, true>
+                                            : HcCombineVec4Kernel<__half>;
+    hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
+                       block_out, inject, inject_parts, gamma, xn, xn_q8,
+                       hidden, eps, defer_w);
+    return defer_w != nullptr;
   }
   hipLaunchKernelGGL(HcCombineKernel<__half>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
                      inject_parts, gamma, xn, xn_q8, hidden, streams, eps,
                      nullptr);
+  return false;
 }
 
 void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream) {

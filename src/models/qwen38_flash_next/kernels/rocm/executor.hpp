@@ -503,6 +503,9 @@ private:
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
            bool last_only = false) const;
+  /// Whether MoeExperts takes the routed F16 WMMA route, whose epilogue the
+  /// following combine absorbs (see Moe).
+  bool WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const;
   /// Runs routed experts after the router and shared expert are ready.
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
                   std::uint32_t n_tokens, std::string* error_msg) const;
@@ -562,6 +565,7 @@ private:
     float* mixed;
     float* inject;
     float* block_out;
+    float* hc_defer_w;  ///< [t][4] stream weights of a deferred combine
     // linear attention
     float* qkv;
     float* z;
@@ -700,6 +704,11 @@ private:
   bool wide_mixer_{false};
   /// Set by Moe when its epilogue is left for the combine that follows.
   mutable bool moe_pending_{false};
+  /// Set before an attention-side combine whose FFN combine fuses the MoE
+  /// epilogue: that combine may then leave its residual update to the next
+  /// one (res_deferred_), which reads s_.block_out and s_.hc_defer_w.
+  mutable bool defer_residual_{false};
+  mutable bool res_deferred_{false};
   /// Set by GatedDense when s_.shexp_half holds the SwiGLU rows its F16
   /// down projection reads.
   mutable bool shexp_half_ready_{false};

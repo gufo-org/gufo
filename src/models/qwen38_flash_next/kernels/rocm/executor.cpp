@@ -1007,6 +1007,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.mixed = f32(T * hidden);
   s.inject = f32(T * c.hc_count * HcInjectParts(hidden));
   s.block_out = f32(T * hidden);
+  s.hc_defer_w = f32(T * c.hc_count);
   const std::uint32_t max_blocks =
       (c.context_length + c.compress_ratio - 1) / c.compress_ratio;
   e->mask_words_ = (max_blocks + 31) / 32;
@@ -1818,27 +1819,47 @@ void Executor::Combine(float* res, const float* gamma,
   // separate activation pass for the projection.
   xn_half_ = wide_mixer_ && MatrixRows(n_tokens) && gamma != nullptr;
   xn_q8_ready_ = {};  // s_.xn is rewritten (or left stale) below
+  const bool defer = defer_residual_;
+  defer_residual_ = false;
+  const bool deferred = res_deferred_;
+  res_deferred_ = false;
   if (moe_pending_) {
-    // The MoE epilogue was deferred to this combine (see Moe).
+    // The MoE epilogue was deferred to this combine (see Moe), and with it
+    // the previous combine's residual update when that was deferred too.
     moe_pending_ = false;
     const auto* down = reinterpret_cast<const __half*>(s_.down_e);
     if (wide_mixer_ && MatrixRows(n_tokens) &&
-        HcCombineMoeF16(res, down, s_.weights, s_.shexp_out,
-                        s_.router + c.num_experts, c.num_experts + 1,
-                        c.num_experts_used, s_.inject, inject_parts_, gamma,
-                        s_.xn_half, s_.xn_q8t, n_tokens, c.hidden_size,
-                        c.hc_count, c.rms_eps, stream_)) {
+        HcCombineMoeF16(
+            res, down, s_.weights, s_.shexp_out, s_.router + c.num_experts,
+            c.num_experts + 1, c.num_experts_used, s_.inject, inject_parts_,
+            gamma, s_.xn_half, s_.xn_q8t, n_tokens, c.hidden_size, c.hc_count,
+            c.rms_eps, stream_, deferred ? s_.block_out : nullptr,
+            deferred ? s_.hc_defer_w : nullptr)) {
       return;
+    }
+    if (deferred) {
+      HcApplyDeferred(res, s_.block_out, s_.hc_defer_w, n_tokens, c.hidden_size,
+                      stream_);
     }
     MoeEpilogueVec4F16(down, s_.weights, s_.shexp_out,
                        s_.router + c.num_experts, c.num_experts + 1,
                        s_.block_out, n_tokens, c.num_experts_used,
                        c.hidden_size, stream_);
   }
+  if (deferred) {
+    // Only a fused MoE combine follows a deferring one; settle the update
+    // before anything else reads the residual.
+    HcApplyDeferred(res, s_.block_out, s_.hc_defer_w, n_tokens, c.hidden_size,
+                    stream_);
+  }
   if (xn_half_) {
-    HcCombineF16(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn_half,
-                 s_.xn_q8t, n_tokens, c.hidden_size, c.hc_count, c.rms_eps,
-                 stream_);
+    // The FFN combine that follows rereads this block output (42 MB at
+    // 4,096 tokens) instead of this combine writing the residual and the
+    // next reading it back (168 MB each).
+    res_deferred_ = HcCombineF16(
+        res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn_half,
+        s_.xn_q8t, n_tokens, c.hidden_size, c.hc_count, c.rms_eps, stream_,
+        defer && c.hc_count == 4 ? s_.hc_defer_w : nullptr);
     return;
   }
   // A decode batch's next mixer quantizes xn for its down projection: the
@@ -2492,6 +2513,17 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   return MoeExperts(l, x, out, n_tokens, error_msg);
 }
 
+bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
+  const Config& c = config();
+  return ExpertMatrixRows(n_tokens) &&
+         (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
+          l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
+         l.ffn_up_exps.type == l.ffn_gate_exps.type &&
+         (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
+          l.ffn_down_exps.type == GgmlType::kQ8_0) &&
+         c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
+}
+
 bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                           std::uint32_t n_tokens,
                           std::string* error_msg) const {
@@ -2504,13 +2536,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   // Tiled batches take the WMMA route: assignments compacted by expert
   // into 16-row padded buckets, token rows narrowed to F16 once, then the
   // F16 matrix-core GEMM per (expert, row tile).
-  const bool wmma_experts = ExpertMatrixRows(n_tokens) &&
-                            (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
-                             l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
-                            l.ffn_up_exps.type == l.ffn_gate_exps.type &&
-                            (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
-                             l.ffn_down_exps.type == GgmlType::kQ8_0) &&
-                            c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
+  const bool wmma_experts = WmmaExperts(l, n_tokens);
   if (wmma_experts) {
     RoutedCompact(s_.ids, s_.expert_counts, s_.routed_bounds, s_.routed_cursors,
                   s_.rows_token, s_.rows_slot, n_tokens, used, c.num_experts,
@@ -2965,6 +2991,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                              ? (n - needed) / 128 * 128
                              : 0U;
     const auto finish = [&](std::uint32_t rows) {
+      defer_residual_ = WmmaExperts(l, rows);
       Combine(s_.res, l.hc_ffn.norm.f32(), rows);
       if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows,
                  error_msg) ||
