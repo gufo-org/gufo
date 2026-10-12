@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <thread>
@@ -314,6 +315,119 @@ void GroupedBacking() {
   pin.reset();
   assert(ledger.Snapshot().total_bytes == 0);
 }
+void OnDemandBacking() {
+  // Five blocks in segments of two: nothing commits until a capture needs it,
+  // runs stay inside one segment and the last segment is partial.
+  constexpr std::size_t pages = 5, headroom = 16 << 10;
+  constexpr std::size_t capacity = pages * block_bytes + headroom;
+  cache::ResourceLedger ledger(Limits(capacity));
+  std::size_t asked{};
+  bool admit = true;
+  std::optional<hip::BackingPin> pin;
+  std::byte* survivor{};
+  {
+    const auto physical = allocations.load();
+    hip::CommittedBackingPool pool(
+        ledger, {capacity, block_bytes, headroom, 2 * block_bytes,
+                 [&](std::size_t bytes) {
+                   asked += bytes;
+                   return admit;
+                 }});
+    assert(pool.BlockCount() == 0 && pool.PageCommitAllocations() == 0);
+    assert(allocations == physical &&
+           ledger.Snapshot().total_bytes == headroom);
+    assert(!pool.TryAcquire(Category::kPrivateState, 3 * block_bytes));
+    assert(allocations == physical && asked == 0);
+    auto first = pool.TryAcquire(Category::kPrivateState);
+    assert(first && pool.BlockCount() == 2 &&
+           pool.PageCommitAllocations() == 1);
+    assert(allocations == physical + 1 && asked == 2 * block_bytes);
+    assert(std::all_of(first->Bytes().begin(), first->Bytes().end(),
+                       [](std::byte b) { return b == std::byte{}; }));
+    first->Convert();
+    // One free block remains in the first segment; a pair needs the next.
+    auto pair = pool.TryAcquire(Category::kBackingAssigned, 2 * block_bytes);
+    assert(pair && pool.BlockCount() == 4 && allocations == physical + 2);
+    auto single = pool.TryAcquire(Category::kPrivateTail);
+    assert(single && pool.BlockCount() == 4);
+    assert(single->Bytes().data() == first->Bytes().data() + block_bytes);
+    // A refused segment leaves the pool as it is; capture is declined.
+    admit = false;
+    assert(!pool.TryAcquire(Category::kPrivateTail));
+    assert(pool.BlockCount() == 4 && allocations == physical + 2);
+    admit = true;
+    ledger.FailAfter(cache::LedgerStep::kReserve, 0);
+    assert(!pool.TryAcquire(Category::kPrivateTail));
+    assert(pool.BlockCount() == 4 && allocations == physical + 2);
+    fail_alloc = true;
+    assert(!pool.TryAcquire(Category::kPrivateTail));
+    fail_alloc = false;
+    assert(pool.BlockCount() == 4 &&
+           ledger.Snapshot().total_bytes == headroom + 4 * block_bytes);
+    auto last = pool.TryAcquire(Category::kPrivateTail);
+    assert(last && pool.BlockCount() == pages &&
+           pool.PageCommitAllocations() == 3);
+    assert(pool.CommittedBytes() == pages * block_bytes);
+    assert(!pool.TryAcquire(Category::kPrivateTail));
+    assert(pool.PageCommitAllocations() == 3);
+    last->Convert();
+    survivor = last->Bytes().data();
+    pin.emplace(last->PinPersistence());
+    // Released blocks serve later captures without another segment.
+    pair.reset();
+    auto again = pool.TryAcquire(Category::kPrivateState, 2 * block_bytes);
+    assert(again && pool.PageCommitAllocations() == 3);
+  }
+  // A grown segment and its owner survive the facade like the first one.
+  survivor[block_bytes - 1] = std::byte{9};
+  pin.reset();
+  assert(ledger.Snapshot().total_bytes == 0);
+  // Racing captures grow the pool once per segment and never share a block.
+  constexpr std::size_t many = 64, many_headroom = (many + 4) * 1024;
+  constexpr std::size_t many_capacity = many * block_bytes + many_headroom;
+  cache::ResourceLedger racing_ledger(Limits(many_capacity));
+  hip::CommittedBackingPool pool(
+      racing_ledger,
+      {many_capacity, block_bytes, many_headroom, 8 * block_bytes, {}});
+  std::mutex mutex;
+  std::vector<const std::byte*> owned;
+  const auto release = [&](std::vector<hip::BackingBlock>& held) {
+    const std::lock_guard lock(mutex);
+    for (const auto& block : held)
+      std::erase(owned, block.Bytes().data());
+    held.clear();
+  };
+  std::vector<std::jthread> threads;
+  for (int thread = 0; thread < 8; ++thread)
+    threads.emplace_back([&] {
+      std::vector<hip::BackingBlock> held;
+      for (int iteration = 0; iteration < 200; ++iteration) {
+        auto block = pool.TryAcquire(Category::kPrivateTail);
+        if (!block) {
+          release(held);
+          continue;
+        }
+        {
+          const std::lock_guard lock(mutex);
+          assert(std::ranges::find(owned, block->Bytes().data()) ==
+                 owned.end());
+          owned.push_back(block->Bytes().data());
+        }
+        block->Convert();
+        held.push_back(std::move(*block));
+        if (held.size() == 12)
+          release(held);
+      }
+      release(held);
+    });
+  threads.clear();
+  assert(owned.empty() && pool.BlockCount() % 8 == 0 &&
+         pool.PageCommitAllocations() == pool.BlockCount() / 8);
+  std::vector<hip::BackingBlock> all;
+  while (auto block = pool.TryAcquire(Category::kPrivateTail))
+    all.push_back(std::move(*block));
+  assert(all.size() == many && pool.PageCommitAllocations() == many / 8);
+}
 void Transfers() {
   cache::ResourceLedger ledger(Limits());
   hip::CommittedBackingPool backing(ledger, {budget, block_bytes, metadata});
@@ -512,12 +626,14 @@ int main() {
   assert(std::strncmp(properties.gcnArchName, "gfx1151", 7) == 0);
   Backing();
   GroupedBacking();
+  OnDemandBacking();
   Transfers();
   LifetimeAndFailures();
   PendingStreams();
   AcquireAllocationFailure();
   BorrowedPoolLifetime();
   std::puts(
-      "PASS: precommitted blocks, accounting, racing borrowers, pinned "
-      "lifetime, bounded copies, leases and failure drains");
+      "PASS: precommitted and on-demand blocks, accounting, racing "
+      "borrowers, pinned lifetime, bounded copies, leases and failure "
+      "drains");
 }

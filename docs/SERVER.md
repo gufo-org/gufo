@@ -188,11 +188,12 @@ On Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
 buffers are separate from this RAM budget.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
-Qwen3.8-Flash-Next commits about 89% of its budget at startup as pinned
-pages, after its execution sessions allocate; the rest covers cache metadata
-as it grows. The pages hold checkpoint state and KV rows, partial tails and
-idle-session spill, so most of the budget is resident from startup instead of
-growing with use; there is no separate spill option.
+Qwen3.8-Flash-Next pins pages for up to about 89% of its budget as captures
+need them, about 1 GiB at a time, and keeps them; the rest covers cache metadata as
+it grows. A step takes about 60 ms while the host has free pages and longer when
+the kernel must reclaim page cache. Growth stops early while the host would keep
+less than 4 GiB available. The pages hold checkpoint state and KV rows, partial
+tails and idle-session spill; there is no separate spill option.
 Other models allocate payloads only when captured. Under pressure, optional
 copies give way before another conversation's last useful checkpoint.
 

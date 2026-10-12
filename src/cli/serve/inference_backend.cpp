@@ -2497,11 +2497,58 @@ public:
       if (plan.size() != 1)
         throw std::invalid_argument("insufficient component backing budget");
       const auto& allocation = plan.front();
+      // Pages commit as captures need them. A payload cannot span segments,
+      // so the edge of each one strands space a ~140 MB private state cannot
+      // use; equal segments of about 1 GiB, and at least two private states,
+      // keep that small. A step costs about 60 ms on the capturing thread
+      // while the host has free pages (more when it must reclaim page cache)
+      // and does not stall other HIP work. Growth stops early when the host
+      // would keep less than its reserve.
+      std::size_t largest = 0;
+      for (const auto& [id, bytes] : backing->component_classes)
+        largest = std::max(largest, bytes);
+      const auto block = allocation.block_bytes;
+      const auto target =
+          std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
+      const auto parts =
+          std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
+      const auto segment = (allocation.blocks + parts - 1) / parts * block;
+      struct Limited {
+        std::mutex mutex;
+        std::chrono::steady_clock::time_point refused;
+        bool active{};
+      };
       backing->pool = std::make_unique<hip::CommittedBackingPool>(
-          ledger, hip::BackingPoolConfig{
-                      allocation.blocks * allocation.block_bytes +
-                          allocation.metadata_bytes,
-                      allocation.block_bytes, allocation.metadata_bytes});
+          ledger,
+          hip::BackingPoolConfig{
+              allocation.blocks * allocation.block_bytes +
+                  allocation.metadata_bytes,
+              allocation.block_bytes, allocation.metadata_bytes, segment,
+              [limited = std::make_shared<Limited>()](std::size_t bytes) {
+                const std::lock_guard lock(limited->mutex);
+                const auto now = std::chrono::steady_clock::now();
+                // Pressure retries ask once per capture; recheck at most
+                // once a second while the host is short.
+                if (limited->active &&
+                    now - limited->refused < std::chrono::seconds(1))
+                  return false;
+                const auto ceiling = HostSnapshotCeilingBytes();
+                if (ceiling >= bytes) {
+                  limited->active = false;
+                  return true;
+                }
+                if (!limited->active)
+                  Logger::Warn(
+                      "cache",
+                      "schema=component-cache-v1 "
+                      "event=backing_limited reason=host_reserve "
+                      "segment_bytes=" +
+                          std::to_string(bytes) +
+                          " host_headroom_bytes=" + std::to_string(ceiling));
+                limited->active = true;
+                limited->refused = now;
+                return false;
+              }});
     };
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
@@ -2517,7 +2564,19 @@ public:
           request.category == cache::ResourceCategory::kBackingAssigned
               ? cache::ResourceCategory::kBackingAssigned
               : request.category;
+      const auto segments = backing->pool->PageCommitAllocations();
+      const auto started = std::chrono::steady_clock::now();
       auto block = backing->pool->TryAcquire(category, request.bytes);
+      if (backing->pool->PageCommitAllocations() != segments)
+        Logger::Info(
+            "cache",
+            "schema=component-cache-v1 event=backing_grown committed_bytes=" +
+                std::to_string(backing->pool->CommittedBytes()) + " segments=" +
+                std::to_string(backing->pool->PageCommitAllocations()) +
+                " acquire_ms=" +
+                std::to_string(std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - started)
+                                   .count()));
       if (!block)
         throw cache::ResourceExhausted();
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
