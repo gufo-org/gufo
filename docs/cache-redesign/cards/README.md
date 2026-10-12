@@ -40,7 +40,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [D1](d1-transition.md) | One cache at a time; a single switch-over at the end | agreed |
 | [D2](d2-first-mode.md) | Adapter order: Flash-Next, Qwen 27B AR, Qwen 27B DFlash2, DeepSeek | agreed |
 | [D3](d3-step-baselines.md) | Step baselines per card instead of upfront targets | agreed |
-| [D4](d4-options-and-budgets.md) | Options and budgets | done for Flash-Next |
+| [D4](d4-options-and-budgets.md) | Options and budgets | done |
 
 ## PR cards
 
@@ -66,8 +66,8 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [18](18-non-continuation-records.md) | Capability records for non-continuation models | Adapters | 02 | S | agreed |
 | [19](19-switch-over.md) | Switch serving to the new cache | Switch-over | 01, 07, 09, 12–18 | L (stack) | proposed |
 | [20](20-e2e-baseline-and-qualification.md) | End-to-end baseline and qualification | After switch-over | 19 | evidence | proposed |
-| [21](21-edit-boundary-admission.md) | Edit-boundary admission under byte pressure | Switch-over review | 07, 19 | S | in progress: timing gate open |
-| [22](22-small-budget-retention.md) | Retention under small RAM budgets | Switch-over review | 07, 19, 21 | M | in progress: timing gate open |
+| [21](21-edit-boundary-admission.md) | Edit-boundary admission under byte pressure | Switch-over review | 07, 19 | S | in progress |
+| [22](22-small-budget-retention.md) | Retention under small RAM budgets | Switch-over review | 07, 19, 21 | M | in progress |
 
 Cards 02–19 change no runtime behavior until card 19 wires them in and deletes
 the legacy cache (D1).

@@ -1,8 +1,7 @@
 # 21 · Edit-boundary admission under byte pressure
 
 **Milestone:** Switch-over review · **Depends on:** 07, 19 · **Size:** S ·
-**Affects:** Flash-Next AR/MTP serving · **Status:** in progress (correctness
-checks pass; the timing gate is open)
+**Affects:** Flash-Next AR/MTP serving · **Status:** in progress
 
 ## Problem
 
@@ -57,6 +56,9 @@ Production binary SHA-256:
 `def206c3bb6a37af4cb6eaed2a914209252ca9781d1321cfb4c45f47062442f7`.
 
 ## Done when
+
+The correctness criteria pass; the timing gate below is still open
+(2026-10-12).
 
 - [x] Actual backing-pressure regression fails without protection and passes
   with it, including independent cold-state checks.

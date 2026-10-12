@@ -1,7 +1,6 @@
 # D4 · Options and budgets
 
-**Type:** decision · **Blocks:** 08, 10, 19 · **Status:** done for Flash-Next
-(Qwen 27B and DeepSeek adopt it with cards 15–17 and 19)
+**Type:** decision · **Blocks:** 08, 10, 19 · **Status:** done
 
 ## Question
 
@@ -58,8 +57,8 @@ From `src/cli/serve/serve.cpp` and `docs/SERVER.md`:
 
 ## Results (2026-10-12)
 
-Implemented for Flash-Next, the only model the component cache serves on the
-card 19 branch. Qwen 27B and DeepSeek keep the legacy cache and its option
+Done for Flash-Next, the only model the component cache serves on the card 19
+branch; Qwen 27B and DeepSeek adopt it with cards 15–17 and 19. Qwen 27B and DeepSeek keep the legacy cache and its option
 meanings until their adapters land (cards 15–17); `--help`, `docs/SERVER.md`,
 `docs/KV-CACHE.md` and `docs/CLI.md` describe both.
 
@@ -85,11 +84,11 @@ meanings until their adapters land (cards 15–17); `--help`, `docs/SERVER.md`,
 3. **Disk bytes.** The store already counted referenced, temporary and orphan
    files, but refused to open a directory above the budget, while the legacy
    store evicts to fit. A lowered `--cache-disk-bytes` now opens: serving
-   reclaims orphans and temporaries, then evicts the earliest-published
-   checkpoints until the directory fits, and logs `event=disk_evicted
+   reclaims orphans and temporaries, then evicts the oldest checkpoints
+   (by creation order) until the directory fits, and logs `event=disk_evicted
    reason=budget` (or `event=disk_over_budget` if it cannot fit). Startup
-   evicts by publication order because the catalog does not persist use
-   history; the legacy store orders by file modification time. Opening above budget
+   evicts by checkpoint ID, assigned at creation, because the catalog does
+   not persist use history; the legacy store orders by file modification time. Opening above budget
    made an unsigned underflow in the publication check reachable
    (`budget - managed`), which would have admitted any write; the check now
    refuses while the directory is above budget.
@@ -101,7 +100,11 @@ meanings until their adapters land (cards 15–17); `--help`, `docs/SERVER.md`,
    first. It still opens after the weights load. The lock does not wait, so a
    restarted server whose predecessor is still draining disk writes fails
    unless the predecessor finishes during the model load. Legacy-model
-   servers do not take this lock.
+   servers do not take this lock. The ownership error is tested on CPU
+   through `TextRunnerPool`; serving reports load errors this way, as the
+   GPU staging check below shows. No GPU run started two Flash-Next
+   servers: one uses about 98 GB of device memory, so a second likely cannot
+   load its weights on the 128 GB target before reaching the lock.
 5. **Records.** `RetentionPolicy::kRecordLimit` stays 128.
 
 Decisions on the open questions:
@@ -128,6 +131,12 @@ directory exceeds disk budget`, and removing the staging check, the
 over-budget refusal or the early store opening each fails its assertion. All
 57 hosted contracts and the shared formatter pass. `cache_streaming_test`
 checks that `MinimumStagingBytes` takes the widest of differently sized rows.
+A further serving case plants an unreferenced chunk that puts the directory
+over a budget the referenced checkpoints still fit: startup reclaims it and
+both conversations still restore (removing the wait for reclamation fails
+5 of 5 runs). The ownership test also checks that the losing server
+allocates no slot. The `disk_over_budget` warning has no test: once
+reclamation finishes, startup can always retire unpinned entries.
 
 Production-build smoke runs (release `gufo serve llm`, one session, context
 16384) check the startup paths on gfx1151. In AR, the first server published

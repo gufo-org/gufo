@@ -1,8 +1,7 @@
 # 22 · Retention under small RAM budgets
 
 **Milestone:** Switch-over review · **Depends on:** 07, 19, 21 · **Size:** M ·
-**Affects:** Flash-Next AR/MTP serving · **Status:** in progress (correctness
-checks pass; the timing gate is open)
+**Affects:** Flash-Next AR/MTP serving · **Status:** in progress
 
 ## Problem
 
@@ -141,6 +140,9 @@ tokens; flags use the strict 5% and 3 ms gate per request and phase.
 No timing improvement or pass is claimed beyond the changed-work requests.
 
 ## Done when
+
+The correctness criteria pass; the timing gate below is still open
+(2026-10-12).
 
 - [x] Each new retention rule has a regression that fails on the preceding
   order; a serving regression fails without the turn's reuse mark.

@@ -278,7 +278,7 @@ struct ComponentTextCache::Impl {
       disk->ReclaimOrphans();
       if (disk->Stats().managed_bytes > disk_capacity) {
         // A lowered --cache-disk-bytes keeps its meaning: reclaim orphans and
-        // temporaries first, then evict the earliest-published checkpoints
+        // temporaries first, then evict the oldest checkpoints by creation
         // (startup has no use history) to fit.
         disk->WaitForReclamation();
         std::size_t evicted{};

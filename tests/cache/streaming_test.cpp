@@ -972,7 +972,6 @@ void ConcurrentStop() {
   assert(queue.Stats().pending == 0);
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
 }
-}  // namespace
 void MinimumStagingHoldsWidestRow() {
   // Private state streams in pieces of any size; rows never split.
   const std::array<ComponentDescriptor, 3> mixed{{
@@ -983,6 +982,7 @@ void MinimumStagingHoldsWidestRow() {
   assert(MinimumStagingBytes(mixed) == 1024);
   assert(MinimumStagingBytes(std::span(mixed).last(1)) == 1);
 }
+}  // namespace
 int main() {
   MinimumStagingHoldsWidestRow();
   PrefetchDoesNotValidateOrAdmitPayload();

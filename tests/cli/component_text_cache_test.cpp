@@ -619,6 +619,39 @@ void LoweredDiskBudgetEvictsOldestAtStartup() {
   }
   std::filesystem::remove_all(directory);
 }
+void OrphansLeaveBeforeCheckpoints() {
+  char pattern[] = "/tmp/gufo-component-orphan-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                  .capacity_bytes = 1 << 20,
+                                  .staging_capacity_bytes = 7};
+  const std::vector<TextRunnerToken> first{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  auto second = first;
+  second.front() = 999;
+  for (const auto& prompt : {first, second}) {
+    TextRunnerPool pool(std::make_shared<Runner>(), 1, disk);
+    auto request = pool.Acquire(prompt);
+    Prefill(request);
+    (void)Generate(request);
+    assert(request.Commit().disk_queued_bytes > 0);
+  }
+  // A crash left an unreferenced chunk that pushes the directory over a budget
+  // the referenced checkpoints still fit; reclaiming it must suffice.
+  disk.capacity_bytes = ManagedBytes(directory);
+  const auto orphan = directory / "v2/chunks" / (std::string(32, 'f') + ".bin");
+  std::ofstream(orphan, std::ios::binary) << std::string(4096, 'x');
+  {
+    TextRunnerPool pool(std::make_shared<Runner>(), 1, disk);
+    assert(!std::filesystem::exists(orphan));
+    assert(ManagedBytes(directory) <= disk.capacity_bytes);
+    for (const auto& prompt : {first, second}) {
+      auto restored = pool.Acquire(prompt);
+      assert(restored.cache_disk_hit());
+      restored.Invalidate();
+    }
+  }
+  std::filesystem::remove_all(directory);
+}
 void StagingHoldsOneRow() {
   char pattern[] = "/tmp/gufo-component-staging-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
@@ -656,10 +689,16 @@ void DiskDirectoryHasOneOwner() {
   class CommitRunner final : public Runner {
   public:
     mutable bool committed{};
+    mutable std::size_t streams{};
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
         cache::ResourceLedger& ledger, std::size_t ram) const override {
       auto resources = Runner::CreateComponentCacheResources(ledger, ram);
       resources->commit_backing = [this](std::size_t) { committed = true; };
+      // Every execution slot takes a preservation stream when it allocates.
+      resources->stream = [this, stream = std::move(resources->stream)] {
+        ++streams;
+        return stream();
+      };
       return resources;
     }
   };
@@ -679,8 +718,8 @@ void DiskDirectoryHasOneOwner() {
     }
     assert(error.find("ownership") != std::string::npos &&
            error.find(directory.string()) != std::string::npos);
-    // The losing server fails before committing its RAM budget.
-    assert(!second_runner->committed);
+    // The losing server fails before allocating slots or committing its RAM.
+    assert(!second_runner->streams && !second_runner->committed);
   }
   // Ownership ends with the owning server.
   {
@@ -869,6 +908,7 @@ int main() {
   FailedCaptureKeepsPublishedBoundary();
   DiskBudgetEvictsAnUnpinnedConversation();
   LoweredDiskBudgetEvictsOldestAtStartup();
+  OrphansLeaveBeforeCheckpoints();
   StagingHoldsOneRow();
   DiskDirectoryHasOneOwner();
   GridDoesNotSuppressFirstDiskPrompt();

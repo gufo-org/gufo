@@ -227,7 +227,7 @@ before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
 On Flash-Next, `--cache-disk-bytes` counts every file the cache manages,
 including temporary files of unfinished writes and files a crash left
 unreferenced. Restarting with a lower budget removes those first, then the
-earliest-published checkpoints, until the directory fits; use history does not
+oldest checkpoints by creation order, until the directory fits; use history does not
 survive a restart. One Flash-Next server owns the directory: a second one fails
 at startup, after loading its model but before committing its RAM budget, with
 an ownership error naming the directory. The lock does not wait: a restarted

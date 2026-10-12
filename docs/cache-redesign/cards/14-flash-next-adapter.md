@@ -4,6 +4,9 @@
 inventory, then AR, then MTP) · **Affects:** nothing served until card 19 ·
 **Status:** done
 
+Both completion criteria are met. Re-confirming the capacity rows at D4's
+startup-committed budget remains open in [todo.md](todo.md).
+
 ## Goal
 
 Implement the adapter for Flash-Next in MTP and AR modes, and prove with

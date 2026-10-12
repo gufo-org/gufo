@@ -86,8 +86,8 @@ The supported modalities are LLM, image, video, and audio (TTS, ASR).
   directory: one Flash-Next server owns it, and a second one fails at
   startup.
 - `cacheDiskBytes` — the maximum size of that cache on disk. Flash-Next also
-  counts unfinished writes, and lowering it removes its earliest-published
-  checkpoints at the next start.
+  counts unfinished writes, and lowering it removes its oldest checkpoints
+  (by creation) at the next start.
 - `cacheDiskStagingBytes` — RAM used to move cache entries to and from disk.
   Flash-Next streams entries of any size through a 1 MiB buffer by default;
   other models need it to hold a whole entry. See
