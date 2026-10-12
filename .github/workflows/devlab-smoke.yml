@@ -1,0 +1,120 @@
+name: Devlab smoke
+
+on:
+  workflow_dispatch:
+  # Bootstrap the smoke test before workflow_dispatch exists on main.
+  push:
+    branches: [ codex/devlab-smoke ]
+    paths: [ .github/workflows/devlab-smoke.yml ]
+
+permissions: {}
+
+concurrency:
+  group: devlab-smoke
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    name: Authorize cluster smoke test
+    if: github.repository == 'gufo-org/gufo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Require a repository maintainer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.actor }}
+          RERUN_ACTOR: ${{ github.triggering_actor }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for actor in "$REQUEST_ACTOR" "$RERUN_ACTOR"; do
+            role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$actor/permission" --jq .role_name)
+            case "$role" in
+              admin|maintain) echo "Authorized $actor ($role)" ;;
+              *) echo "::error::Cluster smoke tests require Maintain or Admin access."; exit 1 ;;
+            esac
+          done
+
+  smoke:
+    name: Strix Halo cluster smoke test
+    needs: authorize
+    runs-on: [ strix-halo, devlab-dispatch ]
+    timeout-minutes: 5
+    steps:
+      # No checkout or PR code: this probes only the allocated runner.
+      - name: Verify platform and GPU device access
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '## Devlab Strix Halo smoke test\n\n' >> "$GITHUB_STEP_SUMMARY"
+          uname -srm
+          [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || {
+            echo "::error::Gufo requires Linux x86-64."
+            exit 1
+          }
+          [[ -c /dev/kfd && -r /dev/kfd && -w /dev/kfd ]] || {
+            echo "::error::The runner needs read/write access to /dev/kfd."
+            exit 1
+          }
+          render_access=false
+          for device in /dev/dri/renderD*; do
+            if [[ -c "$device" && -r "$device" && -w "$device" ]]; then
+              echo "Accessible render device: $device"
+              render_access=true
+            fi
+          done
+          [[ "$render_access" == true ]] || {
+            echo "::error::No accessible DRM render device."
+            exit 1
+          }
+          printf -- '- Linux x86-64: verified\n- KFD/render device access: verified\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify gfx1151 and inventory available tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          rocminfo_bin=$(command -v rocminfo || true)
+          if [[ -z "$rocminfo_bin" && -x /opt/rocm/bin/rocminfo ]]; then
+            rocminfo_bin=/opt/rocm/bin/rocminfo
+          fi
+          if [[ -n "$rocminfo_bin" ]]; then
+            "$rocminfo_bin" > "$RUNNER_TEMP/devlab-rocminfo.txt"
+            cat "$RUNNER_TEMP/devlab-rocminfo.txt"
+            grep -Eq 'Name:[[:space:]]+gfx1151([[:space:]]|$)' "$RUNNER_TEMP/devlab-rocminfo.txt" || {
+              echo "::error::ROCm did not enumerate a gfx1151 agent."
+              exit 1
+            }
+            verification='ROCm agent enumeration'
+          else
+            # KFD encodes gfx1151 as major 11, minor 5, stepping 1.
+            verified=false
+            for properties in /sys/class/kfd/kfd/topology/nodes/*/properties; do
+              if [[ -r "$properties" ]]; then
+                target=$(awk '$1 == "gfx_target_version" { print $2 }' "$properties")
+                echo "KFD graphics target: $target"
+                if [[ "$target" == 110501 ]]; then
+                  verified=true
+                fi
+              fi
+            done
+            [[ "$verified" == true ]] || {
+              echo "::error::Cannot verify gfx1151: install rocminfo or expose KFD topology."
+              exit 1
+            }
+            verification='KFD topology; ROCm tools are not installed'
+          fi
+          printf -- '- gfx1151: verified (%s)\n' "$verification" >> "$GITHUB_STEP_SUMMARY"
+          for tool in nix hipcc rocminfo rocm-smi amd-smi python3 git; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "$tool: available"
+              printf -- '- %s: available\n' "$tool" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "$tool: not on PATH"
+              printf -- '- %s: not on PATH\n' "$tool" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          awk '/^MemTotal:/ { printf "Host-visible memory: %.1f GiB\n", $2 / 1048576 }' /proc/meminfo
+          printf '\nThis probe verifies runner placement and GPU device access. It does not execute a model or qualify performance.\n' >> "$GITHUB_STEP_SUMMARY"
