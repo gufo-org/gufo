@@ -359,7 +359,8 @@ in the artifact directory. R12 processes eight bytes per checksum update,
 with the same CRC-64/ECMA and streaming seed semantics. An independent bitwise
 oracle covers alignments, lengths, seeds and split updates; all six focused
 CPU disk/cache targets and all 57 hosted PR checks pass. Focused AR and MTP
-HTTP cache histories also pass. [Source and evidence](../../models/qwen3.8-flash-next/artifacts/cache-crc-review.json).
+HTTP cache histories also pass. Source and evidence:
+`/home/mixer/gufo-qualification/pr543-followup/cache-crc-review.json`.
 
 AR disk restore observations improve from 238–526 ms on R11 to 65–164 ms
 on R12, versus 89–180 ms on main. All 479 observations are retained: 476
@@ -424,9 +425,10 @@ main control. All four fail the unchanged 5% and 3 ms per-phase gates.
 **R14 is rejected and its code has been removed from the working tree.** Its
 binary, complete patch, successful focused CPU checks, failed timing comparison
 and raw memory samples remain retained. It was never pushed. The remaining R13
-allocator work is separate and unpushed. [Source manifests, hashes, commands,
-memory observations and individual queue gates](../../models/qwen3.8-flash-next/artifacts/cache-ram-review.json)
-make the experiment reviewable without presenting it as the current PR.
+allocator work is separate and unpushed. Source manifests, hashes, commands,
+memory observations and individual queue gates in
+`/home/mixer/gufo-qualification/pr543-followup/cache-ram-review.json` make the
+experiment reviewable without presenting it as the current PR.
 
 Borrowed-row capture and idle spill still need serving integration and real
 reassignment qualification. They can reduce eager capture work, but the RFC
@@ -911,7 +913,9 @@ Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
 
 ### Review follow-up: open and closed cache issue audit (October 11)
 
-[The issue audit](../review-543-issues.md) records 106 cache search matches and
+The issue audit (`review-543-issues.md` and `issue-audit-classification.json`
+in `/home/mixer/gufo-qualification/pr543-review-2026-10-11`) records 106 cache
+search matches and
 160 unique issues after expanding to checkpoint, prefill and continuation
 (139 closed, 21 open). Fifty directly related assessments name the evidence and
 its limits; other matches remain outside checkpoint qualification. Closed state
