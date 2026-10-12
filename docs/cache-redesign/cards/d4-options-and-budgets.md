@@ -163,3 +163,61 @@ the request path is unchanged.
 
 Evidence: `/home/mixer/gufo-qualification/d4-options-2026-10-12` (`smoke.py`,
 `run-gpu.sh`, server logs, `results.json`, candidate binary and SHA-256).
+
+## Revision: pages on demand (2026-10-12)
+
+Feedback on #562 showed the startup commit costing more than it saved. A
+12 GiB budget left 5.2 GB of host RAM after load. Pinning it evicted the disk
+checkpoints from the page cache, so the first restore after a restart read
+them from disk again. The backing pool now commits its pages as captures need
+them, up to the same budget, and keeps them. This reverses item 1's "committed
+at startup" and the rejected alternative above, for these measured reasons:
+
+- A segment commit on another thread did not stall a concurrent
+  launch-and-synchronize loop at 64 MiB, 256 MiB or 1 GiB
+  (`tools/bench/host_commit_stall.hip`). A 1 GiB commit took about 60 ms with
+  free pages. In the server, captures run on the scheduler thread, so a step
+  also pauses peers' decode for its length.
+- When the kernel must reclaim page cache (the model files read at load), a
+  step slows down. 256 MiB steps took 100–670 ms inside a busy request, and
+  4.8 GB of growth cost a 157K-token turn about 3.5 s. Startup paid the same
+  reclaim before: at a 17 GiB budget model load took 29–39 s, against 16.4 s
+  now.
+- Pinned registrations cannot be joined: a copy spanning two of them fails
+  with `invalid argument`. A payload therefore stays inside one segment, and
+  every segment edge strands space a ~140 MB private state cannot use. With
+  256 MiB segments that changed retention at a full 8 GiB pool. A retry copy
+  was refused that the single pool had kept, and two cases prefilled 7 more
+  tokens. Segments are now equal and about 1 GiB, at least two private
+  states: an 8 GiB budget grows in eight steps.
+- Growth stops early while the host would keep less than 4 GiB available
+  (`event=backing_limited`). A capture that finds no room in a growing pool
+  reads the ledger's free backing first, and skips a scan of every committed
+  block that cannot succeed.
+
+Disk restores also hint the next files from four threads, up to 32 MiB ahead.
+Before, a single thread hinted one file at a time. A 157K-token checkpoint is
+4.45 GB in 18,672 files. Restoring it took 8.7–9.9 s cold before; it now takes
+1.3–1.4 s cold and 0.85 s from the page cache.
+
+Results with both changes (1 session, context 262144, 157K-token
+conversation, restarted between turns):
+
+| | Before | After |
+| --- | --- | --- |
+| Host RAM available after load, 17 GiB budget | 6.1 GB | 21.9 GB |
+| Model load, 17 GiB budget | 29–39 s | 16.4 s |
+| First deep turn after restart, 17 GiB budget | 9.2–10.7 s | 1.7–5.5 s |
+| First deep turn after restart, 2 GiB budget, files on disk | 9.1 s | 1.7 s |
+
+The card 21 six-suite history in MTP at 8 GiB passes; the base is
+`edd0d282`. One cache-work change remains, and it is an improvement: a
+full-pool retry copy that the base refused now fits, so
+`cache_edit_rewind_unchanged` prefills 0 tokens instead of 7. An
+unchanged-base control run showed no cache-work changes. Per-suite totals
+match the control except `cache-growth` capture time, +240 ms for the eight
+growth steps. A first base run was faster across every suite (run-order drift).
+
+Evidence: `/home/mixer/gufo-qualification/issue562-2026-10-12`
+(`restore_probe.py`, `prefetch_bench.py`, `parallel_prefetch_bench.py`,
+`lazy3_qual.sh`, `control_check.py`, reports, logs, binaries and SHA-256).

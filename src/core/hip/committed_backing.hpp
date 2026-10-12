@@ -2,6 +2,7 @@
 #define GUFO_CORE_HIP_COMMITTED_BACKING_HPP_
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -68,16 +69,28 @@ struct BackingPoolConfig {
   std::size_t ram_bytes;
   std::size_t block_bytes;
   std::size_t metadata_headroom_bytes;
+  // Zero commits every block at construction. Otherwise TryAcquire commits
+  // blocks on demand, one segment of this many bytes (a block multiple) at a
+  // time, until ram_bytes is reached. A payload never spans two segments.
+  std::size_t segment_bytes{};
+  // Asked before each on-demand segment with its bytes; false keeps the pool
+  // at its current size, for example to leave host memory to the OS.
+  std::function<bool(std::size_t)> admit_segment;
 };
 
 class CommittedBackingPool {
 public:
-  // Initialization only: reserves metadata first, admits every block, then
-  // allocates and touches all payload pages. No refill or resize API exists.
+  // Reserves metadata for every block first. Without segment_bytes it admits,
+  // allocates and touches every payload page here; otherwise none until a
+  // TryAcquire finds no free run. Committed pages are never released early.
+  // The ledger must outlive this facade.
   CommittedBackingPool(cache::ResourceLedger&, BackingPoolConfig);
-  // Thread safe. Races/bad_alloc try other blocks, then decline capture.
+  // Thread safe. Races/bad_alloc try other blocks, then commit another
+  // segment if the pool may grow, then decline capture. Growth allocates
+  // pinned host memory on the calling thread.
   [[nodiscard]] std::optional<BackingBlock> TryAcquire(
       cache::ResourceCategory, std::size_t payload_bytes = 0);
+  // Committed blocks and bytes; both grow with on-demand segments.
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;
   [[nodiscard]] std::size_t PageCommitAllocations() const noexcept;

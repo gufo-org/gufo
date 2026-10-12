@@ -417,7 +417,7 @@ Flash-Next keeps the same options with these meanings:
 
 | Option | Meaning |
 | --- | --- |
-| `--cache-ram-bytes` | The automatic and explicit sizing above. After the execution sessions allocate, about 89% of the budget is committed at startup as pinned 64 KiB pages; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
+| `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
 | `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the oldest checkpoints by creation order: use history does not survive a restart. |
 | `--cache-disk-staging-bytes` | Transfer buffer only, 1 MiB by default, allocated at startup as pinned host memory. Checkpoints of any size stream through it. It must hold one cache row, 1,024 bytes on Flash-Next. It comes out of the RAM ceiling: `max_bytes` is the available host RAM minus 4 GiB minus staging. A larger explicit `--cache-ram-bytes` is reduced to it with an `event=ram_reduced reason=staging` warning, and staging that leaves no RAM fails at startup. Earlier advice to raise staging for deep checkpoints no longer applies. |
 | `--cache-disk DIR` | Owned by one Flash-Next server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory. Other models do not take this lock. Startup removes earlier-release `*.kvc` and `.tmp-*` files from the directory, including those of another model's server sharing it. |
@@ -429,10 +429,23 @@ count under 128; only larger explicit budgets can reach the record limit. The st
 `automatic_bytes`, `max_bytes`, `staging_capacity_bytes` and
 `disk_capacity_bytes`.
 
-Committing the pages at startup makes them resident immediately; the old cache
-reached a similar footprint only as checkpoints accumulated. Co-resident
-servers started later see that memory as used, so the advice above on explicit
-budgets applies from the first request.
+A step of about 1 GiB took 56–58 ms on the capturing thread while the host had
+free pages **(measured)**. Captures run on the scheduler thread, so concurrent
+requests pause for that long too; an 8 GiB budget fills in eight steps. When the
+kernel must first reclaim page cache, such as the model files read at load, a
+step takes longer: a 157K-token turn that retained 4.8 GB right after a restart
+spent about 3.5 s growing in 256 MiB steps. The eager pool paid the same reclaim at startup; at a
+17 GiB budget model load took 29–39 s against 16 s now **(measured)**. Segments
+cannot be joined, so a payload stays within one, and each edge strands space
+that a ~140 MB private state cannot use; equal segments of about 1 GiB keep that
+small. A step is skipped while the host would keep less than 4 GiB available
+(`schema=component-cache-v1 event=backing_limited`); the cache then works within
+what it has committed, evicting as at a full budget, and tries again a second
+later. Until the cache fills, the host keeps the remaining memory, including the
+page cache that holds recent disk checkpoints, so a restore soon after a
+restart reads them from memory. A cache that has filled keeps its footprint, as
+the old cache did; the advice above on explicit budgets for co-resident servers
+still applies.
 
 ## The disk tier
 
@@ -508,6 +521,8 @@ lookup for a single request. The result can still populate the cache.
 | --- | --- |
 | `event=snapshot_cache_configured` | retained capacity at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
 | `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
+| `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 1 GiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
+| `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
 | `schema=component-cache-v1 event=ram_reduced reason=staging` | Flash-Next: pinned disk staging left less than the explicit `--cache-ram-bytes`; the RAM budget was reduced to `capacity_bytes` |
 | `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the oldest checkpoints (creation order) to fit a lowered `--cache-disk-bytes` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
