@@ -59,6 +59,22 @@ if (ENGINE_ENABLE_HIP)
     engine.cpp)
   target_sources(gufo_qwen38_flash_next PRIVATE ${QFN_HIP_SOURCES})
   set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
+
+  # Optional: offload part of the wide-batch dense projections to the XDNA2
+  # NPU through XRT (see kernels/rocm/npu_gemm.hpp). Needs the XRT headers.
+  option(GUFO_ENABLE_NPU "Offload dense prefill work to the XDNA2 NPU" OFF)
+  if (GUFO_ENABLE_NPU)
+    set(GUFO_XRT_INCLUDE_DIR "" CACHE PATH "Directory holding xrt/xrt_bo.h")
+    set(GUFO_XRT_LIB_DIR "/opt/xilinx/xrt/lib" CACHE PATH "XRT runtime libraries")
+    if (NOT EXISTS "${GUFO_XRT_INCLUDE_DIR}/xrt/xrt_bo.h")
+      message(FATAL_ERROR "GUFO_ENABLE_NPU needs GUFO_XRT_INCLUDE_DIR with xrt/xrt_bo.h")
+    endif()
+    target_sources(gufo_qwen38_flash_next PRIVATE ${QFN_ROCM_DIR}/npu_gemm.cpp)
+    target_include_directories(gufo_qwen38_flash_next PRIVATE ${GUFO_XRT_INCLUDE_DIR})
+    target_compile_definitions(gufo_qwen38_flash_next PUBLIC GUFO_NPU=1)
+    target_link_libraries(gufo_qwen38_flash_next PUBLIC
+      ${GUFO_XRT_LIB_DIR}/libxrt_coreutil.so.2 ${GUFO_XRT_LIB_DIR}/libxrt_core.so.2)
+  endif()
   set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
     PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
   target_compile_definitions(gufo_qwen38_flash_next PRIVATE QFN_ROCM_BUILD=1)

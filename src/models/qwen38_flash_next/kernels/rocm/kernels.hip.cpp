@@ -1884,14 +1884,45 @@ __global__ void RestoreGdnStateKernel(float* state, RollbackRows snapshots,
 /// of the ssm_out projection (K = v_heads * d) in place of the F32 row:
 /// each wave-wide slice of 32 lanes is one K block. Otherwise a non-null
 /// `out_q8_1` also receives the F32 rows' unpadded Q8_1 rows.
+// The NPU kernel's C tiles (512 x 128, row-major, 2x2 super blocks of 8x8
+// blocks): the layout of the block-float output streams NpuDecodeOutput reads.
+constexpr int kNpuTileM = 128;
+constexpr int kNpuTileK = 64;
+constexpr int kNpuTileN = 128;
+constexpr int kNpuTileRowsC = 4 * kNpuTileM;
+
+/// One value of a 1024-column C stream: token `tl` of its group, column `cc`.
+__device__ inline float NpuStreamValue(const std::uint8_t* stream,
+                                       std::uint32_t tl, std::uint32_t cc) {
+  constexpr std::uint32_t kGroupsPerTile = kNpuTileRowsC * kNpuTileN / 8;
+  constexpr std::uint32_t kTilesN = 1024 / kNpuTileN;
+  const std::uint32_t tile_row = tl / kNpuTileRowsC;
+  const std::uint32_t r = tl % kNpuTileRowsC;
+  const std::uint32_t tile_col = cc / kNpuTileN;
+  const std::uint32_t c = cc % kNpuTileN;
+  const std::uint32_t rib = r & 7;
+  const std::uint32_t br = (r >> 3) & 1;
+  const std::uint32_t sr = r >> 4;
+  const std::uint32_t bc = (c >> 3) & 1;
+  const std::uint32_t sc = c >> 4;
+  const std::uint32_t gi = rib | (bc << 3) | (br << 4) | (sc << 5) | (sr << 8);
+  const std::uint8_t* p =
+      stream +
+      (std::size_t{tile_row * kTilesN + tile_col} * kGroupsPerTile + gi) * 9;
+  return static_cast<float>(static_cast<std::int8_t>(p[1 + (c & 7)])) *
+         (ldexpf(1.0F, static_cast<int>(p[0]) - 127) / 64.0F);
+}
+
 template<bool kBatch>
-__global__ void GdnEpilogueKernel(const float* raw, const float* z,
-                                  std::uint32_t z_stride, const float* norm_w,
-                                  float* out, void* out_q8, __half* out_half,
-                                  std::uint32_t n_rows, std::uint32_t v_heads,
-                                  float eps, const GdnBatchItem* batch,
-                                  std::uint32_t active, void* out_q8_1,
-                                  std::uint32_t out_half_stride = 0) {
+__global__ void GdnEpilogueKernel(
+    const float* raw, const float* z, std::uint32_t z_stride,
+    const float* norm_w, float* out, void* out_q8, __half* out_half,
+    std::uint32_t n_rows, std::uint32_t v_heads, float eps,
+    const GdnBatchItem* batch, std::uint32_t active, void* out_q8_1,
+    std::uint32_t out_half_stride = 0,
+    const std::uint8_t* const* z_streams = nullptr,
+    std::uint32_t z_stream_stride = 0, std::uint32_t z_tokens = 0,
+    std::uint32_t z_gpu_cols = 0) {
   if constexpr (kBatch) {
     if ((active & (1U << blockIdx.z)) == 0)
       return;
@@ -1910,6 +1941,22 @@ __global__ void GdnEpilogueKernel(const float* raw, const float* z,
   }
   // z rows are [t][v_heads*d] with a caller-side row stride.
   const float* zrow = z + (row / v_heads) * z_stride + (row % v_heads) * d;
+  // Columns from z_gpu_cols on are read from the NPU's C tile streams (one
+  // per z_tokens tokens and 1024 columns) instead of F32 rows.
+  const auto z_at = [&](std::uint32_t i) -> float {
+    if (z_streams == nullptr) {
+      return zrow[i];
+    }
+    const std::uint32_t col = (row % v_heads) * d + i;
+    if (col < z_gpu_cols) {
+      return zrow[i];
+    }
+    const std::size_t t = row / v_heads;
+    const std::uint32_t ncol = col - z_gpu_cols;
+    return NpuStreamValue(
+        z_streams[(t / z_tokens) * z_stream_stride + ncol / 1024],
+        static_cast<std::uint32_t>(t % z_tokens), ncol % 1024);
+  };
   const std::uint32_t per_lane = d / warpSize;
   const float* src = raw + row * d;
   float v[d / 32];
@@ -1924,7 +1971,7 @@ __global__ void GdnEpilogueKernel(const float* raw, const float* z,
 #pragma unroll
     for (std::uint32_t r = 0; r < per_lane; ++r) {
       const std::uint32_t i = r * warpSize + lane;
-      const float value = v[r] * scale * norm_w[i] * SigmoidF(zrow[i]);
+      const float value = v[r] * scale * norm_w[i] * SigmoidF(z_at(i));
       if (out_half != nullptr) {
         const auto offset =
             out_half_stride != 0
@@ -1946,7 +1993,7 @@ __global__ void GdnEpilogueKernel(const float* raw, const float* z,
 #pragma unroll
   for (std::uint32_t r = 0; r < per_lane; ++r) {
     const std::uint32_t i = r * warpSize + lane;
-    const float n = v[r] * scale * norm_w[i] * SigmoidF(zrow[i]);
+    const float n = v[r] * scale * norm_w[i] * SigmoidF(z_at(i));
     float max_abs = fabsf(n);
     for (int off = 16; off > 0; off >>= 1) {
       max_abs = fmaxf(max_abs, XorLane(max_abs, off));
@@ -2111,7 +2158,7 @@ __global__ void UnpackQGateKernel(const float* qg, std::uint32_t qg_stride,
 
 // Keep each head's original eight-wave reduction. Heads in a block share
 // rotary angles; normalization statistics remain independent.
-template<std::uint32_t kHeadsPerBlock>
+template<std::uint32_t kHeadsPerBlock, bool kStreams = false>
 __global__ void PrepareAttentionKernel(
     const float* __restrict__ packed, std::uint32_t stride,
     const float* __restrict__ q_gamma, const float* __restrict__ k_gamma,
@@ -2119,25 +2166,46 @@ __global__ void PrepareAttentionKernel(
     __half* __restrict__ k_cache, __half* __restrict__ v_cache,
     std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
     std::uint32_t rotary, const std::uint32_t* start_pos, float theta,
-    float eps, const qwen::vision::DeviceRope* rope) {
+    float eps, const qwen::vision::DeviceRope* rope,
+    std::uint32_t q_only_heads = 0,
+    const std::uint8_t* const* streams = nullptr,
+    std::uint32_t stream_stride = 0, std::uint32_t stream_tokens = 0) {
   __shared__ float partial[kHeadsPerBlock][8];
   __shared__ float norm[kHeadsPerBlock][256];
   const std::uint32_t t = blockIdx.x, first = blockIdx.y * kHeadsPerBlock,
                       tid = threadIdx.x;
   const std::uint32_t lane = tid % 32, wave = tid / 32;
-  const std::uint32_t live = min(kHeadsPerBlock, heads + kv_heads - first);
+  // q_only_heads: only the first heads' query and gate rows (the rest of the
+  // projection was prepared by the projection kernel itself).
+  const std::uint32_t total =
+      q_only_heads != 0 ? q_only_heads : heads + kv_heads;
+  const std::uint32_t live = min(kHeadsPerBlock, total - first);
   const std::size_t width = std::size_t(heads) * d,
                     kv_width = std::size_t(kv_heads) * d;
   const float* row = packed + std::size_t(t) * stride;
+  // kStreams: the packed query/gate rows are still in the NPU's C streams
+  // (1024 columns per stream, one stream set per stream_tokens tokens).
+  const auto packed_at = [&](std::uint32_t col) -> float {
+    if constexpr (kStreams) {
+      return NpuStreamValue(
+          streams[(t / stream_tokens) * stream_stride + col / 1024],
+          t % stream_tokens, col % 1024);
+    } else {
+      return row[col];
+    }
+  };
   float values[kHeadsPerBlock];
 #pragma unroll
   for (std::uint32_t j = 0; j < kHeadsPerBlock; ++j) {
     const std::uint32_t h = first + j;
     const bool query = h < heads;
     const std::uint32_t head = query ? h : h - heads;
-    values[j] = j < live && tid < d
-                    ? row[(query ? head * 2 * d : 2 * width + head * d) + tid]
-                    : 0.0f;
+    values[j] =
+        j < live && tid < d
+            ? (kStreams
+                   ? packed_at(head * 2 * d + tid)
+                   : row[(query ? head * 2 * d : 2 * width + head * d) + tid])
+            : 0.0f;
     float ss = values[j] * values[j];
     // Match the separate RMS kernel's rounded square before its reduction.
     // Otherwise fast-math can contract it with the first shuffle addition.
@@ -2163,7 +2231,8 @@ __global__ void PrepareAttentionKernel(
       norm[j][tid] = values[j] * scale * (gamma != nullptr ? gamma[tid] : 1.0f);
       if (query)
         gate[std::size_t(t) * width + head * d + tid] =
-            row[head * 2 * d + d + tid];
+            kStreams ? packed_at(head * 2 * d + d + tid)
+                     : row[head * 2 * d + d + tid];
       else
         v_cache[std::size_t(*start_pos + t) * kv_width + head * d + tid] =
             __float2half(row[2 * width + kv_width + head * d + tid]);
@@ -5534,6 +5603,42 @@ __global__ void SsmConvBoundaryKernel(const float* qkv, const float* w,
       SsmConv4Value(taps, v[0], v[1], v[2], v[3]);
 }
 
+// Convolution of the channels [c_begin, channels) whose projection rows came
+// from elsewhere (the NPU): every token, from the raw rows and the history.
+__global__ void SsmConvRangeKernel(const float* qkv, const float* w,
+                                   const float* history, float* out,
+                                   std::uint32_t n_tokens,
+                                   std::uint32_t channels, std::uint32_t stride,
+                                   std::uint32_t c_begin) {
+  const std::uint32_t c = c_begin + blockIdx.x * blockDim.x + threadIdx.x;
+  if (c >= channels) {
+    return;
+  }
+  const std::uint32_t t0 = blockIdx.y * kSsmConvTokensPerThread;
+  const float4 taps = *reinterpret_cast<const float4*>(w + c * 4);
+  float window[3];
+#pragma unroll
+  for (int i = 0; i < 3; ++i) {
+    const int src = static_cast<int>(t0) - 3 + i;
+    window[i] = src < 0
+                    ? history[static_cast<std::size_t>(src + 3) * channels + c]
+                    : qkv[static_cast<std::size_t>(src) * stride + c];
+  }
+#pragma unroll
+  for (std::uint32_t i = 0; i < kSsmConvTokensPerThread; ++i) {
+    const std::uint32_t t = t0 + i;
+    if (t >= n_tokens) {
+      break;
+    }
+    const float v = qkv[static_cast<std::size_t>(t) * stride + c];
+    out[static_cast<std::size_t>(t) * channels + c] =
+        SsmConv4Value(taps, window[0], window[1], window[2], v);
+    window[0] = window[1];
+    window[1] = window[2];
+    window[2] = v;
+  }
+}
+
 // Optional output layout for the stacked QKV projection. The projection's
 // 256-row tile covers one query, gate, key or value head.
 struct AttentionProjectionOutput {
@@ -5547,6 +5652,8 @@ struct AttentionProjectionOutput {
   float theta;
   float eps;
   const qwen::vision::DeviceRope* rope;
+  /// Query and gate tiles of the first heads are computed elsewhere (the NPU).
+  std::uint32_t skip_gate_heads;
 };
 
 /// Dense F16 WMMA GEMM over Q8_0 or F16 weights: block = BM rows x BN tokens,
@@ -5612,6 +5719,12 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   const unsigned row_group = blockIdx.y / kRowGroup;
   const unsigned within = (blockIdx.y % kRowGroup) * gridDim.x + blockIdx.x;
   const int r_block = (row_group * kRowGroup + within % kRowGroup) * BM;
+  if constexpr (kAttention) {
+    const unsigned head_tile = static_cast<unsigned>(r_block) / 256;
+    if (head_tile < 48 && head_tile / 2 < attention.skip_gate_heads) {
+      return;
+    }
+  }
   const int t_block = (within / kRowGroup) * BN;
   // BF16 replaces a library GEMM whose 32-token tile g starts its K loop
   // (g % 4) * 4 blocks in and wraps. A block takes the four tiles of one
@@ -6148,14 +6261,16 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
                       float* gate, __half* keys, __half* values,
                       std::uint32_t n_tokens, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
-                      const qwen::vision::DeviceRope* rope) {
+                      const qwen::vision::DeviceRope* rope,
+                      std::uint32_t skip_gate_heads) {
   if (n_tokens < 1024 || weights == nullptr || input == nullptr ||
       q_gamma == nullptr || k_gamma == nullptr || query == nullptr ||
       gate == nullptr || keys == nullptr || values == nullptr ||
       position == nullptr)
     return false;
-  const AttentionProjectionOutput output{q_gamma, k_gamma,  query, gate, keys,
-                                         values,  position, theta, eps,  rope};
+  const AttentionProjectionOutput output{
+      q_gamma,  k_gamma, query, gate, keys,           values,
+      position, theta,   eps,   rope, skip_gate_heads};
   // One 256-row tile per query, gate, key or value head (52). Four row
   // tiles per token tile in launch order share each activation tile's read
   // (8.8 to 7.9 ms at 4,096 tokens). One K block per LDS stage halves the
@@ -6287,24 +6402,297 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
   return true;
 }
 
+// ---- NPU staging: block-float (v8bfp16ebs8) tiles for the XDNA2 GEMM -------
+// The NPU kernel (M = 4096 tokens, K = 2560, N = 1024) reads A and B as streams
+// of 9-byte groups: one shared exponent byte then eight signed 8-bit mantissas,
+// value = q * 2^(e - 127) / 64. Group order follows the kernel's L1 tiles
+// (128 x 64): A tiles row-major over (M, K) with 2x1 super blocks of 8x8
+// row-major blocks, B tiles column-major over (K, N) with 1x2 super blocks of
+// 8x8 column-major blocks, C tiles (512 x 128) row-major with 2x2 super blocks.
+
+__device__ inline void NpuEncodeGroup(const float* v, std::uint8_t* out) {
+  unsigned max_exp = 0;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    max_exp = max(max_exp, (__float_as_uint(v[i]) >> 23) & 0xFFu);
+  }
+  // 2^(133 - max_exp), the exact reciprocal of the group's mantissa unit.
+  const float inv = __uint_as_float(max_exp >= 7 ? (260u - max_exp) << 23 : 0u);
+  out[0] = static_cast<std::uint8_t>(max_exp);
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const float q = fminf(127.0F, fmaxf(-128.0F, rintf(v[i] * inv)));
+    out[1 + i] = static_cast<std::uint8_t>(static_cast<std::int8_t>(q));
+  }
+}
+
+/// One block per A tile: coalesced 16-byte loads into LDS, then four groups
+/// per thread. Columns at or past k_valid encode as zero (K padding).
+__global__ void __launch_bounds__(256)
+    NpuEncodeActivationsKernel(const __half* __restrict__ x,
+                               std::uint8_t* __restrict__ out,
+                               std::uint32_t k_slice, std::uint32_t k_offset,
+                               std::uint32_t k_valid, std::size_t ldx) {
+  __shared__ __align__(16) __half tile[kNpuTileM * kNpuTileK];
+  __shared__ __align__(16) std::uint8_t staged[kNpuTileM * kNpuTileK / 8 * 9];
+  const std::uint32_t tiles_k = k_slice / kNpuTileK;
+  const std::uint32_t tile_row = blockIdx.x / tiles_k;
+  const std::uint32_t tile_col = blockIdx.x % tiles_k;
+  const std::uint32_t t = threadIdx.x;
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const std::uint32_t row = (t >> 3) + 32 * j;
+    const std::uint32_t vec = t & 7;
+    const std::uint32_t col = tile_col * kNpuTileK + vec * 8;
+    uint4 raw = make_uint4(0, 0, 0, 0);
+    if (k_offset + col + 8 <= k_valid) {
+      raw = *reinterpret_cast<const uint4*>(
+          &x[(static_cast<std::size_t>(tile_row) * kNpuTileM + row) * ldx +
+             k_offset + col]);
+    }
+    *reinterpret_cast<uint4*>(&tile[row * kNpuTileK + vec * 8]) = raw;
+  }
+  __syncthreads();
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const std::uint32_t gi = t + 256 * j;
+    const std::uint32_t rib = gi & 7;
+    const std::uint32_t block = (gi >> 3) & 1;
+    const std::uint32_t sc = (gi >> 4) & 7;
+    const std::uint32_t sr = gi >> 7;
+    const std::uint32_t row = sr * 16 + block * 8 + rib;
+    const uint4 raw =
+        *reinterpret_cast<const uint4*>(&tile[row * kNpuTileK + sc * 8]);
+    const __half* h = reinterpret_cast<const __half*>(&raw);
+    float v[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      v[i] = __half2float(h[i]);
+    }
+    NpuEncodeGroup(v, staged + gi * 9);
+  }
+  __syncthreads();
+  const uint4* src = reinterpret_cast<const uint4*>(staged);
+  uint4* dst =
+      reinterpret_cast<uint4*>(out + static_cast<std::size_t>(blockIdx.x) *
+                                         (kNpuTileM * kNpuTileK / 8 * 9));
+  for (std::uint32_t i = t; i < kNpuTileM * kNpuTileK / 8 * 9 / 16; i += 256) {
+    dst[i] = src[i];
+  }
+}
+
+/// B groups from Q8_0 weight rows: row n of the slice is output column n,
+/// eight consecutive K values of a Q8_0 block form one group.
+__global__ void NpuEncodeWeightsQ8Kernel(
+    const Q8_0Block* __restrict__ w, std::uint8_t* __restrict__ out,
+    std::uint32_t row0, std::uint32_t cols, std::uint32_t k_slice,
+    std::uint32_t k_offset, std::uint32_t k_valid, std::uint32_t k_total) {
+  const std::size_t g = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  const std::size_t total = std::size_t{k_slice} * cols / 8;
+  if (g >= total) {
+    return;
+  }
+  constexpr std::uint32_t kGroupsPerTile = kNpuTileK * kNpuTileN / 8;
+  const std::size_t tile = g / kGroupsPerTile;
+  const std::uint32_t gi = static_cast<std::uint32_t>(g % kGroupsPerTile);
+  const std::uint32_t tiles_k = k_slice / kNpuTileK;
+  const std::uint32_t tile_col = static_cast<std::uint32_t>(tile / tiles_k);
+  const std::uint32_t tile_row = static_cast<std::uint32_t>(tile % tiles_k);
+  const std::uint32_t cib = gi & 7;
+  const std::uint32_t block = (gi >> 3) & 1;
+  const std::uint32_t sr = (gi >> 4) & 7;
+  const std::uint32_t sc2 = gi >> 7;
+  const std::uint32_t kk = k_offset + tile_row * kNpuTileK + sr * 8;
+  const std::uint32_t nn = tile_col * kNpuTileN + (sc2 * 2 + block) * 8 + cib;
+  float v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  if (kk + 8 <= k_valid) {
+    const Q8_0Block& b =
+        w[static_cast<std::size_t>(row0 + nn) * (k_total / 32) + kk / 32];
+    const float scale = __half2float(b.d);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      v[i] = scale * static_cast<float>(b.qs[(kk % 32) + i]);
+    }
+  }
+  NpuEncodeGroup(v, out + g * 9);
+}
+
+/// Decodes a C tile stream into rows of `out` (pitch out_pitch, first column
+/// col0). With accumulate the values add to what is there.
+__global__ void NpuDecodeOutputKernel(const std::uint8_t* __restrict__ in,
+                                      float* __restrict__ out,
+                                      std::uint32_t tokens, std::uint32_t cols,
+                                      std::size_t out_pitch, std::uint32_t col0,
+                                      bool accumulate,
+                                      std::uint32_t valid_cols) {
+  const std::size_t g = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  if (g >= std::size_t{tokens} * cols / 8) {
+    return;
+  }
+  constexpr std::uint32_t kGroupsPerTile = kNpuTileRowsC * kNpuTileN / 8;
+  const std::size_t tile = g / kGroupsPerTile;
+  const std::uint32_t gi = static_cast<std::uint32_t>(g % kGroupsPerTile);
+  const std::uint32_t tiles_n = cols / kNpuTileN;
+  const std::uint32_t tile_row = static_cast<std::uint32_t>(tile / tiles_n);
+  const std::uint32_t tile_col = static_cast<std::uint32_t>(tile % tiles_n);
+  const std::uint32_t rib = gi & 7;
+  const std::uint32_t bc = (gi >> 3) & 1;
+  const std::uint32_t br = (gi >> 4) & 1;
+  const std::uint32_t sc = (gi >> 5) & 7;
+  const std::uint32_t sr = gi >> 8;
+  const std::size_t row =
+      std::size_t{tile_row} * kNpuTileRowsC + (sr * 2 + br) * 8 + rib;
+  const std::uint32_t col = tile_col * kNpuTileN + (sc * 2 + bc) * 8;
+  if (valid_cols != 0 && col >= valid_cols) {
+    return;
+  }
+  const std::uint8_t* p = in + g * 9;
+  const float mult = ldexpf(1.0F, static_cast<int>(p[0]) - 127) / 64.0F;
+  float* dst = out + row * out_pitch + col0 + col;
+  if (((out_pitch | col0) & 3) != 0) {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      const float v =
+          static_cast<float>(static_cast<std::int8_t>(p[1 + i])) * mult;
+      dst[i] = accumulate ? dst[i] + v : v;
+    }
+    return;
+  }
+  float4 r[2];
+  if (accumulate) {
+    r[0] = *reinterpret_cast<const float4*>(dst);
+    r[1] = *reinterpret_cast<const float4*>(dst + 4);
+  } else {
+    r[0] = make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+    r[1] = r[0];
+  }
+  float* rf = reinterpret_cast<float*>(r);
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const float v =
+        static_cast<float>(static_cast<std::int8_t>(p[1 + i])) * mult;
+    rf[i] = accumulate ? rf[i] + v : v;
+  }
+  *reinterpret_cast<float4*>(dst) = r[0];
+  *reinterpret_cast<float4*>(dst + 4) = r[1];
+}
+
+/// silu(gate) * up straight from two C tile streams, F16 rows of valid_cols
+/// (tokens x valid_cols): the shared expert's activation without the F32 rows
+/// in between.
+__global__ void NpuSwigluKernel(const std::uint8_t* __restrict__ gate_in,
+                                const std::uint8_t* __restrict__ up_in,
+                                __half* __restrict__ out, std::uint32_t tokens,
+                                std::uint32_t cols, std::uint32_t valid_cols) {
+  const std::size_t g = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  if (g >= std::size_t{tokens} * cols / 8) {
+    return;
+  }
+  constexpr std::uint32_t kGroupsPerTile = kNpuTileRowsC * kNpuTileN / 8;
+  const std::size_t tile = g / kGroupsPerTile;
+  const std::uint32_t gi = static_cast<std::uint32_t>(g % kGroupsPerTile);
+  const std::uint32_t tiles_n = cols / kNpuTileN;
+  const std::uint32_t tile_row = static_cast<std::uint32_t>(tile / tiles_n);
+  const std::uint32_t tile_col = static_cast<std::uint32_t>(tile % tiles_n);
+  const std::uint32_t rib = gi & 7;
+  const std::uint32_t bc = (gi >> 3) & 1;
+  const std::uint32_t br = (gi >> 4) & 1;
+  const std::uint32_t sc = (gi >> 5) & 7;
+  const std::uint32_t sr = gi >> 8;
+  const std::size_t row =
+      std::size_t{tile_row} * kNpuTileRowsC + (sr * 2 + br) * 8 + rib;
+  const std::uint32_t col = tile_col * kNpuTileN + (sc * 2 + bc) * 8;
+  if (col >= valid_cols) {
+    return;
+  }
+  const std::uint8_t* pg = gate_in + g * 9;
+  const std::uint8_t* pu = up_in + g * 9;
+  const float mg = ldexpf(1.0F, static_cast<int>(pg[0]) - 127) / 64.0F;
+  const float mu = ldexpf(1.0F, static_cast<int>(pu[0]) - 127) / 64.0F;
+  __half2 packed[4];
+#pragma unroll
+  for (int i = 0; i < 8; i += 2) {
+    const float g0 =
+        static_cast<float>(static_cast<std::int8_t>(pg[1 + i])) * mg;
+    const float g1 =
+        static_cast<float>(static_cast<std::int8_t>(pg[2 + i])) * mg;
+    const float u0 =
+        static_cast<float>(static_cast<std::int8_t>(pu[1 + i])) * mu;
+    const float u1 =
+        static_cast<float>(static_cast<std::int8_t>(pu[2 + i])) * mu;
+    packed[i / 2] = __floats2half2_rn(SiluF(g0) * u0, SiluF(g1) * u1);
+  }
+  *reinterpret_cast<uint4*>(out + row * valid_cols + col) =
+      *reinterpret_cast<const uint4*>(packed);
+}
+
+void NpuSwiglu(const void* gate, const void* up, __half* out,
+               std::uint32_t tokens, std::uint32_t cols,
+               std::uint32_t valid_cols, hipStream_t stream) {
+  const std::size_t groups = std::size_t{tokens} * cols / 8;
+  hipLaunchKernelGGL(NpuSwigluKernel, dim3(Blocks(groups)), dim3(kThreads), 0,
+                     stream, static_cast<const std::uint8_t*>(gate),
+                     static_cast<const std::uint8_t*>(up), out, tokens, cols,
+                     valid_cols);
+}
+
+void NpuEncodeActivations(const __half* x, std::size_t ldx,
+                          std::uint32_t tokens, std::uint32_t k_slice,
+                          std::uint32_t k_offset, std::uint32_t k_valid,
+                          void* dst, hipStream_t stream) {
+  hipLaunchKernelGGL(NpuEncodeActivationsKernel,
+                     dim3((tokens / kNpuTileM) * (k_slice / kNpuTileK)),
+                     dim3(256), 0, stream, x, static_cast<std::uint8_t*>(dst),
+                     k_slice, k_offset, k_valid, ldx);
+}
+
+void NpuEncodeWeights(const void* q8, std::uint32_t k_total, std::uint32_t row0,
+                      std::uint32_t cols, std::uint32_t k_slice,
+                      std::uint32_t k_offset, std::uint32_t k_valid, void* dst,
+                      hipStream_t stream) {
+  const std::size_t groups = std::size_t{k_slice} * cols / 8;
+  hipLaunchKernelGGL(
+      NpuEncodeWeightsQ8Kernel, dim3(Blocks(groups)), dim3(kThreads), 0, stream,
+      static_cast<const Q8_0Block*>(q8), static_cast<std::uint8_t*>(dst), row0,
+      cols, k_slice, k_offset, k_valid, k_total);
+}
+
+void NpuDecodeOutput(const void* src, float* out, std::uint32_t tokens,
+                     std::uint32_t cols, std::size_t out_pitch,
+                     std::uint32_t col0, bool accumulate, hipStream_t stream,
+                     std::uint32_t valid_cols) {
+  const std::size_t groups = std::size_t{tokens} * cols / 8;
+  hipLaunchKernelGGL(NpuDecodeOutputKernel, dim3(Blocks(groups)),
+                     dim3(kThreads), 0, stream,
+                     static_cast<const std::uint8_t*>(src), out, tokens, cols,
+                     out_pitch, col0, accumulate, valid_cols);
+}
+
 bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens) {
-  if (n_tokens < 1024 || m != 16384 || k != 2560 || channels != 10240 ||
-      kernel != kSsmConvTaps) {
+                     hipStream_t stream, std::uint32_t checkpoint_tokens,
+                     std::uint32_t gpu_rows) {
+  if (gpu_rows == 0) {
+    gpu_rows = m;
+  }
+  if (n_tokens < 1024 || (m != 16384 && m != channels) || k != 2560 ||
+      channels != 10240 || kernel != kSsmConvTaps || gpu_rows > m ||
+      gpu_rows == 0 || gpu_rows % 256 != 0 || gpu_rows < channels) {
     return false;
   }
+  // Channels past gpu_rows come from the NPU.
+  const std::uint32_t conv_channels = std::min(gpu_rows, channels);
   // Row-tile pairs per token tile in launch order (-0.9 %).
   hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
-                     dim3((n_tokens + 127) / 128, m / 256), dim3(kThreads), 0,
-                     stream, w, x, qkvz, n_tokens, m, k, nullptr, nullptr,
-                     nullptr, conv_w, convolved, AttentionProjectionOutput{},
-                     checkpoint_tokens);
+                     dim3((n_tokens + 127) / 128, gpu_rows / 256),
+                     dim3(kThreads), 0, stream, w, x, qkvz, n_tokens, m, k,
+                     nullptr, nullptr, nullptr, conv_w, convolved,
+                     AttentionProjectionOutput{}, checkpoint_tokens);
   hipLaunchKernelGGL(
       SsmConvBoundaryKernel,
-      dim3(Blocks(channels),
+      dim3(Blocks(conv_channels),
            (n_tokens + kSsmProjectionTileTokens - 1) / kSsmProjectionTileTokens,
            3),
       dim3(kThreads), 0, stream, qkvz, conv_w, history, convolved, n_tokens,
@@ -6447,18 +6835,19 @@ void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
                      destination, tokens, channels, history_rows);
 }
 
-void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
-                   std::uint32_t z_stride, const float* alpha_beta,
-                   const float* conv_w, const float* a, const float* dt,
-                   const float* norm_w, float* conv_state, float* conv_scratch,
-                   float* qn, float* kn, float* raw, float* state, float* out,
-                   void* out_q8, RollbackRows state_snapshots,
-                   RollbackRows conv_snapshots, std::uint32_t n_tokens,
-                   std::uint32_t k_heads, std::uint32_t v_heads,
-                   std::uint32_t d, std::uint32_t kernel, bool row_split,
-                   bool convolved, float eps, hipStream_t stream,
-                   __half* out_half, GdnCheckpoint checkpoint,
-                   std::uint32_t out_half_stride, void* out_q8_1) {
+void GatedDeltaNet(
+    const float* qkv, std::uint32_t qkv_stride, const float* z,
+    std::uint32_t z_stride, const float* alpha_beta, const float* conv_w,
+    const float* a, const float* dt, const float* norm_w, float* conv_state,
+    float* conv_scratch, float* qn, float* kn, float* raw, float* state,
+    float* out, void* out_q8, RollbackRows state_snapshots,
+    RollbackRows conv_snapshots, std::uint32_t n_tokens, std::uint32_t k_heads,
+    std::uint32_t v_heads, std::uint32_t d, std::uint32_t kernel,
+    bool row_split, bool convolved, float eps, hipStream_t stream,
+    __half* out_half, GdnCheckpoint checkpoint, std::uint32_t out_half_stride,
+    void* out_q8_1, void (*before_epilogue)(void*), void* before_epilogue_arg,
+    const std::uint8_t* const* z_streams, std::uint32_t z_stream_stride,
+    std::uint32_t z_tokens, std::uint32_t z_gpu_cols) {
   const std::uint32_t channels = 2 * k_heads * d + v_heads * d;
   const std::size_t count = static_cast<std::size_t>(n_tokens) * channels;
   const bool saved_history = !convolved && kernel == kSsmConvTaps &&
@@ -6528,13 +6917,18 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
         alpha_beta, a, dt, state, raw, state_snapshots, n_tokens, k_heads,
         v_heads, nullptr, 0, checkpoint);
   }
+  // The caller finishes the z rows (still arriving from the NPU) here: the
+  // epilogue is the first reader.
+  if (before_epilogue != nullptr) {
+    before_epilogue(before_epilogue_arg);
+  }
   hipLaunchKernelGGL(
       GdnEpilogueKernel<false>, dim3((n_tokens * v_heads + waves - 1) / waves),
       dim3(kThreads), 0, stream, raw, z, z_stride, norm_w, out, out_q8,
       out_half, n_tokens * v_heads, v_heads, eps, nullptr, 0,
       out_q8 == nullptr && out_half == nullptr && d == kGdnDim ? out_q8_1
                                                                : nullptr,
-      out_half_stride);
+      out_half_stride, z_streams, z_stream_stride, z_tokens, z_gpu_cols);
 }
 
 bool GatedDeltaNetBatch(const GdnBatchItem* items, std::uint32_t count,
@@ -6607,6 +7001,35 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
                        rotary_dim, start_pos, theta, eps, rope);
   }
   return true;
+}
+
+void PrepareQueryHeadsStreams(
+    const std::uint8_t* const* streams, std::uint32_t stream_stride,
+    std::uint32_t stream_tokens, const float* q_gamma, float* q, float* gate,
+    std::uint32_t n_tokens, std::uint32_t heads, std::uint32_t kv_heads,
+    std::uint32_t d, std::uint32_t rotary_dim, const std::uint32_t* start_pos,
+    float theta, float eps, hipStream_t stream,
+    const qwen::vision::DeviceRope* rope, std::uint32_t q_heads) {
+  hipLaunchKernelGGL((PrepareAttentionKernel<4, true>),
+                     dim3(n_tokens, (q_heads + 3) / 4), dim3(kThreads), 0,
+                     stream, nullptr, 0, q_gamma, nullptr, q, gate, nullptr,
+                     nullptr, heads, kv_heads, d, rotary_dim, start_pos, theta,
+                     eps, rope, q_heads, streams, stream_stride, stream_tokens);
+}
+
+void PrepareQueryHeads(const float* packed, std::uint32_t stride,
+                       const float* q_gamma, float* q, float* gate,
+                       std::uint32_t n_tokens, std::uint32_t heads,
+                       std::uint32_t kv_heads, std::uint32_t d,
+                       std::uint32_t rotary_dim, const std::uint32_t* start_pos,
+                       float theta, float eps, hipStream_t stream,
+                       const qwen::vision::DeviceRope* rope,
+                       std::uint32_t q_heads) {
+  hipLaunchKernelGGL((PrepareAttentionKernel<4>),
+                     dim3(n_tokens, (q_heads + 3) / 4), dim3(kThreads), 0,
+                     stream, packed, stride, q_gamma, nullptr, q, gate, nullptr,
+                     nullptr, heads, kv_heads, d, rotary_dim, start_pos, theta,
+                     eps, rope, q_heads);
 }
 
 void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,

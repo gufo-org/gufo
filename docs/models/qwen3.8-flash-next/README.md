@@ -53,3 +53,5 @@ Build a microbenchmark with
 `dense_blaslt_sweep.hip` times hipBLASLt on the dense prefill shapes.
 No historical logit dump is required. New retained result summaries belong in
 `artifacts/`; generated traces stay in the ignored top-level `artifacts/` tree.
+
+The optional XDNA2 NPU prefill offload is described in [NPU.md](NPU.md).
