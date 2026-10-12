@@ -309,13 +309,13 @@ public:
     return InitialOutputState::kAuto;
   }
 
-  virtual Result complete(
-      std::string_view prompt, std::size_t max_tokens,
-      const sampling::SamplingConfig& sampling,
-      const CancellationCheck& is_cancelled = {},
-      const TokenCallback& on_token = {},
-      std::string_view client_id = "anonymous",
-      const std::vector<std::string>& stop_sequences = {}) = 0;
+  virtual Result complete(std::string_view prompt, std::size_t max_tokens,
+                          const sampling::SamplingConfig& sampling,
+                          const CancellationCheck& is_cancelled = {},
+                          const TokenCallback& on_token = {},
+                          std::string_view client_id = "anonymous",
+                          const std::vector<std::string>& stop_sequences = {},
+                          bool cache_prompt = true) = 0;
 
   virtual Result chat(const ChatRequest& request, std::size_t max_tokens,
                       const sampling::SamplingConfig& sampling,
@@ -356,7 +356,7 @@ public:
       const CancellationCheck& is_cancelled = {}, bool stream_output = false,
       bool ignore_eos = false, std::string_view client_id = "anonymous",
       const std::vector<std::string>& stop_sequences = {},
-      bool return_progress = false);
+      bool return_progress = false, bool cache_prompt = true);
 
   std::shared_ptr<GenerationRequest> start_chat(
       const ChatRequest& request, std::size_t max_tokens, float temperature,
@@ -383,7 +383,7 @@ TextGenerationBackend::start_complete(
     const sampling::SamplingConfig& sampling,
     const CancellationCheck& is_cancelled, bool stream_output, bool ignore_eos,
     std::string_view client_id, const std::vector<std::string>& stop_sequences,
-    bool return_progress) {
+    bool return_progress, bool cache_prompt) {
   (void)stream_output;
   (void)return_progress;
   if (ignore_eos)
@@ -395,14 +395,16 @@ TextGenerationBackend::start_complete(
                               sampling::SamplingConfig sampling,
                               CancellationCheck cancellation,
                               std::string client_id,
-                              std::vector<std::string> stop_sequences)
+                              std::vector<std::string> stop_sequences,
+                              bool cache_prompt)
         : backend_(backend),
           prompt_(std::move(prompt)),
           max_tokens_(max_tokens),
           sampling_(sampling),
           cancellation_(std::move(cancellation)),
           client_id_(std::move(client_id)),
-          stop_sequences_(std::move(stop_sequences)) {}
+          stop_sequences_(std::move(stop_sequences)),
+          cache_prompt_(cache_prompt) {}
 
     Result Wait(const TokenCallback& on_token, const ProgressCallback&,
                 const StartCallback&) override {
@@ -414,7 +416,7 @@ TextGenerationBackend::start_complete(
             return cancelled_.load(std::memory_order_acquire) ||
                    (cancellation_ && cancellation_());
           },
-          on_token, client_id_, stop_sequences_);
+          on_token, client_id_, stop_sequences_, cache_prompt_);
     }
     void Cancel() noexcept override {
       cancelled_.store(true, std::memory_order_release);
@@ -428,12 +430,13 @@ TextGenerationBackend::start_complete(
     CancellationCheck cancellation_;
     std::string client_id_;
     std::vector<std::string> stop_sequences_;
+    bool cache_prompt_;
     std::atomic<bool> waited_{false};
     std::atomic<bool> cancelled_{false};
   };
   return std::make_shared<DeferredGenerationRequest>(
       *this, std::string(prompt), max_tokens, sampling, is_cancelled,
-      std::string(client_id), stop_sequences);
+      std::string(client_id), stop_sequences, cache_prompt);
 }
 
 inline std::shared_ptr<TextGenerationBackend::GenerationRequest>

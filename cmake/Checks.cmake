@@ -14,6 +14,7 @@ set(gufo_pr_targets
   cache_tiered_test
   cache_retention_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
+  heap_placement_test
   logit_sampler_test ggml_dequant_test
   quote_tracker_test
   openai_chat_test http_server_test trace_test audio_websocket_test

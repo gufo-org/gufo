@@ -8,13 +8,15 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
+#include "src/core/hip/managed_alloc.hpp"
+
 namespace gufo::hip::detail {
 
 [[nodiscard]] inline void* AllocateDevice(std::size_t bytes) {
   void* pointer = nullptr;
-  const auto error = hipMalloc(&pointer, bytes);
+  const auto error = gufo::hip::AllocateDevice(&pointer, bytes);
   if (error != hipSuccess) {
-    throw std::runtime_error(std::string("MTP hipMalloc failed: ") +
+    throw std::runtime_error(std::string("MTP allocation failed: ") +
                              hipGetErrorString(error));
   }
   return pointer;
