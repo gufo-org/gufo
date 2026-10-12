@@ -1,11 +1,16 @@
-name: Devlab smoke
+name: Devlab functional checks
 
 on:
   workflow_dispatch:
-  # Bootstrap the smoke test before workflow_dispatch exists on main.
-  push:
-    branches: [ codex/devlab-smoke ]
-    paths: [ .github/workflows/devlab-smoke.yml ]
+    inputs:
+      pr_number:
+        description: Maintainer-approved PR to test (head pinned at authorization)
+        required: true
+        type: string
+      benchmark:
+        description: Also run the native AR benchmark through 128K
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -18,7 +23,11 @@ jobs:
     name: Authorize cluster smoke test
     if: github.repository == 'gufo-org/gufo'
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
+    outputs:
+      head: ${{ steps.revision.outputs.head }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+      base: ${{ steps.plan.outputs.base }}
     permissions:
       contents: read
     steps:
@@ -38,15 +47,78 @@ jobs:
             esac
           done
 
+      - name: Pin approved PR head
+        id: revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::Invalid PR number"; exit 1; }
+          head=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout trusted workflow and test harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Validate functional impact rules
+        run: python3 -m unittest discover -s tests/functional -p test_impact.py
+
+      - name: Select affected Flash-Next suites
+        id: plan
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          APPROVED_HEAD: ${{ steps.revision.outputs.head }}
+          RUN_BENCHMARK: ${{ inputs.benchmark }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch https://github.com/gufo-org/gufo.git "refs/pull/$PR_NUMBER/head:refs/ci/pr" main:refs/ci/main
+          [[ "$(git rev-parse refs/ci/pr)" == "$APPROVED_HEAD" ]] || {
+            echo "::error::PR changed after approval; start a new run."
+            exit 1
+          }
+          base=$(git merge-base refs/ci/main "$APPROVED_HEAD")
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          python3 tests/functional/impact.py --repo . --base "$base" --head "$APPROVED_HEAD" \
+            --model flash-next-q4 --output functional-plan.json
+          python3 - <<'PYPLAN'
+          import json, os
+          plan = json.load(open('functional-plan.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              work = bool(plan['groups']) or os.environ['RUN_BENCHMARK'] == 'true'
+              print('has_work=' + str(work).lower(), file=output)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('## Changed-file functional plan\n\n')
+              summary.write(f"Revisions: `{plan['base']}` → `{plan['head']}`.\n\n")
+              for path in plan['paths']:
+                  summary.write(f"- `{path['path']}` → {', '.join(path['rules'])}\n")
+              for group in plan['groups']:
+                  summary.write(f"\n**{group['profile']} / {group['configuration']}**: " + ', '.join(group['suites']) + '\n')
+              summary.write(f"\nDeferred: {len(plan['deferred'])}; outside Flash-Next scope: {len(plan['out_of_scope'])}.\n")
+              summary.write('Candidate correctness only. Other-model, numerical, agent replay and timing qualification remain separate obligations.\n')
+          PYPLAN
+
+      - name: Retain selection plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: functional-plan-${{ github.run_attempt }}
+          path: functional-plan.json
+
   smoke:
-    name: Strix Halo cluster smoke test
+    name: Flash-Next functional checks on Strix Halo
     needs: authorize
+    if: needs.authorize.outputs.has_work == 'true'
     runs-on: [ strix-halo, devlab-dispatch ]
-    timeout-minutes: 180
+    timeout-minutes: 360
     permissions:
       contents: read
     steps:
-      # The workflow is trusted; the source revision below was selected by a maintainer.
+      # Run only the SHA pinned by the maintainer-authorized hosted job.
       - name: Verify platform and GPU device access
         shell: bash
         run: |
@@ -159,18 +231,32 @@ jobs:
           awk '/^MemTotal:/ { printf "Host-visible memory: %.1f GiB\n", $2 / 1048576 }' /proc/meminfo
           printf '\nThis probe verifies runner placement and GPU device access. It does not execute a model or qualify performance.\n' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Checkout PR 460 at approved revision
+      - name: Checkout trusted workflow and test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: dattrax/gufo
-          ref: c40564d2775eceb084ded63aeaa4675d8075b9e7
           persist-credentials: false
+          path: controller
 
-      - name: Build Gufo from source
+      - name: Recreate approved selection plan and candidate checkout
+        env:
+          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
+          APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
         shell: bash
         run: |
           set -euo pipefail
-          printf 'Source: dattrax/gufo PR #460 at %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          git init candidate
+          git -C candidate fetch https://github.com/gufo-org/gufo.git "$APPROVED_HEAD" "$APPROVED_BASE"
+          git -C candidate checkout --detach "$APPROVED_HEAD"
+          base="$APPROVED_BASE"
+          python3 controller/tests/functional/impact.py --repo candidate --base "$base" --head "$APPROVED_HEAD" \
+            --model flash-next-q4 --output functional-plan.json
+
+      - name: Build Gufo from source
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Approved candidate: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
           cmake --version
           c++ --version
           hipcc --version
@@ -206,7 +292,7 @@ jobs:
           for attempt in 1 2 3; do
             if "$RUNNER_TEMP/gufo-hf-cli/bin/hf" download unsloth/Qwen3.8-Flash-Next-GGUF \
               --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
-              --include 'UD-Q4_K_XL/*.gguf' \
+              --include 'UD-Q4_K_XL/*.gguf' 'MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf' 'mmproj-BF16.gguf' \
               --local-dir "$GUFO_MODEL_DIR"; then
               downloaded=true
               break
@@ -218,7 +304,22 @@ jobs:
             exit 1
           }
 
+      - name: Install functional client dependencies
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/gufo-functional-client"
+          "$RUNNER_TEMP/gufo-functional-client/bin/python" -m pip install openai httpx pillow
+
+      - name: Run selected functional suites in AR and MTP
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/gufo-functional-client/bin/python" controller/tests/functional/cluster.py \
+            --plan functional-plan.json --binary candidate/build/release/gufo \
+            --weights "$GUFO_MODEL_DIR" --output functional-results
+
       - name: Benchmark Flash-Next AR through 128K depth
+        if: inputs.benchmark
+        working-directory: candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -231,7 +332,17 @@ jobs:
             | tee "$RUNNER_TEMP/gufo-bench.md"
           cat "$RUNNER_TEMP/gufo-bench.md" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Retain functional reports and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flash-next-functional-${{ github.run_attempt }}
+          path: |
+            functional-plan.json
+            functional-results/
+          retention-days: 14
+
       - name: Remove temporary downloader environment
         if: always()
         shell: bash
-        run: rm -rf -- "$RUNNER_TEMP/gufo-hf-cli"
+        run: rm -rf -- "$RUNNER_TEMP/gufo-hf-cli" "$RUNNER_TEMP/gufo-functional-client"
