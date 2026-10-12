@@ -440,6 +440,13 @@ budgets applies from the first request.
 written before a restart restored a 24,866-token prompt in 1.8 s against about
 50 s for a cold prefill **(measured)**.
 
+A Flash-Next checkpoint is thousands of files: 157K tokens are 4.45 GB in
+18,672 files, mostly 256 KiB. Four helper threads hint the files ahead of the
+restore, which still reads, checks and copies them in order. That restore took
+1.3–1.4 s with the files on disk and 0.85 s from the page cache, against
+8.7–9.9 s when one thread hinted each file in turn **(measured, NVMe under
+dm-crypt)**.
+
 It also **learns shared-prefix boundaries** that survive restarts. RAM learns a
 divergence point from the second conversation and restores it from the third
 (see above); the disk index needs more conversations, and in one run its
