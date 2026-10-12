@@ -2235,7 +2235,7 @@ void HttpServer::handle_connection(int client_fd) {
         resp.log_details += " error_code=" + resp.stream_log->error_code;
       }
     }
-    if (resp.status < 400 && req.path == "/v1/chat/completions") {
+    if (resp.status < 400) {
       internal_failure_streak.store(0, std::memory_order_relaxed);
     }
     if (resp.status >= 400) {

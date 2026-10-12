@@ -16,19 +16,13 @@ namespace gufo::cli {
 /// when the error is not a device fault, or when GUFO_KEEP_POISONED=1 asks for
 /// the old behaviour.
 ///
-/// Inline because openai_chat.cpp is also compiled directly by tests that do
-/// not link the serve library.
+/// Inline so the header can be included from any translation unit.
 inline void ExitOnPoisonedContext(std::string_view detail) {
   // Markers the driver and the runtime use for a context that can no longer run
   // work, as opposed to a request-level failure.
-  static constexpr std::array<std::string_view, 7> kDeviceFaults{
-      "illegal memory access",
-      "MEMORY_APERTURE_VIOLATION",
-      "HSA_STATUS",
-      "hipError",
-      "device fault",
-      "memory fault",
-      "out of memory"};
+  static constexpr std::array<std::string_view, 5> kDeviceFaults{
+      "illegal memory access", "MEMORY_APERTURE_VIOLATION", "HSA_STATUS",
+      "device fault", "memory fault"};
   bool fatal = false;
   for (const auto marker : kDeviceFaults) {
     fatal = fatal || detail.find(marker) != std::string_view::npos;
@@ -40,8 +34,8 @@ inline void ExitOnPoisonedContext(std::string_view detail) {
       keep != nullptr && keep[0] != '\0' && keep[0] != '0') {
     return;
   }
-  // Written straight to stderr, not through Logger: this header is included by
-  // openai_chat.cpp, which tests compile without the serve or logging library.
+  // Written straight to stderr, not through Logger, so the header stays
+  // independent of the logging library.
   std::fprintf(stderr,
                "fatal: device fault, the GPU context is unusable; exiting "
                "non-zero instead of serving failed requests\n  detail: %.*s\n",
