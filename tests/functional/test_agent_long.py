@@ -3,9 +3,10 @@
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
-from agent_long import check_continuation
+from agent_long import check_continuation, interruption_ready, prepare_turn, resume_prompt
 from opencode_agent import sse_output
 
 
@@ -67,6 +68,80 @@ class ContinuationTest(unittest.TestCase):
             self.assertEqual(content, "")
             self.assertEqual(calls, [])
             self.assertIn("<tool_call>\n<function=", "".join(reasoning))
+
+    def test_interrupt_targets_live_thinking_or_tool_fragments(self):
+        for response in (False, True):
+            for phase in ("thinking", "tool"):
+                if response:
+                    event = {"type": "response.reasoning_summary_text.delta"
+                             if phase == "thinking" else "response.function_call_arguments.delta",
+                             "delta": "partial"}
+                    done = {"type": "response.completed"}
+                else:
+                    delta = {"reasoning_content": "partial"} if phase == "thinking" else {
+                        "tool_calls": [{"index": 0, "function": {"arguments": '{"text":"par'}}]}
+                    event = {"choices": [{"delta": delta}]}
+                    done = {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
+                raw = ("data: " + json.dumps(event) + "\n\n").encode()
+                self.output.write_bytes(raw + b'data: {"unfinished":"\xc3')
+                self.assertTrue(interruption_ready(self.output, phase))
+                other = "tool" if phase == "thinking" else "thinking"
+                self.assertFalse(interruption_ready(self.output, other))
+                self.output.write_bytes(raw + ("data: " + json.dumps(done) + "\n\n").encode())
+                self.assertFalse(interruption_ready(self.output, phase))
+
+    def test_interrupt_does_not_mislabel_a_finished_phase(self):
+        for response in (False, True):
+            events = [
+                {"type": "response.reasoning_summary_text.delta", "delta": "thought"},
+                {"type": "response.function_call_arguments.delta", "output_index": 1,
+                 "delta": '{"text":"part'},
+                {"type": "response.function_call_arguments.delta", "output_index": 1,
+                 "delta": 'ial"}'},
+            ] if response else [
+                {"choices": [{"delta": {"reasoning_content": "thought"}}]},
+                {"choices": [{"delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": '{"text":"part'}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": 'ial"}'}}]}}]},
+            ]
+            raw = b""
+            for index, event in enumerate(events):
+                raw += ("data: " + json.dumps(event) + "\n\n").encode()
+                self.output.write_bytes(raw)
+                self.assertEqual(interruption_ready(self.output, "thinking"), index == 0)
+                self.assertEqual(interruption_ready(self.output, "tool"), index == 1)
+
+    def test_resume_preserves_the_pending_task_and_completed_work(self):
+        root = Path(self.directory.name)
+        args = SimpleNamespace(agent="pi", complex_tools=True)
+        task = prepare_turn(args, root, 2, True)
+        state = root / "catalog-state.json"
+        state.write_text('{"revision":1,"already_committed":true}')
+        fixture = root / "transaction-2.json"
+        before = fixture.read_bytes()
+        resumed = prepare_turn(args, root, 2, True, task)
+        self.assertEqual(resumed["expected"], task["expected"])
+        self.assertEqual(fixture.read_bytes(), before)
+        self.assertEqual(json.loads(state.read_text())["revision"], 1)
+        self.assertFalse((root / "transaction-3.json").exists())
+        with self.assertRaises(AssertionError):
+            prepare_turn(args, root, 3, True, task)
+        self.assertFalse((root / "transaction-3.json").exists())
+
+    def test_resume_distinguishes_this_task_from_earlier_transactions(self):
+        task = {"turn": 30, "prompt": "Read transaction-30.json, query, then apply.",
+                "completed_calls": []}
+        prompt = resume_prompt(task)
+        self.assertIn(task["prompt"], prompt)
+        self.assertIn("No tool calls completed for this task", prompt)
+        self.assertIn("Results from earlier tasks do not complete steps", prompt)
+        task["completed_calls"] = [
+            {"name": "catalog_apply", "arguments": '{"id":42,"dry_run":false}'}]
+        prompt = resume_prompt(task)
+        self.assertNotIn("No tool calls completed", prompt)
+        self.assertIn(json.dumps(task["completed_calls"]), prompt)
+        self.assertIn("do not repeat committed changes", prompt)
 
 
 if __name__ == "__main__":

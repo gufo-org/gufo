@@ -973,6 +973,25 @@ loss permanent for the process:
   stops it after the loss. Teardown can block on the dead device, so the
   process exits with status 75 after 10 s regardless.
 
+A device call that never returns is a different failure: nothing fails, so
+nothing is probed, and the server keeps answering `/health` and sending stream
+heartbeats while generation has stopped. `--stall-timeout-ms MS` bounds that.
+Progress means a request being admitted, a work unit starting, a pending
+checkpoint capture completing or the idle wait returning. When the scheduler has work but none of those
+happens for `MS`, it logs
+`event=device_lost remedy=restart reason=scheduler made no progress for <MS> ms`
+and follows the lost-device path above, including the exit with status 75 and
+the `gufo_device_lost_total` increment. This covers a hang on the scheduler
+thread, in a capture the scheduler is waiting for, and in the idle device
+probe. Detection takes between `MS` and about 1.5 times `MS`. Requests already
+in flight end when the process exits. The default, 0, disables the check;
+other values must be at least 60000, because a deep checkpoint capture or a
+post-failure device probe can legitimately hold progress for tens of seconds.
+An idle server and a queued request never count as stalled. While any other
+request is still progressing, a hung capture is not reported; it is once
+nothing else can run. A disk-cache write that never completes is not detected
+while generation continues.
+
 Text streams defer HTTP headers until the scheduler admits the request and
 starts its prompt, or until the request has waited five seconds in the queue,
 whichever comes first. Chat's initial role and Responses lifecycle events are

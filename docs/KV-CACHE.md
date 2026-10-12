@@ -356,6 +356,10 @@ Strix Halo, so HIP's free-memory estimate alone is not enough.
 For example, 44 GiB available at load gives a 22 GiB automatic RAM cache and
 allows an explicit limit of up to 40 GiB, even when HIP reports more free
 memory.
+Memory that another process claims after startup is not subtracted. When
+other GPU servers share the machine, such as an image or speech server, set an
+explicit `--cache-ram-bytes` that leaves room for their peak use; starting
+them first only accounts for what they hold at that moment.
 The RAM payload budget excludes weights, execution states, token metadata
 and disk staging. It also excludes temporary host buffers used to save
 checkpoints to disk; this is not a limit on total server memory.
