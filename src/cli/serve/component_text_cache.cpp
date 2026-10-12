@@ -160,6 +160,8 @@ struct ComponentTextCache::Impl {
     // not establish that a durable chunk belongs to this execution.
     std::shared_ptr<const void> branch;
     std::shared_ptr<const cache::DiskDescription> durable;
+    // Acquisition order; cold assignment replaces the oldest live frontier.
+    std::uint64_t used{};
     bool busy{};
   };
   std::shared_ptr<TextModelRunner> runner;
@@ -176,6 +178,7 @@ struct ComponentTextCache::Impl {
   cache::RetentionPolicy retention;
   mutable std::mutex mutex;
   std::vector<std::unique_ptr<Entry>> entries;
+  std::uint64_t clock{};
   std::unique_ptr<cache::DiskCatalog> catalog;
   std::unique_ptr<cache::StreamedStore> streaming;
   std::unique_ptr<cache::PersistenceQueue> queue;
@@ -838,20 +841,23 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
         live = location;
       }
     }
-    if (!entry)
-      for (const bool complete : {true, false}) {
-        for (auto& candidate : impl_->entries)
-          if (!candidate->busy &&
-              (!complete || candidate->slot->PreservationComplete())) {
-            entry = candidate.get();
-            break;
-          }
-        if (entry)
-          break;
-      }
+    if (!entry) {
+      // Completed preservation first: it needs no foreground copy. Among
+      // those, a live frontier holds generated tokens no checkpoint covers,
+      // such as the tool call the next turn replays, so take a slot without
+      // one, then the least recently used.
+      const auto rank = [](const Impl::Entry& e) {
+        return std::tuple{!e.slot->PreservationComplete(), bool(e.live),
+                          e.used};
+      };
+      for (auto& candidate : impl_->entries)
+        if (!candidate->busy && (!entry || rank(*candidate) < rank(*entry)))
+          entry = candidate.get();
+    }
     if (!entry)
       throw cache::SlotBusy();
     entry->busy = true;
+    entry->used = ++impl_->clock;
     if (!live) {
       entry->branch = std::make_shared<const std::uint8_t>(0);
       entry->durable.reset();

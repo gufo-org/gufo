@@ -344,6 +344,31 @@ void ColdAssignmentPrefersPreservedSlot() {
   assert(metrics.ledger.reserved_bytes[static_cast<unsigned>(
              cache::ResourceCategory::kBackingAssigned)] == 320);
 }
+void ColdAssignmentKeepsLiveFrontiers() {
+  // No checkpoints are borrowed, so every slot has completed preservation.
+  // Requests that cannot continue a frontier take the empty slot, then the
+  // least recently used one, so the generated reply stays live (#562).
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  const auto turn = [&](const std::vector<TextRunnerToken>& tokens) {
+    auto lease = cache.Acquire(tokens, {}, {}, true, 0, true);
+    const auto live = lease->cache_hit() && !lease->restored_snapshot_bytes();
+    const auto cached = lease->cached_tokens();
+    auto& state = dynamic_cast<State&>(lease->state());
+    const auto tail = std::span(tokens).subspan(cached);
+    runner->adapter->Append(state.slot, tail, tail);
+    (void)lease->Commit({}, {}, tokens);
+    return live ? cached : 0;
+  };
+  std::vector<TextRunnerToken> conversation(12, 7);
+  (void)turn(conversation);
+  for (const TextRunnerToken other : {100, 101}) {
+    (void)turn(std::vector<TextRunnerToken>(12, other));
+    const auto frontier = conversation.size();
+    conversation.push_back(8);
+    assert(turn(conversation) == frontier);
+  }
+}
 void ReuseAndBranches() {
   auto runner = std::make_shared<Runner>();
   TextRunnerPool pool(runner, 2);
@@ -901,6 +926,7 @@ int main() {
   InPassCapturePreservesBoundaryAndLiveTail();
   RestoreFromBusyBorrowedSource();
   ColdAssignmentPrefersPreservedSlot();
+  ColdAssignmentKeepsLiveFrontiers();
   ReuseAndBranches();
   EditBoundariesSurviveActualBackingPressure();
   ReusedConversationOutlivesOneUseRequests();

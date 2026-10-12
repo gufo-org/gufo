@@ -92,7 +92,9 @@ request, including the tokens it generated. It is preferred even when a
 snapshot matches the same length, because the state is already sitting there:
 no restore and no device copy. This is why continuing the previous turn of a
 conversation is nearly free, and why reuse can cover generated tokens and not
-just prompt tokens.
+just prompt tokens. A request that continues no live frontier takes the least
+recently used idle session (Flash-Next prefers one without a frontier), so
+it does not replace the frontier of a conversation that has just replied.
 
 A **snapshot** is an immutable retained checkpoint. Reusing one means restoring
 it into a session, which costs a copy.
