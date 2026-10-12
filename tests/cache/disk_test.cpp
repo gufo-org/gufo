@@ -516,10 +516,41 @@ void BudgetAndDirectories() {
   Payloads(d.path, m);
   Put(d.path, m);
   auto size = EncodeManifest(m).size() + 28;
-  Reject([&] { DiskStore store(ledger, d.path, size - 1); });
   {
     DiskStore store(ledger, d.path, size);
     assert(store.Entries().size() == 1);
+  }
+  {
+    // A lowered budget still opens the directory. Nothing publishes until
+    // retirement brings it back within the budget.
+    DiskStore store(ledger, d.path, size - 1);
+    assert(store.Entries().size() == 1);
+    assert(store.Stats().managed_bytes == size);
+    auto next = m;
+    next.checkpoint = {8};
+    next.tokens = {17, 18};
+    next.components[0].position.valid_rows = 2;
+    next.components[1].position.valid_rows = 2;
+    std::array<std::uint8_t, 8> chunk{1};
+    std::array<std::uint8_t, 16> state{2};
+    next.components[0].chunks[0] = {Id(11), chunk.size(), DiskChecksum(chunk)};
+    next.components[0].tail.reset();
+    next.components[1].private_state =
+        DiskPayload{Id(13), state.size(), DiskChecksum(state)};
+    const std::array<DiskWriteBuffer, 2> writes{
+        {{false, Id(11), chunk}, {true, Id(13), state}}};
+    bool exhausted = false;
+    try {
+      store.Publish(Id(18), next, writes);
+    } catch (const DiskCapacityExhausted&) {
+      exhausted = true;
+    }
+    assert(exhausted);
+    assert(store.Retire({7}));
+    assert(store.Stats().managed_bytes == 0);
+    store.Publish(Id(18), next, writes);
+    assert(store.Entries().size() == 1);
+    assert(store.Stats().managed_bytes <= size - 1);
   }
   fs::remove_all(d.path / "v2/private");
   fs::create_directory_symlink(unrelated.path, d.path / "v2/private");

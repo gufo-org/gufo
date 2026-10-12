@@ -217,6 +217,20 @@ struct ComponentTextCache::Impl {
         static_cast<ssize_t>(nonce.size()))
       throw std::runtime_error("cannot obtain cache publication nonce");
     index.Register(identity, resources->adapter->Components(), digest);
+    if (options) {
+      const auto row_bytes =
+          cache::MinimumStagingBytes(resources->adapter->Components());
+      if (ledger.Limits().staging_bytes < row_bytes)
+        throw std::invalid_argument(
+            "--cache-disk-staging-bytes " +
+            std::to_string(ledger.Limits().staging_bytes) +
+            " is smaller than one " + std::to_string(row_bytes) +
+            "-byte cache row");
+      // Take directory ownership before slots and backing commit, so a
+      // second server fails without claiming its RAM budget first.
+      disk = std::make_unique<cache::DiskStore>(ledger, options->directory,
+                                                options->capacity_bytes);
+    }
     for (std::size_t i = 0; i < count; ++i) {
       auto entry = std::make_unique<Entry>();
       entry->preservation = Stream();
@@ -231,11 +245,15 @@ struct ComponentTextCache::Impl {
                                  }});
       entries.push_back(std::move(entry));
     }
+    std::size_t automatic_bytes{}, max_bytes{};
     if (resources->commit_backing) {
       const auto claim = this->runner->ResourceClaim();
       const auto automatic = claim.retained_snapshot_capacity_bytes.value_or(0);
       const auto ceiling =
           claim.retained_snapshot_ceiling_bytes.value_or(automatic);
+      automatic_bytes =
+          std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
+      max_bytes = ceiling;
       ram = std::min(ram, ceiling);
       if (automatic_ram)
         ram = std::min(ram, automatic);
@@ -244,8 +262,6 @@ struct ComponentTextCache::Impl {
       resources->commit_backing(ram);
     }
     if (options) {
-      disk = std::make_unique<cache::DiskStore>(ledger, options->directory,
-                                                options->capacity_bytes);
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index);
       for (const auto& durable : disk->Entries()) {
         cache::ExecutionHistory::ObserveDurableId(
@@ -260,6 +276,28 @@ struct ComponentTextCache::Impl {
       disk_capacity = options->capacity_bytes;
       disk_step = options->min_checkpoint_step_tokens;
       disk->ReclaimOrphans();
+      if (disk->Stats().managed_bytes > disk_capacity) {
+        // A lowered --cache-disk-bytes keeps its meaning: reclaim orphans and
+        // temporaries first, then evict the oldest checkpoints by creation
+        // (startup has no use history) to fit.
+        disk->WaitForReclamation();
+        std::size_t evicted{};
+        while (disk->Stats().managed_bytes > disk_capacity &&
+               catalog->EvictOne())
+          ++evicted;
+        const auto managed = disk->Stats().managed_bytes;
+        const auto fields = " managed_bytes=" + std::to_string(managed) +
+                            " capacity_bytes=" + std::to_string(disk_capacity);
+        if (evicted)
+          Logger::Info("cache",
+                       "schema=component-cache-v1 event=disk_evicted "
+                       "reason=budget entries=" +
+                           std::to_string(evicted) + fields);
+        if (managed > disk_capacity)
+          Logger::Warn(
+              "cache",
+              "schema=component-cache-v1 event=disk_over_budget" + fields);
+      }
       queue = std::make_unique<cache::PersistenceQueue>(
           ledger, *streaming, kPersistenceDepth, ram,
           [this] {
@@ -329,7 +367,10 @@ struct ComponentTextCache::Impl {
                      std::to_string(count) +
                      " snapshot_entries=128 capacity_bytes=" +
                      std::to_string(ram) + " staging_capacity_bytes=" +
-                     std::to_string(ledger.Limits().staging_bytes));
+                     std::to_string(ledger.Limits().staging_bytes) +
+                     " automatic_bytes=" + std::to_string(automatic_bytes) +
+                     " max_bytes=" + std::to_string(max_bytes) +
+                     " disk_capacity_bytes=" + std::to_string(disk_capacity));
   }
   ~Impl() {
     // Settle immutable-source readers before slots/resources/index unwind.

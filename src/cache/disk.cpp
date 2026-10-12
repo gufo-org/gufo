@@ -619,9 +619,6 @@ struct DiskStore::Impl {
       if (ParseName(name))
         stats.managed_bytes = Add(stats.managed_bytes, st.st_size);
     });
-    if (stats.managed_bytes > budget)
-      throw std::runtime_error("cache directory exceeds disk budget: " +
-                               path.string());
     if (manifest_count) {
       auto entry_reservation =
           ledger->Reserve(ResourceCategory::kMetadata,
@@ -1131,7 +1128,10 @@ struct DiskStore::Impl {
         Invalid();
       additional = Add(additional, p.bytes);
     }
-    if (additional > budget_bytes - stats.managed_bytes)
+    // A directory opened above its budget admits nothing until retirement or
+    // reclamation brings it back within the budget.
+    if (stats.managed_bytes > budget_bytes ||
+        additional > budget_bytes - stats.managed_bytes)
       throw DiskCapacityExhausted();
     std::unique_lock index_guard(index_mutex, std::defer_lock);
     {

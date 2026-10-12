@@ -208,7 +208,10 @@ enum class DiskPublicationStep {
 // do not retain it across publication/retirement or background reclamation.
 // Pin() is thread-safe and blocks retirement until all copies are released.
 // The supplied ledger must outlive the store and its worker.
-// Excess preexisting bytes still fail startup before new writes are admitted.
+// The budget counts every managed file: referenced, temporary and orphaned.
+// A directory above the budget (for example after lowering it) still opens;
+// publication refuses until retirement or orphan reclamation brings
+// Stats().managed_bytes back within the budget.
 class DiskStore {
 public:
   DiskStore(ResourceLedger&, const std::filesystem::path& directory,

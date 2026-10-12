@@ -1,6 +1,7 @@
 #ifndef GUFO_CACHE_STREAMING_HPP_
 #define GUFO_CACHE_STREAMING_HPP_
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <span>
@@ -13,6 +14,16 @@
 namespace gufo::cache {
 class BorrowedRows;
 inline constexpr std::size_t kDefaultDiskStagingBytes = 1ULL << 20;
+// Restores and observed-row captures move whole rows per staging piece; a
+// smaller staging budget can never restore a checkpoint of these components.
+[[nodiscard]] inline std::size_t MinimumStagingBytes(
+    std::span<const ComponentDescriptor> components) {
+  std::size_t bytes = 1;
+  for (const auto& d : components)
+    if (d.kind == ComponentKind::kAppendRows)
+      bytes = std::max(bytes, d.row_bytes);
+  return bytes;
+}
 struct StagingAllocation {
   std::shared_ptr<void> owner;
   std::span<std::uint8_t> bytes;

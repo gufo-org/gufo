@@ -114,6 +114,8 @@ unrelated directories remain untouched. Cleanup only removes bytes and allocates
 no disk payload; after cleanup, excess v2 usage fails startup before new writes
 can occur. A preexisting over-budget legacy store may therefore shrink to fit;
 the constructor cannot retroactively bound bytes written by the old store.
+[D4](d4-options-and-budgets.md) later replaced the startup failure (2026-10-12):
+an over-budget store opens and refuses publication, and serving evicts to fit.
 Card 11 adds publication reservations and reclamation.
 
 ### Review follow-up

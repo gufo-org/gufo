@@ -578,6 +578,157 @@ void DiskBudgetEvictsAnUnpinnedConversation() {
   }
   std::filesystem::remove_all(directory);
 }
+std::uintmax_t ManagedBytes(const std::filesystem::path& directory) {
+  std::uintmax_t bytes{};
+  for (const auto& file :
+       std::filesystem::recursive_directory_iterator(directory / "v2"))
+    if (file.is_regular_file())
+      bytes += file.file_size();
+  return bytes;
+}
+void LoweredDiskBudgetEvictsOldestAtStartup() {
+  char pattern[] = "/tmp/gufo-component-lowered-budget-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                  .capacity_bytes = 1 << 20,
+                                  .staging_capacity_bytes = 7};
+  const std::vector<TextRunnerToken> first{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  auto second = first;
+  second.front() = 999;
+  for (const auto& prompt : {first, second}) {
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 1, disk);
+    auto request = pool.Acquire(prompt);
+    Prefill(request);
+    (void)Generate(request);
+    assert(request.Commit().disk_queued_bytes > 0);
+  }
+  // Restarting below the retained bytes keeps the budget's meaning: the
+  // oldest conversation leaves at startup instead of failing to start.
+  disk.capacity_bytes = ManagedBytes(directory) - 1;
+  {
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 1, disk);
+    assert(ManagedBytes(directory) <= disk.capacity_bytes);
+    auto retained = pool.Acquire(second);
+    assert(retained.cache_disk_hit());
+    retained.Invalidate();
+    auto evicted = pool.Acquire(first);
+    assert(!evicted.cache_hit());
+    evicted.Invalidate();
+  }
+  std::filesystem::remove_all(directory);
+}
+void OrphansLeaveBeforeCheckpoints() {
+  char pattern[] = "/tmp/gufo-component-orphan-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                  .capacity_bytes = 1 << 20,
+                                  .staging_capacity_bytes = 7};
+  const std::vector<TextRunnerToken> first{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  auto second = first;
+  second.front() = 999;
+  for (const auto& prompt : {first, second}) {
+    TextRunnerPool pool(std::make_shared<Runner>(), 1, disk);
+    auto request = pool.Acquire(prompt);
+    Prefill(request);
+    (void)Generate(request);
+    assert(request.Commit().disk_queued_bytes > 0);
+  }
+  // A crash left an unreferenced chunk that pushes the directory over a budget
+  // the referenced checkpoints still fit; reclaiming it must suffice.
+  disk.capacity_bytes = ManagedBytes(directory);
+  const auto orphan = directory / "v2/chunks" / (std::string(32, 'f') + ".bin");
+  std::ofstream(orphan, std::ios::binary) << std::string(4096, 'x');
+  {
+    TextRunnerPool pool(std::make_shared<Runner>(), 1, disk);
+    assert(!std::filesystem::exists(orphan));
+    assert(ManagedBytes(directory) <= disk.capacity_bytes);
+    for (const auto& prompt : {first, second}) {
+      auto restored = pool.Acquire(prompt);
+      assert(restored.cache_disk_hit());
+      restored.Invalidate();
+    }
+  }
+  std::filesystem::remove_all(directory);
+}
+void StagingHoldsOneRow() {
+  char pattern[] = "/tmp/gufo-component-staging-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  // Fake rows are four bytes; every restore piece holds whole rows.
+  TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                  .capacity_bytes = 1 << 20,
+                                  .staging_capacity_bytes = 3};
+  std::string error;
+  try {
+    ComponentTextCache cache(std::make_shared<Runner>(), 1, 1 << 22, disk);
+  } catch (const std::invalid_argument& e) {
+    error = e.what();
+  }
+  assert(
+      error.find("--cache-disk-staging-bytes 3 is smaller than one 4-byte") !=
+      std::string::npos);
+  disk.staging_capacity_bytes = 4;
+  const std::vector<TextRunnerToken> prompt{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  {
+    TextRunnerPool pool(std::make_shared<Runner>(), 1, disk);
+    auto request = pool.Acquire(prompt);
+    Prefill(request);
+    (void)Generate(request);
+    assert(request.Commit().disk_queued_bytes > 0);
+  }
+  {
+    TextRunnerPool pool(std::make_shared<Runner>(), 1, disk);
+    auto restored = pool.Acquire(prompt);
+    assert(restored.cache_disk_hit());
+    restored.Invalidate();
+  }
+  std::filesystem::remove_all(directory);
+}
+void DiskDirectoryHasOneOwner() {
+  class CommitRunner final : public Runner {
+  public:
+    mutable bool committed{};
+    mutable std::size_t streams{};
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->commit_backing = [this](std::size_t) { committed = true; };
+      // Every execution slot takes a preservation stream when it allocates.
+      resources->stream = [this, stream = std::move(resources->stream)] {
+        ++streams;
+        return stream();
+      };
+      return resources;
+    }
+  };
+  char pattern[] = "/tmp/gufo-component-owner-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 7};
+  {
+    TextRunnerPool owner(std::make_shared<CommitRunner>(), 1, disk);
+    auto second_runner = std::make_shared<CommitRunner>();
+    std::string error;
+    try {
+      TextRunnerPool second(second_runner, 1, disk);
+    } catch (const std::exception& e) {
+      error = e.what();
+    }
+    assert(error.find("ownership") != std::string::npos &&
+           error.find(directory.string()) != std::string::npos);
+    // The losing server fails before allocating slots or committing its RAM.
+    assert(!second_runner->streams && !second_runner->committed);
+  }
+  // Ownership ends with the owning server.
+  {
+    auto runner = std::make_shared<CommitRunner>();
+    TextRunnerPool reopened(runner, 1, disk);
+    assert(runner->committed);
+  }
+  std::filesystem::remove_all(directory);
+}
 void GridDoesNotSuppressFirstDiskPrompt() {
   char pattern[] = "/tmp/gufo-component-spacing-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
@@ -756,6 +907,10 @@ int main() {
   RestartAndCorruption();
   FailedCaptureKeepsPublishedBoundary();
   DiskBudgetEvictsAnUnpinnedConversation();
+  LoweredDiskBudgetEvictsOldestAtStartup();
+  OrphansLeaveBeforeCheckpoints();
+  StagingHoldsOneRow();
+  DiskDirectoryHasOneOwner();
   GridDoesNotSuppressFirstDiskPrompt();
   NearTailDiskBranchSurvivesRestart();
   UnbackedDeepRowsSurviveDiskRestart();

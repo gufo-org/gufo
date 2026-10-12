@@ -57,6 +57,9 @@ Production binary SHA-256:
 
 ## Done when
 
+The correctness criteria pass; the timing gate below is still open
+(2026-10-12).
+
 - [x] Actual backing-pressure regression fails without protection and passes
   with it, including independent cold-state checks.
 - [x] Production AR/MTP edits and rotation pass after the preceding suites.

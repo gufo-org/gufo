@@ -141,6 +141,9 @@ No timing improvement or pass is claimed beyond the changed-work requests.
 
 ## Done when
 
+The correctness criteria pass; the timing gate below is still open
+(2026-10-12).
+
 - [x] Each new retention rule has a regression that fails on the preceding
   order; a serving regression fails without the turn's reuse mark.
 - [x] `cache-bridge` then `cache-pressure` at 2 GiB pass every reuse assertion

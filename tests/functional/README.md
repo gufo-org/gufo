@@ -148,6 +148,9 @@ Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. Fo
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
 uses its own 8 GiB disk budget and 1 GiB staging area inside the output directory;
 the runner removes that disk cache when the run ends, keeping reports and logs.
+Flash-Next allocates that staging as pinned host memory at startup, beyond its
+RAM budget, although its default 1 MiB transfer buffer suffices. The runner
+keeps 1 GiB so results stay comparable with retained runs and other models.
 For timing controls on revisions predating progress, use `--allow-missing-progress`
 with `--record-baseline`. Candidate qualification always requires progress events.
 Model runs stay outside hosted CI; CI checks the runner and measurement logic.
