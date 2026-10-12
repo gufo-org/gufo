@@ -434,7 +434,10 @@ if (BUILD_TESTING)
   add_executable(http_server_test tests/cli/http_server_test.cpp)
   target_link_libraries(http_server_test PRIVATE gufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
-  set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
+  # The test drives consecutive internal errors on purpose; the server's
+  # poisoned-context exit would end the process.
+  set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30
+    ENVIRONMENT "GUFO_KEEP_POISONED=1")
   add_executable(audio_websocket_test tests/cli/audio_websocket_test.cpp)
   target_link_libraries(audio_websocket_test PRIVATE gufo_http)
   add_test(NAME audio_websocket_test COMMAND audio_websocket_test)
