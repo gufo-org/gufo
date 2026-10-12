@@ -959,11 +959,10 @@ bool Session::PrepareDecode(const DecodeRequest& request,
       verify_logits_.size() < exec.max_speculative() * model_->VocabSize()) {
     verify_logits_.resize(exec.max_speculative() * model_->VocabSize());
   }
-  // ModelOptions::prompt_lookup (single session): after each MTP draft, a
-  // long enough match in the committed tokens fills the rest of the chain
-  // up to the verify width and ends drafting.
-  const bool lookup =
-      model_->options_.prompt_lookup && !batch_drafts && !defer_head;
+  // Prompt lookup (single session): after each MTP draft, a long enough
+  // match in the committed tokens fills the rest of the chain up to the
+  // verify width and ends drafting.
+  const bool lookup = !batch_drafts && !defer_head;
   if (lookup) {
     lookup_.Extend(tokens_);
   }

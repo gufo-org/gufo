@@ -46,8 +46,6 @@ struct TextSpeculativeConfig {
   std::uint32_t min_draft_tokens{1};
   speculative::DFlashDraftPolicy dflash_policy{
       speculative::DFlashDraftPolicy::kAdaptive};
-  /// Qwen3.8-Flash-Next MTP prompt lookup (see its ModelOptions).
-  bool prompt_lookup{false};
 };
 
 struct TextDiskCacheConfig {

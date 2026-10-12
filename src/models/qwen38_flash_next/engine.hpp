@@ -51,11 +51,6 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
-  /// Single-session prompt lookup: after an MTP draft, a match of 12+ tokens
-  /// in the context proposes the tokens that followed it (PromptLookup).
-  /// Verification is unchanged: greedy text is byte-identical and sampled
-  /// outputs keep the target distribution.
-  bool prompt_lookup = false;
 };
 
 class Session;
@@ -317,7 +312,7 @@ private:
   std::vector<float> verify_logits_;
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
-  /// Index of tokens_ for ModelOptions::prompt_lookup.
+  /// Index of tokens_ for prompt lookup (single-session MTP drafts).
   PromptLookup lookup_;
   SpeculativeStats stats_;
   std::shared_ptr<const qwen::vision::Prompt> image_prompt_;

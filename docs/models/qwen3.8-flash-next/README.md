@@ -44,14 +44,16 @@ planner and may use measured cycle costs. Each request keeps private caches,
 rollback and RNG; snapshots preserve the learned acceptance history.
 See [MTP qualification](QUALITY.md).
 
-`--prompt-lookup` adds copied proposals to single-session MTP decoding. After
+Single-session MTP decoding also proposes copies from the context. After
 each MTP draft, the context (committed tokens plus the chain so far) is matched
 against the request's own earlier tokens by its last three tokens; when the
 best of the 16 most recent occurrences matches at least 12 tokens back, the
 tokens that followed it fill the rest of the chain and drafting stops. Copies
 are verified like any draft: greedy text is byte-identical, and sampled
 requests treat each copied token as a point-mass proposal under the same
-rejection sampling, so outputs keep the target distribution. Shorter matches
+rejection sampling, so outputs keep the target distribution (a seeded sampled
+stream differs from one without copies, because random draws are consumed at
+different points). Shorter matches
 propose nothing; at temperature 1 an ungated 3-token rule displaced accepted
 MTP drafts and was slower on every workload measured. The index is private to
 the session and rebuilt after reset or snapshot restore. Timings report
