@@ -656,10 +656,15 @@ SamplingDistribution SamplerState::Distribution(
     std::span<const float> logits, std::span<const TokenId> token_ids) const {
   if (const auto forced = ForcedToken()) {
     const auto found = std::ranges::find(token_ids, *forced);
-    if (found == token_ids.end())
-      throw std::invalid_argument("forced token is not among compact logits");
-    return SamplingDistribution(
-        {{static_cast<TokenId>(found - token_ids.begin()), 1.0}}, 1.0);
+    if (found != token_ids.end())
+      return SamplingDistribution(
+          {{static_cast<TokenId>(found - token_ids.begin()), 1.0}}, 1.0);
+    // An MTP draft shortlist may miss the forced end. The proposal then
+    // follows the shortlist, and the target's forced distribution rejects it
+    // and emits the end as its correction.
+    auto unforced = *this;
+    unforced.reasoning_open_ = false;
+    return unforced.Distribution(logits, token_ids);
   }
   if (NeedsConstraintMask()) {
     const auto masked = ConstrainedLogits(logits, token_ids);

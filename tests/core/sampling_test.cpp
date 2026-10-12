@@ -57,6 +57,11 @@ void TestReasoningBudgetForcesTheEnd() {
   const std::vector<float> compact{1.0F, 0.0F, 2.0F};
   Expect(sampler.Distribution(compact, ids).best_token() == 1,
          "compact distributions index the forced end among their IDs");
+  // An MTP draft shortlist may not contain the forced end. Its proposal then
+  // follows the shortlist; target verification rejects it and emits the end.
+  const std::vector<TokenId> shortlist{5, 4, 1};
+  Expect(sampler.Distribution(compact, shortlist).best_token() == 2,
+         "a shortlist without the forced end keeps its own distribution");
   auto copy = sampler;
   copy.Accept(3);
   Expect(!copy.ForcedToken() && !copy.NeedsConstraintMask() &&
