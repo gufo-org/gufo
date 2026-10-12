@@ -5702,27 +5702,47 @@ constexpr unsigned kSsmProjectionTileTokens = 32;
 
 // The fused projection leaves each 32-token tile's first and last three
 // raw rows in qkv. Only the first three convolutions need another tile or
-// the previous chunk's history; all other rows are produced in LDS.
+// the previous chunk's history; all other rows are produced in LDS. A
+// thread takes four channels of a tile's three boundary tokens.
 __global__ void SsmConvBoundaryKernel(const float* qkv, const float* w,
                                       const float* history, float* out,
                                       std::uint32_t n_tokens,
                                       std::uint32_t channels,
                                       std::uint32_t stride) {
-  const std::uint32_t c = blockIdx.x * blockDim.x + threadIdx.x;
-  const std::uint32_t t = blockIdx.y * kSsmProjectionTileTokens + blockIdx.z;
-  if (c >= channels || t >= n_tokens) {
+  const std::uint32_t c = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
+  const std::uint32_t t0 = blockIdx.y * kSsmProjectionTileTokens;
+  if (c >= channels) {
     return;
   }
-  const float4 taps = *reinterpret_cast<const float4*>(w + c * 4);
-  float v[4];
+  float4 taps[4];
 #pragma unroll
-  for (int j = 0; j < 4; ++j) {
-    const int src = static_cast<int>(t) - 3 + j;
-    v[j] = src < 0 ? history[static_cast<std::size_t>(src + 3) * channels + c]
-                   : qkv[static_cast<std::size_t>(src) * stride + c];
+  for (int j = 0; j < 4; ++j)
+    taps[j] = *reinterpret_cast<const float4*>(w + (c + j) * 4);
+  // Input rows t0 - 3 .. t0 + 2.
+  float4 v[6];
+#pragma unroll
+  for (int j = 0; j < 6; ++j) {
+    const int src = static_cast<int>(t0) - 3 + j;
+    v[j] = float4{0.0F, 0.0F, 0.0F, 0.0F};
+    if (src < 0)
+      v[j] = *reinterpret_cast<const float4*>(
+          history + static_cast<std::size_t>(src + 3) * channels + c);
+    else if (src < static_cast<int>(n_tokens))
+      v[j] = *reinterpret_cast<const float4*>(
+          qkv + static_cast<std::size_t>(src) * stride + c);
   }
-  out[static_cast<std::size_t>(t) * channels + c] =
-      SsmConv4Value(taps, v[0], v[1], v[2], v[3]);
+#pragma unroll
+  for (int z = 0; z < 3; ++z) {
+    const std::uint32_t t = t0 + z;
+    if (t >= n_tokens)
+      break;
+    *reinterpret_cast<float4*>(out + static_cast<std::size_t>(t) * channels +
+                               c) = float4{
+        SsmConv4Value(taps[0], v[z].x, v[z + 1].x, v[z + 2].x, v[z + 3].x),
+        SsmConv4Value(taps[1], v[z].y, v[z + 1].y, v[z + 2].y, v[z + 3].y),
+        SsmConv4Value(taps[2], v[z].z, v[z + 1].z, v[z + 2].z, v[z + 3].z),
+        SsmConv4Value(taps[3], v[z].w, v[z + 1].w, v[z + 2].w, v[z + 3].w)};
+  }
 }
 
 // Optional output layout for the stacked QKV projection. The projection's
@@ -6505,9 +6525,8 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      checkpoint_tokens);
   hipLaunchKernelGGL(
       SsmConvBoundaryKernel,
-      dim3(Blocks(channels),
-           (n_tokens + kSsmProjectionTileTokens - 1) / kSsmProjectionTileTokens,
-           3),
+      dim3(Blocks(channels / 4), (n_tokens + kSsmProjectionTileTokens - 1) /
+                                     kSsmProjectionTileTokens),
       dim3(kThreads), 0, stream, qkvz, conv_w, history, convolved, n_tokens,
       channels, m);
   return true;
