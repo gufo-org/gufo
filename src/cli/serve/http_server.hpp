@@ -99,6 +99,10 @@ struct HttpServerOptions {
   std::function<void()> on_device_lost{};
 };
 
+/// True for a numeric IPv4 or IPv6 literal `HttpServer` can bind. Host names
+/// are not resolved; IPv6 link-local literals may carry a `%<interface>` scope.
+bool IsListenAddress(const std::string& host);
+
 /// Minimal bounded HTTP/1.1 server for trusted-LAN model serving.
 class HttpServer {
 public:

@@ -186,7 +186,7 @@ These apply to every modality, before or after the subcommand:
 
 - `host` / `port` — where to listen (`-i` / `-p`). In practice: set
   `--host 0.0.0.0` if you serve from inside a container, or the published
-  port will not answer.
+  port will not answer. Use `--host ::` to listen on IPv6 and IPv4 together.
 - `sessions` (`-j`) — preallocated GPU request sessions. In practice: more
   sessions means more requests can compute at once, at the cost of memory
   per session. This option applies to LLM serving; image and speech servers

@@ -931,8 +931,10 @@ Authorization: Bearer <local-token>
 
 Authentication covers every route, including health, metrics, audio, and video.
 CORS preflight (`OPTIONS`) does not require credentials. Select the listen
-address with `--host`; it must be an IPv4 address. TLS termination belongs in
-a reverse proxy.
+address with `--host`; it must be a numeric IPv4 or IPv6 address, not a host
+name. `--host ::` is dual-stack: it accepts IPv6 clients and IPv4 clients, and
+an IPv4 client keeps its IPv4 address as its client ID. `--host ::1` accepts
+only IPv6 loopback clients. TLS termination belongs in a reverse proxy.
 
 Request bodies, prompts, generated text and credentials are not logged.
 

@@ -1,6 +1,5 @@
 #include "src/cli/serve/serve.hpp"
 
-#include <arpa/inet.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -874,9 +873,8 @@ int RunServe(std::span<const char* const> args) {
   // and returns before that point.
 
   const auto prepare_server_options = [&] {
-    in_addr address{};
-    if (::inet_pton(AF_INET, host.c_str(), &address) != 1) {
-      std::cerr << "Error: --host must be an IPv4 address\n";
+    if (!gufo::server::IsListenAddress(host)) {
+      std::cerr << "Error: --host must be an IPv4 or IPv6 address\n";
       return false;
     }
     if (port < 0 || port > 65535) {
