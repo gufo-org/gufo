@@ -843,7 +843,9 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     return Error(400, "Bad Request", error.what(), "invalid_response_format");
   }
   output->chat.client_id = request.client_id;
-  if (const auto* cache_prompt = body.find("cache_prompt")) {
+  // As in llama-server, null keeps the default.
+  if (const auto* cache_prompt = body.find("cache_prompt");
+      cache_prompt != nullptr && !cache_prompt->is_null()) {
     if (!cache_prompt->is_bool()) {
       return Error(400, "Bad Request", "'cache_prompt' must be a boolean",
                    "invalid_cache_prompt");
@@ -3423,7 +3425,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
                    "invalid_return_progress");
     chat->return_progress = progress->as_bool();
   }
-  if (const auto* cache = body.find("cache_prompt")) {
+  if (const auto* cache = body.find("cache_prompt");
+      cache != nullptr && !cache->is_null()) {
     if (!cache->is_bool())
       return Error(400, "Bad Request", "'cache_prompt' must be a boolean",
                    "invalid_cache_prompt");

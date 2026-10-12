@@ -2379,7 +2379,13 @@ void TestResponseSamplingDefaults() {
       assert(server.backend->LastCall().chat.cache_prompt == cache);
     }
   }
-  for (const char* invalid : {"null", "0", "\"false\""}) {
+  // As in llama-server, null keeps the default.
+  body["cache_prompt"] = false;
+  ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+  body["cache_prompt"] = gufo::json::Value();
+  ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+  assert(server.backend->LastCall().chat.cache_prompt);
+  for (const char* invalid : {"0", "\"false\""}) {
     body["cache_prompt"] = gufo::json::parse(invalid);
     const int calls = server.backend->calls;
     ExpectStatus(server.Post("/v1/responses", body.dump()), 400);
@@ -2605,8 +2611,14 @@ void TestRawCompletionCachePrompt() {
     ExpectStatus(server.Post(path, R"({"prompt":"hello","cache_prompt":true})"),
                  200);
     assert(server.backend->last_cache_prompt);
+    // As in llama-server, null keeps the default.
+    ExpectStatus(
+        server.Post(path, R"({"prompt":"hello","cache_prompt":false})"), 200);
+    ExpectStatus(server.Post(path, R"({"prompt":"hello","cache_prompt":null})"),
+                 200);
+    assert(server.backend->last_cache_prompt);
     const auto before = server.backend->calls.load();
-    for (const auto* value : {"null", "\"false\"", "0"}) {
+    for (const auto* value : {"\"false\"", "0"}) {
       const auto rejected = server.Post(
           path,
           std::string(R"({"prompt":"hello","cache_prompt":)") + value + "}");

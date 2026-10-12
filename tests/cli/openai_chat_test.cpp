@@ -403,15 +403,17 @@ void TestCachePromptOption() {
               (stream ? "true" : "false") + R"(,"cache_prompt":)" + value +
               "}"),
           backend);
+      // As in llama-server, null keeps the default.
       const bool valid = std::string_view(value) == "true" ||
-                         std::string_view(value) == "false";
+                         std::string_view(value) == "false" ||
+                         std::string_view(value) == "null";
       Expect(response.status == (valid ? 200 : 400),
-             "cache_prompt accepts only JSON booleans");
+             "cache_prompt accepts only JSON booleans or null");
       if (valid) {
         if (response.streaming_body)
           response.streaming_body([](std::string_view) { return true; });
         Expect(backend.last_request.cache_prompt ==
-                   (std::string_view(value) == "true"),
+                   (std::string_view(value) != "false"),
                "cache_prompt reaches both buffered and streaming backends");
       }
     }

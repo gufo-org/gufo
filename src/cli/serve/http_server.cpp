@@ -903,7 +903,8 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
     return_progress = value->as_bool();
   }
   bool cache_prompt = true;
-  if (const auto* value = body.find("cache_prompt")) {
+  if (const auto* value = body.find("cache_prompt");
+      value != nullptr && !value->is_null()) {
     if (!value->is_bool())
       return InvalidCompatibilityRequest("'cache_prompt' must be a boolean");
     cache_prompt = value->as_bool();
@@ -1342,7 +1343,8 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
           body.find("stop"), StopSequenceFormat::kOpenAi, &stop_sequences))
     return InvalidCompatibilityRequest(*error);
   bool cache_prompt = true;
-  if (const auto* value = body.find("cache_prompt")) {
+  if (const auto* value = body.find("cache_prompt");
+      value != nullptr && !value->is_null()) {
     if (!value->is_bool())
       return InvalidCompatibilityRequest("'cache_prompt' must be a boolean");
     cache_prompt = value->as_bool();
