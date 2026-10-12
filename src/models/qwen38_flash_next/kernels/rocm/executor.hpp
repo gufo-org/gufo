@@ -441,6 +441,10 @@ private:
   /// Reuse or populate the F16 activation staging buffer.
   void PrepareHalfInput(const float* x, std::uint32_t rows,
                         std::uint32_t cols) const;
+  /// Whether a dense Q4_K/Q5_K/Q5_1 matrix fits the F16 weight scratch.
+  bool Expandable(const DeviceTensor& w) const;
+  /// Expands w into s_.w_half (stream-ordered); nullptr if it cannot.
+  const __half* ExpandHalf(const DeviceTensor& w) const;
   /// Whether a wide dense Q8_0 projection takes the F16 WMMA GEMM.
   bool DenseF16Route(const DeviceTensor& w, std::uint32_t n_tokens) const;
   void RoutedHints(const DeviceTensor& w, std::uint32_t n_tokens) const;
@@ -468,7 +472,8 @@ private:
   void CombineBatch(float* res, const float* gamma, std::uint32_t rows) const;
   /// Residual update by the block output plus the grouped norm for the next
   /// mixer (`gamma`); wide batches write it as F16 and tiled Q8.
-  void Combine(float* res, const float* gamma, std::uint32_t n_tokens) const;
+  void Combine(void* res, const float* gamma, std::uint32_t n_tokens,
+               bool res_half = false) const;
   /// Hashes the batch's n-gram rows and starts reading them from disk, so
   /// the read overlaps the layers before the PLE one.
   bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
@@ -524,9 +529,10 @@ private:
   /// Runs `body` eagerly, or as the session's captured graph for `key`
   /// when `graph` is set. A prefix may leave its work queued so the host
   /// can wait for disk reads while the GPU computes it.
+  /// `label` names the pass in the GUFO_GRAPH_LOG=1 capture/launch log.
   bool Run(Session& session, std::uint64_t key, bool graph,
            const std::function<bool()>& body, std::string* error_msg,
-           bool synchronize = true) const;
+           bool synchronize = true, const char* label = "trunk") const;
 
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
@@ -543,7 +549,10 @@ private:
   // Scratch, sized for max_batch tokens. Names follow reference.cpp.
   struct Scratch {
     std::int32_t* tokens;
-    void* x_half;   ///< activations narrowed to the weight's 16-bit type
+    void* x_half;  ///< activations narrowed to the weight's 16-bit type
+    std::size_t half_capacity{0};  ///< element capacity of x_half
+    void* w_half;  ///< F16 copy of one dense K-quant/Q5_1 matrix (wide batches)
+    std::size_t w_half_capacity{0};  ///< element capacity of w_half
     void* x_q8[2];  ///< Q8_1 activations of a decode batch, alternating
     /// Q8_1 rows of a decode batch written by the kernel that produces
     /// them: xn by HcCombine, lo by SiluScale, mixed by the mix epilogue.
@@ -554,6 +563,8 @@ private:
     void* ctx_q8_1;  ///< by the attention output gate (attn_out's input)
     void* x_q8t;     ///< tiled Q8 activations of a wide batch (W8A8 route)
     float* res;
+    __half*
+        res_h;  ///< F16 residual of large wide-prefill chunks (see ForwardBody)
     float* xn;
     __half* xn_half;  ///< xn as F16 on the F16 mixer input route
     void* xn_q8t;     ///< xn as tiled Q8 for the W8A8 mixer down projection
@@ -596,6 +607,9 @@ private:
     // moe
     float* router;
     std::int32_t* ids;
+    /// Expert 0 for the dense quantized head, which the MoE vector kernel
+    /// reads as a one-expert weight.
+    std::int32_t* dense_ids;
     std::uint32_t* expert_counts;
     // Routed WMMA route: 16-row padded bucket bounds, scatter cursors, the
     // compact row -> (token, slot) maps and the tiled Q8 gathered rows.
@@ -662,6 +676,21 @@ private:
   /// Coherent pinned storage, read directly by the GPU through s_.ple_emb.
   /// Reused only after the preceding forward has drained its stream.
   float* host_emb_{nullptr};
+  /// Second pinned n-gram buffer. Prefill reads the next chunk's rows into
+  /// whichever buffer the current chunk is not using, so the table reads run
+  /// while the GPU computes instead of after it.
+  float* host_emb_ahead_{nullptr};
+  mutable const float* ple_src_{nullptr};  ///< rows the next upload reads
+  struct PleAhead {
+    bool valid{false};
+    const Session* owner{nullptr};
+    std::vector<std::int32_t> tokens;
+    NgramHistory before;  ///< session state the read assumed
+    NgramHistory after;   ///< session state once these tokens are consumed
+    float* buffer{nullptr};
+  };
+  mutable PleAhead ple_ahead_;
+  mutable std::span<const std::int32_t> ple_lookahead_;
   mutable std::vector<std::uint32_t> host_rows_;
   mutable bool ple_pending_{false};
   /// The rows a prefill chunk reads are a pure function of its tokens and
@@ -695,6 +724,17 @@ private:
   mutable int routed_tile_cols_{0};
   float* logits_host_{nullptr};
   std::int32_t* mtp_token_host_{nullptr};
+  /// Draft-head vocabulary subset (GUFO_MTP_VOCAB): the first rows of the
+  /// output matrix plus a tail range holding the special tokens. Verification
+  /// still scores the full vocabulary, so only drafting is approximate.
+  std::uint32_t mtp_head_rows_{0};
+  std::uint32_t mtp_tail_rows_{0};
+  std::uint32_t mtp_tail_base_{0};
+  [[nodiscard]] std::uint32_t MtpTokenId(std::uint32_t index) const noexcept {
+    return mtp_head_rows_ != 0 && index >= mtp_head_rows_
+               ? index - mtp_head_rows_ + mtp_tail_base_
+               : index;
+  }
   MtpCandidateLogits* mtp_candidates_host_{nullptr};
   /// The model geometry allows the wide mixer route (see Combine).
   bool wide_mixer_{false};

@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/snapshot_transfer.hpp"
+
 namespace gufo::hip {
 namespace {
 void Check(hipError_t status) {
@@ -149,6 +151,7 @@ TransferPool::TransferPool(std::size_t capacity) {
   auto state = std::make_shared<detail::TransferPoolState>();
   state->slots.resize(capacity);
   for (auto& slot : state->slots) {
+    const std::lock_guard device_lock(SnapshotTransfer::DeviceMutex());
     Check(hipStreamCreateWithFlags(&slot.stream, hipStreamNonBlocking));
     Check(hipEventCreateWithFlags(&slot.event, hipEventDisableTiming));
   }

@@ -1,11 +1,12 @@
 # Qwen3.8 Flash-Next
 
 Hybrid recurrent/QSA mixture-of-experts text/image model on gfx1151.
-Supported target: `unsloth/Qwen3.8-Flash-Next-GGUF`, **UD-Q4_K_XL** (four shards).
+Supported targets: `unsloth/Qwen3.8-Flash-Next-GGUF`, **UD-Q4_K_XL** (four shards) and
+**UD-IQ4_XS** (three shards; speed-tested on this fork, not quality-qualified).
 Optional shared-Q8 MTP predictor; optional BF16 vision projector.
 Original unquantized-model and GGUF-conversion parity remain unqualified.
 
-[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md)
 
 ## Load and run
 

@@ -111,6 +111,10 @@ struct TextRunnerCapabilities {
   std::size_t batched_multi_token_decode_max_width{0};
   bool prefix_reuse{true};
   bool in_pass_checkpoint{false};
+  /// Spacing of the prompt checkpoints that split a cold prefill. A runner
+  /// whose prefill chunks are wider should match them, so a checkpoint lands
+  /// on a chunk edge instead of forcing a short pass.
+  std::size_t prefill_grid_tokens{2048};
 };
 
 /// Model-owned compatibility identity for restart-safe snapshots.
@@ -177,6 +181,9 @@ struct TextDecodeStep {
   std::size_t draft_rounds{0};
   std::size_t draft_tokens{0};
   std::size_t draft_accepted_tokens{0};
+  /// The share of the draft taken from the token history, not the predictor.
+  std::size_t suffix_draft_tokens{0};
+  std::size_t suffix_accepted_tokens{0};
   bool stop{false};
   /// Execution actually used for this request, including model-owned subgroup
   /// dispatch. A runner's advertised maximum is not evidence of batching.

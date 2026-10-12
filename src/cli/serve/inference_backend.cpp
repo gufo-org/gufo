@@ -2486,6 +2486,7 @@ public:
                 .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
+                .prefill_grid_tokens = model_->PrefillCapacity(),
             },
         .persistence = persistence_,
     };
@@ -2776,6 +2777,10 @@ public:
     step.draft_rounds = stats_after.cycles - stats_before.cycles;
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
+    step.suffix_draft_tokens =
+        stats_after.suffix_drafted - stats_before.suffix_drafted;
+    step.suffix_accepted_tokens =
+        stats_after.suffix_accepted - stats_before.suffix_accepted;
     return step;
   }
 
@@ -2863,6 +2868,10 @@ public:
       step.draft_rounds = stats.cycles - before[i].cycles;
       step.draft_tokens = stats.drafted - before[i].drafted;
       step.draft_accepted_tokens = stats.accepted - before[i].accepted;
+      step.suffix_draft_tokens =
+          stats.suffix_drafted - before[i].suffix_drafted;
+      step.suffix_accepted_tokens =
+          stats.suffix_accepted - before[i].suffix_accepted;
     }
     return steps;
   }

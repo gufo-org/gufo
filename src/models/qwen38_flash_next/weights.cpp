@@ -29,6 +29,10 @@ struct Format {
       return {32, 24};
     case GgmlType::kIQ4_NL:
       return {32, 18};
+    case GgmlType::kIQ3_S:
+      return {256, 110};
+    case GgmlType::kIQ4_XS:
+      return {256, 136};
     case GgmlType::kQ4_K:
       return {256, 144};
     case GgmlType::kQ5_K:
@@ -117,13 +121,14 @@ struct Binder {
   HcMixer Mixer(const std::string& prefix, const Config& c, bool with_inject) {
     HcMixer m;
     const std::uint64_t hc_dim = c.HcDim();
+    // Q5_K and Q5_1 are accepted so a requantized HC mixer binds; the narrow
+    // low-rank projections are Q5_1 because 320 and 640 are not multiples of
+    // the 256-element K-quant block.
+    const auto proj = {GgmlType::kQ8_0, GgmlType::kQ5_K, GgmlType::kQ5_1,
+                       GgmlType::kBF16, GgmlType::kF16,  GgmlType::kF32};
     m.norm = Get(prefix + "_norm.weight", hc_dim, 1, 1, {GgmlType::kF32});
-    m.down =
-        Get(prefix + "_down.weight", hc_dim, c.hc_low_rank, 1,
-            {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32});
-    m.up =
-        Get(prefix + "_up.weight", c.hc_low_rank, hc_dim, 1,
-            {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32});
+    m.down = Get(prefix + "_down.weight", hc_dim, c.hc_low_rank, 1, proj);
+    m.up = Get(prefix + "_up.weight", c.hc_low_rank, hc_dim, 1, proj);
     if (with_inject) {
       m.inject = Get(prefix + "_inject.weight", hc_dim, c.hc_count, 1,
                      {GgmlType::kF32, GgmlType::kQ8_0, GgmlType::kBF16});
@@ -138,10 +143,15 @@ struct Binder {
     const std::string p = "blk." + std::to_string(il) + ".";
     const std::uint64_t hidden = c.hidden_size;
     const std::uint64_t hc_dim = c.HcDim();
+    // K-quant and 5-bit types are included so a requantized dense trunk binds.
+    // Q5_1 covers the 320- and 640-wide projections, whose row length is not a
+    // whole number of 256-element K-quant blocks.
     const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
-                        GgmlType::kF32};
-    const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
-                          GgmlType::kQ5_1, GgmlType::kQ8_0};
+                        GgmlType::kF32,  GgmlType::kQ4_K, GgmlType::kQ5_K,
+                        GgmlType::kQ5_1};
+    const auto experts = {GgmlType::kQ4_K,  GgmlType::kQ5_K,  GgmlType::kQ6_K,
+                          GgmlType::kQ5_1,  GgmlType::kQ8_0,  GgmlType::kIQ4_NL,
+                          GgmlType::kIQ3_S, GgmlType::kIQ4_XS};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -248,8 +258,11 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   ModelWeights w;
   w.config = *config;
   const Config& c = w.config;
-  const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kBF16,
-                      GgmlType::kF16, GgmlType::kF32};
+  // The head and the embedding may be requantized; Q5_1 covers projections
+  // whose row length is not a whole number of 256-element K-quant blocks.
+  const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kQ5_K,
+                      GgmlType::kQ5_1, GgmlType::kBF16, GgmlType::kF16,
+                      GgmlType::kF32};
 
   {
     // The vocabulary is the embedding row count; no metadata key carries it.

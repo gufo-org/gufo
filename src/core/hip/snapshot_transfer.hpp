@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -15,7 +16,15 @@ namespace gufo::hip {
 /// unchanged until all copies finish. Other sessions may continue executing.
 class SnapshotTransfer {
 public:
+  /// Serializes creating device resources on a snapshot thread against a graph
+  /// being instantiated and launched for the first time on the decode thread.
+  static std::mutex& DeviceMutex() noexcept {
+    static std::mutex mutex;
+    return mutex;
+  }
+
   SnapshotTransfer() {
+    const std::lock_guard lock(DeviceMutex());
     Check(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
   }
   /// Borrows a nonblocking stream from a caller's pool and hands it to

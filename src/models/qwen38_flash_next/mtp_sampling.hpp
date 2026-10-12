@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_SAMPLING_HPP_
 #define GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_SAMPLING_HPP_
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -28,6 +29,28 @@ struct MtpProposal {
   sampling::TokenId token{0};
   float probability{0.0F};
 };
+
+/// Top-1 mass inside the proposal's own candidate set, used as a per-position
+/// confidence signal. A wide verify batch is not free on a model with hundreds
+/// of experts: verifying n tokens touches far more distinct experts than one
+/// token does, so slots the predictor is unlikely to win are better left
+/// unspent. Renormalizing over the returned candidates rather than the full
+/// vocabulary is deliberate — the head already reduced to them, and the tail
+/// only shifts the scale.
+[[nodiscard]] inline float DraftConfidence(const MtpCandidateLogits& c) {
+  if (c.size == 0) {
+    return 0.0F;
+  }
+  float largest = c.logits[0];
+  for (std::size_t i = 1; i < c.size; ++i) {
+    largest = std::max(largest, c.logits[i]);
+  }
+  float sum = 0.0F;
+  for (std::size_t i = 0; i < c.size; ++i) {
+    sum += std::exp(c.logits[i] - largest);
+  }
+  return sum > 0.0F ? 1.0F / sum : 0.0F;
+}
 
 /// The proposal has bounded support; the target distribution stays complete.
 /// Integer probability masses sum to 2^24, so the exported F32 q sums to

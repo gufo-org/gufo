@@ -1,6 +1,10 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 
+#include <execinfo.h>
+
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <hipblaslt/hipblaslt-ext.hpp>
 
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -131,8 +135,40 @@ std::unique_ptr<BlasLt::Plan> BlasLt::MakePlan(hipDataType type, int m, int n,
   return nullptr;
 }
 
+namespace {
+/// Debug-only breadcrumb for a GEMM launch. GUFO_GEMM_TRACE=1 prints a
+/// backtrace before each launch and aborts on the first failing one, so a
+/// device fault inside a Tensile kernel is attributed to the call site instead
+/// of surfacing later as an unrelated hipErrorIllegalAddress.
+[[nodiscard]] bool GemmTrace() {
+  static const bool on = std::getenv("GUFO_GEMM_TRACE") != nullptr;
+  return on;
+}
+}  // namespace
+
 bool BlasLt::Gemm(const void* weights, const void* input, float* out,
                   hipDataType type, int m, int n, int k, std::string* error) {
+  if (GemmTrace()) {
+    void* frames[32];
+    const int depth = backtrace(frames, 32);
+    auto show = [](const char* tag, const void* p) {
+      std::size_t off = 0;
+      std::size_t bytes = 0;
+      const std::string_view owner = AllocationOwner(p, &off, &bytes);
+      if (owner.data() != nullptr) {
+        std::fprintf(stderr, "  %-5s %-28.*s +%-10zu of %zu\n", tag,
+                     static_cast<int>(owner.size()), owner.data(), off, bytes);
+      } else {
+        std::fprintf(stderr, "  %-5s %p (unregistered)\n", tag, p);
+      }
+    };
+    std::fprintf(stderr, "Gemm m=%d n=%d k=%d type=%d\n", m, n, k,
+                 static_cast<int>(type));
+    show("w", weights);
+    show("in", input);
+    show("out", out);
+    backtrace_symbols_fd(frames, depth, 2);
+  }
   if (m <= 0 || n <= 0 || k <= 0) {
     AssignError(error, "hipBLASLt dimensions must be positive");
     return false;
@@ -186,6 +222,14 @@ bool BlasLt::Run(Plan& p, const void* weights, const void* input, float* out,
                       stream_) != HIPBLAS_STATUS_SUCCESS) {
     AssignError(error, "hipBLASLt GEMM failed");
     return false;
+  }
+  if (GemmTrace()) {
+    if (hipDeviceSynchronize() != hipSuccess ||
+        hipGetLastError() != hipSuccess) {
+      std::fprintf(stderr, "FAULT in the GEMM above: w=%p\n", weights);
+      std::fflush(stderr);
+      std::abort();
+    }
   }
   return true;
 }

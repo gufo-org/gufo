@@ -529,6 +529,71 @@ void CheckBatchFailureIsolation(const std::shared_ptr<qfn::Model>& model) {
                "and sampling replay\n";
 }
 
+// Several conversations share one executor stream, so a speculative batch
+// rolled back by one can free rollback rows that another conversation's
+// captured graphs still name. The rollback row addresses live in the graph
+// kernel arguments, so that replay passes freed device pointers. The rows must
+// therefore survive every trim, and a concurrent set of speculative sessions
+// must produce exactly what the same sessions produce one at a time.
+void CheckConcurrentSpeculativeSessions(
+    const std::shared_ptr<qfn::Model>& model) {
+  std::string error;
+  const auto mode = model->HasMtp() ? gufo::core::SessionMode::kSpeculative
+                                    : gufo::core::SessionMode::kAutoregressive;
+  constexpr std::size_t kConversations = 4;
+  constexpr std::size_t kSteps = 6;
+  std::vector<std::string> prompts;
+  for (std::size_t i = 0; i < kConversations; ++i) {
+    prompts.push_back("Conversation " + std::to_string(i) +
+                      ": the quick brown fox jumps over the lazy dog, then "
+                      "repeats red, blue, red, blue across a long context.");
+  }
+  const auto run = [&](std::size_t index, bool fresh_sessions) {
+    // `fresh_sessions` gives each pass its own sessions, so the concurrent
+    // pass re-captures every graph against the rows it will actually keep.
+    const auto prompt = model->Tokenize(prompts[index]);
+    const auto context = static_cast<std::uint32_t>(prompt.size() + 32);
+    auto session = model->CreateSession(mode, context, &error);
+    Require(session != nullptr, error);
+    Require(session->Sync(prompt, &error), error);
+    sampling::SamplerState sampler(
+        {.seed = 91 + static_cast<std::uint32_t>(index)},
+        std::vector<sampling::TokenId>(prompt.begin(), prompt.end()));
+    std::vector<float> logits;
+    for (std::size_t step = 0; step < kSteps; ++step) {
+      qfn::Session::DecodeResult result;
+      Require(session->DecodeStep(2, sampler, &result, &error, false), error);
+      logits.assign(session->Logits().begin(), session->Logits().end());
+      if (step == 1 && fresh_sessions) {
+        // Force the path that used to free rows: a restore re-enters
+        // TrimRollback, which is where a rollback row used to be released
+        // under the other conversations' captured graphs.
+        const auto snapshot = session->SaveSnapshot(&error);
+        Require(snapshot != nullptr, error);
+        Require(session->RestoreSnapshot(*snapshot, &error), error);
+      }
+    }
+    return logits;
+  };
+
+  std::vector<std::vector<float>> serial;
+  for (std::size_t i = 0; i < kConversations; ++i) {
+    serial.push_back(run(i, false));
+  }
+
+  std::vector<std::future<std::vector<float>>> futures;
+  for (std::size_t i = 0; i < kConversations; ++i) {
+    futures.push_back(
+        std::async(std::launch::async, [&, i] { return run(i, true); }));
+  }
+  for (std::size_t i = 0; i < kConversations; ++i) {
+    const auto concurrent = futures[i].get();
+    RequireExact(
+        serial[i], concurrent,
+        "concurrent speculative sessions diverged from the serial run");
+  }
+}
+
 void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
   std::string error;
   std::size_t sampled_rejections = 0;
@@ -1085,6 +1150,7 @@ int main(int argc, char** argv) {
     CheckImageSnapshotAttachment(model);
     CheckBatchFailureIsolation(model);
     CheckBatchedSessions(model);
+    CheckConcurrentSpeculativeSessions(model);
     if (batch_only)
       return 0;
     CheckServingEos(model);

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <span>
 
 #include "src/models/qwen38_flash_next/mtp_costs.hpp"
@@ -13,6 +14,35 @@
 namespace gufo::models::qwen38_flash_next {
 
 inline constexpr std::uint32_t kMaxMtpDraftTokens = 7;
+
+/// Top-1 mass below which another draft slot is not spent, or 0 to leave width
+/// entirely to the controller. This is a property of the loaded target, not of
+/// the predictor: 0.45 measures +9.7 % on UD-Q4_K_XL and -8.3 % on UD-IQ4_XS,
+/// whose drafts are better calibrated. Comparing the same signal against the
+/// controller's observed acceptance instead regresses both (-5 % and -20 %),
+/// because candidate-set top-1 mass and verification acceptance are not on the
+/// same scale. A per-target value therefore needs the signal mapped onto the
+/// acceptance scale first; that mapping is the open part, not the gating.
+/// 0.60 is tuned on the daily UD-Q5K_HCP target (won 3 of 4 interleaved
+/// 32k+64k rounds against 0.70/0.80, and beat 0.45 in both rounds); UD-Q4_K_XL
+/// was tuned at 0.45, which GUFO_MTP_MIN_CONF restores.
+inline constexpr float kMinDraftConfidence = 0.60F;
+
+/// Runtime override of kMinDraftConfidence via GUFO_MTP_MIN_CONF. Comparing
+/// targets at one gate needs no rebuild; 0 disables the gate entirely. An
+/// unparseable or out-of-range value falls back to kMinDraftConfidence.
+[[nodiscard]] inline float MinDraftConfidence() noexcept {
+  const char* v = std::getenv("GUFO_MTP_MIN_CONF");
+  if (v == nullptr || v[0] == '\0') {
+    return kMinDraftConfidence;
+  }
+  char* end = nullptr;
+  const float parsed = std::strtof(v, &end);
+  if (end == v || parsed < 0.0F || parsed > 1.0F) {
+    return kMinDraftConfidence;
+  }
+  return parsed;
+}
 
 struct MtpLengthState {
   std::array<float, kMaxMtpDraftTokens> successes;

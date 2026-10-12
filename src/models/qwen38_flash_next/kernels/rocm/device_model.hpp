@@ -19,6 +19,9 @@ struct DeviceTensor {
   std::uint32_t cols{0};
   std::uint32_t rows{0};
   std::uint32_t experts{1};
+  /// A Q5_1 re-encoding of a large Q8_0 matrix that the decode GEMV reads in
+  /// place of `data` (prefill keeps the Q8_0 rows); null when there is none.
+  void* decode_data{nullptr};
 
   [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
   [[nodiscard]] const float* f32() const noexcept {
@@ -90,6 +93,10 @@ public:
   [[nodiscard]] std::size_t max_q8_cols() const noexcept {
     return max_q8_cols_;
   }
+  /// Largest dense Q4_K/Q5_K/Q5_1 matrix, in elements (0 when there is none).
+  [[nodiscard]] std::size_t max_dequant_elems() const noexcept {
+    return max_dequant_elems_;
+  }
 
 private:
   DeviceModel() = default;
@@ -105,6 +112,7 @@ private:
   std::size_t bytes_{0};
   std::size_t max_half_cols_{1};
   std::size_t max_q8_cols_{32};
+  std::size_t max_dequant_elems_{0};
 };
 
 }  // namespace gufo::models::qwen38_flash_next::rocm

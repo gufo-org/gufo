@@ -213,6 +213,49 @@ Experts MakeQ8_0(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
+/// Random IQ4_XS blocks: d, split 6-bit sub-block scales, 4-bit codebook codes.
+Experts MakeIQ4Xs(std::size_t e, std::size_t m, std::size_t k,
+                  std::uint32_t seed) {
+  static constexpr int kValues[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                      1,    13,   25,  38,  53,  69,  89,  113};
+  Experts w;
+  const std::size_t blocks = e * m * (k / 256);
+  w.packed.resize(blocks * 136);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    std::uint8_t* blk = w.packed.data() + b * 136;
+    const __half d = __float2half(Uniform(&seed, 0.002F) + 0.003F);
+    std::memcpy(blk, &d, 2);
+    std::uint16_t scales_h = 0;
+    std::uint8_t scales_l[4] = {0, 0, 0, 0};
+    int ls[8];
+    for (int ib = 0; ib < 8; ++ib) {
+      ls[ib] = static_cast<int>(NextRandom(&seed) % 64);
+      scales_l[ib / 2] = static_cast<std::uint8_t>(
+          scales_l[ib / 2] | ((ls[ib] & 0xF) << (4 * (ib & 1))));
+      scales_h = static_cast<std::uint16_t>(scales_h |
+                                            (((ls[ib] >> 4) & 3) << (2 * ib)));
+    }
+    std::memcpy(blk + 2, &scales_h, 2);
+    std::memcpy(blk + 4, scales_l, 4);
+    std::uint8_t* qs = blk + 8;
+    for (int i = 0; i < 128; ++i) {
+      qs[i] = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFF);
+    }
+    const float df = __half2float(d);
+    for (int ib = 0; ib < 8; ++ib) {
+      const float dl = df * static_cast<float>(ls[ib] - 32);
+      for (int j = 0; j < 16; ++j) {
+        w.values[b * 256 + ib * 32 + j] =
+            dl * static_cast<float>(kValues[qs[ib * 16 + j] & 0xF]);
+        w.values[b * 256 + ib * 32 + j + 16] =
+            dl * static_cast<float>(kValues[qs[ib * 16 + j] >> 4]);
+      }
+    }
+  }
+  return w;
+}
+
 struct Result {
   double vs_mmq;
   double vs_ref;
@@ -228,10 +271,11 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
            std::size_t experts, std::size_t m, std::size_t k,
            std::uint32_t seed, std::uint32_t tile_rows = 48) {
   const Experts w =
-      type == q::WeightType::kQ4_K   ? MakeQ4K(experts, m, k, seed)
-      : type == q::WeightType::kQ5_K ? MakeQ5K(experts, m, k, seed)
-      : type == q::WeightType::kQ5_1 ? MakeQ5_1(experts, m, k, seed)
-                                     : MakeQ8_0(experts, m, k, seed);
+      type == q::WeightType::kQ4_K     ? MakeQ4K(experts, m, k, seed)
+      : type == q::WeightType::kQ5_K   ? MakeQ5K(experts, m, k, seed)
+      : type == q::WeightType::kQ5_1   ? MakeQ5_1(experts, m, k, seed)
+      : type == q::WeightType::kIQ4_XS ? MakeIQ4Xs(experts, m, k, seed)
+                                       : MakeQ8_0(experts, m, k, seed);
   const std::size_t slots = n_tokens * used;
   // Skewed top-k without replacement: the low experts see most rows.
   std::vector<std::int32_t> ids(slots);
@@ -274,10 +318,11 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   std::vector<float> zero_out(slots * m, 0.0F);
   float* d_mmq = Upload(zero_out);
 
-  const auto mmq_raw = type == q::WeightType::kQ4_K   ? qfn_mmq_q4_K_moe_raw
-                       : type == q::WeightType::kQ5_K ? qfn_mmq_q5_K_moe_raw
-                       : type == q::WeightType::kQ5_1 ? qfn_mmq_q5_1_moe_raw
-                                                      : qfn_mmq_q8_0_moe_raw;
+  const auto mmq_raw = type == q::WeightType::kQ4_K     ? qfn_mmq_q4_K_moe_raw
+                       : type == q::WeightType::kQ5_K   ? qfn_mmq_q5_K_moe_raw
+                       : type == q::WeightType::kQ5_1   ? qfn_mmq_q5_1_moe_raw
+                       : type == q::WeightType::kIQ4_XS ? qfn_mmq_iq4_xs_moe_raw
+                                                        : qfn_mmq_q8_0_moe_raw;
   const int rc =
       mmq_raw(d_w, d_x, d_ids, d_mmq, static_cast<int>(m), static_cast<int>(k),
               static_cast<int>(n_tokens), static_cast<int>(experts),
@@ -472,10 +517,11 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       r.scale = std::max(r.scale, std::abs(ref));
     }
   }
-  std::cout << (type == q::WeightType::kQ4_K   ? "Q4_K"
-                : type == q::WeightType::kQ5_K ? "Q5_K"
-                : type == q::WeightType::kQ5_1 ? "Q5_1"
-                                               : "Q8_0")
+  std::cout << (type == q::WeightType::kQ4_K     ? "Q4_K"
+                : type == q::WeightType::kQ5_K   ? "Q5_K"
+                : type == q::WeightType::kQ5_1   ? "Q5_1"
+                : type == q::WeightType::kIQ4_XS ? "IQ4_XS"
+                                                 : "Q8_0")
             << " routed n=" << n_tokens << " used=" << used << " E=" << experts
             << " m=" << m << " k=" << k << ": worst |F16 - MMQ| " << r.vs_mmq
             << ", worst |F16 - F64| " << r.vs_ref << ", worst |MMQ - F64| "
@@ -751,6 +797,13 @@ int main() {
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,
                 64)) &&
          ok;
+    // IQ4_XS gate/up view (one layer), 48-row and 16-row tiles.
+    ok = Ok(Run(q::WeightType::kIQ4_XS, 300, 10, 64, 640, 2560, 0x1B4C0001U)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_XS, 300, 10, 64, 640, 2560, 0x1B4C0002U,
+                16)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_XS, 40, 4, 8, 201, 512, 0x1B4C0003U)) && ok;
     // Ragged rows against the 128-row tile and a tiny batch.
     ok = Ok(Run(q::WeightType::kQ4_K, 40, 4, 8, 201, 512, 0xDEADBEEFU)) && ok;
     // The 16-row tile (small buckets) on every type.

@@ -123,12 +123,17 @@ void Executor::UseScratch(const Scratch& scratch) const {
 }
 
 bool Executor::AllocateBatch(std::string* error) const {
-  return batch_logits_ != nullptr ||
-         Check(hipMalloc(&batch_logits_,
-                         static_cast<std::size_t>(kBatchSessions) *
-                             std::min(kDecodeRows, options_.max_logit_rows) *
-                             config().vocab_size * sizeof(float)),
-               error);
+  if (batch_logits_ != nullptr) {
+    return true;
+  }
+  const std::size_t bytes = static_cast<std::size_t>(kBatchSessions) *
+                            std::min(kDecodeRows, options_.max_logit_rows) *
+                            config().vocab_size * sizeof(float);
+  if (!Check(hipMalloc(&batch_logits_, bytes), error)) {
+    return false;
+  }
+  RecordAllocation("batch-logits", batch_logits_, bytes);
+  return true;
 }
 
 bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
@@ -229,8 +234,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                                       item.session->mtp_.position);
   if (!AllocateBatch(error) ||
       (batch_controls_ == nullptr &&
-       !Check(hipHostMalloc(&batch_controls_,
-                            kBatchSessions * sizeof(Session::Control)),
+       !Check(GuardedHostMalloc(GUFO_SITE, &batch_controls_,
+                                kBatchSessions * sizeof(Session::Control)),
               error))) {
     return false;
   }
@@ -248,9 +253,9 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
   const auto body = [&]() {
     if (!AnyActive(items))
       return true;
-    if (!Check(hipMemcpyAsync(base.tokens, tokens_host_,
-                              rows * sizeof(std::int32_t),
-                              hipMemcpyHostToDevice, stream_),
+    if (!Check(GuardedMemcpyAsync(GUFO_SITE, base.tokens, tokens_host_,
+                                  rows * sizeof(std::int32_t),
+                                  hipMemcpyHostToDevice, stream_),
                error))
       return false;
     EmbedTokens(model_->token_embd().data,
@@ -262,9 +267,9 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
       auto& session = *items[i].session;
       const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
       UseScratch(RowScratch(base, offsets[i]));
-      if (!Check(hipMemcpyAsync(session.control_, batch_controls_ + i,
-                                sizeof(Session::Control), hipMemcpyHostToDevice,
-                                stream_),
+      if (!Check(GuardedMemcpyAsync(
+                     GUFO_SITE, session.control_, batch_controls_ + i,
+                     sizeof(Session::Control), hipMemcpyHostToDevice, stream_),
                  error))
         return false;
       MtpHidden(session.mtp_.target_hidden, session.mtp_.h,
@@ -301,8 +306,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
         view.qg = base.qg + std::size_t{offsets[i]} * 2 * c.AttentionQDim();
       UseScratch(view);
       if (!session.CheckCancellation(nullptr)) {
-        if (!Check(hipMemsetAsync(
-                       s_.ctx, 0,
+        if (!Check(GuardedMemsetAsync(
+                       GUFO_SITE, s_.ctx, 0,
                        std::size_t{n} * c.AttentionQDim() * sizeof(float),
                        stream_),
                    error))
@@ -339,10 +344,11 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto r = final_rows[i];
         const auto copy = [&](float* dst, const float* src, std::size_t width) {
-          return Check(hipMemcpyAsync(dst + i * width, src + r * width,
-                                      width * sizeof(float),
-                                      hipMemcpyDeviceToDevice, stream_),
-                       error);
+          return Check(
+              GuardedMemcpyAsync(GUFO_SITE, dst + i * width, src + r * width,
+                                 width * sizeof(float), hipMemcpyDeviceToDevice,
+                                 stream_),
+              error);
         };
         if (!copy(tail.mtp_res, base.mtp_res, c.HcDim()) ||
             !copy(tail.ctx, base.ctx, c.AttentionQDim()) ||
@@ -368,8 +374,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
       if (!items[i].session->CheckCancellation(nullptr))
         continue;
       if (!Check(
-              hipMemcpyAsync(
-                  items[i].session->mtp_.h,
+              GuardedMemcpyAsync(
+                  GUFO_SITE, items[i].session->mtp_.h,
                   tail.mtp_res + (compact_tail ? i : final_rows[i]) * c.HcDim(),
                   c.HcDim() * sizeof(float), hipMemcpyDeviceToDevice, stream_),
               error))
@@ -447,8 +453,8 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
     return false;
   }
   if (batch_candidates_host_ == nullptr) {
-    if (!Check(hipHostMalloc(&batch_candidates_host_,
-                             kBatchSessions * sizeof(MtpCandidateLogits)),
+    if (!Check(GuardedHostMalloc(GUFO_SITE, &batch_candidates_host_,
+                                 kBatchSessions * sizeof(MtpCandidateLogits)),
                error))
       return false;
     for (std::uint32_t i = 0; i < kBatchSessions; ++i)
@@ -479,20 +485,22 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
       if (items[i].output.candidates == nullptr) {
         Argmax(batch_logits_ + std::size_t(i) * output.rows, s_.mtp_argmax,
                s_.mtp_token, 1, output.rows, stream_);
-        if (!Check(hipMemcpyAsync(batch_candidates_host_[i].ids.data(),
-                                  s_.mtp_token, sizeof(std::int32_t),
-                                  hipMemcpyDeviceToHost, stream_),
+        if (!Check(GuardedMemcpyAsync(GUFO_SITE,
+                                      batch_candidates_host_[i].ids.data(),
+                                      s_.mtp_token, sizeof(std::int32_t),
+                                      hipMemcpyDeviceToHost, stream_),
                    error))
           return false;
         continue;
       }
       MtpTopCandidates(batch_logits_ + std::size_t(i) * output.rows, s_.mtp_ids,
                        s_.mtp_scratch_ids, s_.mtp_scores, output.rows, stream_);
-      if (!Check(hipMemcpyAsync(batch_candidates_host_ + i, s_.mtp_ids,
-                                offsetof(MtpCandidateLogits, logits) +
-                                    count * sizeof(float),
-                                hipMemcpyDeviceToHost, stream_),
-                 error)) {
+      if (!Check(
+              GuardedMemcpyAsync(
+                  GUFO_SITE, batch_candidates_host_ + i, s_.mtp_ids,
+                  offsetof(MtpCandidateLogits, logits) + count * sizeof(float),
+                  hipMemcpyDeviceToHost, stream_),
+              error)) {
         return false;
       }
       batch_candidates_host_[i].size = count;
@@ -533,11 +541,12 @@ bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
   void* quantized = s_.x_q8t;
   q8t_src_ = nullptr;
   if (padded != rows &&
-      !Check(
-          hipMemsetAsync(static_cast<std::uint8_t*>(quantized) +
-                             qfn_mmq_q8_1_bytes(rows, cols),
-                         0, qfn_mmq_q8_1_bytes(padded - rows, cols), stream_),
-          error))
+      !Check(GuardedMemsetAsync(GUFO_SITE,
+                                static_cast<std::uint8_t*>(quantized) +
+                                    qfn_mmq_q8_1_bytes(rows, cols),
+                                0, qfn_mmq_q8_1_bytes(padded - rows, cols),
+                                stream_),
+             error))
     return false;
   return qfn_mmq_quantize_q8_1(x, quantized, rows, cols, stream_) == 0 ||
          Fail(error, "batched activation quantization failed");
@@ -547,10 +556,28 @@ bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
                           std::uint32_t rows, std::string* error) const {
   if (rows <= kDecodeRows)
     return Dense(w, x, out, rows, error);
-  if (w.type != core::GgmlType::kQ8_0) {
-    SmallGemm(w.data, EmbeddingType(w.type), x, out, rows, w.rows, w.cols,
-              stream_);
+  if (w.decode_data != nullptr) {
+    for (std::uint32_t r = 0; r < rows; r += kDecodeRows) {
+      const auto count = std::min(kDecodeRows, rows - r);
+      if (!Dense(w, x + std::size_t{r} * w.cols, out + std::size_t{r} * w.rows,
+                 count, error))
+        return false;
+    }
     return true;
+  }
+  if (w.type != core::GgmlType::kQ8_0) {
+    // SmallGemm reads only the types EmbeddingType maps. A K-quant dense
+    // weight (the HCP trunk) is not one of them, so asking for its type threw
+    // "unsupported Flash-Next embedding format" the first time a second
+    // session made this batch wider than one decode step. Dense already has
+    // the correct quantized per-slice route for those.
+    if (w.type == core::GgmlType::kBF16 || w.type == core::GgmlType::kF16 ||
+        w.type == core::GgmlType::kF32) {
+      SmallGemm(w.data, EmbeddingType(w.type), x, out, rows, w.rows, w.cols,
+                stream_);
+      return true;
+    }
+    return Dense(w, x, out, rows, error);
   }
   if (!QuantizeBatch(x, rows, w.cols, error))
     return false;
@@ -729,8 +756,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     return false;
   }
   if (batch_controls_ == nullptr &&
-      !Check(hipHostMalloc(&batch_controls_,
-                           kBatchSessions * sizeof(Session::Control)),
+      !Check(GuardedHostMalloc(GUFO_SITE, &batch_controls_,
+                               kBatchSessions * sizeof(Session::Control)),
              error)) {
     return false;
   }
@@ -740,7 +767,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     const std::size_t bytes =
         std::size_t{c.num_layers} * kBatchSessions * sizeof(GdnBatchItem);
     if ((batch_gdn_host_ == nullptr &&
-         !Check(hipHostMalloc(&batch_gdn_host_, bytes, hipHostMallocMapped),
+         !Check(GuardedHostMalloc(GUFO_SITE, &batch_gdn_host_, bytes,
+                                  hipHostMallocMapped),
                 error)) ||
         (batch_gdn_ == nullptr &&
          !Check(hipHostGetDevicePointer(reinterpret_cast<void**>(&batch_gdn_),
@@ -792,16 +820,16 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     if (!AnyActive(items))
       return true;
     for (std::size_t i = 0; i < items.size(); ++i) {
-      if (!Check(hipMemcpyAsync(items[i].session->control_, batch_controls_ + i,
-                                sizeof(Session::Control), hipMemcpyHostToDevice,
-                                stream_),
+      if (!Check(GuardedMemcpyAsync(
+                     GUFO_SITE, items[i].session->control_, batch_controls_ + i,
+                     sizeof(Session::Control), hipMemcpyHostToDevice, stream_),
                  error)) {
         return false;
       }
     }
-    if (!Check(hipMemcpyAsync(base.tokens, tokens_host_,
-                              rows * sizeof(std::int32_t),
-                              hipMemcpyHostToDevice, stream_),
+    if (!Check(GuardedMemcpyAsync(GUFO_SITE, base.tokens, tokens_host_,
+                                  rows * sizeof(std::int32_t),
+                                  hipMemcpyHostToDevice, stream_),
                error)) {
       return false;
     }
@@ -872,9 +900,9 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         if (!session.CheckCancellation(nullptr)) {
           auto* output = l.linear ? s_.gdn_out : s_.ctx;
           const auto width = l.linear ? c.SsmValueDim() : c.AttentionQDim();
-          if (!Check(hipMemsetAsync(output, 0,
-                                    std::size_t{n} * width * sizeof(float),
-                                    stream_),
+          if (!Check(GuardedMemsetAsync(GUFO_SITE, output, 0,
+                                        std::size_t{n} * width * sizeof(float),
+                                        stream_),
                      error))
             return false;
           continue;
@@ -947,8 +975,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
       UseScratch(RowScratch(base, offsets[i]));
       if (!items[i].session->Cancelled() && items[i].session->mtp_enabled_ &&
-          !Check(hipMemcpyAsync(
-                     items[i].session->mtp_.target_hidden, s_.res,
+          !Check(GuardedMemcpyAsync(
+                     GUFO_SITE, items[i].session->mtp_.target_hidden, s_.res,
                      static_cast<std::size_t>(n) * c.HcDim() * sizeof(float),
                      hipMemcpyDeviceToDevice, stream_),
                  error)) {
@@ -996,9 +1024,9 @@ bool Executor::SelectBatchLogits(std::uint32_t offset, std::uint32_t rows,
   selected_logits_ =
       batch_logits_ + static_cast<std::size_t>(offset) * config().vocab_size;
   if (logits != nullptr) {
-    if (!Check(hipMemcpyAsync(logits_host_, selected_logits_,
-                              count * sizeof(float), hipMemcpyDeviceToHost,
-                              stream_),
+    if (!Check(GuardedMemcpyAsync(GUFO_SITE, logits_host_, selected_logits_,
+                                  count * sizeof(float), hipMemcpyDeviceToHost,
+                                  stream_),
                error) ||
         !Check(hipStreamSynchronize(stream_), error)) {
       return false;

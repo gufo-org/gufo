@@ -205,6 +205,8 @@ public:
     std::size_t draft_rounds{0};
     std::size_t draft_tokens{0};
     std::size_t draft_accepted_tokens{0};
+    std::size_t suffix_draft_tokens{0};
+    std::size_t suffix_accepted_tokens{0};
     std::size_t prefill_tokens{0};
     std::size_t prefill_chunks{0};
     std::size_t active_decode_prefill_chunks{0};

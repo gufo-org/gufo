@@ -16,6 +16,7 @@
 #include "src/models/qwen/vision/encoder.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
+#include "src/models/qwen38_flash_next/lookup_draft.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 
 namespace gufo::core {
@@ -204,6 +205,15 @@ public:
     std::uint64_t cycles{0};
     std::uint64_t drafted{0};
     std::uint64_t accepted{0};
+    /// Cycles by verify width, widths[0] counting ordinary single-token decode.
+    /// The per-width cycle cost is steep and occupancy-dependent, so a change
+    /// in this shape explains a change in throughput that drafted/accepted
+    /// totals cannot.
+    std::uint64_t widths[kMaxMtpDraftTokens + 1]{};
+    /// Cycles drafted from the token history instead of the MTP predictor.
+    std::uint64_t suffix_cycles{0};
+    std::uint64_t suffix_drafted{0};
+    std::uint64_t suffix_accepted{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
@@ -259,7 +269,8 @@ private:
   [[nodiscard]] std::uint32_t KeptHiddenRows() const noexcept;
   bool DraftCatchUp(std::int32_t next_token, bool propose,
                     std::string* error_msg,
-                    MtpCandidateLogits* candidates = nullptr);
+                    MtpCandidateLogits* candidates = nullptr,
+                    bool with_token = false);
   bool DraftReplay(std::int32_t next_token, std::vector<std::int32_t>* replay,
                    std::int32_t* hidden_row, std::string* error_msg) const;
   static bool DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
@@ -287,6 +298,11 @@ private:
   std::vector<float> verify_logits_;
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
+  /// Retrieval drafts over tokens_; extended lazily by SyncLookup.
+  LookupIndex lookup_;
+  std::size_t suffix_cooldown_until_{
+      0};  ///< position until which history drafts need a long match
+  void SyncLookup();
   SpeculativeStats stats_;
   std::shared_ptr<const qwen::vision::Prompt> image_prompt_;
   [[nodiscard]] std::span<const std::uint8_t> ImageIdentity(

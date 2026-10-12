@@ -358,7 +358,9 @@ static int moe_vector_projection(int weight_type, const void* W,
   constexpr const char* tag = "qfn_mmq_moe_vec";
   const auto type = static_cast<ggml_type>(weight_type);
   if (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K &&
-      type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q8_0) {
+      type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q8_0 &&
+      type != GGML_TYPE_Q6_K &&
+      type != GGML_TYPE_IQ3_S && type != GGML_TYPE_IQ4_NL && type != GGML_TYPE_IQ4_XS) {
     fprintf(stderr, "%s: unsupported weight type %d\n", tag, weight_type);
     return -1;
   }
@@ -388,7 +390,8 @@ static int moe_vector_projection(int weight_type, const void* W,
                                  : MMVQ_MAX_BATCH_SIZE;
   if (gated && (n_tokens > max_gated_rows || n_expert_used > 32 ||
                 (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K &&
-                 type != GGML_TYPE_Q8_0))) {
+                 type != GGML_TYPE_Q8_0 && type != GGML_TYPE_IQ3_S &&
+                 type != GGML_TYPE_IQ4_NL && type != GGML_TYPE_IQ4_XS))) {
     fprintf(stderr,
             "%s: gated vector exceeds its format's row or expert limit\n",
             tag);
@@ -400,6 +403,31 @@ static int moe_vector_projection(int weight_type, const void* W,
   if (!ctx) {
     fprintf(stderr, "%s: failed to get HIP context for device %d\n", tag, dev);
     return -1;
+  }
+
+  // IQ3_S gate/up for 1-8 tokens reads F16 activations directly: no Q8_1
+  // pass, the grid codebook in LDS and one arithmetic for every width.
+  if (gated && type == GGML_TYPE_IQ3_S && n_tokens <= MMVQ_MAX_BATCH_SIZE) {
+    if (!X_f32) {
+      fprintf(stderr, "%s: IQ3_S gated vector needs float activations\n", tag);
+      return -1;
+    }
+    const size_t x_bytes = size_t(n_tokens) * K * sizeof(half);
+    const size_t g_bytes =
+        size_t(n_tokens) * n_expert_used * (n_tokens + 1) * sizeof(int32_t);
+    ggml_hip_pool_alloc<char> f16_pool;
+    f16_pool.alloc(ctx->pool(), x_bytes + g_bytes);
+    mul_mat_vec_iq3s_gated_f16(
+        W, W_b, X_f32, ids, reinterpret_cast<half*>(f16_pool.get()),
+        reinterpret_cast<int32_t*>(f16_pool.get() + x_bytes), out_f32, K, M,
+        n_tokens, n_expert_used, stream);
+    const hipError_t status = hipGetLastError();
+    if (status != hipSuccess) {
+      fprintf(stderr, "%s: IQ3_S F16 gated launch failed: %s\n", tag,
+              hipGetErrorString(status));
+      return -3;
+    }
+    return 0;
   }
 
   const int64_t ne10_padded = GGML_PAD((int64_t)K, MATRIX_ROW_PADDING);
@@ -507,6 +535,51 @@ extern "C" int qfn_mmq_moe_vec(int weight_type, const void* W,
                                out_b, false);
 }
 
+extern "C" int qfn_mmq_dense_vec(int weight_type, const void* W,
+                                 const float* X_f32, float* out_f32, int M,
+                                 int K, int n_tokens, hipStream_t stream) {
+  constexpr const char* tag = "qfn_mmq_dense_vec";
+  const auto type = static_cast<ggml_type>(weight_type);
+  if (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K &&
+      type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q6_K) {
+    fprintf(stderr, "%s: unsupported weight type %d\n", tag, weight_type);
+    return -1;
+  }
+  if (!W || !X_f32 || !out_f32) {
+    fprintf(stderr, "%s: null pointer\n", tag);
+    return -1;
+  }
+  if (M <= 0 || K <= 0 || n_tokens <= 0 || n_tokens > MMVQ_MAX_BATCH_SIZE ||
+      K % ggml_blck_size(type) != 0) {
+    fprintf(stderr, "%s: bad shape M=%d K=%d ntok=%d\n", tag, M, K, n_tokens);
+    return -1;
+  }
+  const int dev = ggml_hip_get_device();
+  ggml_backend_hip_context* ctx = get_ctx_for_device(dev);
+  if (!ctx) {
+    fprintf(stderr, "%s: failed to get HIP context for device %d\n", tag, dev);
+    return -1;
+  }
+  const int64_t ne10_padded = GGML_PAD((int64_t)K, MATRIX_ROW_PADDING);
+  ggml_hip_pool_alloc<char> src1_q8_1_pool;
+  src1_q8_1_pool.alloc(ctx->pool(), (size_t)n_tokens * ne10_padded *
+                                        sizeof(block_q8_1) / QK8_1);
+  char* src1_q8_1_ptr = src1_q8_1_pool.get();
+  quantize_row_q8_1_hip(X_f32, nullptr, (void*)src1_q8_1_ptr, type, K,
+                        (int64_t)K, (int64_t)K, (int64_t)K * n_tokens,
+                        ne10_padded, 1, n_tokens, 1, stream);
+  mul_mat_vec_dense_dispatch(W, type,
+                             reinterpret_cast<const block_q8_1*>(src1_q8_1_ptr),
+                             out_f32, K, M, n_tokens,
+                             static_cast<int>(ne10_padded / QK8_1), stream);
+  const hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "%s: launch failed: %s\n", tag, hipGetErrorString(err));
+    return -3;
+  }
+  return 0;
+}
+
 extern "C" int qfn_mmq_moe_gated_vec(int weight_type, const void* gate,
                                      const void* up, const float* x,
                                      const int32_t* ids, float* out, int m,
@@ -560,8 +633,35 @@ extern "C" int qfn_mmq_q5_K_moe_raw(
         int M, int K, int n_tokens, int n_experts, int n_expert_used,
         hipStream_t stream) {
     return qfn_mmq_moe_impl<GGML_TYPE_Q5_K>("qfn_mmq_q5_K_moe_raw", W, X, ids, out, M, K,
-                                            n_tokens, n_experts, n_expert_used, stream,
-                                            nullptr, nullptr);
+                                             n_tokens, n_experts, n_expert_used, stream,
+                                             nullptr, nullptr);
+}
+
+extern "C" int qfn_mmq_iq3_s_moe_raw(
+        const void * W, const float * X, const int32_t * ids, float * out,
+        int M, int K, int n_tokens, int n_experts, int n_expert_used,
+        hipStream_t stream) {
+    return qfn_mmq_moe_impl<GGML_TYPE_IQ3_S>("qfn_mmq_iq3_s_moe_raw", W, X, ids, out, M, K,
+                                             n_tokens, n_experts, n_expert_used, stream,
+                                             nullptr, nullptr);
+}
+
+extern "C" int qfn_mmq_iq4_xs_moe_raw(
+        const void * W, const float * X, const int32_t * ids, float * out,
+        int M, int K, int n_tokens, int n_experts, int n_expert_used,
+        hipStream_t stream) {
+    return qfn_mmq_moe_impl<GGML_TYPE_IQ4_XS>("qfn_mmq_iq4_xs_moe_raw", W, X, ids, out, M, K,
+                                             n_tokens, n_experts, n_expert_used, stream,
+                                             nullptr, nullptr);
+}
+
+extern "C" int qfn_mmq_iq4_nl_moe_raw(
+        const void * W, const float * X, const int32_t * ids, float * out,
+        int M, int K, int n_tokens, int n_experts, int n_expert_used,
+        hipStream_t stream) {
+    return qfn_mmq_moe_impl<GGML_TYPE_IQ4_NL>("qfn_mmq_iq4_nl_moe_raw", W, X, ids, out, M, K,
+                                             n_tokens, n_experts, n_expert_used, stream,
+                                             nullptr, nullptr);
 }
 
 extern "C" int qfn_mmq_q4_K_moe_pair_unique(
@@ -708,5 +808,11 @@ template void mul_mat_q_case<GGML_TYPE_Q4_K>(
 template void mul_mat_q_case<GGML_TYPE_Q5_1>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_Q5_K>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_IQ3_S>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_IQ4_NL>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_IQ4_XS>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 } // namespace qfn_mmq

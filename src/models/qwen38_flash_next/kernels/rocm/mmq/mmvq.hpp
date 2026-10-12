@@ -22,6 +22,10 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                             const block_q8_1* input, float* output,
                             int k, int rows, int tokens, int input_stride,
                             hipStream_t stream);
+void mul_mat_vec_dense_dispatch(const void* weights, ggml_type type,
+                                const block_q8_1* input, float* output, int k,
+                                int rows, int tokens, int input_stride,
+                                hipStream_t stream);
 void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                              const block_q8_1* input, const int32_t* ids, float* output,
                              int k, int rows, int tokens, int experts_used,
@@ -32,7 +36,11 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
 constexpr int mmvq_moe_group_ints(int tokens, int experts_used) {
   return tokens * experts_used * (tokens + 1) + 2 * (tokens * experts_used + 1);
 }
-
+void mul_mat_vec_iq3s_gated_f16(const void* gate, const void* up,
+                                const float* x, const int32_t* ids,
+                                half* x_half, int32_t* groups, float* output,
+                                int k, int rows, int tokens, int experts_used,
+                                hipStream_t stream);
 void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
                            const block_q8_1* input, const int32_t* ids,
                            int32_t* groups, float* output, int k, int rows,

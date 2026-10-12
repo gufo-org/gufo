@@ -738,7 +738,8 @@ struct TextRunnerPool::Request::Impl {
       // Cold long prompts still retain the last grid point for late edits.
       // A grid point just before the prompt end saves little on an edit but
       // would split the final prefill pass and store another snapshot.
-      constexpr std::size_t interval = 2048;
+      const std::size_t interval =
+          std::max<std::size_t>(capabilities.prefill_grid_tokens, 2048);
       constexpr std::size_t tail = 128;
       const auto grid_points = (prompt.size() - 1) / interval;
       const auto count =
