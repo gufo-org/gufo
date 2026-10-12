@@ -17,8 +17,12 @@ priority rules contribute a union. Unknown paths expand to all compatible
 coverage. Suite metadata must cover every name in `run.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
-`Devlab functional checks` is maintainer-only and manually dispatched with a PR
-number. It pins the PR head and merge base on `main`, plans on a hosted runner,
+`Devlab functional checks` starts when a maintainer applies `ci:functional` to a
+PR, or manually dispatches it with a PR number. The label event uses trusted base
+workflow code (`pull_request_target`); only Maintain/Admin senders and rerun
+actors authorize execution. The event's exact PR head must still be current.
+Later commits do not inherit approval: remove and reapply the label to approve
+another revision. It pins the PR head and merge base on `main`, plans on a hosted runner,
 and allocates the cluster only for affected Flash-Next AR/MTP coverage (or an
 explicit benchmark request). The workflow and harness come from the trusted
 workflow revision; only the production binary is built from the approved PR.

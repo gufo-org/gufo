@@ -1,6 +1,8 @@
 name: Devlab functional checks
 
 on:
+  pull_request_target:
+    types: [ labeled ]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -20,12 +22,15 @@ concurrency:
 
 jobs:
   authorize:
-    name: Authorize cluster smoke test
-    if: github.repository == 'gufo-org/gufo'
+    name: Authorize functional checks
+    if: >-
+      github.repository == 'gufo-org/gufo' &&
+      (github.event_name == 'workflow_dispatch' || github.event.label.name == 'ci:functional')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       head: ${{ steps.revision.outputs.head }}
+      pr: ${{ steps.revision.outputs.pr }}
       has_work: ${{ steps.plan.outputs.has_work }}
       base: ${{ steps.plan.outputs.base }}
     permissions:
@@ -34,7 +39,7 @@ jobs:
       - name: Require a repository maintainer
         env:
           GH_TOKEN: ${{ github.token }}
-          REQUEST_ACTOR: ${{ github.actor }}
+          REQUEST_ACTOR: ${{ github.event.sender.login || github.actor }}
           RERUN_ACTOR: ${{ github.triggering_actor }}
         shell: bash
         run: |
@@ -43,7 +48,7 @@ jobs:
             role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$actor/permission" --jq .role_name)
             case "$role" in
               admin|maintain) echo "Authorized $actor ($role)" ;;
-              *) echo "::error::Cluster smoke tests require Maintain or Admin access."; exit 1 ;;
+              *) echo "::error::Functional checks require Maintain or Admin access."; exit 1 ;;
             esac
           done
 
@@ -51,17 +56,24 @@ jobs:
         id: revision
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          LABEL_HEAD: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::Invalid PR number"; exit 1; }
           head=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          if [[ -n "$LABEL_HEAD" && "$head" != "$LABEL_HEAD" ]]; then
+            echo "::error::PR changed since the label was applied. Remove and reapply ci:functional."
+            exit 1
+          fi
           echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "pr=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Checkout trusted workflow and test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
 
@@ -71,9 +83,9 @@ jobs:
       - name: Select affected Flash-Next suites
         id: plan
         env:
-          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_NUMBER: ${{ steps.revision.outputs.pr }}
           APPROVED_HEAD: ${{ steps.revision.outputs.head }}
-          RUN_BENCHMARK: ${{ inputs.benchmark }}
+          RUN_BENCHMARK: ${{ inputs.benchmark || false }}
         shell: bash
         run: |
           set -euo pipefail
@@ -234,6 +246,7 @@ jobs:
       - name: Checkout trusted workflow and test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
           path: controller
 
