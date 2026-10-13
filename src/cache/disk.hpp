@@ -16,6 +16,7 @@
 namespace gufo::cache {
 inline constexpr std::uint32_t kDiskFormatVersion = 2;
 inline constexpr std::size_t kMaxManifestBytes = std::size_t{16} * 1024 * 1024;
+class DiskCapacityExhausted : public ResourceExhausted {};
 using DiskFileId = std::array<std::uint8_t, 16>;
 // SHA-256 of the adapter's canonical compatibility identity, supplied by the
 // caller. Display names never participate in the persistent compatibility key.
@@ -207,7 +208,10 @@ enum class DiskPublicationStep {
 // do not retain it across publication/retirement or background reclamation.
 // Pin() is thread-safe and blocks retirement until all copies are released.
 // The supplied ledger must outlive the store and its worker.
-// Excess preexisting bytes still fail startup before new writes are admitted.
+// The budget counts every managed file: referenced, temporary and orphaned.
+// A directory above the budget (for example after lowering it) still opens;
+// publication refuses until retirement or orphan reclamation brings
+// Stats().managed_bytes back within the budget.
 class DiskStore {
 public:
   DiskStore(ResourceLedger&, const std::filesystem::path& directory,
@@ -230,6 +234,10 @@ public:
       const DiskStagingAccess* access = nullptr, std::stop_token stop = {});
   [[nodiscard]] std::optional<DiskSnapshot> Open(CheckpointId) const;
   [[nodiscard]] std::shared_ptr<const DiskDescription> Describe(CheckpointId);
+  // Optional bounded page-cache hint for an owned dependency. Does not attest
+  // bytes or identity; ReadPayload must still validate the actual read.
+  void PrefetchPayload(const DiskSnapshot&, bool private_file,
+                       const DiskPayload&, std::uint64_t bytes) const;
   // Reads one dependency, invokes consume only with complete pieces, and
   // checks its CRC and stable file identity before returning. Consumers must
   // keep their destination non-executable until every dependency has passed.

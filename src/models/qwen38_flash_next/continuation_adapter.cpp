@@ -8,6 +8,7 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
@@ -108,7 +109,7 @@ public:
     return !restoring && !failed && (guarding || session->IsValid());
   }
   void BeforeExecution() override {
-    if (!IsValid() || pending)
+    if (!IsValid() || pending || checkpoint)
       throw std::logic_error("Flash-Next slot is not ready for execution");
   }
   void BeforeWrite(bool draft, std::uint32_t first, std::uint32_t end,
@@ -117,7 +118,7 @@ public:
     // Model execution temporarily disables its public validity flag. The
     // adapter's restore/failure status and outstanding transfers still gate
     // every native write, including graph replay and speculative rollback.
-    if (restoring || failed || pending)
+    if (restoring || failed || pending || checkpoint)
       throw std::logic_error("Flash-Next slot is not ready for mutation");
     CaptureDuringGuard readable(*this);
     for (const auto& component : adapter.layout_.Components()) {
@@ -133,7 +134,7 @@ public:
   void BeforeReset() override {
     if (invalidating)
       return;
-    if (restoring || pending)
+    if (restoring || pending || checkpoint)
       throw std::logic_error("cannot reset a busy Flash-Next slot");
     GuardAll();
   }
@@ -169,6 +170,10 @@ public:
   ContinuationAdapter& adapter;
   cache::MutationGuard& guard;
   std::unique_ptr<Session> session;
+  const rocm::PrefillCheckpoint* checkpoint{};
+  rocm::Session& CaptureState() const {
+    return checkpoint ? *checkpoint->state : *session->session_;
+  }
   struct CaptureDuringGuard {
     explicit CaptureDuringGuard(State& state)
         : state(state), previous(std::exchange(state.guarding, true)) {}
@@ -215,7 +220,7 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
     for (unsigned i = 0; i < 4; ++i)
       identity_.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
   };
-  put(1);  // Component state ABI; independent of the legacy payload ABI.
+  put(2);  // Private components attest the target checkpoint boundary.
   put(Session::kSnapshotPayloadVersion);
   put(context);
   put(mode == core::SessionMode::kSpeculative);
@@ -241,6 +246,42 @@ Session& ContinuationAdapter::GetSession(cache::Slot& slot) {
   state.BeforeExecution();
   return *state.session;
 }
+void ContinuationAdapter::PrefillThrough(cache::Slot& slot,
+                                         std::span<const std::int32_t> prompt,
+                                         std::uint32_t boundary,
+                                         const std::function<void()>& capture) {
+  auto& state = As(slot);
+  state.BeforeExecution();
+  if (!capture)
+    throw std::invalid_argument("missing component checkpoint consumer");
+  std::string error;
+  const auto consume = [&](const rocm::PrefillCheckpoint& checkpoint) {
+    struct BoundaryScope {
+      State& state;
+      bool guarding;
+      BoundaryScope(State& state, const rocm::PrefillCheckpoint& checkpoint)
+          : state(state), guarding(std::exchange(state.guarding, true)) {
+        state.checkpoint = &checkpoint;
+      }
+      ~BoundaryScope() {
+        // The checkpoint arena may be reused by the next native pass. Even a
+        // rejected consumer must finish reading it before leaving this scope.
+        {
+          const std::lock_guard lock(state.jobs_mutex);
+          for (const auto& job : state.jobs)
+            (void)job->Wait();
+        }
+        state.checkpoint = nullptr;
+        state.guarding = guarding;
+      }
+    } scope(state, checkpoint);
+    capture();
+    if (state.pending)
+      throw std::logic_error("in-pass capture returned with pending transfers");
+  };
+  if (!state.session->SyncThroughComponents(prompt, boundary, consume, &error))
+    throw std::runtime_error("component in-pass prefill failed: " + error);
+}
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
   return {.continuation = true, .persistent_encoding = true};
 }
@@ -264,7 +305,7 @@ std::vector<cache::ComponentPosition> ContinuationAdapter::Positions(
   const auto& state = As(slot);
   if (!state.IsValid())
     throw std::logic_error("cannot query an invalid Flash-Next slot");
-  const auto& native = *state.session->session_;
+  const auto& native = state.CaptureState();
   return layout_.Positions(native.position_, native.mtp_.position,
                            native.blocks_, native.mtp_.blocks);
 }
@@ -284,6 +325,28 @@ std::vector<Rows> ContinuationAdapter::PlanPrefill(const cache::Slot& slot,
   }
   return result;
 }
+std::vector<cache::ComponentPosition>
+ContinuationAdapter::PrefillCheckpointPositions(const cache::Slot& slot,
+                                                Rows boundary) const {
+  const auto& state = As(slot);
+  if (!state.IsValid() || state.pending || state.checkpoint)
+    throw std::logic_error(
+        "Flash-Next slot is not ready for checkpoint planning");
+  if (boundary <= state.session->Position() || boundary > context_ ||
+      !state.session->PrefillCheckpointBytes(
+          static_cast<std::uint32_t>(boundary)))
+    throw std::invalid_argument("unsupported Flash-Next in-pass boundary");
+  const auto& native = *state.session->session_;
+  const auto& config = model_->config();
+  const auto draft =
+      mode_ == core::SessionMode::kSpeculative ? boundary - 1 : 0;
+  return layout_.Positions(
+      boundary, draft,
+      boundary > config.indexer_top_k ? boundary / config.compress_ratio
+                                      : native.blocks_,
+      draft > config.indexer_top_k ? draft / config.compress_ratio
+                                   : native.mtp_.blocks);
+}
 const ContinuationComponent& ContinuationAdapter::Component(
     cache::ComponentId id) const {
   if (!id.value || id.value > layout_.Components().size())
@@ -292,7 +355,7 @@ const ContinuationComponent& ContinuationAdapter::Component(
 }
 void* ContinuationAdapter::RowData(
     State& state, const ContinuationComponent& component) const {
-  auto& native = *state.session->session_;
+  auto& native = state.CaptureState();
   switch (component.part) {
     case ContinuationPart::kTokens:
       return state.session->tokens_.data();
@@ -393,7 +456,7 @@ cache::Completion ContinuationAdapter::Transfer(
 ContinuationAdapter::Region ContinuationAdapter::PrivateRegion(
     State& state, const ContinuationComponent& component, bool loading) const {
   auto& session = *state.session;
-  auto& native = *session.session_;
+  auto& native = state.CaptureState();
   Region result;
   const auto add = [&](void* pointer, std::size_t bytes, bool host = false,
                        std::size_t offset = 0) {
@@ -403,7 +466,9 @@ ContinuationAdapter::Region ContinuationAdapter::PrivateRegion(
   const auto bytes = component.descriptor.state_bytes;
   switch (component.part) {
     case ContinuationPart::kLogits:
-      add(session.logits_.data(), bytes, true);
+      add(state.checkpoint ? const_cast<float*>(state.checkpoint->logits.data())
+                           : session.logits_.data(),
+          bytes, true);
       break;
     case ContinuationPart::kMetadata:
       add(state.metadata.data(), bytes, true);
@@ -424,7 +489,8 @@ ContinuationAdapter::Region ContinuationAdapter::PrivateRegion(
     case ContinuationPart::kKeptHidden:
       add(native.mtp_.target_hidden,
           loading ? bytes
-                  : std::size_t{session.KeptHiddenRows()} *
+                  : std::size_t{state.checkpoint ? state.checkpoint->hidden_rows
+                                                 : session.KeptHiddenRows()} *
                         model_->config().HcDim() * sizeof(float));
       break;
     case ContinuationPart::kRawKeys:
@@ -482,13 +548,15 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
   std::array<std::byte, kContinuationMetadataBytes> host_metadata{};
   if (component.part == ContinuationPart::kMetadata) {
     auto& session = *state.session;
-    auto& native = *session.session_;
+    auto& native = state.CaptureState();
     Metadata metadata{};
     metadata.target = native.position_;
     metadata.draft = native.mtp_.position;
     metadata.blocks = native.blocks_;
     metadata.draft_blocks = native.mtp_.blocks;
-    metadata.hidden_base = session.hidden_base_;
+    metadata.hidden_base =
+        state.checkpoint ? native.position_ - state.checkpoint->hidden_rows
+                         : session.hidden_base_;
     metadata.residual_valid = native.mtp_.residual_valid;
     metadata.ngram = native.ngram_;
     metadata.policy = session.draft_length_.State();
@@ -506,7 +574,28 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     region.pieces = {{host_metadata.data(), 0, host_metadata.size(), true}};
   return Transfer(
       state, false, stream, [&](gufo::hip::TransferStream& transfer) {
-        std::ranges::fill(bytes, std::byte{});
+        // Pieces overwrite their ranges. Clear only uncovered bytes, which
+        // serialize as zeros: clearing the whole recycled copy on the host
+        // dominated capture time.
+        std::vector<std::pair<std::size_t, std::size_t>> covered;
+        covered.reserve(region.pieces.size());
+        for (const auto& piece : region.pieces) {
+          const auto first = std::max(offset, piece.offset);
+          const auto end =
+              std::min(offset + bytes.size(), piece.offset + piece.bytes);
+          if (first < end)
+            covered.emplace_back(first - offset, end - offset);
+        }
+        std::ranges::sort(covered);
+        std::size_t cleared = 0;
+        for (const auto& [first, end] : covered) {
+          if (first > cleared)
+            std::fill(bytes.begin() + cleared, bytes.begin() + first,
+                      std::byte{});
+          cleared = std::max(cleared, end);
+        }
+        std::fill(bytes.begin() + std::min(cleared, bytes.size()), bytes.end(),
+                  std::byte{});
         for (const auto& piece : region.pieces) {
           const auto first = std::max(offset, piece.offset);
           const auto end =
@@ -588,10 +677,9 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
   const auto& component = Component(id);
   if (!state.IsValid())
     throw std::logic_error("cannot read an invalid Flash-Next slot");
-  const auto& native = *state.session->session_;
+  const auto& native = state.CaptureState();
   const auto rows =
-      component.part == ContinuationPart::kTokens
-          ? state.session->tokens_.size()
+      component.part == ContinuationPart::kTokens ? native.position_
       : Pool(component.part)
           ? (Draft(component.part) ? native.mtp_.blocks : native.blocks_)
           : (Draft(component.part) ? native.mtp_.position : native.position_);
@@ -610,6 +698,29 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
           Check(hipMemcpyAsync(bytes.data(), source, bytes.size(),
                                hipMemcpyDeviceToHost, transfer.Native()));
       });
+}
+std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
+    const cache::Slot& slot, cache::ComponentId id, Rows first,
+    Rows end) const {
+  const auto& state = As(slot);
+  const auto& component = Component(id);
+  // The host token vector can move when execution appends. Device append
+  // allocations stay fixed for the session and are guarded before mutation.
+  if (component.part == ContinuationPart::kTokens)
+    return {};
+  if (!state.IsValid() ||
+      component.descriptor.kind != cache::ComponentKind::kAppendRows)
+    throw std::logic_error("cannot borrow invalid Flash-Next rows");
+  const auto positions = Positions(slot);
+  const auto position =
+      std::ranges::find(positions, id, &cache::ComponentPosition::id);
+  const auto row = component.descriptor.row_bytes;
+  if (position == positions.end() || first >= end || end > position->valid_rows)
+    throw std::invalid_argument("invalid Flash-Next borrowed range");
+  return {static_cast<const std::byte*>(
+              RowData(const_cast<State&>(state), component)) +
+              first * row,
+          (end - first) * row};
 }
 cache::Completion ContinuationAdapter::CopyRowsIn(
     cache::Slot& slot, cache::ComponentId id, Rows first, Rows end,
@@ -637,7 +748,7 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
             std::memcpy(destination, bytes.data(), bytes.size());
           else if (!bytes.empty())
             Check(hipMemcpyAsync(destination, bytes.data(), bytes.size(),
-                                 hipMemcpyHostToDevice, transfer.Native()));
+                                 hipMemcpyDefault, transfer.Native()));
         });
   } catch (...) {
     state.failed = true;
@@ -725,7 +836,7 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
   State* resetting = nullptr;
   try {
     auto& state = As(slot);
-    if (state.pending)
+    if (state.pending || state.checkpoint)
       return false;
     resetting = &state;
     state.BeforeRelease();

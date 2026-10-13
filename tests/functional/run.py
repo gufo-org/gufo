@@ -408,7 +408,7 @@ def main():
                     (output / "server.log").read_text(), available_before_load,
                     int(option(command, "--cache-ram-bytes", "0")), sessions)
             configured = bool(set(selected) & {"cache-bridge", "cache-pressure"}) and re.search(
-                r"event=snapshot_cache_configured .*?\bcapacity_bytes=(\d+)\b",
+                r"event=(?:snapshot_cache_configured|configured) .*?\bcapacity_bytes=(\d+)\b",
                 (output / "server.log").read_text())
             for suite in selected:
                 if suite == "cache":

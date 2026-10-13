@@ -2,7 +2,10 @@
 
 **Milestone:** Adapters · **Depends on:** 02, 06, 08 · **Size:** L (split:
 inventory, then AR, then MTP) · **Affects:** nothing served until card 19 ·
-**Status:** draft; model checks complete, HTTP timing inconclusive
+**Status:** done
+
+Both completion criteria are met. Re-confirming the capacity rows at D4's
+startup-committed budget remains open in [todo.md](todo.md).
 
 ## Goal
 
@@ -101,7 +104,7 @@ required (see the README).
 ## Review notes
 
 
-## Results (2026-10-10, draft)
+## Results (2026-10-10)
 
 Three independent reviews of committed adapter revisions are complete. The
 first found batch readiness admission could abort healthy peers; the fix and
@@ -218,6 +221,15 @@ beyond the margin. The original failed report remains retained; this evidence
 does not qualify that phase or imply a speedup. Snapshot allocation/copy code
 is unchanged, and no timing tolerance or numerical contract was relaxed.
 The new cache's HTTP path remains deferred until card 19 exists and attaches it.
+Card 19 ([PR #543](https://github.com/gufo-org/gufo/pull/543)) now attaches
+the adapter on `fedeizzo/cache-staging`, so HTTP qualification belongs to card
+19: its serving-latency and final-validation rows in [todo.md](todo.md)
+replace these pre-attachment observations, and restore latency from disk is
+not a merge gate there. The capacity rows above used 4 GiB of committed
+backing; D4 now commits about 89% of the automatic budget at startup (14.4 GB
+in a one-session, 16K-context AR run), so re-confirming capacity at that
+budget is part of todo.md's resource gate. Both of this card's completion
+criteria are met, so the card is done (2026-10-12).
 
 Reproduction (select a mode and depth explicitly):
 

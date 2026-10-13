@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "src/cache/identity.hpp"
@@ -49,6 +50,9 @@ public:
   // Managed borrowed rows require this pin for every source transfer. Keep it
   // until Completion settles. Owner() is available only after preservation.
   [[nodiscard]] RowPin PinRows(std::stop_token = {}) const;
+  [[nodiscard]] std::shared_ptr<BorrowedRows> BorrowedStorage() const {
+    return rows_;
+  }
   [[nodiscard]] bool IsValid() const;
   // Allocation capacity, not logical range size. Retain the owning checkpoint
   // or chunk handle throughout each access to Owner(); a bare buffer is no pin.
@@ -62,9 +66,20 @@ public:
   [[nodiscard]] std::shared_ptr<const void> Owner() const {
     return rows_ ? rows_->Owner() : owner_;
   }
+  // Removing a checkpoint frees none of this storage while a disk job holds
+  // it.
+  [[nodiscard]] bool PersistencePinned() const;
+  // Assigned immutable storage token, never the original pool handle. Keep
+  // the checkpoint and physical owner alive throughout a persistence job.
+  [[nodiscard]] ResourceCharge CommittedCharge() const {
+    if (rows_)
+      throw std::logic_error("borrowed payload requires preservation");
+    return charge_;
+  }
 
 private:
   friend class ChunkReference;
+  friend class ExecutionHistory;
   [[nodiscard]] PersistencePin PinPersistence() const;
   Payload() = default;
   ResourceCharge charge_;
@@ -182,6 +197,16 @@ public:
   static ExecutionHistory Cold(ResourceLedger&,
                                std::span<const ComponentDescriptor>, Identity);
   static ExecutionHistory Restored(ResourceLedger&, const Checkpoint&);
+  // A validated durable restore with no resident chunk owners starts a fresh
+  // branch. Future captures copy its rows rather than infer hash sharing.
+  static ExecutionHistory RestoredUnshared(ResourceLedger&,
+                                           std::span<const ComponentDescriptor>,
+                                           Identity);
+  // Startup discovery calls this before creating histories. IDs of retained
+  // durable checkpoints cannot be reused after a process restart.
+  static void ObserveDurableId(CheckpointId);
+  // Disk-only capture uses the same process/restart-safe identifier space.
+  [[nodiscard]] static CheckpointId AllocateCheckpointId();
   ExecutionHistory(ExecutionHistory&&) noexcept = default;
   ExecutionHistory& operator=(ExecutionHistory&&) noexcept = delete;
   ExecutionHistory(const ExecutionHistory&) = delete;
@@ -192,8 +217,12 @@ public:
   // no history; partially built owners and references unwind. No callback runs
   // under a lock. Every private state/tail callback must return a fresh copy
   // or a distinct committed assignment; a callback cannot alias private bytes.
+  // Optional prepare sees the exact new payload plan with shared chunks pinned.
+  // It can reserve every backing assignment before the first capture callback.
+  // A refused preparation performs no payload copies and changes no history.
   [[nodiscard]] std::shared_ptr<const Checkpoint> Capture(
-      const CheckpointRequest&, const CapturePayload&);
+      const CheckpointRequest&, const CapturePayload&,
+      const std::function<void(std::span<const PayloadRequest>)>& prepare = {});
   [[nodiscard]] LineageId Lineage() const;
   // Remove expired chunk bookkeeping. Does not evict a checkpoint or payload.
   void Prune();
@@ -210,9 +239,12 @@ private:
     ComponentId component;
     Rows first;
     std::weak_ptr<detail::Chunk> chunk;
+    [[nodiscard]] auto Key() const { return std::pair{component.value, first}; }
   };
   ExecutionHistory(ResourceLedger&, std::span<const ComponentDescriptor>,
                    Identity, std::shared_ptr<const detail::Lineage>);
+  [[nodiscard]] std::shared_ptr<detail::Chunk> FindChunk(ComponentId,
+                                                         Rows first) const;
   bool capturing_{false};
   ResourceLedger* ledger_;
   ResourceCharge metadata_, entries_metadata_, tokens_metadata_;
@@ -221,6 +253,8 @@ private:
   Identity compatibility_, input_;
   std::vector<ComponentPosition> positions_;
   std::vector<Token> tokens_;
+  // Ordered by component and first row. Restored and newly captured entries
+  // are sorted before publication; pruning preserves the order.
   std::vector<Entry> entries_;
 };
 }  // namespace gufo::cache

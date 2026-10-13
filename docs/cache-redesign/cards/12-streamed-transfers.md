@@ -116,7 +116,11 @@ allocation capacities. Admission/coalescing precedes pinning; duplicate logical
 checkpoints are skipped. Optional writes check model idleness between pieces,
 without holding live-source readers, a stream, staging, or the disk metadata
 lock. Staging is leased through each complete read/CRC/write piece, so a
-foreground restore can finish while an optional writer waits for model idleness. Source storage and
+foreground restore can finish while an optional writer waits for model idleness.
+A job yields for at most 500 ms once its write starts: under continuous load
+the model is never idle, and a queued job keeps its sources pinned, so RAM
+captures failed for lack of space and nothing reached disk (#562, #573).
+Source storage and
 callback metadata are caller-admitted before submission. Queue stop cancels,
 drains and joins. Filesystem mutations remain serialized, while index snapshots,
 pins and accounting queries use separate short locks.

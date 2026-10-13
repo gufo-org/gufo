@@ -69,6 +69,12 @@ public:
   // may insert exact required captures; optional captures can reuse this plan.
   [[nodiscard]] virtual std::vector<Rows> PlanPrefill(const Slot&, Rows first,
                                                       Rows end) const = 0;
+  // Optional pure host prediction for a supported in-pass checkpoint. The
+  // actual capture must expose these exact coherent component positions.
+  [[nodiscard]] virtual std::vector<ComponentPosition>
+  PrefillCheckpointPositions(const Slot&, Rows) const {
+    return {};
+  }
 
   // Prepare one complete restore, including an exact shorter frontier. On the
   // host, allocate/check capacity and guard every range that will be replaced
@@ -93,6 +99,17 @@ public:
                                                Rows first, Rows end,
                                                std::span<std::byte>,
                                                Stream&) = 0;
+  // Optional immutable view of a completed append range. Obtain it only
+  // during exclusive execution; retain a RowPin for every later transfer.
+  // The address must remain stable until the mutation/release guard drains
+  // its readers. CopyRowsIn must accept these backend-native source bytes as
+  // well as host buffers. Empty means this component cannot be borrowed.
+  [[nodiscard]] virtual std::span<const std::byte> BorrowRowsView(const Slot&,
+                                                                  ComponentId,
+                                                                  Rows,
+                                                                  Rows) const {
+    return {};
+  }
   [[nodiscard]] virtual Completion CopyRowsIn(Slot&, ComponentId, Rows first,
                                               Rows end,
                                               std::span<const std::byte>,

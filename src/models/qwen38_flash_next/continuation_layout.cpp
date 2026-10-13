@@ -1,6 +1,7 @@
 #include "src/models/qwen38_flash_next/continuation_layout.hpp"
 
 #include <algorithm>
+#include <map>
 #include <stdexcept>
 
 namespace gufo::models::qwen38_flash_next {
@@ -97,10 +98,15 @@ std::vector<cache::ComponentPosition> ContinuationLayout::Positions(
   positions.reserve(components_.size());
   for (const auto& component : components_) {
     const bool draft_part = IsDraft(component.part);
+    // Private state belongs to this target checkpoint, including the lagging
+    // predictor's residual and raw ring. Its execution frontier is recorded
+    // by the draft row components and private metadata.
     positions.push_back(
-        {component.descriptor.id, IsPool(component.part)
-                                      ? (draft_part ? draft_blocks : blocks)
-                                      : (draft_part ? draft : target)});
+        {component.descriptor.id,
+         component.descriptor.kind == cache::ComponentKind::kPrivateState
+             ? target
+         : IsPool(component.part) ? (draft_part ? draft_blocks : blocks)
+                                  : (draft_part ? draft : target)});
   }
   return positions;
 }
@@ -110,6 +116,22 @@ std::size_t ContinuationLayout::PrivateBytes() const noexcept {
   for (const auto& component : components_)
     bytes += component.descriptor.state_bytes;
   return bytes;
+}
+std::vector<ContinuationBackingClass> ContinuationLayout::BackingPlan(
+    std::size_t ram, std::uint32_t concurrency) const {
+  if (!concurrency || concurrency > 8)
+    throw std::invalid_argument("invalid continuation backing concurrency");
+  // Private frontiers, rows and tails share the same committed pages. Fixed
+  // per-component classes can exhaust private backing while rows remain free.
+  // Contiguous page groups retain one payload owner and charge all slack.
+  constexpr std::size_t page = 65536, per_block = 1024, header = 4096;
+  const auto budget = ram > (4ULL << 20) ? (ram - (4ULL << 20)) / 10 * 9 : 0;
+  if (budget <= header)
+    return {};
+  const auto blocks = (budget - header) / (page + per_block);
+  if (!blocks)
+    return {};
+  return {{page, blocks, header + blocks * per_block}};
 }
 
 std::size_t ContinuationLayout::RowBytes(std::uint32_t target,

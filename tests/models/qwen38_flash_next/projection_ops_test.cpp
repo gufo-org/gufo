@@ -354,6 +354,80 @@ void CheckHcDownProjection(const void* w, const void* tiled,
   CheckHip(hipFree(activated), "HC activation free");
 }
 
+/// A batch a few tokens past a full 128-token tile computes its tail with
+/// W8A8TailKernel; every row must equal the tiled kernel's row from a batch
+/// whose tail is too wide to split.
+void CheckW8A8Tail(std::size_t m, std::size_t k, std::uint32_t seed) {
+  constexpr std::size_t kShort = 2051;  // three tokens past 16 tiles
+  constexpr std::size_t kLong = 2091;   // a 43-token tail stays tiled
+  const Q8Weights w = MakeWeights(m, k, seed, false);
+  std::vector<float> x(kLong * k);
+  std::uint32_t state = seed ^ 0x7A11U;
+  for (float& v : x) {
+    v = Uniform(&state, 2.0F);
+  }
+  void* d_w = nullptr;
+  float* d_x = nullptr;
+  void* d_tiled = nullptr;
+  float* d_long = nullptr;
+  float* d_short = nullptr;
+  CheckHip(hipMalloc(&d_w, w.blocks.size() + 4096), "tail weights");
+  CheckHip(hipMalloc(&d_x, x.size() * 4), "tail input");
+  CheckHip(hipMalloc(&d_tiled, q::Q8TiledBytes(kLong, k)), "tail tiles");
+  CheckHip(hipMalloc(&d_long, kLong * m * 4), "tail long output");
+  CheckHip(hipMalloc(&d_short, kLong * m * 4), "tail short output");
+  CheckHip(
+      hipMemcpy(d_w, w.blocks.data(), w.blocks.size(), hipMemcpyHostToDevice),
+      "tail weight upload");
+  CheckHip(hipMemcpy(d_x, x.data(), x.size() * 4, hipMemcpyHostToDevice),
+           "tail input upload");
+  CheckHip(hipMemset(d_short, 0x7F, kLong * m * 4), "tail guards");
+  q::QuantizeQ8Tiled(d_x, d_tiled, kLong, k, nullptr);
+  if (!q::W8A8Gemm(d_w, d_tiled, d_long, kLong, m, k, nullptr) ||
+      !q::W8A8Gemm(d_w, d_tiled, d_short, kShort, m, k, nullptr))
+    throw std::runtime_error("W8A8 tail shapes rejected");
+  std::vector<float> a(kLong * m);
+  std::vector<float> b(kLong * m);
+  CheckHip(hipMemcpy(a.data(), d_long, a.size() * 4, hipMemcpyDeviceToHost),
+           "tail long download");
+  CheckHip(hipMemcpy(b.data(), d_short, b.size() * 4, hipMemcpyDeviceToHost),
+           "tail short download");
+  if (std::memcmp(a.data(), b.data(), kShort * m * 4) != 0)
+    throw std::runtime_error("W8A8 tail rows differ from the tiled rows");
+  for (std::size_t i = kShort * m; i < b.size(); ++i) {
+    std::uint32_t bits;
+    std::memcpy(&bits, &b[i], sizeof(bits));
+    if (bits != 0x7F7F7F7FU)
+      throw std::runtime_error("W8A8 tail wrote past its batch");
+  }
+  if (m == 320 && k == 10240) {
+    __half* h_long = nullptr;
+    __half* h_short = nullptr;
+    CheckHip(hipMalloc(&h_long, kLong * m * 2), "HC tail long");
+    CheckHip(hipMalloc(&h_short, kLong * m * 2), "HC tail short");
+    if (!q::HcDownF16Gemm(d_w, d_tiled, h_long, kLong, nullptr) ||
+        !q::HcDownF16Gemm(d_w, d_tiled, h_short, kShort, nullptr))
+      throw std::runtime_error("HC down tail shapes rejected");
+    std::vector<__half> ha(kShort * m);
+    std::vector<__half> hb(kShort * m);
+    CheckHip(hipMemcpy(ha.data(), h_long, ha.size() * 2, hipMemcpyDeviceToHost),
+             "HC tail long download");
+    CheckHip(
+        hipMemcpy(hb.data(), h_short, hb.size() * 2, hipMemcpyDeviceToHost),
+        "HC tail short download");
+    if (std::memcmp(ha.data(), hb.data(), ha.size() * 2) != 0)
+      throw std::runtime_error("HC down tail rows differ from the tiled rows");
+    (void)hipFree(h_long);
+    (void)hipFree(h_short);
+  }
+  std::cout << "W8A8 tail m=" << m << " k=" << k << ": exact\n";
+  (void)hipFree(d_w);
+  (void)hipFree(d_x);
+  (void)hipFree(d_tiled);
+  (void)hipFree(d_long);
+  (void)hipFree(d_short);
+}
+
 void CheckRoutedQ8Placement() {
   constexpr int rows = 64, cols = 512, tokens = 65, experts = 2;
   const auto weights = MakeWeights(rows * experts, cols, 31415, false);
@@ -870,6 +944,8 @@ int main() {
     CheckMtpOutputHead(1.0F);
     // Small activations must retain products below F16's normal range.
     CheckMtpOutputHead(0.0001F);
+    CheckW8A8Tail(320, 10240, 0x7A1320U);
+    CheckW8A8Tail(640, 2560, 0x7A1640U);
     bool ok = true;
     // Ragged batch and rows against the 128-wide macro tiles, the 64-token
     // tile below 96, and the model's ssm_out / shexp_down widths.

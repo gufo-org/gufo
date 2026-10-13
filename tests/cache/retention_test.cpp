@@ -70,6 +70,22 @@ void Planning() {
   std::array<Rows, 1> retained{2048};
   plan = PlanCaptures(adapter, *slot, {4096, 0, 0, 0, true, false, retained});
   assert(plan.size() == 1 && plan[0].boundary == 4096);
+  // A small budget keeps only the shallowest grid; a retained one still counts.
+  adapter.SetPrefillPassRows(2048);
+  plan = PlanCaptures(adapter, *slot,
+                      {10000, 0, 1500, 0, true, false, {}, std::size_t{1}});
+  assert(plan.size() == 3 && plan[1].boundary == 2048 &&
+         plan[1].purpose == CheckpointPurpose::kGrid);
+  plan = PlanCaptures(adapter, *slot,
+                      {10000, 0, 1500, 0, true, false, retained, 1});
+  assert(plan.size() == 2 && plan[1].boundary == 10000);
+  assert(PlanCaptures(adapter, *slot, {10000, 0, 1500, 0, true, false, {}, 0})
+             .size() == 2);
+  // Flash-Next keeps about 133 MB of private state per checkpoint.
+  assert(GridLimit(2ULL << 30, 133'100'000) == 1);
+  assert(GridLimit(8ULL << 30, 133'100'000) == 4);
+  assert(GridLimit(1ULL << 30, 133'100'000) == 0);
+  assert(GridLimit(1ULL << 30, 0) == 4);
 }
 void Branches() {
   for (bool branched : {false, true}) {
@@ -172,6 +188,299 @@ void RanksAndSources() {
     g.Add({1, 2, 3}, RetentionPurpose::kContinuation, 0, {}, true, {2});
     assert(g.policy.Rank(a) == 3);  // image identities never cover each other
   }
+}
+void ShortPeersDoNotCoverHistory() {
+  for (const auto purpose :
+       {RetentionPurpose::kContinuation, RetentionPurpose::kBranchPoint}) {
+    Fixture f(3);
+    const auto root = f.Add({1, 2}, purpose);
+    const auto short_tail = f.Add({1, 2, 7});
+    const auto history = f.Add({1, 2, 3, 4}, RetentionPurpose::kHistory);
+    // A shared system prefix cannot restore the deeper history's rows.
+    assert(f.policy.Rank(history) == 3);
+    f.Add({1, 2, 8}, RetentionPurpose::kContinuation, 0, root);
+    assert(f.log.events[f.log.events.size() - 2].checkpoint == short_tail);
+    assert(f.Cached({1, 2, 3, 4, 5}) == 4);
+    assert(f.Cached({1, 2, 8, 9}) == 3);
+    assert(f.Cached({1, 2, 7, 9}) == 2);
+  }
+  {
+    Fixture f(3);
+    const auto history = f.Add({1, 2, 3, 4}, RetentionPurpose::kHistory);
+    f.Add({1, 2, 3, 4, 5});
+    assert(f.policy.Rank(history) == 1);  // a deeper peer really covers it
+  }
+  {
+    Fixture f(3);
+    const auto history =
+        f.Add({1, 2, 3, 4}, RetentionPurpose::kHistory, 0, {}, true, {1});
+    f.Add({1, 2, 3, 4, 5}, RetentionPurpose::kContinuation, 0, {}, true, {2});
+    assert(f.policy.Rank(history) == 3);  // different inputs cannot cover it
+  }
+}
+void HistoryBytePressureCanReplaceOldFamilies() {
+  Fixture f(4);
+  const auto old = f.Add({9, 9});
+  f.Add({8, 8});
+  std::vector<Token> history{1, 2};
+  unsigned attempts = 0;
+  assert(f.policy.Admit({history, {1}, {}, RetentionPurpose::kHistory}, [&] {
+    if (!attempts++)
+      throw ResourceExhausted();
+    return IndexCheckpoint(f.ledger, history);
+  }));
+  assert(attempts == 2 && f.Cached({1, 2, 3}) == 2);
+  assert(f.Cached({9, 9, 1}) == 0 && f.Cached({8, 8, 1}) == 2);
+  assert(f.log.events[f.log.events.size() - 2].checkpoint == old);
+  assert(f.log.events[f.log.events.size() - 2].reason ==
+         RetentionReason::kByteCapacity);
+}
+void CurrentTurnKeepsItsEditBoundaries() {
+  Fixture f(4);
+  const auto old = f.Add({9, 9});
+  const auto early = f.Add({1, 2}, RetentionPurpose::kHistory);
+  const auto later = f.Add({1, 2, 3, 4}, RetentionPurpose::kHistory);
+  const auto source = f.Add({1, 2, 3, 4, 5});
+  std::array protected_ids{early, later};
+  std::vector<Token> incoming{1, 2, 3, 4, 5, 6};
+  RetentionRequest request{
+      incoming, {1}, {}, RetentionPurpose::kContinuation, 0, source, true};
+  request.protected_checkpoints = protected_ids;
+  assert(f.policy.Reclaim(request));
+  assert(f.log.events.back().checkpoint == old);
+  assert(f.Cached({1, 2, 7}) == 2 && f.Cached({1, 2, 3, 4, 7}) == 4);
+  // Protection lasts for the current turn only; a later independent turn may
+  // reclaim these covered histories under the same finite capacity. The
+  // deeper one goes first: the shallow boundary may serve other prompts.
+  request.protected_checkpoints = {};
+  assert(f.policy.Reclaim(request));
+  assert(f.log.events.back().checkpoint == later);
+  assert(f.Cached({1, 2, 7}) == 2 && f.Cached({1, 2, 3, 4, 7}) == 2);
+}
+// Eight tokens of rows cost as much as one private state: shorter checkpoints
+// are cheap to recompute relative to the budget they hold.
+constexpr std::array<ComponentDescriptor, 2> kPressureComponents{
+    {{{1}, 1, ComponentKind::kAppendRows, 64, 4, 0},
+     {{2}, 1, ComponentKind::kPrivateState, 0, 0, 4096}}};
+struct PressureFixture {
+  ResourceLedger ledger;
+  PrefixIndex index{ledger};
+  Log log;
+  RetentionPolicy policy;
+  explicit PressureFixture(std::size_t ram = 1ULL << 30)
+      : ledger({ram, ram, 0, ram}), policy(ledger, index, &log) {
+    index.Register({1}, kPressureComponents);
+  }
+  // Each conversation executes separately, so no two share chunks. Admission
+  // reclaims through the byte-pressure order when the ledger is full.
+  CheckpointId Add(std::vector<Token> tokens,
+                   RetentionPurpose purpose = RetentionPurpose::kContinuation,
+                   bool reused = false) {
+    RetentionRequest request{tokens, {1}, {}, purpose};
+    request.reused = reused;
+    assert(policy.Admit(request, [&] {
+      return IndexCheckpoint(ledger, tokens, {1}, {}, kPressureComponents);
+    }));
+    return log.events.back().checkpoint;
+  }
+  CheckpointId Reclaim() {
+    std::vector<Token> incoming{99, 99, 99, 99, 99, 99, 99, 99, 99};
+    assert(policy.Reclaim({incoming, {1}, {}}));
+    return log.events.back().checkpoint;
+  }
+  Rows Cached(std::vector<Token> tokens) {
+    return index.CachedPrefixTokens(
+        {{1}, tokens, InputIdentity(tokens.size()), 0, true});
+  }
+};
+std::vector<Token> Conversation(Token first, std::size_t size) {
+  std::vector<Token> tokens(size, first);
+  for (std::size_t i = 0; i < size; ++i)
+    tokens[i] += static_cast<Token>(i * 1000);
+  return tokens;
+}
+void CheapCheckpointsGiveWayFirst() {
+  // An idle deep conversation outlives newer short requests (cache-pressure
+  // idle resume). Retry copies still go before any cheap checkpoint.
+  PressureFixture f;
+  const auto idle = f.Add(Conversation(1, 16));
+  const auto first = f.Add(Conversation(2, 7));
+  const auto second = f.Add(Conversation(3, 7));
+  auto retry_tokens = Conversation(3, 7);
+  retry_tokens.push_back(5);
+  RetentionRequest retry{retry_tokens, {1}, {}, RetentionPurpose::kRetry, 7};
+  assert(f.policy.Admit(retry, [&] {
+    return IndexCheckpoint(f.ledger, retry_tokens, {1}, {},
+                           kPressureComponents);
+  }));
+  const auto copy = f.log.events.back().checkpoint;
+  assert(f.Reclaim() == copy);
+  assert(f.Reclaim() == first && f.Reclaim() == second);
+  assert(f.Reclaim() == idle);
+}
+void ReusedCheapCheckpointKeepsRecency() {
+  // A short checkpoint restored one request ago is not cheap any more: its
+  // next turn would be a full miss (state-edges). It competes by recency.
+  PressureFixture f;
+  const auto idle = f.Add(Conversation(1, 16));
+  const auto restored = f.Add(Conversation(2, 7));
+  const auto other = f.Add(Conversation(3, 7));
+  f.policy.Touch(restored);
+  assert(f.Reclaim() == other);
+  assert(f.Reclaim() == idle);
+  assert(f.Reclaim() == restored);
+}
+void PersistingCheckpointIsNotAVictim() {
+  // While a disk job writes a checkpoint, removing it frees none of its
+  // storage and only drops a restorable boundary from the index.
+  PressureFixture f;
+  const auto older = f.Add(Conversation(1, 16));
+  auto tokens = Conversation(2, 16);
+  std::vector<ResourceCharge> charges;
+  RetentionRequest request{tokens, {1}, {}, RetentionPurpose::kContinuation};
+  assert(f.policy.Admit(request, [&] {
+    auto history = ExecutionHistory::Cold(f.ledger, kPressureComponents, {1});
+    std::vector<ComponentPosition> positions;
+    for (const auto& d : kPressureComponents)
+      positions.push_back({d.id, tokens.size()});
+    return history.Capture(
+        {tokens, InputIdentity(tokens.size()), positions,
+         CheckpointPurpose::kPrompt, 1},
+        [&](const PayloadRequest& payload) {
+          auto pool =
+              f.ledger.Reserve(ResourceCategory::kBackingFree, payload.bytes)
+                  .Convert();
+          auto charge = pool.ReserveBacking(payload.category).Convert();
+          charges.push_back(charge);
+          return Payload::Committed(std::move(charge),
+                                    std::make_shared<int>(0));
+        });
+  }));
+  const auto written = f.log.events.back().checkpoint;
+  std::vector<PersistencePin> pins;
+  for (const auto& charge : charges)
+    pins.push_back(charge.PinPersistence());
+  // The written checkpoint is newer, so it would otherwise go second.
+  f.policy.Touch(older);
+  assert(f.Reclaim() == older);
+  assert(!f.policy.Reclaim({std::vector<Token>(9, 99), {1}, {}}));
+  pins.clear();
+  assert(f.Reclaim() == written);
+}
+void RetryCopyReplacesItsNearbySource() {
+  // An unchanged retry restored from its stable boundary may replace that
+  // boundary with the full-prompt copy (state-edges), never another
+  // conversation's checkpoint, and not when the gap exceeds the framing.
+  PressureFixture f;
+  const auto other = f.Add(Conversation(1, 16));
+  const auto stable = Conversation(2, 7);
+  const auto source = f.Add(stable);
+  auto retry = stable;
+  retry.push_back(5);
+  RetentionRequest request{retry, {1}, {}, RetentionPurpose::kRetry, 7};
+  request.source = source;
+  assert(f.policy.Reclaim(request));
+  assert(f.log.events.back().checkpoint == source);
+  assert(!f.policy.Reclaim(request));
+  auto far = Conversation(1, 16);
+  far.resize(16 + 65, 3);
+  RetentionRequest distant{far, {1}, {}, RetentionPurpose::kRetry, 16};
+  distant.source = other;
+  assert(!f.policy.Reclaim(distant));
+}
+void SharedShortPrefixIsNotCheap() {
+  // A new conversation sharing a short system/tools prefix must not evict
+  // that prefix to admit itself (tool-agent peers).
+  PressureFixture f;
+  const auto idle = f.Add(Conversation(1, 16));
+  const auto prefix = Conversation(2, 7);
+  const auto shared = f.Add(prefix);
+  auto incoming = prefix;
+  incoming.insert(incoming.end(), {4, 4, 4});
+  assert(f.policy.Reclaim({incoming, {1}, {}}));
+  assert(f.log.events.back().checkpoint == idle);
+  assert(f.Cached(incoming) == 7);
+  (void)shared;
+}
+void UnreusedConversationKeepsItsStem() {
+  // Compaction keeps a stale conversation's system prompt (cache-pressure
+  // compacted): its leaf goes before its shallow history boundary. Once a
+  // conversation is reused, its covered records go before any leaf.
+  PressureFixture f;
+  auto old_conversation = Conversation(1, 16);
+  const auto old_stem =
+      f.Add({old_conversation.begin(), old_conversation.begin() + 8},
+            RetentionPurpose::kHistory);
+  const auto old_leaf = f.Add(old_conversation);
+  auto live = Conversation(2, 16);
+  const auto live_stem =
+      f.Add({live.begin(), live.begin() + 8}, RetentionPurpose::kHistory);
+  const auto live_old = f.Add({live.begin(), live.begin() + 12});
+  const auto live_leaf = f.Add(live, RetentionPurpose::kContinuation, true);
+  assert(f.Reclaim() == old_leaf);
+  auto compacted = old_conversation;
+  compacted.resize(9);
+  compacted[8] = 7;
+  assert(f.Cached(compacted) == 8);
+  assert(f.Reclaim() == old_stem);
+  // The reused conversation drops its prior turn, then its stem, deepest
+  // covered record first, before its own continuation.
+  assert(f.Reclaim() == live_old && f.Reclaim() == live_stem);
+  assert(f.Reclaim() == live_leaf);
+}
+void ForkedParentOutlivesItsChildren() {
+  // Concurrent subagents share the parent turn but diverge a few tokens later
+  // (cache-pressure fan-out), so the parent is no exact branch point. The
+  // parent must still outlive the children for its own next turn.
+  PressureFixture f;
+  auto parent = Conversation(1, 12);
+  const auto prior = f.Add({parent.begin(), parent.begin() + 8},
+                           RetentionPurpose::kContinuation, true);
+  const auto fork = f.Add(parent, RetentionPurpose::kContinuation, true);
+  std::array<CheckpointId, 2> children;
+  for (Token child = 0; child < 2; ++child) {
+    auto tokens = parent;
+    tokens.insert(tokens.end(), {500, 501, Token(600 + child), 502});
+    children[child] = f.Add(tokens, RetentionPurpose::kContinuation, true);
+  }
+  assert(f.Reclaim() == prior);
+  assert(f.Reclaim() == children[0] && f.Reclaim() == children[1]);
+  parent.push_back(7);
+  assert(f.Cached(parent) == 12);
+  assert(f.Reclaim() == fork);
+}
+void ReuseProtectionLastsOneTurnover() {
+  // A reused conversation outlives newer one-use requests (cache-pressure UI
+  // tasks) for one turnover of the RAM budget, then ages out like any other.
+  constexpr std::size_t kRam = 64 * 1024;
+  PressureFixture f(kRam);
+  auto conversation = Conversation(1, 16);
+  f.Add(conversation);
+  f.policy.Touch(f.log.events.back().checkpoint);
+  Token next = 100;
+  std::size_t admitted = 0;
+  // Unique admitted bytes per one-use request: private state plus rows.
+  constexpr std::size_t kRequest = 4096 + 16 * 64;
+  while (admitted + kRequest < kRam) {
+    f.Add(Conversation(next++, 16));
+    admitted += kRequest;
+  }
+  // The budget filled; least recently used order alone would have removed
+  // the conversation before any of these newer requests.
+  assert(std::ranges::any_of(f.log.events, [](const auto& e) {
+    return e.action == RetentionAction::kRemoved;
+  }));
+  assert(f.Cached(conversation) == 16);
+  while (admitted < 2 * kRam) {
+    f.Add(Conversation(next++, 16));
+    admitted += kRequest;
+    assert(f.ledger.Snapshot().total_bytes <= kRam);
+  }
+  assert(f.Cached(conversation) == 0);
+  assert(std::ranges::any_of(f.log.events, [](const auto& e) {
+    return e.action == RetentionAction::kRemoved &&
+           e.reason == RetentionReason::kByteCapacity;
+  }));
 }
 void RecordSourceReplacement() {
   for (const bool preserve : {true, false}) {
@@ -288,7 +597,10 @@ void FailureAndReplay() {
       const auto id = log.events.back().checkpoint;
       auto pin = index.Lookup({{1}, t, InputIdentity(t.size())});
       const auto before = ledger.Snapshot().total_bytes;
+      assert(policy.RetainedPayloadBytes() > 0);
       policy.Remove(id);
+      assert(policy.RetainedPayloadBytes() == 0);
+      assert(log.events.back().retained_payload_bytes == 0);
       assert(pin.selected && pin.selected->checkpoint->IsValid());
       assert(log.events.back().unique_bytes_freed ==
              before - ledger.Snapshot().total_bytes);
@@ -467,9 +779,15 @@ void RealCapacityAndUniqueAdmission() {
                   std::make_shared<int>(0));
             });
       }));
+      assert(policy.RetainedPayloadBytes() == end * 1024 + end / 4 * 32);
+      assert(log.events.back().retained_payload_bytes ==
+             policy.RetainedPayloadBytes());
     }
     assert(policy.Size() == 3);
     assert(policy.RetainedPayloadBytes() == 12 * 1024 + 3 * 32);
+    const auto latest = log.events.back().checkpoint;
+    policy.Touch(latest);
+    assert(log.events.back().retained_payload_bytes == 12 * 1024 + 3 * 32);
     assert(ledger.Snapshot().total_bytes <= 32768);
     // An independent large branch needs real reclamation, with no simulated
     // pressure exception. Full payload exceeds the old available capacity.
@@ -509,6 +827,17 @@ int main() {
   Planning();
   Branches();
   RanksAndSources();
+  ShortPeersDoNotCoverHistory();
+  HistoryBytePressureCanReplaceOldFamilies();
+  CurrentTurnKeepsItsEditBoundaries();
+  CheapCheckpointsGiveWayFirst();
+  ReusedCheapCheckpointKeepsRecency();
+  PersistingCheckpointIsNotAVictim();
+  RetryCopyReplacesItsNearbySource();
+  SharedShortPrefixIsNotCheap();
+  UnreusedConversationKeepsItsStem();
+  ForkedParentOutlivesItsChildren();
+  ReuseProtectionLastsOneTurnover();
   RecordSourceReplacement();
   FullOptionalExactReplacement();
   FailureAndReplay();

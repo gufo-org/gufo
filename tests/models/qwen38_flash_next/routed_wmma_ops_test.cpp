@@ -226,7 +226,8 @@ struct Result {
 /// its activation quantization).
 Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
            std::size_t experts, std::size_t m, std::size_t k,
-           std::uint32_t seed, std::uint32_t tile_rows = 48) {
+           std::uint32_t seed, std::uint32_t tile_rows = 48,
+           float input_scale = 2.0F) {
   const Experts w =
       type == q::WeightType::kQ4_K   ? MakeQ4K(experts, m, k, seed)
       : type == q::WeightType::kQ5_K ? MakeQ5K(experts, m, k, seed)
@@ -250,7 +251,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   }
   std::vector<float> x(n_tokens * k);
   for (float& v : x) {
-    v = Uniform(&state, 2.0F);
+    v = Uniform(&state, input_scale);
   }
   std::vector<std::uint32_t> counts(experts, 0);
   for (std::int32_t e : ids) {
@@ -325,7 +326,12 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
     }
   }
-  __half* d_x_half = Upload(x_half);
+  __half* d_x_half = nullptr;
+  CheckHip(hipMalloc(&d_x_half, x_half.size() * sizeof(__half)),
+           "exact F16 input allocation");
+  CheckHip(hipMemcpy(d_x_half, x_half.data(), x_half.size() * sizeof(__half),
+                     hipMemcpyHostToDevice),
+           "F16 input upload");
   std::int32_t* d_tiles = Upload(tiles);
   float* d_f16 = Upload(zero_out);
   if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_tiles,
@@ -400,7 +406,14 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       }
     }
     auto* d_up = Upload(up);
-    auto* d_pair = Upload(std::vector<__half>(slots * m, __float2half(0.0F)));
+    __half* d_pair = nullptr;
+    CheckHip(hipMalloc(&d_pair, (slots * m + kHalfGuard) * sizeof(__half)),
+             "paired output allocation");
+    const std::vector<__half> pair_initial(slots * m + kHalfGuard, half_guard);
+    CheckHip(
+        hipMemcpy(d_pair, pair_initial.data(),
+                  pair_initial.size() * sizeof(__half), hipMemcpyHostToDevice),
+        "paired output upload");
     if (!q::RoutedF16Gemm(d_up, type, d_x_half, d_tiles,
                           static_cast<std::uint32_t>(tiles.size()), tile_rows,
                           d_bounds, d_rows_token, d_rows_slot, d_f16, nullptr,
@@ -408,7 +421,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       throw std::runtime_error("separate routed SwiGLU launch failed");
     }
     const auto separate = Download(d_f16_half, slots * m);
-    for (std::uint32_t pair_rows : {64U, 128U}) {
+    {
+      constexpr std::uint32_t pair_rows = 128;
       std::vector<std::int32_t> gate_tiles;
       for (std::size_t e = 0; e < experts; ++e) {
         for (std::uint32_t j = 0; j < (counts[e] + pair_rows - 1) / pair_rows;
@@ -420,11 +434,17 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       auto launch_pair = [&] {
         if (!q::RoutedGatedF16Gemm(
                 d_w, d_up, type, d_x_half, d_gate_tiles,
-                static_cast<std::uint32_t>(gate_tiles.size()), pair_rows,
-                d_bounds, d_rows_token, d_rows_slot, d_pair, m, k, nullptr)) {
+                static_cast<std::uint32_t>(gate_tiles.size()), d_bounds,
+                d_rows_token, d_rows_slot, d_pair, m, k, nullptr)) {
           throw std::runtime_error("paired routed SwiGLU launch failed");
         }
       };
+      // The paired launch must write the whole output itself; stale results
+      // can hide an incomplete launch grid.
+      CheckHip(hipMemcpy(d_pair, pair_initial.data(),
+                         pair_initial.size() * sizeof(__half),
+                         hipMemcpyHostToDevice),
+               "paired output reset");
       launch_pair();
       const auto paired = Download(d_pair, slots * m);
       for (std::size_t i = 0; i < paired.size(); ++i) {
@@ -438,6 +458,10 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
               std::to_string(a) + " vs " + std::to_string(b));
         }
       }
+      const auto guard = Download(d_pair + slots * m, kHalfGuard);
+      if (std::memcmp(guard.data(), pair_initial.data() + slots * m,
+                      kHalfGuard * sizeof(__half)) != 0)
+        throw std::runtime_error("paired output overwrote its guard");
       launch_pair();
       const auto replay = Download(d_pair, slots * m);
       if (std::memcmp(paired.data(), replay.data(),
@@ -753,6 +777,13 @@ int main() {
          ok;
     // Ragged rows against the 128-row tile and a tiny batch.
     ok = Ok(Run(q::WeightType::kQ4_K, 40, 4, 8, 201, 512, 0xDEADBEEFU)) && ok;
+    // Paired waves must retain unsaturated SiLU arithmetic and protect the
+    // last odd output row in short and partial token groups.
+    for (auto type : {q::WeightType::kQ4_K, q::WeightType::kQ5_K}) {
+      for (std::size_t rows : {1U, 8U, 9U, 32U, 33U, 65U, 129U}) {
+        ok = Ok(Run(type, rows, 1, 1, 65, 256, 0x5A1711U, 48, 0.002F)) && ok;
+      }
+    }
     // The 16-row tile (small buckets) on every type.
     ok = Ok(Run(q::WeightType::kQ4_K, 300, 10, 64, 640, 2560, 0x16161616U,
                 16)) &&
