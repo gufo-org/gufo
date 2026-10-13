@@ -36,7 +36,9 @@ admission and per-turn edit-boundary protection are unchanged.
       restore (under about 600 Flash-Next tokens), unless reused within one
       RAM-budget turnover: those go with the unreused conversations by
       recency, so a short prompt restored one request ago survives its retry
-      (`state-edges`, #573);
+      (`state-edges`, #573), and unless they are a prefix of the incoming
+      prompt, so a new conversation does not evict the system/tools prefix
+      it shares with the previous one (`tool-agent` peers, #573);
    3. conversations not reused within one RAM-budget turnover, least recently
       used first, where recency includes retained descendants;
    4. reused conversations.
@@ -45,6 +47,14 @@ admission and per-turn edit-boundary protection are unchanged.
    leaf, then shared boundaries: the shallowest history boundary, which other
    prompts may reach, and forks. Within a reused conversation, covered records
    go first, then leaves, then forks.
+
+   An unchanged retry's full-prompt copy may replace the checkpoint it was
+   restored from when at most 64 tokens (the assistant framing) separate
+   them. No other conversation loses a checkpoint, so this keeps the #451
+   rule that a retry copy never evicts another conversation, and restores
+   main's zero-prefill replay (AR `state-edges`, #573). Records a disk job is
+   writing are never victims: removing them frees nothing until the write
+   ends.
 3. **Reuse.** A turn that restored or continued a cached prefix marks the
    checkpoints it admits; a RAM restore marks its source. The mark lasts until
    admitted unique payload since that reuse exceeds the RAM budget, so a stale

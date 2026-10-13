@@ -1134,6 +1134,10 @@ struct TextRunnerPool::Request::Impl {
   // A throwing model call may have partially mutated device state. Never
   // publish that state as a live continuation, even if its position is stale.
   bool state_reusable{true};
+  // The caller's cancellation poll. Checked before each prefill step, and
+  // re-armed after a step that runs to completion (see Request::Prefill), so
+  // a request cancelled between steps keeps the frontier it reached.
+  CancellationCheck cancelled;
   bool stopped{false};
   std::optional<TextDecodeSelection> pending_selection;
   sampling::SamplerState sampler;
@@ -1374,6 +1378,8 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
         std::min(max_input_tokens, snapshot_position - impl_->prefill_offset);
 
   const std::size_t remaining = impl_->prompt.size() - impl_->prefill_offset;
+  if (impl_->cancelled && impl_->cancelled())
+    throw std::runtime_error("generation cancelled");
   impl_->state_reusable = false;
   // Complete the model frontier at the cache boundary, including logits and
   // draft catch-up. Its snapshot can then be restored independently.
@@ -1392,6 +1398,22 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
           ? std::function<std::unique_ptr<TextRunnerSnapshot>()>(
                 [&] { return impl_->lease.Capture(); })
           : std::function<std::unique_ptr<TextRunnerSnapshot>()>{};
+  // A cancellation observed inside a step abandons it half-fed, which loses
+  // the whole conversation. Let a step run to completion instead, and honour
+  // the cancellation at the next step boundary where Cancel keeps the prefix.
+  const bool finish_step =
+      impl_->runner->Descriptor().capabilities.partial_prefill_retention &&
+      impl_->cancelled;
+  struct Rearm {
+    TextRunnerState* state;
+    const CancellationCheck* check;
+    ~Rearm() {
+      if (state != nullptr)
+        state->SetCancellationCheck(*check);
+    }
+  } rearm{finish_step ? &state : nullptr, &impl_->cancelled};
+  if (finish_step)
+    state.SetCancellationCheck({});
   auto step =
       in_pass ? impl_->runner->PrefillThrough(
                     state, model_prompt, impl_->prefill_offset,
@@ -1618,7 +1640,9 @@ TextRunnerPool::Request::Cancel() noexcept {
     if (impl_->state_reusable &&
         (impl_->decode_ready ||
          impl_->prefill_offset == impl_->snapshot_tokens.size() ||
-         impl_->prefill_offset == impl_->fallback_position)) {
+         impl_->prefill_offset == impl_->fallback_position ||
+         (capabilities.partial_prefill_retention &&
+          impl_->prefill_offset > impl_->lease.cached_tokens()))) {
       if (impl_->decode_ready)
         impl_->runner->PrepareCancellation(state);
       checkpoint.assign(impl_->prompt.begin(),
@@ -1886,6 +1910,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
         impl_->validated.runner, nullptr, ServingCacheLease(std::move(lease)),
         std::move(prompt), std::vector<std::size_t>{}, sampling_config,
         std::move(context), cache_prefix_tokens, capacity() > 1));
+    request.impl_->cancelled = is_cancelled;
     if (reuse_prompt) {
       const auto common = impl_->component_cache->CachedPrefixTokens(
           request.prompt(), request.impl_->context.get(), true);
@@ -2023,6 +2048,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       impl_->validated.runner, impl_->disk_store, std::move(lease),
       std::move(prompt), std::move(boundaries), sampling_config,
       std::move(context), cache_prefix_tokens, impl_->cache->capacity() > 1));
+  request.impl_->cancelled = is_cancelled;
   // Prompts that diverge from a retained one after a long common prefix,
   // such as new conversations under one system prompt, publish a checkpoint
   // at the divergence point. Later prompts sharing it restore it exactly
@@ -2052,6 +2078,13 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     std::vector<TextRunnerToken> prompt,
     const CancellationCheck& is_cancelled) {
   return Acquire(std::move(prompt), sampling::SamplingConfig{}, is_cancelled);
+}
+
+bool TextRunnerPool::PublicationPending(
+    std::span<const TextRunnerToken> prompt,
+    const TextPromptContext* context) const {
+  return impl_->component_cache &&
+         impl_->component_cache->PublicationPending(prompt, context);
 }
 
 std::size_t TextRunnerPool::CachedPrefixTokens(

@@ -27,6 +27,7 @@ public:
   mutable std::size_t captures{};
   bool defer_idle{};
   bool in_pass{};
+  bool partial{};
   std::size_t private_blocks{128};
   mutable std::size_t through_calls{};
   bool UsesComponentCache() const override { return true; }
@@ -39,7 +40,8 @@ public:
                              .fork = true,
                              .final_token_advance_required = false,
                              .prefix_reuse = true,
-                             .in_pass_checkpoint = in_pass}};
+                             .in_pass_checkpoint = in_pass,
+                             .partial_prefill_retention = partial}};
   }
   TextRunnerResourceClaim ResourceClaim() const override {
     return {.state_capacity_bytes = 1ULL << 30,
@@ -343,6 +345,24 @@ void ColdAssignmentPrefersPreservedSlot() {
   assert(metrics.spill.foreground_bytes == 0);
   assert(metrics.ledger.reserved_bytes[static_cast<unsigned>(
              cache::ResourceCategory::kBackingAssigned)] == 320);
+}
+void CancelledPrefillKeepsCompletedSteps() {
+  // A prefill cancelled between steps keeps the frontier it reached as a live
+  // prefix (#486, #491), including on the component path Flash-Next uses.
+  for (const bool partial : {false, true}) {
+    auto runner = std::make_shared<Runner>();
+    runner->partial = partial;
+    TextRunnerPool pool(runner, 1);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto request = pool.Acquire(prompt, {}, [] { return false; }, {}, true, 0);
+    assert(request.Prefill(16).consumed_tokens == 16);
+    (void)request.Cancel();
+    prompt.push_back(99);
+    auto resend = pool.Acquire(prompt, {}, {}, {}, true, 0);
+    assert(resend.cached_prompt_tokens() == (partial ? 16 : 0));
+    resend.Invalidate();
+  }
 }
 void ColdAssignmentKeepsLiveFrontiers() {
   // No checkpoints are borrowed, so every slot has completed preservation.
@@ -677,23 +697,14 @@ void OrphansLeaveBeforeCheckpoints() {
   }
   std::filesystem::remove_all(directory);
 }
-void StagingHoldsOneRow() {
+void StagingIsInternal() {
   char pattern[] = "/tmp/gufo-component-staging-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
-  // Fake rows are four bytes; every restore piece holds whole rows.
+  // The legacy option is ignored: even a value below one four-byte row
+  // still writes and restores through the internal staging buffer.
   TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                   .capacity_bytes = 1 << 20,
                                   .staging_capacity_bytes = 3};
-  std::string error;
-  try {
-    ComponentTextCache cache(std::make_shared<Runner>(), 1, 1 << 22, disk);
-  } catch (const std::invalid_argument& e) {
-    error = e.what();
-  }
-  assert(
-      error.find("--cache-disk-staging-bytes 3 is smaller than one 4-byte") !=
-      std::string::npos);
-  disk.staging_capacity_bytes = 4;
   const std::vector<TextRunnerToken> prompt{10, 11, 12, 13, 14, 15, 16, 17, 18};
   {
     TextRunnerPool pool(std::make_shared<Runner>(), 1, disk);
@@ -731,26 +742,16 @@ void StagingCountsAgainstRamCeiling() {
   };
   char pattern[] = "/tmp/gufo-component-ceiling-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
-  // Pinned staging and RAM share the ceiling: an explicit 4 MiB beside
-  // 1 MiB of staging commits 3 MiB.
-  TextRunnerDiskCacheOptions disk{.directory = directory.string(),
-                                  .capacity_bytes = 1 << 20,
-                                  .staging_capacity_bytes = 1 << 20};
-  {
+  // Pinned staging and RAM share the ceiling: an explicit 4 MiB beside the
+  // internal 1 MiB of staging commits 3 MiB, whatever the ignored option says.
+  for (const std::size_t option : {std::size_t{0}, std::size_t{4} << 20}) {
+    TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                    .capacity_bytes = 1 << 20,
+                                    .staging_capacity_bytes = option};
     auto runner = std::make_shared<CeilingRunner>();
     TextRunnerPool pool(runner, 1, disk, {.capacity_bytes = 4 << 20});
     assert(runner->committed == 3 << 20);
   }
-  disk.staging_capacity_bytes = 4 << 20;
-  std::string error;
-  try {
-    TextRunnerPool pool(std::make_shared<CeilingRunner>(), 1, disk,
-                        {.capacity_bytes = 4 << 20});
-  } catch (const std::invalid_argument& e) {
-    error = e.what();
-  }
-  assert(error.find("--cache-disk-staging-bytes 4194304 leaves no cache RAM") !=
-         std::string::npos);
   std::filesystem::remove_all(directory);
 }
 void DiskDirectoryHasOneOwner() {
@@ -965,6 +966,7 @@ void UnbackedDeepRowsSurviveDiskRestart() {
 }
 }  // namespace
 int main() {
+  CancelledPrefillKeepsCompletedSteps();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
   RestoreFromBusyBorrowedSource();
@@ -978,7 +980,7 @@ int main() {
   DiskBudgetEvictsAnUnpinnedConversation();
   LoweredDiskBudgetEvictsOldestAtStartup();
   OrphansLeaveBeforeCheckpoints();
-  StagingHoldsOneRow();
+  StagingIsInternal();
   StagingCountsAgainstRamCeiling();
   DiskDirectoryHasOneOwner();
   GridDoesNotSuppressFirstDiskPrompt();

@@ -240,12 +240,11 @@ The first start on a directory written by an earlier release removes its old
 checkpoint files (`*.kvc`), and the cache refills as conversations run. Do not
 share a directory between Flash-Next and other models; Flash-Next removes
 their checkpoint and temporary files too, including writes in progress.
-`--cache-disk-staging-bytes` is Flash-Next's disk transfer buffer. Writes and
-restores stream each checkpoint through it piece by piece, so it no longer
-limits checkpoint size. `0` (the default) allocates 1 MiB of pinned host memory
-at startup; larger values allocate that much, reduce the RAM budget by the
-same amount and are not needed for deep checkpoints. It must hold one cache row (1,024 bytes); startup reports the
-required size otherwise.
+Flash-Next ignores `--cache-disk-staging-bytes` and logs
+`event=option_ignored`. Writes and restores stream each checkpoint through an
+internal 1 MiB pinned buffer, piece by piece; a larger buffer did not change
+restore or write speed and took pinned RAM and device heap from the cache and
+the sessions. Remove the option from Flash-Next command lines.
 
 For the other models, `--cache-disk-staging-bytes 0` (the default) selects the
 smaller of one eighth of available host RAM after model/session loading

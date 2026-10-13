@@ -160,6 +160,9 @@ struct ComponentTextCache::Impl {
     // not establish that a durable chunk belongs to this execution.
     std::shared_ptr<const void> branch;
     std::shared_ptr<const cache::DiskDescription> durable;
+    // The live frontier's prompt, to tell whether any checkpoint covers it.
+    std::vector<cache::Token> live_tokens;
+    cache::Identity live_input;
     // Acquisition order; cold assignment replaces the oldest live frontier.
     std::uint64_t used{};
     bool busy{};
@@ -197,16 +200,11 @@ struct ComponentTextCache::Impl {
        const std::optional<TextRunnerDiskCacheOptions>& options,
        bool automatic_ram)
       : runner(std::move(runner)),
-        ledger({ram + (options ? (options->staging_capacity_bytes
-                                      ? options->staging_capacity_bytes
-                                      : cache::kDefaultDiskStagingBytes)
-                               : 0),
-                ram,
-                options ? (options->staging_capacity_bytes
-                               ? options->staging_capacity_bytes
-                               : cache::kDefaultDiskStagingBytes)
-                        : 0,
-                ram}),
+        // Disk transfers lease one fixed pinned staging buffer. Its size does
+        // not change restore or write speed (#562), and a larger one only
+        // takes pinned RAM and device heap from the cache and the sessions.
+        ledger({ram + (options ? cache::kDefaultDiskStagingBytes : 0), ram,
+                options ? cache::kDefaultDiskStagingBytes : 0, ram}),
         resources(this->runner->CreateComponentCacheResources(ledger, ram)),
         identity(resources->adapter->CompatibilityIdentity()),
         index(ledger),
@@ -224,11 +222,16 @@ struct ComponentTextCache::Impl {
       const auto row_bytes =
           cache::MinimumStagingBytes(resources->adapter->Components());
       if (ledger.Limits().staging_bytes < row_bytes)
-        throw std::invalid_argument(
-            "--cache-disk-staging-bytes " +
-            std::to_string(ledger.Limits().staging_bytes) +
-            " is smaller than one " + std::to_string(row_bytes) +
-            "-byte cache row");
+        throw std::logic_error("a " + std::to_string(row_bytes) +
+                               "-byte cache row exceeds the disk staging "
+                               "buffer");
+      if (options->staging_capacity_bytes)
+        Logger::Warn("cache",
+                     "schema=component-cache-v1 event=option_ignored "
+                     "option=--cache-disk-staging-bytes requested_bytes=" +
+                         std::to_string(options->staging_capacity_bytes) +
+                         " staging_capacity_bytes=" +
+                         std::to_string(ledger.Limits().staging_bytes));
       // Take directory ownership before slots and backing commit, so a
       // second server fails without claiming its RAM budget first.
       disk = std::make_unique<cache::DiskStore>(ledger, options->directory,
@@ -259,20 +262,7 @@ struct ComponentTextCache::Impl {
       // Staging is pinned host memory too, so the host keeps its reserve
       // only if both fit under the ceiling.
       const auto staging = ledger.Limits().staging_bytes;
-      if (staging && staging >= ceiling)
-        throw std::invalid_argument(
-            "--cache-disk-staging-bytes " + std::to_string(staging) +
-            " leaves no cache RAM: at most " + std::to_string(ceiling) +
-            " bytes of host RAM may be pinned");
-      max_bytes = ceiling - staging;
-      ram = std::min(ram, ceiling);
-      if (!automatic_ram && ram > max_bytes)
-        Logger::Warn("cache",
-                     "schema=component-cache-v1 event=ram_reduced "
-                     "reason=staging requested_bytes=" +
-                         std::to_string(ram) +
-                         " capacity_bytes=" + std::to_string(max_bytes) +
-                         " staging_capacity_bytes=" + std::to_string(staging));
+      max_bytes = ceiling > staging ? ceiling - staging : 0;
       ram = std::min(ram, max_bytes);
       if (automatic_ram)
         ram = std::min(ram, automatic);
@@ -866,13 +856,30 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       }
     }
     if (!entry) {
-      // Completed preservation first: it needs no foreground copy. Among
-      // those, a live frontier holds generated tokens no checkpoint covers,
-      // such as the tool call the next turn replays, so take a slot without
-      // one, then the least recently used.
-      const auto rank = [](const Impl::Entry& e) {
-        return std::tuple{!e.slot->PreservationComplete(), bool(e.live),
-                          e.used};
+      // A frontier far beyond every checkpoint of its prompt is the only
+      // copy of that work, as for a conversation larger than the RAM budget
+      // whose captures are refused: take it last. Then completed
+      // preservation first: it needs no foreground copy. Among those, a live
+      // frontier holds generated tokens no checkpoint covers, such as the
+      // tool call the next turn replays, so take a slot without one, then
+      // the least recently used.
+      constexpr std::size_t kUncoveredTokens = 4096;
+      const auto uncovered = [&](const Impl::Entry& e) {
+        if (!e.live || e.live_tokens.size() <= kUncoveredTokens)
+          return false;
+        const auto covering = impl_->index.Lookup(
+            {impl_->identity, e.live_tokens,
+             cache::InputIdentity(e.live_tokens.size(), e.live_input)});
+        std::size_t deepest = 0;
+        for (const auto& candidate : covering.candidates)
+          if (!candidate.live)
+            deepest =
+                std::max(deepest, static_cast<std::size_t>(candidate.boundary));
+        return e.live_tokens.size() - deepest > kUncoveredTokens;
+      };
+      const auto rank = [&](const Impl::Entry& e) {
+        return std::tuple{uncovered(e), !e.slot->PreservationComplete(),
+                          bool(e.live), e.used};
       };
       for (auto& candidate : impl_->entries)
         if (!candidate->busy && (!entry || rank(*candidate) < rank(*entry)))
@@ -889,6 +896,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     if (entry->live) {
       impl_->index.Erase(*entry->live);
       entry->live.reset();
+      entry->live_tokens.clear();
     }
   }
   std::unique_ptr<Lease> lease;
@@ -1123,6 +1131,31 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     }
     throw;
   }
+}
+
+bool ComponentTextCache::PublicationPending(
+    std::span<const ContinuationToken> prompt,
+    const TextPromptContext* context) const {
+  // A disk job still writing a much deeper prefix of this prompt usually
+  // finishes sooner than prefilling the difference again (#562, step E2):
+  // a conversation larger than the RAM budget has no RAM copy.
+  constexpr std::size_t kWaitGainTokens = 4096;
+  if (!impl_->queue)
+    return false;
+  const auto input = Inputs(prompt.size(), context);
+  const std::lock_guard lock(impl_->mutex);
+  const auto found =
+      impl_->index.Lookup({impl_->identity, prompt, input, 0, true});
+  const std::size_t best = found.selected ? found.selected->boundary : 0;
+  return std::ranges::any_of(impl_->pending_durable, [&](const auto& capture) {
+    if (!capture)
+      return false;
+    const auto& tokens = capture->manifest.tokens;
+    return tokens.size() > best + kWaitGainTokens &&
+           tokens.size() <= prompt.size() &&
+           capture->manifest.input == At(input, tokens.size()) &&
+           std::equal(tokens.begin(), tokens.end(), prompt.begin());
+  });
 }
 
 std::size_t ComponentTextCache::CachedPrefixTokens(
@@ -1409,6 +1442,8 @@ std::size_t ComponentTextCache::Lease::Commit(
   impl_->slot.Commit();
   {
     const std::lock_guard lock(impl_->cache->mutex);
+    impl_->entry->live_tokens = live;
+    impl_->entry->live_input = At(impl_->input, impl_->prompt.size());
     impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
         location, std::move(live), impl_->cache->identity,
         At(impl_->input, impl_->prompt.size()), std::move(positions)});

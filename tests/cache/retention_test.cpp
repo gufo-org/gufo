@@ -367,6 +367,41 @@ void PersistingCheckpointIsNotAVictim() {
   pins.clear();
   assert(f.Reclaim() == written);
 }
+void RetryCopyReplacesItsNearbySource() {
+  // An unchanged retry restored from its stable boundary may replace that
+  // boundary with the full-prompt copy (state-edges), never another
+  // conversation's checkpoint, and not when the gap exceeds the framing.
+  PressureFixture f;
+  const auto other = f.Add(Conversation(1, 16));
+  const auto stable = Conversation(2, 7);
+  const auto source = f.Add(stable);
+  auto retry = stable;
+  retry.push_back(5);
+  RetentionRequest request{retry, {1}, {}, RetentionPurpose::kRetry, 7};
+  request.source = source;
+  assert(f.policy.Reclaim(request));
+  assert(f.log.events.back().checkpoint == source);
+  assert(!f.policy.Reclaim(request));
+  auto far = Conversation(1, 16);
+  far.resize(16 + 65, 3);
+  RetentionRequest distant{far, {1}, {}, RetentionPurpose::kRetry, 16};
+  distant.source = other;
+  assert(!f.policy.Reclaim(distant));
+}
+void SharedShortPrefixIsNotCheap() {
+  // A new conversation sharing a short system/tools prefix must not evict
+  // that prefix to admit itself (tool-agent peers).
+  PressureFixture f;
+  const auto idle = f.Add(Conversation(1, 16));
+  const auto prefix = Conversation(2, 7);
+  const auto shared = f.Add(prefix);
+  auto incoming = prefix;
+  incoming.insert(incoming.end(), {4, 4, 4});
+  assert(f.policy.Reclaim({incoming, {1}, {}}));
+  assert(f.log.events.back().checkpoint == idle);
+  assert(f.Cached(incoming) == 7);
+  (void)shared;
+}
 void UnreusedConversationKeepsItsStem() {
   // Compaction keeps a stale conversation's system prompt (cache-pressure
   // compacted): its leaf goes before its shallow history boundary. Once a
@@ -798,6 +833,8 @@ int main() {
   CheapCheckpointsGiveWayFirst();
   ReusedCheapCheckpointKeepsRecency();
   PersistingCheckpointIsNotAVictim();
+  RetryCopyReplacesItsNearbySource();
+  SharedShortPrefixIsNotCheap();
   UnreusedConversationKeepsItsStem();
   ForkedParentOutlivesItsChildren();
   ReuseProtectionLastsOneTurnover();

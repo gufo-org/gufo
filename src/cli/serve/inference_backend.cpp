@@ -36,6 +36,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/core/hip/committed_backing.hpp"
+#include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
@@ -2534,7 +2535,14 @@ public:
                     now - limited->refused < std::chrono::seconds(1))
                   return false;
                 const auto ceiling = HostSnapshotCeilingBytes();
-                if (ceiling >= bytes) {
+                // Pinned host pages come out of the same device heap that
+                // session and scratch allocations draw on; keep its dispatch
+                // reserve so they do not fall back to managed memory.
+                std::size_t heap_free = 0, heap_total = 0;
+                const bool heap_fits =
+                    hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
+                    hip::HeapFitsAboveReserve(heap_free, bytes);
+                if (ceiling >= bytes && heap_fits) {
                   limited->active = false;
                   return true;
                 }
@@ -2542,10 +2550,13 @@ public:
                   Logger::Warn(
                       "cache",
                       "schema=component-cache-v1 "
-                      "event=backing_limited reason=host_reserve "
-                      "segment_bytes=" +
-                          std::to_string(bytes) +
-                          " host_headroom_bytes=" + std::to_string(ceiling));
+                      "event=backing_limited reason=" +
+                          std::string(heap_fits ? "host_reserve "
+                                                : "device_heap_reserve ") +
+                          "segment_bytes=" + std::to_string(bytes) +
+                          " host_headroom_bytes=" + std::to_string(ceiling) +
+                          " device_heap_free_bytes=" +
+                          std::to_string(heap_free));
                 limited->active = true;
                 limited->refused = now;
                 return false;
@@ -2646,6 +2657,7 @@ public:
                 .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
+                .partial_prefill_retention = true,
             },
         .persistence = persistence_,
     };

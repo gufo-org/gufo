@@ -29,7 +29,10 @@ From `src/cli/serve/serve.cpp` and `docs/SERVER.md`:
 2. **`--cache-disk-staging-bytes` keeps its name; its meaning narrows.** It
    bounds the transfer buffer only and no longer limits checkpoint size. Card 12
    selects a 1 MiB default from target-disk piece measurements; it is a
-   transfer-piece budget, independent of checkpoint size.
+   transfer-piece budget, independent of checkpoint size. (Revised for #573:
+   Flash-Next now ignores the option and always uses 1 MiB. Its size made no
+   measured difference, and carried-over 4–6 GiB values starved hosts in #562.
+   The legacy store of the other models still reads it.)
 3. **`--cache-disk-bytes` keeps its meaning.** Referenced, temporary and orphan
    bytes all count against it.
 4. **`--cache-disk DIR` becomes single-process.** A second process gets a clear
@@ -195,6 +198,12 @@ at startup" and the rejected alternative above, for these measured reasons:
   outruns that thread. Before, steps 14 and 15 of a #573 run took 945 ms and
   1,752 ms on the capturing thread and delayed peers through
   `shared_prefix_wait_ms`.
+- Pinned host pages count against the device heap: 8 GiB of `hipHostMalloc`
+  lowered `hipMemGetInfo` free memory by 8.00 GiB, exactly as `hipMalloc`
+  did. Growth therefore also stops while a segment would leave the heap less
+  than #460's 4 GiB dispatch reserve (`reason=device_heap_reserve`), so it
+  cannot push later session and scratch allocations onto managed memory on a
+  host with the default half-RAM `ttm.pages_limit`.
 - Growth stops early while the host would keep less than 4 GiB available
   (`event=backing_limited`). A capture that finds no room in a growing pool
   reads the ledger's free backing first, and skips a scan of every committed

@@ -214,7 +214,14 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
   // A short prompt is cheap to prefill again. Once reused it competes by
   // recency with unreused conversations instead: evicting the checkpoint a
   // retry restored one request ago turns its next turn into a full miss.
-  const bool cheap = rows * 8 < state;
+  // A shared system/tools prefix of the incoming prompt is also not cheap:
+  // removing it to admit the new conversation leaves the next one with no
+  // checkpoint at the prefix they share (tool-agent peers).
+  const bool shared_prefix = e.checkpoint->Compatibility() == r.compatibility &&
+                             e.checkpoint->Input() == r.input &&
+                             e.checkpoint->Boundary() < r.tokens.size() &&
+                             Prefix(e.checkpoint->Tokens(), r.tokens);
+  const bool cheap = rows * 8 < state && !shared_prefix;
   if (cheap && !fresh(e))
     return {1, e.last_used, 0, 0};
   bool rooted = false, reused = fresh(e);
@@ -279,6 +286,20 @@ bool RetentionPolicy::Persisting(std::size_t i) const {
 std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
                                     bool record_pressure) const {
   const auto source = Find(r.source);
+  // An unchanged retry's full-prompt copy may replace the checkpoint it was
+  // restored from when only the assistant framing separates them: the copy
+  // covers every prompt the source did except an edit inside those few
+  // tokens, and no other conversation loses a checkpoint.
+  constexpr Rows kRetryFraming = 64;
+  const bool replaces_source =
+      !record_pressure && r.purpose == RetentionPurpose::kRetry &&
+      source != limit_ && !Persisting(source) &&
+      records_[source].checkpoint->Compatibility() == r.compatibility &&
+      records_[source].checkpoint->Input() == r.input &&
+      records_[source].checkpoint->Boundary() < r.tokens.size() &&
+      r.tokens.size() - records_[source].checkpoint->Boundary() <=
+          kRetryFraming &&
+      Prefix(records_[source].checkpoint->Tokens(), r.tokens);
   const auto eligible = [&](std::size_t i) {
     // Byte admission for an edit boundary must not starve behind last copies
     // of older families. Record-pressure guards and retry admission retain
@@ -333,6 +354,8 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
       target = i;
     }
   }
+  if (target == limit_ && replaces_source)
+    return source;
   // preserve_source protects byte admission while capture is incomplete. At
   // full-record publication, advance a redundant source before another
   // family's last copy regardless of that flag (ContinuationCache::Commit).

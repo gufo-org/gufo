@@ -95,6 +95,11 @@ public:
       std::span<const ContinuationToken>,
       const ContinuationCache::CancellationCheck&,
       std::shared_ptr<const TextPromptContext>, bool, std::size_t, bool);
+  // A disk job is writing a prefix of the prompt much deeper than any
+  // restorable boundary; admission may wait for it instead of prefilling.
+  [[nodiscard]] bool PublicationPending(
+      std::span<const ContinuationToken> prompt,
+      const TextPromptContext* context) const;
   [[nodiscard]] std::size_t CachedPrefixTokens(
       std::span<const ContinuationToken>, const TextPromptContext*,
       bool common = false) const;
