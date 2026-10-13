@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -213,6 +214,50 @@ Experts MakeQ8_0(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
+/// Random IQ3_S blocks (110 bytes: d, codebook indices, high bits, signs,
+/// scales); every byte pattern is valid, values come from the CPU reference.
+Experts MakeIQ3S(std::size_t e, std::size_t m, std::size_t k,
+                 std::uint32_t seed) {
+  Experts w;
+  const std::size_t blocks = e * m * (k / 256);
+  w.packed.resize(blocks * 110);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    std::uint8_t* blk = w.packed.data() + b * 110;
+    const __half d = __float2half(Uniform(&seed, 0.002F) + 0.003F);
+    std::memcpy(blk, &d, 2);
+    for (int i = 2; i < 110; ++i) {
+      blk[i] = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFF);
+    }
+    gufo::quant::DequantizeIQ3_S(blk, w.values.data() + b * 256, 256);
+  }
+  return w;
+}
+
+/// Random IQ4_NL blocks: d and 32 four-bit codebook codes.
+Experts MakeIQ4Nl(std::size_t e, std::size_t m, std::size_t k,
+                  std::uint32_t seed) {
+  static constexpr int kValues[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                      1,    13,   25,  38,  53,  69,  89,  113};
+  Experts w;
+  const std::size_t blocks = e * m * (k / 32);
+  w.packed.resize(blocks * 18);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    std::uint8_t* blk = w.packed.data() + b * 18;
+    const __half d = __float2half(Uniform(&seed, 0.002F) + 0.003F);
+    std::memcpy(blk, &d, 2);
+    const float df = __half2float(d);
+    for (int j = 0; j < 16; ++j) {
+      blk[2 + j] = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFF);
+      w.values[b * 32 + j] = df * static_cast<float>(kValues[blk[2 + j] & 0xF]);
+      w.values[b * 32 + j + 16] =
+          df * static_cast<float>(kValues[blk[2 + j] >> 4]);
+    }
+  }
+  return w;
+}
+
 /// Random IQ4_XS blocks: d, split 6-bit sub-block scales, 4-bit codebook codes.
 Experts MakeIQ4Xs(std::size_t e, std::size_t m, std::size_t k,
                   std::uint32_t seed) {
@@ -269,12 +314,15 @@ struct Result {
 /// its activation quantization).
 Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
            std::size_t experts, std::size_t m, std::size_t k,
-           std::uint32_t seed, std::uint32_t tile_rows = 48) {
+           std::uint32_t seed, std::uint32_t tile_rows = 48,
+           float input_scale = 2.0F) {
   const Experts w =
       type == q::WeightType::kQ4_K     ? MakeQ4K(experts, m, k, seed)
       : type == q::WeightType::kQ5_K   ? MakeQ5K(experts, m, k, seed)
       : type == q::WeightType::kQ5_1   ? MakeQ5_1(experts, m, k, seed)
       : type == q::WeightType::kIQ4_XS ? MakeIQ4Xs(experts, m, k, seed)
+      : type == q::WeightType::kIQ3_S  ? MakeIQ3S(experts, m, k, seed)
+      : type == q::WeightType::kIQ4_NL ? MakeIQ4Nl(experts, m, k, seed)
                                        : MakeQ8_0(experts, m, k, seed);
   const std::size_t slots = n_tokens * used;
   // Skewed top-k without replacement: the low experts see most rows.
@@ -294,7 +342,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   }
   std::vector<float> x(n_tokens * k);
   for (float& v : x) {
-    v = Uniform(&state, 2.0F);
+    v = Uniform(&state, input_scale);
   }
   std::vector<std::uint32_t> counts(experts, 0);
   for (std::int32_t e : ids) {
@@ -322,6 +370,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                        : type == q::WeightType::kQ5_K   ? qfn_mmq_q5_K_moe_raw
                        : type == q::WeightType::kQ5_1   ? qfn_mmq_q5_1_moe_raw
                        : type == q::WeightType::kIQ4_XS ? qfn_mmq_iq4_xs_moe_raw
+                       : type == q::WeightType::kIQ3_S  ? qfn_mmq_iq3_s_moe_raw
+                       : type == q::WeightType::kIQ4_NL ? qfn_mmq_iq4_nl_moe_raw
                                                         : qfn_mmq_q8_0_moe_raw;
   const int rc =
       mmq_raw(d_w, d_x, d_ids, d_mmq, static_cast<int>(m), static_cast<int>(k),
@@ -370,7 +420,12 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
     }
   }
-  __half* d_x_half = Upload(x_half);
+  __half* d_x_half = nullptr;
+  CheckHip(hipMalloc(&d_x_half, x_half.size() * sizeof(__half)),
+           "exact F16 input allocation");
+  CheckHip(hipMemcpy(d_x_half, x_half.data(), x_half.size() * sizeof(__half),
+                     hipMemcpyHostToDevice),
+           "F16 input upload");
   std::int32_t* d_tiles = Upload(tiles);
   float* d_f16 = Upload(zero_out);
   if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_tiles,
@@ -445,7 +500,14 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       }
     }
     auto* d_up = Upload(up);
-    auto* d_pair = Upload(std::vector<__half>(slots * m, __float2half(0.0F)));
+    __half* d_pair = nullptr;
+    CheckHip(hipMalloc(&d_pair, (slots * m + kHalfGuard) * sizeof(__half)),
+             "paired output allocation");
+    const std::vector<__half> pair_initial(slots * m + kHalfGuard, half_guard);
+    CheckHip(
+        hipMemcpy(d_pair, pair_initial.data(),
+                  pair_initial.size() * sizeof(__half), hipMemcpyHostToDevice),
+        "paired output upload");
     if (!q::RoutedF16Gemm(d_up, type, d_x_half, d_tiles,
                           static_cast<std::uint32_t>(tiles.size()), tile_rows,
                           d_bounds, d_rows_token, d_rows_slot, d_f16, nullptr,
@@ -453,7 +515,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       throw std::runtime_error("separate routed SwiGLU launch failed");
     }
     const auto separate = Download(d_f16_half, slots * m);
-    for (std::uint32_t pair_rows : {64U, 128U}) {
+    {
+      constexpr std::uint32_t pair_rows = 128;
       std::vector<std::int32_t> gate_tiles;
       for (std::size_t e = 0; e < experts; ++e) {
         for (std::uint32_t j = 0; j < (counts[e] + pair_rows - 1) / pair_rows;
@@ -465,11 +528,17 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       auto launch_pair = [&] {
         if (!q::RoutedGatedF16Gemm(
                 d_w, d_up, type, d_x_half, d_gate_tiles,
-                static_cast<std::uint32_t>(gate_tiles.size()), pair_rows,
-                d_bounds, d_rows_token, d_rows_slot, d_pair, m, k, nullptr)) {
+                static_cast<std::uint32_t>(gate_tiles.size()), d_bounds,
+                d_rows_token, d_rows_slot, d_pair, m, k, nullptr)) {
           throw std::runtime_error("paired routed SwiGLU launch failed");
         }
       };
+      // The paired launch must write the whole output itself; stale results
+      // can hide an incomplete launch grid.
+      CheckHip(hipMemcpy(d_pair, pair_initial.data(),
+                         pair_initial.size() * sizeof(__half),
+                         hipMemcpyHostToDevice),
+               "paired output reset");
       launch_pair();
       const auto paired = Download(d_pair, slots * m);
       for (std::size_t i = 0; i < paired.size(); ++i) {
@@ -483,6 +552,10 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
               std::to_string(a) + " vs " + std::to_string(b));
         }
       }
+      const auto guard = Download(d_pair + slots * m, kHalfGuard);
+      if (std::memcmp(guard.data(), pair_initial.data() + slots * m,
+                      kHalfGuard * sizeof(__half)) != 0)
+        throw std::runtime_error("paired output overwrote its guard");
       launch_pair();
       const auto replay = Download(d_pair, slots * m);
       if (std::memcmp(paired.data(), replay.data(),
@@ -521,6 +594,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                 : type == q::WeightType::kQ5_K   ? "Q5_K"
                 : type == q::WeightType::kQ5_1   ? "Q5_1"
                 : type == q::WeightType::kIQ4_XS ? "IQ4_XS"
+                : type == q::WeightType::kIQ3_S  ? "IQ3_S"
+                : type == q::WeightType::kIQ4_NL ? "IQ4_NL"
                                                  : "Q8_0")
             << " routed n=" << n_tokens << " used=" << used << " E=" << experts
             << " m=" << m << " k=" << k << ": worst |F16 - MMQ| " << r.vs_mmq
@@ -804,8 +879,27 @@ int main() {
                 16)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ4_XS, 40, 4, 8, 201, 512, 0x1B4C0003U)) && ok;
+    // IQ3_S gate/up view: 48-, 16- and 128-row tiles.
+    for (std::uint32_t rows : {48U, 16U, 128U}) {
+      ok = Ok(Run(q::WeightType::kIQ3_S, 300, 10, 64, 640, 2560,
+                  0x33530000U + rows, rows)) &&
+           ok;
+    }
+    // IQ4_NL down view: 48-, 16-, 64- and 128-row tiles.
+    for (std::uint32_t rows : {48U, 16U, 64U, 128U}) {
+      ok = Ok(Run(q::WeightType::kIQ4_NL, 300, 1, 64, 2560, 640,
+                  0x4E4C0000U + rows, rows)) &&
+           ok;
+    }
     // Ragged rows against the 128-row tile and a tiny batch.
     ok = Ok(Run(q::WeightType::kQ4_K, 40, 4, 8, 201, 512, 0xDEADBEEFU)) && ok;
+    // Paired waves must retain unsaturated SiLU arithmetic and protect the
+    // last odd output row in short and partial token groups.
+    for (auto type : {q::WeightType::kQ4_K, q::WeightType::kQ5_K}) {
+      for (std::size_t rows : {1U, 8U, 9U, 32U, 33U, 65U, 129U}) {
+        ok = Ok(Run(type, rows, 1, 1, 65, 256, 0x5A1711U, 48, 0.002F)) && ok;
+      }
+    }
     // The 16-row tile (small buckets) on every type.
     ok = Ok(Run(q::WeightType::kQ4_K, 300, 10, 64, 640, 2560, 0x16161616U,
                 16)) &&

@@ -115,17 +115,22 @@ bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
 /// mixer's projection and epilogue consume on the F16 mixer input route.
 /// A non-null `xn_q8` also receives the norm quantized into the tiled Q8
 /// layout (`Q8TiledBytes(n_tokens, streams * hidden)`) for the W8A8 down
-/// projection; hidden must be a multiple of 32.
-void HcCombineF16(void* res, const float* block_out, const float* inject,
+/// projection; hidden must be a multiple of 32. A non-null `defer_w`
+/// ([tokens][streams]) defers the residual update: res is left unchanged,
+/// the stream weights land in defer_w, and true is returned. The update is
+/// then owed by HcCombineMoeF16 (prior_out, prior_w) or HcApplyDeferred.
+/// A deferring combine given `inject_w` also writes the next mixer's
+/// inject partials to `inject_out` (see HcCombineMoeF16).
+bool HcCombineF16(float* res, const float* block_out, const float* inject,
                   std::uint32_t inject_parts, const float* gamma, __half* xn,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
                   std::uint32_t streams, float eps, hipStream_t stream,
-                  bool res_half = false);
-/// Residual rows between F32 and F16 storage (count = elements, a multiple of
-/// four). The F16 form is used by large wide-prefill chunks; stores saturate.
-void ResidualToHalf(const float* src, __half* dst, std::size_t count,
-                    hipStream_t stream);
-void ResidualToFloat(const __half* src, float* dst, std::size_t count,
+                  float* defer_w = nullptr, float* inject_out = nullptr,
+                  const float* inject_w = nullptr);
+/// Applies the residual update a deferring HcCombineF16 left out (four
+/// streams), with the same arithmetic.
+void HcApplyDeferred(float* res, const float* block_out, const float* w,
+                     std::uint32_t n_tokens, std::uint32_t hidden,
                      hipStream_t stream);
 /// HcCombineF16 with the MoE epilogue fused in: the block output is
 /// MoeEpilogueVec4F16's result over `expert_out` ([tokens][used][hidden]
@@ -133,15 +138,19 @@ void ResidualToFloat(const __half* src, float* dst, std::size_t count,
 /// registers and never written. Returns false (launching nothing) for a
 /// geometry the fused kernel does not cover (four 2,560-wide streams).
 /// A null gamma updates only the residual; otherwise xn_q8 is required.
-/// res is F16 when res_half is set, otherwise F32.
-bool HcCombineMoeF16(void* res, const __half* expert_out, const float* weights,
-                     const float* shared_out, const float* gate,
-                     std::uint32_t gate_stride, std::uint32_t used,
-                     const float* inject, std::uint32_t inject_parts,
-                     const float* gamma, __half* xn, void* xn_q8,
-                     std::uint32_t n_tokens, std::uint32_t hidden,
-                     std::uint32_t streams, float eps, hipStream_t stream,
-                     bool res_half = false);
+/// A non-null `prior_out` first applies a deferred HcCombineF16 update
+/// (its block output and `prior_w` stream weights). A non-null `inject_w`
+/// (with gamma and `prior_out`) also writes the next mixer's inject partials
+/// to `inject_out`, as HcMixF16Gemm would from the F16 norm; they may
+/// replace this combine's own `inject` logits.
+bool HcCombineMoeF16(
+    float* res, const __half* expert_out, const float* weights,
+    const float* shared_out, const float* gate, std::uint32_t gate_stride,
+    std::uint32_t used, const float* inject, std::uint32_t inject_parts,
+    const float* gamma, __half* xn, void* xn_q8, std::uint32_t n_tokens,
+    std::uint32_t hidden, std::uint32_t streams, float eps, hipStream_t stream,
+    const float* prior_out = nullptr, const float* prior_w = nullptr,
+    float* inject_out = nullptr, const float* inject_w = nullptr);
 
 /// x[i] = silu(x[i] * scale), in place over `count` floats.
 void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream);
@@ -185,6 +194,11 @@ void NarrowActivations(const float* x, void* out, bool bf16, std::size_t count,
                        const char* layer, const char* tensor,
                        std::size_t tokens, std::size_t width,
                        hipStream_t stream);
+/// Unchecked form for callers that own the destination's capacity.
+inline void NarrowActivations(const float* x, void* out, bool bf16,
+                              std::size_t count, hipStream_t stream) {
+  NarrowActivations(x, out, bf16, count, count, "", "", "", 0, 0, stream);
+}
 
 /// W8A8 route for wide batches over Q8_0 weights: activations quantized per
 /// 32-wide block into the tiled fragment layout (`Q8TiledBytes(batch, k)`
@@ -377,12 +391,11 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
 /// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
-/// routing layout as RoutedF16Gemm, with 64 or 128 token rows per tile. The two
+/// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two
 /// projections share one launch and never materialize the gate output.
 bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const __half* x, const std::int32_t* tiles,
-                        std::uint32_t n_tiles, std::uint32_t tile_rows,
-                        const std::int32_t* pad_bounds,
+                        std::uint32_t n_tiles, const std::int32_t* pad_bounds,
                         const std::int32_t* rows_in,
                         const std::int32_t* rows_out, __half* out,
                         std::size_t m, std::size_t k, hipStream_t stream);
