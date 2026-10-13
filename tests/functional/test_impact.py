@@ -89,6 +89,15 @@ class ImpactTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             impact.plan(self.manifest, [], ["typo"])
 
+    def test_profile_filter_keeps_one_mode(self):
+        paths = ["src/models/qwen38_flash_next/engine.cpp"]
+        plan = impact.plan(self.manifest, paths, ["flash-next-q4/mtp"])
+        self.assertTrue(plan["groups"])
+        self.assertEqual({group["profile"] for group in plan["groups"]}, {"flash-next-q4/mtp"})
+        self.assertIn("flash-next-q4/off", {row["profile"] for row in plan["out_of_scope"]})
+        with self.assertRaises(ValueError):
+            impact.plan(self.manifest, paths, ["flash-next-q4/typo"])
+
     def test_executor_retains_failed_groups_and_runs_both_modes(self):
         plan = impact.plan(self.manifest, ["src/models/qwen38_flash_next/engine.cpp"], ["flash-next-q4"])
         with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {}, clear=True):
@@ -107,6 +116,31 @@ class ImpactTest(unittest.TestCase):
                 self.assertIn("--mtp-model", args)
                 self.assertIn("--mmproj", args)
                 self.assertIn("--record-baseline", args)
+
+    def test_executor_reports_failure_detail_and_removes_disk_caches(self):
+        plan = impact.plan(self.manifest, ["src/models/qwen38_flash_next/engine.cpp"], ["flash-next-q4"])
+
+        def fake_run(args, stdout, stderr):
+            group = Path(args[args.index("--output") + 1])
+            (group / "disk").mkdir(parents=True)
+            (group / "disk" / "segment").write_bytes(b"x")
+            (group / "report.json").write_text(json.dumps({"error": "server exited 1"}))
+            (group / "server.log").write_text("Failed to open GGUF\n")
+            (group / "stops.json").write_text(json.dumps(
+                {"suites": {"stops": {"status": "failed", "error": "sync close"}}}))
+            stdout.write("baseline failed\n")
+            return subprocess.CompletedProcess(args, 1)
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {}, clear=True):
+            output = Path(directory) / "results"
+            with patch("cluster.subprocess.run", side_effect=fake_run):
+                self.assertEqual(cluster.execute(plan, Path("/binary"), Path("/weights"), output), 1)
+            self.assertEqual(list(output.rglob("disk")), [])
+            row = json.loads((output / "summary.json").read_text())["groups"][0]
+            self.assertEqual(row["error"], "server exited 1")
+            self.assertEqual(row["failures"], {"stops": "sync close"})
+            self.assertIn("baseline failed", row["log_tail"])
+            self.assertNotIn("Failed to open GGUF", row["log_tail"])
 
 
 if __name__ == "__main__":

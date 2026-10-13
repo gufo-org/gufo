@@ -62,9 +62,10 @@ def changed_paths(repo, base, head):
 
 def plan(manifest, paths, models=None):
     selected, deferred, excluded, obligations, resolutions = {}, {}, {}, [], []
+    # Entries name a model (all its modes) or one profile such as flash-next-q4/mtp.
     model_filter = set(models) if models else None
     known_models = {row["model"] for row in manifest["profiles"].values()}
-    if model_filter is not None and not model_filter <= known_models:
+    if model_filter is not None and not model_filter <= known_models | set(manifest["profiles"]):
         raise ValueError("Unknown model filter")
     for path in sorted(set(paths)):
         parts = PurePosixPath(path).parts
@@ -83,7 +84,8 @@ def plan(manifest, paths, models=None):
                                for check in rule["obligations"])
             for profile in rule["profiles"]:
                 info = manifest["profiles"][profile]
-                in_scope = model_filter is None or info["model"] in model_filter
+                in_scope = (model_filter is None or info["model"] in model_filter
+                            or profile in model_filter)
                 for name, suite in manifest["suites"].items():
                     if profile not in suite.get("profiles", manifest["profiles"]):
                         continue
@@ -124,7 +126,8 @@ def main():
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--base")
     parser.add_argument("--head")
-    parser.add_argument("--model", action="append")
+    parser.add_argument("--model", action="append",
+                        help="Model or model/mode profile to plan; repeatable")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:

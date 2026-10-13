@@ -19,8 +19,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Validate functional suite selection (CPU only)
-        run: python3 -m unittest discover -s tests/functional -p test_impact.py
+      - name: Validate functional suite selection and reporting (CPU only)
+        run: |
+          python3 -m unittest discover -s tests/functional -p test_impact.py
+          python3 -m unittest discover -s tests/functional -p test_report.py
 
       - name: Compute CMake compiler cache key
         id: ccache-key
