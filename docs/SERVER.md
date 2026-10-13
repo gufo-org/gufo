@@ -190,9 +190,12 @@ The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
 Qwen3.8-Flash-Next pins pages for up to about 89% of its budget as captures
 need them, about 1 GiB at a time, and keeps them; the rest covers cache metadata as
-it grows. A step takes about 60 ms while the host has free pages and longer when
-the kernel must reclaim page cache. Growth stops early while the host would keep
-less than 4 GiB available. The pages hold checkpoint state and KV rows, partial
+it grows. The first step runs at startup and later ones on a background thread
+ahead of need. Each takes about 200 ms while the host has free pages and longer
+when the kernel must reclaim page cache. Segments use ordinary pages that are
+registered with HIP: `hipHostMalloc` asks for high-order pages, and compacting
+host memory for them stalled decode for seconds when most RAM belonged to the GPU.
+Growth stops early while the host would keep less than 4 GiB available. The pages hold checkpoint state and KV rows, partial
 tails and idle-session spill; there is no separate spill option.
 Other models allocate payloads only when captured. Under pressure, optional
 copies give way before another conversation's last useful checkpoint.

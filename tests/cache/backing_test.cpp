@@ -60,7 +60,7 @@ hipError_t __wrap_hipMalloc(void** p, std::size_t n) {
 hipError_t __real_hipHostRegister(void*, std::size_t, unsigned);
 hipError_t __wrap_hipHostRegister(void* p, std::size_t n, unsigned flags) {
   ++allocations;
-  return __real_hipHostRegister(p, n, flags);
+  return fail_alloc ? hipErrorOutOfMemory : __real_hipHostRegister(p, n, flags);
 }
 hipError_t __real_hipMallocManaged(void**, std::size_t, unsigned);
 hipError_t __wrap_hipMallocManaged(void** p, std::size_t n, unsigned flags) {

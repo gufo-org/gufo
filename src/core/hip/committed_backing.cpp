@@ -1,10 +1,10 @@
 #include "src/core/hip/committed_backing.hpp"
 
 #include <hip/hip_runtime.h>
+#include <sys/mman.h>
 
 #include <algorithm>
 #include <atomic>
-#include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -12,6 +12,26 @@
 
 namespace gufo::hip {
 namespace detail {
+namespace {
+// Ordinary anonymous pages, then pinned. hipHostMalloc asks the kernel for
+// high-order pages: when most host RAM belongs to the GPU, that compacts
+// memory and stalls running kernels for up to seconds per GiB. Zero-filled.
+void* CommitPages(std::size_t bytes) {
+  void* data = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+  if (data == MAP_FAILED)
+    return nullptr;
+  if (hipHostRegister(data, bytes, hipHostRegisterDefault) != hipSuccess) {
+    munmap(data, bytes);
+    return nullptr;
+  }
+  return data;
+}
+void ReleasePages(void* data, std::size_t bytes) {
+  (void)hipHostUnregister(data);
+  munmap(data, bytes);
+}
+}  // namespace
 struct BackingState {
   cache::ResourceCharge metadata;
   // Fixed capacity; entries below `committed` are published and never move.
@@ -26,6 +46,10 @@ struct BackingState {
   std::byte* Address(std::size_t index) const {
     return static_cast<std::byte*>(segments[index / segment_blocks]) +
            index % segment_blocks * block_bytes;
+  }
+  std::size_t SegmentBytes(std::size_t segment) const {
+    return std::min(segment_blocks, capacity - segment * segment_blocks) *
+           block_bytes;
   }
   std::size_t SegmentCount() const {
     const auto blocks = committed.load(std::memory_order_acquire);
@@ -53,18 +77,15 @@ struct BackingState {
       return false;
     }
     auto& data = segments[first / segment_blocks];
-    if (hipHostMalloc(&data, count * block_bytes, hipHostMallocCoherent) !=
-        hipSuccess) {
-      data = nullptr;
+    data = CommitPages(count * block_bytes);
+    if (!data)
       return false;
-    }
-    std::memset(data, 0, count * block_bytes);
     try {
       for (std::size_t i = 0; i < count; ++i)
         blocks[first + i] = reservations[i].Convert();
     } catch (const std::bad_alloc&) {
       // Free before the converted charges unwind, as at initialization.
-      (void)hipHostFree(data);
+      ReleasePages(data, count * block_bytes);
       data = nullptr;
       for (std::size_t i = 0; i < count; ++i)
         blocks[first + i] = {};
@@ -77,7 +98,7 @@ struct BackingState {
     // Physical storage is freed before its original committed charges.
     if (segments)
       for (std::size_t i = 0; i < SegmentCount(); ++i)
-        (void)hipHostFree(segments[i]);
+        ReleasePages(segments[i], SegmentBytes(i));
   }
 };
 }  // namespace detail
@@ -194,19 +215,16 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
           cache::ResourceCategory::kBackingFree, config.block_bytes));
     auto& data = state->segments[0];
     try {
-      // Explicit coherence avoids HIP_HOST_COHERENT changing this contract.
-      const auto status = hipHostMalloc(&data, count * config.block_bytes,
-                                        hipHostMallocCoherent);
-      if (status != hipSuccess)
-        throw std::runtime_error(hipGetErrorString(status));
-      std::memset(data, 0, count * config.block_bytes);
+      data = detail::CommitPages(count * config.block_bytes);
+      if (!data)
+        throw std::runtime_error("cannot commit pinned cache backing");
       for (std::size_t i = 0; i < count; ++i)
         state->blocks[i] = reservations[i].Convert();
     } catch (...) {
       // Convert may fail after pages commit. Free before pending reservations
       // or converted charges unwind, preserving physical-byte accounting.
       if (data) {
-        (void)hipHostFree(data);
+        detail::ReleasePages(data, count * config.block_bytes);
         data = nullptr;
       }
       for (std::size_t i = 0; i < count; ++i)

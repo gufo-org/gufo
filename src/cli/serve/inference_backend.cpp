@@ -2501,11 +2501,11 @@ public:
       // Pages commit as captures need them. A payload cannot span segments,
       // so the edge of each one strands space a ~140 MB private state cannot
       // use; equal segments of about 1 GiB, and at least two private states,
-      // keep that small. A step costs about 60 ms while the host has free
-      // pages (up to seconds when it must reclaim page cache) and does not
-      // stall other HIP work, so it runs ahead on a background thread; only a
-      // capture that outruns it grows on its own thread. Growth stops early
-      // when the host would keep less than its reserve.
+      // keep that small. A step costs about 200 ms of page faults and pinning
+      // (more when the host must reclaim page cache), so it runs ahead on a
+      // background thread; only a capture that outruns it grows on its own
+      // thread. Growth stops early when the host would keep less than its
+      // reserve.
       std::size_t largest = 0;
       for (const auto& [id, bytes] : backing->component_classes)
         largest = std::max(largest, bytes);
@@ -2561,6 +2561,9 @@ public:
                 limited->refused = now;
                 return false;
               }});
+      // The first capture would otherwise commit the first segment on the
+      // request path (seconds while the host reclaims page cache).
+      backing->pool->GrowAhead();
     };
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
