@@ -187,6 +187,8 @@ void SamplingConfig::Validate() const {
   if (constraint && (!constraint->grammar || !constraint->vocabulary ||
                      constraint->vocabulary->size() == 0))
     throw std::invalid_argument("sampling constraint is incomplete");
+  if (reasoning_budget && reasoning_budget->forced.empty())
+    throw std::invalid_argument("reasoning budget has no forced end");
   if (!std::isfinite(temperature) || temperature < 0.0F) {
     throw std::invalid_argument(
         "sampling temperature must be finite and nonnegative");
@@ -449,11 +451,11 @@ SamplerState::SamplerState(SamplingConfig config,
                            std::span<const TokenId> initial_history)
     : config_(config),
       history_(initial_history.begin(), initial_history.end()),
-      rng_state_(InitialRngState(config.seed)),
-      reasoning_open_(config.reasoning_budget.has_value()) {
+      rng_state_(InitialRngState(config.seed)) {
   config_.Validate();
   if (config_.constraint)
     constraint_state_ = config_.constraint->grammar->Start();
+  StartReasoning();
   TrimHistory();
   RebuildPenaltyCounts();
 }
@@ -467,8 +469,9 @@ SamplerState::SamplerState(const SamplerState& other)
       penalty_counts_(other.penalty_counts_),
       rng_state_(other.rng_state_),
       pending_sample_(other.pending_sample_),
-      reasoning_tokens_(other.reasoning_tokens_),
-      reasoning_open_(other.reasoning_open_) {}
+      reasoning_phase_(other.reasoning_phase_),
+      reasoning_remaining_(other.reasoning_remaining_),
+      reasoning_forced_(other.reasoning_forced_) {}
 
 SamplerState& SamplerState::operator=(const SamplerState& other) {
   if (this == &other) {
@@ -483,8 +486,9 @@ SamplerState& SamplerState::operator=(const SamplerState& other) {
   candidate_scratch_.clear();
   rng_state_ = other.rng_state_;
   pending_sample_ = other.pending_sample_;
-  reasoning_tokens_ = other.reasoning_tokens_;
-  reasoning_open_ = other.reasoning_open_;
+  reasoning_phase_ = other.reasoning_phase_;
+  reasoning_remaining_ = other.reasoning_remaining_;
+  reasoning_forced_ = other.reasoning_forced_;
   return *this;
 }
 
@@ -560,8 +564,7 @@ void SamplerState::ResetHistory(std::span<const TokenId> tokens) {
     constraint_state_ = config_.constraint->grammar->Start();
   constraint_mask_.reset();
   pending_sample_.reset();
-  reasoning_tokens_ = 0;
-  reasoning_open_ = config_.reasoning_budget.has_value();
+  StartReasoning();
   penalty_counts_.clear();
   history_.assign(tokens.begin(), tokens.end());
   TrimHistory();
@@ -573,20 +576,62 @@ void SamplerState::Accept(TokenId token) {
 }
 
 std::optional<TokenId> SamplerState::ForcedToken() const noexcept {
-  if (reasoning_open_ && reasoning_tokens_ >= *config_.reasoning_budget)
-    return config_.reasoning_end;
+  if (reasoning_phase_ == ReasoningPhase::kForcing)
+    return config_.reasoning_budget->forced[reasoning_forced_];
   return std::nullopt;
 }
 
-void SamplerState::Accept(std::span<const TokenId> tokens) {
-  for (const auto token : tokens) {
-    if (!reasoning_open_)
+void SamplerState::StartReasoning() {
+  reasoning_phase_ = ReasoningPhase::kOff;
+  const auto& budget = config_.reasoning_budget;
+  if (!budget)
+    return;
+  reasoning_remaining_ = budget->tokens;
+  reasoning_forced_ = 0;
+  reasoning_phase_ = budget->tokens == 0 ? ReasoningPhase::kForcing
+                                         : ReasoningPhase::kCounting;
+  for (const auto token : budget->prompt)
+    AdvanceReasoning(token);
+}
+
+// Mirrors llama.cpp common_reasoning_budget_accept: the forcing phase advances
+// one forced token per accepted token, and a spent budget waits for a token
+// that completes its UTF-8 character.
+void SamplerState::AdvanceReasoning(TokenId token) {
+  const auto& budget = *config_.reasoning_budget;
+  switch (reasoning_phase_) {
+    case ReasoningPhase::kOff:
+      return;
+    case ReasoningPhase::kForcing:
+      if (++reasoning_forced_ >= budget.forced.size())
+        reasoning_phase_ = ReasoningPhase::kOff;
+      return;
+    case ReasoningPhase::kCounting:
+    case ReasoningPhase::kWaitingUtf8:
       break;
-    if (token == config_.reasoning_end)
-      reasoning_open_ = false;
-    else
-      ++reasoning_tokens_;
   }
+  if (std::ranges::find(budget.ends, token) != budget.ends.end()) {
+    reasoning_phase_ = ReasoningPhase::kOff;
+    return;
+  }
+  const bool complete = !budget.partial_utf8 ||
+                        token >= budget.partial_utf8->size() ||
+                        !(*budget.partial_utf8)[token];
+  if (reasoning_phase_ == ReasoningPhase::kCounting &&
+      --reasoning_remaining_ != 0)
+    return;
+  if (complete) {
+    reasoning_phase_ = ReasoningPhase::kForcing;
+    reasoning_forced_ = 0;
+  } else {
+    reasoning_phase_ = ReasoningPhase::kWaitingUtf8;
+  }
+}
+
+void SamplerState::Accept(std::span<const TokenId> tokens) {
+  if (reasoning_phase_ != ReasoningPhase::kOff)
+    for (const auto token : tokens)
+      AdvanceReasoning(token);
   if (config_.constraint) {
     auto next = constraint_state_;
     for (const auto token : tokens)
@@ -663,7 +708,7 @@ SamplingDistribution SamplerState::Distribution(
     // follows the shortlist, and the target's forced distribution rejects it
     // and emits the end as its correction.
     auto unforced = *this;
-    unforced.reasoning_open_ = false;
+    unforced.reasoning_phase_ = ReasoningPhase::kOff;
     return unforced.Distribution(logits, token_ids);
   }
   if (NeedsConstraintMask()) {

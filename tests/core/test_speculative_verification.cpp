@@ -882,8 +882,11 @@ void TestGreedyReasoningBudgetForcesEndThroughVerification() {
     const TokenId current = verifier.Prime(prompt);
     std::vector<TokenId> sequence{0, current};
     gufo::sampling::SamplingConfig config;
-    config.reasoning_budget = reasoning_budget;
-    config.reasoning_end = 2;
+    auto budget = std::make_shared<gufo::sampling::ReasoningBudget>();
+    budget->tokens = reasoning_budget;
+    budget->forced = {2};
+    budget->ends = {2};
+    config.reasoning_budget = budget;
     gufo::sampling::SamplerState sampler(config);
     auto reference = sampler;
     const auto result =

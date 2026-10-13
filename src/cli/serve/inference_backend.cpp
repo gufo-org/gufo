@@ -1067,6 +1067,15 @@ public:
               tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
         });
   }
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return static_cast<std::uint32_t>(model_->GetTokenizer().GetVocabSize());
+  }
+
+  // llama.cpp's Qwen3-Coder format forces "\n</think>" and also ends
+  // reasoning at a tool call.
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"<think>", "\n</think>", {"</think>", "<tool_call>"}};
+  }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
@@ -1811,10 +1820,17 @@ public:
               model_->IsStopToken(static_cast<int>(id))};
         });
   }
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return static_cast<std::uint32_t>(model_->VocabSize());
+  }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     return DeepSeekRunnerTokens(model_->Tokenize(text));
+  }
+  [[nodiscard]] std::vector<TextRunnerToken> TokenizeControl(
+      std::string_view text) const override {
+    return DeepSeekRunnerTokens(model_->Tokenize(text, true));
   }
 
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
@@ -2769,6 +2785,15 @@ public:
               tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
         });
   }
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return static_cast<std::uint32_t>(model_->tokenizer().GetVocabSize());
+  }
+
+  // llama.cpp's Qwen3-Coder format forces "\n</think>" and also ends
+  // reasoning at a tool call.
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"<think>", "\n</think>", {"</think>", "<tool_call>"}};
+  }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
@@ -3162,7 +3187,8 @@ struct InferenceBackend::Impl {
           request_(std::move(scheduled_request)),
           tool_format_(tool_format) {
       if (initial == InitialOutputState::kReasoning)
-        reasoning_end_ = state_->scheduler->runner().Tokenize("</think>");
+        reasoning_end_ =
+            state_->scheduler->runner().TokenizeControl("</think>");
     }
 
     Result Wait(const TokenCallback& on_token,
@@ -4041,15 +4067,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
-      initial == TextGenerationBackend::InitialOutputState::kReasoning) {
-    // A single-token end of thinking can be forced by the sampler (#266).
-    const auto end = state->scheduler->runner().Tokenize("</think>");
-    if (end.size() == 1) {
-      effective_sampling.reasoning_budget = *request.reasoning.budget_tokens;
-      effective_sampling.reasoning_end =
-          static_cast<sampling::TokenId>(end.front());
-    }
-  }
+      initial == TextGenerationBackend::InitialOutputState::kReasoning)
+    effective_sampling.reasoning_budget =
+        state->scheduler->runner().BuildReasoningBudget(
+            *request.reasoning.budget_tokens, prompt->tokens);
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   auto scheduled_request = state->scheduler->Submit(
