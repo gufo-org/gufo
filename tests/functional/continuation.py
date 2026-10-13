@@ -153,7 +153,11 @@ def main():
             if "followup" in item:
                 followup = call(args.url, item["followup"]["request"])
                 followup_exact = digest(followup) == item["followup"]["sha256"]
-                if metrics(followup)["cached"] < measured["cached"] or (
+                # The follow-up shares less than the whole stored request, so
+                # bound it by its live reuse, less the same disk step.
+                followup_cached = metrics(followup)["cached"]
+                if (not followup_cached or followup_cached <=
+                        item["followup"]["cached"] - DISK_CHECKPOINT_STEP) or (
                         exact_required and not followup_exact):
                     raise RuntimeError(f"{item['case']}: disk-restored third turn differs")
                 exact = exact and followup_exact
