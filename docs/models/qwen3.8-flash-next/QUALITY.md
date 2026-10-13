@@ -105,23 +105,18 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-The October 13 focused refresh uses PR #571's kernel snapshot `a772fae6`
-atop `33a91366` against the unchanged published paired-wave implementation
-`7e9e145a` (snapshot `ab889954`), with production CMake release builds in the
-same pinned Nix environment. HTTP C1, capacity 133760, greedy, thinking off,
-ordered depths `[0, 32768]`, pp2048/tg128 after shape warm-up. AR has two
-repetitions in each of two captures plus a reverse control. Both MTP workloads
-have two captures and a fresh unchanged control after the initial mixed d32K
-outlier. Every measured prefill/decode phase uses the 5% and 3 ms gate;
-request/output hashes and all token/cache/draft counts match. Loaded AR/MTP
-modes are checked in server logs, with zero/positive actual drafts respectively.
-The card uses the last AR and MTP captures; other depths retain October 10
-values and per-row provenance. No reference refresh was run. Earlier higher
-published absolute rates are unmatched; fresh controls qualify the incremental
-gain. The earlier native d32K outlier and the first slow mixed-MTP control
-are excluded as effect-size evidence.
+The October 13 single-user refresh uses the production Nix build of PR #571
+at `0951ea2f` (binary SHA-256 prefix `61d0583912d9e2c8`) through
+`tools/bench/model-bench.py run --target gufo --table single-ar,single-mtp
+--fresh`: HTTP C1, capacity 133760, greedy, thinking off, pp2048/tg128 at
+every depth from 0 to 131072, one warmed sample per point, platform profile
+`performance`. Token and cache counts pass the driver's calibration gates.
+The single-user kernels behind it retain byte-identical logits for 718 fixed
+continuation rows after a 35,559-token prompt at batch 2048 and 4096 against
+the previous PR head ([experiments](EXPERIMENTS.md)). Multi-user, loading and memory
+tables and all reference values keep their earlier provenance.
 
-The historical full sweep follows:
+The October 10 sweep follows:
 
 Gufo refreshed October 10, 2026 using production Nix build `25cdb2a1`,
 PR #518 rebased onto main `a41e88da` with all 16 patches unchanged.
