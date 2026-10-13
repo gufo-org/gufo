@@ -4157,6 +4157,9 @@ struct Q8_0Block {
   std::int8_t qs[32];
 };
 static_assert(sizeof(Q8_0Block) == 34, "block_q8_0 must be 34 bytes");
+/// W8A8TailKernel limits: tokens past the last full tile and K width.
+constexpr std::size_t kW8A8TailMaxTokens = 16;
+constexpr std::size_t kW8A8TailMaxK = 10240;
 
 using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
@@ -4437,7 +4440,10 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
           c = WmmaI8(a1[i], b1, c);
 #pragma unroll
           for (int l = 0; l < 8; ++l) {
-            acc[i][j][l] += (dw[i][l] * dx) * static_cast<float>(c[l]);
+            // The order fast-math compiled (dw * dx) * c to, written out
+            // so W8A8TailKernel can repeat it: (dx * c), then one FMA.
+            acc[i][j][l] = __fmaf_rn(__fmul_rn(dx, static_cast<float>(c[l])),
+                                     dw[i][l], acc[i][j][l]);
           }
         }
       }
@@ -5584,13 +5590,111 @@ void QuantizeQ8Tiled(const float* x, void* out, std::size_t batch,
                      dim3(kThreads), 0, stream, x, out, batch, k);
 }
 
+/// Tokens [first, batch) of a W8A8 GEMM with W8A8BlockedWmmaGEMMKernel's
+/// arithmetic, one wave per output: lanes form the exact integer dot and
+/// dx * c of every 32-wide K block, then the K blocks' FMAs run in order
+/// through lane reads. A few tokens past the last full 128-token tile
+/// otherwise cost the tiled kernel a second wave of blocks.
+template<bool kHcDown>
+__launch_bounds__(256) __global__ void W8A8TailKernel(
+    const void* __restrict__ w, const void* __restrict__ x_blocks,
+    std::conditional_t<kHcDown, __half, float>* __restrict__ y,
+    std::size_t first, std::size_t m, std::size_t k) {
+  constexpr int kMaxSteps = kW8A8TailMaxK / 32 / 32;
+  const std::size_t row =
+      (static_cast<std::size_t>(blockIdx.x) * 8) + (threadIdx.x >> 5u);
+  const std::size_t tok = first + blockIdx.y;
+  const int lane = static_cast<int>(threadIdx.x & 31u);
+  if (row >= m) {
+    return;
+  }
+  const int num_kb = static_cast<int>(k / 32);
+  const auto* w_row = static_cast<const Q8_0Block*>(w) + (row * num_kb);
+  const std::size_t tl = tok % kQ8ActTileTokens;
+  float t[kMaxSteps];
+  float dw[kMaxSteps];
+#pragma unroll
+  for (int s = 0; s < kMaxSteps; ++s) {
+    const int kb = (s * 32) + lane;
+    t[s] = 0.0F;
+    dw[s] = 0.0F;
+    if (kb < num_kb) {
+      const Q8_0Block& blk = w_row[kb];
+      int qs[8];
+      __builtin_memcpy(qs, blk.qs, sizeof(qs));
+      const auto* tile =
+          static_cast<const std::int8_t*>(x_blocks) +
+          ((((tok / kQ8ActTileTokens) * num_kb) + kb) * kQ8ActTileBytes);
+      const auto lo = *reinterpret_cast<const int4*>(tile + (tl * 16));
+      const auto hi = *reinterpret_cast<const int4*>(tile + 256 + (tl * 16));
+      const int xs[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+      int c = 0;
+#pragma unroll
+      for (int q = 0; q < 8; ++q) {
+        c = __builtin_amdgcn_sudot4(true, qs[q], true, xs[q], c, false);
+      }
+      const float dx = *reinterpret_cast<const float*>(
+          tile + kQ8ActScaleOffset + (tl * sizeof(float)));
+      t[s] = __fmul_rn(dx, static_cast<float>(c));
+      dw[s] = __half2float(blk.d);
+    }
+  }
+  float acc = Materialize(0.0F);
+#pragma unroll
+  for (int s = 0; s < kMaxSteps; ++s) {
+#pragma unroll
+    for (int l = 0; l < 32; ++l) {
+      if ((s * 32) + l < num_kb) {
+        const float ts = __builtin_bit_cast(
+            float, __builtin_amdgcn_readlane(__builtin_bit_cast(int, t[s]), l));
+        const float ws = __builtin_bit_cast(
+            float,
+            __builtin_amdgcn_readlane(__builtin_bit_cast(int, dw[s]), l));
+        acc = __fmaf_rn(ts, ws, acc);
+      }
+    }
+  }
+  if (lane == 0) {
+    if constexpr (kHcDown) {
+      y[(tok * m) + row] = __float2half_rn(HcScaledSilu(acc));
+    } else {
+      y[(tok * m) + row] = acc;
+    }
+  }
+}
+
+/// Splits a 128-token-tiled W8A8 launch: the tail past the last full tile
+/// goes to W8A8TailKernel when it is short. Returns the tiled token count.
+std::size_t W8A8TailSplit(std::size_t batch, std::size_t k) {
+  const std::size_t tail = batch % 128;
+  return batch > 128 && tail != 0 && tail <= kW8A8TailMaxTokens &&
+                 k <= kW8A8TailMaxK
+             ? batch - tail
+             : batch;
+}
+
+template<bool kHcDown>
+void LaunchW8A8Tail(const void* w, const void* x_tiled,
+                    std::conditional_t<kHcDown, __half, float>* out,
+                    std::size_t first, std::size_t batch, std::size_t m,
+                    std::size_t k, hipStream_t stream) {
+  if (first < batch) {
+    hipLaunchKernelGGL(W8A8TailKernel<kHcDown>,
+                       dim3(static_cast<unsigned>((m + 7) / 8),
+                            static_cast<unsigned>(batch - first)),
+                       dim3(kThreads), 0, stream, w, x_tiled, out, first, m, k);
+  }
+}
+
 bool HcDownF16Gemm(const void* w, const void* x_tiled, __half* out,
                    std::uint32_t n_tokens, hipStream_t stream) {
   if (n_tokens < 96 || w == nullptr || x_tiled == nullptr || out == nullptr)
     return false;
+  const std::size_t tiled = W8A8TailSplit(n_tokens, 10240);
   hipLaunchKernelGGL((W8A8BlockedWmmaGEMMKernel<64, 128, 4, 2, 4, true>),
-                     dim3((n_tokens + 127) / 128, 5), dim3(kThreads), 0, stream,
-                     w, x_tiled, out, n_tokens, 320, 10240);
+                     dim3((tiled + 127) / 128, 5), dim3(kThreads), 0, stream, w,
+                     x_tiled, out, tiled, 320, 10240);
+  LaunchW8A8Tail<true>(w, x_tiled, out, tiled, n_tokens, 320, 10240, stream);
   return true;
 }
 
@@ -5613,17 +5717,21 @@ bool W8A8Gemm(const void* w, const void* x_tiled, float* out, std::size_t batch,
   if (m <= 512 && batch >= 96) {
     constexpr int kBN = 128;
     constexpr int kNarrowBM = 64;
-    const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
+    const std::size_t tiled = W8A8TailSplit(batch, k);
+    const dim3 grid(static_cast<unsigned int>((tiled + kBN - 1) / kBN),
                     static_cast<unsigned int>((m + kNarrowBM - 1) / kNarrowBM));
     hipLaunchKernelGGL((W8A8BlockedWmmaGEMMKernel<kNarrowBM, kBN, 4, 2, 4>),
-                       grid, dim3(kThreads), 0, stream, w, x_tiled, out, batch,
+                       grid, dim3(kThreads), 0, stream, w, x_tiled, out, tiled,
                        m, k);
+    LaunchW8A8Tail<false>(w, x_tiled, out, tiled, batch, m, k, stream);
   } else if (batch >= 96) {
     constexpr int kBN = 128;
-    const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
+    const std::size_t tiled = W8A8TailSplit(batch, k);
+    const dim3 grid(static_cast<unsigned int>((tiled + kBN - 1) / kBN),
                     static_cast<unsigned int>((m + kBM - 1) / kBM));
     hipLaunchKernelGGL((W8A8BlockedWmmaGEMMKernel<kBM, kBN, 2, 4, 2>), grid,
-                       dim3(kThreads), 0, stream, w, x_tiled, out, batch, m, k);
+                       dim3(kThreads), 0, stream, w, x_tiled, out, tiled, m, k);
+    LaunchW8A8Tail<false>(w, x_tiled, out, tiled, batch, m, k, stream);
   } else {
     constexpr int kBN = 64;
     const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
