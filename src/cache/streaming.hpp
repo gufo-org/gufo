@@ -1,6 +1,8 @@
 #ifndef GUFO_CACHE_STREAMING_HPP_
 #define GUFO_CACHE_STREAMING_HPP_
 
+#include <algorithm>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <span>
@@ -11,7 +13,19 @@
 #include "src/cache/disk.hpp"
 
 namespace gufo::cache {
+class BorrowedRows;
 inline constexpr std::size_t kDefaultDiskStagingBytes = 1ULL << 20;
+inline constexpr std::chrono::milliseconds kPersistenceYieldLimit{500};
+// Restores and observed-row captures move whole rows per staging piece; a
+// smaller staging budget can never restore a checkpoint of these components.
+[[nodiscard]] inline std::size_t MinimumStagingBytes(
+    std::span<const ComponentDescriptor> components) {
+  std::size_t bytes = 1;
+  for (const auto& d : components)
+    if (d.kind == ComponentKind::kAppendRows)
+      bytes = std::max(bytes, d.row_bytes);
+  return bytes;
+}
 struct StagingAllocation {
   std::shared_ptr<void> owner;
   std::span<std::uint8_t> bytes;
@@ -25,10 +39,11 @@ struct TransferTiming {
   std::uint64_t yield_ns{}, bytes{}, pieces{};
   std::uint64_t staging_wait_ns{}, io_lock_ns{};
 };
-// The owner and charge describe committed immutable source storage, not a live
-// execution slot. A borrowed source must have completed preservation first.
-// Copy settles via Completion on a leased stream. Its callback and owner must
-// retain all source-specific metadata; no capture occurs in the queue worker.
+// Sources retain immutable storage, assigned spill backing or discardable
+// observations. Backed borrowers wait for preservation before disk work
+// unless they read live pieces; live reads and observations pin one native
+// piece until its leased transfer completes.
+// Capture supplies private state/tails before submitting a job to the queue.
 class PersistenceSource {
 public:
   using Copy =
@@ -36,6 +51,22 @@ public:
   PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
                     std::size_t alignment, ResourceCharge,
                     std::shared_ptr<const void> owner, Copy);
+  using CopyRows = std::function<Completion(std::span<const std::byte>,
+                                            std::span<std::byte>, Stream&)>;
+  // Backed borrowed rows. Without read_live, the writer waits until slot
+  // preservation has copied them to their backing. With it, a piece still in
+  // the slot is read from there under a reader pin held through completion,
+  // so a busy or reused slot cannot hold the job (and its pins) back.
+  PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
+                    std::size_t alignment, std::shared_ptr<BorrowedRows>,
+                    CopyRows read_live = {});
+  // Discardable live rows, for histories exceeding RAM. Reads pin exactly
+  // one staging piece through completion; mutation retires unread sources.
+  // Private state/tails remain immutable committed copies. No publication
+  // completes with unread retired rows. No full-history backing is assigned.
+  PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
+                    std::size_t alignment, std::shared_ptr<BorrowedRows>,
+                    std::size_t first_byte, CopyRows);
   PersistenceSource(PersistenceSource&&) noexcept = default;
   PersistenceSource& operator=(PersistenceSource&&) = delete;
   PersistenceSource(const PersistenceSource&) = delete;
@@ -44,10 +75,14 @@ private:
   friend class StreamedStore;
   friend class PersistenceJob;
   friend class PersistenceQueue;
+  [[nodiscard]] PersistencePin Pin() const;
+  [[nodiscard]] std::size_t Capacity() const;
   ResourceCharge charge_;
   PersistencePin pin_;
   std::shared_ptr<const void> owner_;
+  std::shared_ptr<BorrowedRows> rows_;
   Copy copy_;
+  bool live_reads_{};
   bool private_file_;
   DiskFileId file_;
   std::uint64_t bytes_;
@@ -99,9 +134,11 @@ private:
   DiskManifest manifest_;
   std::vector<PersistenceSource> sources_;
   std::size_t pinned_bytes_{};
+  std::uint64_t submitted_{};
 };
 struct PersistenceQueueStats {
-  std::uint64_t accepted{}, skipped{}, coalesced{}, completed{}, failed{};
+  std::uint64_t accepted{}, skipped{}, coalesced{}, superseded{}, completed{},
+      failed{};
   std::size_t pending{}, pinned_bytes{}, peak_pending{}, peak_pinned_bytes{};
   TransferTiming timing;
 };
@@ -109,12 +146,20 @@ struct PersistenceQueueStats {
 // TrySubmit never waits for capacity. Stop cancels active/pending work and
 // joins. Callbacks must be thread-safe, nonblocking and outlive the queue.
 // Model idle is checked between pieces, without holding metadata or
-// device-source locks.
+// device-source locks. A job yields for at most yield_limit after its write
+// starts, so continuous load cannot hold its pins indefinitely.
+// Keep the first pending boundary and coalesce later pending ancestors into
+// their newest descendant. Under pressure, recent jobs
+// may replace the oldest pending non-learned job; active writes are untouched.
+// Completion reports false for superseded work, outside the queue lock.
 class PersistenceQueue {
 public:
-  PersistenceQueue(ResourceLedger&, StreamedStore&, std::size_t max_depth,
-                   std::size_t max_pinned_bytes,
-                   std::function<bool()> model_idle);
+  PersistenceQueue(
+      ResourceLedger&, StreamedStore&, std::size_t max_depth,
+      std::size_t max_pinned_bytes, std::function<bool()> model_idle,
+      std::function<void(CheckpointId, bool)> completed = {},
+      std::function<bool(const DiskManifest&)> reclaim = {},
+      std::chrono::milliseconds yield_limit = kPersistenceYieldLimit);
   ~PersistenceQueue();
   PersistenceQueue(const PersistenceQueue&) = delete;
   PersistenceQueue& operator=(const PersistenceQueue&) = delete;

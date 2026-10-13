@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -21,6 +22,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "src/cli/serve/component_text_cache.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
@@ -33,6 +35,8 @@
 #include "src/models/qwen/generator.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
+#include "src/core/hip/committed_backing.hpp"
+#include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
@@ -40,6 +44,7 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #endif
 
@@ -2358,22 +2363,13 @@ std::vector<std::int32_t> QwenFlashNextEngineTokens(
 
 class QwenFlashNextTextRunnerState final : public TextRunnerState {
 public:
-  QwenFlashNextTextRunnerState(const std::shared_ptr<QwenFlashNextModel>& model,
-                               std::uint32_t max_context, bool use_mtp) {
-    std::string error;
-    session_ =
-        model->CreateSession(use_mtp ? gufo::core::SessionMode::kSpeculative
-                                     : gufo::core::SessionMode::kAutoregressive,
-                             max_context, &error);
-    if (session_ == nullptr) {
-      throw std::runtime_error("Failed to create Qwen3.8-Flash-Next session: " +
-                               error);
-    }
-  }
+  QwenFlashNextTextRunnerState(QwenFlashNextSession& session,
+                               cache::Adapter& adapter, cache::Slot& slot)
+      : session_(&session), adapter_(&adapter), slot_(&slot) {}
 
   void Invalidate() noexcept override {
     session_->SetCancellationCheck({});
-    session_->Reset();
+    (void)adapter_->Invalidate(*slot_);
     position_ = 0;
   }
   void SetCancellationCheck(const CancellationCheck& check) override {
@@ -2386,43 +2382,20 @@ public:
   }
 
   [[nodiscard]] QwenFlashNextSession& session() const { return *session_; }
+  [[nodiscard]] models::qwen38_flash_next::ContinuationAdapter& adapter()
+      const {
+    return dynamic_cast<models::qwen38_flash_next::ContinuationAdapter&>(
+        *adapter_);
+  }
+  [[nodiscard]] cache::Slot& slot() const { return *slot_; }
   [[nodiscard]] std::size_t position() const noexcept { return position_; }
   void set_position(std::size_t position) noexcept { position_ = position; }
 
 private:
-  std::unique_ptr<QwenFlashNextSession> session_;
+  QwenFlashNextSession* session_{};
+  cache::Adapter* adapter_{};
+  cache::Slot* slot_{};
   std::size_t position_{0};
-};
-
-class QwenFlashNextTextRunnerSnapshot final : public TextRunnerSnapshot {
-public:
-  QwenFlashNextTextRunnerSnapshot(
-      std::shared_ptr<QwenFlashNextModel> model,
-      std::unique_ptr<models::qwen38_flash_next::SessionSnapshot> snapshot,
-      std::size_t position)
-      : model(std::move(model)),
-        snapshot(std::move(snapshot)),
-        position(position) {}
-
-  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
-    if (snapshot == nullptr ||
-        snapshot->SizeBytes() > static_cast<std::uint64_t>(
-                                    std::numeric_limits<std::size_t>::max())) {
-      return 0;
-    }
-    return static_cast<std::size_t>(snapshot->SizeBytes());
-  }
-
-  [[nodiscard]] bool PrefersState(
-      const ContinuationState& state) const noexcept override {
-    const auto* flash =
-        dynamic_cast<const QwenFlashNextTextRunnerState*>(&state);
-    return snapshot && flash && flash->session().OwnsSnapshot(*snapshot);
-  }
-
-  std::shared_ptr<QwenFlashNextModel> model;
-  std::unique_ptr<models::qwen38_flash_next::SessionSnapshot> snapshot;
-  std::size_t position;
 };
 
 QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
@@ -2457,6 +2430,10 @@ public:
         max_context_(max_context),
         use_mtp_(use_mtp),
         max_draft_tokens_(max_draft_tokens) {
+    // The typed in-process API owns an immutable loaded model but need not
+    // supply file fingerprints when disk caching is disabled. Its model
+    // lifetime is an exact process-local identity; durable caches still
+    // require the validated full artifact fingerprints below.
     if (!artifact_fingerprint.empty()) {
       persistence_ = TextRunnerPersistenceDescriptor{
           .compatibility_identity = QwenFlashNextCompatibilityIdentity(
@@ -2466,7 +2443,201 @@ public:
           .payload_version =
               models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
       };
+      component_identity_ = persistence_->compatibility_identity;
+    } else {
+      std::ostringstream identity;
+      identity << "schema=gufo-process-text-continuation-v1\n"
+               << "model_instance=" << model_.get() << '\n'
+               << "context_tokens=" << max_context_ << '\n'
+               << "mtp=" << use_mtp_ << '\n'
+               << "draft_max_tokens=" << max_draft_tokens_ << '\n'
+               << "draft_cost_concurrency=" << model_->DecodeConcurrency()
+               << '\n';
+      const auto canonical = identity.str();
+      component_identity_.assign(canonical.begin(), canonical.end());
     }
+  }
+
+  [[nodiscard]] bool UsesComponentCache() const override { return true; }
+  [[nodiscard]] std::unique_ptr<ComponentCacheResources>
+  CreateComponentCacheResources(cache::ResourceLedger& ledger,
+                                std::size_t ram) const override {
+    struct Backing {
+      hip::TransferPool streams{64};
+      std::unique_ptr<hip::CommittedBackingPool> pool;
+      std::map<std::uint32_t, std::size_t> component_classes;
+    };
+    auto result = std::make_unique<ComponentCacheResources>();
+    auto adapter =
+        std::make_unique<models::qwen38_flash_next::ContinuationAdapter>(
+            model_,
+            use_mtp_ ? core::SessionMode::kSpeculative
+                     : core::SessionMode::kAutoregressive,
+            max_context_, component_identity_);
+    (void)ram;  // Backing sizing follows actual slot allocation below.
+    result->adapter = std::move(adapter);
+    auto backing = std::make_shared<Backing>();
+    result->transfer_batch_size = 16;
+    const auto rounded = [](std::size_t bytes) {
+      return (bytes + 4095) / 4096 * 4096;
+    };
+    for (const auto& d : result->adapter->Components()) {
+      const auto bytes = rounded(d.kind == cache::ComponentKind::kPrivateState
+                                     ? d.state_bytes
+                                     : d.row_bytes * d.rows_per_chunk);
+      backing->component_classes.emplace(d.id.value, bytes);
+    }
+    // The remainder belongs to index, histories, disk catalog and queue
+    // metadata. The pools charge their own per-block allocator headroom.
+    result->commit_backing = [backing, &ledger,
+                              adapter =
+                                  result->adapter.get()](std::size_t budget) {
+      const auto plan =
+          static_cast<models::qwen38_flash_next::ContinuationAdapter*>(adapter)
+              ->BackingPlan(budget);
+      if (plan.size() != 1)
+        throw std::invalid_argument("insufficient component backing budget");
+      const auto& allocation = plan.front();
+      // Pages commit as captures need them. A payload cannot span segments,
+      // so the edge of each one strands space a ~140 MB private state cannot
+      // use; equal segments of about 1 GiB, and at least two private states,
+      // keep that small. A step costs about 60 ms while the host has free
+      // pages (up to seconds when it must reclaim page cache) and does not
+      // stall other HIP work, so it runs ahead on a background thread; only a
+      // capture that outruns it grows on its own thread. Growth stops early
+      // when the host would keep less than its reserve.
+      std::size_t largest = 0;
+      for (const auto& [id, bytes] : backing->component_classes)
+        largest = std::max(largest, bytes);
+      const auto block = allocation.block_bytes;
+      const auto target =
+          std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
+      const auto parts =
+          std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
+      const auto segment = (allocation.blocks + parts - 1) / parts * block;
+      struct Limited {
+        std::mutex mutex;
+        std::chrono::steady_clock::time_point refused;
+        bool active{};
+      };
+      backing->pool = std::make_unique<hip::CommittedBackingPool>(
+          ledger,
+          hip::BackingPoolConfig{
+              allocation.blocks * allocation.block_bytes +
+                  allocation.metadata_bytes,
+              allocation.block_bytes, allocation.metadata_bytes, segment,
+              [limited = std::make_shared<Limited>()](std::size_t bytes) {
+                const std::lock_guard lock(limited->mutex);
+                const auto now = std::chrono::steady_clock::now();
+                // Pressure retries ask once per capture; recheck at most
+                // once a second while the host is short.
+                if (limited->active &&
+                    now - limited->refused < std::chrono::seconds(1))
+                  return false;
+                const auto ceiling = HostSnapshotCeilingBytes();
+                // Pinned host pages come out of the same device heap that
+                // session and scratch allocations draw on; keep its dispatch
+                // reserve so they do not fall back to managed memory.
+                std::size_t heap_free = 0, heap_total = 0;
+                const bool heap_fits =
+                    hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
+                    hip::HeapFitsAboveReserve(heap_free, bytes);
+                if (ceiling >= bytes && heap_fits) {
+                  limited->active = false;
+                  return true;
+                }
+                if (!limited->active)
+                  Logger::Warn(
+                      "cache",
+                      "schema=component-cache-v1 "
+                      "event=backing_limited reason=" +
+                          std::string(heap_fits ? "host_reserve "
+                                                : "device_heap_reserve ") +
+                          "segment_bytes=" + std::to_string(bytes) +
+                          " host_headroom_bytes=" + std::to_string(ceiling) +
+                          " device_heap_free_bytes=" +
+                          std::to_string(heap_free));
+                limited->active = true;
+                limited->refused = now;
+                return false;
+              }});
+    };
+    result->owner = backing;
+    result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
+      return backing->streams.TryAcquire();
+    };
+    result->allocate = [backing](const cache::PayloadRequest& request) {
+      // Bound the logical capture, then assign whole shared backing pages.
+      const auto capacity =
+          backing->component_classes.at(request.component.value);
+      if (request.bytes > capacity)
+        throw std::logic_error("component capture exceeds its backing class");
+      const auto category =
+          request.category == cache::ResourceCategory::kBackingAssigned
+              ? cache::ResourceCategory::kBackingAssigned
+              : request.category;
+      const auto segments = backing->pool->PageCommitAllocations();
+      const auto started = std::chrono::steady_clock::now();
+      auto block = backing->pool->TryAcquire(category, request.bytes);
+      if (backing->pool->PageCommitAllocations() != segments)
+        Logger::Info(
+            "cache",
+            "schema=component-cache-v1 event=backing_grown committed_bytes=" +
+                std::to_string(backing->pool->CommittedBytes()) + " segments=" +
+                std::to_string(backing->pool->PageCommitAllocations()) +
+                " acquire_ms=" +
+                std::to_string(std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - started)
+                                   .count()));
+      if (!block)
+        throw cache::ResourceExhausted();
+      // Commit the next segment off the capturing thread, which otherwise
+      // stalls this and every peer request for the allocation (up to seconds
+      // while the host reclaims page cache).
+      backing->pool->GrowAhead();
+      auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
+      return ComponentCaptureBuffer{
+          owner->Bytes(),
+          [owner] {
+            owner->Convert();
+            return std::move(*owner).TakePayload();
+          },
+          backing->pool.get(),
+          [owner, request](cache::SlotLease& lease, auto source) {
+            return cache::Payload::Borrowed(std::move(*owner).Borrow(
+                lease, request.component, request.first, request.end,
+                request.bytes, source));
+          }};
+    };
+    result->staging = [](std::size_t bytes) {
+      void* data = nullptr;
+      const auto status = hipHostMalloc(&data, bytes, hipHostMallocCoherent);
+      if (status != hipSuccess)
+        throw std::runtime_error(hipGetErrorString(status));
+      auto owner = std::shared_ptr<void>(
+          data, [](void* value) { (void)hipHostFree(value); });
+      std::memset(data, 0, bytes);
+      return cache::StagingAllocation{
+          std::move(owner), {static_cast<std::uint8_t*>(data), bytes}};
+    };
+    result->copy_observed_rows = [](auto source, auto destination,
+                                    cache::Stream& stream) {
+      return dynamic_cast<hip::TransferStream&>(stream).Copy(
+          destination.data(), source.data(), destination.size(),
+          hip::CopyDirection::kDeviceToHost, destination.size());
+    };
+    return result;
+  }
+  [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
+      cache::Adapter& adapter, cache::Slot& slot) const override {
+    auto& flash =
+        dynamic_cast<models::qwen38_flash_next::ContinuationAdapter&>(adapter);
+    return std::make_unique<QwenFlashNextTextRunnerState>(
+        flash.GetSession(slot), adapter, slot);
+  }
+  void ReconcileComponentState(TextRunnerState& state,
+                               std::size_t position) const override {
+    RequireQwenFlashNextState(state).set_position(position);
   }
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
@@ -2487,6 +2658,7 @@ public:
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .prefill_grid_tokens = model_->PrefillCapacity(),
+                .partial_prefill_retention = true,
             },
         .persistence = persistence_,
     };
@@ -2585,8 +2757,8 @@ public:
   }
 
   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    return std::make_unique<QwenFlashNextTextRunnerState>(model_, max_context_,
-                                                          use_mtp_);
+    throw std::logic_error(
+        "Flash-Next execution slots are owned by the component cache");
   }
 
   void PreparePrefixReuse(
@@ -2659,25 +2831,37 @@ public:
   [[nodiscard]] TextPrefillStep PrefillThrough(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t budget, std::size_t boundary,
-      std::unique_ptr<TextRunnerSnapshot>* checkpoint) const override {
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
+      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& capture)
+      const override {
     auto& qfn = RequireQwenFlashNextState(state);
-    if (offset != qfn.position())
-      throw std::logic_error("in-pass checkpoint offset does not match state");
+    if (!checkpoint || !capture || offset != qfn.position())
+      throw std::logic_error("invalid component in-pass checkpoint request");
     const auto consumed = std::min<std::size_t>(
         {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
     const auto next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
-    std::unique_ptr<models::qwen38_flash_next::SessionSnapshot> captured;
-    std::string error;
     double capture_ms = 0;
-    if (!qfn.session().SyncThrough(prefix, static_cast<std::uint32_t>(boundary),
-                                   &captured, &error, &capture_ms)) {
+    try {
+      qfn.adapter().PrefillThrough(
+          qfn.slot(), prefix, static_cast<std::uint32_t>(boundary), [&] {
+            const auto started = std::chrono::steady_clock::now();
+            try {
+              *checkpoint = capture();
+            } catch (...) {
+              // Optional retention may refuse; the complete live prefill is
+              // valid.
+              checkpoint->reset();
+            }
+            capture_ms += std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - started)
+                              .count();
+          });
+    } catch (...) {
       qfn.set_position(0);
-      throw std::runtime_error("in-pass checkpoint failed: " + error);
+      throw;
     }
     qfn.set_position(next_position);
-    *checkpoint = std::make_unique<QwenFlashNextTextRunnerSnapshot>(
-        model_, std::move(captured), boundary);
     return {.consumed_tokens = consumed,
             .decode_ready = next_position == prompt.size(),
             .checkpoint_ms = capture_ms};
@@ -2881,123 +3065,13 @@ public:
     return RequireQwenFlashNextState(state).position();
   }
 
-  [[nodiscard]] std::size_t SnapshotPayloadBytes(
-      const TextRunnerState& state) const override {
-    const std::uint64_t bytes =
-        RequireQwenFlashNextState(state).session().SnapshotBytes();
-    if (bytes == 0 || bytes > static_cast<std::uint64_t>(
-                                  std::numeric_limits<std::size_t>::max())) {
-      throw std::overflow_error(
-          "Qwen3.8-Flash-Next snapshot size is unavailable");
-    }
-    return static_cast<std::size_t>(bytes);
-  }
-
-  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
-      const TextRunnerState& state) const override {
-    return CaptureSnapshot(state,
-                           QwenFlashNextSession::SnapshotMode::kBorrowed);
-  }
-
-  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> SnapshotForPersistence(
-      const TextRunnerState& state) const override {
-    return CaptureSnapshot(state,
-                           QwenFlashNextSession::SnapshotMode::kMaterialized);
-  }
-
-  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> CaptureSnapshot(
-      const TextRunnerState& state,
-      QwenFlashNextSession::SnapshotMode mode) const {
-    const auto& qfn = RequireQwenFlashNextState(state);
-    std::string error;
-    auto snapshot = qfn.session().SaveSnapshot(&error, mode);
-    if (snapshot == nullptr) {
-      throw std::runtime_error("Qwen3.8-Flash-Next snapshot failed: " + error);
-    }
-    return std::make_unique<QwenFlashNextTextRunnerSnapshot>(
-        model_, std::move(snapshot), qfn.position());
-  }
-
-  void RestoreOrFork(TextRunnerState& state,
-                     const TextRunnerSnapshot& snapshot) const override {
-    const auto* qfn_snapshot =
-        dynamic_cast<const QwenFlashNextTextRunnerSnapshot*>(&snapshot);
-    if (qfn_snapshot == nullptr || qfn_snapshot->model.get() != model_.get() ||
-        qfn_snapshot->snapshot == nullptr) {
-      throw std::invalid_argument(
-          "Qwen3.8-Flash-Next snapshot does not belong to this model");
-    }
-    auto& restored = RequireQwenFlashNextState(state);
-    std::string error;
-    if (!restored.session().RestoreSnapshot(*qfn_snapshot->snapshot, &error)) {
-      restored.Invalidate();
-      throw std::runtime_error("Qwen3.8-Flash-Next snapshot restore failed: " +
-                               error);
-    }
-    restored.set_position(qfn_snapshot->position);
-  }
-
-  [[nodiscard]] std::size_t PersistentSnapshotPayloadBytes(
-      const TextRunnerSnapshot& snapshot) const override {
-    const auto* qfn_snapshot =
-        dynamic_cast<const QwenFlashNextTextRunnerSnapshot*>(&snapshot);
-    if (qfn_snapshot == nullptr || qfn_snapshot->model.get() != model_.get() ||
-        qfn_snapshot->snapshot == nullptr) {
-      throw std::invalid_argument(
-          "Qwen3.8-Flash-Next persistent snapshot does not belong to this "
-          "model");
-    }
-    return qfn_snapshot->PayloadBytes();
-  }
-
-  [[nodiscard]] std::size_t SerializePersistentSnapshot(
-      const TextRunnerSnapshot& snapshot,
-      std::span<std::uint8_t> destination) const override {
-    const auto* qfn_snapshot =
-        dynamic_cast<const QwenFlashNextTextRunnerSnapshot*>(&snapshot);
-    if (qfn_snapshot == nullptr || qfn_snapshot->model.get() != model_.get() ||
-        qfn_snapshot->snapshot == nullptr ||
-        destination.size() != qfn_snapshot->PayloadBytes() ||
-        !qfn_snapshot->snapshot->CopyTo(destination)) {
-      throw std::invalid_argument(
-          "Qwen3.8-Flash-Next persistent snapshot serialization failed");
-    }
-    return destination.size();
-  }
-
-  void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
-                                const SnapshotSink& sink) const override {
-    (void)PersistentSnapshotPayloadBytes(snapshot);
-    sink(dynamic_cast<const QwenFlashNextTextRunnerSnapshot&>(snapshot)
-             .snapshot->bytes());
-  }
-
-  void RestorePersistentSnapshot(
-      TextRunnerState& state,
-      std::span<const std::uint8_t> payload) const override {
-    auto& restored = RequireQwenFlashNextState(state);
-    std::string error;
-    if (!restored.session().RestoreSnapshot(payload, &error)) {
-      restored.Invalidate();
-      throw std::runtime_error(
-          "Qwen3.8-Flash-Next persistent snapshot restore failed: " + error);
-    }
-    const std::uint32_t position = restored.session().Position();
-    if (position == 0 || position > max_context_) {
-      restored.Invalidate();
-      throw std::runtime_error(
-          "Qwen3.8-Flash-Next persistent snapshot restored an invalid "
-          "position");
-    }
-    restored.set_position(position);
-  }
-
 private:
   std::shared_ptr<QwenFlashNextModel> model_;
   std::uint32_t max_context_;
   bool use_mtp_;
   std::uint32_t max_draft_tokens_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
+  cache::Identity component_identity_;
 };
 #endif
 
@@ -3246,15 +3320,13 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                "Failed to create Qwen3.8-Flash-Next model: " + load_error);
       return false;
     }
-    if (DiskCacheEnabled(resolved_disk_cache_config) &&
-        resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
+    if (resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
         !FingerprintArtifact(
             "Qwen3.8-Flash-Next", *reader,
             &resolved_disk_cache_config.model_artifact_fingerprint, error)) {
       return false;
     }
-    if (DiskCacheEnabled(resolved_disk_cache_config) &&
-        speculative_config.backend == TextSpeculativeBackend::kMtp &&
+    if (speculative_config.backend == TextSpeculativeBackend::kMtp &&
         resolved_disk_cache_config.draft_model_artifact_fingerprint.empty() &&
         !FingerprintArtifactFile(
             "Qwen3.8-Flash-Next MTP", speculative_config.draft_model_path,

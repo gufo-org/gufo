@@ -3,8 +3,10 @@
 from copy import deepcopy
 import sys
 
+from cache_growth import check_unchanged_retry, log_offset
 
-def check_cache_edits(client, model, checks, chat_result):
+
+def check_cache_edits(client, model, checks, chat_result, server_log=None):
     # Start each shape with a complete synthetic history, so no earlier request
     # has already supplied a convenient checkpoint before the edit. Distinct
     # prompt heads keep the histories independent even with --sessions 1.
@@ -68,11 +70,16 @@ def check_cache_edits(client, model, checks, chat_result):
 
         initial_request = deepcopy(request)
         initial_request["extra_body"]["cache_prompt"] = False
+        before_initial = log_offset(server_log)
         cold = chat("initial", initial_request)
         total, reused, prefilled = work(cold)
         assert total >= 2048 and reused == 0 and prefilled == total, cold
+        before_warm = log_offset(server_log)
         warm = chat("unchanged", request)
-        assert work(warm) == (total, total, 0), warm
+        warm_total, _, warm_prefilled = work(warm)
+        assert warm_total == total, warm
+        check_unchanged_retry(label + "_unchanged", warm, warm_prefilled,
+                              server_log, before_initial, before_warm)
         assert signature(warm) == signature(cold), (warm, cold)
 
         edited_request = deepcopy(request)

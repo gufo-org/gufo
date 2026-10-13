@@ -52,12 +52,17 @@ public:
   [[nodiscard]] std::vector<Rows> PlanPrefill(const Slot&, Rows first,
                                               Rows end) const override;
   void SetPrefillPassRows(Rows rows);
+  [[nodiscard]] std::vector<ComponentPosition> PrefillCheckpointPositions(
+      const Slot&, Rows boundary) const override;
   void BeginRestore(Slot&, std::span<const ComponentPosition>) override;
   [[nodiscard]] Completion CapturePrivate(const Slot&, ComponentId,
                                           std::span<std::byte>,
                                           Stream&) override;
   [[nodiscard]] Completion CopyRowsOut(const Slot&, ComponentId, Rows, Rows,
                                        std::span<std::byte>, Stream&) override;
+  [[nodiscard]] std::span<const std::byte> BorrowRowsView(const Slot&,
+                                                          ComponentId, Rows,
+                                                          Rows) const override;
   [[nodiscard]] Completion CopyRowsIn(Slot&, ComponentId, Rows, Rows,
                                       std::span<const std::byte>,
                                       Stream&) override;

@@ -18,6 +18,14 @@ public:
                       std::uint32_t context, cache::Identity);
   ~ContinuationAdapter() override;
   [[nodiscard]] Session& GetSession(cache::Slot&);
+  // Capture synchronously while the coherent boundary is exposed; settle
+  // all transfers before the callback returns and the shared arena is reused.
+  void PrefillThrough(cache::Slot&, std::span<const std::int32_t>,
+                      std::uint32_t boundary, const std::function<void()>&);
+  [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
+      std::size_t ram_bytes) const {
+    return layout_.BackingPlan(ram_bytes, model_->DecodeConcurrency());
+  }
   [[nodiscard]] cache::Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
       const override;
@@ -28,6 +36,8 @@ public:
       const cache::Slot&) const override;
   [[nodiscard]] std::vector<cache::Rows> PlanPrefill(
       const cache::Slot&, cache::Rows first, cache::Rows end) const override;
+  [[nodiscard]] std::vector<cache::ComponentPosition>
+  PrefillCheckpointPositions(const cache::Slot&, cache::Rows) const override;
   void BeginRestore(cache::Slot&,
                     std::span<const cache::ComponentPosition>) override;
   [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot&,
@@ -50,6 +60,9 @@ public:
   [[nodiscard]] cache::Completion CopyRowsOut(
       const cache::Slot&, cache::ComponentId, cache::Rows first,
       cache::Rows end, std::span<std::byte>, cache::Stream&) override;
+  [[nodiscard]] std::span<const std::byte> BorrowRowsView(
+      const cache::Slot&, cache::ComponentId, cache::Rows,
+      cache::Rows) const override;
   [[nodiscard]] cache::Completion CopyRowsIn(cache::Slot&, cache::ComponentId,
                                              cache::Rows first, cache::Rows end,
                                              std::span<const std::byte>,

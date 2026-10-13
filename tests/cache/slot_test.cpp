@@ -539,6 +539,34 @@ void MissedGuard() {
 }
 }  // namespace
 int main() {
+  {
+    Fixture fixture;
+    auto rows =
+        fixture.lease.Observe(kTarget, 0, 4,
+                              fixture.adapter.BorrowRowsView(
+                                  fixture.lease.Execution(), kTarget, 0, 4));
+    assert(rows->IsValid() && !rows->HasBacking());
+    auto persistence = rows->PinPersistence();
+    assert(fixture.ledger.Snapshot().persistence_pinned_bytes == 0);
+    Throws([&] { (void)Payload::Borrowed(rows); });
+    auto pin = rows->Pin();
+    assert(pin.Bytes().size() == 4 * sizeof(Token));
+    auto mutate = std::async(std::launch::async, [&] {
+      fixture.adapter.GuardRows(fixture.lease.Execution(), kTarget, 0, 4);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (rows->IsValid() && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    assert(!rows->IsValid());
+    assert(mutate.wait_for(0ms) == std::future_status::timeout);
+    (void)rows->PinPersistence();  // Optional jobs fail at their next row read.
+    Throws([&] { (void)rows->Pin(); });
+    pin = {};
+    assert(mutate.wait_for(2s) == std::future_status::ready);
+    mutate.get();
+    assert(fixture.ledger.Snapshot().bytes[static_cast<std::size_t>(
+               ResourceCategory::kBackingFree)] == 0);
+  }
   Paths();
   Failures();
   EveryPreservationConversion();

@@ -574,9 +574,11 @@ class FunctionalRunnerTest(unittest.TestCase):
             else:
                 cached = 2995 if pinned and "drop_reasoning" in label else last - 5
             previous[label] = total
+            thinking = body["extra_body"].get("thinking", {}).get("type")
+            enabled = (thinking == "enabled" if thinking is not None else
+                       body.get("reasoning_effort", "low") != "none")
             return {"text": "BETA", "reasoning": "The code word is BETA."
-                    if body.get("reasoning_effort", "low") != "none"
-                    and not missing_reasoning else "",
+                    if enabled and not missing_reasoning else "",
                     "tools": [], "finish": "stop", "usage": {
                         "prompt_tokens": total, "cached_tokens": cached,
                         "completion_tokens": 8,

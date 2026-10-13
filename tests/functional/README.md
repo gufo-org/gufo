@@ -190,6 +190,9 @@ Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. Fo
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
 uses its own 8 GiB disk budget and 1 GiB staging area inside the output directory;
 the runner removes that disk cache when the run ends, keeping reports and logs.
+Flash-Next allocates that staging as pinned host memory at startup, beyond its
+RAM budget, although its default 1 MiB transfer buffer suffices. The runner
+keeps 1 GiB so results stay comparable with retained runs and other models.
 For timing controls on revisions predating progress, use `--allow-missing-progress`
 with `--record-baseline`. Candidate qualification always requires progress events.
 Model runs stay outside hosted CI; CI checks the runner and measurement logic.
@@ -358,7 +361,7 @@ nix develop -c python3 tests/functional/cache_lifecycle.py \
   --context 32768 --sessions 1 --think off --speculative off
 ```
 
-Repeat `--case restart|tiered|oversized|crash` to select cases. `restart` models
+Repeat `--case restart|tiered|oversized|crash|side-traffic` to select cases. `restart` models
 llama-swap stopping and starting a server between turns. `tiered` first warms a
 short RAM prefix after restart, then requests a history with a deeper published
 disk checkpoint. `oversized` uses 1 MiB staging beneath an observed larger
@@ -368,6 +371,30 @@ request, then SIGKILLs that child. Restart may restore only previously published
 boundaries. The helper is disarmed for initial publication and is covered by
 CPU process tests. Every case owns an 8 GiB disk budget, checks free space and
 deletes its cache on completion/failure. Reports and logs remain outside Git.
+For the 100K+ case, use `--seed-lines 7300 --minimum-published-tokens 100000`
+with context 133760, selecting `oversized` and `crash`. Actual prompt usage,
+publication and disk restoration must meet that depth; line count alone is
+not evidence. `--publication-timeout 300` allows the large checkpoint to finish
+before the deliberate crash without changing request timing gates. The
+oversized case waits for the deep publication before graceful shutdown and
+still uses 1 MiB staging. Keep the same explicit RAM limit in both modes.
+Use `--staging-bytes` to match the staging budget of a reported restart,
+tiered or crash workload (default: 2 GiB). This value is recorded in the
+report; the oversized case always keeps its 1 MiB staging allocation.
+For checkpoints larger than committed RAM, use `--require-over-ram` with
+`--case oversized` or `--case side-traffic`. For example, Flash-Next at context 262144 with
+`--seed-lines 12500 --minimum-published-tokens 174000` and
+`--cache-ram-bytes 4593364992` exercises a 175K seed and a 186K continuation.
+The assertion compares the published payload with the server's actual
+post-allocation RAM budget; a queued job alone does not qualify the case.
+`side-traffic` keeps the system prompt at at most 256 background lines and
+places the remaining seed in the user history. After publishing the deep append
+and restarting, it alternates four short conversations sharing that system with
+one further deep turn, for three rounds. Every deep turn must retain at least
+the last published boundary; each new deep publication must advance before the
+next round. Cold output controls run after all warm traffic. This covers the
+short-peer/deep-history pattern reported in #542; the system-only oversized
+fixture cannot establish that behavior.
 Known cache-work failures exit nonzero and retain controls/evidence; they are
 not skipped, marked as expected passes, or fixed in this test-only card.
 

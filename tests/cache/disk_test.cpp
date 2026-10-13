@@ -3,6 +3,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cerrno>
@@ -172,6 +174,94 @@ void Format() {
   rows.tail.reset();
   // Each chunk size fits u64, but the complete component does not.
   Reject([&] { (void)EncodeManifest(m); });
+}
+void ChecksumReference() {
+  std::vector<std::uint8_t> storage(65536 + 16);
+  std::uint64_t random = 0x3fd52bb7c4186a95ULL;
+  for (auto& byte : storage) {
+    random ^= random << 13;
+    random ^= random >> 7;
+    random ^= random << 17;
+    byte = random;
+  }
+  const auto reference = [](auto bytes, std::uint64_t crc) {
+    for (const auto byte : bytes) {
+      crc ^= std::uint64_t(byte) << 56;
+      for (unsigned bit = 0; bit < 8; ++bit)
+        crc = (crc << 1) ^ ((crc >> 63) ? 0x42f0e1eba9ea3693ULL : 0);
+    }
+    return crc;
+  };
+  for (std::size_t offset = 0; offset < 16; ++offset)
+    for (const std::size_t length :
+         {0,   1,   7,   8,   9,   15,   16,   17,   31,
+          32,  33,  63,  64,  65,  127,  128,  129,  255,
+          256, 257, 511, 512, 513, 4095, 4096, 4097, 65536}) {
+      const auto bytes = std::span(storage).subspan(offset, length);
+      for (const auto seed :
+           std::array<std::uint64_t, 3>{0, UINT64_MAX, 0x1a3875eb2cf049d6ULL}) {
+        const auto expected = reference(bytes, seed);
+        assert(DiskChecksum(bytes, seed) == expected);
+        for (const std::size_t split :
+             {0, 1, 7, 8, 9, 63, 64, 65, 255, 256, 257}) {
+          const auto first = std::min(length, split);
+          assert(DiskChecksum(bytes.subspan(first),
+                              DiskChecksum(bytes.first(first), seed)) ==
+                 expected);
+        }
+      }
+    }
+}
+void LargePieceReadAndCorruption() {
+  Directory directory;
+  DiskStore disk(ledger, directory.path, 100000);
+  auto manifest = Manifest();
+  std::array<std::uint8_t, 8> chunk{1, 2, 3};
+  std::array<std::uint8_t, 4> tail{4, 5, 6};
+  std::vector<std::uint8_t> state(1025);
+  for (std::size_t i = 0; i < state.size(); ++i)
+    state[i] = i * 131;
+  manifest.components[0].chunks[0].checksum = DiskChecksum(chunk);
+  manifest.components[0].tail->checksum = DiskChecksum(tail);
+  auto& component = manifest.components[1];
+  component.descriptor.state_bytes = state.size();
+  component.private_state =
+      DiskPayload{Id(3), state.size(), DiskChecksum(state)};
+  const std::array<DiskWriteBuffer, 3> writes{
+      {{false, Id(1), chunk}, {true, Id(2), tail}, {true, Id(3), state}}};
+  disk.Publish(Id(7), manifest, writes);
+  auto snapshot = disk.Open({7});
+  assert(snapshot);
+  const auto payload = *snapshot->Manifest().components[1].private_state;
+  std::array<std::uint8_t, 513> staging{};
+  std::size_t copied{};
+  interrupt_next_read = true;
+  shorten_reads = true;
+  const auto read = disk.ReadPayload(
+      *snapshot, true, payload, staging, [&](auto offset, auto bytes) {
+        assert(offset == copied &&
+               std::ranges::equal(
+                   bytes, std::span(state).subspan(offset, bytes.size())));
+        copied += bytes.size();
+      });
+  shorten_reads = false;
+  assert(copied == state.size() && read.bytes == state.size() &&
+         !read.verification_cached);
+  disk.PrefetchPayload(*snapshot, true, payload, payload.bytes);
+  {
+    std::fstream corrupt(directory.path / "v2/private" / DiskFileName(Id(3)),
+                         std::ios::in | std::ios::out | std::ios::binary);
+    corrupt.seekp(513);
+    corrupt.put('\xff');
+  }
+  bool invalid = false;
+  try {
+    (void)disk.ReadPayload(*snapshot, true, payload, staging,
+                           [](auto, auto) {});
+  } catch (const DiskDependencyError& error) {
+    invalid = error.private_file && error.file == payload.file;
+  }
+  assert(invalid);
 }
 void Ownership() {
   Directory d;
@@ -426,10 +516,41 @@ void BudgetAndDirectories() {
   Payloads(d.path, m);
   Put(d.path, m);
   auto size = EncodeManifest(m).size() + 28;
-  Reject([&] { DiskStore store(ledger, d.path, size - 1); });
   {
     DiskStore store(ledger, d.path, size);
     assert(store.Entries().size() == 1);
+  }
+  {
+    // A lowered budget still opens the directory. Nothing publishes until
+    // retirement brings it back within the budget.
+    DiskStore store(ledger, d.path, size - 1);
+    assert(store.Entries().size() == 1);
+    assert(store.Stats().managed_bytes == size);
+    auto next = m;
+    next.checkpoint = {8};
+    next.tokens = {17, 18};
+    next.components[0].position.valid_rows = 2;
+    next.components[1].position.valid_rows = 2;
+    std::array<std::uint8_t, 8> chunk{1};
+    std::array<std::uint8_t, 16> state{2};
+    next.components[0].chunks[0] = {Id(11), chunk.size(), DiskChecksum(chunk)};
+    next.components[0].tail.reset();
+    next.components[1].private_state =
+        DiskPayload{Id(13), state.size(), DiskChecksum(state)};
+    const std::array<DiskWriteBuffer, 2> writes{
+        {{false, Id(11), chunk}, {true, Id(13), state}}};
+    bool exhausted = false;
+    try {
+      store.Publish(Id(18), next, writes);
+    } catch (const DiskCapacityExhausted&) {
+      exhausted = true;
+    }
+    assert(exhausted);
+    assert(store.Retire({7}));
+    assert(store.Stats().managed_bytes == 0);
+    store.Publish(Id(18), next, writes);
+    assert(store.Entries().size() == 1);
+    assert(store.Stats().managed_bytes <= size - 1);
   }
   fs::remove_all(d.path / "v2/private");
   fs::create_directory_symlink(unrelated.path, d.path / "v2/private");
@@ -439,6 +560,8 @@ void BudgetAndDirectories() {
 }  // namespace
 int main() {
   Format();
+  ChecksumReference();
+  LargePieceReadAndCorruption();
   Ownership();
   Index();
   Conflicts();

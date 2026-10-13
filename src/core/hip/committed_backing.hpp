@@ -2,10 +2,14 @@
 #define GUFO_CORE_HIP_COMMITTED_BACKING_HPP_
 
 #include <cstddef>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <thread>
 
+#include "src/cache/checkpoint.hpp"
 #include "src/cache/ledger.hpp"
 #include "src/cache/slot.hpp"
 
@@ -41,20 +45,22 @@ public:
   [[nodiscard]] std::span<std::byte> Bytes() const;
   [[nodiscard]] cache::ResourceAllocationInfo Info() const;
   void Convert();
+  [[nodiscard]] cache::Payload TakePayload() &&;
   // Consume an unconverted assigned block as borrowed checkpoint backing.
   // Payload is a prefix of the block; accounting still charges full capacity.
   // The row handle retains the slab after this block/pool facade is destroyed.
   [[nodiscard]] std::shared_ptr<cache::BorrowedRows> Borrow(
       cache::SlotLease&, cache::ComponentId, cache::Rows first, cache::Rows end,
-      std::size_t payload_bytes) &&;
+      std::size_t payload_bytes, std::span<const std::byte> source = {}) &&;
   [[nodiscard]] BackingPin PinPersistence() const;
 
 private:
   friend class CommittedBackingPool;
-  BackingBlock(std::shared_ptr<detail::BackingState>, std::size_t,
+  BackingBlock(std::shared_ptr<detail::BackingState>, std::size_t, std::size_t,
                cache::ResourceReservation);
   std::shared_ptr<detail::BackingState> state_;
   std::size_t index_;
+  std::size_t blocks_;
   cache::ResourceReservation reservation_;
   cache::ResourceCharge charge_;
 };
@@ -65,21 +71,41 @@ struct BackingPoolConfig {
   std::size_t ram_bytes;
   std::size_t block_bytes;
   std::size_t metadata_headroom_bytes;
+  // Zero commits every block at construction. Otherwise TryAcquire commits
+  // blocks on demand, one segment of this many bytes (a block multiple) at a
+  // time, until ram_bytes is reached. A payload never spans two segments.
+  std::size_t segment_bytes{};
+  // Asked before each on-demand segment with its bytes; false keeps the pool
+  // at its current size, for example to leave host memory to the OS.
+  std::function<bool(std::size_t)> admit_segment;
 };
 
 class CommittedBackingPool {
 public:
-  // Initialization only: reserves metadata first, admits every block, then
-  // allocates and touches all payload pages. No refill or resize API exists.
+  // Reserves metadata for every block first. Without segment_bytes it admits,
+  // allocates and touches every payload page here; otherwise none until a
+  // TryAcquire finds no free run. Committed pages are never released early.
+  // The ledger must outlive this facade.
   CommittedBackingPool(cache::ResourceLedger&, BackingPoolConfig);
-  // Thread safe. Races/bad_alloc try other blocks, then decline capture.
-  [[nodiscard]] std::optional<BackingBlock> TryAcquire(cache::ResourceCategory);
+  // Thread safe. Races/bad_alloc try other blocks, then commit another
+  // segment if the pool may grow, then decline capture. Growth allocates
+  // pinned host memory on the calling thread.
+  [[nodiscard]] std::optional<BackingBlock> TryAcquire(
+      cache::ResourceCategory, std::size_t payload_bytes = 0);
+  // Starts committing the next on-demand segment on a background thread when
+  // less than one segment of free backing remains, so a later TryAcquire
+  // finds it ready instead of allocating on its own thread. Returns at once.
+  void GrowAhead();
+  // Committed blocks and bytes; both grow with on-demand segments.
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;
   [[nodiscard]] std::size_t PageCommitAllocations() const noexcept;
 
 private:
   std::shared_ptr<detail::BackingState> state_;
+  std::mutex ahead_mutex_;
+  // Joined before state_ is released; it keeps its own state reference.
+  std::jthread ahead_;
 };
 
 }  // namespace gufo::hip

@@ -271,6 +271,16 @@ std::vector<ComponentPosition> FakeAdapter::Positions(const Slot& slot) const {
                                    : state.draft.size()},
           {kRecurrent, state.recurrent[0]}};
 }
+std::vector<ComponentPosition> FakeAdapter::PrefillCheckpointPositions(
+    const Slot& slot, Rows boundary) const {
+  const auto& state = AsSlot(slot);
+  if (!slot.IsValid() || state.Busy() || boundary <= state.target.size())
+    throw std::invalid_argument("invalid fake in-pass boundary");
+  // The serving fixture advances target and draft by the same prefill tail.
+  return {{kTarget, boundary},
+          {kDraft, state.draft.size() + boundary - state.target.size()},
+          {kRecurrent, boundary}};
+}
 void FakeAdapter::BeginRestore(Slot& slot,
                                std::span<const ComponentPosition> positions) {
   auto& state = AsSlot(slot);
@@ -512,6 +522,19 @@ bool FakeAdapter::Invalidate(Slot& slot) noexcept {
   state.valid = true;
   state.guard_.AfterReset();
   return true;
+}
+std::span<const std::byte> FakeAdapter::BorrowRowsView(const Slot& slot,
+                                                       ComponentId component,
+                                                       Rows first,
+                                                       Rows end) const {
+  const auto& state = AsSlot(slot);
+  RequireCapture(state);
+  const auto& rows = RowArray(state, component);
+  if (first >= end || end > rows.size())
+    throw std::invalid_argument("invalid borrowed fake range");
+  // Append, restore and release guard the old allocation before replacing
+  // the vector, so views stay fixed even though this fixture moves storage.
+  return std::as_bytes(std::span(rows).subspan(first, end - first));
 }
 void FakeAdapter::Append(Slot& slot, std::span<const Token> target,
                          std::span<const Token> draft) {
