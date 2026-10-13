@@ -22,12 +22,11 @@ The latest wave-owned weight increment gains 0.9–2.5% AR pp at d0 and
 exact outputs and draft counts; all 16 measured candidate requests pass the
 5% and 3 ms gate for each prefill/decode phase. The initial mixed-MTP d32K
 control was unusually slow; its apparent 8.4% gain is excluded as an effect
-size, with both the fresh control and retry retained in the evidence.
+size in favour of the fresh control and retry.
 These captures use ordered depths `[0, 32768]`. Fresh unchanged previous-PR
 controls identify the increment; the earlier published absolute rates were
 higher in unmatched captures. Other depths and reference values retain their
 original provenance. The earlier native d32K outlier remains inconclusive.
-[Every request, control and numerical check](artifacts/paired-prefill-review.json).
 
 ## Single user, autoregressive
 

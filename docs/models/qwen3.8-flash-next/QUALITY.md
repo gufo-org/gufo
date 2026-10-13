@@ -10,8 +10,8 @@ convolution, output, state and replay remain exact, including 2049-token tails.
 Deferred residual, F16 norm, packed Q8 bytes and independent host FP32 inject
 checks pass unchanged. All 16 measured AR/MTP HTTP completions at d0/d32K
 retain exact outputs and token/cache/draft counts, with no per-request
-prefill/decode timing flag. The first unusually slow mixed-MTP control and
-its focused retry remain visible in the [evidence](artifacts/paired-prefill-review.json).
+prefill/decode timing flag. The first unusually slow mixed-MTP control is
+excluded as effect-size evidence.
 These are regression checks. The older functional timing failures below remain
 unresolved, and upstream model/conversion accuracy is not requalified.
 
@@ -37,7 +37,7 @@ Concurrent setup and maximum-token-gap flags are also retained in the evidence.
 
 | Check | Result |
 | --- | --- |
-| Wave-owned prefill weights, October 13 | Routed WMMA, projection/convolution, MoE epilogue and HC mix checks pass with unchanged tolerances. Routed inputs end at their allocation boundary; independently reset output tails retain their guards. Fused SSM output/state/replay and full fixed-history logits are exact. HTTP C1 pp2048/tg128, two AR captures with two repetitions and two mixed/repetitive MTP captures: 16 exact measured completions, including actual drafts. All request phases pass the timing gate; the anomalous first mixed-MTP control is retained separately. [Evidence](artifacts/paired-prefill-review.json). |
+| Wave-owned prefill weights, October 13 | Routed WMMA, projection/convolution, MoE epilogue and HC mix checks pass with unchanged tolerances. Routed inputs end at their allocation boundary; independently reset output tails retain their guards. Fused SSM output/state/replay and full fixed-history logits are exact. HTTP C1 pp2048/tg128, two AR captures with two repetitions and two mixed/repetitive MTP captures: 16 exact measured completions, including actual drafts. All request phases pass the timing gate; the anomalous first mixed-MTP control is excluded. |
 | Decode-kernel review, October 10 | All 13 operator tests and native snapshot/session/deep-execution checks pass. Independent MTP formulas: worst relative RMS 0.0007655 (limit 0.002), 41 reported comparisons over eight text/image states. Sampled replay, cancellation, C2/4/6/8 and RAM/disk restoration pass. [Evidence](artifacts/decode-kernels-review.json). |
 | Focused HTTP regression, October 10 | `state-edges`, `tool-agent`, `long-context`, `cache`, Flash AR/MTP only. Two main/PR pairs plus unchanged-main controls; no output or expected cache/prefill-work changes. Timing failures remain visible above and in the [evidence](artifacts/decode-kernels-review.json). |
 | Concurrency, October 10 | All 63 tg128 requests match fresh AR completions: 21 AR, 21 mixed MTP and 21 repetitive MTP at C1/2/4/6/8. Prepared prefixes are reused; mixed/repetitive MTP propose 882/2170 drafts and accept 517/1959. [Evidence](artifacts/decode-kernels-review.json). |
@@ -119,8 +119,7 @@ The card uses the last AR and MTP captures; other depths retain October 10
 values and per-row provenance. No reference refresh was run. Earlier higher
 published absolute rates are unmatched; fresh controls qualify the incremental
 gain. The earlier native d32K outlier and the first slow mixed-MTP control
-remain visible and are excluded as effect-size evidence.
-[Every retained sample and limitation](artifacts/paired-prefill-review.json).
+are excluded as effect-size evidence.
 
 The historical full sweep follows:
 
