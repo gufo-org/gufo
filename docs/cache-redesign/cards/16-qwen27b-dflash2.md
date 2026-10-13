@@ -74,6 +74,12 @@ metadata. Sampled frontier logits and up to nine pending output tokens accompany
 the target checkpoint. The Qwen runner's legacy snapshot/persistence hooks are
 removed; DeepSeek keeps its existing snapshot path.
 
-Implementation validation is pending. Per user instruction, performance
-measurements run after functional implementation; further FP16/FP32 long-capacity
-telemetry probes are skipped. Historical results remain tied to their revisions.
+At `c7053529`, Q4 and Q8 full cache-serving checks pass for AR and DFlash2:
+generated frontiers, greedy/seeded forks, cancellation history, disk restart,
+artifact compatibility misses, concurrency and cleanup. The shared verification,
+component cache and runner checks pass, as do all 59 hosted checks and formatting.
+The current DFlash component round-trip also passes. These checks do not qualify
+the outstanding vision cold-prefill discrepancy, deep workloads or resource gates.
+Per user instruction, performance measurements follow functional completion;
+further FP16/FP32 long-capacity telemetry probes are skipped. Historical results
+remain tied to their revisions.

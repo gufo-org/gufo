@@ -1,6 +1,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -409,6 +410,85 @@ void CheckGeneratedFrontierReuse(
   }
 }
 
+void CheckCompletedPrefillRetention(
+    const std::shared_ptr<const gufo::hip::QwenGpuModel>& model,
+    const char* draft_path) {
+  using Backend = gufo::server::InferenceBackend;
+  std::string error;
+  for (const bool speculative : {false, true}) {
+    if (speculative && draft_path == nullptr)
+      continue;
+    const gufo::server::TextSpeculativeConfig draft{
+        .backend = speculative
+                       ? gufo::server::TextSpeculativeBackend::kDFlash
+                       : gufo::server::TextSpeculativeBackend::kDisabled,
+        .draft_model_path = draft_path == nullptr ? "" : draft_path,
+    };
+    Backend backend;
+    Expect(backend.load(model, &error, 256, 2, {.decode_active_tokens = 8}, {},
+                        draft),
+           error);
+    std::string prompt = "Cancelled prefill retention: ";
+    while (backend.count_tokens(prompt) < 160)
+      prompt += "red blue green orange violet. ";
+    prompt += "Name the first color.";
+    const auto tokens = model->GetTokenizer().Encode(prompt);
+    gufo::hip::QwenGpuExecutor oracle(model, 256);
+    const auto expected = GenerateDirect(oracle, tokens, 8);
+
+    // An already decoding peer bounds the first prefill pass. Cancel from
+    // actual completed-pass progress, rather than a timer or callback count.
+    std::promise<void> decoding;
+    auto started = decoding.get_future();
+    const gufo::sampling::SamplingConfig greedy{.temperature = 0.0F};
+    auto peer = backend.start_complete(
+        "Count from one to one hundred, without stopping.", 64, greedy, {},
+        true, true, "prefill-cancel-peer");
+    auto peer_result = std::async(std::launch::async, [&] {
+      bool signalled = false;
+      return peer->Wait([&](std::string_view) {
+        if (!signalled) {
+          decoding.set_value();
+          signalled = true;
+        }
+        return true;
+      });
+    });
+    Expect(
+        started.wait_for(std::chrono::seconds(30)) == std::future_status::ready,
+        "prefill cancellation peer never reached decode");
+    auto pending = backend.start_complete(prompt, 8, greedy, {}, true, false,
+                                          "prefill-cancel-target", {}, true);
+    std::size_t observed = 0;
+    const auto cancelled =
+        pending->Wait({}, [&](const Backend::PromptProgress& progress) {
+          observed = progress.processed;
+          return progress.processed == 0;
+        });
+    Expect(observed > 0 && cancelled.cancelled &&
+               cancelled.completion_tokens == 0 &&
+               cancelled.prefill_tokens >= observed &&
+               cancelled.prefill_tokens < cancelled.prompt_tokens,
+           "fixture must cancel after a completed partial prefill pass");
+    peer->Cancel();
+    (void)peer_result.get();
+    const auto resumed = backend.complete(prompt, 8, 0.0F);
+    Expect(resumed.cache_hit &&
+               resumed.cached_prompt_tokens == cancelled.prefill_tokens &&
+               resumed.prefill_tokens + resumed.cached_prompt_tokens ==
+                   resumed.prompt_tokens,
+           "cancelled prefill lost or recomputed its completed frontier");
+    Expect(resumed.tokens == expected,
+           "cancelled prefill resume differs from independent cold execution");
+    if (speculative)
+      Expect(resumed.draft_tokens > 0,
+             "cancelled DFlash prefill resume bypassed drafting");
+    std::cout << "Completed prefill cancel/resume "
+              << (speculative ? "DFlash2" : "AR")
+              << " retained=" << resumed.cached_prompt_tokens << " exact\n";
+  }
+}
+
 }  // namespace
 
 int main(int argc, const char* const* argv) {
@@ -426,6 +506,7 @@ int main(int argc, const char* const* argv) {
     bool sampling_only = false;
     bool cache_only = false;
     bool continuation_only = false;
+    bool prefill_cancel_only = false;
     auto sampling_policy = gufo::speculative::DFlashDraftPolicy::kAdaptive;
     for (int index = 2; index < argc; ++index) {
       const std::string_view argument = argv[index];
@@ -437,6 +518,8 @@ int main(int argc, const char* const* argv) {
         run_full_suite = cache_only = true;
       } else if (argument == "--continuation-only") {
         continuation_only = true;
+      } else if (argument == "--prefill-cancel-only") {
+        prefill_cancel_only = true;
       } else if (argument == "--fixed") {
         sampling_policy = gufo::speculative::DFlashDraftPolicy::kFixed;
       } else if (argument.starts_with("--")) {
@@ -459,11 +542,16 @@ int main(int argc, const char* const* argv) {
     Expect(model->GetWeightRegionCount() == reader->GetMappedRegions().size(),
            "every mapped GGUF shard must have one shared GPU region");
 
+    if (prefill_cancel_only) {
+      CheckCompletedPrefillRetention(model, draft_model_path);
+      return 0;
+    }
     if (continuation_only ||
         (run_full_suite && draft_model_path != nullptr && !sampling_only)) {
       Expect(draft_model_path != nullptr,
              "continuation qualification requires a DFlash2 model");
       CheckGeneratedFrontierReuse(model, draft_model_path);
+      CheckCompletedPrefillRetention(model, draft_model_path);
       if (continuation_only)
         return 0;
     }

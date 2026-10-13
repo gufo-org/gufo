@@ -1,9 +1,9 @@
-# Qwen 27B autoregressive continuation state
+# Qwen 27B AR and DFlash2 continuation state
 
-The adapter owns a `hip::QwenGpuExecutor`, the same execution session held by
-`QwenTextRunnerState`. Card 19 will attach the cache to that session. The legacy
-runner continues to create its executor directly; every continuation hook is
-null on that path. The adapter adds no alternative model evaluator.
+The adapter owns each target `hip::QwenGpuExecutor` and, in DFlash2 mode, its
+draft backend. `QwenTextRunnerState` binds those component-cache slots and its
+verifier borrows the slot's draft backend. AR and DFlash2 HTTP serving use this
+path. The adapter adds no alternative model evaluator.
 
 Each checkpoint contains the exact stable target frontier:
 
@@ -15,15 +15,22 @@ Each checkpoint contains the exact stable target frontier:
 | Next-token logits | private | full FP32 vocabulary row; zero representation when no row has been computed |
 | Position and generation frontier | private metadata | target position, logit validity, optional `GenerateFromPrefix` pending token |
 | Image position/input identity | private metadata and attachment | SHA-256 of the computed image prefix; RoPE layout rebuilt from the matching request |
+| Served generation frontier | private | selected token, publication flag, FP32 sampling logits and up to nine pending output IDs |
+| DFlash2 K and V, separately per draft layer | private | FP32 physical ring bounded by context and sliding window; unused storage is zero |
+| DFlash2 frontier and controller | private metadata | injected draft position, priming, pending feature count and adaptive controller state |
+| DFlash2 pending target features | private | up to eight target feature rows in their original order, with zero padding |
 
 For the retained 27B geometry, 16 attention layers contribute 64 KiB per token
 with FP16 KV or 128 KiB with FP32 KV. Forty-eight recurrent layers contribute
 48 × (163,840 convolution bytes + 3,145,728 DeltaNet bytes) in production.
-The vocabulary contributes 993,280 bytes and metadata contributes 64 bytes.
-The total production private claim is 159,852,608 bytes. It includes logits;
-the RFC's approximate 152 MiB describes the recurrent tensors.
+The native vocabulary contributes 993,280 bytes and metadata contributes 64
+bytes. Served frontier state adds another vocabulary row and a 96-byte header.
+The AR private claim is 160,845,984 bytes. DFlash2 adds the bounded draft ring,
+pending feature storage and a 64-byte header. The RFC's approximate 152 MiB
+describes the target recurrent tensors.
 
-FP16 native KV is token-major. FP32 native KV is head-major; transfers gather
+FP16 native KV is token-major and can be borrowed without a capture copy.
+FP32 native KV is head-major; transfers gather
 or scatter each head with pitched copies without casting or rounding. Pieces
 on independent nonblocking streams can arrive in any order. Private pieces
 are bounded by each descriptor's state bytes, including tensor-crossing
@@ -50,8 +57,11 @@ workspaces. A checkpoint cannot be captured between `SaveState` and
 Stale saved recurrence and verification diagnostics are discarded on restore.
 Ordinary forward passes overwrite activation, hidden, sampling and projection
 scratch before reading it. Host prompt/verification feature captures are
-request outputs, not AR resume state. DFlash2's retained target features,
-draft state and controller belong to card 16.
+request outputs, not AR resume state. DFlash2's pending target features are
+retained private state. Its injected position can trail the target position;
+private component index positions name the target checkpoint boundary, while
+draft metadata carries the injected position independently. Captures also
+refuse an outstanding draft proposal.
 
 Images remain request attachments. Restoration requires the exact image
 prefix identity and rejects missing or changed input. Text-only restoration
@@ -62,9 +72,16 @@ requires an invalidation; image inputs after its frontier can be attached.
 Legacy snapshots retain their existing caller responsibility to supply the
 matching image input; their payload format is unchanged.
 
-Production capacity and capture/restore measurements are recorded in card 15.
-This adapter alone does not qualify the common cache allocator or the HTTP
-switch-over. Those paths remain unattached until card 19.
+Serving uses committed host backing in equal segments of about 1 GiB, admitted
+above both host and device heap reserves, and fixed 1 MiB disk staging. Completed
+prefill passes finish target and draft state together before cancellation is
+observed. Qwen's legacy server snapshot hooks are removed; standalone native
+snapshots remain available and DeepSeek keeps its legacy serving path.
+
+Earlier capacity and capture/restore measurements remain recorded in card 15
+against their original revisions. Current Q4/Q8 AR/DFlash2 cache-serving checks
+pass; the vision cold-prefill versus decoded-history discrepancy and broader
+functional/resource gates remain open. Performance follows functional completion.
 
 ## Reproduce the adapter checks
 
@@ -78,7 +95,9 @@ nix develop -c cmake --build --preset gpu-test \
 nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test "$MODEL"
 ```
 
-`--guard-only` and `--image-only` select focused follow-ups. The portable
+`--guard-only`, `--image-only` and `--draft "$DRAFT"` select focused follow-ups.
+The draft check restores into another slot and checks component bytes, injected
+position, sampled proposals/RNG and feedback/controller state. The portable
 `qwen27b_continuation_layout_test` covers checked geometry and policy identity;
 it does not load model weights or establish numerical quality.
 

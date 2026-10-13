@@ -80,8 +80,10 @@ tolerances, not bit-identical upstream sampler parity.
 
 ## Vision
 
-Q4/Q8 AR and DFlash2 pass multi-image, sampled/greedy C4, cancellation,
-generated-history continuation and disk-restart checks. Q8 also requires exact
+Earlier Q4/Q8 AR and DFlash2 checks cover multi-image, sampled/greedy C4,
+cancellation, generated-history continuation and disk restart. The current
+component migration retains a strict Q4 cold-prefill versus decoded-history
+failure; see [the current status](#component-serving-migration). Q8 also requires exact
 cold/live/restored continuation logits. Encoder controls use official
 Transformers operators over the **same converted BF16 GGUF**; they cannot detect
 conversion errors. Flash-Next has a separate [vision limit](../qwen3.8-flash-next/QUALITY.md#vision).
@@ -170,6 +172,11 @@ and the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
 
 The new component format adds sampled frontier state and DFlash2 ring KV,
 pending target features and controller metadata. AR and DFlash2 serving use
-adapter-owned slots and committed host backing. Functional validation on this
-implementation remains pending; the earlier probe results cover the earlier AR
-adapter format. Performance measurements are deferred until functional work ends.
+adapter-owned slots and committed host backing. At `c7053529`, Q4/Q8 full cache-serving checks pass in both modes, including
+exact greedy/seeded forks, generated-frontier cancellation, disk restarts and
+artifact compatibility misses. Current DFlash component restore checks also pass.
+The vision suite restores image identity, sampling and cancellation exactly,
+but cold prefill differs from decoded-history continuation on a Q4 fixture;
+that strict failure remains open. Deep workloads and resource checks remain
+unqualified. Earlier capacity probes cover the earlier AR adapter format.
+Performance measurements are deferred until functional work ends.
