@@ -4,6 +4,24 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.15.0](https://github.com/gufo-org/gufo/compare/v0.14.0...v0.15.0) (2026-10-13)
+
+
+### Features
+
+* **serve:** accept IPv6 listen addresses ([#585](https://github.com/gufo-org/gufo/issues/585)) ([a690704](https://github.com/gufo-org/gufo/commit/a690704b99ce7f8b962e1b6004c07c7af24e0ce3))
+
+
+### Bug Fixes
+
+* **cache:** pin Flash-Next cache pages without compacting host memory ([#589](https://github.com/gufo-org/gufo/issues/589)) ([10c40b0](https://github.com/gufo-org/gufo/commit/10c40b0d09b6a58f0932c1f73e08318647b75474))
+* **serve:** accept response schemas without additionalProperties ([#582](https://github.com/gufo-org/gufo/issues/582)) ([c406e40](https://github.com/gufo-org/gufo/commit/c406e40e97fcee008e47e3447b71f82066def6a7))
+
+
+### Performance
+
+* **qwen-flash:** speed up wide prefill kernels ([#571](https://github.com/gufo-org/gufo/issues/571)) ([a33e989](https://github.com/gufo-org/gufo/commit/a33e989cf49e533e3cb591a9f0483c67c590ba50))
+
 ## [0.14.0](https://github.com/gufo-org/gufo/compare/v0.13.0...v0.14.0) (2026-10-13)
 
 
