@@ -172,7 +172,9 @@ inline std::string GenerationLogDetails(
         << result.component_cache->ledger.total_bytes;
   if (result.draft_tokens > 0)
     out << " acceptance_pct="
-        << 100.0 * result.draft_accepted_tokens / result.draft_tokens;
+        << 100.0 * result.draft_accepted_tokens / result.draft_tokens
+        << " suffix_accepted=" << result.suffix_accepted_tokens
+        << " suffix_proposed=" << result.suffix_draft_tokens;
   if (result.cache_snapshot_bytes > 0)
     out << " cache_snapshot_bytes=" << result.cache_snapshot_bytes;
   if (result.cache_disk_queued_bytes > 0)
