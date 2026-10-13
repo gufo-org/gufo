@@ -443,7 +443,7 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
   prepared.sampled = prepared.random_sampling ||
                      request.sampler.config().penalties_enabled() ||
                      request.sampler.config().constraint != nullptr ||
-                     request.sampler.config().reasoning_budget.has_value();
+                     request.sampler.config().reasoning_budget != nullptr;
   if (prepared.sampled)
     prepared.working_sampler.emplace(request.sampler);
   prepared.max_draft_tokens =
