@@ -8,6 +8,9 @@
 Extend the Qwen adapter to DFlash2, with draft state restored exactly and
 speculative rollback guarded.
 
+Qwen 27B serving supports AR and DFlash2. This migration covers those modes;
+MTP remains unsupported, as confirmed for the October 13 qualification.
+
 ## Scope
 
 - **Inventory:**
@@ -60,4 +63,3 @@ required (see the README).
 [Component descriptors and model modules](../RFC.md#component-descriptors-and-model-modules)
 
 ## Review notes
-

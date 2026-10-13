@@ -134,6 +134,12 @@ int main() {
   TestDispatchThresholdAndFallbackOrder();
   TestBackendSupportPredicates();
   TestDecodeSplitPolicy();
+  Check(gufo::hip::detail::BatchedAttentionScoresFitLds(16128),
+        "last score row fits alongside the reduction scratch");
+  Check(!gufo::hip::detail::BatchedAttentionScoresFitLds(16129),
+        "score rows cannot consume the reduction scratch reserve");
+  Check(!gufo::hip::detail::BatchedAttentionScoresFitLds(100000),
+        "long prefill needs bounded-memory attention");
   if (failures != 0) {
     std::cerr << failures << " Qwen attention policy test(s) failed.\n";
     return 1;

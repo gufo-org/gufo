@@ -936,11 +936,14 @@ void LaunchCausalDecodeAttention(
     return;
   }
   // Each query keeps the scalar decode reduction and its own causal endpoint.
-  // Crossing the split-K threshold retains the per-row route and scratch.
+  // Without split-K scratch, online attention batches any causal depth.
+  // Crossing the split-K threshold retains the per-row route when scratch
+  // is available but insufficient to hold all query rows.
   if (batch_size > 1 && head_dim == 256 && num_kv_heads > 0 &&
       num_heads % num_kv_heads == 0 &&
-      static_cast<std::size_t>(start_pos) + batch_size <
-          detail::kSplitKDecodeAttentionMinContext) {
+      (split_k_scratch == nullptr ||
+       static_cast<std::size_t>(start_pos) + batch_size <
+           detail::kSplitKDecodeAttentionMinContext)) {
     const dim3 grid(num_heads, static_cast<unsigned>(batch_size));
     if (k_cache != nullptr && v_cache != nullptr) {
       QwenDecodeOnlineAttentionKernel<<<grid, 32, 0, stream>>>(

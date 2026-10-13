@@ -108,6 +108,23 @@ common checkpoint allocator. The [adapter inventory and commands](CONTINUATION-A
 and [card 15 results](../../cache-redesign/cards/15-qwen27b-ar-adapter.md)
 record the scope and retained evidence.
 
+## Long-context FP32 attention qualification (2026-10-13)
+
+A new capacity probe exposed an invalid FP32 prefill launch at 16K: its
+context-sized score array plus reduction scratch used 66,560 bytes of LDS,
+above gfx1151's 64 KiB limit. The bounded online fallback passes the existing
+attention controls and new three-row causal checks around the LDS boundary,
+32K and 100K in both KV representations. The worst absolute FP64-oracle error
+is 5.04e-7 (limit 1e-5); long rows match scalar online attention exactly, and
+BF16 output bits match independent rounding. The pinned `64639c28` Q4 FP32
+32K full-model probe also passes every restored component byte and sixteen
+continued full-logit/token checks. After the telemetry-only repair, the pinned
+`e008ffc7` binary passes Q4/Q8 FP16 and Q4 FP32 at both 32K and 100K,
+and Q8 FP32 at 32K. Every restored component byte and sixteen continued
+full-logit/token checks match. Q8 FP32 at 100K and matched-main performance
+are still unqualified. All original aborts and diagnostics remain retained in
+`/home/mixer/gufo-qualification/qwen27b-component-2026-10-13`.
+
 ## Reproduce
 
 Run only the affected [model suite](../../../tools/qwen27b/check.py):

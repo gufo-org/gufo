@@ -362,6 +362,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             });
         if (tiled_attention) {
           detail::EmitAttentionDispatch("prefill_tiled", "");
+        } else if (!detail::BatchedAttentionScoresFitLds(visible_context)) {
+          detail::EmitAttentionDispatch(
+              arena_.d_kv_cache != nullptr ? "prefill_online_fp32"
+                                           : "prefill_online_fp16",
+              "prefill_baseline: score_rows_exceed_lds");
         } else {
           detail::EmitAttentionDispatch(
               "prefill_baseline",
