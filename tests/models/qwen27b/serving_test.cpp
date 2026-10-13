@@ -759,6 +759,15 @@ int main(int argc, const char* const* argv) {
     Expect(rendered_chat.has_value() && !rendered_chat->empty(),
            "CLI chat prompt rendering");
     const auto chat_prompt = model->GetTokenizer().Encode(*rendered_chat);
+    // Disk spacing keeps the stable message boundary, not the adjacent
+    // assistant opening. Keep this framing oracle independent of the renderer.
+    const auto stable_chat_prompt = model->GetTokenizer().Encode(
+        "<|im_start|>system\nAnswer with one short sentence.<|im_end|>\n"
+        "<|im_start|>user\nName one primary color.<|im_end|>\n");
+    Expect(stable_chat_prompt.size() < chat_prompt.size() &&
+               std::equal(stable_chat_prompt.begin(), stable_chat_prompt.end(),
+                          chat_prompt.begin()),
+           "stable disk fixture is not the prompt's message prefix");
     const auto direct_chat = GenerateDirect(*direct, chat_prompt, 2);
     const auto http_chat = backend.chat(cache_request(messages), 2, {});
     Expect(http_chat.tokens == direct_chat,
@@ -880,7 +889,8 @@ int main(int argc, const char* const* argv) {
       Expect(restored_continuation.cache_hit &&
                  restored_continuation.cache_disk_hit,
              "fresh Qwen backend did not restore its disk prefix");
-      Expect(restored_continuation.cached_prompt_tokens == chat_prompt.size() &&
+      Expect(restored_continuation.cached_prompt_tokens ==
+                     stable_chat_prompt.size() &&
                  restored_continuation.cached_prompt_tokens <
                      restored_continuation.prompt_tokens,
              "Qwen disk restore did not report its exact reusable prefix");
@@ -955,7 +965,7 @@ int main(int argc, const char* const* argv) {
                    restored_dflash_continuation.cache_disk_hit,
                "fresh DFlash backend did not restore its disk prefix");
         Expect(restored_dflash_continuation.cached_prompt_tokens ==
-                       chat_prompt.size() &&
+                       stable_chat_prompt.size() &&
                    warm_dflash_continuation.cached_prompt_tokens >=
                        restored_dflash_continuation.cached_prompt_tokens &&
                    restored_dflash_continuation.cached_prompt_tokens <
@@ -1030,9 +1040,10 @@ int main(int argc, const char* const* argv) {
     Expect(http_fork.tokens == direct_fork,
            "forked Qwen continuation differs from cold full prefill");
 
-    // Both prompts must generate enough tokens to exercise an actual decode
-    // batch. The old "complete this phrase" fixtures ended after one token.
+    // The first request must still decode after its peer's bounded prefill
+    // completes. Eight outputs can finish before that peer reaches decode.
     // Small chunks also cover bounded prefill before the concurrent decode.
+    constexpr std::uint32_t concurrent_output_tokens = 32;
     Expect(backend.load(model, &error, context, 2, {.decode_active_tokens = 8}),
            error);
     gufo::server::ChatRequest concurrent_a({
@@ -1056,14 +1067,19 @@ int main(int argc, const char* const* argv) {
     Expect(rendered_a.has_value() && rendered_b.has_value(),
            "concurrent chat prompt rendering");
     const auto direct_a =
-        GenerateDirect(*direct, model->GetTokenizer().Encode(*rendered_a), 8);
+        GenerateDirect(*direct, model->GetTokenizer().Encode(*rendered_a),
+                       concurrent_output_tokens);
     const auto direct_b =
-        GenerateDirect(*direct, model->GetTokenizer().Encode(*rendered_b), 8);
-    Expect(direct_a.size() == 8 && direct_b.size() == 8,
-           "concurrency fixtures must retain eight generated tokens");
+        GenerateDirect(*direct, model->GetTokenizer().Encode(*rendered_b),
+                       concurrent_output_tokens);
+    Expect(direct_a.size() == concurrent_output_tokens &&
+               direct_b.size() == concurrent_output_tokens,
+           "concurrency fixtures must retain the complete output budget");
 
-    auto pending_a = backend.start_chat(concurrent_a, 8, 0.0F);
-    auto pending_b = backend.start_chat(concurrent_b, 8, 0.0F);
+    auto pending_a =
+        backend.start_chat(concurrent_a, concurrent_output_tokens, 0.0F);
+    auto pending_b =
+        backend.start_chat(concurrent_b, concurrent_output_tokens, 0.0F);
     const auto concurrent_result_a = pending_a->Wait();
     const auto concurrent_result_b = pending_b->Wait();
     Expect(concurrent_result_a.tokens == direct_a,
@@ -1096,6 +1112,12 @@ int main(int argc, const char* const* argv) {
                concurrent_result_b.execution_plan == "batched-w2",
            "concurrent Qwen requests did not report the W=2 plan");
 
+    // Retaining this new prompt legitimately allocates a full checkpoint.
+    // Establish that retention before measuring cancellation/error cleanup.
+    const auto cleanup_root = backend.complete(raw_prompt, 2, 0.0F);
+    Expect(cleanup_root.tokens == direct_raw,
+           "cleanup fixture must establish the exact reusable prompt");
+    HIP_CHECK(hipDeviceSynchronize());
     std::size_t free_before = 0;
     std::size_t total_memory = 0;
     HIP_CHECK(hipMemGetInfo(&free_before, &total_memory));

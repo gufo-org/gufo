@@ -189,3 +189,30 @@ these controls do not turn noisy timings into a pass.
 No geometry-only check or unexecuted test qualifies these measurements.
 The restore checks establish execution consistency, not original-weight or
 upstream parity.
+
+## Merged-main qualification (2026-10-13, in progress)
+
+PR #540 was merged locally with main `058d6e80` (#573), without rebasing.
+The merged production source is `af4d42e3`; the later merge commit `ca704f57`
+has the same tree. Tests and drivers are retained under
+`/home/mixer/gufo-qualification/qwen27b-component-2026-10-13`.
+
+| Area | Current evidence |
+| --- | --- |
+| Hosted contracts / formatting | 59/59 checks and all 580 C++ files pass. |
+| GPU cache and runner | Backing, component serving and text runner checks pass. |
+| AR adapter | Full Q4/Q8 checks pass in FP16/FP32 KV, including component bytes, logits, edits, guards, committed replay, images and transfer lifetimes. |
+| Q4 serving/cache | Focused replay passes after correcting independent fixture boundaries, actual W2 overlap and checkpoint retention before the cleanup-memory baseline. Original failures remain retained; main reproduces the disk-boundary and overlap failures. |
+| Q4 vision | Exact append-state logits, published-history replay, fixed-width C4 drafts, seeded replay, cancellation and disk restoration pass. The complete test still fails its final cold-versus-continuation output assertion on both unchanged main and the candidate. No numerical assertion or tolerance is relaxed. |
+| Capacity and inactive-path speed | Fresh FP16/FP32 capacity probes are running. Matched pp2048/tg128 timing qualification remains pending; the speed checkbox stays open. |
+
+The vision replay oracle now consumes the published pending token with decode
+arithmetic, as serving does, before prefilling the new suffix. Its cold and
+chunk-boundary comparisons remain separate strict checks. Standard vision
+fixtures come from `tools/qwen27b/vision_check.py`; earlier runs with different
+synthetic image sizes are retained as setup observations.
+
+Qwen 27B serves AR and DFlash2. The user confirmed that this migration should
+preserve that supported-mode set; adding MTP serving is outside its scope.
+The existing cold-versus-continuation numerical discrepancy, not a restored-state
+failure, remains an explicit open gate pending the user's scope decision.
