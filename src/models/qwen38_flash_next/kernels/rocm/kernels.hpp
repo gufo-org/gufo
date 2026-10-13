@@ -281,12 +281,11 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
 /// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
-/// routing layout as RoutedF16Gemm, with 64 or 128 token rows per tile. The two
+/// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two
 /// projections share one launch and never materialize the gate output.
 bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const __half* x, const std::int32_t* tiles,
-                        std::uint32_t n_tiles, std::uint32_t tile_rows,
-                        const std::int32_t* pad_bounds,
+                        std::uint32_t n_tiles, const std::int32_t* pad_bounds,
                         const std::int32_t* rows_in,
                         const std::int32_t* rows_out, __half* out,
                         std::size_t m, std::size_t k, hipStream_t stream);

@@ -457,9 +457,11 @@ private:
                std::uint32_t n_tokens, std::string* error_msg) const;
   /// `normed` says the previous Combine already produced m's grouped norm
   /// of res (F32 in s_.xn, or F16 plus tiled Q8 on the wide route).
+  /// `half_only` leaves only the F16 copy of `mixed`; `no_f32` keeps its
+  /// F16 and tiled Q8 copies but skips the F32 rows nothing reads.
   bool HcMix(const DeviceMixer& m, const float* res, bool normed, float* mixed,
              float* inject, std::uint32_t n_tokens, std::string* error_msg,
-             bool half_only = false) const;
+             bool half_only = false, bool no_f32 = false) const;
   /// Share mixer projections across decode requests without selecting the
   /// prefill arithmetic. Injection rows are compact across the whole batch.
   bool HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
@@ -693,11 +695,10 @@ private:
   std::uint32_t* counts_host_{nullptr};
   std::int32_t* tiles_host_{nullptr};         ///< routed tile map staging
   mutable std::uint32_t routed_max_rows_{0};  ///< 0 = no readback yet
-  mutable std::uint32_t routed_n_tiles_{0};   ///< down projection tiles
-  mutable std::uint32_t routed_64_tiles_{0};  ///< appended 64-token tiles
+  mutable std::uint32_t routed_n_tiles_{0};   ///< routed_tile_rows_ tiles
+  mutable std::uint32_t routed_64_tiles_{0};  ///< wide batches' down tiles
   mutable std::uint32_t routed_pair_offset_{0};
   mutable std::uint32_t routed_pair_tiles_{0};
-  mutable std::uint32_t routed_pair_rows_{64};
   mutable std::uint32_t routed_tile_rows_{48};  ///< token rows per tile
   mutable int routed_tile_cols_{0};
   float* logits_host_{nullptr};

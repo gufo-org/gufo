@@ -1644,10 +1644,10 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   // that download while the shared expert continues on the same stream.
   const Config& c = config();
   routed_max_rows_ = 0;
+  routed_n_tiles_ = 0;
   routed_64_tiles_ = 0;
   routed_pair_tiles_ = 0;
   routed_pair_offset_ = 0;
-  routed_pair_rows_ = 64;
   if (!ExpertMatrixRows(n_tokens)) {
     return true;
   }
@@ -1656,47 +1656,35 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   }
   // The F16 expert GEMM launches one block per (expert, row tile of its
   // 16-padded bucket): the map is built here and uploaded ahead of the
-  // launches on the same stream.
+  // launches on the same stream. Tile heights are multiples of 16, so a
+  // bucket's tile count follows from its unpadded rows.
   std::uint32_t max_rows = 0;
   std::uint32_t n_tiles = 0;
   routed_tile_rows_ = RoutedTileRows(
       static_cast<std::size_t>(n_tokens) * c.num_experts_used, c);
   for (std::uint32_t e = 0; e < c.num_experts; ++e) {
-    const std::uint32_t padded = (counts_host_[e] + 15u) / 16u * 16u;
     max_rows = std::max(max_rows, counts_host_[e]);
-    for (std::uint32_t j = 0;
-         j < (padded + routed_tile_rows_ - 1) / routed_tile_rows_; ++j) {
-      tiles_host_[n_tiles++] = static_cast<std::int32_t>(e | (j << 16));
-    }
   }
   routed_max_rows_ = std::max<std::uint32_t>(1, max_rows);
-  routed_n_tiles_ = n_tiles;
-  // Append the 64-token map for gate/up and eligible down projections.
-  // Wide expert buckets also get a 128-token gate/up map: it amortizes
-  // weight decoding, while short buckets retain the cheaper 64-token tile.
-  if (n_tokens >= 1024 && routed_tile_rows_ == kRoutedTileRowsWide) {
+  const auto append = [&](std::uint32_t tile_rows) {
     for (std::uint32_t e = 0; e < c.num_experts; ++e) {
-      const std::uint32_t padded = (counts_host_[e] + 15u) / 16u * 16u;
-      for (std::uint32_t j = 0; j < (padded + 63u) / 64u; ++j)
+      for (std::uint32_t j = 0;
+           j < (counts_host_[e] + tile_rows - 1) / tile_rows; ++j) {
         tiles_host_[n_tiles++] = static_cast<std::int32_t>(e | (j << 16));
-    }
-    routed_64_tiles_ = n_tiles - routed_n_tiles_;
-    routed_pair_offset_ = routed_n_tiles_;
-    routed_pair_tiles_ = routed_64_tiles_;
-    std::uint32_t tiles_128 = 0;
-    for (std::uint32_t e = 0; e < c.num_experts; ++e) {
-      tiles_128 += (counts_host_[e] + 127u) / 128u;
-    }
-    if (tiles_128 * 4 <= routed_64_tiles_ * 3) {
-      routed_pair_rows_ = 128;
-      routed_pair_offset_ = n_tiles;
-      routed_pair_tiles_ = tiles_128;
-      for (std::uint32_t e = 0; e < c.num_experts; ++e) {
-        for (std::uint32_t j = 0; j < (counts_host_[e] + 127u) / 128u; ++j) {
-          tiles_host_[n_tiles++] = static_cast<std::int32_t>(e | (j << 16));
-        }
       }
     }
+  };
+  if (n_tokens >= 1024 && routed_tile_rows_ == kRoutedTileRowsWide) {
+    // Wide batches: 64-token tiles for the down projection, then 128-token
+    // tiles for the paired gate/up projections.
+    append(64);
+    routed_64_tiles_ = n_tiles;
+    routed_pair_offset_ = n_tiles;
+    append(128);
+    routed_pair_tiles_ = n_tiles - routed_pair_offset_;
+  } else {
+    append(routed_tile_rows_);
+    routed_n_tiles_ = n_tiles;
   }
   routed_tile_cols_ = qfn_mmq_routed_tile_cols_for_counts(
       counts_host_, static_cast<int>(c.num_experts));
@@ -1896,7 +1884,8 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
 
 bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
                      float* mixed, float* inject, std::uint32_t n_tokens,
-                     std::string* error_msg, bool half_only) const {
+                     std::string* error_msg, bool half_only,
+                     bool no_f32) const {
   const Config& c = config();
   mixed_q8_ready_ = {};  // `mixed` is rewritten below
   // Without `normed` this mixer's grouped norm of res is computed here (F32);
@@ -1977,7 +1966,7 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
       if (!HcMixF16Gemm(m.up.data, reinterpret_cast<const __half*>(s_.hc_gate),
                         s_.xn_half,
                         fused_inject && !inject_done ? m.inject.f32() : nullptr,
-                        half_only ? nullptr : mixed,
+                        half_only || no_f32 ? nullptr : mixed,
                         static_cast<__half*>(s_.x_half),
                         half_only ? nullptr : s_.x_q8t, inject, n_tokens,
                         c.hidden_size, c.hc_low_rank, stream_)) {
@@ -2590,8 +2579,8 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
             ? RoutedGatedF16Gemm(
                   l.ffn_gate_exps.data, l.ffn_up_exps.data, gate_type, x_half,
                   s_.routed_tiles + routed_pair_offset_, routed_pair_tiles_,
-                  routed_pair_rows_, s_.routed_bounds, s_.rows_token,
-                  s_.rows_slot, up_half, c.expert_ff, c.hidden_size, stream_)
+                  s_.routed_bounds, s_.rows_token, s_.rows_slot, up_half,
+                  c.expert_ff, c.hidden_size, stream_)
             : (RoutedF16Gemm(l.ffn_gate_exps.data, gate_type, x_half,
                              s_.routed_tiles, routed_n_tiles_,
                              routed_tile_rows_, s_.routed_bounds, s_.rows_token,
@@ -2609,16 +2598,13 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     const WeightType down_type = l.ffn_down_exps.type == GgmlType::kQ8_0
                                      ? WeightType::kQ8_0
                                      : WeightType::kQ5_1;
-    // Larger down tiles amortize weight decoding. Reuse the 64-token map
-    // when it has no more padded rows than the 48-token map.
-    const bool wide_down =
-        (down_type == WeightType::kQ5_1 || down_type == WeightType::kQ8_0) &&
-        routed_tile_rows_ == 48 && routed_64_tiles_ != 0 &&
-        routed_64_tiles_ * 4 <= routed_n_tiles_ * 3;
+    // Wide batches take the 64-token down tiles: they decode each expert's
+    // weights over more rows, also where 48-token tiles would be fewer.
+    const bool wide_down = routed_64_tiles_ != 0;
     // The down projection's rows are F16 too: the epilogue reads half the
     // bytes of the largest routed intermediate.
     if (!RoutedF16Gemm(l.ffn_down_exps.data, down_type, up_half,
-                       s_.routed_tiles + (wide_down ? routed_n_tiles_ : 0),
+                       s_.routed_tiles,
                        wide_down ? routed_64_tiles_ : routed_n_tiles_,
                        wide_down ? 64 : routed_tile_rows_, s_.routed_bounds,
                        s_.rows_slot, s_.rows_slot, nullptr, nullptr,
@@ -3019,9 +3005,16 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                              : 0U;
     const auto finish = [&](std::uint32_t rows) {
       defer_residual_ = WmmaExperts(l, rows);
+      // The wide FFN reads the mix only through its F16 rows (router, routed
+      // experts) and tiled Q8 rows (shared expert).
+      const bool no_f32 = prefill_phase && defer_residual_ &&
+                          rows <= options_.max_batch &&
+                          l.router.type == GgmlType::kF16 &&
+                          l.shexp_gate.type == GgmlType::kQ8_0 &&
+                          l.shexp_up.type == GgmlType::kQ8_0;
       Combine(s_.res, l.hc_ffn.norm.f32(), rows, InjectWeights(l.hc_ffn));
-      if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows,
-                 error_msg) ||
+      if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows, error_msg,
+                 false, no_f32) ||
           !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
         return false;
       Combine(s_.res, next_norm, rows, next_inject);

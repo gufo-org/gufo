@@ -421,7 +421,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       throw std::runtime_error("separate routed SwiGLU launch failed");
     }
     const auto separate = Download(d_f16_half, slots * m);
-    for (std::uint32_t pair_rows : {64U, 128U}) {
+    {
+      constexpr std::uint32_t pair_rows = 128;
       std::vector<std::int32_t> gate_tiles;
       for (std::size_t e = 0; e < experts; ++e) {
         for (std::uint32_t j = 0; j < (counts[e] + pair_rows - 1) / pair_rows;
@@ -433,13 +434,13 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       auto launch_pair = [&] {
         if (!q::RoutedGatedF16Gemm(
                 d_w, d_up, type, d_x_half, d_gate_tiles,
-                static_cast<std::uint32_t>(gate_tiles.size()), pair_rows,
-                d_bounds, d_rows_token, d_rows_slot, d_pair, m, k, nullptr)) {
+                static_cast<std::uint32_t>(gate_tiles.size()), d_bounds,
+                d_rows_token, d_rows_slot, d_pair, m, k, nullptr)) {
           throw std::runtime_error("paired routed SwiGLU launch failed");
         }
       };
-      // Every tile width must write the whole output independently; stale
-      // results from the preceding width can hide an incomplete launch grid.
+      // The paired launch must write the whole output itself; stale results
+      // can hide an incomplete launch grid.
       CheckHip(hipMemcpy(d_pair, pair_initial.data(),
                          pair_initial.size() * sizeof(__half),
                          hipMemcpyHostToDevice),
