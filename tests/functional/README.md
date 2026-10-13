@@ -188,6 +188,7 @@ RAM, disk and restart settings once their contracts pass.
 | `tool-reasoning` | Quoted tags, exact literal arguments, early stops, disabled tools, envelope framing, completed tool-result continuations and warm replay of contaminated history; Chat/Responses |
 | `tool-streaming` | Incremental argument arrival and exact assembly in Chat/Responses/Messages; stable IDs, literal framing, thinking, stopped/limited calls and successful retries |
 | `reasoning-separator` | No leading separator newlines after reasoning in Chat/Responses, plain/tools/JSON; exact streamed/buffered text, warm retry, continuation and thinking-off paragraph breaks |
+| `reasoning-budget` | llama.cpp-compatible budgets: Responses/Chat `thinking_budget_tokens` (buffered and streamed) and Messages `budget_tokens` stop reasoning after exactly N tokens, follow the uncapped greedy reasoning, adaptive and `-1` stay unlimited, invalid values fail, sampled requests still end at the budget, and a replayed capped thinking block is reused in full |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
