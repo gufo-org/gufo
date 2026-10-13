@@ -658,6 +658,7 @@ std::unique_ptr<QwenDFlashGpuSnapshot> QwenDFlashGpuExecutor::SaveSnapshot()
 
 void QwenDFlashGpuExecutor::RestoreSnapshot(
     const QwenDFlashGpuSnapshot& snapshot) {
+  CheckContinuation();
   const std::size_t kv_width =
       static_cast<std::size_t>(model_->GetConfig().num_key_value_heads) *
       model_->GetConfig().head_dim;
@@ -699,6 +700,7 @@ void QwenDFlashGpuExecutor::RestoreSnapshot(
 
 void QwenDFlashGpuExecutor::RestorePersistentSnapshot(
     std::span<const std::uint8_t> payload) {
+  CheckContinuation();
   if (payload.size() < kDFlashGpuPersistentHeaderBytes ||
       !std::equal(kDFlashGpuPersistentMagic.begin(),
                   kDFlashGpuPersistentMagic.end(), payload.begin()) ||
@@ -776,6 +778,13 @@ void QwenDFlashGpuExecutor::RestorePersistentSnapshot(
 }
 
 void QwenDFlashGpuExecutor::Reset() noexcept {
+  try {
+    CheckContinuation();
+  } catch (...) {
+    if (continuation_hooks_)
+      continuation_hooks_->WriteFailed();
+    return;
+  }
   // Attention only reads the valid prefix; new rows overwrite stale KV.
   injected_context_len_ = 0;
 }
@@ -783,6 +792,7 @@ void QwenDFlashGpuExecutor::Reset() noexcept {
 bool QwenDFlashGpuExecutor::InjectTargetContext(
     std::span<const float> target_features, std::uint32_t position,
     std::uint32_t num_tokens, const DFlashTrace& trace) {
+  CheckContinuation();
   const std::size_t width = GetTargetFeaturesSize();
   if (position != injected_context_len_ || position > max_context_ ||
       num_tokens > max_context_ - position ||
@@ -902,6 +912,7 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     std::span<const float> sample_uniforms, std::vector<float>* out_confidences,
     std::vector<tokenization::TokenId>* out_candidate_ids,
     std::vector<float>* out_candidate_probabilities, const DFlashTrace& trace) {
+  CheckContinuation();
   const auto& weights = model_->GetWeights();
   const auto& cfg = model_->GetConfig();
   const auto& df_cfg = model_->GetDFlashConfig();

@@ -73,6 +73,9 @@ ContinuationLayout::ContinuationLayout(const core::ModelConfig& c,
           policy.UsesBf16RecurrentState() ? 2 : 1);
     }
   }
+  add(ContinuationPart::kFrontier, 0,
+      kContinuationFrontierMetadataBytes +
+          Product({c.vocab_size, sizeof(float)}));
   // Check the complete retained representation, not just individual tensors.
   const auto private_bytes = PrivateBytes();
   const auto row_bytes = Product({context, BytesPerToken()});
@@ -101,5 +104,18 @@ std::size_t ContinuationLayout::BytesPerToken() const noexcept {
   for (const auto& component : components_)
     bytes += component.descriptor.row_bytes;
   return bytes;
+}
+std::vector<ContinuationBackingClass> ContinuationLayout::BackingPlan(
+    std::size_t ram) const {
+  // Shared pages can serve rows and private frontiers without stranding one
+  // component's reservation while another component is under pressure.
+  constexpr std::size_t page = 65536, per_block = 1024, header = 4096;
+  const auto budget = ram > (4ULL << 20) ? (ram - (4ULL << 20)) / 10 * 9 : 0;
+  if (budget <= header)
+    return {};
+  const auto blocks = (budget - header) / (page + per_block);
+  if (!blocks)
+    return {};
+  return {{page, blocks, header + blocks * per_block}};
 }
 }  // namespace gufo::models::qwen

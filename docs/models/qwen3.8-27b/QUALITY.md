@@ -121,8 +121,9 @@ BF16 output bits match independent rounding. The pinned `64639c28` Q4 FP32
 continued full-logit/token checks. After the telemetry-only repair, the pinned
 `e008ffc7` binary passes Q4/Q8 FP16 and Q4 FP32 at both 32K and 100K,
 and Q8 FP32 at 32K. Every restored component byte and sixteen continued
-full-logit/token checks match. Q8 FP32 at 100K and matched-main performance
-are still unqualified. All original aborts and diagnostics remain retained in
+full-logit/token checks match. The user stopped the Q8 FP32 100K probe and
+skipped further long-capacity probes for both KV precisions. That case has no
+qualification result. Matched-main timing flags remain open. All original aborts and diagnostics remain retained in
 `/home/mixer/gufo-qualification/qwen27b-component-2026-10-13`.
 
 ## Reproduce
@@ -164,3 +165,11 @@ Loading uses cold files (`POSIX_FADV_DONTNEED`, zero resident pages checked
 with `mincore`), C1/DFlash2/capacity 262144; memory uses C1/AR peak HIP
 allocation. Commands, hashes and counts remain in [artifacts](artifacts/bench.json)
 and the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
+
+## Component serving migration
+
+The new component format adds sampled frontier state and DFlash2 ring KV,
+pending target features and controller metadata. AR and DFlash2 serving use
+adapter-owned slots and committed host backing. Functional validation on this
+implementation remains pending; the earlier probe results cover the earlier AR
+adapter format. Performance measurements are deferred until functional work ends.

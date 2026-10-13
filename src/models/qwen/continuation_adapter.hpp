@@ -4,9 +4,17 @@
 #include "src/cache/adapter.hpp"
 #include "src/core/hip/transfer_pool.hpp"
 #include "src/models/qwen/continuation_layout.hpp"
+#include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
 namespace gufo::models::qwen {
+
+struct ContinuationFrontier {
+  std::optional<tokenization::TokenId> token;
+  std::vector<float> logits;
+  bool published{};
+  std::vector<tokenization::TokenId> pending;
+};
 
 // Slots own the same QwenGpuExecutor used by serving. The caller supplies full
 // model/tokenizer/template identity; the adapter adds state ABI, geometry and
@@ -16,9 +24,17 @@ public:
   ContinuationAdapter(
       std::shared_ptr<const hip::QwenGpuModel>, std::uint32_t context,
       cache::Identity,
-      hip::QwenExecutionPolicy = hip::QwenExecutionPolicy::Production());
+      hip::QwenExecutionPolicy = hip::QwenExecutionPolicy::Production(),
+      std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model = nullptr,
+      hip::QwenDFlashGpuDraftConfig draft_config = {});
   ~ContinuationAdapter() override;
   [[nodiscard]] hip::QwenGpuExecutor& GetExecutor(cache::Slot&);
+  [[nodiscard]] hip::QwenDFlashGpuDraftBackend* GetDraftBackend(cache::Slot&);
+  [[nodiscard]] ContinuationFrontier& GetFrontier(cache::Slot&);
+  [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
+      std::size_t ram_bytes) const {
+    return layout_.BackingPlan(ram_bytes);
+  }
   [[nodiscard]] cache::Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
       const override;
@@ -55,6 +71,9 @@ public:
                                              cache::Rows first, cache::Rows end,
                                              std::span<const std::byte>,
                                              cache::Stream&) override;
+  [[nodiscard]] std::span<const std::byte> BorrowRowsView(
+      const cache::Slot&, cache::ComponentId, cache::Rows first,
+      cache::Rows end) const override;
   [[nodiscard]] bool Validate(
       cache::Slot&, std::span<const cache::ComponentPosition>) override;
   [[nodiscard]] bool Invalidate(cache::Slot&) noexcept override;
@@ -74,9 +93,12 @@ private:
                                                cache::Rows end, std::byte*,
                                                cache::Stream&);
   std::shared_ptr<const hip::QwenGpuModel> model_;
+  std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model_;
+  hip::QwenDFlashGpuDraftConfig draft_config_;
   hip::QwenExecutionPolicy policy_;
   std::uint32_t context_;
   ContinuationLayout layout_;
+  std::vector<ContinuationComponent> components_;
   std::vector<cache::ComponentDescriptor> descriptors_;
   cache::Identity identity_;
 };

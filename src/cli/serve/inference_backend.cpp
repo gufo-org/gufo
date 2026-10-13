@@ -43,6 +43,7 @@
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/qwen/continuation_adapter.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -202,13 +203,8 @@ void PrepareVision(
 
 constexpr std::string_view kDeepSeekStateAbi =
     "deepseek-v4-flash-gfx1151-state-v4";
-constexpr std::array<std::uint8_t, 8> kQwenPersistentSnapshotMagic = {
-    'G', 'Q', 'W', 'R', 'U', 'N', '0', '1'};
-constexpr std::uint32_t kQwenPersistentPayloadVersion = 3;
+constexpr std::uint32_t kQwenComponentPayloadVersion = 2;
 constexpr std::size_t kQwenMaxResumeTokens = 9;
-constexpr std::size_t kQwenPersistentSnapshotHeaderBytes = 112;
-constexpr std::uint32_t kQwenPersistentSpeculativeFlag = 1U << 0U;
-constexpr std::uint32_t kQwenPersistentPendingTokenFlag = 1U << 1U;
 
 constexpr std::string_view QwenStateAbi(bool speculative,
                                         bool fp16_attention_kv,
@@ -339,8 +335,8 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "chat_template=qwen38-reasoning-compiled-v3\n"
            << "chat_template_reference_sha256="
            << tokenization::QwenChatTemplate::OfficialTemplateSha256() << '\n'
-           << "state_abi=" << state_abi << '\n'
-           << "payload_layout=qwen-gfx1151-live-prefix-v3\n"
+           << "state_abi=" << state_abi << "-component-v2\n"
+           << "payload_layout=qwen-component-v2\n"
            // Older learned boundaries could keep logits from an earlier
            // prefix. Their payload has no readiness tag to distinguish them.
            << "checkpoint_frontier=complete-prefix-v1\n"
@@ -389,89 +385,59 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
   return {canonical.begin(), canonical.end()};
 }
 
-template<typename T>
-  requires(std::is_unsigned_v<T>)
-void PutLittleEndian(std::span<std::uint8_t> destination, std::size_t offset,
-                     T value) {
-  if (offset > destination.size() || sizeof(T) > destination.size() - offset) {
-    throw std::length_error("Qwen persistent snapshot header is truncated");
-  }
-  for (std::size_t byte = 0; byte < sizeof(T); ++byte) {
-    destination[offset + byte] =
-        static_cast<std::uint8_t>(value >> (byte * 8U));
-  }
-}
-
-template<typename T>
-  requires(std::is_unsigned_v<T>)
-T GetLittleEndian(std::span<const std::uint8_t> source, std::size_t offset) {
-  if (offset > source.size() || sizeof(T) > source.size() - offset) {
-    throw std::invalid_argument("Qwen persistent snapshot header is truncated");
-  }
-  T value = 0;
-  for (std::size_t byte = 0; byte < sizeof(T); ++byte) {
-    value |= static_cast<T>(source[offset + byte]) << (byte * 8U);
-  }
-  return value;
-}
-
-std::size_t CheckedPersistentAdd(std::size_t left, std::size_t right) {
-  if (right > std::numeric_limits<std::size_t>::max() - left) {
-    throw std::overflow_error("Qwen persistent snapshot size overflows");
-  }
-  return left + right;
-}
-
-std::size_t PersistentSizeFromU64(std::uint64_t value) {
-  if (value > std::numeric_limits<std::size_t>::max()) {
-    throw std::overflow_error("Qwen persistent snapshot size overflows");
-  }
-  return static_cast<std::size_t>(value);
-}
-
 class QwenTextRunnerState final : public TextRunnerState {
 public:
-  QwenTextRunnerState(
-      std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t max_context,
-      std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model,
-      speculative::SpeculativeOptions speculative_options,
-      hip::QwenExecutionPolicy execution_policy)
-      : model_(std::move(model)) {
+  QwenTextRunnerState(std::shared_ptr<const hip::QwenGpuModel> model,
+                      models::qwen::ContinuationAdapter& adapter,
+                      cache::Slot& slot,
+                      speculative::SpeculativeOptions options)
+      : model_(std::move(model)),
+        executor_(&adapter.GetExecutor(slot)),
+        draft_backend_(adapter.GetDraftBackend(slot)),
+        adapter_(&adapter),
+        slot_(&slot),
+        frontier_(adapter.GetFrontier(slot).token),
+        frontier_logits_(adapter.GetFrontier(slot).logits),
+        frontier_published_(adapter.GetFrontier(slot).published),
+        resume_tokens_(adapter.GetFrontier(slot).pending) {
     resume_tokens_.reserve(kQwenMaxResumeTokens);
     rollback_tokens_.reserve(kQwenMaxResumeTokens);
-    std::string error;
-    executor_ = hip::QwenGpuExecutor::Create(model_, &error, max_context,
-                                             execution_policy);
-    if (executor_ == nullptr) {
-      throw std::runtime_error("Failed to create GPU session: " + error);
-    }
-    if (dflash_model != nullptr) {
-      auto draft_backend = hip::QwenDFlashGpuDraftBackend::Create(
-          std::move(dflash_model),
-          hip::QwenDFlashGpuDraftConfig{
-              .max_context = max_context,
-              .max_draft_tokens = speculative_options.max_draft_tokens,
-              .policy = speculative_options.dflash_policy,
-          },
-          &error);
-      if (draft_backend == nullptr) {
-        throw std::runtime_error("Failed to create DFlash session: " + error);
-      }
-      draft_backend_ = draft_backend.get();
+    if (draft_backend_) {
       verifier_ = std::make_unique<speculative::SpeculativeVerifier>(
-          *executor_, std::move(draft_backend), speculative_options);
+          *executor_, *draft_backend_, options);
+      executor_->SetPromptHiddenCapture(true,
+                                        draft_backend_->TargetHiddenLayerIds());
     }
   }
 
   void SetCancellationCheck(const CancellationCheck& check) override {
-    executor_->SetCancellationCheck(check);
+    cancellation_check_ = check;
+    if (!check) {
+      executor_->SetCancellationCheck({});
+      return;
+    }
+    executor_->SetCancellationCheck([this] {
+      return !prefill_active_ && cancellation_check_ && cancellation_check_();
+    });
   }
+  ~QwenTextRunnerState() override { executor_->SetCancellationCheck({}); }
+
+  class PrefillScope {
+  public:
+    explicit PrefillScope(QwenTextRunnerState& state) : state_(state) {
+      state_.prefill_active_ = true;
+    }
+    ~PrefillScope() { state_.prefill_active_ = false; }
+    PrefillScope(const PrefillScope&) = delete;
+    PrefillScope& operator=(const PrefillScope&) = delete;
+
+  private:
+    QwenTextRunnerState& state_;
+  };
+  [[nodiscard]] PrefillScope BeginPrefill() { return PrefillScope(*this); }
 
   void Invalidate() noexcept override {
-    if (verifier_ != nullptr) {
-      verifier_->Reset();
-    }
-    executor_->Reset();
+    (void)adapter_->Invalidate(*slot_);
     sequence_.clear();
     position_ = 0;
     frontier_.reset();
@@ -686,6 +652,7 @@ public:
     draft_backend_->DiscardPendingTargetContext(
         static_cast<std::uint32_t>(*rollback_position_));
     executor_->RestoreState();
+    executor_->FinishVerification();
     position_ = *rollback_position_;
     sequence_.resize(position_);
     frontier_logits_ = std::move(rollback_logits_);
@@ -748,54 +715,6 @@ public:
     resume_tokens_.assign(tokens.begin(), tokens.end());
     rollback_position_.reset();
   }
-  [[nodiscard]] std::unique_ptr<speculative::SpeculativeVerifierSnapshot>
-  SaveVerifierSnapshot() const {
-    return verifier_ != nullptr ? verifier_->Snapshot() : nullptr;
-  }
-  [[nodiscard]] std::size_t SnapshotPayloadBytes() const {
-    std::size_t bytes = executor_->SnapshotPayloadBytes(position_);
-    const auto checked_add = [&bytes](std::size_t value) {
-      if (value > std::numeric_limits<std::size_t>::max() - bytes) {
-        throw std::overflow_error("Qwen snapshot size overflows");
-      }
-      bytes += value;
-    };
-    const std::size_t logits_count = frontier_logits_.empty()
-                                         ? model_->GetConfig().vocab_size
-                                         : frontier_logits_.size();
-    if (logits_count >
-        std::numeric_limits<std::size_t>::max() / sizeof(float)) {
-      throw std::overflow_error("Qwen snapshot size overflows");
-    }
-    checked_add(logits_count * sizeof(float));
-    checked_add(resume_tokens_.size() * sizeof(TextRunnerToken));
-    checked_add(std::ranges::count_if(executor_->VisionLayout().images,
-                                      [this](const auto& image) {
-                                        return image.offset < position_;
-                                      }) *
-                sizeof(models::qwen::vision::ImageGrid));
-    if (verifier_ != nullptr) {
-      checked_add(verifier_->SnapshotPayloadBytes());
-    }
-    return bytes;
-  }
-  void RestoreVerifierSnapshot(
-      const speculative::SpeculativeVerifierSnapshot& snapshot) {
-    if (verifier_ == nullptr) {
-      throw std::invalid_argument(
-          "cannot restore speculative state into a plain Qwen session");
-    }
-    verifier_->RestoreSnapshot(snapshot);
-  }
-  void RestoreVerifierPersistentSnapshot(
-      std::span<const std::uint8_t> payload) {
-    if (verifier_ == nullptr) {
-      throw std::invalid_argument(
-          "cannot restore speculative persistent state into a plain Qwen "
-          "session");
-    }
-    verifier_->RestorePersistentSnapshot(payload);
-  }
 
 private:
   bool AppendSpeculativeSelection(TextRunnerToken token,
@@ -817,54 +736,23 @@ private:
   }
 
   std::shared_ptr<const hip::QwenGpuModel> model_;
-  std::unique_ptr<hip::QwenGpuExecutor> executor_;
+  hip::QwenGpuExecutor* executor_{};
   std::unique_ptr<speculative::SpeculativeVerifier> verifier_;
-  // Owned by verifier_; used only to account the session's draft allocations.
+  // Owned by the verifier for standalone execution, or by the component slot.
   hip::QwenDFlashGpuDraftBackend* draft_backend_{nullptr};
+  models::qwen::ContinuationAdapter* adapter_{};
+  cache::Slot* slot_{};
+  CancellationCheck cancellation_check_;
+  bool prefill_active_{};
   std::vector<TextRunnerToken> sequence_;
   std::size_t position_{0};
-  std::optional<TextRunnerToken> frontier_;
-  std::vector<float> frontier_logits_;
-  bool frontier_published_{false};
-  std::vector<TextRunnerToken> resume_tokens_;
+  std::optional<TextRunnerToken>& frontier_;
+  std::vector<float>& frontier_logits_;
+  bool& frontier_published_;
+  std::vector<TextRunnerToken>& resume_tokens_;
   std::optional<std::size_t> rollback_position_;
   std::vector<TextRunnerToken> rollback_tokens_;
   std::vector<float> rollback_logits_;
-};
-
-class QwenTextRunnerSnapshot final : public TextRunnerSnapshot {
-public:
-  QwenTextRunnerSnapshot(
-      std::shared_ptr<const hip::QwenGpuModel> model,
-      std::unique_ptr<hip::QwenGpuSnapshot> snapshot, std::size_t position,
-      std::optional<TextRunnerToken> frontier,
-      std::vector<float> frontier_logits,
-      std::vector<TextRunnerToken> pending_tokens,
-      std::unique_ptr<speculative::SpeculativeVerifierSnapshot>
-          verifier_snapshot)
-      : model(std::move(model)),
-        snapshot(std::move(snapshot)),
-        position(position),
-        frontier(frontier),
-        frontier_logits(std::move(frontier_logits)),
-        pending_tokens(std::move(pending_tokens)),
-        verifier_snapshot(std::move(verifier_snapshot)) {}
-
-  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
-    return (snapshot != nullptr ? snapshot->PayloadBytes() : 0) +
-           frontier_logits.size() * sizeof(float) +
-           pending_tokens.size() * sizeof(TextRunnerToken) +
-           (verifier_snapshot != nullptr ? verifier_snapshot->PayloadBytes()
-                                         : 0);
-  }
-
-  std::shared_ptr<const hip::QwenGpuModel> model;
-  std::unique_ptr<hip::QwenGpuSnapshot> snapshot;
-  std::size_t position;
-  std::optional<TextRunnerToken> frontier;
-  std::vector<float> frontier_logits;
-  std::vector<TextRunnerToken> pending_tokens;
-  std::unique_ptr<speculative::SpeculativeVerifierSnapshot> verifier_snapshot;
 };
 
 QwenTextRunnerState& RequireQwenState(TextRunnerState& state) {
@@ -950,6 +838,165 @@ private:
   mutable bool probe_pending_{false};
 };
 
+template<typename AdapterType>
+std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
+    std::unique_ptr<AdapterType> adapter, cache::ResourceLedger& ledger) {
+  struct Backing {
+    hip::TransferPool streams{64};
+    std::unique_ptr<hip::CommittedBackingPool> pool;
+    std::map<std::uint32_t, std::size_t> component_classes;
+  };
+  auto result = std::make_unique<ComponentCacheResources>();
+  result->adapter = std::move(adapter);
+  auto backing = std::make_shared<Backing>();
+  result->transfer_batch_size = 16;
+  const auto rounded = [](std::size_t bytes) {
+    return (bytes + 4095) / 4096 * 4096;
+  };
+  for (const auto& d : result->adapter->Components()) {
+    const auto bytes = rounded(d.kind == cache::ComponentKind::kPrivateState
+                                   ? d.state_bytes
+                                   : d.row_bytes * d.rows_per_chunk);
+    backing->component_classes.emplace(d.id.value, bytes);
+  }
+  // The remainder belongs to index, histories, disk catalog and queue
+  // metadata. The pools charge their own per-block allocator headroom.
+  result->commit_backing = [backing, &ledger, adapter = result->adapter.get()](
+                               std::size_t budget) {
+    const auto plan = static_cast<AdapterType*>(adapter)->BackingPlan(budget);
+    if (plan.size() != 1)
+      throw std::invalid_argument("insufficient component backing budget");
+    const auto& allocation = plan.front();
+    // Pages commit as captures need them. A payload cannot span segments,
+    // so the edge of each one strands space a ~140 MB private state cannot
+    // use; equal segments of about 1 GiB, and at least two private states,
+    // keep that small. A step costs about 60 ms while the host has free
+    // pages (up to seconds when it must reclaim page cache) and does not
+    // stall other HIP work, so it runs ahead on a background thread; only a
+    // capture that outruns it grows on its own thread. Growth stops early
+    // when the host would keep less than its reserve.
+    std::size_t largest = 0;
+    for (const auto& [id, bytes] : backing->component_classes)
+      largest = std::max(largest, bytes);
+    const auto block = allocation.block_bytes;
+    const auto target =
+        std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
+    const auto parts =
+        std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
+    const auto segment = (allocation.blocks + parts - 1) / parts * block;
+    struct Limited {
+      std::mutex mutex;
+      std::chrono::steady_clock::time_point refused;
+      bool active{};
+    };
+    backing->pool = std::make_unique<hip::CommittedBackingPool>(
+        ledger,
+        hip::BackingPoolConfig{
+            allocation.blocks * allocation.block_bytes +
+                allocation.metadata_bytes,
+            allocation.block_bytes, allocation.metadata_bytes, segment,
+            [limited = std::make_shared<Limited>()](std::size_t bytes) {
+              const std::lock_guard lock(limited->mutex);
+              const auto now = std::chrono::steady_clock::now();
+              // Pressure retries ask once per capture; recheck at most
+              // once a second while the host is short.
+              if (limited->active &&
+                  now - limited->refused < std::chrono::seconds(1))
+                return false;
+              const auto ceiling = HostSnapshotCeilingBytes();
+              // Pinned host pages come out of the same device heap that
+              // session and scratch allocations draw on; keep its dispatch
+              // reserve so they do not fall back to managed memory.
+              std::size_t heap_free = 0, heap_total = 0;
+              const bool heap_fits =
+                  hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
+                  hip::HeapFitsAboveReserve(heap_free, bytes);
+              if (ceiling >= bytes && heap_fits) {
+                limited->active = false;
+                return true;
+              }
+              if (!limited->active)
+                Logger::Warn(
+                    "cache",
+                    "schema=component-cache-v1 "
+                    "event=backing_limited reason=" +
+                        std::string(heap_fits ? "host_reserve "
+                                              : "device_heap_reserve ") +
+                        "segment_bytes=" + std::to_string(bytes) +
+                        " host_headroom_bytes=" + std::to_string(ceiling) +
+                        " device_heap_free_bytes=" + std::to_string(heap_free));
+              limited->active = true;
+              limited->refused = now;
+              return false;
+            }});
+  };
+  result->owner = backing;
+  result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
+    return backing->streams.TryAcquire();
+  };
+  result->allocate = [backing](const cache::PayloadRequest& request) {
+    // Bound the logical capture, then assign whole shared backing pages.
+    const auto capacity =
+        backing->component_classes.at(request.component.value);
+    if (request.bytes > capacity)
+      throw std::logic_error("component capture exceeds its backing class");
+    const auto category =
+        request.category == cache::ResourceCategory::kBackingAssigned
+            ? cache::ResourceCategory::kBackingAssigned
+            : request.category;
+    const auto segments = backing->pool->PageCommitAllocations();
+    const auto started = std::chrono::steady_clock::now();
+    auto block = backing->pool->TryAcquire(category, request.bytes);
+    if (backing->pool->PageCommitAllocations() != segments)
+      Logger::Info(
+          "cache",
+          "schema=component-cache-v1 event=backing_grown committed_bytes=" +
+              std::to_string(backing->pool->CommittedBytes()) + " segments=" +
+              std::to_string(backing->pool->PageCommitAllocations()) +
+              " acquire_ms=" +
+              std::to_string(std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - started)
+                                 .count()));
+    if (!block)
+      throw cache::ResourceExhausted();
+    // Commit the next segment off the capturing thread, which otherwise
+    // stalls this and every peer request for the allocation (up to seconds
+    // while the host reclaims page cache).
+    backing->pool->GrowAhead();
+    auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
+    return ComponentCaptureBuffer{
+        owner->Bytes(),
+        [owner] {
+          owner->Convert();
+          return std::move(*owner).TakePayload();
+        },
+        backing->pool.get(),
+        [owner, request](cache::SlotLease& lease, auto source) {
+          return cache::Payload::Borrowed(
+              std::move(*owner).Borrow(lease, request.component, request.first,
+                                       request.end, request.bytes, source));
+        }};
+  };
+  result->staging = [](std::size_t bytes) {
+    void* data = nullptr;
+    const auto status = hipHostMalloc(&data, bytes, hipHostMallocCoherent);
+    if (status != hipSuccess)
+      throw std::runtime_error(hipGetErrorString(status));
+    auto owner = std::shared_ptr<void>(
+        data, [](void* value) { (void)hipHostFree(value); });
+    std::memset(data, 0, bytes);
+    return cache::StagingAllocation{std::move(owner),
+                                    {static_cast<std::uint8_t*>(data), bytes}};
+  };
+  result->copy_observed_rows = [](auto source, auto destination,
+                                  cache::Stream& stream) {
+    return dynamic_cast<hip::TransferStream&>(stream).Copy(
+        destination.data(), source.data(), destination.size(),
+        hip::CopyDirection::kDeviceToHost, destination.size());
+  };
+  return result;
+}
+
 class QwenTextRunner final : public HipTextModelRunner {
 public:
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
@@ -972,18 +1019,59 @@ public:
           .compatibility_identity = QwenCompatibilityIdentity(
               artifact_fingerprint, draft_artifact_fingerprint, max_context_,
               execution_policy_, speculative, speculative_options_),
-          .payload_version = kQwenPersistentPayloadVersion,
+          .payload_version = kQwenComponentPayloadVersion,
       };
+      component_identity_ = persistence_->compatibility_identity;
+    } else {
+      std::ostringstream identity;
+      identity << "schema=gufo-process-qwen-component-v2\n"
+               << "model_instance=" << model_.get() << '\n'
+               << "draft_instance=" << dflash_model_.get() << '\n'
+               << "context_tokens=" << max_context_ << '\n';
+      const auto canonical = identity.str();
+      component_identity_.assign(canonical.begin(), canonical.end());
     }
+  }
+
+  [[nodiscard]] bool UsesComponentCache() const override { return true; }
+  [[nodiscard]] std::unique_ptr<ComponentCacheResources>
+  CreateComponentCacheResources(cache::ResourceLedger& ledger,
+                                std::size_t ram) const override {
+    (void)ram;
+    return CreateHipComponentCacheResources(
+        std::make_unique<models::qwen::ContinuationAdapter>(
+            model_, max_context_, component_identity_, execution_policy_,
+            dflash_model_,
+            hip::QwenDFlashGpuDraftConfig{
+                .max_context = max_context_,
+                .max_draft_tokens = speculative_options_.max_draft_tokens,
+                .policy = speculative_options_.dflash_policy}),
+        ledger);
+  }
+  [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
+      cache::Adapter& adapter, cache::Slot& slot) const override {
+    return std::make_unique<QwenTextRunnerState>(
+        model_, dynamic_cast<models::qwen::ContinuationAdapter&>(adapter), slot,
+        speculative_options_);
+  }
+  void ReconcileComponentState(TextRunnerState& state,
+                               std::size_t position) const override {
+    auto& qwen = RequireQwenState(state);
+    qwen.set_position(position);
+    if (!qwen.frontier())
+      qwen.set_frontier(
+          0);  // Partial prefill: the suffix computes its frontier.
   }
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
     const bool speculative_enabled = dflash_model_ != nullptr;
     return {
         .model_id = model_->GetConfig().model_name,
-        .state_abi = std::string(QwenStateAbi(
-            speculative_enabled, execution_policy_.UsesFp16AttentionKv(),
-            execution_policy_.UsesBf16RecurrentState())),
+        .state_abi =
+            std::string(QwenStateAbi(
+                speculative_enabled, execution_policy_.UsesFp16AttentionKv(),
+                execution_policy_.UsesBf16RecurrentState())) +
+            "-component-v2",
         .max_context = max_context_,
         .capabilities =
             TextRunnerCapabilities{
@@ -998,6 +1086,7 @@ public:
                 .batched_multi_token_decode_max_width =
                     speculative_enabled ? MaximumDecodeBatchWidth() : 0,
                 .prefix_reuse = true,
+                .partial_prefill_retention = true,
             },
         .persistence = persistence_,
     };
@@ -1126,9 +1215,8 @@ public:
   }
 
   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    return std::make_unique<QwenTextRunnerState>(
-        model_, max_context_, dflash_model_, speculative_options_,
-        execution_policy_);
+    throw std::logic_error(
+        "Qwen execution slots are owned by the component cache");
   }
 
   void PreparePrefixReuse(
@@ -1142,6 +1230,9 @@ public:
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
     auto& qwen = RequireQwenState(state);
+    // A started pass must finish target and draft state together. Cancellation
+    // is observed between passes, where its completed frontier is retainable.
+    auto activity = qwen.BeginPrefill();
     if (offset != qwen.position()) {
       throw std::logic_error(
           "Qwen prefill offset does not match retained state");
@@ -1335,255 +1426,6 @@ public:
     RequireQwenState(state).PrepareCancellation();
   }
 
-  [[nodiscard]] std::size_t SnapshotPayloadBytes(
-      const TextRunnerState& state) const override {
-    return RequireQwenState(state).SnapshotPayloadBytes();
-  }
-
-  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
-      const TextRunnerState& state) const override {
-    const auto& qwen = RequireQwenState(state);
-    if (!qwen.frontier().has_value()) {
-      throw std::logic_error("Qwen state has no exact frontier to snapshot");
-    }
-    return std::make_unique<QwenTextRunnerSnapshot>(
-        model_,
-        qwen.executor().SaveSnapshot(
-            static_cast<std::uint32_t>(qwen.position())),
-        qwen.position(), qwen.frontier(), qwen.CopyFrontierLogits(),
-        qwen.pending_tokens(), qwen.SaveVerifierSnapshot());
-  }
-
-  void RestoreOrFork(TextRunnerState& state,
-                     const TextRunnerSnapshot& snapshot) const override {
-    const auto* qwen_snapshot =
-        dynamic_cast<const QwenTextRunnerSnapshot*>(&snapshot);
-    if (qwen_snapshot == nullptr ||
-        qwen_snapshot->model.get() != model_.get() ||
-        qwen_snapshot->snapshot == nullptr ||
-        !qwen_snapshot->frontier.has_value()) {
-      throw std::invalid_argument(
-          "Qwen snapshot does not belong to this model");
-    }
-    auto& restored = RequireQwenState(state);
-    if (restored.speculative() !=
-        (qwen_snapshot->verifier_snapshot != nullptr)) {
-      throw std::invalid_argument(
-          "Qwen snapshot speculative mode does not match the destination");
-    }
-    restored.executor().RestoreSnapshot(*qwen_snapshot->snapshot);
-    restored.set_position(qwen_snapshot->position);
-    restored.set_frontier(*qwen_snapshot->frontier);
-    restored.RestoreFrontierLogits(qwen_snapshot->frontier_logits);
-    restored.RestorePendingTokens(qwen_snapshot->pending_tokens);
-    if (qwen_snapshot->verifier_snapshot != nullptr) {
-      restored.RestoreVerifierSnapshot(*qwen_snapshot->verifier_snapshot);
-    }
-  }
-
-  [[nodiscard]] std::size_t PersistentSnapshotPayloadBytes(
-      const TextRunnerSnapshot& snapshot) const override {
-    const auto* qwen_snapshot =
-        dynamic_cast<const QwenTextRunnerSnapshot*>(&snapshot);
-    const bool speculative = dflash_model_ != nullptr;
-    if (qwen_snapshot == nullptr ||
-        qwen_snapshot->model.get() != model_.get() ||
-        qwen_snapshot->snapshot == nullptr ||
-        !qwen_snapshot->frontier.has_value() ||
-        (qwen_snapshot->verifier_snapshot != nullptr) != speculative ||
-        qwen_snapshot->position != qwen_snapshot->snapshot->ValidContext() ||
-        qwen_snapshot->pending_tokens.size() > kQwenMaxResumeTokens ||
-        qwen_snapshot->frontier_logits.size() !=
-            model_->GetConfig().vocab_size) {
-      throw std::invalid_argument(
-          "Qwen persistent snapshot does not belong to this runner");
-    }
-    const std::size_t logits_bytes = CheckedPersistentAdd(
-        0, qwen_snapshot->frontier_logits.size() * sizeof(float));
-    const std::size_t verifier_payload_bytes =
-        qwen_snapshot->verifier_snapshot != nullptr
-            ? qwen_snapshot->verifier_snapshot->PersistentPayloadBytes()
-            : 0;
-    return CheckedPersistentAdd(
-        CheckedPersistentAdd(
-            CheckedPersistentAdd(
-                kQwenPersistentSnapshotHeaderBytes,
-                qwen_snapshot->snapshot->CompactPayloadBytes()),
-            logits_bytes),
-        verifier_payload_bytes);
-  }
-
-  [[nodiscard]] std::size_t SerializePersistentSnapshot(
-      const TextRunnerSnapshot& snapshot,
-      std::span<std::uint8_t> destination) const override {
-    const auto* qwen_snapshot =
-        dynamic_cast<const QwenTextRunnerSnapshot*>(&snapshot);
-    const std::size_t expected_bytes = PersistentSnapshotPayloadBytes(snapshot);
-    if (qwen_snapshot == nullptr || destination.size() != expected_bytes) {
-      throw std::invalid_argument(
-          "Qwen persistent snapshot destination size is invalid");
-    }
-    const std::size_t gpu_payload_bytes =
-        qwen_snapshot->snapshot->CompactPayloadBytes();
-    const std::size_t logits_bytes =
-        qwen_snapshot->frontier_logits.size() * sizeof(float);
-    const std::size_t verifier_payload_bytes =
-        qwen_snapshot->verifier_snapshot != nullptr
-            ? qwen_snapshot->verifier_snapshot->PersistentPayloadBytes()
-            : 0;
-    // Preserve zeroed reserved fields and unused pending-token slots without
-    // clearing the large payload that the serializers below overwrite.
-    std::fill_n(destination.begin(), kQwenPersistentSnapshotHeaderBytes,
-                std::uint8_t{0});
-    std::copy(kQwenPersistentSnapshotMagic.begin(),
-              kQwenPersistentSnapshotMagic.end(), destination.begin());
-    PutLittleEndian<std::uint32_t>(destination, 8,
-                                   kQwenPersistentPayloadVersion);
-    PutLittleEndian<std::uint32_t>(
-        destination, 12,
-        static_cast<std::uint32_t>(kQwenPersistentSnapshotHeaderBytes));
-    PutLittleEndian<std::uint64_t>(
-        destination, 16, static_cast<std::uint64_t>(qwen_snapshot->position));
-    PutLittleEndian<std::uint32_t>(destination, 24, *qwen_snapshot->frontier);
-    PutLittleEndian<std::uint32_t>(destination, 28,
-                                   (qwen_snapshot->verifier_snapshot != nullptr
-                                        ? kQwenPersistentSpeculativeFlag
-                                        : 0U) |
-                                       (!qwen_snapshot->pending_tokens.empty()
-                                            ? kQwenPersistentPendingTokenFlag
-                                            : 0U));
-    PutLittleEndian<std::uint64_t>(
-        destination, 32,
-        static_cast<std::uint64_t>(qwen_snapshot->frontier_logits.size()));
-    PutLittleEndian<std::uint64_t>(
-        destination, 40, static_cast<std::uint64_t>(gpu_payload_bytes));
-    PutLittleEndian<std::uint64_t>(destination, 48,
-                                   static_cast<std::uint64_t>(expected_bytes));
-    PutLittleEndian<std::uint64_t>(
-        destination, 56, static_cast<std::uint64_t>(verifier_payload_bytes));
-    PutLittleEndian<std::uint32_t>(
-        destination, 64,
-        static_cast<std::uint32_t>(qwen_snapshot->pending_tokens.size()));
-    for (std::size_t i = 0; i < qwen_snapshot->pending_tokens.size(); ++i)
-      PutLittleEndian<std::uint32_t>(destination,
-                                     72 + i * sizeof(std::uint32_t),
-                                     qwen_snapshot->pending_tokens[i]);
-    const std::size_t gpu_offset = kQwenPersistentSnapshotHeaderBytes;
-    const std::size_t logits_offset =
-        CheckedPersistentAdd(gpu_offset, gpu_payload_bytes);
-    const std::size_t verifier_offset =
-        CheckedPersistentAdd(logits_offset, logits_bytes);
-    const std::size_t written = qwen_snapshot->snapshot->SerializeCompact(
-        destination.subspan(gpu_offset, gpu_payload_bytes));
-    if (written != gpu_payload_bytes) {
-      throw std::runtime_error(
-          "Qwen compact snapshot serializer returned the wrong byte count");
-    }
-    std::memcpy(destination.data() + logits_offset,
-                qwen_snapshot->frontier_logits.data(), logits_bytes);
-    if (qwen_snapshot->verifier_snapshot != nullptr) {
-      const std::size_t verifier_written =
-          qwen_snapshot->verifier_snapshot->SerializePersistent(
-              destination.subspan(verifier_offset, verifier_payload_bytes));
-      if (verifier_written != verifier_payload_bytes) {
-        throw std::runtime_error(
-            "Qwen verifier serializer returned the wrong byte count");
-      }
-    }
-    return destination.size();
-  }
-
-  void RestorePersistentSnapshot(
-      TextRunnerState& state,
-      std::span<const std::uint8_t> payload) const override {
-    auto& restored = RequireQwenState(state);
-    if (payload.size() < kQwenPersistentSnapshotHeaderBytes ||
-        !std::equal(kQwenPersistentSnapshotMagic.begin(),
-                    kQwenPersistentSnapshotMagic.end(), payload.begin()) ||
-        GetLittleEndian<std::uint32_t>(payload, 8) !=
-            kQwenPersistentPayloadVersion ||
-        GetLittleEndian<std::uint32_t>(payload, 12) !=
-            kQwenPersistentSnapshotHeaderBytes) {
-      throw std::invalid_argument("Qwen persistent snapshot header is invalid");
-    }
-    const std::size_t position =
-        PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 16));
-    const TextRunnerToken frontier =
-        GetLittleEndian<std::uint32_t>(payload, 24);
-    const std::uint32_t flags = GetLittleEndian<std::uint32_t>(payload, 28);
-    const std::size_t logits_count =
-        PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 32));
-    const std::size_t gpu_payload_bytes =
-        PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 40));
-    const std::size_t total_bytes =
-        PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 48));
-    const std::size_t verifier_payload_bytes =
-        PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 56));
-    const bool speculative = (flags & kQwenPersistentSpeculativeFlag) != 0;
-    const bool has_pending_token =
-        (flags & kQwenPersistentPendingTokenFlag) != 0;
-    const std::uint32_t pending_count =
-        GetLittleEndian<std::uint32_t>(payload, 64);
-    if (position == 0 || position > max_context_ ||
-        position > std::numeric_limits<std::uint32_t>::max() ||
-        (flags & ~(kQwenPersistentSpeculativeFlag |
-                   kQwenPersistentPendingTokenFlag)) != 0 ||
-        has_pending_token != (pending_count != 0) ||
-        pending_count > kQwenMaxResumeTokens ||
-        GetLittleEndian<std::uint32_t>(payload, 68) != 0 ||
-        GetLittleEndian<std::uint32_t>(payload, 108) != 0 ||
-        speculative != restored.speculative() ||
-        frontier >= model_->GetConfig().vocab_size ||
-        logits_count != model_->GetConfig().vocab_size ||
-        logits_count >
-            std::numeric_limits<std::size_t>::max() / sizeof(float) ||
-        gpu_payload_bytes == 0 ||
-        speculative != (verifier_payload_bytes != 0) ||
-        total_bytes != payload.size()) {
-      throw std::invalid_argument(
-          "Qwen persistent snapshot metadata is invalid");
-    }
-    std::vector<TextRunnerToken> pending_tokens;
-    for (std::size_t i = 0; i < kQwenMaxResumeTokens; ++i) {
-      const auto token = GetLittleEndian<std::uint32_t>(
-          payload, 72 + i * sizeof(std::uint32_t));
-      if (i < pending_count) {
-        if (token >= model_->GetConfig().vocab_size)
-          throw std::invalid_argument("Qwen snapshot pending token is invalid");
-        pending_tokens.push_back(token);
-      } else if (token != 0) {
-        throw std::invalid_argument(
-            "Qwen snapshot has nonzero reserved tokens");
-      }
-    }
-    const std::size_t logits_bytes = logits_count * sizeof(float);
-    const std::size_t gpu_offset = kQwenPersistentSnapshotHeaderBytes;
-    const std::size_t logits_offset =
-        CheckedPersistentAdd(gpu_offset, gpu_payload_bytes);
-    const std::size_t verifier_offset =
-        CheckedPersistentAdd(logits_offset, logits_bytes);
-    if (CheckedPersistentAdd(verifier_offset, verifier_payload_bytes) !=
-        payload.size()) {
-      throw std::invalid_argument(
-          "Qwen persistent snapshot payload size is invalid");
-    }
-
-    std::vector<float> frontier_logits(logits_count);
-    std::memcpy(frontier_logits.data(), payload.data() + logits_offset,
-                logits_bytes);
-    restored.executor().RestoreCompactSnapshot(
-        payload.subspan(gpu_offset, gpu_payload_bytes),
-        static_cast<std::uint32_t>(position));
-    if (speculative) {
-      restored.RestoreVerifierPersistentSnapshot(
-          payload.subspan(verifier_offset, verifier_payload_bytes));
-    }
-    restored.set_position(position);
-    restored.set_frontier(frontier);
-    restored.RestoreFrontierLogits(std::move(frontier_logits));
-    restored.RestorePendingTokens(pending_tokens);
-  }
-
 private:
   [[nodiscard]] std::size_t MaximumDecodeBatchWidth() const noexcept {
     const std::size_t rows_per_session = dflash_model_ != nullptr ? 8 : 1;
@@ -1597,6 +1439,7 @@ private:
   speculative::SpeculativeOptions speculative_options_;
   hip::QwenExecutionPolicy execution_policy_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
+  cache::Identity component_identity_;
 };
 
 std::vector<TextRunnerToken> DeepSeekRunnerTokens(std::span<const int> tokens) {
@@ -2525,188 +2368,14 @@ public:
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
-    struct Backing {
-      hip::TransferPool streams{64};
-      std::unique_ptr<hip::CommittedBackingPool> pool;
-      std::map<std::uint32_t, std::size_t> component_classes;
-    };
-    auto result = std::make_unique<ComponentCacheResources>();
-    auto adapter =
+    (void)ram;
+    return CreateHipComponentCacheResources(
         std::make_unique<models::qwen38_flash_next::ContinuationAdapter>(
             model_,
             use_mtp_ ? core::SessionMode::kSpeculative
                      : core::SessionMode::kAutoregressive,
-            max_context_, component_identity_);
-    (void)ram;  // Backing sizing follows actual slot allocation below.
-    result->adapter = std::move(adapter);
-    auto backing = std::make_shared<Backing>();
-    result->transfer_batch_size = 16;
-    const auto rounded = [](std::size_t bytes) {
-      return (bytes + 4095) / 4096 * 4096;
-    };
-    for (const auto& d : result->adapter->Components()) {
-      const auto bytes = rounded(d.kind == cache::ComponentKind::kPrivateState
-                                     ? d.state_bytes
-                                     : d.row_bytes * d.rows_per_chunk);
-      backing->component_classes.emplace(d.id.value, bytes);
-    }
-    // The remainder belongs to index, histories, disk catalog and queue
-    // metadata. The pools charge their own per-block allocator headroom.
-    result->commit_backing = [backing, &ledger,
-                              adapter =
-                                  result->adapter.get()](std::size_t budget) {
-      const auto plan =
-          static_cast<models::qwen38_flash_next::ContinuationAdapter*>(adapter)
-              ->BackingPlan(budget);
-      if (plan.size() != 1)
-        throw std::invalid_argument("insufficient component backing budget");
-      const auto& allocation = plan.front();
-      // Pages commit as captures need them. A payload cannot span segments,
-      // so segments of about 128 MiB bound registration pauses and stranded
-      // edge space, fitting at least two of the largest payloads. Prefill
-      // chunks prepare backing before GPU work, after any fallback capture.
-      // Growth stops when the host keeps less than its reserve.
-      std::size_t largest = 0;
-      for (const auto& [id, bytes] : backing->component_classes)
-        largest = std::max(largest, bytes);
-      const auto block = allocation.block_bytes;
-      const auto target =
-          std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
-      const auto parts =
-          std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
-      const auto segment = (allocation.blocks + parts - 1) / parts * block;
-      struct Limited {
-        std::mutex mutex;
-        std::chrono::steady_clock::time_point refused;
-        bool active{};
-      };
-      backing->pool = std::make_unique<hip::CommittedBackingPool>(
-          ledger,
-          hip::BackingPoolConfig{
-              allocation.blocks * allocation.block_bytes +
-                  allocation.metadata_bytes,
-              allocation.block_bytes, allocation.metadata_bytes, segment,
-              [limited = std::make_shared<Limited>()](std::size_t bytes) {
-                const std::lock_guard lock(limited->mutex);
-                const auto now = std::chrono::steady_clock::now();
-                // Pressure retries ask once per capture; recheck at most
-                // once a second while the host is short.
-                if (limited->active &&
-                    now - limited->refused < std::chrono::seconds(1))
-                  return false;
-                const auto ceiling = HostSnapshotCeilingBytes();
-                // Pinned host pages come out of the same device heap that
-                // session and scratch allocations draw on; keep its dispatch
-                // reserve so they do not fall back to managed memory.
-                std::size_t heap_free = 0, heap_total = 0;
-                const bool heap_fits =
-                    hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
-                    hip::HeapFitsAboveReserve(heap_free, bytes);
-                if (ceiling >= bytes && heap_fits) {
-                  limited->active = false;
-                  return true;
-                }
-                if (!limited->active)
-                  Logger::Warn(
-                      "cache",
-                      "schema=component-cache-v1 "
-                      "event=backing_limited reason=" +
-                          std::string(heap_fits ? "host_reserve "
-                                                : "device_heap_reserve ") +
-                          "segment_bytes=" + std::to_string(bytes) +
-                          " host_headroom_bytes=" + std::to_string(ceiling) +
-                          " device_heap_free_bytes=" +
-                          std::to_string(heap_free));
-                limited->active = true;
-                limited->refused = now;
-                return false;
-              }});
-      // Prepare a bounded reserve before readiness. The first shared-prefix
-      // capture needs more than one segment; preparing 2 GiB avoids moving
-      // registration onto that request's capture or decode path.
-      backing->pool->GrowAhead(2ULL << 30);
-      backing->pool->WaitForGrowth();
-      Logger::Info(
-          "cache",
-          "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
-              std::to_string(backing->pool->CommittedBytes()) +
-              " long_term_pinned_bytes=" +
-              std::to_string(backing->pool->LongTermPinnedBytes()));
-    };
-    result->prepare_prefill = [backing](std::size_t tokens) {
-      // Prepare after any fallback capture, alongside actual prefill work.
-      // Short turns need a smaller reserve for private states and row tails.
-      backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
-    };
-    result->can_capture = [backing](auto payloads) {
-      return backing->pool->CanFit(payloads);
-    };
-    result->owner = backing;
-    result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
-      return backing->streams.TryAcquire();
-    };
-    result->allocate = [backing](const cache::PayloadRequest& request) {
-      // Bound the logical capture, then assign whole shared backing pages.
-      const auto capacity =
-          backing->component_classes.at(request.component.value);
-      if (request.bytes > capacity)
-        throw std::logic_error("component capture exceeds its backing class");
-      const auto category =
-          request.category == cache::ResourceCategory::kBackingAssigned
-              ? cache::ResourceCategory::kBackingAssigned
-              : request.category;
-      const auto segments = backing->pool->PageCommitAllocations();
-      const auto started = std::chrono::steady_clock::now();
-      auto block = backing->pool->TryAcquire(category, request.bytes);
-      if (backing->pool->PageCommitAllocations() != segments)
-        Logger::Info(
-            "cache",
-            "schema=component-cache-v1 event=backing_grown committed_bytes=" +
-                std::to_string(backing->pool->CommittedBytes()) + " segments=" +
-                std::to_string(backing->pool->PageCommitAllocations()) +
-                " long_term_pinned_bytes=" +
-                std::to_string(backing->pool->LongTermPinnedBytes()) +
-                " acquire_ms=" +
-                std::to_string(std::chrono::duration<double, std::milli>(
-                                   std::chrono::steady_clock::now() - started)
-                                   .count()));
-      if (!block)
-        throw cache::ResourceExhausted();
-      // Do not start registration between a capture's allocations and copies.
-      // Each prefill chunk prepares its own reserve before GPU work.
-      auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
-      return ComponentCaptureBuffer{
-          owner->Bytes(),
-          [owner] {
-            owner->Convert();
-            return std::move(*owner).TakePayload();
-          },
-          backing->pool.get(),
-          [owner, request](cache::SlotLease& lease, auto source) {
-            return cache::Payload::Borrowed(std::move(*owner).Borrow(
-                lease, request.component, request.first, request.end,
-                request.bytes, source));
-          }};
-    };
-    result->staging = [](std::size_t bytes) {
-      auto allocation = std::make_shared<hip::HostAllocations>();
-      void* data = nullptr;
-      const auto status =
-          allocation->Allocate(&data, bytes, hipHostMallocCoherent);
-      if (status != hipSuccess)
-        throw std::runtime_error(hipGetErrorString(status));
-      auto owner = std::shared_ptr<void>(std::move(allocation), data);
-      std::memset(data, 0, bytes);
-      return cache::StagingAllocation{
-          std::move(owner), {static_cast<std::uint8_t*>(data), bytes}};
-    };
-    result->copy_observed_rows = [](auto source, auto destination,
-                                    cache::Stream& stream) {
-      return dynamic_cast<hip::TransferStream&>(stream).Copy(
-          destination.data(), source.data(), destination.size(),
-          hip::CopyDirection::kDeviceToHost, destination.size());
-    };
-    return result;
+            max_context_, component_identity_),
+        ledger);
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {

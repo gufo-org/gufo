@@ -36,12 +36,12 @@ void Check(bool fp16, bool bf16) {
   policy.recurrent_state_storage = bf16 ? hip::QwenRecurrentStateStorage::kBf16
                                         : hip::QwenRecurrentStateStorage::kFp32;
   qwen::ContinuationLayout layout(c, policy, 100000);
-  Require(layout.Components().size() == 130, "incomplete state inventory");
+  Require(layout.Components().size() == 131, "incomplete state inventory");
   // 48 independent recurrent layers: 10240 * 4 FP32 convolution elements,
   // plus 48 heads * 128 * 128 state elements. Logits and host metadata are
   // fixed.
   const std::size_t fixed =
-      48 * (163840 + 786432 * (bf16 ? 2 : 4)) + 993280 + 64;
+      48 * (163840 + 786432 * (bf16 ? 2 : 4)) + 2 * 993280 + 64 + 96;
   Require(layout.PrivateBytes() == fixed, "incorrect private state claim");
   Require(layout.BytesPerToken() == (fp16 ? 65536 : 131072),
           "incorrect KV stride");

@@ -198,12 +198,12 @@ movable pages, not GPU allocations. 27B also checks HIP free memory. A
 positive value sets a byte cap that may exceed the automatic budget, up to the
 available host RAM minus 4 GiB; the startup line reports both as
 `automatic_bytes` and `max_bytes`.
-On Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
+On Qwen27B and Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
 `max_bytes` excludes it. Other models' disk staging and temporary disk-save
 buffers are separate from this RAM budget.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
-Qwen3.8-Flash-Next pins pages for up to about 89% of its budget as captures
+Qwen27B and Qwen3.8-Flash-Next pin pages for up to about 89% of its budget as captures
 need them, about 1 GiB at a time, and keeps them; the rest covers cache metadata as
 it grows. The first step runs at startup and later ones on a background thread
 ahead of need. Each takes about 200 ms while the host has free pages and longer
@@ -214,6 +214,12 @@ Growth stops early while the host would keep less than 4 GiB available. The page
 tails and idle-session spill; there is no separate spill option.
 Other models allocate payloads only when captured. Under pressure, optional
 copies give way before another conversation's last useful checkpoint.
+
+Qwen27B uses component-cache slots in both AR and DFlash2 modes. A checkpoint
+includes target KV and recurrent state, image-prefix identity, sampled frontier
+and pending output tokens. DFlash2 also retains its independently positioned
+ring KV, pending target features and draft controller state. Completed prefill
+steps can be retained after cancellation. MTP is unsupported on Qwen27B.
 
 Prompt reuse is enabled by default; how the cache finds, retains and
 evicts that state is described in [the KV cache](KV-CACHE.md).
@@ -255,26 +261,26 @@ encoding scratch is still allocated per image.
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
 
-On Flash-Next, `--cache-disk-bytes` counts every file the cache manages,
+On Qwen27B and Flash-Next, `--cache-disk-bytes` counts every file the cache manages,
 including temporary files of unfinished writes and files a crash left
 unreferenced. Restarting with a lower budget removes those first, then the
 oldest checkpoints by creation order, until the directory fits; use history does not
-survive a restart. One Flash-Next server owns the directory: a second one fails
+survive a restart. One Qwen27B or Flash-Next server owns the directory: a second one fails
 at startup, after loading its model but before committing its RAM budget, with
 an ownership error naming the directory. The lock does not wait: a restarted
 server fails if its predecessor is still draining disk writes when the new one
 finishes loading its model. Other models do not take this lock.
 The first start on a directory written by an earlier release removes its old
 checkpoint files (`*.kvc`), and the cache refills as conversations run. Do not
-share a directory between Flash-Next and other models; Flash-Next removes
+share a directory with another model server; the component cache removes
 their checkpoint and temporary files too, including writes in progress.
-Flash-Next ignores `--cache-disk-staging-bytes` and logs
+Qwen27B and Flash-Next ignore `--cache-disk-staging-bytes` and logs
 `event=option_ignored`. Writes and restores stream each checkpoint through an
 internal 1 MiB pinned buffer, piece by piece; a larger buffer did not change
 restore or write speed and took pinned RAM and device heap from the cache and
-the sessions. Remove the option from Flash-Next command lines.
+the sessions. Remove the option from Qwen27B and Flash-Next command lines.
 
-For the other models, `--cache-disk-staging-bytes 0` (the default) selects the
+For DeepSeek, `--cache-disk-staging-bytes 0` (the default) selects the
 smaller of one eighth of available host RAM after model/session loading
 (including cgroup limits) and the disk budget. This bounds queued
 captures/writes and each disk read separately; it allocates nothing upfront.
@@ -283,8 +289,8 @@ Snapshots that exceed either limit are skipped with their required size and
 available budget logged; live conversation reuse remains available. Existing
 files that exceed the current staging limit are preserved subject to disk LRU
 eviction and can be reused after restarting with sufficient staging.
-Qwen27B at full context needs larger staging and `--cache-disk-bytes` limits;
-use the required size reported in the skip log.
+Qwen27B streams large checkpoints through the same fixed 1 MiB staging buffer;
+`--cache-disk-bytes` still needs to fit the retained checkpoints.
 
 For a focused cancellation check, run
 `python3 tests/functional/continuation.py --output /tmp/cache-check.json`

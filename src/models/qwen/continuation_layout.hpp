@@ -13,10 +13,15 @@ namespace gufo::models::qwen {
 enum class ContinuationPart {
   kMetadata,
   kLogits,
+  kFrontier,
   kKey,
   kValue,
   kConvolution,
-  kRecurrent
+  kRecurrent,
+  kDraftMetadata,
+  kDraftKey,
+  kDraftValue,
+  kDraftFeatures
 };
 struct ContinuationComponent {
   cache::ComponentDescriptor descriptor;
@@ -25,6 +30,12 @@ struct ContinuationComponent {
 };
 
 inline constexpr std::size_t kContinuationMetadataBytes = 64;
+inline constexpr std::size_t kContinuationFrontierMetadataBytes = 96;
+inline constexpr std::size_t kContinuationPendingTokens = 9;
+
+struct ContinuationBackingClass {
+  std::size_t block_bytes{}, blocks{}, metadata_bytes{};
+};
 
 // KV rows have a canonical token/head/channel order. FP32's native head-major
 // planes are gathered without conversion; their layout version differs from
@@ -40,6 +51,8 @@ public:
       cache::Rows) const;
   [[nodiscard]] std::size_t PrivateBytes() const noexcept;
   [[nodiscard]] std::size_t BytesPerToken() const noexcept;
+  [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
+      std::size_t ram_bytes) const;
 
 private:
   std::uint32_t context_;

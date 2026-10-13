@@ -350,7 +350,12 @@ void CheckGeneratedFrontierReuse(
                    result.cached_prompt_tokens >= root.prompt_tokens + 7 &&
                    result.tokens == expected.tokens,
                "a concurrent fork re-prefilled generated tokens or changed "
-               "the isolated replay");
+               "the isolated replay: speculative=" +
+                   std::to_string(speculative) +
+                   " cached=" + std::to_string(result.cached_prompt_tokens) +
+                   " required=" + std::to_string(root.prompt_tokens + 7) +
+                   " tokens_equal=" +
+                   std::to_string(result.tokens == expected.tokens));
         if (sampling.temperature > 0.0F)
           Expect(result.draft_tokens == expected.draft_tokens &&
                      result.draft_accepted_tokens ==
@@ -881,37 +886,42 @@ int main(int argc, const char* const* argv) {
                "Qwen disk writer did not publish a compact snapshot");
       }
 
-      gufo::server::InferenceBackend restarted;
-      Expect(restarted.load(model, &error, context, 1, {}, {}, {}, disk_cache),
-             error);
-      const auto restored_continuation =
-          restarted.chat(cache_request(continued_messages), 2, {});
-      Expect(restored_continuation.cache_hit &&
-                 restored_continuation.cache_disk_hit,
-             "fresh Qwen backend did not restore its disk prefix");
-      Expect(restored_continuation.cached_prompt_tokens ==
-                     stable_chat_prompt.size() &&
-                 restored_continuation.cached_prompt_tokens <
-                     restored_continuation.prompt_tokens,
-             "Qwen disk restore did not report its exact reusable prefix");
-      Expect(restored_continuation.cache_restore_bytes > 0,
-             "Qwen disk restore did not report restored bytes");
-      Expect(restored_continuation.tokens == direct_continuation,
-             "Qwen disk continuation differs from cold full prefill");
+      {
+        gufo::server::InferenceBackend restarted;
+        Expect(
+            restarted.load(model, &error, context, 1, {}, {}, {}, disk_cache),
+            error);
+        const auto restored_continuation =
+            restarted.chat(cache_request(continued_messages), 2, {});
+        Expect(restored_continuation.cache_hit &&
+                   restored_continuation.cache_disk_hit,
+               "fresh Qwen backend did not restore its disk prefix");
+        Expect(restored_continuation.cached_prompt_tokens ==
+                       stable_chat_prompt.size() &&
+                   restored_continuation.cached_prompt_tokens <
+                       restored_continuation.prompt_tokens,
+               "Qwen disk restore did not report its exact reusable prefix");
+        Expect(restored_continuation.cache_restore_bytes > 0,
+               "Qwen disk restore did not report restored bytes");
+        Expect(restored_continuation.tokens == direct_continuation,
+               "Qwen disk continuation differs from cold full prefill");
+      }
 
       auto incompatible_cache = disk_cache;
       incompatible_cache.model_artifact_fingerprint = std::string(64, 'b');
-      gufo::server::InferenceBackend incompatible;
-      Expect(incompatible.load(model, &error, context, 1, {}, {}, {},
-                               incompatible_cache),
-             error);
-      const auto incompatible_result =
-          incompatible.chat(cache_request(continued_messages), 2, {});
-      Expect(
-          !incompatible_result.cache_hit && !incompatible_result.cache_disk_hit,
-          "changed Qwen artifact fingerprint must be a cold miss");
-      Expect(incompatible_result.tokens == direct_continuation,
-             "Qwen compatibility miss changed cold execution");
+      {
+        gufo::server::InferenceBackend incompatible;
+        Expect(incompatible.load(model, &error, context, 1, {}, {}, {},
+                                 incompatible_cache),
+               error);
+        const auto incompatible_result =
+            incompatible.chat(cache_request(continued_messages), 2, {});
+        Expect(!incompatible_result.cache_hit &&
+                   !incompatible_result.cache_disk_hit,
+               "changed Qwen artifact fingerprint must be a cold miss");
+        Expect(incompatible_result.tokens == direct_continuation,
+               "Qwen compatibility miss changed cold execution");
+      }
 
       if (draft_model_path != nullptr) {
         const gufo::server::TextSpeculativeConfig dflash_config{
@@ -955,30 +965,32 @@ int main(int argc, const char* const* argv) {
                  "DFlash disk writer did not publish a compact snapshot");
         }
 
-        gufo::server::InferenceBackend restarted_dflash;
-        Expect(restarted_dflash.load(model, &error, context, 1, {}, {},
-                                     dflash_config, dflash_disk_cache),
-               error);
-        const auto restored_dflash_continuation =
-            restarted_dflash.chat(cache_request(continued_messages), 8, {});
-        Expect(restored_dflash_continuation.cache_hit &&
-                   restored_dflash_continuation.cache_disk_hit,
-               "fresh DFlash backend did not restore its disk prefix");
-        Expect(restored_dflash_continuation.cached_prompt_tokens ==
-                       stable_chat_prompt.size() &&
-                   warm_dflash_continuation.cached_prompt_tokens >=
-                       restored_dflash_continuation.cached_prompt_tokens &&
-                   restored_dflash_continuation.cached_prompt_tokens <
-                       restored_dflash_continuation.prompt_tokens,
-               "DFlash disk restore did not report its exact prefix");
-        Expect(restored_dflash_continuation.tokens ==
-                   warm_dflash_continuation.tokens,
-               "DFlash disk restore changed continuation tokens");
-        Expect(restored_dflash_continuation.draft_tokens ==
-                       warm_dflash_continuation.draft_tokens &&
-                   restored_dflash_continuation.draft_accepted_tokens ==
-                       warm_dflash_continuation.draft_accepted_tokens,
-               "DFlash disk restore changed the speculative trajectory");
+        {
+          gufo::server::InferenceBackend restarted_dflash;
+          Expect(restarted_dflash.load(model, &error, context, 1, {}, {},
+                                       dflash_config, dflash_disk_cache),
+                 error);
+          const auto restored_dflash_continuation =
+              restarted_dflash.chat(cache_request(continued_messages), 8, {});
+          Expect(restored_dflash_continuation.cache_hit &&
+                     restored_dflash_continuation.cache_disk_hit,
+                 "fresh DFlash backend did not restore its disk prefix");
+          Expect(restored_dflash_continuation.cached_prompt_tokens ==
+                         stable_chat_prompt.size() &&
+                     warm_dflash_continuation.cached_prompt_tokens >=
+                         restored_dflash_continuation.cached_prompt_tokens &&
+                     restored_dflash_continuation.cached_prompt_tokens <
+                         restored_dflash_continuation.prompt_tokens,
+                 "DFlash disk restore did not report its exact prefix");
+          Expect(restored_dflash_continuation.tokens ==
+                     warm_dflash_continuation.tokens,
+                 "DFlash disk restore changed continuation tokens");
+          Expect(restored_dflash_continuation.draft_tokens ==
+                         warm_dflash_continuation.draft_tokens &&
+                     restored_dflash_continuation.draft_accepted_tokens ==
+                         warm_dflash_continuation.draft_accepted_tokens,
+                 "DFlash disk restore changed the speculative trajectory");
+        }
 
         auto incompatible_dflash_cache = dflash_disk_cache;
         incompatible_dflash_cache.draft_model_artifact_fingerprint =

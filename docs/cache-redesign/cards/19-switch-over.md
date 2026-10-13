@@ -962,3 +962,17 @@ checkpoints, LRU letting short requests remove an idle conversation, and one-use
 requests displacing a reused conversation. [Card 22](22-small-budget-retention.md)
 records the bounded grid density and byte-pressure order that fix them, their
 regressions, the AR/MTP reuse results and the still-unqualified timing.
+
+## Qwen27B implementation update
+
+AR and DFlash2 serving now bind component-owned executors. The adapter supplies
+borrowed FP16 target rows, canonical FP32 transfers, bounded private serialization
+and committed backing shared with Flash-Next. Draft components retain physical
+ring KV and its independent frontier, pending target features and controller
+metadata. Sampled frontier logits and up to nine pending output tokens accompany
+the target checkpoint. The Qwen runner's legacy snapshot/persistence hooks are
+removed; DeepSeek keeps its existing snapshot path.
+
+Implementation validation is pending. Per user instruction, performance
+measurements run after functional implementation; further FP16/FP32 long-capacity
+telemetry probes are skipped. Historical results remain tied to their revisions.

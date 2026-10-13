@@ -150,6 +150,7 @@ void QwenDFlashGpuExecutor::InjectTargetContextBatch(
       if (requests[previous].executor == executor)
         throw std::invalid_argument("DFlash2 context batch repeats a session");
     }
+    executor->CheckContinuation();
     counts[index] =
         static_cast<std::uint32_t>(request.features.size() / feature_width);
     offsets[index + 1] = offsets[index] + counts[index];
@@ -257,6 +258,11 @@ void QwenDFlashGpuExecutor::InjectTargetContextBatch(
 std::vector<speculative::DraftProposal>
 QwenDFlashGpuExecutor::ForwardBlockBatch(
     std::span<const QwenDFlashBlockRequest> requests) {
+  for (const auto& request : requests) {
+    if (request.executor)
+      request.executor->CheckContinuation();
+  }
+
   if (requests.empty() || requests.size() > 8 ||
       requests.front().executor == nullptr)
     throw std::invalid_argument(

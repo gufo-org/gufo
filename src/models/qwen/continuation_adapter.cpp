@@ -34,16 +34,37 @@ struct Metadata {
   std::array<std::uint8_t, 32> image{};
 };
 static_assert(sizeof(Metadata) <= kContinuationMetadataBytes);
+struct DraftMetadata {
+  std::uint32_t version{1}, injected{}, pending_rows{}, primed{};
+  float controller{};
+  std::uint32_t last_full_width{};
+};
+static_assert(sizeof(DraftMetadata) <= kContinuationMetadataBytes);
+struct FrontierMetadata {
+  std::uint32_t version{1}, has_token{}, token{}, published{}, logits{},
+      pending{};
+  std::array<std::uint32_t, 2> reserved{};
+  std::array<std::uint32_t, kContinuationPendingTokens> tokens{};
+};
+static_assert(sizeof(FrontierMetadata) <= kContinuationFrontierMetadataBytes);
 }  // namespace
 
 class ContinuationAdapter::State final : public cache::Slot,
                                          public ContinuationHooks {
 public:
   State(ContinuationAdapter& adapter, cache::MutationGuard& guard,
-        std::unique_ptr<hip::QwenGpuExecutor> executor)
-      : adapter(adapter), guard(guard), executor(std::move(executor)) {
+        std::unique_ptr<hip::QwenGpuExecutor> executor,
+        std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft)
+      : adapter(adapter),
+        guard(guard),
+        executor(std::move(executor)),
+        draft(std::move(draft)) {
     this->executor->continuation_hooks_ = this;
     this->executor->vision_input_.continuation_hooks_ = this;
+    if (this->draft) {
+      this->draft->continuation_hooks_ = this;
+      this->draft->executor_->continuation_hooks_ = this;
+    }
   }
   struct Job {
     State* owner;
@@ -84,6 +105,10 @@ public:
     for (const auto& job : jobs)
       (void)job->Wait();
     BeforeRelease();
+    if (draft) {
+      draft->continuation_hooks_ = nullptr;
+      draft->executor_->continuation_hooks_ = nullptr;
+    }
     executor->continuation_hooks_ = nullptr;
     executor->vision_input_.continuation_hooks_ = nullptr;
   }
@@ -91,6 +116,8 @@ public:
     return guarding || (!restoring && !failed && !executor->reset_failure_);
   }
   void BeforeExecution() override {
+    if (invalidating)
+      return;
     if (!IsValid() || pending)
       throw std::logic_error("Qwen slot is not ready for execution");
   }
@@ -185,12 +212,13 @@ public:
     bool previous;
   };
   void Stable() const {
-    if (!IsValid() || verification)
+    if (!IsValid() || verification || (draft && draft->proposal_active_))
       throw std::logic_error("Qwen capture requires a stable frontier");
   }
   ContinuationAdapter& adapter;
   cache::MutationGuard& guard;
   std::unique_ptr<hip::QwenGpuExecutor> executor;
+  std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
   std::uint32_t position{};
   bool logits_valid{}, verification{}, restoring{}, guarding{}, invalidating{},
       native_restoring{}, validating{};
@@ -201,12 +229,20 @@ public:
   std::vector<cache::ComponentPosition> expected;
   std::vector<Coverage> coverage;
   std::array<std::byte, kContinuationMetadataBytes> metadata{};
+  std::array<std::byte, kContinuationMetadataBytes> draft_metadata{};
+  std::vector<std::byte> draft_features;
+  ContinuationFrontier frontier;
+  std::vector<std::byte> frontier_bytes;
 };
 
 ContinuationAdapter::ContinuationAdapter(
     std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t context,
-    cache::Identity identity, hip::QwenExecutionPolicy policy)
+    cache::Identity identity, hip::QwenExecutionPolicy policy,
+    std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model,
+    hip::QwenDFlashGpuDraftConfig draft_config)
     : model_(std::move(model)),
+      draft_model_(std::move(draft_model)),
+      draft_config_(draft_config),
       policy_(policy),
       context_(context),
       layout_(model_ ? model_->GetConfig() : core::ModelConfig{}, policy,
@@ -218,7 +254,7 @@ ContinuationAdapter::ContinuationAdapter(
     for (unsigned i = 0; i < 8; ++i)
       identity_.push_back(static_cast<std::uint8_t>(value >> (i * 8)));
   };
-  put(1);
+  put(2);
   put(context);
   put(policy.Fingerprint());
   const auto& c = model_->GetConfig();
@@ -229,6 +265,43 @@ ContinuationAdapter::ContinuationAdapter(
         c.ssm_group_count, c.ssm_time_step_rank, c.ssm_inner_size})
     put(value);
   for (const auto& component : layout_.Components())
+    components_.push_back(component);
+  if (draft_model_) {
+    if (draft_config_.max_context != context_)
+      throw std::invalid_argument("draft context differs from target context");
+    const auto& d = draft_model_->GetDFlashConfig();
+    const auto& dc = draft_model_->GetConfig();
+    const auto add = [&](ContinuationPart part, std::size_t bytes,
+                         std::uint32_t layer = 0) {
+      components_.push_back(
+          {{{static_cast<std::uint32_t>(components_.size() + 1)},
+            1,
+            cache::ComponentKind::kPrivateState,
+            0,
+            0,
+            bytes},
+           part,
+           layer});
+    };
+    add(ContinuationPart::kDraftMetadata, kContinuationMetadataBytes);
+    const auto ring_bytes = std::size_t{std::min(context_, d.sliding_window)} *
+                            dc.num_key_value_heads * dc.head_dim *
+                            sizeof(float);
+    for (std::uint32_t layer = 0; layer < d.num_layers; ++layer) {
+      add(ContinuationPart::kDraftKey, ring_bytes, layer);
+      add(ContinuationPart::kDraftValue, ring_bytes, layer);
+    }
+    add(ContinuationPart::kDraftFeatures, std::size_t{8} *
+                                              d.target_layer_ids.size() *
+                                              dc.hidden_size * sizeof(float));
+    put(draft_config_.max_draft_tokens);
+    put(static_cast<std::uint64_t>(draft_config_.policy));
+    put(d.sliding_window);
+    put(d.num_layers);
+    for (auto layer : d.target_layer_ids)
+      put(layer);
+  }
+  for (const auto& component : components_)
     descriptors_.push_back(component.descriptor);
 }
 ContinuationAdapter::~ContinuationAdapter() = default;
@@ -247,6 +320,17 @@ hip::QwenGpuExecutor& ContinuationAdapter::GetExecutor(cache::Slot& slot) {
   state.BeforeExecution();
   return *state.executor;
 }
+hip::QwenDFlashGpuDraftBackend* ContinuationAdapter::GetDraftBackend(
+    cache::Slot& slot) {
+  auto& state = As(slot);
+  state.BeforeExecution();
+  return state.draft.get();
+}
+ContinuationFrontier& ContinuationAdapter::GetFrontier(cache::Slot& slot) {
+  auto& state = As(slot);
+  state.BeforeExecution();
+  return state.frontier;
+}
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
   return {.continuation = true, .persistent_encoding = true};
 }
@@ -261,14 +345,31 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
     cache::MutationGuard& guard) {
   auto executor =
       std::make_unique<hip::QwenGpuExecutor>(model_, context_, policy_);
-  return std::make_unique<State>(*this, guard, std::move(executor));
+  std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
+  if (draft_model_) {
+    std::string error;
+    draft = hip::QwenDFlashGpuDraftBackend::Create(draft_model_, draft_config_,
+                                                   &error);
+    if (!draft)
+      throw std::runtime_error("cannot create component draft: " + error);
+  }
+  return std::make_unique<State>(*this, guard, std::move(executor),
+                                 std::move(draft));
 }
 std::vector<cache::ComponentPosition> ContinuationAdapter::Positions(
     const cache::Slot& slot) const {
   const auto& state = As(slot);
   if (!state.IsValid())
     throw std::logic_error("cannot query an invalid Qwen slot");
-  return layout_.Positions(state.position);
+  auto positions = layout_.Positions(state.position);
+  for (std::size_t i = positions.size(); i < components_.size(); ++i) {
+    const auto& component = components_[i];
+    // Private components describe one coherent target checkpoint. Their
+    // independent injected frontier is encoded in DraftMetadata, together
+    // with pending features, rather than treated as an append-row position.
+    positions.push_back({component.descriptor.id, state.position});
+  }
+  return positions;
 }
 std::vector<Rows> ContinuationAdapter::PlanPrefill(const cache::Slot& slot,
                                                    Rows first, Rows end) const {
@@ -284,9 +385,9 @@ std::vector<Rows> ContinuationAdapter::PlanPrefill(const cache::Slot& slot,
 }
 const ContinuationComponent& ContinuationAdapter::Component(
     cache::ComponentId id) const {
-  if (!id.value || id.value > layout_.Components().size())
+  if (!id.value || id.value > components_.size())
     throw std::invalid_argument("invalid Qwen component ID");
-  return layout_.Components()[id.value - 1];
+  return components_[id.value - 1];
 }
 void ContinuationAdapter::BeginRestore(
     cache::Slot& slot, std::span<const cache::ComponentPosition> positions) {
@@ -302,14 +403,30 @@ void ContinuationAdapter::BeginRestore(
     ordered.push_back(*std::ranges::find(positions, descriptor.id,
                                          &cache::ComponentPosition::id));
   }
-  if (ordered != layout_.Positions(ordered.front().valid_rows))
+  const auto target_positions = layout_.Positions(ordered.front().valid_rows);
+  if (!std::equal(target_positions.begin(), target_positions.end(),
+                  ordered.begin()))
     throw std::invalid_argument("inconsistent Qwen frontiers");
+  for (std::size_t i = target_positions.size(); i < ordered.size(); ++i) {
+    if (ordered[i].valid_rows != ordered.front().valid_rows) {
+      throw std::invalid_argument("inconsistent Qwen draft metadata frontier");
+    }
+  }
   std::vector<Coverage> coverage(descriptors_.size());
   state.GuardAll();
   Check(hipStreamSynchronize(state.executor->arena_.stream));
+  if (state.draft)
+    Check(hipStreamSynchronize(state.draft->executor_->stream_));
   state.expected = std::move(ordered);
   state.coverage = std::move(coverage);
   state.metadata.fill(std::byte{});
+  state.draft_metadata.fill(std::byte{});
+  const auto frontier = std::ranges::find(
+      components_, ContinuationPart::kFrontier, &ContinuationComponent::part);
+  state.frontier_bytes.assign(frontier->descriptor.state_bytes, std::byte{});
+  if (state.draft)
+    state.draft_features.assign(components_.back().descriptor.state_bytes,
+                                std::byte{});
   state.restoring = true;
 }
 cache::Completion ContinuationAdapter::Transfer(
@@ -386,6 +503,34 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
   } else if (component.part == ContinuationPart::kLogits) {
     if (state.logits_valid)
       source = arena.d_logits;
+  } else if (component.part == ContinuationPart::kFrontier) {
+    const auto& frontier = state.frontier;
+    if (frontier.pending.size() > kContinuationPendingTokens ||
+        (!frontier.logits.empty() &&
+         frontier.logits.size() != model_->GetConfig().vocab_size))
+      throw std::logic_error("Qwen frontier exceeds component capacity");
+    FrontierMetadata metadata{};
+    metadata.has_token = frontier.token.has_value();
+    metadata.token = frontier.token.value_or(0);
+    metadata.published = frontier.published;
+    metadata.logits = static_cast<std::uint32_t>(frontier.logits.size());
+    metadata.pending = static_cast<std::uint32_t>(frontier.pending.size());
+    std::ranges::copy(frontier.pending, metadata.tokens.begin());
+    return Transfer(state, false, stream, [&](hip::TransferStream&) {
+      std::ranges::fill(bytes, std::byte{});
+      const auto copy = [&](const void* data, std::size_t start,
+                            std::size_t length) {
+        const auto first = std::max(offset, start);
+        const auto end = std::min(offset + bytes.size(), start + length);
+        if (first < end)
+          std::memcpy(bytes.data() + first - offset,
+                      static_cast<const std::byte*>(data) + first - start,
+                      end - first);
+      };
+      copy(&metadata, 0, sizeof(metadata));
+      copy(frontier.logits.data(), kContinuationFrontierMetadataBytes,
+           frontier.logits.size() * sizeof(float));
+    });
   } else if (component.part == ContinuationPart::kConvolution) {
     source = arena.d_ssm_conv_state +
              std::size_t{model_->GetConfig().SsmLayerIndex(component.layer)} *
@@ -394,6 +539,48 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     source =
         static_cast<std::byte*>(arena.d_ssm_deltanet_state) +
         std::size_t{model_->GetConfig().SsmLayerIndex(component.layer)} * total;
+  } else if (component.part == ContinuationPart::kDraftMetadata) {
+    const auto& draft = *state.draft;
+    DraftMetadata metadata{};
+    metadata.injected = draft.executor_->GetInjectedContextLength();
+    metadata.pending_rows = draft.PendingFeatureCount(state.position);
+    metadata.primed = draft.primed_;
+    metadata.controller = draft.controller_.State();
+    metadata.last_full_width = draft.controller_.LastFullWidth();
+    std::memcpy(host.data(), &metadata, sizeof(metadata));
+    source = host.data();
+    is_host = true;
+  } else if (component.part == ContinuationPart::kDraftFeatures) {
+    const auto& pending = state.draft->pending_target_features_;
+    const auto valid = pending.size() * sizeof(float);
+    if (valid > total)
+      throw std::logic_error(
+          "Qwen draft pending features exceed component capacity");
+    return Transfer(state, false, stream, [&](hip::TransferStream&) {
+      std::ranges::fill(bytes, std::byte{});
+      if (offset < valid)
+        std::memcpy(bytes.data(),
+                    reinterpret_cast<const std::byte*>(pending.data()) + offset,
+                    std::min(bytes.size(), valid - offset));
+    });
+  } else if (component.part == ContinuationPart::kDraftKey ||
+             component.part == ContinuationPart::kDraftValue) {
+    auto& draft = *state.draft->executor_;
+    Check(hipStreamSynchronize(draft.stream_));
+    source = component.part == ContinuationPart::kDraftKey
+                 ? draft.d_injected_k_[component.layer]
+                 : draft.d_injected_v_[component.layer];
+    const auto valid =
+        total / draft.history_capacity_ *
+        std::min(draft.injected_context_len_, draft.history_capacity_);
+    return Transfer(state, false, stream, [&](hip::TransferStream& transfer) {
+      std::ranges::fill(bytes, std::byte{});
+      if (offset < valid)
+        Check(hipMemcpyAsync(bytes.data(),
+                             static_cast<std::byte*>(source) + offset,
+                             std::min(bytes.size(), valid - offset),
+                             hipMemcpyDeviceToHost, transfer.Native()));
+    });
   }
   return Transfer(state, false, stream, [&](hip::TransferStream& transfer) {
     if (bytes.empty())
@@ -444,7 +631,10 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
       is_host = true;
     } else if (component.part == ContinuationPart::kLogits)
       target = arena.d_logits;
-    else if (component.part == ContinuationPart::kConvolution)
+    else if (component.part == ContinuationPart::kFrontier) {
+      target = state.frontier_bytes.data();
+      is_host = true;
+    } else if (component.part == ContinuationPart::kConvolution)
       target = arena.d_ssm_conv_state +
                std::size_t{model_->GetConfig().SsmLayerIndex(component.layer)} *
                    total / sizeof(float);
@@ -452,6 +642,19 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
       target = static_cast<std::byte*>(arena.d_ssm_deltanet_state) +
                std::size_t{model_->GetConfig().SsmLayerIndex(component.layer)} *
                    total;
+    else if (component.part == ContinuationPart::kDraftMetadata) {
+      target = state.draft_metadata.data();
+      is_host = true;
+    } else if (component.part == ContinuationPart::kDraftFeatures) {
+      target = state.draft_features.data();
+      is_host = true;
+    } else if (component.part == ContinuationPart::kDraftKey ||
+               component.part == ContinuationPart::kDraftValue) {
+      auto& draft = *state.draft->executor_;
+      target = component.part == ContinuationPart::kDraftKey
+                   ? draft.d_injected_k_[component.layer]
+                   : draft.d_injected_v_[component.layer];
+    }
     {
       const std::lock_guard lock(state.jobs_mutex);
       state.coverage[id.value - 1].emplace_back(offset, offset + bytes.size());
@@ -513,6 +716,32 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
     throw;
   }
 }
+std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
+    const cache::Slot& slot, cache::ComponentId id, Rows first,
+    Rows end) const {
+  const auto& state = As(slot);
+  const auto& component = Component(id);
+  if (!state.IsValid() ||
+      component.descriptor.kind != cache::ComponentKind::kAppendRows)
+    throw std::logic_error("cannot borrow invalid Qwen rows");
+  if (first >= end || end > state.position)
+    throw std::invalid_argument("invalid Qwen borrowed range");
+  // FP32 planes are head-major, so a token range is not contiguous. Its
+  // canonical host representation still goes through TransferRows.
+  if (!policy_.UsesFp16AttentionKv())
+    return {};
+  Check(hipStreamSynchronize(state.executor->arena_.stream));
+  const auto& c = model_->GetConfig();
+  const auto row = component.descriptor.row_bytes;
+  const auto layer = component.layer / c.full_attention_interval;
+  const auto plane = component.part == ContinuationPart::kValue
+                         ? c.FullAttentionLayerCount()
+                         : 0;
+  return {
+      static_cast<const std::byte*>(state.executor->arena_.d_attention_kv_f16) +
+          ((plane + layer) * std::size_t{context_} + first) * row,
+      (end - first) * row};
+}
 cache::Completion ContinuationAdapter::TransferRows(
     State& state, const ContinuationComponent& component, bool load, Rows first,
     Rows end, std::byte* bytes, cache::Stream& stream) {
@@ -531,7 +760,7 @@ cache::Completion ContinuationAdapter::TransferRows(
   return Transfer(state, load, stream, [&](hip::TransferStream& transfer) {
     if (first == end)
       return;
-    const auto direction = load ? hipMemcpyHostToDevice : hipMemcpyDeviceToHost;
+    const auto direction = load ? hipMemcpyDefault : hipMemcpyDeviceToHost;
     if (policy_.UsesFp16AttentionKv()) {
       auto* device = native + first * row;
       Check(hipMemcpyAsync(load ? device : bytes, load ? bytes : device,
@@ -584,6 +813,68 @@ bool ContinuationAdapter::Validate(
       (metadata.image_bytes != 0 && metadata.image_bytes != 32))
     return refuse();
   try {
+    FrontierMetadata frontier_metadata{};
+    std::memcpy(&frontier_metadata, state.frontier_bytes.data(),
+                sizeof(frontier_metadata));
+    if (frontier_metadata.version != 1 || frontier_metadata.has_token > 1 ||
+        frontier_metadata.published > 1 ||
+        frontier_metadata.pending > kContinuationPendingTokens ||
+        (frontier_metadata.logits &&
+         frontier_metadata.logits != c.vocab_size) ||
+        (frontier_metadata.has_token &&
+         frontier_metadata.token >= c.vocab_size))
+      return refuse();
+    for (std::size_t i = 0; i < frontier_metadata.pending; ++i)
+      if (frontier_metadata.tokens[i] >= c.vocab_size)
+        return refuse();
+    state.frontier.token =
+        frontier_metadata.has_token
+            ? std::optional<tokenization::TokenId>{frontier_metadata.token}
+            : std::nullopt;
+    state.frontier.published = frontier_metadata.published;
+    state.frontier.pending.assign(
+        frontier_metadata.tokens.begin(),
+        frontier_metadata.tokens.begin() + frontier_metadata.pending);
+    state.frontier.logits.resize(frontier_metadata.logits);
+    if (frontier_metadata.logits)
+      std::memcpy(
+          state.frontier.logits.data(),
+          state.frontier_bytes.data() + kContinuationFrontierMetadataBytes,
+          state.frontier.logits.size() * sizeof(float));
+    if (state.draft) {
+      DraftMetadata draft_metadata{};
+      std::memcpy(&draft_metadata, state.draft_metadata.data(),
+                  sizeof(draft_metadata));
+      auto& draft = *state.draft;
+      const auto width = draft.executor_->GetTargetFeaturesSize();
+      if (draft_metadata.version != 1 || draft_metadata.primed > 1 ||
+          draft_metadata.injected > metadata.position ||
+          draft_metadata.pending_rows > 8 ||
+          draft_metadata.pending_rows !=
+              metadata.position - draft_metadata.injected ||
+          (!draft_metadata.primed && metadata.position))
+        return refuse();
+      for (std::size_t i = layout_.Components().size(); i < components_.size();
+           ++i)
+        if ((components_[i].part == ContinuationPart::kDraftKey ||
+             components_[i].part == ContinuationPart::kDraftValue) &&
+            state.expected[i].valid_rows != metadata.position)
+          return refuse();
+      auto controller = draft.controller_;
+      controller.Restore(draft_metadata.controller,
+                         draft_metadata.last_full_width);
+      draft.pending_target_features_.resize(
+          std::size_t{draft_metadata.pending_rows} * width);
+      if (!draft.pending_target_features_.empty())
+        std::memcpy(draft.pending_target_features_.data(),
+                    state.draft_features.data(),
+                    draft.pending_target_features_.size() * sizeof(float));
+      draft.executor_->injected_context_len_ = draft_metadata.injected;
+      draft.controller_ = controller;
+      draft.primed_ = draft_metadata.primed;
+      draft.proposal_active_ = false;
+      draft.proposed_tokens_.clear();
+    }
     struct Scope {
       bool& flag;
       ~Scope() { flag = false; }
@@ -650,10 +941,15 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
     state.executor->Reset();
     if (state.executor->reset_failure_)
       return false;
+    if (state.draft)
+      state.draft->Reset();
     state.restoring = false;
     state.failed = false;
     state.expected.clear();
     state.coverage.clear();
+    state.draft_features.clear();
+    state.frontier = {};
+    state.frontier_bytes.clear();
     state.guard.AfterReset();
     return true;
   } catch (...) {

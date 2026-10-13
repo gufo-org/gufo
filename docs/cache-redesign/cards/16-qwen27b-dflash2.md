@@ -63,3 +63,17 @@ required (see the README).
 [Component descriptors and model modules](../RFC.md#component-descriptors-and-model-modules)
 
 ## Review notes
+
+## Qwen27B implementation update
+
+AR and DFlash2 serving now bind component-owned executors. The adapter supplies
+borrowed FP16 target rows, canonical FP32 transfers, bounded private serialization
+and committed backing shared with Flash-Next. Draft components retain physical
+ring KV and its independent frontier, pending target features and controller
+metadata. Sampled frontier logits and up to nine pending output tokens accompany
+the target checkpoint. The Qwen runner's legacy snapshot/persistence hooks are
+removed; DeepSeek keeps its existing snapshot path.
+
+Implementation validation is pending. Per user instruction, performance
+measurements run after functional implementation; further FP16/FP32 long-capacity
+telemetry probes are skipped. Historical results remain tied to their revisions.

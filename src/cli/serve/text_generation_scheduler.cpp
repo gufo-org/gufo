@@ -1043,17 +1043,24 @@ struct TextGenerationScheduler::Impl {
         common = shared;
       }
     }
-    if (leader == nullptr ||
-        common < TextRunnerPool::Request::kSharedPrefixMinTokens)
+    if (leader == nullptr)
       return false;
     // A longer retained prefix, such as this conversation's previous turn,
     // already beats waiting for a peer.
     const auto cached =
         runner_pool->CachedPrefixTokens(prompt, request->prompt_context.get());
-    if (common < cached + TextRunnerPool::Request::kSharedPrefixMinTokens)
+    // A leader may have leased a deeper native frontier than a sibling can
+    // restore. Share its next planned checkpoint even for a short suffix:
+    // replaying generated tokens through prefill can change recurrent state.
+    // Ordinary cold-prefix sharing retains its minimum-work threshold.
+    const auto minimum_gain =
+        leader->runner_request.cached_prompt_tokens() > cached
+            ? std::size_t{1}
+            : TextRunnerPool::Request::kSharedPrefixMinTokens;
+    if (common < cached + minimum_gain)
       return false;
     const auto position = leader->runner_request.ShareCheckpoint(common);
-    if (position < cached + TextRunnerPool::Request::kSharedPrefixMinTokens)
+    if (position < cached + minimum_gain)
       return false;
     request->prefix_leader = std::move(leader);
     request->prefix_position = position;

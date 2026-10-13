@@ -202,7 +202,7 @@ def main():
     parser.add_argument("--binary", type=Path, help="gufo binary for prompt/chat checks")
     parser.add_argument("--target", type=Path, help="target GGUF for CLI checks")
     parser.add_argument("--draft", type=Path, help="draft GGUF for CLI checks")
-    parser.add_argument("--speculative", choices=("dflash2", "mtp"))
+    parser.add_argument("--speculative", choices=("dflash2",))
     args = parser.parse_args()
     if bool(args.binary) != bool(args.target):
         parser.error("--binary and --target must be supplied together")

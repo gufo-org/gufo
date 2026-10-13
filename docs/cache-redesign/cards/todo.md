@@ -20,3 +20,11 @@ the final revision. Restore latency from disk and a Flash server sharing a
 
 Qwen 27B and DeepSeek migration, legacy cache deletion and the full RFC
 all-model cutover remain outside this Flash-only change.
+
+## Qwen27B PR #540
+
+The AR/DFlash2 component adapter and serving wiring are implemented locally;
+final functional validation, remaining fixes and qualification are in progress.
+Do not infer completion from the historical AR adapter results. Performance
+measurements are deferred until functional work is complete; further long-capacity
+FP16/FP32 probes are skipped by user instruction.

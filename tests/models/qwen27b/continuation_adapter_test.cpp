@@ -65,7 +65,7 @@ Checkpoint Capture(qwen::ContinuationAdapter& adapter, cache::Slot& slot,
 }
 void Load(qwen::ContinuationAdapter& adapter, cache::Slot& slot,
           const Checkpoint& checkpoint, hip::TransferPool& pool,
-          bool missing = false) {
+          bool missing = false, cache::Slot* borrowed_source = nullptr) {
   adapter.BeginRestore(slot, checkpoint.positions);
   for (std::size_t i = 0; i < checkpoint.bytes.size(); ++i) {
     const auto& descriptor = adapter.Components()[i];
@@ -76,12 +76,20 @@ void Load(qwen::ContinuationAdapter& adapter, cache::Slot& slot,
       auto first = pool.TryAcquire();
       auto second = pool.TryAcquire();
       Require(first && second, "independent row streams unavailable");
-      auto tail =
-          adapter.CopyRowsIn(slot, descriptor.id, cut, rows,
-                             bytes.subspan(cut * descriptor.row_bytes), *first);
+      const auto borrowed =
+          borrowed_source
+              ? adapter.BorrowRowsView(*borrowed_source, descriptor.id, 0, rows)
+              : std::span<const std::byte>{};
+      if (borrowed_source)
+        Require(borrowed.size() == bytes.size(),
+                "borrowed KV view is incomplete");
+      const auto source = borrowed_source ? borrowed : bytes;
+      auto tail = adapter.CopyRowsIn(slot, descriptor.id, cut, rows,
+                                     source.subspan(cut * descriptor.row_bytes),
+                                     *first);
       auto head =
           adapter.CopyRowsIn(slot, descriptor.id, 0, cut,
-                             bytes.first(cut * descriptor.row_bytes), *second);
+                             source.first(cut * descriptor.row_bytes), *second);
       Wait(std::move(head));
       Wait(std::move(tail));
     } else {
@@ -613,15 +621,92 @@ void CheckImageSuffix(const std::shared_ptr<const hip::QwenGpuModel>& model) {
   }
   std::cout << "image_suffix,PASS\n";
 }
+void CheckDraftComponents(std::shared_ptr<const hip::QwenGpuModel> model,
+                          const char* draft_path) {
+  std::string error;
+  auto reader = gufo::core::GgufReader::OpenFile(draft_path, &error);
+  Require(bool(reader), error.c_str());
+  auto draft_model = hip::QwenDFlashGpuModel::Create(
+      std::shared_ptr<const gufo::core::GgufReader>(std::move(reader)), model,
+      &error);
+  Require(bool(draft_model), error.c_str());
+  qwen::ContinuationAdapter adapter(
+      model, 256, {'d', 'r', 'a', 'f', 't'},
+      hip::QwenExecutionPolicy::Production(), draft_model,
+      {.max_context = 256, .max_draft_tokens = 4});
+  Guard ga, gb;
+  hip::TransferPool pool(2);
+  auto source = adapter.CreateSlot(ga), destination = adapter.CreateSlot(gb);
+  auto& a = adapter.GetExecutor(*source);
+  auto& b = adapter.GetExecutor(*destination);
+  auto& da = *adapter.GetDraftBackend(*source);
+  auto& db = *adapter.GetDraftBackend(*destination);
+  a.SetPromptHiddenCapture(true, da.TargetHiddenLayerIds());
+  b.SetPromptHiddenCapture(true, db.TargetHiddenLayerIds());
+  const auto fixture = model->GetTokenizer().Encode(
+      "The quick brown fox jumps over the lazy dog. ");
+  Require(!fixture.empty(), "empty draft fixture");
+  std::vector<Token> tokens(64);
+  for (std::size_t i = 0; i < tokens.size(); ++i)
+    tokens[i] = fixture[i % fixture.size()];
+  auto next = a.ForwardPromptBatch(tokens);
+  const auto hidden = a.GetPromptHiddenStates();
+  Require(da.PrimeTargetContext({.prompt_tokens = tokens,
+                                 .prompt_hidden_states = hidden,
+                                 .hidden_size = hidden.size() / tokens.size(),
+                                 .first_token = next}),
+          "draft prime failed");
+  for (std::uint32_t i = 0; i < 3; ++i) {
+    tokens.push_back(next);
+    next = a.ForwardToken(next, 64 + i);
+    da.UpdateTargetHidden(a.CopyLastHidden());
+  }
+  auto& frontier = adapter.GetFrontier(*source);
+  frontier.token = next;
+  frontier.pending = {next, fixture.front()};
+  frontier.published = true;
+  const auto logits = a.CopyLastLogits();
+  frontier.logits.assign(logits.begin(), logits.end());
+  const auto checkpoint = Capture(adapter, *source, pool);
+  Require(da.GetInjectedContextLength() == 64 &&
+              checkpoint.positions.front().valid_rows == 67,
+          "draft frontier was replaced by target frontier");
+  Load(adapter, *destination, checkpoint, pool, false, source.get());
+  Require(adapter.Validate(*destination, checkpoint.positions),
+          "draft restore failed");
+  Require(db.GetInjectedContextLength() == 64,
+          "independent draft frontier was not restored");
+  Require(Capture(adapter, *destination, pool).bytes == checkpoint.bytes,
+          "restored draft components differ");
+  SameLogits(a, b);
+  std::uint64_t rng_a = 12345, rng_b = rng_a;
+  const auto proposal_a = da.ProposeSampled(tokens, 67, 4, 0.8F, &rng_a);
+  const auto proposal_b = db.ProposeSampled(tokens, 67, 4, 0.8F, &rng_b);
+  Require(!proposal_a.tokens.empty(), "draft fixture produced no proposal");
+  Require(proposal_a.tokens == proposal_b.tokens &&
+              proposal_a.candidate_ids == proposal_b.candidate_ids &&
+              proposal_a.candidate_probabilities ==
+                  proposal_b.candidate_probabilities &&
+              rng_a == rng_b,
+          "draft proposals changed after component restore");
+  Reject([&] { (void)Capture(adapter, *source, pool); });
+  da.AcceptFeedback(proposal_a.tokens, next);
+  db.AcceptFeedback(proposal_b.tokens, next);
+  Require(Capture(adapter, *source, pool).bytes ==
+              Capture(adapter, *destination, pool).bytes,
+          "draft controller or pending features diverged after feedback");
+  std::cout << "draft_components,PASS\n";
+}
 }  // namespace
 int main(int argc, const char* const* argv) {
   try {
     const bool guard_only = argc == 3 && std::string(argv[2]) == "--guard-only";
     const bool image_only = argc == 3 && std::string(argv[2]) == "--image-only";
-    if (argc != 2 && !guard_only && !image_only)
+    const bool draft_only = argc == 4 && std::string(argv[2]) == "--draft";
+    if (argc != 2 && !guard_only && !image_only && !draft_only)
       throw std::invalid_argument(
           "Usage: continuation_adapter_test MODEL.gguf "
-          "[--guard-only|--image-only]");
+          "[--guard-only|--image-only|--draft DRAFT.gguf]");
     std::string error;
     auto reader = gufo::core::GgufReader::OpenFile(argv[1], &error);
     Require(bool(reader), error.c_str());
@@ -630,6 +715,11 @@ int main(int argc, const char* const* argv) {
         std::shared_ptr<const gufo::core::GgufReader>(std::move(reader)),
         &error, encoder);
     Require(bool(model), error.c_str());
+    if (draft_only) {
+      CheckDraftComponents(model, argv[3]);
+      std::cout << "Qwen continuation draft adapter: PASS\n";
+      return 0;
+    }
     if (!guard_only && !image_only) {
       Check(model, true);
       Check(model, false);

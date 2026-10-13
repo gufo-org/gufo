@@ -46,6 +46,7 @@ public:
     state_.clear();
     saved_state_.clear();
     restore_count_ = 0;
+    verification_active_ = false;
   }
 
   TokenId ForwardPromptBatch(std::span<const TokenId> prompt_tokens) override {
@@ -84,13 +85,17 @@ public:
     Expect(valid_context == state_.size(),
            "snapshot length must match committed target state");
     saved_state_ = state_;
+    verification_active_ = true;
   }
 
   void RestoreState() override {
     Expect(!saved_state_.empty(), "target state must be saved before restore");
     state_ = saved_state_;
+    verification_active_ = true;
     ++restore_count_;
   }
+
+  void FinishVerification() override { verification_active_ = false; }
 
   void SetPromptHiddenCapture(
       bool enabled, std::span<const std::uint32_t> target_layer_ids) override {
@@ -114,7 +119,9 @@ public:
     return "token";
   }
 
-  [[nodiscard]] const std::vector<TokenId>& State() const noexcept {
+  [[nodiscard]] const std::vector<TokenId>& State() const {
+    Expect(!verification_active_,
+           "committed target state must close its verification transaction");
     return state_;
   }
 
@@ -137,6 +144,7 @@ private:
   std::vector<TokenId> saved_state_;
   std::size_t restore_count_{0};
   bool hidden_capture_enabled_{false};
+  bool verification_active_{false};
 };
 
 class HiddenAwareDraftBackend final : public gufo::speculative::IDraftBackend {

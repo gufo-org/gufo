@@ -249,7 +249,21 @@ SpeculativeVerifier::SpeculativeVerifier(
     : owned_target_executor_(
           std::make_unique<QwenGpuSpeculativeTarget>(target_executor)),
       target_executor_(owned_target_executor_.get()),
-      draft_backend_(std::move(draft_backend)),
+      owned_draft_backend_(std::move(draft_backend)),
+      draft_backend_(owned_draft_backend_.get()),
+      options_(options),
+      current_draft_length_(options_.initial_draft_tokens),
+      use_batched_verification_(options_.use_batched_verification) {
+  ConfigureAdaptiveDraftPolicy();
+}
+
+SpeculativeVerifier::SpeculativeVerifier(hip::QwenGpuExecutor& target_executor,
+                                         IDraftBackend& draft_backend,
+                                         SpeculativeOptions options)
+    : owned_target_executor_(
+          std::make_unique<QwenGpuSpeculativeTarget>(target_executor)),
+      target_executor_(owned_target_executor_.get()),
+      draft_backend_(&draft_backend),
       options_(options),
       current_draft_length_(options_.initial_draft_tokens),
       use_batched_verification_(options_.use_batched_verification) {
@@ -260,7 +274,8 @@ SpeculativeVerifier::SpeculativeVerifier(
     ISpeculativeTargetExecutor& target_executor,
     std::unique_ptr<IDraftBackend> draft_backend, SpeculativeOptions options)
     : target_executor_(&target_executor),
-      draft_backend_(std::move(draft_backend)),
+      owned_draft_backend_(std::move(draft_backend)),
+      draft_backend_(owned_draft_backend_.get()),
       options_(options),
       current_draft_length_(options_.initial_draft_tokens),
       use_batched_verification_(options_.use_batched_verification) {
@@ -780,6 +795,7 @@ SpeculativeVerifier::ProcessVerificationChunk(
         std::span<const tokenization::TokenId>(verification_inputs.data(),
                                                committed_input_count),
         cur_pos);
+    target_executor_->FinishVerification();
   }
 
   StepResult result;
@@ -854,7 +870,7 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
       auto& sampler = step.sampled ? *step.working_sampler : request.sampler;
       draft_indices.push_back(prepared.size() - 1);
       draft_requests.push_back(
-          {verifier.draft_backend_.get(), request.sequence, request.position,
+          {verifier.draft_backend_, request.sequence, request.position,
            step.max_draft_tokens,
            step.random_sampling ? request.sampler.config().temperature : 0.0F,
            step.random_sampling ? sampler.mutable_rng_state() : nullptr});
@@ -1100,6 +1116,10 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
       break;
     }
   }
+
+  // Replay restores the transaction's saved state. Close it only after the
+  // committed rows have been rebuilt, so this frontier can be retained.
+  target_executor_->FinishVerification();
 
   // 6. Update stats and notify backend
   stats_.total_draft_tokens += num_draft;
