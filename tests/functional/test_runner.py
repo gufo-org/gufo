@@ -114,7 +114,9 @@ class FunctionalRunnerTest(unittest.TestCase):
             ({"resume_equal": False, "followup_equal": None}, None),
             ({"temperature": 0}, None),
             ({"prefill": 0}, None),
-            ({"followup_cached": 671}, "disk-restored third turn differs"),
+            ({"followup_cached": 513}, None),
+            ({"followup_cached": 512}, "disk-restored third turn differs"),
+            ({"followup_cached": 0}, "disk-restored third turn differs"),
             ({"prefill": 2048}, "disk restore lost too much"),
             ({"disk": False}, "restart did not restore disk state"),
             ({"cached": 0}, "restart did not restore disk state"),
@@ -125,7 +127,7 @@ class FunctionalRunnerTest(unittest.TestCase):
         for changes, error in cases:
             settings = {"temperature": .8, "prefill": 37, "cached": 672, "disk": True,
                         "resume_equal": True, "followup_equal": True, "followup_cached": 672,
-                        **changes}
+                        "followup_live": 2560, **changes}
             with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 output = root / "restored.json"
@@ -135,7 +137,8 @@ class FunctionalRunnerTest(unittest.TestCase):
                                   settings["prefill"], settings["cached"], settings["disk"])]
                 if settings["followup_equal"] is not None:
                     previous["followup"] = {"request": {"temperature": settings["temperature"]},
-                                            "sha256": continuation.digest(result("seven"))}
+                                            "sha256": continuation.digest(result("seven")),
+                                            "cached": settings["followup_live"]}
                     replies.append(result("seven" if settings["followup_equal"] else "eight",
                                           cached=settings["followup_cached"]))
                 source = root / "previous.json"
