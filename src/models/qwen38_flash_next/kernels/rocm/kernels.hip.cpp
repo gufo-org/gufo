@@ -4614,14 +4614,15 @@ __launch_bounds__(256) __global__
   // two nibble blocks are two, Q8_0's two byte blocks are four.
   constexpr int kChunks = kQ8 ? 2 * BK : BK;
 
-  // LDS plan (bytes): the code plane holds BM rows x kChunks 16-byte chunks
-  // with the chunks of nearby rows permuted so a fragment read (one row per
-  // lane) covers all bank groups; the activation plane is
+  // Separate projections stage codes and affine parameters in LDS, with
+  // nearby rows permuted across the bank groups. Paired waves keep them in
+  // registers: each half owns the same rows' first or second K16 fragment.
+  // Both paths share the activation plane,
   // [kb][16-element quarter][token][16 B] so a fragment read is 256
   // contiguous bytes; the epilogue reuses it all.
-  constexpr int kCodeBytes = BM * kChunks * 16;
-  constexpr int kHighBytes = (kQ5 || kQ5K) ? BK * BM * 4 : 0;
-  constexpr int kScaleBytes = BK * BM * 4;
+  constexpr int kCodeBytes = kPair ? 0 : BM * kChunks * 16;
+  constexpr int kHighBytes = !kPair && (kQ5 || kQ5K) ? BK * BM * 4 : 0;
+  constexpr int kScaleBytes = kPair ? 0 : BK * BM * 4;
   // One slot of padding per activation quarter plane: the eight chunks of
   // a token then land on eight bank groups when they are written.
   constexpr int kActStride = BN + 1;
@@ -4629,7 +4630,9 @@ __launch_bounds__(256) __global__
   // The epilogue transposes one 16x16 tile per wave through the same
   // bytes (8 KB), which the narrow tile's stages do not reach.
   constexpr int kStageBytes = kCodeBytes + kHighBytes + kScaleBytes + kActBytes;
-  constexpr int kLdsBytes = kStageBytes > 8 * 1024 ? kStageBytes : 8 * 1024;
+  constexpr int kEpilogueBytes = kPair ? BN * (BM / 2 + 2) * 2 : 8 * 1024;
+  constexpr int kLdsBytes =
+      kStageBytes > kEpilogueBytes ? kStageBytes : kEpilogueBytes;
   __shared__ __attribute__((aligned(16))) std::uint8_t lds[kLdsBytes];
   auto* s_codes = reinterpret_cast<uint4*>(lds);
   auto* s_high = reinterpret_cast<std::uint32_t*>(lds + kCodeBytes);
@@ -4659,21 +4662,22 @@ __launch_bounds__(256) __global__
   constexpr int kRows = kPair ? BM / 2 : BM;
   const int r_block = static_cast<int>(blockIdx.x) * kRows;
 
-  // Weight fetch: unit u of a thread is (row = tid / 2 + 128 u, chunk c =
-  // tid % 2). Q4_K: the two 16-byte halves of one 32-byte nibble group (two
-  // K blocks, low and high nibbles); Q5_1: one 24-byte K block each.
-  const int f_c = tid & 1;
+  // A paired wave owns eight gate rows and their matching eight up rows.
+  // Its halves load the two 16-byte chunks of each row's nibble group;
+  // each chunk carries one K16 fragment in both K32 blocks. Separate
+  // projections use row=tid/2+128u and chunk=tid%2 instead.
+  const int f_c = kPair ? half_id : tid & 1;
   const std::uint8_t* f_ptr[kWaveRowTiles];
   bool f_live[kWaveRowTiles];
   uint4 f_header[kWaveRowTiles];
 #pragma unroll
   for (int u = 0; u < kWaveRowTiles; ++u) {
-    const int r = r_block + (kPair ? ((tid >> 1) / 16) * 8 + ((tid >> 1) % 8)
-                                   : (tid >> 1) + (u * 128));
+    const int r =
+        r_block + (kPair ? wave_id * 8 + sub_lane % 8 : (tid >> 1) + (u * 128));
     f_live[u] = r < m_i;
     const std::uint8_t* weights = w_expert;
     if constexpr (kPair) {
-      if (((tid >> 1) & 8) != 0) {
+      if ((sub_lane & 8) != 0) {
         weights = static_cast<const std::uint8_t*>(w_up) +
                   static_cast<std::size_t>(expert) * m * row_bytes;
       }
@@ -4792,19 +4796,28 @@ __launch_bounds__(256) __global__
     }
   };
 
+  // Keep this stage's codes and affine/high-bit parameters live while the
+  // next fetch can replace its quantization header and code-cache group.
+  uint4 own_codes[kWaveRowTiles];
+  std::uint32_t own_scale[kWaveRowTiles];
+  std::uint32_t own_high[kWaveRowTiles];
   const auto commit_stage = [&]() {
 #pragma unroll
     for (int u = 0; u < kWaveRowTiles; ++u) {
       const int row = (tid >> 1) + (u * 128);
       std::uint32_t scale_bias = 0;
-      if constexpr (kQ8) {
+      if constexpr (kPair) {
+        own_codes[u] = f_codes[u];
+        if constexpr (kQ5K)
+          own_high[u] = f_high[u];
+      } else if constexpr (kQ8) {
         s_codes[swizzle(row, 2 * f_c)] = f_codes[u];
         s_codes[swizzle(row, (2 * f_c) + 1)] = f_codes_hi[u];
         scale_bias = f_live[u] ? f_dm[u] : 0U;  // half2 (d, 0)
       } else {
         s_codes[swizzle(row, f_c)] = f_codes[u];
       }
-      if constexpr (kQ5K) {
+      if constexpr (kQ5K && !kPair) {
         s_high[(f_c * BM) + row] = f_high[u];
       }
       if constexpr (kQ8) {
@@ -4842,7 +4855,10 @@ __launch_bounds__(256) __global__
         scale_bias = __builtin_bit_cast(std::uint32_t,
                                         __floats2half2_rn(scale, -offset));
       }
-      s_scale[(f_c * BM) + row] = scale_bias;
+      if constexpr (kPair)
+        own_scale[u] = scale_bias;
+      else
+        s_scale[(f_c * BM) + row] = scale_bias;
     }
 #pragma unroll
     for (int i = 0; i < kActFetch; ++i) {
@@ -4865,7 +4881,7 @@ __launch_bounds__(256) __global__
       __floats2half2_rn(kQ8 ? -1152.0F : -1024.0F, kQ8 ? -1152.0F : -1024.0F);
   const auto compute_stage = [&]() {
     uint4 raw[kWaveRowTiles][BK];
-    if constexpr (!kQ8) {
+    if constexpr (!kQ8 && !kPair) {
 #pragma unroll
       for (int u = 0; u < kWaveRowTiles; ++u) {
         const int row = (wave_id * 16) + (u * 128) + sub_lane;
@@ -4875,68 +4891,114 @@ __launch_bounds__(256) __global__
         }
       }
     }
+    std::uint32_t peer_scale[kWaveRowTiles];
+    std::uint32_t peer_high[kWaveRowTiles];
+    if constexpr (kPair) {
+#pragma unroll
+      for (int u = 0; u < kWaveRowTiles; ++u) {
+        peer_scale[u] = XorLane(own_scale[u], 16);
+        if constexpr (kQ5K)
+          peer_high[u] = XorLane(own_high[u], 16);
+      }
+    }
 #pragma unroll
     for (int kb = 0; kb < BK; ++kb) {
       v16h a_lo[kWaveRowTiles];
       v16h a_hi[kWaveRowTiles];
+      if constexpr (kPair) {
+        // Decode each K16 fragment once, then duplicate its packed F16 bits
+        // across the wave halves for WMMA. No weight data passes through LDS.
+        using v8u = __attribute__((__vector_size__(32))) std::uint32_t;
 #pragma unroll
-      for (int u = 0; u < kWaveRowTiles; ++u) {
-        const int row = (wave_id * 16) + (u * 128) + sub_lane;
-        const __half2 sb =
-            __builtin_bit_cast(__half2, s_scale[(kb * BM) + row]);
-        const __half2 scale2 = __low2half2(sb);
-        const __half2 bias2 = __high2half2(sb);
-        std::uint32_t nib[8];
-        if constexpr (kQ8) {
-          // Q8_0: the block's 32 signed bytes are chunks 2 kb and 2 kb + 1;
-          // flipping the sign bit carries q + 128, which the 1152 magic
-          // takes back out.
-          const uint4 c0 = s_codes[swizzle(row, 2 * kb)];
-          const uint4 c1 = s_codes[swizzle(row, (2 * kb) + 1)];
-          const std::uint32_t words[8] = {c0.x, c0.y, c0.z, c0.w,
-                                          c1.x, c1.y, c1.z, c1.w};
-#pragma unroll
-          for (int i = 0; i < 8; ++i) {
-            nib[i] = words[i] ^ 0x80808080U;
-          }
-        } else if constexpr (kQ5) {
-          // Q5_1: K block kb's 16 bytes are chunk kb; elements 0-15 take
-          // the low nibbles, 16-31 the high, plus bit j of the high-bit
-          // word.
-          const uint4 r = raw[u][kb];
-          const std::uint32_t high = s_high[(kb * BM) + row];
-          const std::uint32_t words[4] = {r.x, r.y, r.z, r.w};
+        for (int u = 0; u < kWaveRowTiles; ++u) {
+          const __half2 sb = __builtin_bit_cast(
+              __half2, half_id == kb ? own_scale[u] : peer_scale[u]);
+          const __half2 scale2 = __low2half2(sb);
+          const __half2 bias2 = __high2half2(sb);
+          const uint4 codes = own_codes[u];
+          const std::uint32_t words[4] = {codes.x, codes.y, codes.z, codes.w};
+          const std::uint32_t high =
+              kQ5K ? ((half_id == kb ? own_high[u] : peer_high[u]) >>
+                      (16U * half_id))
+                   : 0U;
+          __half2 h[8];
 #pragma unroll
           for (int i = 0; i < 4; ++i) {
-            nib[i] = (words[i] & 0x0F0F0F0FU) |
-                     SpreadHighBits((high >> (4 * i)) & 0xFU);
-            nib[4 + i] = ((words[i] >> 4U) & 0x0F0F0F0FU) |
-                         SpreadHighBits((high >> (16 + 4 * i)) & 0xFU);
+            std::uint32_t nib = (words[i] >> (4U * kb)) & 0x0F0F0F0FU;
+            if constexpr (kQ5K)
+              nib |= SpreadHighBits((high >> (4 * i)) & 0xFU);
+            CodesToHalves(nib, magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
           }
-        } else {
-          // Q4_K / Q5_K: elements 0-15 of K block kb0 + kb are the low
-          // (kb = 0) or high (kb = 1) nibbles of chunk 0, elements 16-31
-          // of chunk 1; Q5_K adds bit j of the staged high-bit word.
-          const unsigned shift = 4U * static_cast<unsigned>(kb);
-          const std::uint32_t words[8] = {raw[u][0].x, raw[u][0].y, raw[u][0].z,
-                                          raw[u][0].w, raw[u][1].x, raw[u][1].y,
-                                          raw[u][1].z, raw[u][1].w};
-          const std::uint32_t high = kQ5K ? s_high[(kb * BM) + row] : 0U;
+          v16h own;
+          __builtin_memcpy(&own, &h[0], 32);
+          const v8u packed = __builtin_bit_cast(v8u, own);
+          v8u peer;
 #pragma unroll
-          for (int i = 0; i < 8; ++i) {
-            nib[i] = (words[i] >> shift) & 0x0F0F0F0FU;
-            if constexpr (kQ5K) {
-              nib[i] |= SpreadHighBits((high >> (4 * i)) & 0xFU);
+          for (int i = 0; i < 8; ++i)
+            peer[i] = XorLane(packed[i], 16);
+          a_lo[u] = __builtin_bit_cast(v16h, half_id == 0 ? packed : peer);
+          a_hi[u] = __builtin_bit_cast(v16h, half_id == 1 ? packed : peer);
+        }
+      } else {
+#pragma unroll
+        for (int u = 0; u < kWaveRowTiles; ++u) {
+          const int row = (wave_id * 16) + (u * 128) + sub_lane;
+          const __half2 sb =
+              __builtin_bit_cast(__half2, s_scale[(kb * BM) + row]);
+          const __half2 scale2 = __low2half2(sb);
+          const __half2 bias2 = __high2half2(sb);
+          std::uint32_t nib[8];
+          if constexpr (kQ8) {
+            // Q8_0: the block's 32 signed bytes are chunks 2 kb and 2 kb + 1;
+            // flipping the sign bit carries q + 128, which the 1152 magic
+            // takes back out.
+            const uint4 c0 = s_codes[swizzle(row, 2 * kb)];
+            const uint4 c1 = s_codes[swizzle(row, (2 * kb) + 1)];
+            const std::uint32_t words[8] = {c0.x, c0.y, c0.z, c0.w,
+                                            c1.x, c1.y, c1.z, c1.w};
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+              nib[i] = words[i] ^ 0x80808080U;
+            }
+          } else if constexpr (kQ5) {
+            // Q5_1: K block kb's 16 bytes are chunk kb; elements 0-15 take
+            // the low nibbles, 16-31 the high, plus bit j of the high-bit
+            // word.
+            const uint4 r = raw[u][kb];
+            const std::uint32_t high = s_high[(kb * BM) + row];
+            const std::uint32_t words[4] = {r.x, r.y, r.z, r.w};
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+              nib[i] = (words[i] & 0x0F0F0F0FU) |
+                       SpreadHighBits((high >> (4 * i)) & 0xFU);
+              nib[4 + i] = ((words[i] >> 4U) & 0x0F0F0F0FU) |
+                           SpreadHighBits((high >> (16 + 4 * i)) & 0xFU);
+            }
+          } else {
+            // Q4_K / Q5_K: elements 0-15 of K block kb0 + kb are the low
+            // (kb = 0) or high (kb = 1) nibbles of chunk 0, elements 16-31
+            // of chunk 1; Q5_K adds bit j of the staged high-bit word.
+            const unsigned shift = 4U * static_cast<unsigned>(kb);
+            const std::uint32_t words[8] = {
+                raw[u][0].x, raw[u][0].y, raw[u][0].z, raw[u][0].w,
+                raw[u][1].x, raw[u][1].y, raw[u][1].z, raw[u][1].w};
+            const std::uint32_t high = kQ5K ? s_high[(kb * BM) + row] : 0U;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+              nib[i] = (words[i] >> shift) & 0x0F0F0F0FU;
+              if constexpr (kQ5K) {
+                nib[i] |= SpreadHighBits((high >> (4 * i)) & 0xFU);
+              }
             }
           }
-        }
-        __half2 h[16];
+          __half2 h[16];
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-          CodesToHalves(nib[i], magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
+          for (int i = 0; i < 8; ++i) {
+            CodesToHalves(nib[i], magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
+          }
+          __builtin_memcpy(&a_lo[u], &h[0], 32);
+          __builtin_memcpy(&a_hi[u], &h[8], 32);
         }
-        __builtin_memcpy(&a_lo[u], &h[0], 32);
-        __builtin_memcpy(&a_hi[u], &h[8], 32);
       }
 #pragma unroll
       for (int j = 0; j < kTokTiles; ++j) {
@@ -5767,8 +5829,9 @@ struct AttentionProjectionOutput {
 /// groups. The codes are dequantized to F16 once per stage as they are
 /// committed to LDS (magic-number F16 construction, exact for a Q8_0 code),
 /// and the activations are F16 rows [batch][k], so the matrix cores
-/// accumulate in F32 with no per-block scaling. F16 weights skip decoding
-/// and use the same ordered K16 products. y is [batch][m].
+/// accumulate in F32 with no per-block scaling. SSM waves retain their
+/// decoded weight rows in registers instead of staging them in LDS. F16 weights
+/// skip decoding and use the same ordered K16 products. y is [batch][m].
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
          bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false>
@@ -5785,6 +5848,9 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   // 16-bit weight rows staged as they are: F16, or BF16 with BF16
   // activations.
   constexpr bool kRawWeights = kHalfWeights || kBf16;
+  constexpr bool kRegisterWeights = kSsmConv;
+  static_assert(!kRegisterWeights ||
+                (BM == 256 && BK == 2 && WM == 8 && WN == 1));
   constexpr int kRowTiles = BM / 16;
   constexpr int kTokTiles = BN / 16;
   constexpr int kWaveRowTiles = kRowTiles / WM;
@@ -5799,14 +5865,16 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   // One K block of one row or token is four 16-byte chunks; the chunks of
   // nearby rows are permuted so a fragment read (one row per lane, 64-byte
   // stride) covers all bank groups.
-  constexpr int kLdsChunks = BK * (BM + BN) * 4;
-  static_assert(kLdsChunks * 16 >= 8 * 512 * 4, "epilogue transposes 16 KB");
-  constexpr int kTransposeChunks = 8 * 16 * 36 * sizeof(float) / sizeof(uint4);
+  constexpr int kLdsChunks = BK * ((kRegisterWeights ? 0 : BM) + BN) * 4;
+  constexpr int kTransposeChunks = 8 *
+                                   (kSsmConv ? kSsmProjectionTileTokens : 16) *
+                                   36 * sizeof(float) / sizeof(uint4);
   constexpr int kLdsStorage =
       kLdsChunks < kTransposeChunks ? kTransposeChunks : kLdsChunks;
   __shared__ __attribute__((aligned(16))) uint4 s_lds[kLdsStorage];
   auto* s_a = reinterpret_cast<uint4(*)[BM][4]>(s_lds);
-  auto* s_b = reinterpret_cast<uint4(*)[BN][4]>(s_lds + (BK * BM * 4));
+  auto* s_b = reinterpret_cast<uint4(*)[BN][4]>(
+      s_lds + (kRegisterWeights ? 0 : BK * BM * 4));
   const auto swizzle = [](int row, int c) { return c ^ ((row >> 1) & 3); };
 
   const int num_kb = static_cast<int>(k / 32);
@@ -5846,15 +5914,15 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     return r >= num_kb ? r - num_kb : r;
   };
 
-  // Weight fetch unit p of a thread: row (p * 256 + tid) / BK, K block
-  // (p * 256 + tid) % BK of the stage; rows past m read the last row with
-  // a zero scale.
+  // SSM thread tid owns row tid and K block p of the stage. Other paths
+  // use row (p*256+tid)/BK and K block (p*256+tid)%BK; rows past m read
+  // the last row with a zero scale.
   const std::uint8_t* a_ptr[kAPer];
   bool a_live[kAPer];
 #pragma unroll
   for (int p = 0; p < kAPer; ++p) {
     const int idx = (p * 256) + tid;
-    const int r = r_block + (idx / BK);
+    const int r = r_block + (kRegisterWeights ? tid : idx / BK);
     a_live[p] = idx < kAUnits && r < m_i;
     // Interleave the four gate streams within the tile, without repacking
     // weights. Each group of four rows produces one mixed hidden element.
@@ -5881,7 +5949,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   const auto fetch_stage = [&](int kb0) {
 #pragma unroll
     for (int p = 0; p < kAPer; ++p) {
-      const int kb = kb0 + (((p * 256) + tid) % BK);
+      const int kb = kb0 + (kRegisterWeights ? p : (((p * 256) + tid) % BK));
       const bool live = a_live[p] && kb < num_kb;
       if constexpr (kRawWeights) {
         const auto* src = reinterpret_cast<const uint4*>(
@@ -5919,6 +5987,10 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 
   const __half2 magic = __floats2half2_rn(-1152.0F, -1152.0F);
   const __half2 zero2 = __floats2half2_rn(0.0F, 0.0F);
+  // Preserve this stage's rounded fragments before prefetch overwrites
+  // the raw Q8 codes. Each SSM wave owns both of its 16-row output tiles.
+  v16h own_a_lo[BK];
+  v16h own_a_hi[BK];
   const auto commit_stage = [&]() {
 #pragma unroll
     for (int p = 0; p < kAPer; ++p) {
@@ -5946,11 +6018,16 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
           CodesToHalves(words[i] ^ 0x80808080U, magic, scale2, zero2, h[2 * i],
                         h[2 * i + 1]);
         }
+        if constexpr (kRegisterWeights) {
+          __builtin_memcpy(&own_a_lo[p], &h[0], 32);
+          __builtin_memcpy(&own_a_hi[p], &h[8], 32);
+        } else {
 #pragma unroll
-        for (int c = 0; c < 4; ++c) {
-          uint4 v;
-          __builtin_memcpy(&v, &h[4 * c], 16);
-          s_a[kk][row][swizzle(row, c)] = v;
+          for (int c = 0; c < 4; ++c) {
+            uint4 v;
+            __builtin_memcpy(&v, &h[4 * c], 16);
+            s_a[kk][row][swizzle(row, c)] = v;
+          }
         }
       }
     }
@@ -6002,16 +6079,34 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       for (int kb = 0; kb < BK; ++kb) {
         v16h a_lo[kWaveRowTiles];
         v16h a_hi[kWaveRowTiles];
+        if constexpr (kRegisterWeights) {
+          using v8u = __attribute__((__vector_size__(32))) std::uint32_t;
+          const v8u own_lo = __builtin_bit_cast(v8u, own_a_lo[kb]);
+          const v8u own_hi = __builtin_bit_cast(v8u, own_a_hi[kb]);
+          v8u peer_lo;
+          v8u peer_hi;
 #pragma unroll
-        for (int i = 0; i < kWaveRowTiles; ++i) {
-          const int row = (((wave_row * kWaveRowTiles) + i) * 16) + sub_lane;
-          uint4 c[4];
-#pragma unroll
-          for (int q = 0; q < 4; ++q) {
-            c[q] = s_a[kb][row][swizzle(row, q)];
+          for (int q = 0; q < 8; ++q) {
+            peer_lo[q] = XorLane(own_lo[q], 16);
+            peer_hi[q] = XorLane(own_hi[q], 16);
           }
-          __builtin_memcpy(&a_lo[i], &c[0], 32);
-          __builtin_memcpy(&a_hi[i], &c[2], 32);
+#pragma unroll
+          for (int i = 0; i < kWaveRowTiles; ++i) {
+            a_lo[i] = __builtin_bit_cast(v16h, half_id == i ? own_lo : peer_lo);
+            a_hi[i] = __builtin_bit_cast(v16h, half_id == i ? own_hi : peer_hi);
+          }
+        } else {
+#pragma unroll
+          for (int i = 0; i < kWaveRowTiles; ++i) {
+            const int row = (((wave_row * kWaveRowTiles) + i) * 16) + sub_lane;
+            uint4 c[4];
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              c[q] = s_a[kb][row][swizzle(row, q)];
+            }
+            __builtin_memcpy(&a_lo[i], &c[0], 32);
+            __builtin_memcpy(&a_hi[i], &c[2], 32);
+          }
         }
 #pragma unroll
         for (int j = 0; j < kWaveTokTiles; ++j) {

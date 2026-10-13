@@ -22,7 +22,7 @@
     "fingerprintId": "eed32a3391cf24241ab05bb6e39dca0bc4d0a32a1e5f0ee3bb4487440003aaef",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-12",
+  "measuredOn": "2026-10-13",
   "mode": "mtp",
   "model": {
     "id": "Qwen3.8-Flash-Next",
@@ -31,8 +31,8 @@
   "notes": [
     "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
     "synthetic text: 1.159 tokens/word, template overhead 12 tokens",
-    "Only d0/32768 refreshed on October13 Europe/Paris (October12 UTC); other rows retain October10 values and provenance.",
-    "Fixed ordered depths[0,32768] differ from the historical full sweep; matched previous-PR controls and per-request phase timings are in paired-prefill-review.json."
+    "Only d0/32768 refreshed on October 13 Europe/Paris; captures span October 12\u201313 UTC. Other depths retain October 10 values and provenance.",
+    "Fixed ordered depths [0,32768]; matched unchanged v28 controls, every request phase and the unusually slow initial mixed-MTP d32K control are retained in paired-prefill-review.json. Source/binary hashes identify the measured code; reported Git metadata was cached when the CMake tree was configured."
   ],
   "referenceName": "llama.cpp",
   "rows": {
@@ -41,7 +41,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 3.74,
       "accepted_per_step_sd": null,
-      "command": "gufo-candidate-v28 serve --port 60143 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "gufo-candidate-v46 serve --port 39611 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 0,
@@ -52,24 +52,26 @@
           "prompt_n": 2034
         }
       ],
-      "pp": 1666.83,
+      "pp": 1637.69,
       "pp_sd": null,
       "provenance": {
-        "evidence": "paired-prefill-review.json",
-        "measuredOn": "2026-10-12",
+        "capture": "http-candidate-v46-mtp-b",
+        "evidence": "paired-prefill-review.json#registerPrefillIncrement",
+        "measuredLocalDate": "2026-10-13 Europe/Paris",
+        "measuredOn": "2026-10-13",
         "orderedDepths": [
           0,
           32768
         ],
         "source": {
-          "baseRevision": "f06f32b9d2d23a5a6389abf975b5d9d1b5e9f9e4",
-          "binarySha256": "e7f9a0e8106e9892940b695c5eaf1d6f98759a2093eaea7d4d018f38b233ccb9",
-          "build": "CMake release preset in pinned nix develop; no compiler or competing GPU job during timing",
-          "kernelSha256": "ab889954a80fcae27bbd076ac01d50787537d6b5a09a46f31c7cafa6b4096c51"
+          "baseRevision": "33a91366ffe3dd29bca4d26d8fcbcd5635b9ac1a",
+          "binarySha256": "822655e330aa2110b56cf8c2ae3d29b824669c665d2088ac3842ebac2c33fbed",
+          "build": "CMake release preset in pinned nix develop; same compiler/dependencies/flags; serial GPU work, no overlapping compilation during measured requests",
+          "kernelSha256": "a772fae6683a3b3b88f013505be8eb74b7bae3013164fa3701d44974ad26483e"
         }
       },
       "samples": 1,
-      "tg": 65.56,
+      "tg": 65.37,
       "tg_sd": null,
       "workload": "repetition"
     },
@@ -201,7 +203,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.51,
       "accepted_per_step_sd": null,
-      "command": "gufo-candidate-v28 serve --port 60143 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "gufo-candidate-v46 serve --port 39611 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 32768,
@@ -212,24 +214,26 @@
           "prompt_n": 2054
         }
       ],
-      "pp": 1494.83,
+      "pp": 1497.99,
       "pp_sd": null,
       "provenance": {
-        "evidence": "paired-prefill-review.json",
-        "measuredOn": "2026-10-12",
+        "capture": "http-candidate-v46-mtp-b",
+        "evidence": "paired-prefill-review.json#registerPrefillIncrement",
+        "measuredLocalDate": "2026-10-13 Europe/Paris",
+        "measuredOn": "2026-10-13",
         "orderedDepths": [
           0,
           32768
         ],
         "source": {
-          "baseRevision": "f06f32b9d2d23a5a6389abf975b5d9d1b5e9f9e4",
-          "binarySha256": "e7f9a0e8106e9892940b695c5eaf1d6f98759a2093eaea7d4d018f38b233ccb9",
-          "build": "CMake release preset in pinned nix develop; no compiler or competing GPU job during timing",
-          "kernelSha256": "ab889954a80fcae27bbd076ac01d50787537d6b5a09a46f31c7cafa6b4096c51"
+          "baseRevision": "33a91366ffe3dd29bca4d26d8fcbcd5635b9ac1a",
+          "binarySha256": "822655e330aa2110b56cf8c2ae3d29b824669c665d2088ac3842ebac2c33fbed",
+          "build": "CMake release preset in pinned nix develop; same compiler/dependencies/flags; serial GPU work, no overlapping compilation during measured requests",
+          "kernelSha256": "a772fae6683a3b3b88f013505be8eb74b7bae3013164fa3701d44974ad26483e"
         }
       },
       "samples": 1,
-      "tg": 44.98,
+      "tg": 44.72,
       "tg_sd": null,
       "workload": "repetition"
     },
@@ -360,10 +364,10 @@
   "schemaVersion": 1,
   "server": {
     "command": [
-      "gufo-candidate-v28",
+      "gufo-candidate-v46",
       "serve",
       "--port",
-      "60143",
+      "39611",
       "--sessions",
       "1",
       "llm",
@@ -384,15 +388,15 @@
     ]
   },
   "source": {
-    "buildMode": "nix-release",
-    "dirty": true,
-    "inferenceSnapshot": {
-      "baseRevision": "f06f32b9d2d23a5a6389abf975b5d9d1b5e9f9e4",
-      "binarySha256": "e7f9a0e8106e9892940b695c5eaf1d6f98759a2093eaea7d4d018f38b233ccb9",
-      "build": "CMake release preset in pinned nix develop; no compiler or competing GPU job during timing",
-      "kernelSha256": "ab889954a80fcae27bbd076ac01d50787537d6b5a09a46f31c7cafa6b4096c51"
-    },
-    "revision": "f06f32b9d2d23a5a6389abf975b5d9d1b5e9f9e4"
+    "baseRevision": "33a91366ffe3dd29bca4d26d8fcbcd5635b9ac1a",
+    "binarySha256": "822655e330aa2110b56cf8c2ae3d29b824669c665d2088ac3842ebac2c33fbed",
+    "build": "CMake release preset in pinned nix develop; same compiler/dependencies/flags; serial GPU work, no overlapping compilation during measured requests",
+    "kernelSha256": "a772fae6683a3b3b88f013505be8eb74b7bae3013164fa3701d44974ad26483e",
+    "reportedGitIdentity": {
+      "buildMode": "nix-release",
+      "dirty": true,
+      "revision": "33a91366ffe3dd29bca4d26d8fcbcd5635b9ac1a"
+    }
   },
   "table": "single-mtp-repetition",
   "target": "gufo"
