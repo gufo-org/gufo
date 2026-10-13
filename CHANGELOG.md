@@ -4,6 +4,19 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.14.0](https://github.com/gufo-org/gufo/compare/v0.13.0...v0.14.0) (2026-10-13)
+
+
+### Features
+
+* **cache:** wire Flash-Next serving to the component cache ([#573](https://github.com/gufo-org/gufo/issues/573)) ([058d6e8](https://github.com/gufo-org/gufo/commit/058d6e80c21089b8e3af76b6ae3c7b31a01d541f))
+* **rocm:** managed-alloc fallback ([#460](https://github.com/gufo-org/gufo/issues/460)) ([248d902](https://github.com/gufo-org/gufo/commit/248d902e206be118216d8a3627718824816b0ab2))
+
+
+### Documentation
+
+* update readme ([#574](https://github.com/gufo-org/gufo/issues/574)) ([8d4e1a2](https://github.com/gufo-org/gufo/commit/8d4e1a2b74c94752b9b16b1dda153cbf52638443))
+
 ## [0.13.0](https://github.com/gufo-org/gufo/compare/v0.12.0...v0.13.0) (2026-10-12)
 
 
