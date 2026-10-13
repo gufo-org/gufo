@@ -340,9 +340,9 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            // Older learned boundaries could keep logits from an earlier
            // prefix. Their payload has no readiness tag to distinguish them.
            << "checkpoint_frontier=complete-prefix-v1\n"
-           << "numerics=qwen-bf16-fp32-prefill-v1\n"
+           << "numerics=qwen-decode-equivalent-fp32-prefill-v2\n"
            << "rmsnorm=fused-square-sum-v1\n"
-           << "prefill_attention=visible-causal-tail-v1\n"
+           << "prefill_attention=decode-equivalent-causal-v2\n"
            << "attention_split_min_context="
            << hip::detail::kSplitKDecodeAttentionMinContext << '\n'
            << "attention_split_count="

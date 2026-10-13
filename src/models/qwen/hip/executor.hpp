@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_
 #define GUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -48,6 +49,12 @@ struct QwenGpuVerificationItem {
   std::span<const tokenization::TokenId> tokens;
   std::uint32_t position{0};
   bool capture_logits{false};
+};
+
+enum class QwenGpuChunkOutput {
+  kVerification,
+  kPrefill,
+  kPrefillNoLogits,
 };
 
 struct QwenSampledVerificationResult {
@@ -477,7 +484,9 @@ public:
   /// Shares exact projections across independent speculative chunks. Each
   /// sequence retains its own causal attention, recurrence and replay state.
   [[nodiscard]] static std::vector<std::vector<tokenization::TokenId>>
-  ForwardVerificationBatch(std::span<const QwenGpuVerificationItem> items);
+  ForwardVerificationBatch(
+      std::span<const QwenGpuVerificationItem> items,
+      QwenGpuChunkOutput output = QwenGpuChunkOutput::kVerification);
   void CommitVerificationChunk(
       std::span<const tokenization::TokenId> committed_tokens,
       std::uint32_t start_pos);
@@ -530,7 +539,7 @@ public:
   [[nodiscard]] std::span<const float> CopyLastHidden();
 
   [[nodiscard]] std::uint32_t GetMaxPromptBatch() const noexcept {
-    return arena_.GetMaxBatch();
+    return std::min<std::uint32_t>(arena_.GetMaxBatch(), 8);
   }
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return arena_.GetMaxContext();
@@ -573,9 +582,7 @@ private:
   friend class models::qwen::ContinuationAdapter;
   models::qwen::ContinuationHooks* continuation_hooks_{nullptr};
   void CheckPrefillCancellation() const;
-  void PrefillLayerCheckpoint(std::uint32_t layer);
   std::function<bool()> cancellation_check_;
-  std::array<hipEvent_t, 2> prefill_events_{};
   void CheckReset() const {
     if (reset_failure_)
       std::rethrow_exception(reset_failure_);
@@ -588,9 +595,6 @@ private:
   [[nodiscard]] GpuSamplingParameters PrepareGpuSamplingParameters(
       const sampling::SamplerState& sampler);
 
-  [[nodiscard]] tokenization::TokenId ForwardPromptChunk(
-      std::span<const tokenization::TokenId> prompt_tokens,
-      std::uint32_t start_pos, bool compute_logits);
   [[nodiscard]] std::vector<tokenization::TokenId>
   ForwardDecodeEquivalentVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,

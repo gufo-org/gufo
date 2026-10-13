@@ -89,11 +89,6 @@ void CheckPrefillReplay(
         std::pair{0U, 2048U}, std::pair{8192U, 1025U},
         std::pair{8193U, 2059U}}) {
     const bool check_chunks = depth == 8193;
-    // Q8 uses the same projection precision at every chunk size. Q4's
-    // separately qualified large-prefill route uses FP16 activations.
-    if (check_chunks && model->GetWeights().layers.front().ffn_gate.type !=
-                            gufo::core::GgmlType::kQ8_0)
-      continue;
     const std::uint32_t end = depth + length;
     std::vector<Token> tokens(end + 2);
     for (std::size_t i = 0; i < tokens.size(); ++i)
@@ -129,6 +124,23 @@ void CheckPrefillReplay(
     std::cout << "prefill fingerprint depth=" << depth << " tokens=" << length
               << " logits=" << Fingerprint(expected) << " features=" << features
               << '\n';
+
+    if (depth == 0 && (length == 64 || length == 257)) {
+      executor->Reset();
+      std::vector<float> scalar_features;
+      for (std::size_t row = 0; row < prompt.size(); ++row) {
+        (void)executor->ForwardToken(prompt[row], row,
+                                     row + 1 == prompt.size());
+        const auto hidden = executor->CopyLastHidden();
+        scalar_features.insert(scalar_features.end(), hidden.begin(),
+                               hidden.end());
+      }
+      Expect(ByteEqual(Logits(*executor), expected) &&
+                 Fingerprint(scalar_features) == features,
+             "prompt versus scalar decode changed full logits or feature rows");
+      std::cout << "prefill versus scalar decode tokens=" << length
+                << ": full logits and all feature rows exact\n";
+    }
 
     if (check_chunks) {
       for (const std::uint32_t budget : {512U, 2048U}) {
@@ -698,6 +710,7 @@ void CompareReference(const std::vector<Case>& candidate,
 }  // namespace
 
 int main(int argc, const char* const* argv) {
+  std::cout << std::unitbuf;
   try {
     const char* model = argc > 1 ? argv[1] : std::getenv("GUFO_QWEN27B_MODEL");
     if (model == nullptr) {

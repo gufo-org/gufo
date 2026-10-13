@@ -42,6 +42,14 @@ adapter adds state ABI, context, architecture geometry and the execution
 policy fingerprint. Model artifacts, quantization, vision encoder and framing
 must participate in the supplied identity. Distinct KV or recurrent storage
 policies cannot share cache entries.
+The numerical ABI also distinguishes the current decode-equivalent FP32 prefill
+from earlier batch-size-dependent activation rounding. Existing checkpoints
+from the earlier numerical ABI are cold misses, not reinterpretations.
+
+Target prompt evaluation uses exact batches of up to eight rows and the same
+persistent-state arithmetic as decode. Only a completed final prompt row needs
+vocabulary logits. The scheduler observes cancellation between these completed
+passes; draft priming and target state reach that boundary together.
 
 Mutation guards run synchronously on the host before decode, prefill chunks,
 batched decode, batched verification, committed recurrent replay, reset,
@@ -80,8 +88,9 @@ snapshots remain available and DeepSeek keeps its legacy serving path.
 
 Earlier capacity and capture/restore measurements remain recorded in card 15
 against their original revisions. Current Q4/Q8 AR/DFlash2 cache-serving checks
-pass; the vision cold-prefill versus decoded-history discrepancy and broader
-functional/resource gates remain open. Performance follows functional completion.
+pass. Decode-equivalent FP32 prefill fixes the cold/live vision discrepancy;
+focused and complete Q4/Q8 vision checks pass. Broader numerical,
+functional and resource gates remain open. Performance follows functional completion.
 
 ## Reproduce the adapter checks
 

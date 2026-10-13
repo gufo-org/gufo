@@ -347,9 +347,11 @@ int main(int argc, char** argv) {
         argc == 5 && std::string_view(argv[4]) == "--disk-only";
     const bool append_only =
         argc == 5 && std::string_view(argv[4]) == "--append-only";
-    Require(argc == 4 || disk_only || append_only,
+    const bool numerics_only =
+        argc == 5 && std::string_view(argv[4]) == "--numerics-only";
+    Require(argc == 4 || disk_only || append_only || numerics_only,
             "usage: qwen_vision_serving_test MODEL DRAFT_OR_DASH "
-            "IMAGE_DIRECTORY [--disk-only|--append-only]");
+            "IMAGE_DIRECTORY [--disk-only|--append-only|--numerics-only]");
     const std::string model_path(argv[1]);
     const std::string draft = std::string_view(argv[2]) == "-" ? "" : argv[2];
     const std::filesystem::path images(argv[3]);
@@ -383,7 +385,7 @@ int main(int argc, char** argv) {
           hip::QwenGpuModel::CreateFromGguf(reader, &error, std::move(encoder));
       Require(qwen != nullptr, error);
     }
-    if (!disk_only)
+    if (!disk_only && !numerics_only)
       CheckAppendSnapshotOracle(qwen, qfn, images);
     if (append_only)
       return 0;
@@ -420,7 +422,7 @@ int main(int argc, char** argv) {
     sampled.seed = 47;
     std::array<Backend::Result, 4> references;
     std::unique_ptr<Backend> spec;
-    if (!disk_only) {
+    if (!disk_only && !numerics_only) {
       for (std::size_t i = 0; i < requests.size(); ++i) {
         references[i] = ar->chat(requests[i], 16, greedy);
         Require(!references[i].cache_hit,
@@ -513,7 +515,7 @@ int main(int argc, char** argv) {
     Require(continued.cache_hit && continued.cached_prompt_tokens > 0 &&
                 continued.prefill_tokens > 0,
             "image continuation did not reuse its prefix");
-    if (!disk_only) {
+    if (!disk_only && !numerics_only) {
       const auto multiple = ar->chat(multi_image, 32, greedy);
       std::cout << "multiple images: " << multiple.text << '\n';
       const auto colors = Lower(multiple.text);
@@ -545,6 +547,12 @@ int main(int argc, char** argv) {
       CheckQwenIncrementalOracle(qwen, continuation, references[0], continued);
     if (flash)
       CheckFlashIncrementalOracle(qfn, continuation, continued);
+    if (numerics_only) {
+      Require(continuation_exact,
+              "continued image cache differs from cold prefill");
+      std::cout << "image cold/live and chunk arithmetic exact\n";
+      return 0;
+    }
 
     std::array<char, 64> pattern{};
     const std::string temporary = "/tmp/gufo-vision-cache-XXXXXX";
