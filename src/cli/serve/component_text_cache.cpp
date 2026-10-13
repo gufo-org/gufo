@@ -84,6 +84,17 @@ void Check(cache::Completion completion) {
   if (completion.Wait() != cache::TransferResult::kSucceeded)
     throw std::runtime_error("component cache transfer failed");
 }
+// A published checkpoint that is still resident restores from RAM, so its
+// candidate carries no disk description; its availability still marks every
+// component durable.
+bool Published(const cache::PrefixCandidate& candidate) {
+  if (candidate.durable)
+    return true;
+  return candidate.availability &&
+         !candidate.availability->components.empty() &&
+         std::ranges::all_of(candidate.availability->components,
+                             &cache::ComponentAvailability::durable);
+}
 bool SameOwner(const std::shared_ptr<const void>& a,
                const std::shared_ptr<const void>& b) {
   return !a.owner_before(b) && !b.owner_before(a);
@@ -427,7 +438,7 @@ struct ComponentTextCache::Impl {
                                                         checkpoint->Input())});
         std::size_t prior = 0;
         for (const auto& candidate : found.candidates)
-          if (candidate.durable)
+          if (Published(candidate))
             prior =
                 std::max(prior, static_cast<std::size_t>(candidate.boundary));
         for (const auto& queued : pending)
@@ -536,7 +547,7 @@ struct ComponentTextCache::Impl {
         {identity, tokens, cache::InputIdentity(tokens.size(), input)});
     std::size_t prior = 0;
     for (const auto& candidate : found.candidates)
-      if (candidate.durable)
+      if (Published(candidate))
         prior = std::max(prior, static_cast<std::size_t>(candidate.boundary));
     const auto compatible = [&](auto prefix, const auto& prefix_input) {
       return prefix_input == input && prefix.size() <= tokens.size() &&

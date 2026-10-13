@@ -1,6 +1,7 @@
 #include "src/cli/serve/component_text_cache.hpp"
 
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -877,6 +878,58 @@ void GridDoesNotSuppressFirstDiskPrompt() {
   }
   std::filesystem::remove_all(directory);
 }
+void PublishedResidentCheckpointKeepsDiskStep() {
+  // A published checkpoint that is still resident restores from RAM, so its
+  // lookup candidate carries no disk description. The next capture within
+  // the step must still be refused.
+  char pattern[] = "/tmp/gufo-component-step-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 7,
+                                        .min_checkpoint_step_tokens = 16};
+  std::vector<TextRunnerToken> prompt(48);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  const std::vector<TextRunnerToken> first(prompt.begin(), prompt.begin() + 40);
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, disk);
+  {
+    auto lease = cache.Acquire(first, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, first, first);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), first.size(), false,
+                                     SnapshotPurpose::kContinuation, {}));
+    assert(lease->PublishSnapshot(first, lease->Capture(), false));
+    assert(lease->Metrics().disk_queued_bytes > 0);
+    lease->Invalidate();
+  }
+  // The idle queue writes the job; wait until its files exist, then for the
+  // publication that follows them.
+  const auto files = [&] {
+    std::size_t count = 0;
+    if (std::filesystem::exists(directory / "v2" / "private"))
+      for (const auto& entry :
+           std::filesystem::directory_iterator(directory / "v2" / "private"))
+        count += entry.is_regular_file();
+    return count;
+  };
+  for (int i = 0; i < 500 && files() == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  assert(files() > 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(lease->cached_tokens() == first.size() &&
+         !lease->restored_from_disk());
+  auto& state = dynamic_cast<State&>(lease->state());
+  const auto tail = std::span(prompt).subspan(first.size());
+  runner->adapter->Append(state.slot, tail, tail);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, {}));
+  assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+  assert(lease->Metrics().disk_queued_bytes == 0);
+  lease->Invalidate();
+  std::filesystem::remove_all(directory);
+}
 void NearTailDiskBranchSurvivesRestart() {
   char pattern[] = "/tmp/gufo-component-branch-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
@@ -1004,6 +1057,7 @@ void UnbackedDeepRowsSurviveDiskRestart() {
 }
 }  // namespace
 int main() {
+  PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
