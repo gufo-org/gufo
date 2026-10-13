@@ -105,10 +105,12 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-The October 13 single-user refresh uses the production Nix build of PR #571
-at `0951ea2f` (binary SHA-256 prefix `61d0583912d9e2c8`) through
-`tools/bench/model-bench.py run --target gufo --table single-ar,single-mtp
---fresh`: HTTP C1, capacity 133760, greedy, thinking off, pp2048/tg128 at
+The October 13 single-user refresh uses production Nix builds of PR #571:
+`0951ea2f` (binary SHA-256 prefix `61d0583912d9e2c8`), and `ac51031a`
+(`d6cc00786ffc8786`) for AR d16K/d64K and MTP d64K, whose prompts end a few
+tokens past a 128-token tile and take its W8A8 tail path. Both run through
+`tools/bench/model-bench.py run --target gufo --table single-ar,single-mtp`:
+HTTP C1, capacity 133760, greedy, thinking off, pp2048/tg128 at
 every depth from 0 to 131072, one warmed sample per point, platform profile
 `performance`. Token and cache counts pass the driver's calibration gates.
 The single-user kernels behind it retain byte-identical logits for 718 fixed

@@ -2,8 +2,10 @@
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target and
 shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.
-Gufo single-user AR and MTP: October 13, 2026, production Nix build of
-`0951ea2f` (PR #571), every depth. Other Gufo tables retain October 10's
+Gufo single-user AR and MTP: October 13, 2026, production Nix builds of
+PR #571, every depth: AR d16K/d64K and MTP d64K use `ac51031a`, which adds
+the short W8A8 tail path those prompts (2,051–2,058 tokens) take; the other
+rows use `0951ea2f`. Other Gufo tables retain October 10's
 production Nix review build `25cdb2a1` of PR #518.
 Reference results remain unchanged from September 22–23.
 llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
@@ -28,9 +30,9 @@ Context capacities differ between engines; see the measurement details.
 | 4,096 | 1694.96 | 455.24 | +272.3% | 28.20 | 21.21 | +33.0% |
 | 8,192 | 1686.00 | 428.85 | +293.1% | 28.20 | 20.40 | +38.2% |
 | 12,288 | 1669.01 | 400.21 | +317.0% | 28.18 | 19.64 | +43.5% |
-| 16,384 | 1608.98 | 375.89 | +328.0% | 28.17 | 18.95 | +48.7% |
+| 16,384 | 1624.22 | 375.89 | +332.1% | 28.19 | 18.95 | +48.8% |
 | 32,768 | 1648.69 | 301.31 | +447.2% | 28.05 | 16.54 | +69.6% |
-| 65,536 | 1569.41 | 221.94 | +607.1% | 27.77 | 11.62 | +139.0% |
+| 65,536 | 1548.05 | 221.94 | +597.5% | 27.83 | 11.62 | +139.5% |
 | 131,072 | 1529.63 | 144.78 | +956.5% | 27.24 | 7.98 | +241.4% |
 <!-- /bench -->
 
@@ -50,7 +52,7 @@ text, including Gufo predictor catch-up.
 | 12,288 | 1614.15 | 365.91 | +341.1% | 37.61 | 32.32 | +16.4% | 45.56 | 43.53 | +4.7% |
 | 16,384 | 1604.17 | 341.98 | +369.1% | 38.18 | 32.07 | +19.1% | 54.59 | 43.66 | +25.0% |
 | 32,768 | 1603.98 | 277.61 | +477.8% | 37.02 | 25.41 | +45.7% | 48.55 | 39.28 | +23.6% |
-| 65,536 | 1519.78 | 208.04 | +630.5% | 36.43 | 19.65 | +85.4% | 42.87 | 27.75 | +54.5% |
+| 65,536 | 1560.11 | 208.04 | +649.9% | 32.60 | 19.65 | +65.9% | 48.18 | 27.75 | +73.6% |
 | 131,072 | 1488.23 | 135.42 | +999.0% | 36.10 | 14.63 | +146.8% | 47.77 | 20.96 | +127.9% |
 <!-- /bench -->
 
