@@ -32,8 +32,12 @@ public:
   using Sequence = std::vector<std::uint32_t>;
   using Rule = std::vector<Sequence>;
 
+  // Response formats pass open_objects: as in JSON Schema and llama.cpp, an
+  // object without additionalProperties:false then admits extra keys after
+  // its declared properties. Tool admission and argument recovery keep closed
+  // objects.
   static std::shared_ptr<const JsonConstraint> Compile(
-      const json::Value& schema, bool strict);
+      const json::Value& schema, bool strict, bool open_objects = false);
   static std::shared_ptr<const JsonConstraint> Object();
   // Resolve a local JSON pointer using the same rules as schema compilation.
   // Throws invalid_argument for malformed or missing references.

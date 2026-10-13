@@ -1269,6 +1269,68 @@ def check_structured_outputs(client, model, checks, vision=False):
         record("schema_responses_image", {"text": responses_image.output_text,
                                          "usage": responses_image.usage.to_dict()})
 
+    # #580: hand-written schemas often omit additionalProperties. As in
+    # llama.cpp, such objects admit extra keys while declared properties stay
+    # constrained; strict only keeps every property required. Kept last so
+    # older servers still record every preceding check as a timing control.
+    from jsonschema import Draft202012Validator
+    open_schemas = (
+        ("person", "Who was Nostradamus? Give his name, birth year and occupation.",
+         {"type": "object", "properties": {
+             "name": {"type": "string"},
+             "born": {"type": "integer", "description": "birth year"},
+             "occupation": {"type": "string"}},
+          "required": ["name", "born", "occupation"]},
+         # Models may answer with his birth name, Michel de Nostredame.
+         lambda value: "nostr" in value["name"].lower() and value["born"] == 1503),
+        ("sentiment", 'Classify the sentiment of "I loved the movie, it was fantastic!".',
+         {"type": "object", "properties": {
+             "sentiment": {"type": "string", "enum": ["positive", "negative", "neutral"]},
+             "confidence": {"type": "number"}},
+          "required": ["sentiment", "confidence"]},
+         lambda value: value["sentiment"] == "positive"),
+        ("ingredients", "List the ingredients of a classic tomato soup.",
+         {"type": "object", "properties": {
+             "ingredients": {"type": "array", "items": {"type": "string"}, "minItems": 3}},
+          "required": ["ingredients"]},
+         lambda value: any("tomato" in item.lower() for item in value["ingredients"])),
+        ("address", 'Extract the address from: "Ship the package to 221B Baker Street, '
+         'London, NW1 6XE, UK."',
+         {"type": "object", "properties": {
+             "street": {"type": "string"}, "city": {"type": "string"},
+             "postcode": {"type": "string"}, "country": {"type": "string"}},
+          "required": ["street", "city", "postcode", "country"]},
+         lambda value: "baker street" in value["street"].lower()
+         and value["city"].lower() == "london"),
+    )
+    for name, prompt, schema, expected in open_schemas:
+        body = {**common, "max_completion_tokens": 256,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_schema", "json_schema": {
+                    "name": name, "schema": schema, "strict": True}}}
+        buffered = chat_result(client, body)
+        streamed = chat_result(client, body, True)
+        for result in (buffered, streamed):
+            assert result["finish"] == "stop" and not result["tools"], result
+            value = json.loads(result["text"])
+            Draft202012Validator(schema).validate(value)
+            assert expected(value), result
+        assert streamed["text"] == buffered["text"], (buffered, streamed)
+        record(f"schema_open_{name}", streamed)
+    open_item = {"type": "object", "properties": {
+        "items": {"type": "array", "minItems": 1, "items": {
+            "type": "object", "properties": {"name": {"type": "string"}},
+            "required": ["name"]}}}, "required": ["items"]}
+    response = client.responses.create(
+        model=model, input="List two fruits, each as an item with a name.",
+        text={"format": {"type": "json_schema", "name": "fruits", "strict": False,
+                         "schema": open_item}},
+        reasoning={"effort": "none"}, temperature=0, max_output_tokens=256)
+    assert response.status == "completed", response
+    Draft202012Validator(open_item).validate(json.loads(response.output_text))
+    record("schema_open_responses", {"text": response.output_text,
+                                     "usage": response.usage.to_dict()})
+
 
 def check_strict_tools(client, model, checks):
     """Strict arguments work without imposing a JSON response on ordinary text."""
