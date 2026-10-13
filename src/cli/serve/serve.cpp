@@ -1,6 +1,5 @@
 #include "src/cli/serve/serve.hpp"
 
-#include <arpa/inet.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -713,10 +712,12 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption(
         "", "--cache-ram-bytes", "N",
         "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB)",
+        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
+        "Flash-Next commits most of it at startup",
         "Cache", &cache_ram_bytes);
     parser.AddOption("", "--cache-disk", "DIR",
-                     "Opt-in restart-safe continuation cache directory",
+                     "Opt-in restart-safe continuation cache directory "
+                     "(Flash-Next: owned by one process)",
                      "Cache", &cache_disk_directory);
     parser.AddOption("", "--cache-disk-bytes", "N",
                      "Retained disk-cache byte budget (default: " +
@@ -724,7 +725,9 @@ void PrintServeHelp(std::string_view program_name,
                      "Cache", &cache_disk_bytes);
     parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
-        "RAM limit for queued snapshots and each disk read "
+        "Flash-Next: pinned disk transfer buffer allocated at startup within "
+        "the RAM ceiling, not a checkpoint size limit (default: 0 = 1 MiB). "
+        "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
     parser.AddFlag("", "--log-progress",
@@ -870,9 +873,8 @@ int RunServe(std::span<const char* const> args) {
   // and returns before that point.
 
   const auto prepare_server_options = [&] {
-    in_addr address{};
-    if (::inet_pton(AF_INET, host.c_str(), &address) != 1) {
-      std::cerr << "Error: --host must be an IPv4 address\n";
+    if (!gufo::server::IsListenAddress(host)) {
+      std::cerr << "Error: --host must be an IPv4 or IPv6 address\n";
       return false;
     }
     if (port < 0 || port > 65535) {
@@ -1253,10 +1255,12 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption(
         "", "--cache-ram-bytes", "N",
         "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB)",
+        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
+        "Flash-Next commits most of it at startup",
         "Cache", &cache_ram_bytes);
     llm_parser.AddOption("", "--cache-disk", "DIR",
-                         "Opt-in restart-safe continuation cache directory",
+                         "Opt-in restart-safe continuation cache directory "
+                         "(Flash-Next: owned by one process)",
                          "Cache", &cache_disk_directory);
     llm_parser.AddOption("", "--cache-disk-bytes", "N",
                          "Retained disk-cache byte budget (default: " +
@@ -1264,7 +1268,9 @@ int RunServe(std::span<const char* const> args) {
                          "Cache", &cache_disk_bytes);
     llm_parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
-        "RAM limit for queued snapshots and each disk read "
+        "Flash-Next: pinned disk transfer buffer allocated at startup within "
+        "the RAM ceiling, not a checkpoint size limit (default: 0 = 1 MiB). "
+        "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
     llm_parser.AddFlag("", "--log-progress",

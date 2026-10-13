@@ -1,6 +1,7 @@
 #include "src/cli/serve/http_server.hpp"
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -255,10 +256,14 @@ private:
 class RunningServer {
 public:
   explicit RunningServer(gufo::server::HttpServerOptions options = {},
-                         bool handle_signals = false)
+                         bool handle_signals = false,
+                         std::string host = "127.0.0.1")
       : backend(std::make_shared<FakeBackend>()),
-        server("127.0.0.1", 0, backend, nullptr, nullptr, nullptr,
+        server(std::move(host), 0, backend, nullptr, nullptr, nullptr,
                std::move(options)) {
+    server.add("GET", "/peer", [](const auto& request, auto&) {
+      return gufo::server::HttpResponse{.body = request.client_id};
+    });
     server.add("POST", "/echo", [](const auto& request, auto&) {
       return gufo::server::HttpResponse{.body = request.body};
     });
@@ -319,22 +324,33 @@ public:
     worker.join();
   }
 
-  int Connect() {
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  int Connect(const std::string& peer = "127.0.0.1") {
+    sockaddr_storage address{};
+    socklen_t length = 0;
+    auto* ipv4 = reinterpret_cast<sockaddr_in*>(&address);
+    auto* ipv6 = reinterpret_cast<sockaddr_in6*>(&address);
+    if (::inet_pton(AF_INET, peer.c_str(), &ipv4->sin_addr) == 1) {
+      ipv4->sin_family = AF_INET;
+      ipv4->sin_port = htons(server.port());
+      length = sizeof(*ipv4);
+    } else {
+      assert(::inet_pton(AF_INET6, peer.c_str(), &ipv6->sin6_addr) == 1);
+      ipv6->sin6_family = AF_INET6;
+      ipv6->sin6_port = htons(server.port());
+      length = sizeof(*ipv6);
+    }
+    const int fd = ::socket(address.ss_family, SOCK_STREAM, 0);
     assert(fd >= 0);
     const timeval timeout{3, 0};
     assert(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                         sizeof(timeout)) == 0);
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(server.port());
-    assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
-    assert(::connect(fd, reinterpret_cast<const sockaddr*>(&address),
-                     sizeof(address)) == 0);
+    assert(::connect(fd, reinterpret_cast<const sockaddr*>(&address), length) ==
+           0);
     return fd;
   }
-  std::string Send(std::string_view request, bool half_close = false) {
-    const int fd = Connect();
+  std::string Send(std::string_view request, bool half_close = false,
+                   const std::string& peer = "127.0.0.1") {
+    const int fd = Connect(peer);
     while (!request.empty()) {
       const auto count =
           ::send(fd, request.data(), request.size(), MSG_NOSIGNAL);
@@ -2171,6 +2187,46 @@ void TestInvalidBindSettings() {
   assert(!error.empty());
 }
 
+// Some CI containers have no IPv6 loopback; listener checks skip there.
+bool HasIpv6Loopback() {
+  const int fd = ::socket(AF_INET6, SOCK_STREAM, 0);
+  if (fd < 0)
+    return false;
+  sockaddr_in6 address{};
+  address.sin6_family = AF_INET6;
+  address.sin6_addr = in6addr_loopback;
+  const bool bound = ::bind(fd, reinterpret_cast<const sockaddr*>(&address),
+                            sizeof(address)) == 0;
+  ::close(fd);
+  return bound;
+}
+
+void TestListenAddresses() {
+  using gufo::server::IsListenAddress;
+  for (const char* host : {"127.0.0.1", "0.0.0.0", "::", "::1", "fe80::1%lo"})
+    assert(IsListenAddress(host));
+  for (const char* host : {"", "localhost", "127.1", "[::1]", "bad.address"})
+    assert(!IsListenAddress(host));
+  if (!HasIpv6Loopback()) {
+    std::cout << "IPv6 loopback unavailable; skipping IPv6 listener checks.\n";
+    return;
+  }
+  const auto peer = [](RunningServer& server, const std::string& address) {
+    const auto response =
+        server.Send("GET /peer HTTP/1.1\r\n\r\n", false, address);
+    ExpectStatus(response, 200);
+    return response.substr(response.find("\r\n\r\n") + 4);
+  };
+  {
+    RunningServer loopback({}, false, "::1");
+    assert(peer(loopback, "::1") == "::1");
+  }
+  // `::` is dual-stack, and an IPv4 peer keeps its IPv4 client ID.
+  RunningServer dual({}, false, "::");
+  assert(peer(dual, "::1") == "::1");
+  assert(peer(dual, "127.0.0.1") == "127.0.0.1");
+}
+
 void TestCompatibilityUtf8() {
   RunningServer server;
   server.backend->SetOutput("é中😀\xE2\x94!\xF0\x9F");
@@ -2673,6 +2729,7 @@ int main() {
   TestLogLevelFilter();
   TestLogLevelNames();
   TestInvalidBindSettings();
+  TestListenAddresses();
   TestQueryParameters();
   TestAuthorization();
   TestFramingAndMetrics();

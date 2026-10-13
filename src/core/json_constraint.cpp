@@ -125,8 +125,12 @@ public:
   using Sequence = JsonConstraint::Sequence;
   using Rule = JsonConstraint::Rule;
   explicit JsonConstraintCompiler(const json::Value& schema, bool strict,
-                                  bool tool = false)
-      : schema_(schema), strict_(strict), open_objects_(tool && !strict) {
+                                  bool tool = false,
+                                  bool open_response_objects = false)
+      : schema_(schema),
+        strict_(strict),
+        open_objects_(tool && !strict),
+        open_response_objects_(open_response_objects) {
     // Literal bytes occupy the first 256 terminal classes.
     for (unsigned i = 0; i < 256; ++i) {
       std::bitset<256> bits;
@@ -1558,11 +1562,15 @@ private:
     if (!properties)
       properties = &empty_properties;
     const auto* additional = schema.find("additionalProperties");
-    const bool closed = ClosedProperties(schema, ignore_unknown_keys_);
+    // As in llama.cpp common/json-schema.cpp at 23b0202a1, a response object
+    // that declares properties without additionalProperties stays closed.
+    const bool closed = ClosedProperties(schema, ignore_unknown_keys_) ||
+                        (open_response_objects_ && !additional &&
+                         schema.contains("properties"));
     if (!properties->is_object() ||
         (additional && !additional->is_bool() && !additional->is_object()))
       Invalid("invalid object properties or additionalProperties");
-    if (!closed && !open_objects_)
+    if (!closed && !open_objects_ && !open_response_objects_)
       Invalid("objects require properties and additionalProperties: false");
     properties_ += properties->size();
     if (properties_ > 5000)
@@ -1672,6 +1680,10 @@ private:
   const json::Value& schema_;
   bool strict_;
   bool open_objects_;
+  // Unlike open_objects_, this admits undeclared keys only when
+  // additionalProperties is true or a schema, or the object declares no
+  // properties. Untyped leaves and unsupported keywords remain errors.
+  bool open_response_objects_;
   bool ignore_unknown_keys_{false};
   std::shared_ptr<JsonConstraint> grammar_{new JsonConstraint};
   std::uint32_t ws_, string_, integer_, number_, bool_, null_;
@@ -1685,8 +1697,9 @@ private:
 };
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::Compile(
-    const json::Value& schema, bool strict) {
-  const auto key = std::string(strict ? "strict:" : "schema:") + schema.dump();
+    const json::Value& schema, bool strict, bool open_objects) {
+  const auto key = std::string(strict ? "strict:" : "schema:") +
+                   (open_objects ? "open:" : "") + schema.dump();
   if (key.size() > kMaxSchemaBytes)
     Invalid("maximum schema size is 2 MiB");
   // Bounded cache; compile outside the lock so unrelated HTTP requests proceed.
@@ -1697,7 +1710,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::Compile(
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
-  auto grammar = JsonConstraintCompiler(schema, strict).Compile(false);
+  auto grammar = JsonConstraintCompiler(schema, strict, false, open_objects)
+                     .Compile(false);
   const std::lock_guard lock(mutex);
   if (cache.size() >= 16)
     cache.erase(cache.begin());

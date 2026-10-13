@@ -21,14 +21,15 @@ from cache_workloads import history, continue_history, signature, work
 from metrics import Recorder, join_server_timings
 from run import execution_coverage, option, provenance, server, write_json
 
-CASES = ("restart", "tiered", "oversized", "crash")
+CASES = ("restart", "tiered", "oversized", "crash", "side-traffic")
 DISK_BYTES = 8 * 1024**3
 STAGING_BYTES = 2 * 1024**3
 
 
 def published_tokens(log):
-    return [int(n) for n in re.findall(
-        r"event=disk_cache action=stored reason=saved .*?\btokens=(\d+)\b", log)]
+    legacy = re.findall(r"event=disk_cache action=stored reason=saved .*?\btokens=(\d+)\b", log)
+    component = re.findall(r"schema=component-cache-v1 event=published tokens=(\d+)\b", log)
+    return [int(tokens) for tokens in legacy + component]
 
 
 def wait_until(predicate, description, timeout=30):
@@ -42,12 +43,24 @@ def wait_until(predicate, description, timeout=30):
 
 
 class Lifecycle:
-    def __init__(self, command, output, timeout, library):
+    def __init__(self, command, output, timeout, library, seed_lines=160,
+                 minimum_published_tokens=0, publication_timeout=30,
+                 require_over_ram=False, staging_bytes=STAGING_BYTES):
         self.command, self.output, self.timeout, self.library = command, output, timeout, library
+        self.seed_lines = seed_lines
+        self.minimum_published_tokens = minimum_published_tokens
+        self.publication_timeout = publication_timeout
+        self.require_over_ram = require_over_ram
+        self.staging_bytes = staging_bytes
         self.model = option(command, "--served-model-name", "cache-lifecycle")
         self.mode = option(command, "--speculative", "off")
         self.report = {**provenance(), "command": command,
                        "binary": str(Path(command[0]).resolve()),
+                       "seed_lines": seed_lines,
+                       "minimum_published_tokens": minimum_published_tokens,
+                       "publication_timeout": publication_timeout,
+                       "require_over_ram": require_over_ram,
+                       "staging_bytes": staging_bytes,
                        "status": "running", "cases": {}}
         source = hashlib.sha256()
         source.update(self.report["harness_sha256"].encode())
@@ -58,7 +71,9 @@ class Lifecycle:
         write_json(output / "report.json", self.report)
 
     @contextmanager
-    def stage(self, name, staging=STAGING_BYTES, environment=None):
+    def stage(self, name, staging=None, environment=None):
+        if staging is None:
+            staging = self.staging_bytes
         self.stage_path = self.output / self.case / name
         self.stage_path.mkdir()
         command = [*self.command, "--host", "127.0.0.1", "--port", str(self.port),
@@ -86,6 +101,8 @@ class Lifecycle:
             self.row["failures"].append(f"{label}: {detail}")
 
     def chat(self, label, messages, floor=0, ceiling=None, disk=False, cold=False):
+        if disk:
+            floor = max(floor, self.minimum_published_tokens)
         body = dict(model=self.model, messages=deepcopy(messages), temperature=0, seed=31,
                     max_completion_tokens=16, reasoning_effort="none", cache_prompt=not cold)
         raw = continuation.call(f"http://127.0.0.1:{self.port}", body)
@@ -95,6 +112,10 @@ class Lifecycle:
                   "tools": choice["message"].get("tool_calls") or [],
                   "finish": choice["finish_reason"], "usage": raw["usage"]}
         total, cached, prefilled = work(result)
+        if label == "seed":
+            assert total >= self.minimum_published_tokens, (
+                "unqualified: seed is below the required depth", total,
+                self.minimum_published_tokens)
         assert result["text"].strip() == "ALPHA" and not result["reasoning"] \
             and not result["tools"] and result["finish"] == "stop", result
         passed = cached >= floor and (ceiling is None or cached <= ceiling) \
@@ -131,16 +152,23 @@ class Lifecycle:
             self.port = reserve.getsockname()[1]
         if shutil.disk_usage(root).free < 2 * DISK_BYTES:
             raise AssertionError("unqualified: disk lifecycle needs 16 GiB free")
-        seed = history("lifecycle_" + name, 160)
+        seed = history("lifecycle_" + name, self.seed_lines)
         try:
             if name == "crash":
                 self.crash_case(seed, root)
+            elif name == "side-traffic":
+                self.side_traffic_case()
             else:
-                staging = 1024**2 if name == "oversized" else STAGING_BYTES
+                staging = 1024**2 if name == "oversized" else self.staging_bytes
                 with self.stage("initial", staging):
                     first = self.chat("seed", seed)
                     long = continue_history(seed, first, ARCHIVE_LINE * 800 + "Reply with only ALPHA.")
                     deep = self.chat("append", long, work(first)[0] - 16)
+                    if self.minimum_published_tokens:
+                        wait_until(lambda: max(published_tokens(
+                            (self.stage_path / "server.log").read_text()), default=0)
+                            >= max(self.minimum_published_tokens, work(deep)[0] - 16),
+                            "a published deep checkpoint", self.publication_timeout)
                 stored = published_tokens((root / "initial/server.log").read_text())
                 self.row["published_tokens"] = stored
                 boundary = max((n for n in stored if n <= work(deep)[0]),
@@ -148,10 +176,18 @@ class Lifecycle:
                 if name == "oversized":
                     log = (root / "initial/server.log").read_text()
                     sizes = [int(n) for n in re.findall(
-                        r"event=disk_cache .*?\b(?:file|payload)_bytes=(\d+)", log)]
+                        r"event=(?:disk_cache|published) .*?\b(?:file|payload)_bytes=(\d+)", log)]
                     assert sizes and max(sizes) > staging, (
                         "unqualified: checkpoint did not exceed staging", sizes, staging)
                     self.row["oversized_bytes"] = max(sizes)
+                    if self.require_over_ram:
+                        capacities = [int(n) for n in re.findall(
+                            r"schema=component-cache-v1 event=configured .*?\bcapacity_bytes=(\d+)",
+                            log)]
+                        assert capacities and max(sizes) > max(capacities), (
+                            "unqualified: checkpoint did not exceed committed RAM backing",
+                            sizes, capacities)
+                        self.row["ram_capacity_bytes"] = max(capacities)
                     self.require("oversized_publication", bool(stored),
                                  "checkpoint larger than staging was not published")
                 else:
@@ -175,6 +211,56 @@ class Lifecycle:
             write_json(self.output / "report.json", self.report)
         print(f"{name}: {self.row['status']}", flush=True)
 
+    def side_traffic_case(self):
+        # Keep the common system prompt short. A deep system-only fixture
+        # cannot represent short conversations competing with a long agent.
+        system_lines = min(self.seed_lines, 256)
+        seed = history("lifecycle_side_traffic", system_lines,
+                       notes=self.seed_lines - system_lines)
+
+        def published(minimum):
+            return wait_until(lambda: max(published_tokens(
+                (self.stage_path / "server.log").read_text()), default=0)
+                >= minimum, "a published deep checkpoint", self.publication_timeout)
+
+        with self.stage("initial"):
+            first = self.chat("seed", seed)
+            published(max(1, work(first)[0] - 16))
+            long = continue_history(seed, first,
+                                    ARCHIVE_LINE * 800 + "Reply with only ALPHA.")
+            deep = self.chat("append", long, floor=work(first)[0] - 16)
+            published(work(deep)[0] - 16)
+            log = (self.stage_path / "server.log").read_text()
+            stored = published_tokens(log)
+            boundary = max(stored)
+            self.row["published_tokens"] = stored
+            if self.require_over_ram:
+                sizes = [int(n) for n in re.findall(
+                    r"event=published .*?\bpayload_bytes=(\d+)", log)]
+                capacities = [int(n) for n in re.findall(
+                    r"schema=component-cache-v1 event=configured .*?\bcapacity_bytes=(\d+)",
+                    log)]
+                assert sizes and capacities and max(sizes) > max(capacities), (
+                    "unqualified: checkpoint did not exceed committed RAM backing",
+                    sizes, capacities)
+                self.row.update(oversized_bytes=max(sizes), ram_capacity_bytes=max(capacities))
+        with self.stage("restarted"):
+            restored = self.chat("restore", long, floor=boundary, disk=True)
+            for round_index in range(3):
+                for peer in range(4):
+                    short = [deepcopy(seed[0]), {"role": "user", "content":
+                             f"Independent short conversation {round_index}/{peer}. "
+                             "Reply with only ALPHA."}]
+                    result = self.chat(f"side_{round_index}_{peer}", short)
+                    assert work(result)[0] * 4 < boundary, (
+                        "unqualified: side conversation is not short", work(result), boundary)
+                long = continue_history(long, restored,
+                                        ARCHIVE_LINE * 256 + "Reply with only ALPHA.")
+                restored = self.chat(f"deep_{round_index}", long, floor=boundary)
+                published(work(restored)[0] - 16)
+                boundary = max(published_tokens((self.stage_path / "server.log").read_text()))
+            self.controls_after_warm()
+
     def crash_case(self, seed, root):
         gate = root / "gate"
         gate.mkdir()
@@ -184,8 +270,10 @@ class Lifecycle:
         with self.stage("initial", environment=environment) as process:
             try:
                 first = self.chat("seed", seed)
-                wait_until(lambda: published_tokens((self.stage_path / "server.log").read_text()),
-                           "a published seed checkpoint")
+                wait_until(lambda: max(published_tokens(
+                    (self.stage_path / "server.log").read_text()), default=0)
+                    >= max(1, self.minimum_published_tokens),
+                    "a published seed checkpoint", self.publication_timeout)
                 (gate / "armed").touch()
                 long = continue_history(seed, first, ARCHIVE_LINE * 800 + "Reply with only ALPHA.")
                 deep = self.chat("queued_append", long, work(first)[0] - 16)
@@ -218,8 +306,24 @@ def main():
     parser.add_argument("--fault-library", type=Path, required=True)
     parser.add_argument("--case", action="append", choices=CASES)
     parser.add_argument("--startup-timeout", type=float, default=240)
+    parser.add_argument("--seed-lines", type=int, default=160,
+                        help="Background lines in the initial history")
+    parser.add_argument("--minimum-published-tokens", type=int, default=0,
+                        help="Require this actual seed and disk-restoration depth")
+    parser.add_argument("--publication-timeout", type=float, default=30,
+                        help="Seconds to await publication before a deliberate crash")
+    parser.add_argument("--require-over-ram", action="store_true",
+                        help="Require oversized/side-traffic publication to exceed actual committed RAM backing")
+    parser.add_argument("--staging-bytes", type=int, default=STAGING_BYTES,
+                        help="Staging budget for restart, tiered and crash (oversized always uses 1 MiB)")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.seed_lines <= 0 or args.minimum_published_tokens < 0 \
+            or args.publication_timeout <= 0 or args.staging_bytes <= 0:
+        parser.error("seed lines, publication timeout and staging bytes must be positive; "
+                     "depth must be nonnegative")
+    if args.require_over_ram and args.case and not set(args.case) & {"oversized", "side-traffic"}:
+        parser.error("--require-over-ram requires --case oversized or side-traffic")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1:3] != ["serve", "llm"]:
         parser.error("pass a gufo serve llm command after --")
@@ -236,7 +340,9 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     if option(command, "--served-model-name") is None:
         command += ["--served-model-name", "cache-lifecycle"]
-    runner = Lifecycle(command, args.output, args.startup_timeout, args.fault_library)
+    runner = Lifecycle(command, args.output, args.startup_timeout, args.fault_library,
+                       args.seed_lines, args.minimum_published_tokens, args.publication_timeout,
+                       args.require_over_ram, args.staging_bytes)
     runner.report["fault_library_sha256"] = hashlib.file_digest(
         args.fault_library.open("rb"), "sha256").hexdigest()
     try:

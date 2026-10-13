@@ -43,6 +43,10 @@ struct ContinuationComponent {
 // restoration.
 inline constexpr std::size_t kContinuationMetadataBytes = 160;
 
+struct ContinuationBackingClass {
+  std::size_t block_bytes{}, blocks{}, metadata_bytes{};
+};
+
 class ContinuationLayout {
 public:
   ContinuationLayout(const Config&, bool mtp, std::uint32_t context,
@@ -54,6 +58,11 @@ public:
       std::uint32_t target, std::uint32_t draft, std::uint32_t blocks,
       std::uint32_t draft_blocks) const;
   [[nodiscard]] std::size_t PrivateBytes() const noexcept;
+  // Precommitted classes include allocator headroom. Preserve row capacity
+  // for independent execution slots and budget checkpoint tails explicitly;
+  // remaining capacity extends private-state retention.
+  [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
+      std::size_t ram_bytes, std::uint32_t concurrency) const;
   // Completed pools contribute indexer_head_dim * sizeof(f16) per block,
   // rather than per token. Returns the exact total at the supplied frontiers.
   [[nodiscard]] std::size_t RowBytes(std::uint32_t target, std::uint32_t draft,

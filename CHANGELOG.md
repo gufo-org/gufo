@@ -4,6 +4,43 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.14.0](https://github.com/gufo-org/gufo/compare/v0.13.0...v0.14.0) (2026-10-13)
+
+
+### Features
+
+* **cache:** wire Flash-Next serving to the component cache ([#573](https://github.com/gufo-org/gufo/issues/573)) ([058d6e8](https://github.com/gufo-org/gufo/commit/058d6e80c21089b8e3af76b6ae3c7b31a01d541f))
+* **rocm:** managed-alloc fallback ([#460](https://github.com/gufo-org/gufo/issues/460)) ([248d902](https://github.com/gufo-org/gufo/commit/248d902e206be118216d8a3627718824816b0ab2))
+
+
+### Documentation
+
+* update readme ([#574](https://github.com/gufo-org/gufo/issues/574)) ([8d4e1a2](https://github.com/gufo-org/gufo/commit/8d4e1a2b74c94752b9b16b1dda153cbf52638443))
+
+## [0.13.0](https://github.com/gufo-org/gufo/compare/v0.12.0...v0.13.0) (2026-10-12)
+
+
+### Features
+
+* **serve:** exit as device_lost when generation stops making progress ([#541](https://github.com/gufo-org/gufo/issues/541)) ([2b4daed](https://github.com/gufo-org/gufo/commit/2b4daede679e4fd46cc77e5658606306ed5ed2f0))
+
+
+### Bug Fixes
+
+* **serve:** accept a boolean or null stream on compatibility routes ([#544](https://github.com/gufo-org/gufo/issues/544)) ([ccf3463](https://github.com/gufo-org/gufo/commit/ccf3463f028bc97e5082cb2c612cf40da9cf77c4))
+* **serve:** honor cache_prompt on raw completion routes ([#557](https://github.com/gufo-org/gufo/issues/557)) ([956f3d6](https://github.com/gufo-org/gufo/commit/956f3d62386a80d327aea9610310fef105c31b95))
+
+
+### Performance
+
+* **qwen-flash:** use 128 n-gram readers as documented ([#551](https://github.com/gufo-org/gufo/issues/551)) ([f37fb01](https://github.com/gufo-org/gufo/commit/f37fb012281bbd58054b1082933153bbec303106))
+
+
+### Documentation
+
+* **cache:** warn that the automatic RAM budget ignores later co-resident servers ([#556](https://github.com/gufo-org/gufo/issues/556)) ([113d42f](https://github.com/gufo-org/gufo/commit/113d42fbfecd57b3b18126a22e62a04dd4a4b51d))
+* **qwen-flash:** record rejected fork prefill kernels ([#565](https://github.com/gufo-org/gufo/issues/565)) ([1834991](https://github.com/gufo-org/gufo/commit/1834991317745b095ea42fc21370d594fabd519c))
+
 ## [0.12.0](https://github.com/gufo-org/gufo/compare/v0.11.0...v0.12.0) (2026-10-11)
 
 

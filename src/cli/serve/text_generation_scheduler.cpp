@@ -69,6 +69,9 @@ struct OutputBudget {
 
 struct ScheduledRequest;
 
+/// Longest admission wait for a disk job writing a deeper prompt prefix.
+constexpr auto kPublicationWait = std::chrono::seconds(120);
+
 /// Requests holding each execution session, for `/slots`. No other mutex is
 /// acquired while this table's mutex is held.
 struct SessionTable {
@@ -135,6 +138,11 @@ struct ScheduledRequest {
   std::size_t prefix_position{0};
   bool prefix_considered{false};
   std::optional<TextGenerationScheduler::Clock::time_point> prefix_wait_start;
+  // Admission also waits, once and bounded, for a disk job writing a much
+  // deeper prefix of the prompt (a conversation larger than the RAM budget).
+  std::optional<TextGenerationScheduler::Clock::time_point>
+      publication_wait_start;
+  bool publication_waiting{false};
   // The held `/slots` session while counted_processing is set. Only the
   // scheduler worker changes it.
   std::size_t session{kNoSession};
@@ -389,6 +397,8 @@ void WriteGenerationTrace(GenerationTrace trace,
                           const TextGenerationScheduler::Result& result,
                           const std::exception_ptr& failure) {
   auto& record = trace.record;
+  if (result.component_cache)
+    record["component_cache"] = ComponentCacheJson(*result.component_cache);
   record["prompt_tokens"] = result.prompt_tokens;
   record["cache"] = result.cache_disk_hit ? "disk"
                     : result.cache_hit    ? "memory"
@@ -709,6 +719,7 @@ struct TextGenerationScheduler::Impl {
     try {
       if (request->runner_request) {
         const auto retained = request->runner_request.Cancel();
+        request->result.component_cache = retained.component_cache;
         request->result.cache_snapshot_bytes = retained.snapshot_bytes;
         request->result.cache_snapshot_ms = retained.snapshot_ms;
         request->result.cache_disk_queued_bytes = retained.disk_queued_bytes;
@@ -877,6 +888,7 @@ struct TextGenerationScheduler::Impl {
         finish_reason == TextGenerationBackend::FinishReason::kStopSequence
             ? request->runner_request.Cancel()
             : request->runner_request.Commit();
+    request->result.component_cache = cache_commit.component_cache;
     request->result.cache_snapshot_bytes = cache_commit.snapshot_bytes;
     request->result.cache_snapshot_ms = cache_commit.snapshot_ms;
     request->result.cache_disk_queued_bytes = cache_commit.disk_queued_bytes;
@@ -1021,15 +1033,22 @@ struct TextGenerationScheduler::Impl {
         }
         request->prefix_leader.reset();
       }
+      if (request->publication_waiting &&
+          (Clock::now() - *request->publication_wait_start > kPublicationWait ||
+           !runner_pool->PublicationPending(request->prompt,
+                                            request->prompt_context.get())))
+        request->publication_waiting = false;
       ++it;
     }
   }
 
   [[nodiscard]] static std::shared_ptr<ScheduledRequest> PopReleased(
       std::deque<std::shared_ptr<ScheduledRequest>>& waiting) {
-    const auto released = std::ranges::find_if(
-        waiting,
-        [](const auto& request) { return request->prefix_leader == nullptr; });
+    const auto released =
+        std::ranges::find_if(waiting, [](const auto& request) {
+          return request->prefix_leader == nullptr &&
+                 !request->publication_waiting;
+        });
     if (released == waiting.end())
       return {};
     auto request = std::move(*released);
@@ -1071,6 +1090,14 @@ struct TextGenerationScheduler::Impl {
           waiting.push_back(std::move(request));
           continue;
         }
+        if (request->cache_prompt && !request->publication_wait_start &&
+            runner_pool->PublicationPending(request->prompt,
+                                            request->prompt_context.get())) {
+          request->publication_wait_start = Clock::now();
+          request->publication_waiting = true;
+          waiting.push_back(std::move(request));
+          continue;
+        }
 
         const std::weak_ptr<ScheduledRequest> weak_request = request;
         request->runner_request = runner_pool->Acquire(
@@ -1090,6 +1117,8 @@ struct TextGenerationScheduler::Impl {
           continue;
         }
 
+        request->result.component_cache =
+            request->runner_request.component_cache_metrics();
         request->result.cache_hit = request->runner_request.cache_hit();
         const auto lookup = request->runner_request.cache_lookup();
         request->result.cache_miss_reason = lookup.miss_reason;

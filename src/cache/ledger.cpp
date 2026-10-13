@@ -7,6 +7,7 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace gufo::cache {
 namespace {
@@ -26,7 +27,7 @@ struct LedgerState {
   explicit LedgerState(ResourceLimits limits, bool timing)
       : limits(limits), timing(timing) {}
   std::mutex mutex;
-  const ResourceLimits limits;
+  ResourceLimits limits;
   const bool timing;
   ResourceSnapshot snapshot;
   std::array<std::optional<std::size_t>, kLedgerStepCount> faults{};
@@ -127,6 +128,13 @@ struct ChargeToken {
   ChargeToken(ChargeToken&&) = delete;
   ChargeToken& operator=(ChargeToken&&) = delete;
   std::shared_ptr<Allocation> allocation;
+  std::vector<std::shared_ptr<Allocation>> additional;
+  template<class F>
+  void Each(F&& f) const {
+    f(*allocation);
+    for (const auto& item : additional)
+      f(*item);
+  }
   bool pooled{false};
   bool active{false};
   ChargeToken(std::shared_ptr<Allocation> allocation, bool pooled)
@@ -136,14 +144,16 @@ struct ChargeToken {
       return;
     auto& a = *allocation;
     const Lock lock(*a.ledger, LedgerStep::kRelease);
-    assert(a.pins == 0 && a.backing && a.category != Free);
     auto& s = a.ledger->snapshot;
-    s.bytes[Index(a.category)] -= a.bytes;
-    if (a.reserved)
-      s.reserved_bytes[Index(a.category)] -= a.bytes;
-    s.bytes[Index(Free)] += a.bytes;
-    a.category = Free;
-    a.reserved = false;
+    Each([&](Allocation& block) {
+      assert(block.pins == 0 && block.backing && block.category != Free);
+      s.bytes[Index(block.category)] -= block.bytes;
+      if (block.reserved)
+        s.reserved_bytes[Index(block.category)] -= block.bytes;
+      s.bytes[Index(Free)] += block.bytes;
+      block.category = Free;
+      block.reserved = false;
+    });
     a.ledger->Peaks();
     // allocation's shared_ptr is destroyed after this lock is released.
   }
@@ -162,15 +172,32 @@ struct PinToken {
       return;
     auto& a = *charge->allocation;
     const Lock lock(*a.ledger, LedgerStep::kRelease);
-    assert(a.pins);
-    if (--a.pins == 0)
-      a.ledger->snapshot.persistence_pinned_bytes -= a.bytes;
+    charge->Each([&](Allocation& block) {
+      assert(block.pins);
+      if (--block.pins == 0)
+        a.ledger->snapshot.persistence_pinned_bytes -= block.bytes;
+    });
   }
 };
 }  // namespace detail
 
 ResourceLedger::ResourceLedger(ResourceLimits limits, bool timing)
     : state_(std::make_shared<detail::LedgerState>(limits, timing)) {}
+void ResourceLedger::ConstrainLimits(ResourceLimits limits) {
+  const detail::Lock lock(*state_, LedgerStep::kReserve);
+  const auto& old = state_->limits;
+  const auto& s = state_->snapshot;
+  if (limits.total_bytes > old.total_bytes ||
+      limits.ram_bytes > old.ram_bytes ||
+      limits.staging_bytes > old.staging_bytes ||
+      limits.persistence_pinned_bytes > old.persistence_pinned_bytes)
+    throw std::invalid_argument("ledger limits may only decrease");
+  if (limits.total_bytes < s.total_bytes || limits.ram_bytes < s.ram_bytes ||
+      limits.staging_bytes < s.bytes[Index(Staging)] ||
+      limits.persistence_pinned_bytes < s.persistence_pinned_bytes)
+    throw ResourceExhausted();
+  state_->limits = limits;
+}
 ResourceReservation::ResourceReservation(
     std::shared_ptr<detail::ChargeToken> token)
     : token_(std::move(token)) {}
@@ -217,7 +244,15 @@ ResourceAllocationInfo Info(const std::shared_ptr<detail::ChargeToken>& token) {
     throw std::logic_error("empty ledger handle");
   const auto& a = *token->allocation;
   const std::lock_guard lock(a.ledger->mutex);
-  return {a.category, a.bytes, a.reserved, a.backing, token->pooled};
+  std::size_t bytes = 0;
+  bool pinned = false;
+  token->Each([&](const detail::Allocation& block) {
+    assert(block.category == a.category && block.reserved == a.reserved &&
+           block.backing == a.backing);
+    bytes += block.bytes;
+    pinned |= block.pins != 0;
+  });
+  return {a.category, bytes, a.reserved, a.backing, token->pooled, pinned};
 }
 }  // namespace
 ResourceAllocationInfo ResourceReservation::Info() const {
@@ -231,42 +266,66 @@ ResourceCharge ResourceReservation::Convert() {
     throw std::logic_error("empty ledger reservation");
   auto& a = *token_->allocation;
   const detail::Lock lock(*a.ledger, LedgerStep::kConvert);
-  assert(a.reserved);
   a.ledger->Fail(LedgerStep::kConvert);
   auto& s = a.ledger->snapshot;
-  s.reserved_bytes[Index(a.category)] -= a.bytes;
-  a.reserved = false;
-  if (a.category == Spill) {
-    s.bytes[Index(Spill)] -= a.bytes;
-    s.bytes[Index(Chunk)] += a.bytes;
-    a.category = Chunk;
-  }
+  token_->Each([&](detail::Allocation& block) {
+    assert(block.reserved);
+    s.reserved_bytes[Index(block.category)] -= block.bytes;
+    block.reserved = false;
+    if (block.category == Spill) {
+      s.bytes[Index(Spill)] -= block.bytes;
+      s.bytes[Index(Chunk)] += block.bytes;
+      block.category = Chunk;
+    }
+  });
   a.ledger->Peaks();
   return ResourceCharge(std::move(token_));
 }
 ResourceReservation ResourceCharge::ReserveBacking(
     ResourceCategory category) const {
+  return ReserveBacking(std::span(this, 1), category);
+}
+ResourceReservation ResourceCharge::ReserveBacking(
+    std::span<const ResourceCharge> blocks, ResourceCategory category) {
   if (category != Spill && category != ResourceCategory::kPrivateState &&
       category != ResourceCategory::kPrivateTail)
     throw std::invalid_argument(
         "backing assignment requires spill, private state or tail");
-  if (!token_ || token_->pooled || !token_->allocation->backing)
-    throw std::logic_error("assignment requires a pool backing handle");
-  auto& a = *token_->allocation;
-  auto assignment =
-      std::make_shared<detail::ChargeToken>(token_->allocation, true);
-  const detail::Lock lock(*a.ledger, LedgerStep::kReserve);
-  if (a.category != Free) {
-    throw ResourceExhausted();
+  if (blocks.empty())
+    throw std::invalid_argument("empty backing assignment");
+  for (const auto& block : blocks)
+    if (!block.token_ || block.token_->pooled ||
+        !block.token_->allocation->backing)
+      throw std::logic_error(
+          "assignment requires original pool backing handles");
+  const auto& first = blocks.front().token_->allocation;
+  auto assignment = std::make_shared<detail::ChargeToken>(first, true);
+  assignment->additional.reserve(blocks.size() - 1);
+  for (std::size_t i = 1; i < blocks.size(); ++i) {
+    const auto& allocation = blocks[i].token_->allocation;
+    if (allocation->ledger != first->ledger)
+      throw std::invalid_argument("backing assignment spans ledgers");
+    for (std::size_t j = 0; j < i; ++j)
+      if (allocation == blocks[j].token_->allocation)
+        throw std::invalid_argument("duplicate backing block");
+    assignment->additional.push_back(allocation);
   }
-  assert(!a.reserved);
+  auto& a = *first;
+  const detail::Lock lock(*a.ledger, LedgerStep::kReserve);
+  assignment->Each([](const detail::Allocation& block) {
+    if (block.category != Free)
+      throw ResourceExhausted();
+    assert(!block.reserved);
+  });
   a.ledger->Fail(LedgerStep::kReserve);
   auto& s = a.ledger->snapshot;
-  s.bytes[Index(Free)] -= a.bytes;
-  s.bytes[Index(category)] += a.bytes;
-  s.reserved_bytes[Index(category)] += a.bytes;
-  a.category = category;
-  a.reserved = true;
+  assignment->Each([&](detail::Allocation& block) {
+    s.bytes[Index(Free)] -= block.bytes;
+    s.bytes[Index(category)] += block.bytes;
+    s.reserved_bytes[Index(category)] += block.bytes;
+    block.category = category;
+    block.reserved = true;
+  });
   assignment->active = true;
   a.ledger->Peaks();
   return ResourceReservation(std::move(assignment));
@@ -279,24 +338,28 @@ std::shared_ptr<detail::PinToken> Pin(
   auto& a = *token->allocation;
   auto pin = std::make_shared<detail::PinToken>(token);
   const detail::Lock lock(*a.ledger, LedgerStep::kPin);
-  // The pool handle cannot impersonate the active borrower/chunk owner.
-  const bool payload = a.category == Spill || a.category == Chunk ||
-                       a.category == ResourceCategory::kPrivateState ||
-                       a.category == ResourceCategory::kPrivateTail;
-  const bool borrowed =
-      token->pooled &&
-      (a.category == Spill || a.category == ResourceCategory::kPrivateTail);
-  if (!payload || (a.reserved && !borrowed) || (a.backing && !token->pooled))
-    throw std::logic_error("persistence pin requires owned payload");
+  // Validate and admit the complete group before changing any pin counter.
+  std::size_t newly_pinned = 0;
+  token->Each([&](const detail::Allocation& block) {
+    const bool payload = block.category == Spill || block.category == Chunk ||
+                         block.category == ResourceCategory::kPrivateState ||
+                         block.category == ResourceCategory::kPrivateTail;
+    const bool borrowed =
+        token->pooled && (block.category == Spill ||
+                          block.category == ResourceCategory::kPrivateTail);
+    if (!payload || (block.reserved && !borrowed) ||
+        (block.backing && !token->pooled))
+      throw std::logic_error("persistence pin requires owned payload");
+    if (!block.pins)
+      newly_pinned += block.bytes;
+  });
   a.ledger->Fail(LedgerStep::kPin);
   auto& s = a.ledger->snapshot;
-  if (a.pins == 0) {
-    if (a.bytes >
-        a.ledger->limits.persistence_pinned_bytes - s.persistence_pinned_bytes)
-      throw std::bad_alloc();
-    s.persistence_pinned_bytes += a.bytes;
-  }
-  ++a.pins;
+  if (newly_pinned >
+      a.ledger->limits.persistence_pinned_bytes - s.persistence_pinned_bytes)
+    throw std::bad_alloc();
+  s.persistence_pinned_bytes += newly_pinned;
+  token->Each([](detail::Allocation& block) { ++block.pins; });
   pin->active = true;
   a.ledger->Peaks();
   return pin;
@@ -309,6 +372,7 @@ PersistencePin ResourceReservation::PinPersistence() const {
   return PersistencePin(Pin(token_));
 }
 ResourceLimits ResourceLedger::Limits() const {
+  const std::lock_guard lock(state_->mutex);
   return state_->limits;
 }
 ResourceSnapshot ResourceLedger::Snapshot() const {

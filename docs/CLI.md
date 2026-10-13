@@ -82,10 +82,16 @@ The supported modalities are LLM, image, video, and audio (TTS, ASR).
 
 - `cacheDisk` — enable an on-disk cache of computed prompt state, reused
   across requests and restarts. In practice: repeated or shared prompts get
-  much faster; costs disk space.
-- `cacheDiskBytes` — the maximum size of that cache on disk.
-- `cacheDiskStagingBytes` — scratch space used while writing new cache
-  entries. Must fit alongside `cacheDiskBytes`.
+  much faster; costs disk space. Give each Flash-Next server its own
+  directory: one Flash-Next server owns it, and a second one fails at
+  startup.
+- `cacheDiskBytes` — the maximum size of that cache on disk. Flash-Next also
+  counts unfinished writes, and lowering it removes its oldest checkpoints
+  (by creation) at the next start.
+- `cacheDiskStagingBytes` — RAM used to move cache entries to and from disk.
+  Flash-Next streams entries of any size through a 1 MiB buffer by default;
+  other models need it to hold a whole entry. See
+  [the server guide](SERVER.md) for the defaults.
 
 **Speculative decoding**
 
@@ -180,7 +186,7 @@ These apply to every modality, before or after the subcommand:
 
 - `host` / `port` — where to listen (`-i` / `-p`). In practice: set
   `--host 0.0.0.0` if you serve from inside a container, or the published
-  port will not answer.
+  port will not answer. Use `--host ::` to listen on IPv6 and IPv4 together.
 - `sessions` (`-j`) — preallocated GPU request sessions. In practice: more
   sessions means more requests can compute at once, at the cost of memory
   per session. This option applies to LLM serving; image and speech servers

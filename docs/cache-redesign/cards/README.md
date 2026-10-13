@@ -40,7 +40,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [D1](d1-transition.md) | One cache at a time; a single switch-over at the end | agreed |
 | [D2](d2-first-mode.md) | Adapter order: Flash-Next, Qwen 27B AR, Qwen 27B DFlash2, DeepSeek | agreed |
 | [D3](d3-step-baselines.md) | Step baselines per card instead of upfront targets | agreed |
-| [D4](d4-options-and-budgets.md) | Options and budgets | agreed |
+| [D4](d4-options-and-budgets.md) | Options and budgets | done |
 
 ## PR cards
 
@@ -59,13 +59,15 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [11](11-publication-and-crash-safety.md) | Crash-safe publication and orphan recovery | Disk store | 10 | M | agreed |
 | [12](12-streamed-transfers.md) | Bounded streaming writes and restores | Disk store | 08, 11 | L | agreed |
 | [13](13-tiered-lookup-and-eviction.md) | RAM + disk lookup and reference eviction | Disk store | 05, 11 | M | agreed |
-| [14](14-flash-next-adapter.md) | Flash-Next MTP and AR adapter | Adapters | 02, 06, 08 | L | draft; model checks complete, HTTP timing unqualified |
+| [14](14-flash-next-adapter.md) | Flash-Next MTP and AR adapter | Adapters | 02, 06, 08 | L | done |
 | [15](15-qwen27b-ar-adapter.md) | Qwen 27B AR adapter | Adapters | 02, 06, 08 | L | proposed |
 | [16](16-qwen27b-dflash2.md) | Qwen 27B DFlash2 draft state | Adapters | 15 | M | proposed |
 | [17](17-deepseek-adapter.md) | DeepSeek V4 Flash adapter | Adapters | 02, 06, 08 | L | proposed |
 | [18](18-non-continuation-records.md) | Capability records for non-continuation models | Adapters | 02 | S | agreed |
 | [19](19-switch-over.md) | Switch serving to the new cache | Switch-over | 01, 07, 09, 12–18 | L (stack) | proposed |
 | [20](20-e2e-baseline-and-qualification.md) | End-to-end baseline and qualification | After switch-over | 19 | evidence | proposed |
+| [21](21-edit-boundary-admission.md) | Edit-boundary admission under byte pressure | Switch-over review | 07, 19 | S | in progress |
+| [22](22-small-budget-retention.md) | Retention under small RAM budgets | Switch-over review | 07, 19, 21 | M | in progress |
 
 Cards 02–19 change no runtime behavior until card 19 wires them in and deletes
 the legacy cache (D1).

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <span>
 
 namespace gufo::cache {
 
@@ -72,6 +73,8 @@ struct ResourceAllocationInfo {
   bool reserved;
   bool pool_backing;
   bool assigned_backing;
+  // A queued or active disk job holds this storage until its write ends.
+  bool persistence_pinned{};
 };
 class ResourceCharge;
 class PersistencePin;
@@ -130,6 +133,10 @@ public:
   // it and the pool should try another block or decline capture. Invalid pool
   // handles throw logic_error. No request-path page commitment is required.
   [[nodiscard]] ResourceReservation ReserveBacking(ResourceCategory) const;
+  // Atomically assign adjacent physical blocks as one payload owner. Every
+  // input is a distinct original free pool handle from the same ledger.
+  [[nodiscard]] static ResourceReservation ReserveBacking(
+      std::span<const ResourceCharge>, ResourceCategory);
   // Only retained payload (assigned spill, chunks, private state/tails) counts
   // as persistence-pinned bytes. Staging and metadata use their own admission
   // categories; retain their charges directly for queued-job lifetimes.
@@ -161,6 +168,10 @@ public:
   [[nodiscard]] ResourceReservation Reserve(ResourceCategory, std::size_t);
   [[nodiscard]] ResourceSnapshot Snapshot() const;
   [[nodiscard]] ResourceLimits Limits() const;
+  // Initialization only, before workers start: lower limits after execution
+  // slots allocate, retaining the charges already admitted for their metadata.
+  // Reject increases or limits below current reservations/charges atomically.
+  void ConstrainLimits(ResourceLimits);
   // Atomic end/start of a global reporting window. The returned snapshot keeps
   // the ending peaks; next-window peaks start at the current charges/pins.
   // Overlapping request-local attribution belongs to card 19, not this reset.

@@ -457,9 +457,11 @@ private:
                std::uint32_t n_tokens, std::string* error_msg) const;
   /// `normed` says the previous Combine already produced m's grouped norm
   /// of res (F32 in s_.xn, or F16 plus tiled Q8 on the wide route).
+  /// `half_only` leaves only the F16 copy of `mixed`; `no_f32` keeps its
+  /// F16 and tiled Q8 copies but skips the F32 rows nothing reads.
   bool HcMix(const DeviceMixer& m, const float* res, bool normed, float* mixed,
              float* inject, std::uint32_t n_tokens, std::string* error_msg,
-             bool half_only = false) const;
+             bool half_only = false, bool no_f32 = false) const;
   /// Share mixer projections across decode requests without selecting the
   /// prefill arithmetic. Injection rows are compact across the whole batch.
   bool HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
@@ -467,8 +469,11 @@ private:
                   std::string* error) const;
   void CombineBatch(float* res, const float* gamma, std::uint32_t rows) const;
   /// Residual update by the block output plus the grouped norm for the next
-  /// mixer (`gamma`); wide batches write it as F16 and tiled Q8.
-  void Combine(float* res, const float* gamma, std::uint32_t n_tokens) const;
+  /// mixer (`gamma`); wide batches write it as F16 and tiled Q8. With that
+  /// mixer's F32 `inject_w`, the fused MoE combine also leaves its inject
+  /// partials in s_.inject (inject_fused_).
+  void Combine(float* res, const float* gamma, std::uint32_t n_tokens,
+               const float* inject_w = nullptr) const;
   /// Hashes the batch's n-gram rows and starts reading them from disk, so
   /// the read overlaps the layers before the PLE one.
   bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
@@ -503,6 +508,9 @@ private:
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
            bool last_only = false) const;
+  /// Whether MoeExperts takes the routed F16 WMMA route, whose epilogue the
+  /// following combine absorbs (see Moe).
+  bool WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const;
   /// Runs routed experts after the router and shared expert are ready.
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
                   std::uint32_t n_tokens, std::string* error_msg) const;
@@ -562,6 +570,7 @@ private:
     float* mixed;
     float* inject;
     float* block_out;
+    float* hc_defer_w;  ///< [t][4] stream weights of a deferred combine
     // linear attention
     float* qkv;
     float* z;
@@ -686,11 +695,10 @@ private:
   std::uint32_t* counts_host_{nullptr};
   std::int32_t* tiles_host_{nullptr};         ///< routed tile map staging
   mutable std::uint32_t routed_max_rows_{0};  ///< 0 = no readback yet
-  mutable std::uint32_t routed_n_tiles_{0};   ///< down projection tiles
-  mutable std::uint32_t routed_64_tiles_{0};  ///< appended 64-token tiles
+  mutable std::uint32_t routed_n_tiles_{0};   ///< routed_tile_rows_ tiles
+  mutable std::uint32_t routed_64_tiles_{0};  ///< wide batches' down tiles
   mutable std::uint32_t routed_pair_offset_{0};
   mutable std::uint32_t routed_pair_tiles_{0};
-  mutable std::uint32_t routed_pair_rows_{64};
   mutable std::uint32_t routed_tile_rows_{48};  ///< token rows per tile
   mutable int routed_tile_cols_{0};
   float* logits_host_{nullptr};
@@ -700,6 +708,11 @@ private:
   bool wide_mixer_{false};
   /// Set by Moe when its epilogue is left for the combine that follows.
   mutable bool moe_pending_{false};
+  /// Set before an attention-side combine whose FFN combine fuses the MoE
+  /// epilogue: that combine may then leave its residual update to the next
+  /// one (res_deferred_), which reads s_.block_out and s_.hc_defer_w.
+  mutable bool defer_residual_{false};
+  mutable bool res_deferred_{false};
   /// Set by GatedDense when s_.shexp_half holds the SwiGLU rows its F16
   /// down projection reads.
   mutable bool shexp_half_ready_{false};
@@ -717,6 +730,9 @@ private:
   mutable bool xn_half_{false};
   /// Partial sums per inject logit the last HcMix left in s_.inject.
   mutable std::uint32_t inject_parts_{1};
+  /// Inject weights whose partials the last combine already wrote to
+  /// s_.inject, so the following HcMix skips its inject pass.
+  mutable const float* inject_fused_{nullptr};
   mutable unsigned q8_slot_{0};
   /// Producer-written Q8_1 rows (see ReadyQ8): source, rows and width.
   struct ReadyRows {

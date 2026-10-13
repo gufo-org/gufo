@@ -14,11 +14,12 @@ set(gufo_pr_targets
   cache_tiered_test
   cache_retention_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
+  heap_placement_test
   logit_sampler_test ggml_dequant_test
   quote_tracker_test
   openai_chat_test http_server_test trace_test audio_websocket_test
   text_generation_scheduler_test
-  text_model_runner_test continuation_disk_store_test
+  component_text_cache_test text_model_runner_test continuation_disk_store_test
   bench_cli_test prompt_cli_test eval_http_client_test
   qwen_tokenizer_test qwen_chat_template_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
@@ -40,7 +41,7 @@ list(APPEND gufo_pr_tests
   gufo_version gufo_help serve_cli_test eval_http_test functional_runner_test
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test
-  kernel_resources_parser_test check_docs_test)
+  kernel_resources_parser_test check_docs_test check_pr_title_test)
 list(JOIN gufo_pr_tests "|" gufo_pr_pattern)
 add_custom_target(check-pr
   COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --no-tests=error

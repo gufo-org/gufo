@@ -1,5 +1,20 @@
 # Qwen3.8 Flash-Next quality
 
+**PR #571's wave-owned prefill weights retain byte-exact logits:**
+99,328,000 F32 values after a 34,159-token code/prose prompt and 400 fixed
+continuation steps, batch 4096, capacity 65536, match the original PR control
+`f06f32b9`. October 13, 2026 (Europe/Paris), kernel snapshot `a772fae6` atop
+`33a91366`, with the same pinned toolchain. Independent FP64 routed checks,
+unsaturated activations, odd outputs and guarded partial tiles pass. Fused SSM
+convolution, output, state and replay remain exact, including 2049-token tails.
+Deferred residual, F16 norm, packed Q8 bytes and independent host FP32 inject
+checks pass unchanged. All 16 measured AR/MTP HTTP completions at d0/d32K
+retain exact outputs and token/cache/draft counts, with no per-request
+prefill/decode timing flag. The first unusually slow mixed-MTP control is
+excluded as effect-size evidence.
+These are regression checks. The older functional timing failures below remain
+unresolved, and upstream model/conversion accuracy is not requalified.
+
 **PR #518 retains main's full logits at 64K/128K:** 512 fixed code/prose token
 positions, each checked at verification widths 1–8; all 1,017,118,720 logit
 comparisons are byte-exact (KL/TV 0, top-1 agreement 100%). Prefill and 56
@@ -22,6 +37,7 @@ Concurrent setup and maximum-token-gap flags are also retained in the evidence.
 
 | Check | Result |
 | --- | --- |
+| Wave-owned prefill weights, October 13 | Routed WMMA, projection/convolution, MoE epilogue and HC mix checks pass with unchanged tolerances. Routed inputs end at their allocation boundary; independently reset output tails retain their guards. Fused SSM output/state/replay and full fixed-history logits are exact. HTTP C1 pp2048/tg128, two AR captures with two repetitions and two mixed/repetitive MTP captures: 16 exact measured completions, including actual drafts. All request phases pass the timing gate; the anomalous first mixed-MTP control is excluded. |
 | Decode-kernel review, October 10 | All 13 operator tests and native snapshot/session/deep-execution checks pass. Independent MTP formulas: worst relative RMS 0.0007655 (limit 0.002), 41 reported comparisons over eight text/image states. Sampled replay, cancellation, C2/4/6/8 and RAM/disk restoration pass. [Evidence](artifacts/decode-kernels-review.json). |
 | Focused HTTP regression, October 10 | `state-edges`, `tool-agent`, `long-context`, `cache`, Flash AR/MTP only. Two main/PR pairs plus unchanged-main controls; no output or expected cache/prefill-work changes. Timing failures remain visible above and in the [evidence](artifacts/decode-kernels-review.json). |
 | Concurrency, October 10 | All 63 tg128 requests match fresh AR completions: 21 AR, 21 mixed MTP and 21 repetitive MTP at C1/2/4/6/8. Prepared prefixes are reused; mixed/repetitive MTP propose 882/2170 drafts and accept 517/1959. [Evidence](artifacts/decode-kernels-review.json). |
@@ -88,6 +104,21 @@ formulas supply independent predictor checks; pinned Transformers ignores MTP
 weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
+
+The October 13 single-user refresh uses production Nix builds of PR #571:
+`0951ea2f` (binary SHA-256 prefix `61d0583912d9e2c8`), and `ac51031a`
+(`d6cc00786ffc8786`) for AR d16K/d64K and MTP d64K, whose prompts end a few
+tokens past a 128-token tile and take its W8A8 tail path. Both run through
+`tools/bench/model-bench.py run --target gufo --table single-ar,single-mtp`:
+HTTP C1, capacity 133760, greedy, thinking off, pp2048/tg128 at
+every depth from 0 to 131072, one warmed sample per point, platform profile
+`performance`. Token and cache counts pass the driver's calibration gates.
+The single-user kernels behind it retain byte-identical logits for 718 fixed
+continuation rows after a 35,559-token prompt at batch 2048 and 4096 against
+the previous PR head ([experiments](EXPERIMENTS.md)). Multi-user, loading and memory
+tables and all reference values keep their earlier provenance.
+
+The October 10 sweep follows:
 
 Gufo refreshed October 10, 2026 using production Nix build `25cdb2a1`,
 PR #518 rebased onto main `a41e88da` with all 16 patches unchanged.

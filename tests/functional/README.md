@@ -3,6 +3,48 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+The cluster workflow uses [impact.json](impact.json) to select suites from changed
+paths. Inspect a plan locally without running Gufo:
+
+```sh
+python3 tests/functional/impact.py --model flash-next-q4 \
+  src/models/qwen38_flash_next/continuation_adapter.cpp
+```
+
+`--repo PATH --base SHA --head SHA` reads a Git diff instead. Renames retain both
+old and new ownership. Rules with the highest explicit priority apply; equal
+priority rules contribute a union. Unknown paths expand to all compatible
+coverage. Suite metadata must cover every name in `run.py`; dependencies are
+deliberately conservative, so even narrow source rules can select many suites.
+
+`Devlab functional checks` starts when a maintainer applies `ci:functional` to a
+PR, or manually dispatches it with a PR number. The label event uses trusted base
+workflow code (`pull_request_target`); only Maintain/Admin senders and rerun
+actors authorize execution. The event's exact PR head must still be current.
+Later commits do not inherit approval: remove and reapply the label to approve
+another revision. It pins the PR head and merge base on `main`, plans on a hosted runner,
+and allocates the cluster only for affected Flash-Next AR/MTP coverage (or an
+explicit benchmark request). The workflow and harness come from the trusted
+workflow revision; only the production binary is built from the approved PR.
+It fetches the pinned Q4 shards, MTP sidecar and vision projector into a persistent
+cache, and retains reports and selection reasons as artifacts. Weight reuse
+depends on the cluster preserving that user's cache on the allocated machine.
+
+`cluster.py` executes each configuration group with a fresh server/cache history
+and continues to other groups after a failure. Candidate correctness uses
+`--record-baseline` to capture observations; this does **not** qualify timing
+regressions. Failures fail the cluster job. Deferred cache rollout suites,
+other-model coverage, numerical checks and agent-client replays remain named
+qualification obligations rather than being counted as passes. This workflow
+currently covers only Flash-Next, including for shared changes.
+
+Planner and executor checks are CPU-only:
+
+```sh
+python3 -m unittest discover -s tests/functional -p test_impact.py
+```
+
+
 Device-loss process tests use a separate opt-in runner because each lost-device
 case must terminate its server. Build its CMake-owned preload helper, then run
 against a production binary and one explicitly selected model/mode:
@@ -148,6 +190,9 @@ Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. Fo
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
 uses its own 8 GiB disk budget and 1 GiB staging area inside the output directory;
 the runner removes that disk cache when the run ends, keeping reports and logs.
+Flash-Next allocates that staging as pinned host memory at startup, beyond its
+RAM budget, although its default 1 MiB transfer buffer suffices. The runner
+keeps 1 GiB so results stay comparable with retained runs and other models.
 For timing controls on revisions predating progress, use `--allow-missing-progress`
 with `--record-baseline`. Candidate qualification always requires progress events.
 Model runs stay outside hosted CI; CI checks the runner and measurement logic.
@@ -316,7 +361,7 @@ nix develop -c python3 tests/functional/cache_lifecycle.py \
   --context 32768 --sessions 1 --think off --speculative off
 ```
 
-Repeat `--case restart|tiered|oversized|crash` to select cases. `restart` models
+Repeat `--case restart|tiered|oversized|crash|side-traffic` to select cases. `restart` models
 llama-swap stopping and starting a server between turns. `tiered` first warms a
 short RAM prefix after restart, then requests a history with a deeper published
 disk checkpoint. `oversized` uses 1 MiB staging beneath an observed larger
@@ -326,6 +371,30 @@ request, then SIGKILLs that child. Restart may restore only previously published
 boundaries. The helper is disarmed for initial publication and is covered by
 CPU process tests. Every case owns an 8 GiB disk budget, checks free space and
 deletes its cache on completion/failure. Reports and logs remain outside Git.
+For the 100K+ case, use `--seed-lines 7300 --minimum-published-tokens 100000`
+with context 133760, selecting `oversized` and `crash`. Actual prompt usage,
+publication and disk restoration must meet that depth; line count alone is
+not evidence. `--publication-timeout 300` allows the large checkpoint to finish
+before the deliberate crash without changing request timing gates. The
+oversized case waits for the deep publication before graceful shutdown and
+still uses 1 MiB staging. Keep the same explicit RAM limit in both modes.
+Use `--staging-bytes` to match the staging budget of a reported restart,
+tiered or crash workload (default: 2 GiB). This value is recorded in the
+report; the oversized case always keeps its 1 MiB staging allocation.
+For checkpoints larger than committed RAM, use `--require-over-ram` with
+`--case oversized` or `--case side-traffic`. For example, Flash-Next at context 262144 with
+`--seed-lines 12500 --minimum-published-tokens 174000` and
+`--cache-ram-bytes 4593364992` exercises a 175K seed and a 186K continuation.
+The assertion compares the published payload with the server's actual
+post-allocation RAM budget; a queued job alone does not qualify the case.
+`side-traffic` keeps the system prompt at at most 256 background lines and
+places the remaining seed in the user history. After publishing the deep append
+and restarting, it alternates four short conversations sharing that system with
+one further deep turn, for three rounds. Every deep turn must retain at least
+the last published boundary; each new deep publication must advance before the
+next round. Cold output controls run after all warm traffic. This covers the
+short-peer/deep-history pattern reported in #542; the system-only oversized
+fixture cannot establish that behavior.
 Known cache-work failures exit nonzero and retain controls/evidence; they are
 not skipped, marked as expected passes, or fixed in this test-only card.
 

@@ -1,6 +1,9 @@
 # RFC: continuation cache redesign
 
-Status: draft for discussion. Updated 2026-10-08. Implementation has not started.
+Status: implementation in progress. Updated 2026-10-11. Flash-Next serving
+integration is under qualification in [PR #543](https://github.com/gufo-org/gufo/pull/543).
+The all-model cutover and measured acceptance gates remain open; predictions
+below are not qualified implementation results.
 
 This is the single, self-contained review document for the cache redesign.
 The original research documents, scripts and measurement inputs are preserved

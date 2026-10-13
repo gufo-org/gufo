@@ -197,13 +197,69 @@ def main():
             prefix_cases.append((schema, prefixes, expected))
     if args.node:
         cases.extend(ecmascript_cases(args.node))
+    # Response formats follow llama.cpp (#580): an object that declares
+    # properties without additionalProperties stays closed, so validate
+    # against that closed form. Like llama.cpp, the grammar emits declared
+    # properties in schema order before extra keys, so instances follow it.
+    open_cases = []
+
+    def llama_closed(schema):
+        if isinstance(schema, list):
+            return [llama_closed(item) for item in schema]
+        if not isinstance(schema, dict):
+            return schema
+        result = {key: llama_closed(value) for key, value in schema.items()}
+        if "properties" in result and "additionalProperties" not in result:
+            result["additionalProperties"] = False
+        return result
+
+    def add_open(schema, values, strict=False):
+        validator = Draft202012Validator(llama_closed(schema))
+        texts = [json.dumps(value, ensure_ascii=False) for value in values]
+        open_cases.append((schema, texts, [validator.is_valid(value) for value in values], strict))
+
+    extras = [{}, {"extra": 1}, {"note": "é 😀"}, {"x": [1, {"y": None}], "z": True}]
+    add_open({"type": "object", "properties": {"name": {"type": "string"},
+              "born": {"type": "integer", "description": "birth year"}},
+              "required": ["name", "born"]},
+             [{**base, **extra} for base in ({"name": "a", "born": 1503}, {"name": "a"},
+              {"name": "a", "born": "1503"}, {"name": 1, "born": 1}) for extra in extras],
+             strict=True)
+    add_open({"type": "object", "properties": {"a": {"type": "integer"},
+              "b": {"type": "boolean"}}, "required": ["b"]},
+             [{**base, **extra} for base in ({"b": True}, {"a": 1, "b": False}, {"a": 1},
+              {}, {"a": "1", "b": True}) for extra in extras])
+    add_open({"type": "object", "properties": {"items": {"type": "array", "minItems": 1,
+              "items": {"type": "object", "properties": {"id": {"type": "integer"}},
+                        "required": ["id"]}}}, "required": ["items"]},
+             [{"items": items, **extra} for items in ([], [{"id": 1}], [{"id": 1, "n": "x"}],
+              [{"n": "x"}], [{"id": 1}, {"id": "2"}]) for extra in extras])
+    add_open({"type": "object", "properties": {"k": {"type": "string"}},
+              "required": ["k"], "additionalProperties": {"type": "integer"}},
+             [{"k": "v", **extra} for extra in ({}, {"n": 2}, {"n": "2"}, {"n": 1, "m": 2.5})])
+    add_open({"type": "object", "properties": {"k": {"type": "string"}},
+              "required": ["k"], "additionalProperties": True},
+             [{"k": "v", **extra} for extra in extras] + [{"k": 1}])
+    add_open({"type": "object", "properties": {"k": {"type": "string"}},
+              "required": ["k"], "additionalProperties": False},
+             [{"k": "v", **extra} for extra in extras])
+    add_open({"type": "object", "properties": {"any": {"type": "object"}},
+              "required": ["any"], "additionalProperties": True},
+             [{"any": value, **extra} for value in ({}, {"a": 1}, {"b": [None]}, [])
+              for extra in extras])
     records = "\n".join(json.dumps({"schema": schema, "texts": texts}) for schema, texts, _ in cases)
+    records += "\n" + "\n".join(json.dumps({"schema": schema, "texts": texts, "open": True,
+                                              "strict": strict})
+                                  for schema, texts, _, strict in open_cases)
     records += "\n" + "\n".join(json.dumps({"schema": schema, "texts": [], "prefixes": prefixes})
                               for schema, prefixes, _ in prefix_cases)
     result = subprocess.run([args.probe, "--probe"], input=records + "\n", text=True,
                             capture_output=True, check=True, timeout=120)
     outputs = [json.loads(line) for line in result.stdout.splitlines()]
-    assert len(outputs) == len(cases) + len(prefix_cases), (len(outputs), len(cases), result.stderr)
+    assert len(outputs) == len(cases) + len(open_cases) + len(prefix_cases), (
+        len(outputs), len(cases), result.stderr)
+    open_outputs = outputs[len(cases):len(cases) + len(open_cases)]
+    outputs = outputs[:len(cases)] + outputs[len(cases) + len(open_cases):]
     decisions = 0
     for (schema, texts, expected), output in zip(cases, outputs):
         if "error" in output:
@@ -213,6 +269,12 @@ def main():
         for text, actual, wanted in zip(texts, output["accepted"], expected):
             assert actual == wanted, (schema, text, actual, wanted)
             decisions += 1
+    open_decisions = 0
+    for (schema, texts, expected, _), output in zip(open_cases, open_outputs):
+        assert "error" not in output, (schema, output)
+        for text, actual, wanted in zip(texts, output["accepted"], expected):
+            assert actual == wanted, (schema, text, actual, wanted)
+            open_decisions += 1
     prefix_decisions = 0
     for (schema, prefixes, expected), output in zip(prefix_cases, outputs[len(cases):]):
         if "error" in output:
@@ -223,6 +285,8 @@ def main():
             if actual != wanted])
         prefix_decisions += len(prefixes)
     print(f"JSON Schema oracle: {decisions} acceptance decisions across {len(cases)} schemas passed")
+    print(f"JSON Schema open-object oracle: {open_decisions} acceptance decisions "
+          f"across {len(open_cases)} schemas passed")
     print(f"JSON Schema prefix oracle: {prefix_decisions} completion-feasibility decisions passed")
 
 

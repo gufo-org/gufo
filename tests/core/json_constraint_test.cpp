@@ -6,10 +6,13 @@
 #include <cassert>
 #include <cmath>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #include "src/core/sampling.hpp"
 
@@ -369,6 +372,96 @@ void TestPrimitiveConstraints() {
     assert(Accepts(*grammar, std::string("{\"x\":\"") + valid + "\"}"));
     assert(!Accepts(*grammar, std::string("{\"x\":\"") + invalid + "\"}"));
   }
+}
+
+bool Rejects(const gufo::json::Value& schema, bool strict,
+             bool open_objects = false) {
+  try {
+    (void)JsonConstraint::Compile(schema, strict, open_objects);
+  } catch (const std::invalid_argument&) {
+    return true;
+  }
+  return false;
+}
+
+// Response formats follow llama.cpp (#580): objects that declare properties
+// stay closed unless additionalProperties is true or a schema, and objects
+// without properties admit any keys. Tool schemas keep the closed contract.
+void TestOpenResponseObjects() {
+  const auto person = parse(R"({
+    "type":"object","properties":{
+      "name":{"type":"string"},
+      "born":{"type":"integer","description":"birth year"}
+    },"required":["name","born"]})");
+  // Compiling the open form first must not leak into the closed cache entry.
+  const auto implicit = JsonConstraint::Compile(person, true, true);
+  assert(implicit == JsonConstraint::Compile(person, true, true));
+  assert(Rejects(person, true));
+  assert(Rejects(person, false));
+  assert(Accepts(*implicit, R"({"name":"Nostradamus","born":1503})"));
+  for (const char* invalid :
+       {R"({"name":"a","born":1,"occupation":"seer"})", R"({"name":"a"})"})
+    assert(!Accepts(*implicit, invalid));
+
+  auto extensible = person;
+  extensible["additionalProperties"] = true;
+  const auto open = JsonConstraint::Compile(extensible, true, true);
+  for (const char* valid :
+       {R"({"name":"Nostradamus","born":1503})",
+        R"({"name":"a","born":1,"occupation":"seer"})",
+        R"({ "name" : "a" , "born" : 1 , "x" : [1,{"y":null}], "z" : true })"})
+    assert(Accepts(*open, valid));
+  for (const char* invalid :
+       {R"({"name":"a"})", R"({"name":"a","born":"1503"})",
+        R"({"name":"a","born":1,"name":"b"})",
+        R"({"name":"a","born":1,"born":2})", R"({"name":"a","born":1,})",
+        R"({"name":"a","born":1,"x":})"})
+    assert(!Accepts(*open, invalid));
+
+  const auto nested = JsonConstraint::Compile(parse(R"({
+    "type":"object","properties":{
+      "items":{"type":"array","minItems":1,"items":{
+        "type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}},
+      "closed":{"type":"object","properties":{"a":{"type":"boolean"}},
+        "required":["a"],"additionalProperties":false},
+      "typed":{"type":"object","properties":{},"additionalProperties":{"type":"integer"}},
+      "explicit":{"type":"object","properties":{},"additionalProperties":true},
+      "any":{"type":"object"}
+    },"required":["items","closed","typed","explicit","any"]})"),
+                                              true, true);
+  assert(Accepts(
+      *nested,
+      R"({"items":[{"id":1}],"closed":{"a":true},"typed":{"n":2},"explicit":{"k":[]},"any":{"m":{}}})"));
+  for (
+      const char* invalid :
+      {R"({"items":[{"id":1,"note":"x"}],"closed":{"a":true},"typed":{},"explicit":{},"any":{}})",
+       R"({"items":[{"id":1}],"closed":{"a":true,"b":1},"typed":{},"explicit":{},"any":{}})",
+       R"({"items":[{"id":1}],"closed":{"a":true},"typed":{"n":"2"},"explicit":{},"any":{}})",
+       R"({"items":[{"note":"x"}],"closed":{"a":true},"typed":{},"explicit":{},"any":{}})",
+       R"({"items":[{"id":1}],"closed":{"a":true},"typed":{},"explicit":{},"any":{},"more":1})"})
+    assert(!Accepts(*nested, invalid));
+
+  // Closed schemas compile to the same language with or without the flag.
+  const auto closed = parse(R"({
+    "type":"object","properties":{"a":{"type":"integer"},"b":{"type":"boolean"}},
+    "required":["a"],"additionalProperties":false})");
+  for (const char* text : {R"({"a":1})", R"({"a":1,"b":false})",
+                           R"({"a":1,"c":0})", R"({"b":true})"})
+    assert(Accepts(*JsonConstraint::Compile(closed, false), text) ==
+           Accepts(*JsonConstraint::Compile(closed, false, true), text));
+
+  // Only undeclared keys open up: strict requirements, untyped leaves,
+  // unsupported keywords and a non-object root remain errors.
+  for (
+      const auto& [input, strict] :
+      std::initializer_list<std::pair<const char*, bool>>{
+          {R"({"type":"object","properties":{"a":{"type":"integer"}}})", true},
+          {R"({"type":"object","properties":{"a":{}},"required":["a"]})",
+           false},
+          {R"({"type":"object","properties":{},"patternProperties":{"x":{"type":"integer"}}})",
+           false},
+          {R"({"type":"array","items":{"type":"integer"}})", false}})
+    assert(Rejects(parse(input), strict, true));
 }
 
 void TestIntegerBoundsAndRecursion() {
@@ -2016,8 +2109,11 @@ int main(int argc, char** argv) {
       auto output = gufo::json::Value::object();
       try {
         const auto input = parse(line);
-        const auto grammar =
-            JsonConstraint::Compile(*input.find("schema"), true);
+        const auto* strict = input.find("strict");
+        const auto* open = input.find("open");
+        const auto grammar = JsonConstraint::Compile(
+            *input.find("schema"), !strict || strict->as_bool(),
+            open && open->as_bool());
         output["accepted"] = gufo::json::Value::array();
         for (const auto& text : input.find("texts")->items())
           output["accepted"].push_back(Accepts(*grammar, text.str()));
@@ -2042,6 +2138,7 @@ int main(int argc, char** argv) {
   TestSchemaIntersections();
   TestMixedEnumValues();
   TestRejectedSchemas();
+  TestOpenResponseObjects();
   TestIntegerBoundsAndRecursion();
   TestPrimitiveConstraints();
   TestTokensAndSampling();
