@@ -384,8 +384,9 @@ bool Rejects(const gufo::json::Value& schema, bool strict,
   return false;
 }
 
-// Response formats admit undeclared keys unless additionalProperties is
-// false, as in llama.cpp (#580). Tool schemas keep the closed contract.
+// Response formats follow llama.cpp (#580): objects that declare properties
+// stay closed unless additionalProperties is true or a schema, and objects
+// without properties admit any keys. Tool schemas keep the closed contract.
 void TestOpenResponseObjects() {
   const auto person = parse(R"({
     "type":"object","properties":{
@@ -393,10 +394,18 @@ void TestOpenResponseObjects() {
       "born":{"type":"integer","description":"birth year"}
     },"required":["name","born"]})");
   // Compiling the open form first must not leak into the closed cache entry.
-  const auto open = JsonConstraint::Compile(person, true, true);
-  assert(open == JsonConstraint::Compile(person, true, true));
+  const auto implicit = JsonConstraint::Compile(person, true, true);
+  assert(implicit == JsonConstraint::Compile(person, true, true));
   assert(Rejects(person, true));
   assert(Rejects(person, false));
+  assert(Accepts(*implicit, R"({"name":"Nostradamus","born":1503})"));
+  for (const char* invalid :
+       {R"({"name":"a","born":1,"occupation":"seer"})", R"({"name":"a"})"})
+    assert(!Accepts(*implicit, invalid));
+
+  auto extensible = person;
+  extensible["additionalProperties"] = true;
+  const auto open = JsonConstraint::Compile(extensible, true, true);
   for (const char* valid :
        {R"({"name":"Nostradamus","born":1503})",
         R"({"name":"a","born":1,"occupation":"seer"})",
@@ -405,8 +414,7 @@ void TestOpenResponseObjects() {
   for (const char* invalid :
        {R"({"name":"a"})", R"({"name":"a","born":"1503"})",
         R"({"name":"a","born":1,"name":"b"})",
-        R"({"name":"a","born":1,"born":2})",
-        R"({"name":"a","born":1,"name":"b"})", R"({"name":"a","born":1,})",
+        R"({"name":"a","born":1,"born":2})", R"({"name":"a","born":1,})",
         R"({"name":"a","born":1,"x":})"})
     assert(!Accepts(*open, invalid));
 
@@ -417,18 +425,20 @@ void TestOpenResponseObjects() {
       "closed":{"type":"object","properties":{"a":{"type":"boolean"}},
         "required":["a"],"additionalProperties":false},
       "typed":{"type":"object","properties":{},"additionalProperties":{"type":"integer"}},
-      "explicit":{"type":"object","properties":{},"additionalProperties":true}
-    },"required":["items","closed","typed","explicit"],"additionalProperties":false})"),
+      "explicit":{"type":"object","properties":{},"additionalProperties":true},
+      "any":{"type":"object"}
+    },"required":["items","closed","typed","explicit","any"]})"),
                                               true, true);
   assert(Accepts(
       *nested,
-      R"({"items":[{"id":1,"note":"x"}],"closed":{"a":true},"typed":{"n":2},"explicit":{"k":[]}})"));
+      R"({"items":[{"id":1}],"closed":{"a":true},"typed":{"n":2},"explicit":{"k":[]},"any":{"m":{}}})"));
   for (
       const char* invalid :
-      {R"({"items":[{"id":1}],"closed":{"a":true,"b":1},"typed":{},"explicit":{}})",
-       R"({"items":[{"id":1}],"closed":{"a":true},"typed":{"n":"2"},"explicit":{}})",
-       R"({"items":[{"note":"x"}],"closed":{"a":true},"typed":{},"explicit":{}})",
-       R"({"items":[{"id":1}],"closed":{"a":true},"typed":{},"explicit":{},"more":1})"})
+      {R"({"items":[{"id":1,"note":"x"}],"closed":{"a":true},"typed":{},"explicit":{},"any":{}})",
+       R"({"items":[{"id":1}],"closed":{"a":true,"b":1},"typed":{},"explicit":{},"any":{}})",
+       R"({"items":[{"id":1}],"closed":{"a":true},"typed":{"n":"2"},"explicit":{},"any":{}})",
+       R"({"items":[{"note":"x"}],"closed":{"a":true},"typed":{},"explicit":{},"any":{}})",
+       R"({"items":[{"id":1}],"closed":{"a":true},"typed":{},"explicit":{},"any":{},"more":1})"})
     assert(!Accepts(*nested, invalid));
 
   // Closed schemas compile to the same language with or without the flag.

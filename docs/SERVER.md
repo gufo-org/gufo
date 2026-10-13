@@ -848,12 +848,12 @@ Supported: objects, arrays, nullable types, `enum`/`const`, `anyOf`, recursive l
 array length bounds. Formats include date/time, duration, email, hostname,
 IP addresses and UUID.
 
-The root must resolve to an object. As in JSON Schema and llama.cpp, an object
-without `additionalProperties:false` admits extra keys after its declared
-properties; `additionalProperties` may also be `true` or a schema for those
-values. Set it to `false` to forbid extra keys. Strict schemas require every
-property (use null for optional values). Tool parameter schemas keep their
-separate rules below.
+The root must resolve to an object. As in llama.cpp, an object that declares
+`properties` admits no other keys unless `additionalProperties` is `true` or a
+schema for their values; extra keys then follow the declared properties. An
+object without `properties` admits any keys unless `additionalProperties` is
+`false`. Strict schemas require every property (use null for optional values).
+Tool parameter schemas keep their separate rules below.
 Unsupported keywords, external references and unusable cycles are rejected.
 Schemas are limited to 2 MiB, 5,000 properties, 1,000 enum values and 120,000
 characters in names and enum/const strings. Patterns use ECMA-262 Unicode

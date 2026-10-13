@@ -1562,7 +1562,11 @@ private:
     if (!properties)
       properties = &empty_properties;
     const auto* additional = schema.find("additionalProperties");
-    const bool closed = ClosedProperties(schema, ignore_unknown_keys_);
+    // As in llama.cpp common/json-schema.cpp at 23b0202a1, a response object
+    // that declares properties without additionalProperties stays closed.
+    const bool closed = ClosedProperties(schema, ignore_unknown_keys_) ||
+                        (open_response_objects_ && !additional &&
+                         schema.contains("properties"));
     if (!properties->is_object() ||
         (additional && !additional->is_bool() && !additional->is_object()))
       Invalid("invalid object properties or additionalProperties");
@@ -1676,8 +1680,9 @@ private:
   const json::Value& schema_;
   bool strict_;
   bool open_objects_;
-  // Unlike open_objects_, this admits only undeclared keys. Untyped leaves and
-  // unsupported keywords remain errors.
+  // Unlike open_objects_, this admits undeclared keys only when
+  // additionalProperties is true or a schema, or the object declares no
+  // properties. Untyped leaves and unsupported keywords remain errors.
   bool open_response_objects_;
   bool ignore_unknown_keys_{false};
   std::shared_ptr<JsonConstraint> grammar_{new JsonConstraint};

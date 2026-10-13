@@ -197,13 +197,24 @@ def main():
             prefix_cases.append((schema, prefixes, expected))
     if args.node:
         cases.extend(ecmascript_cases(args.node))
-    # Response formats admit undeclared keys unless additionalProperties is
-    # false (#580). Like llama.cpp, the grammar emits declared properties in
-    # schema order before extra keys, so instances follow that order.
+    # Response formats follow llama.cpp (#580): an object that declares
+    # properties without additionalProperties stays closed, so validate
+    # against that closed form. Like llama.cpp, the grammar emits declared
+    # properties in schema order before extra keys, so instances follow it.
     open_cases = []
 
+    def llama_closed(schema):
+        if isinstance(schema, list):
+            return [llama_closed(item) for item in schema]
+        if not isinstance(schema, dict):
+            return schema
+        result = {key: llama_closed(value) for key, value in schema.items()}
+        if "properties" in result and "additionalProperties" not in result:
+            result["additionalProperties"] = False
+        return result
+
     def add_open(schema, values, strict=False):
-        validator = Draft202012Validator(schema)
+        validator = Draft202012Validator(llama_closed(schema))
         texts = [json.dumps(value, ensure_ascii=False) for value in values]
         open_cases.append((schema, texts, [validator.is_valid(value) for value in values], strict))
 
@@ -232,6 +243,10 @@ def main():
     add_open({"type": "object", "properties": {"k": {"type": "string"}},
               "required": ["k"], "additionalProperties": False},
              [{"k": "v", **extra} for extra in extras])
+    add_open({"type": "object", "properties": {"any": {"type": "object"}},
+              "required": ["any"], "additionalProperties": True},
+             [{"any": value, **extra} for value in ({}, {"a": 1}, {"b": [None]}, [])
+              for extra in extras])
     records = "\n".join(json.dumps({"schema": schema, "texts": texts}) for schema, texts, _ in cases)
     records += "\n" + "\n".join(json.dumps({"schema": schema, "texts": texts, "open": True,
                                               "strict": strict})

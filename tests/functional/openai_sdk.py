@@ -1270,10 +1270,20 @@ def check_structured_outputs(client, model, checks, vision=False):
                                          "usage": responses_image.usage.to_dict()})
 
     # #580: hand-written schemas often omit additionalProperties. As in
-    # llama.cpp, such objects admit extra keys while declared properties stay
-    # constrained; strict only keeps every property required. Kept last so
-    # older servers still record every preceding check as a timing control.
+    # llama.cpp, they are admitted and objects that declare properties stay
+    # closed, so validate against that closed form. Kept last so older
+    # servers still record every preceding check as a timing control.
     from jsonschema import Draft202012Validator
+
+    def closed(schema):
+        if isinstance(schema, list):
+            return [closed(item) for item in schema]
+        if not isinstance(schema, dict):
+            return schema
+        result = {key: closed(value) for key, value in schema.items()}
+        if "properties" in result and "additionalProperties" not in result:
+            result["additionalProperties"] = False
+        return result
     open_schemas = (
         ("person", "Who was Nostradamus? Give his name, birth year and occupation.",
          {"type": "object", "properties": {
@@ -1313,7 +1323,7 @@ def check_structured_outputs(client, model, checks, vision=False):
         for result in (buffered, streamed):
             assert result["finish"] == "stop" and not result["tools"], result
             value = json.loads(result["text"])
-            Draft202012Validator(schema).validate(value)
+            Draft202012Validator(closed(schema)).validate(value)
             assert expected(value), result
         assert streamed["text"] == buffered["text"], (buffered, streamed)
         record(f"schema_open_{name}", streamed)
@@ -1327,7 +1337,7 @@ def check_structured_outputs(client, model, checks, vision=False):
                          "schema": open_item}},
         reasoning={"effort": "none"}, temperature=0, max_output_tokens=256)
     assert response.status == "completed", response
-    Draft202012Validator(open_item).validate(json.loads(response.output_text))
+    Draft202012Validator(closed(open_item)).validate(json.loads(response.output_text))
     record("schema_open_responses", {"text": response.output_text,
                                      "usage": response.usage.to_dict()})
 

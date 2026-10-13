@@ -2545,8 +2545,10 @@ void TestStructuredResponseFormat() {
     Expect(answer == literal && reasoning == "Consider <tool_call> as text.",
            "only the reasoning delimiter changes structured-output phase");
   }
-  // #580: schemas that omit additionalProperties admit extra keys, as in
-  // llama.cpp. Strict tool parameters keep requiring closed objects.
+  // #580: as in llama.cpp, response schemas that omit additionalProperties
+  // are admitted and keep declared objects closed; additionalProperties true
+  // or a schema admits extra keys. Strict tool parameters keep requiring
+  // explicitly closed objects.
   {
     auto open = gufo::json::parse(
         R"({"model":"test-model","messages":[{"role":"user","content":"Who?"}],
@@ -2560,12 +2562,15 @@ void TestStructuredResponseFormat() {
       const auto response =
           gufo::server::HandleOpenAiChat(Request(open.dump()), backend);
       Expect(response.status == 200 && backend.last_request.response_format,
-             "open response schemas are admitted");
-      Expect(Accepts(*backend.last_request.response_format,
-                     R"({"name":"Nostradamus","born":1503,"note":"seer"})") &&
-                 !Accepts(*backend.last_request.response_format,
-                          R"({"name":"Nostradamus"})"),
-             "open response schemas keep declared requirements");
+             "response schemas without additionalProperties are admitted");
+      Expect(
+          Accepts(*backend.last_request.response_format,
+                  R"({"name":"Nostradamus","born":1503})") &&
+              !Accepts(*backend.last_request.response_format,
+                       R"({"name":"Nostradamus","born":1503,"note":"seer"})") &&
+              !Accepts(*backend.last_request.response_format,
+                       R"({"name":"Nostradamus"})"),
+          "omitted additionalProperties keeps declared objects closed");
     }
     open["stream"] = false;
     open["tools"] = gufo::json::parse(
@@ -2582,11 +2587,13 @@ void TestStructuredResponseFormat() {
     Expect(!gufo::server::ParseOpenAiResponseControls(
                gufo::json::parse(R"({"text":{"format":{"type":"json_schema",
                  "name":"person","strict":true,"schema":{"type":"object",
-                 "properties":{"name":{"type":"string"}},"required":["name"]}}}})"),
+                 "properties":{"name":{"type":"string"}},"required":["name"],
+                 "additionalProperties":{"type":"integer"}}}}})"),
                &responses) &&
                responses.response_format &&
-               Accepts(*responses.response_format, R"({"name":"a","b":1})"),
-           "Responses text.format admits open schemas");
+               Accepts(*responses.response_format, R"({"name":"a","b":1})") &&
+               !Accepts(*responses.response_format, R"({"name":"a","b":"1"})"),
+           "Responses text.format admits typed additional properties");
   }
   body["stop"] = "END";
   Expect(gufo::server::HandleOpenAiChat(Request(body.dump()), backend).status ==
