@@ -1663,27 +1663,27 @@ void ParseQwenCalls(
   }
 }
 
-// Applies the advertised schema to a scanned DeepSeek invocation. A
-// `string="false"` value is an explicit JSON claim the API can check; a value
-// that does not parse as its declared parameter type rejects the call, as for
-// Qwen arguments. Strings and unknown parameters stay as the dialect wrote
-// them.
-bool DeepSeekArgumentsMatchSchema(
+// Counts the argument prefix accepted by the advertised schema. A
+// `string="false"` value that fails its declared type rejects the call, as for
+// Qwen. Streaming keeps only the arguments before that rejection; strings and
+// unknown parameters stay as the dialect wrote them.
+std::size_t DeepSeekAcceptedArgumentCount(
     std::span<const tokenization::ChatTool> tools, std::string_view name,
     std::span<const models::deepseek_v4_flash::ChatMessage::ToolArgument>
         arguments) {
   const auto tool =
       std::ranges::find(tools, name, &tokenization::ChatTool::name);
   if (tool == tools.end())
-    return true;
+    return arguments.size();
   const auto schema = TryParseJson(tool->parameters_json);
   if (!schema)
-    return true;
+    return arguments.size();
   const auto* object = ResolveToolSchema(*schema, *schema);
   const auto* properties = object ? object->find("properties") : nullptr;
   if (!properties || !properties->is_object())
-    return true;
-  for (const auto& argument : arguments) {
+    return arguments.size();
+  for (std::size_t index = 0; index < arguments.size(); ++index) {
+    const auto& argument = arguments[index];
     if (argument.is_string)
       continue;
     const auto* property = properties->find(argument.name);
@@ -1691,9 +1691,9 @@ bool DeepSeekArgumentsMatchSchema(
       continue;
     const auto parsed = TryParseJson(Trim(argument.value));
     if (!parsed || !SchemaAccepts(*schema, *property, *parsed))
-      return false;
+      return index;
   }
-  return true;
+  return arguments.size();
 }
 
 // Converts a scanned DeepSeek argument list to the shared API form.
@@ -1727,14 +1727,16 @@ void ParseDsmlCalls(
   models::deepseek_v4_flash::ScanDeepSeekToolCalls(text, dialect_markers,
                                                    &scanned, spans, partial);
   for (auto& invocation : scanned) {
-    const bool valid =
-        invocation.valid && DeepSeekArgumentsMatchSchema(tools, invocation.name,
-                                                         invocation.arguments);
+    const auto accepted = DeepSeekAcceptedArgumentCount(tools, invocation.name,
+                                                        invocation.arguments);
+    const auto arguments = std::span(invocation.arguments).first(accepted);
+    const bool schema_valid = accepted == invocation.arguments.size();
+    const bool valid = invocation.valid && schema_valid;
     if (valid && invocation.complete) {
       ParsedToolCall call;
       call.id = RandomId("call_");
       call.name = std::move(invocation.name);
-      call.arguments = DeepSeekArguments(invocation.arguments);
+      call.arguments = DeepSeekArguments(arguments);
       calls->push_back(std::move(call));
       continue;
     }
@@ -1743,8 +1745,8 @@ void ParseDsmlCalls(
     ParsedToolCall call;
     call.id = RandomId("call_");
     call.name = std::move(invocation.name);
-    call.arguments = DeepSeekArguments(invocation.arguments);
-    if (invocation.unfinished && !call.partial_arguments)
+    call.arguments = DeepSeekArguments(arguments);
+    if (invocation.unfinished && schema_valid)
       PartialStringArgument(call, invocation.unfinished->name,
                             invocation.unfinished->value);
     if (!call.partial_arguments)

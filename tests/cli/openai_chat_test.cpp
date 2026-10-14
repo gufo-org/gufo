@@ -5912,22 +5912,37 @@ void TestStreamingQuotedAndMalformedTools() {
   }
 }
 
-// A parameter the schema rejects ends a streamed Qwen call's arguments; a later
-// unfinished value is never streamed for that call.
-void TestQwenStreamingStopsAtRejectedParameter() {
-  const std::string raw =
-      "<tool_call>\n<function=record>\n<parameter=data>\nnot json\n"
-      "</parameter>\n<parameter=text>\nlater value\n</parameter>\n"
-      "</function>\n</tool_call>";
-  std::vector<std::string> pieces;
-  for (const char byte : raw)
-    pieces.emplace_back(1, byte);
-  for (const int api : {0, 1, 2}) {
-    const auto output = ToolBoundaryRequest(
-        pieces, gufo::sampling::JsonConstraint::ToolFormat::kQwen, api, true);
-    for (const auto& arguments : output.arguments)
-      Expect(arguments.find("later") == std::string::npos,
-             "arguments after a rejected parameter are not streamed");
+// A parameter the schema rejects ends a streamed call's arguments; neither the
+// rejected parameter nor a later unfinished value is published.
+void TestStreamingStopsAtRejectedParameter() {
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const std::string raw =
+        format == Format::kQwen
+            ? "<tool_call>\n<function=record>\n<parameter=data>\nnot json\n"
+              "</parameter>\n<parameter=text>\nlater value\n</parameter>\n"
+              "</function>\n</tool_call>"
+            : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
+              "<｜DSML｜parameter name=\"data\" string=\"false\">[]"
+              "</｜DSML｜parameter>\n"
+              "<｜DSML｜parameter name=\"text\" string=\"true\">later value"
+              "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+              "</｜DSML｜tool_calls>";
+    std::vector<std::string> bytewise;
+    for (const char byte : raw)
+      bytewise.emplace_back(1, byte);
+    for (const auto& pieces : {std::vector<std::string>{raw}, bytewise}) {
+      for (const int api : {0, 1, 2}) {
+        const auto output = ToolBoundaryRequest(pieces, format, api, true);
+        Expect(output.failed, "a rejected streamed call fails safely");
+        for (const auto& arguments : output.arguments) {
+          Expect(arguments.find("data") == std::string::npos,
+                 "a schema-rejected parameter is not streamed");
+          Expect(arguments.find("later") == std::string::npos,
+                 "arguments after a rejected parameter are not streamed");
+        }
+      }
+    }
   }
 }
 
@@ -6169,7 +6184,7 @@ int main() {
   TestDeepSeekToolCallsAreStructured();
   TestDeepSeekRepeatedToolParameters();
   TestDeepSeekSchemaCheckedArguments();
-  TestQwenStreamingStopsAtRejectedParameter();
+  TestStreamingStopsAtRejectedParameter();
   TestWrongModelIsRejected();
   TestClientIdentityReachesBackend();
   TestStreamingOverloadIsRejectedBeforeHeaders();
