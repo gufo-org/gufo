@@ -438,10 +438,7 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
 
 std::vector<std::vector<tokenization::TokenId>>
 QwenGpuExecutor::ForwardVerificationBatch(
-    std::span<const QwenGpuVerificationItem> items, QwenGpuChunkOutput output) {
-  const bool prefill = output != QwenGpuChunkOutput::kVerification;
-  if (prefill && items.size() != 1)
-    throw std::invalid_argument("Qwen prefill requires one sequence");
+    std::span<const QwenGpuVerificationItem> items) {
   for (const auto& item : items)
     if (item.executor)
       item.executor->CheckReset();
@@ -527,9 +524,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
   const bool reuse_gate =
       items.size() > 1 && full_gate.size() >= batch_size * vocab_size;
   coordinator.EnsureVerificationLogits(std::max(
-      prefill ? std::size_t{1}
-              : (reuse_gate ? items.front().tokens.size() : batch_size),
-      feature_rows));
+      reuse_gate ? items.front().tokens.size() : batch_size, feature_rows));
   auto* const feature_buffer = coordinator.d_verification_logits_;
   auto* const logits_buffer =
       reuse_gate ? full_gate.data() : coordinator.d_verification_logits_;
@@ -805,53 +800,34 @@ QwenGpuExecutor::ForwardVerificationBatch(
       executor.last_hidden_offset_ = 0;
     }
   }
+  LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
+                       static_cast<const float*>(weights_.output_norm.data),
+                       scratch.decode.normed.data(), nullptr, batch_size,
+                       hidden_size, 1e-6F, arena_.stream);
+  LaunchProjection(weights_.output, scratch.decode.normed.data(), logits_buffer,
+                   batch_size, vocab_size, hidden_size, arena_.stream);
+  auto* const d_out_tokens = scratch.decode.prompt_tokens.data();
+  LaunchBatchedGPUArgmax(logits_buffer, d_out_tokens, batch_size, vocab_size,
+                         scratch.ffn.out, arena_.stream);
   std::array<tokenization::TokenId, kMaxRows> host_predictions{};
-  if (output == QwenGpuChunkOutput::kPrefill) {
-    // Only the final prompt row needs a vocabulary projection. Use exactly
-    // the same norm, projection and selector as scalar decoding.
-    LaunchRMSNorm(scratch.decode.hidden.data() + (batch_size - 1) * hidden_size,
-                  static_cast<const float*>(weights_.output_norm.data),
-                  scratch.decode.normed.data(), hidden_size, 1e-6F,
-                  arena_.stream);
-    LaunchGEMV(weights_.output.data, weights_.output.type,
-               scratch.decode.normed.data(), scratch.decode.logits.data(),
-               vocab_size, hidden_size, arena_.stream);
-    LaunchGPUArgmax(scratch.decode.logits.data(),
-                    scratch.decode.sampled_token.data(), vocab_size,
-                    arena_.stream);
-    HIP_CHECK(hipMemcpyAsync(
-        &host_predictions[batch_size - 1], scratch.decode.sampled_token.data(),
-        sizeof(tokenization::TokenId), hipMemcpyDeviceToHost, arena_.stream));
-  } else if (!prefill) {
-    LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
-                         static_cast<const float*>(weights_.output_norm.data),
-                         scratch.decode.normed.data(), nullptr, batch_size,
-                         hidden_size, 1e-6F, arena_.stream);
-    LaunchProjection(weights_.output, scratch.decode.normed.data(),
-                     logits_buffer, batch_size, vocab_size, hidden_size,
-                     arena_.stream);
-    auto* const d_out_tokens = scratch.decode.prompt_tokens.data();
-    LaunchBatchedGPUArgmax(logits_buffer, d_out_tokens, batch_size, vocab_size,
-                           scratch.ffn.out, arena_.stream);
-    HIP_CHECK(hipMemcpyAsync(host_predictions.data(), d_out_tokens,
-                             batch_size * sizeof(tokenization::TokenId),
-                             hipMemcpyDeviceToHost, arena_.stream));
-    for (std::size_t index = 0; index < items.size(); ++index) {
-      const auto& item = items[index];
-      auto& executor = *item.executor;
-      const std::size_t count = item.tokens.size() * vocab_size;
-      const auto* logits = logits_buffer + offsets[index] * vocab_size;
-      if (logits != executor.d_verification_logits_) {
-        HIP_CHECK(hipMemcpyAsync(executor.d_verification_logits_, logits,
-                                 count * sizeof(float), hipMemcpyDeviceToDevice,
-                                 arena_.stream));
-      }
-      if (item.capture_logits) {
-        executor.h_verification_logits_.resize(count);
-        HIP_CHECK(hipMemcpyAsync(executor.h_verification_logits_.data(), logits,
-                                 count * sizeof(float), hipMemcpyDeviceToHost,
-                                 arena_.stream));
-      }
+  HIP_CHECK(hipMemcpyAsync(host_predictions.data(), d_out_tokens,
+                           batch_size * sizeof(tokenization::TokenId),
+                           hipMemcpyDeviceToHost, arena_.stream));
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    const auto& item = items[index];
+    auto& executor = *item.executor;
+    const std::size_t count = item.tokens.size() * vocab_size;
+    const auto* logits = logits_buffer + offsets[index] * vocab_size;
+    if (logits != executor.d_verification_logits_) {
+      HIP_CHECK(hipMemcpyAsync(executor.d_verification_logits_, logits,
+                               count * sizeof(float), hipMemcpyDeviceToDevice,
+                               arena_.stream));
+    }
+    if (item.capture_logits) {
+      executor.h_verification_logits_.resize(count);
+      HIP_CHECK(hipMemcpyAsync(executor.h_verification_logits_.data(), logits,
+                               count * sizeof(float), hipMemcpyDeviceToHost,
+                               arena_.stream));
     }
   }
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
@@ -868,7 +844,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
   for (std::size_t i = 0; i < items.size(); ++i)
     writes[i].Commit(
         items[i].position + static_cast<std::uint32_t>(items[i].tokens.size()),
-        output == QwenGpuChunkOutput::kPrefill);
+        false);
   return predictions;
 }
 

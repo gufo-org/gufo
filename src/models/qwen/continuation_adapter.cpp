@@ -254,8 +254,7 @@ ContinuationAdapter::ContinuationAdapter(
     for (unsigned i = 0; i < 8; ++i)
       identity_.push_back(static_cast<std::uint8_t>(value >> (i * 8)));
   };
-  // Numerical ABI: prompt rows use the same FP32 arithmetic as decoding.
-  put(3);
+  put(2);
   put(context);
   put(policy.Fingerprint());
   const auto& c = model_->GetConfig();

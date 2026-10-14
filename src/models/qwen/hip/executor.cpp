@@ -8,7 +8,6 @@
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
-#include "src/core/hip/managed_alloc.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -75,7 +74,10 @@ QwenGpuExecutor::~QwenGpuExecutor() {
   if (continuation_hooks_)
     continuation_hooks_->BeforeRelease();
   (void)hipStreamSynchronize(arena_.stream);
-
+  for (const auto event : prefill_events_) {
+    if (event)
+      (void)hipEventDestroy(event);
+  }
   if (d_verification_logits_ != nullptr) {
     (void)hipFree(d_verification_logits_);
   }
@@ -91,9 +93,8 @@ void QwenGpuExecutor::EnsureVerificationLogits(std::size_t batch_size) {
     d_verification_logits_ = nullptr;
   }
   verification_logits_capacity_ = 0;
-  HIP_CHECK(
-      AllocateDevice(&d_verification_logits_,
-                     batch_size * weights_.config.vocab_size * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_verification_logits_,
+                      batch_size * weights_.config.vocab_size * sizeof(float)));
   verification_logits_capacity_ = batch_size;
 }
 

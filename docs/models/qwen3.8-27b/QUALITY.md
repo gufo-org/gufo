@@ -82,9 +82,8 @@ tolerances, not bit-identical upstream sampler parity.
 
 Earlier Q4/Q8 AR and DFlash2 checks cover multi-image, sampled/greedy C4,
 cancellation, generated-history continuation and disk restart. The current
-component migration now uses decode-equivalent FP32 prefill to fix the Q4
-cold-prefill versus decoded-history discrepancy; see
-[the current status](#component-serving-migration). Q8 also requires exact
+component migration retains a strict Q4 cold-prefill versus decoded-history
+failure; see [the current status](#component-serving-migration). Q8 also requires exact
 cold/live/restored continuation logits. Encoder controls use official
 Transformers operators over the **same converted BF16 GGUF**; they cannot detect
 conversion errors. Flash-Next has a separate [vision limit](../qwen3.8-flash-next/QUALITY.md#vision).
@@ -176,15 +175,8 @@ pending target features and controller metadata. AR and DFlash2 serving use
 adapter-owned slots and committed host backing. At `c7053529`, Q4/Q8 full cache-serving checks pass in both modes, including
 exact greedy/seeded forks, generated-frontier cancellation, disk restarts and
 artifact compatibility misses. Current DFlash component restore checks also pass.
-A subsequent numerical fix uses the existing exact FP32 batched decode body
-for all target prompt rows, with a vocabulary projection only on the final row.
-The former Q4 cold/live mismatch now passes; focused Q4/Q8 checks require exact
-cold/live tokens and full chunk-invariant logits. Complete Q4/Q8 AR/DFlash2 vision
-suites also pass, including sampling, cancellation, image identity and disk
-restore. Q4 deep ragged prefill checks also pass with exact full logits and all target
-feature rows, including scalar decode and different chunk budgets. The equivalent
-Q8 numerical check and post-fix serving workflows remain under validation.
-The numerical ABI rejects checkpoints created by the earlier prefill routes;
-those routes rounded activations differently according to batch size. Deep workloads and resource checks remain
+The vision suite restores image identity, sampling and cancellation exactly,
+but cold prefill differs from decoded-history continuation on a Q4 fixture;
+that strict failure remains open. Deep workloads and resource checks remain
 unqualified. Earlier capacity probes cover the earlier AR adapter format.
 Performance measurements are deferred until functional work ends.

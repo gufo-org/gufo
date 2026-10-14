@@ -982,18 +982,3 @@ the outstanding vision cold-prefill discrepancy, deep workloads or resource gate
 Per user instruction, performance measurements follow functional completion;
 further FP16/FP32 long-capacity telemetry probes are skipped. Historical results
 remain tied to their revisions.
-
-
-## Numerical follow-up
-
-The user explicitly included the existing cold-prefill numerical defect in this
-PR. Prompt evaluation now uses the exact FP32 batched decode body, with only the
-final vocabulary row projected. The earlier batch-size-dependent target prefill
-route and its event-submission path are removed. The numerical compatibility
-identity changes, so earlier checkpoints cannot be reused under the new arithmetic.
-
-Complete Q4/Q8 AR/DFlash2 vision suites pass, including the former cold/live
-failure, full chunk-invariant logits, sampling, cancellation and disk restart.
-Q4 deep ragged prefill checks also pass, with exact full logits and every draft
-feature row; Q8 deep and post-fix serving workflows remain under validation.
-All 59 hosted checks pass. Performance remains deferred until functional work ends.
