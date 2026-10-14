@@ -801,7 +801,8 @@ keys last. Impossible strict schemas are rejected before generation.
 call, with the same argument syntax as `auto`. Where
 the backend cannot constrain sampling, an unmet `required` choice still returns
 `tool_choice_unsatisfied` (HTTP 502, or an SSE error after streaming starts).
-Stops and token limits terminate normally without emitting incomplete calls.
+Stops and token limits terminate normally. Responses streams may retain a partial
+call with `status: "incomplete"`; clients must execute only completed calls.
 With no tools or `tool_choice:"none"`, tool markers are ordinary text and do
 not interrupt reasoning or delay streaming.
 

@@ -188,6 +188,23 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
             first = record(label, chat_result(client, request, stream))
             assert_bash(first, label)
 
+            # The call the model generated is the call history renders, so the
+            # immediate next turn reuses it from cache instead of re-prefilling
+            # it. Run the unrelated schema control afterwards: it may replace
+            # the live generated frontier while retaining only prompt snapshots.
+            call = first["tools"][0]
+            continued = {**request, "tool_choice": "auto", "messages": [
+                *request["messages"],
+                {"role": "assistant", "content": first["text"] or None, "tool_calls": [call]},
+                {"role": "tool", "tool_call_id": call["id"], "content": "native-schemas\n"},
+                {"role": "user", "content": "Reply with the single word DONE."}]}
+            done = record(label + "_continued", chat_result(client, continued, not stream))
+            assert done["finish"] == "stop" and not done["tools"], (label, done)
+            assert cached(done["usage"]) > first["usage"]["prompt_tokens"], (
+                label, "the generated call was not reused on the next turn",
+                first["usage"], done["usage"])
+            assert_native(done, label + "_continued")
+
             # No instruction is added: the prompt matches the control within
             # the spelling of the renamed keyword. The JSON instruction alone
             # was about 45 tokens.
@@ -201,21 +218,6 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
             assert tolerance < 30 and abs(delta) <= tolerance, (
                 label, "prompt changed beyond the schema text", delta, tolerance,
                 first["usage"], baseline["usage"])
-
-            # The call the model generated is the call history renders, so the
-            # next turn reuses it from cache instead of re-prefilling it.
-            call = first["tools"][0]
-            continued = {**request, "tool_choice": "auto", "messages": [
-                *request["messages"],
-                {"role": "assistant", "content": first["text"] or None, "tool_calls": [call]},
-                {"role": "tool", "tool_call_id": call["id"], "content": "native-schemas\n"},
-                {"role": "user", "content": "Reply with the single word DONE."}]}
-            done = record(label + "_continued", chat_result(client, continued, not stream))
-            assert done["finish"] == "stop" and not done["tools"], (label, done)
-            assert cached(done["usage"]) > first["usage"]["prompt_tokens"], (
-                label, "the generated call was not reused on the next turn",
-                first["usage"], done["usage"])
-            assert_native(done, label + "_continued")
 
     # Calls to the neighbor itself keep their declared JSON types.
     typed = (

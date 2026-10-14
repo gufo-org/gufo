@@ -1514,7 +1514,8 @@ def check_native_tools(client, model, checks, vision=False):
         final = events[-1].response
         assert final.status == "incomplete", final
         assert final.incomplete_details.reason == "max_output_tokens", final
-        assert not any(item.type == "function_call" for item in final.output), final
+        assert all(item.status == "incomplete" for item in final.output
+                   if item.type == "function_call"), final
         record(f"responses_tool_limit_{limit}", final.to_dict())
 
     def isolated(index):
