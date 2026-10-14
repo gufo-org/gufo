@@ -4,6 +4,7 @@
 #include <unicode/utf8.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -282,11 +283,26 @@ void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools,
   }
   output.append(
       "\n</tools>\n\nIf you choose to call a function ONLY reply in the "
-      "following format with NO suffix:\n\n<tool_call>\n"
-      "<function=example_function_name>\n<parameter=example_parameter_1>\n"
-      "value_1\n</parameter>\n<parameter=example_parameter_2>\n"
-      "This is the value for the second parameter\nthat can span\nmultiple "
-      "lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\n"
+      "following format with NO suffix:\n\n");
+  output.append(QwenToolSyntax::kCallOpen);
+  output.push_back('\n');
+  output.append(QwenToolSyntax::kFunctionOpen);
+  output.append("example_function_name>\n");
+  output.append(QwenToolSyntax::kParameterOpen);
+  output.append("example_parameter_1>\nvalue_1\n");
+  output.append(QwenToolSyntax::kParameterClose);
+  output.push_back('\n');
+  output.append(QwenToolSyntax::kParameterOpen);
+  output.append(
+      "example_parameter_2>\nThis is the value for the second "
+      "parameter\nthat can span\nmultiple lines\n");
+  output.append(QwenToolSyntax::kParameterClose);
+  output.push_back('\n');
+  output.append(QwenToolSyntax::kFunctionClose);
+  output.push_back('\n');
+  output.append(QwenToolSyntax::kCallClose);
+  output.append(
+      "\n\n<IMPORTANT>\n"
       "Reminder:\n- Function calls MUST follow the specified format: an inner "
       "<function=...></function> block must be nested within "
       "<tool_call></tool_call> XML tags\n- Required parameters MUST be "
@@ -311,21 +327,210 @@ void AppendToolCalls(std::string& output,
       output.push_back('\n');
     }
     first_call = false;
-    output.append("<tool_call>\n<function=");
+    output.append(QwenToolSyntax::kCallOpen);
+    output.push_back('\n');
+    output.append(QwenToolSyntax::kFunctionOpen);
     output.append(call.name);
     output.append(">\n");
     for (const auto& argument : call.arguments) {
-      output.append("<parameter=");
+      output.append(QwenToolSyntax::kParameterOpen);
       output.append(argument.name);
       output.append(">\n");
       AppendContent(output, content_spans, argument.value);
-      output.append("\n</parameter>\n");
+      output.push_back('\n');
+      output.append(QwenToolSyntax::kParameterClose);
+      output.push_back('\n');
     }
-    output.append("</function>\n</tool_call>");
+    output.append(QwenToolSyntax::kFunctionClose);
+    output.push_back('\n');
+    output.append(QwenToolSyntax::kCallClose);
   }
 }
 
 }  // namespace
+
+namespace {
+
+// The API surface trims framing with ASCII whitespace; the scanner keeps the
+// same reading so parser decisions do not depend on Unicode table updates.
+std::string_view TrimAscii(std::string_view value) {
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.front())) != 0)
+    value.remove_prefix(1);
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.back())) != 0)
+    value.remove_suffix(1);
+  return value;
+}
+
+// Qwen writes a parameter as "<parameter=name>\nVALUE\n</parameter>": one
+// newline on each side is framing, everything else (a file's final newline,
+// indentation, blank lines) belongs to the value.
+std::string_view StripFramingNewlines(std::string_view value) {
+  const std::string_view frame = value.starts_with("\r\n") ? "\r\n" : "\n";
+  if (value.starts_with(frame)) {
+    value.remove_prefix(frame.size());
+    if (value.ends_with(frame))
+      value.remove_suffix(frame.size());
+  }
+  return value;
+}
+
+// Hold a possible closing delimiter until its next byte disambiguates it.
+std::string_view BeforePartialDelimiter(std::string_view value,
+                                        std::string_view delimiter) {
+  for (auto size = std::min(value.size(), delimiter.size()); size > 0; --size)
+    if (delimiter.starts_with(value.substr(value.size() - size)))
+      return value.substr(0, value.size() - size);
+  return value;
+}
+
+}  // namespace
+
+QwenToolCallScan ScanQwenToolCall(std::string_view text) {
+  QwenToolCallScan result;
+  if (!text.starts_with(QwenToolSyntax::kCallOpen))
+    return result;
+  result.matched = true;
+  const std::size_t begin = QwenToolSyntax::kCallOpen.size();
+  result.progress = begin;
+  result.end = begin;
+
+  QwenToolCallSyntax call;
+  call.canonical_header = text.starts_with(QwenToolSyntax::kNativeCallOpen);
+  std::string_view body = text.substr(begin);
+  const auto consume = [&](std::string_view tag) {
+    body = TrimAscii(body);
+    if (!body.starts_with(tag))
+      return false;
+    body.remove_prefix(tag.size());
+    return true;
+  };
+  body = TrimAscii(body);
+  if (consume(QwenToolSyntax::kFunctionOpen)) {
+    const auto name_end = body.find('>');
+    if (name_end == std::string_view::npos)
+      return result;
+    call.name = std::string(TrimAscii(body.substr(0, name_end)));
+    body.remove_prefix(name_end + 1);
+    if (call.name.empty())
+      return result;
+    bool valid = true;
+    bool canonical_parameters = call.canonical_header;
+    while (consume(QwenToolSyntax::kParameterOpen)) {
+      const auto parameter_name_end = body.find('>');
+      if (parameter_name_end == std::string_view::npos) {
+        valid = false;
+        break;
+      }
+      const std::string spelled(body.substr(0, parameter_name_end));
+      body.remove_prefix(parameter_name_end + 1);
+      auto close = body.find(QwenToolSyntax::kParameterClose);
+      const bool framed_value =
+          body.starts_with('\n') || body.starts_with("\r\n");
+      canonical_parameters &= framed_value;
+      if (framed_value) {
+        // The canonical Qwen delimiter includes the following newline. A line
+        // such as "</parameter> is literal" is argument data.
+        auto framed = body.find("\n</parameter>");
+        while (framed != std::string_view::npos) {
+          const auto tail =
+              body.substr(framed + std::string_view("\n</parameter>").size());
+          // Compact legacy headers also admit compact closers. A canonical
+          // header uses the complete delimiter: apparent tags on the same
+          // line remain argument data, as in llama.cpp.
+          if (tail.starts_with('\n') || tail.starts_with("\r\n") ||
+              (!canonical_parameters &&
+               (TrimAscii(tail).starts_with(QwenToolSyntax::kFunctionClose) ||
+                TrimAscii(tail).starts_with(QwenToolSyntax::kParameterOpen))))
+            break;
+          framed = body.find("\n</parameter>", framed + 1);
+        }
+        close = framed == std::string_view::npos ? framed : framed + 1;
+        // Never recover a nested example from inside an unfinished value.
+        result.progress =
+            close == std::string_view::npos
+                ? text.size()
+                : static_cast<std::size_t>(body.data() - text.data()) + close +
+                      QwenToolSyntax::kParameterClose.size();
+        result.end = result.progress;
+      }
+      if (close == std::string_view::npos || spelled.empty()) {
+        if (framed_value && !spelled.empty()) {
+          auto value = body;
+          const auto frame = body.starts_with("\r\n") ? std::string_view("\r\n")
+                                                      : std::string_view("\n");
+          value.remove_prefix(frame.size());
+          value = BeforePartialDelimiter(value, "\n</parameter>\n");
+          value = BeforePartialDelimiter(value, "\n</parameter>\r\n");
+          if (frame == "\r\n" && value.ends_with('\r'))
+            value.remove_suffix(1);
+          call.unfinished = QwenToolCallParameter{
+              .name = spelled, .value = std::string(value), .framed = true};
+        }
+        valid = false;
+        break;
+      }
+      const auto nested = body.find(QwenToolSyntax::kCallOpen);
+      if (!body.starts_with('\n') && !body.starts_with("\r\n") &&
+          nested < close &&
+          TrimAscii(body.substr(nested + QwenToolSyntax::kCallOpen.size()))
+              .starts_with(QwenToolSyntax::kFunctionOpen)) {
+        // Recover an unframed, unterminated legacy call at the next complete
+        // opener. A literal <tool_call> alone is always argument data.
+        valid = false;
+        break;
+      }
+      const auto value = StripFramingNewlines(body.substr(0, close));
+      call.parameters.push_back(
+          QwenToolCallParameter{.name = spelled,
+                                .value = std::string(value),
+                                .framed = framed_value});
+      body.remove_prefix(close + QwenToolSyntax::kParameterClose.size());
+    }
+    call.complete = valid && consume(QwenToolSyntax::kFunctionClose) &&
+                    consume(QwenToolSyntax::kCallClose);
+    if (call.complete)
+      result.end = static_cast<std::size_t>(body.data() - text.data());
+  } else {
+    // Recovery boundaries belong to the envelope, not quoted JSON data. An
+    // unfinished string owns the remaining bytes, including tool tags.
+    bool in_string = false;
+    bool escaped = false;
+    std::size_t close = 0;
+    for (; close < body.size(); ++close) {
+      const char byte = body[close];
+      if (in_string) {
+        if (escaped)
+          escaped = false;
+        else if (byte == '\\')
+          escaped = true;
+        else if (byte == '"')
+          in_string = false;
+        continue;
+      }
+      if (byte == '"') {
+        in_string = true;
+        continue;
+      }
+      if (body.substr(close).starts_with(QwenToolSyntax::kCallClose) ||
+          body.substr(close).starts_with(QwenToolSyntax::kCallOpen))
+        break;
+    }
+    result.progress =
+        static_cast<std::size_t>(body.data() - text.data()) + close;
+    result.end = result.progress;
+    if (body.substr(close).starts_with(QwenToolSyntax::kCallClose)) {
+      result.progress += QwenToolSyntax::kCallClose.size();
+      result.end = result.progress;
+      call.native = false;
+      call.json_payload = std::string(TrimAscii(body.substr(0, close)));
+      call.complete = true;
+    }
+  }
+  result.call = std::move(call);
+  return result;
+}
 
 std::unique_ptr<QwenChatTemplate> QwenChatTemplate::CreateFromGguf(
     const core::GgufReader& reader, std::string* error_msg) {

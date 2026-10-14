@@ -245,6 +245,9 @@ add_library(gufo_http STATIC
   src/cli/serve/asr_websocket.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
+  # The DeepSeek tool dialect scanner lives with its renderer and is compiled
+  # by every target that parses that dialect.
+  src/models/deepseek_v4_flash/chat_template.cpp
 )
 target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21)
 

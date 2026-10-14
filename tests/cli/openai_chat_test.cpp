@@ -1376,6 +1376,65 @@ void TestDeepSeekRepeatedToolParameters() {
   }
 }
 
+// #290: a non-string DSML parameter that does not parse as its declared type
+// rejects the call, as for Qwen arguments. Strings and unknown parameters stay
+// as the dialect wrote them.
+void TestDeepSeekSchemaCheckedArguments() {
+  const auto call = [](std::string_view name, std::string_view string_attr,
+                       std::string_view value) {
+    return "<｜DSML｜tool_calls><｜DSML｜invoke name=\"run\">"
+           "<｜DSML｜parameter name=\"" +
+           std::string(name) + "\" string=\"" + std::string(string_attr) +
+           "\">" + std::string(value) +
+           "</｜DSML｜parameter>"
+           "</｜DSML｜invoke></｜DSML｜tool_calls>";
+  };
+  struct Case {
+    std::string text;
+    bool accepted;
+    std::string arguments;
+  };
+  for (const auto& item :
+       {Case{call("tags", "false", "[1,2]"), true, R"({"tags":[1,2]})"},
+        Case{call("tags", "false", "oops"), false, ""},
+        Case{call("tags", "false", R"({"a":1})"), false, ""},
+        Case{call("tags", "true", "oops"), true, R"({"tags":"oops"})"},
+        // The dialect's string attribute is authoritative; a declared string is
+        // not retyped from the schema.
+        Case{call("tags", "true", "[1]"), true, R"({"tags":"[1]"})"},
+        // An undeclared parameter still has to satisfy the dialect's JSON
+        // claim.
+        Case{call("unknown", "false", "oops"), false, ""},
+        Case{call("unknown", "false", "[1]"), true, R"({"unknown":[1]})"},
+        Case{call("unknown", "true", "oops"), true, R"({"unknown":"oops"})"}}) {
+    FakeBackend backend;
+    backend.pieces = {item.text};
+    const auto response = gufo::server::HandleOpenAiChat(
+        Request(
+            R"({"model":"test-model","messages":[{"role":"user","content":"run"}],)"
+            R"("tools":[{"type":"function","function":{"name":"run",)"
+            R"("parameters":{"type":"object","properties":{"tags":{"type":"array"}}}}}]})"),
+        backend);
+    Expect(response.status == 200, "DeepSeek schema request is accepted");
+    const auto output = gufo::json::parse(response.body);
+    const auto* choices = output.find("choices");
+    const auto* message = choices != nullptr && !choices->items().empty()
+                              ? choices->items()[0].find("message")
+                              : nullptr;
+    const auto* calls =
+        message != nullptr ? message->find("tool_calls") : nullptr;
+    const bool accepted = calls != nullptr && calls->items().size() == 1;
+    Expect(accepted == item.accepted,
+           "declared DSML parameter types are enforced: " + item.text);
+    if (accepted) {
+      const auto arguments = gufo::json::parse(
+          calls->items()[0].find("function")->member_str("arguments"));
+      Expect(arguments.dump() == item.arguments,
+             "declared DSML arguments keep their JSON form: " + item.text);
+    }
+  }
+}
+
 void TestBackendSamplingDefaults() {
   FakeBackend backend;
   backend.defaults = {
@@ -5636,7 +5695,7 @@ void TestToolTagBoundaries() {
             continue;
           const auto prefix =
               initial == Initial::kContent ? std::string{}
-              : implicit                   ? std::string("Check tags.\n\n")
+              : implicit ? std::string("Check tags.\n\n")
                          : (initial == Initial::kAuto ? "<think>" : "") +
                                std::string("Check tags.</think>\n");
           const auto raw = prefix + call + "\n" + noop;
@@ -6079,6 +6138,7 @@ int main() {
   TestQwenToolBoundariesAndSchema();
   TestDeepSeekToolCallsAreStructured();
   TestDeepSeekRepeatedToolParameters();
+  TestDeepSeekSchemaCheckedArguments();
   TestWrongModelIsRejected();
   TestClientIdentityReachesBackend();
   TestStreamingOverloadIsRejectedBeforeHeaders();
