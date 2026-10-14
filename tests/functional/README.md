@@ -59,6 +59,31 @@ nix develop -c python3 tests/functional/cache_startup.py \
 Run again with `--speculative off` for AR. `--case ram` or `--case disk` selects
 only that lifecycle. Commands, startup times, request timings, responses and logs
 remain in the output directory. This check stays outside hosted model CI.
+Qwen 27B deep-history recovery uses separate, explicitly selected workloads:
+
+```sh
+python3 tests/functional/deep_peers_qwen.py \
+  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --mode ar --source-revision BUILD_SHA --expect-component --out /tmp/qwen-deep
+python3 tests/functional/over_ram_qwen.py \
+  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --mode dflash2 --draft /path/to/dflash2.gguf \
+  --source-revision BUILD_SHA --expect-component --out /tmp/qwen-over-ram
+```
+
+Each starts its own loopback server, retains responses, loaded mode, actual draft
+counts and process/host memory samples, and removes only its owned disk cache
+after retaining an inventory. Use a new output directory for every invocation.
+The deep workload verifies 140K+ tokens, observes a published checkpoint before
+SIGKILL, checks newest compatible checkpoint selection after restarts and peers,
+and compares recovery with `cache_prompt: false` at temperature zero. The over-RAM
+workload verifies a completed cancellation frontier survives short peers and
+requires a rewritten final message to wait for successful deeper publication.
+It fails if that publication race was not exercised. These are correctness
+workloads outside hosted model CI; retained phase times do not qualify speed.
+CPU evidence-refusal checks run with
+`python3 -m unittest discover -s tests/functional -p test_qwen_recovery.py`;
+they do not establish model correctness.
 
 The cluster workflow uses [impact.json](impact.json) to select suites from changed
 paths. Inspect a plan locally without running Gufo:
