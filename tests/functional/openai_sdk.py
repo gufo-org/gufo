@@ -10,6 +10,7 @@ import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 from pathlib import Path
 import struct
 import sys
@@ -2739,6 +2740,8 @@ def main():
                         help="Expected loaded inputs for the discovery suite")
     parser.add_argument("--base-url", required=True, help="http://127.0.0.1:PORT/v1")
     parser.add_argument("--model", required=True, help="Gufo served model name")
+    parser.add_argument("--request-timeout", type=float, default=120,
+                        help="Finite positive SDK request deadline in seconds")
     parser.add_argument("--expect-reasoning", action="store_true")
     parser.add_argument("--suite", choices=("all", *SDK_SUITES), default="all")
     parser.add_argument("--vision", action="store_true",
@@ -2788,11 +2791,14 @@ def main():
     async def async_local_only(request):
         local_only(request)
 
+    if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
+        parser.error("--request-timeout must be finite and positive")
     options = dict(api_key="local-test", base_url=args.base_url, max_retries=0,
-                   timeout=120, _strict_response_validation=True)
+                   timeout=args.request_timeout, _strict_response_validation=True)
     report = {"sdk": openai.__version__, "model": args.model, "suite": args.suite,
               "vision": args.vision, "speculative": args.speculative,
               "sampling_preset": args.sampling_preset,
+              "request_timeout": args.request_timeout,
               "sampling_overrides": args.sampling_overrides, "suites": {},
               "through_case": args.through_case, "status": "running"}
     report["expected_input_modalities"] = args.expected_input_modalities

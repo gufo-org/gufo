@@ -1645,6 +1645,18 @@ class FunctionalRunnerTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 2)
         start.assert_not_called()
 
+    def test_invalid_request_deadline_does_not_start_server(self):
+        for timeout in ("0", "-1", "nan", "inf"):
+            args = ["run.py", "--record-baseline", "--output", "/unused",
+                    "--sampling-preset", "qwen38", "--suite", "responses",
+                    "--request-timeout", timeout, "--", "gufo", "serve", "llm"]
+            with self.subTest(timeout=timeout), patch.object(sys, "argv", args), \
+                 patch.object(functional, "server") as start, \
+                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                functional.main()
+            self.assertEqual(error.exception.code, 2)
+            start.assert_not_called()
+
     def test_runner_inconclusive_is_nonzero_and_correctness_still_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1732,12 +1744,13 @@ p.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests":
         ):
             with self.subTest(child=child), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                (root / "openai_sdk.py").write_text(child)
+                (root / "openai_sdk.py").write_text(
+                    'import sys; assert sys.argv[sys.argv.index("--request-timeout") + 1] == "360.0"\n' + child)
                 args = ["run.py", "--record-baseline", "--output", str(root / "report"),
                         "--sampling-preset", "qwen38", "--suite", "responses",
                         # Only the hung child relies on the timeout; the others need time
                         # to start Python on a loaded host.
-                        "--suite-timeout", ".2" if child == hung else "60", "--",
+                        "--suite-timeout", ".2" if child == hung else "60", "--request-timeout", "360", "--",
                         sys.executable, "serve", "llm", "--model", "fixture.gguf"]
                 with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
                      patch.object(functional, "server", return_value=contextlib.nullcontext()), \
@@ -1747,6 +1760,7 @@ p.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests":
                      contextlib.redirect_stdout(io.StringIO()):
                     status = functional.main()
                 report = json.loads((root / "report/report.json").read_text())
+                self.assertEqual(report["request_timeout"], 360)
                 self.assertEqual(report["status"], expected)
                 self.assertEqual(status, 0 if expected == "passed" else 1)
 

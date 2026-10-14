@@ -237,6 +237,12 @@ Each invocation tests **one model and one mode**. Model-specific changes need
 only the affected target/modes. For shared text changes, run the affected suites
 once per row/mode below; no full benchmark sweep is needed.
 
+For correctness capture of slow cold prompts, `--request-timeout SECONDS` sets
+the SDK deadline (default 120); `--suite-timeout SECONDS` separately bounds the
+whole suite (default 900). The request deadline is retained in both reports and
+must match for baseline comparison. Longer deadlines do not change assertions
+or timing margins; retain the original timeout failure when investigating it.
+
 | Target | `--speculative` modes | Sidecar option |
 | --- | --- | --- |
 | Qwen27B Q4_K_XL | `off`, `dflash2` | `--dflash-model` |
