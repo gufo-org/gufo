@@ -3,6 +3,22 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+Flash-Next startup identity checks use a separate runner with an initially empty
+artifact-hash cache, as on a fresh container. RAM-only serving must skip full-file
+fingerprints and still reuse its prompt. Disk serving must fingerprint the model
+and restore the same reply after a restart:
+
+```sh
+nix develop -c python3 tests/functional/cache_startup.py \
+  --output /tmp/cache-startup-mtp -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --speculative mtp --mtp-model /path/to/mtp.gguf --context 8192
+```
+
+Run again with `--speculative off` for AR. `--case ram` or `--case disk` selects
+only that lifecycle. Commands, startup times, request timings, responses and logs
+remain in the output directory. This check stays outside hosted model CI.
+
 The cluster workflow uses [impact.json](impact.json) to select suites from changed
 paths. Inspect a plan locally without running Gufo:
 

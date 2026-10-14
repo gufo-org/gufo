@@ -3314,13 +3314,18 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                "Failed to create Qwen3.8-Flash-Next model: " + load_error);
       return false;
     }
-    if (resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
+    // RAM checkpoints cannot outlive this loaded model. Their process-local
+    // identity is sufficient; hashing every shard here adds a complete model
+    // read on each fresh container start even when disk caching is disabled.
+    if (DiskCacheEnabled(resolved_disk_cache_config) &&
+        resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
         !FingerprintArtifact(
             "Qwen3.8-Flash-Next", *reader,
             &resolved_disk_cache_config.model_artifact_fingerprint, error)) {
       return false;
     }
-    if (speculative_config.backend == TextSpeculativeBackend::kMtp &&
+    if (DiskCacheEnabled(resolved_disk_cache_config) &&
+        speculative_config.backend == TextSpeculativeBackend::kMtp &&
         resolved_disk_cache_config.draft_model_artifact_fingerprint.empty() &&
         !FingerprintArtifactFile(
             "Qwen3.8-Flash-Next MTP", speculative_config.draft_model_path,
