@@ -445,6 +445,22 @@ void OnDemandBacking() {
   assert(ahead.BlockCount() == 4 && ahead.PageCommitAllocations() == 2);
   ahead.GrowAhead();
   assert(ahead.BlockCount() == 4);
+  // A bounded startup reserve finishes before requests acquire its pages.
+  // Observe real HIP allocations: neither request below may commit a segment.
+  cache::ResourceLedger startup_ledger(Limits(ahead_capacity));
+  hip::CommittedBackingPool startup(
+      startup_ledger,
+      {ahead_capacity, block_bytes, headroom, 2 * block_bytes, {}});
+  startup.GrowAhead(2);
+  startup.WaitForGrowth();
+  assert(startup.BlockCount() == 4 && startup.PageCommitAllocations() == 2);
+  const auto committed_allocations = allocations.load();
+  auto startup_first =
+      startup.TryAcquire(Category::kPrivateTail, 2 * block_bytes);
+  auto startup_second =
+      startup.TryAcquire(Category::kPrivateTail, 2 * block_bytes);
+  assert(startup_first && startup_second &&
+         allocations.load() == committed_allocations);
 }
 void Transfers() {
   cache::ResourceLedger ledger(Limits());

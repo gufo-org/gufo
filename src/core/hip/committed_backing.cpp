@@ -291,9 +291,9 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
       return std::nullopt;
   }
 }
-void CommittedBackingPool::GrowAhead() {
+void CommittedBackingPool::GrowAhead(std::size_t segments) {
   const auto committed = state_->committed.load(std::memory_order_acquire);
-  if (committed == state_->capacity)
+  if (!segments || committed == state_->capacity)
     return;
   const auto free_bytes =
       state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
@@ -306,9 +306,14 @@ void CommittedBackingPool::GrowAhead() {
   if (ahead_.joinable())
     ahead_.join();
   try {
-    ahead_ = std::jthread([state = state_, committed] {
+    ahead_ = std::jthread([state = state_, committed, segments] {
       try {
-        (void)state->Grow(committed);
+        auto seen = committed;
+        for (std::size_t i = 0; i < segments; ++i) {
+          if (!state->Grow(seen))
+            break;
+          seen = state->committed.load(std::memory_order_acquire);
+        }
       } catch (...) {
       }
       state->growing_ahead.store(false);
@@ -316,6 +321,11 @@ void CommittedBackingPool::GrowAhead() {
   } catch (...) {
     state_->growing_ahead.store(false);
   }
+}
+void CommittedBackingPool::WaitForGrowth() {
+  const std::lock_guard lock(ahead_mutex_);
+  if (ahead_.joinable())
+    ahead_.join();
 }
 std::size_t CommittedBackingPool::BlockCount() const noexcept {
   return state_->committed.load(std::memory_order_acquire);

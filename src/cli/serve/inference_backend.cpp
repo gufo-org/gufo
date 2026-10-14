@@ -2501,10 +2501,10 @@ public:
       // Pages commit as captures need them. A payload cannot span segments,
       // so the edge of each one strands space a ~140 MB private state cannot
       // use; equal segments of about 1 GiB, and at least two private states,
-      // keep that small. Growth commits on the capture thread when needed:
-      // pinning ahead can delay kernel launches during a decoder's next
-      // step. Growth stops early when the host would keep less than its
-      // reserve.
+      // keep that small. Completed append rows prepare more backing; private
+      // and tail copies commit only when needed. Pinning ahead after a final
+      // private copy can delay decoder launches. Growth stops when the host
+      // keeps less than its reserve.
       std::size_t largest = 0;
       for (const auto& [id, bytes] : backing->component_classes)
         largest = std::max(largest, bytes);
@@ -2560,9 +2560,11 @@ public:
                 limited->refused = now;
                 return false;
               }});
-      // The first capture would otherwise commit the first segment on the
-      // request path (seconds while the host reclaims page cache).
-      backing->pool->GrowAhead();
+      // Prepare a bounded reserve before readiness. The first shared-prefix
+      // capture needs more than one segment; preparing both avoids moving
+      // registration onto that request's capture or decode path.
+      backing->pool->GrowAhead(2);
+      backing->pool->WaitForGrowth();
     };
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
@@ -2593,9 +2595,11 @@ public:
                                    .count()));
       if (!block)
         throw cache::ResourceExhausted();
-      // Grow only when capture needs another segment. Speculative pinning on
-      // a background thread can delay kernel launches in the next decode
-      // step even when the current capture already has sufficient backing.
+      // Completed append rows prepare backing for subsequent prefill/guard
+      // work. Final private-state and partial-tail copies must not start
+      // speculative pinning that delays the next decode step.
+      if (request.category == cache::ResourceCategory::kBackingAssigned)
+        backing->pool->GrowAhead();
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
       return ComponentCaptureBuffer{
           owner->Bytes(),

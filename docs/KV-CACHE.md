@@ -429,6 +429,10 @@ count under 128; only larger explicit budgets can reach the record limit. The st
 `automatic_bytes`, `max_bytes`, `staging_capacity_bytes` and
 `disk_capacity_bytes`.
 
+Flash-Next prepares a bounded two-segment reserve before readiness and can
+prepare the next segment when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative
+growth; a capture still commits any backing it needs.
+
 A step of about 1 GiB took 56–58 ms on the capturing thread while the host had
 free pages **(measured)**. Captures run on the scheduler thread, so concurrent
 requests pause for that long too; an 8 GiB budget fills in eight steps. When the
@@ -528,6 +532,8 @@ result can still populate the cache. `null` keeps the default, `true`.
 | `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |
 | `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the oldest checkpoints (creation order) to fit a lowered `--cache-disk-bytes` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
+| `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
+| `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |
 | `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |
@@ -547,6 +553,11 @@ stored prompt shares a token with the request and `no_compatible_boundary`
 when one does but no restorable boundary covers it;
 `cache_common_prefix_tokens` is then the longest agreement and
 `cache_checkpoint_tokens` the deepest compatible boundary.
+
+Flash-Next also reports `usage.gufo.component_cache.captured_checkpoint_ids`.
+Match these request-local IDs to `checkpoint_id` in publication/refusal logs:
+an earlier request's asynchronous write may finish after the current response.
+IDs belong to one server lifetime; correlate each restart separately.
 
 Reading them:
 

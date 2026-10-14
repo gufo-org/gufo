@@ -95,7 +95,9 @@ public:
   // Starts committing the next on-demand segment on a background thread when
   // less than one segment of free backing remains, so a later TryAcquire
   // finds it ready instead of allocating on its own thread. Returns at once.
-  void GrowAhead();
+  // A larger count can prepare a bounded startup reserve before readiness.
+  void GrowAhead(std::size_t segments = 1);
+  void WaitForGrowth();
   // Committed blocks and bytes; both grow with on-demand segments.
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;
