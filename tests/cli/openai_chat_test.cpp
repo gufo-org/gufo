@@ -1175,6 +1175,17 @@ void TestQwenToolBoundariesAndSchema() {
         Case{"<tool_call><function=f><parameter=text>a</parameter>"
              "<parameter=text>a </parameter></function></tool_call>",
              0, ""},
+        // A name that is only whitespace names no parameter.
+        Case{"<tool_call><function=f><parameter= >x</parameter>"
+             "</function></tool_call>",
+             0, ""},
+        // Recovery resumes after a rejected parameter, so the bytes of later
+        // parameters are scanned again.
+        Case{"<tool_call><function=f><parameter=count>\noops\n</parameter>"
+             "<parameter=text>\n<tool_call><function=f><parameter=count>5"
+             "</parameter></function></tool_call>\n</parameter></function>"
+             "</tool_call>",
+             1, R"({"count":5})"},
         Case{"<tool_call>{\"name\":\"f\",\"arguments\":{\"text\":"
              "\"literal </tool_call>\"}}</tool_call>",
              1, R"({"text":"literal </tool_call>"})"}}) {
@@ -5695,7 +5706,7 @@ void TestToolTagBoundaries() {
             continue;
           const auto prefix =
               initial == Initial::kContent ? std::string{}
-              : implicit ? std::string("Check tags.\n\n")
+              : implicit                   ? std::string("Check tags.\n\n")
                          : (initial == Initial::kAuto ? "<think>" : "") +
                                std::string("Check tags.</think>\n");
           const auto raw = prefix + call + "\n" + noop;
@@ -5898,6 +5909,25 @@ void TestStreamingQuotedAndMalformedTools() {
         }
       }
     }
+  }
+}
+
+// A parameter the schema rejects ends a streamed Qwen call's arguments; a later
+// unfinished value is never streamed for that call.
+void TestQwenStreamingStopsAtRejectedParameter() {
+  const std::string raw =
+      "<tool_call>\n<function=record>\n<parameter=data>\nnot json\n"
+      "</parameter>\n<parameter=text>\nlater value\n</parameter>\n"
+      "</function>\n</tool_call>";
+  std::vector<std::string> pieces;
+  for (const char byte : raw)
+    pieces.emplace_back(1, byte);
+  for (const int api : {0, 1, 2}) {
+    const auto output = ToolBoundaryRequest(
+        pieces, gufo::sampling::JsonConstraint::ToolFormat::kQwen, api, true);
+    for (const auto& arguments : output.arguments)
+      Expect(arguments.find("later") == std::string::npos,
+             "arguments after a rejected parameter are not streamed");
   }
 }
 
@@ -6139,6 +6169,7 @@ int main() {
   TestDeepSeekToolCallsAreStructured();
   TestDeepSeekRepeatedToolParameters();
   TestDeepSeekSchemaCheckedArguments();
+  TestQwenStreamingStopsAtRejectedParameter();
   TestWrongModelIsRejected();
   TestClientIdentityReachesBackend();
   TestStreamingOverloadIsRejectedBeforeHeaders();

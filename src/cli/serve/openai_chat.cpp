@@ -30,6 +30,7 @@
 #include "src/core/json.hpp"
 #include "src/core/utf8.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
+#include "src/models/deepseek_v4_flash/tool_calls.hpp"
 #include "src/models/qwen/chat_template.hpp"
 
 namespace gufo::server {
@@ -84,8 +85,12 @@ struct ParsedGeneration {
 };
 
 constexpr std::array<std::string_view, 7> kToolMarkers{
-    "<tool_call>",          "<｜DSML｜tool_calls｜>", "<｜DSML｜tool_calls>",
-    "<DSML｜tool_calls｜>", "<DSML｜tool_calls>",     "<tool_calls｜>",
+    tokenization::QwenToolSyntax::kCallOpen,
+    "<｜DSML｜tool_calls｜>",
+    models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen,
+    "<DSML｜tool_calls｜>",
+    "<DSML｜tool_calls>",
+    "<tool_calls｜>",
     "<tool_calls>",
 };
 using ToolMarkerSet = std::span<const std::string_view>;
@@ -142,18 +147,18 @@ constexpr std::array<std::string_view, 4> kQwenClosers{
 };
 constexpr std::array<std::string_view, 9> kToolClosers{
     // Qwen family.
-    "</parameter>",
-    "</function>",
-    "</tool_call>",
+    tokenization::QwenToolSyntax::kParameterClose,
+    tokenization::QwenToolSyntax::kFunctionClose,
+    tokenization::QwenToolSyntax::kCallClose,
     // Envelope dialects the clients and harness prompts render; Qwen models
     // echo these back verbatim, so they are framing here too.
     "</invoke>",
     "</function_results>",
     "</tool_calls>",
     // Model-native dialects, which this fallback admits like any other opener.
-    "</｜DSML｜parameter>",
-    "</｜DSML｜invoke>",
-    "</｜DSML｜tool_calls>",
+    models::deepseek_v4_flash::DeepSeekToolSyntax::kParameterCloses[0],
+    models::deepseek_v4_flash::DeepSeekToolSyntax::kInvokeCloses[0],
+    models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsClose,
 };
 using ToolCloserSet = std::span<const std::string_view>;
 
@@ -1465,6 +1470,17 @@ void PartialStringArgument(ParsedToolCall& call, std::string_view name,
   call.partial_arguments = prefix + quoted;
 }
 
+// Resolves the schema's exact key. A declared key with surrounding spaces is
+// preserved; otherwise the spelled name is trimmed, as llama.cpp's mapper
+// does.
+std::string QwenParameterName(const json::Value* properties,
+                              std::string_view spelled) {
+  return properties && properties->is_object() &&
+                 properties->contains(std::string(spelled))
+             ? std::string(spelled)
+             : std::string(Trim(spelled));
+}
+
 // Interprets one scanned Qwen parameter against the advertised schema. Qwen's
 // XML-like arguments carry no type marker, so the schema decides whether the
 // value is a string or JSON; without one the raw text is kept.
@@ -1472,10 +1488,9 @@ bool InterpretQwenParameter(
     const std::optional<json::Value>& schema, const json::Value* properties,
     const tokenization::QwenToolCallParameter& parameter,
     tokenization::ChatMessage::ToolArgument* argument) {
-  const std::string name = properties && properties->is_object() &&
-                                   properties->contains(parameter.name)
-                               ? parameter.name
-                               : std::string(Trim(parameter.name));
+  const std::string name = QwenParameterName(properties, parameter.name);
+  if (name.empty())
+    return false;
   const auto* property = properties ? properties->find(name) : nullptr;
   const bool string_allowed =
       !property || SchemaAccepts(*schema, *property,
@@ -1513,17 +1528,6 @@ bool InterpretQwenParameter(
   }
   *argument = {.name = name, .value = std::move(raw), .is_string = is_string};
   return true;
-}
-
-// Resolves the schema's exact key. A declared key with surrounding spaces is
-// preserved; otherwise the spelled name is trimmed, as llama.cpp's mapper
-// does.
-std::string QwenParameterName(const json::Value* properties,
-                              std::string_view spelled) {
-  return properties && properties->is_object() &&
-                 properties->contains(std::string(spelled))
-             ? std::string(spelled)
-             : std::string(Trim(spelled));
 }
 
 void ParseQwenCalls(
@@ -1571,8 +1575,10 @@ void ParseQwenCalls(
                            !call_quotes.UnclosedAt(marker_begin);
     if (syntax.native) {
       for (const auto& parameter : syntax.parameters) {
+        // Recovery resumes after the rejected parameter, not after the call.
         tokenization::ChatMessage::ToolArgument argument;
         if (!InterpretQwenParameter(schema, properties, parameter, &argument)) {
+          cursor = marker_begin + parameter.progress;
           valid = false;
           break;
         }
@@ -1585,13 +1591,15 @@ void ParseQwenCalls(
           call.arguments.push_back(std::move(argument));
         } else if (previous->value != argument.value ||
                    previous->is_string != argument.is_string) {
+          cursor = marker_begin + parameter.progress;
           valid = false;
           break;
         }
       }
       if (valid && syntax.complete)
         complete = true;
-      if (!complete && tentative && syntax.unfinished) {
+      // Arguments after a rejected parameter are never streamed.
+      if (!complete && tentative && valid && syntax.unfinished) {
         const std::string name =
             QwenParameterName(properties, syntax.unfinished->name);
         const auto* property = properties ? properties->find(name) : nullptr;
@@ -1852,7 +1860,7 @@ ParsedGeneration ParseGeneration(
     // The outer envelope selects the format, as in llama.cpp's model parsers.
     // Scanning both dialects would turn a literal call inside an argument into
     // an additional API invocation.
-    if (text_from_tools.starts_with("<tool_call>"))
+    if (text_from_tools.starts_with(tokenization::QwenToolSyntax::kCallOpen))
       ParseQwenCalls(parsed.text, tools, &parsed.tool_calls, nullptr,
                      unfinished_reasoning_quote, partial);
     else
@@ -1966,14 +1974,16 @@ ParsedGeneration ParseStructuredGeneration(
   if (const auto marker = EarliestMarker(content, markers, quotes);
       !tools.empty() && choice != ChatRequest::ToolChoice::kNone &&
       (tool_only || marker == 0) && marker != std::string_view::npos &&
-      !content.substr(marker).starts_with("<tool_call>")) {
+      !content.substr(marker).starts_with(
+          tokenization::QwenToolSyntax::kCallOpen)) {
     auto native = ParseGeneration(
         content, TextGenerationBackend::InitialOutputState::kContent, tools,
         choice, enforce_required, markers, closers, quotes, partial);
     native.reasoning_content = std::move(parsed.reasoning_content);
     return native;
   }
-  constexpr std::string_view tool_start = "<tool_call>";
+  constexpr std::string_view tool_start =
+      tokenization::QwenToolSyntax::kCallOpen;
   auto marker = tool_only ? EarliestMarker(content, markers, quotes) : 0;
   if (tool_only && choice == ChatRequest::ToolChoice::kRequired &&
       marker == std::string_view::npos) {

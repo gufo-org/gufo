@@ -465,8 +465,10 @@ QwenToolCallScan ScanQwenToolCall(std::string_view text) {
           value = BeforePartialDelimiter(value, "\n</parameter>\r\n");
           if (frame == "\r\n" && value.ends_with('\r'))
             value.remove_suffix(1);
-          call.unfinished = QwenToolCallParameter{
-              .name = spelled, .value = std::string(value), .framed = true};
+          call.unfinished = QwenToolCallParameter{.name = spelled,
+                                                  .value = std::string(value),
+                                                  .framed = true,
+                                                  .progress = result.progress};
         }
         valid = false;
         break;
@@ -485,7 +487,8 @@ QwenToolCallScan ScanQwenToolCall(std::string_view text) {
       call.parameters.push_back(
           QwenToolCallParameter{.name = spelled,
                                 .value = std::string(value),
-                                .framed = framed_value});
+                                .framed = framed_value,
+                                .progress = result.progress});
       body.remove_prefix(close + QwenToolSyntax::kParameterClose.size());
     }
     call.complete = valid && consume(QwenToolSyntax::kFunctionClose) &&

@@ -111,6 +111,9 @@ struct QwenToolCallParameter {
   std::string name;    ///< Spelled between "<parameter=" and ">".
   std::string value;   ///< Canonical framing newlines removed; all else kept.
   bool framed{false};  ///< The opening newline frame was present.
+  /// Bytes of the scanned text consumed through this parameter. Recovery
+  /// resumes here when the API surface rejects this parameter.
+  std::size_t progress{0};
 };
 
 /// One call exactly as written, before schema interpretation.
