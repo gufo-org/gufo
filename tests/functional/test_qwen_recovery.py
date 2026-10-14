@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from qwen_deep_options import assert_cold_control, assert_publication_wait
+from qwen_deep_options import assert_cold_control, assert_publication_wait, verify_execution_log
 
 
 def response(cached=0):
@@ -28,6 +28,21 @@ WAIT = (
 
 
 class QwenRecoveryEvidenceTest(unittest.TestCase):
+    def test_actual_drafts_exclude_repeated_progress_counters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory, "server.log")
+            log.write_text(
+                "event=load_completed kind=text speculative=dflash2\n"
+                "[progress] phase=decode draft_proposed=100\n"
+                "[http] event=completed method=POST draft_proposed=7\n"
+                "[progress] phase=decode draft_proposed=7\n")
+            verify_execution_log(directory, "server.log", "dflash2")
+            record = json.loads(Path(directory, "server.log.execution.json").read_text())
+            self.assertEqual(record["proposed"], 7)
+            log.write_text(log.read_text().replace("draft_proposed=7\n", "draft_proposed=0\n"))
+            with self.assertRaises(RuntimeError):
+                verify_execution_log(directory, "server.log", "dflash2")
+
     def test_exact_uncached_control(self):
         with tempfile.TemporaryDirectory() as directory:
             assert_cold_control(directory, "control", response(17000), response())

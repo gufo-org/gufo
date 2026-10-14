@@ -416,7 +416,11 @@ def wait_for_published(out, log_name, minimum, server, timeout=120):
 def verify_execution_log(out, log_name, mode):
     verify_loaded(out, log_name, mode)
     text = (Path(out) / log_name).read_text()
-    counts = [int(value) for value in re.findall(r'\bdraft_proposed=(\d+)\b', text)]
+    # Progress logs repeat cumulative counters. Count completed HTTP requests
+    # once, so intermediate decode observations cannot inflate actual drafts.
+    counts = [int(value) for line in text.splitlines()
+              if '[http]' in line and 'event=completed' in line and 'method=POST' in line
+              for value in re.findall(r'\bdraft_proposed=(\d+)\b', line)]
     proposed = sum(counts)
     record = {'mode': mode, 'proposed': proposed, 'completed_request_counts': counts,
               'qualified': bool(counts) and (proposed == 0 if mode == 'ar' else proposed > 0)}
