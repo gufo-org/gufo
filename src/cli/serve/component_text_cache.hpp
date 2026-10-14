@@ -99,7 +99,8 @@ public:
   // restorable boundary; admission may wait for it instead of prefilling.
   [[nodiscard]] bool PublicationPending(
       std::span<const ContinuationToken> prompt,
-      const TextPromptContext* context) const;
+      const TextPromptContext* context,
+      std::size_t* pending_tokens = nullptr) const;
   [[nodiscard]] std::size_t CachedPrefixTokens(
       std::span<const ContinuationToken>, const TextPromptContext*,
       bool common = false) const;

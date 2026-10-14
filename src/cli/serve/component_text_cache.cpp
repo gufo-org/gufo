@@ -1134,8 +1134,10 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
 }
 
 bool ComponentTextCache::PublicationPending(
-    std::span<const ContinuationToken> prompt,
-    const TextPromptContext* context) const {
+    std::span<const ContinuationToken> prompt, const TextPromptContext* context,
+    std::size_t* pending_tokens) const {
+  if (pending_tokens)
+    *pending_tokens = 0;
   // A disk job still writing a much deeper prefix of this prompt usually
   // finishes sooner than prefilling the difference again (#562, step E2):
   // a conversation larger than the RAM budget has no RAM copy.
@@ -1147,15 +1149,21 @@ bool ComponentTextCache::PublicationPending(
   const auto found =
       impl_->index.Lookup({impl_->identity, prompt, input, 0, true});
   const std::size_t best = found.selected ? found.selected->boundary : 0;
-  return std::ranges::any_of(impl_->pending_durable, [&](const auto& capture) {
-    if (!capture)
-      return false;
-    const auto& tokens = capture->manifest.tokens;
-    return tokens.size() > best + kWaitGainTokens &&
-           tokens.size() <= prompt.size() &&
-           capture->manifest.input == At(input, tokens.size()) &&
-           std::equal(tokens.begin(), tokens.end(), prompt.begin());
-  });
+  const auto pending =
+      std::ranges::find_if(impl_->pending_durable, [&](const auto& capture) {
+        if (!capture)
+          return false;
+        const auto& tokens = capture->manifest.tokens;
+        return tokens.size() > best + kWaitGainTokens &&
+               tokens.size() <= prompt.size() &&
+               capture->manifest.input == At(input, tokens.size()) &&
+               std::equal(tokens.begin(), tokens.end(), prompt.begin());
+      });
+  if (pending == impl_->pending_durable.end())
+    return false;
+  if (pending_tokens)
+    *pending_tokens = (*pending)->manifest.tokens.size();
+  return true;
 }
 
 std::size_t ComponentTextCache::CachedPrefixTokens(

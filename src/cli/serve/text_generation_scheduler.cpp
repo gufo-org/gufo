@@ -968,17 +968,24 @@ struct TextGenerationScheduler::Impl {
         common = shared;
       }
     }
-    if (leader == nullptr ||
-        common < TextRunnerPool::Request::kSharedPrefixMinTokens)
+    if (leader == nullptr)
       return false;
     // A longer retained prefix, such as this conversation's previous turn,
     // already beats waiting for a peer.
     const auto cached =
         runner_pool->CachedPrefixTokens(prompt, request->prompt_context.get());
-    if (common < cached + TextRunnerPool::Request::kSharedPrefixMinTokens)
+    // A leader may have leased a deeper native frontier than a sibling can
+    // restore. Share its next planned checkpoint even for a short suffix:
+    // replaying generated tokens through prefill can change recurrent state.
+    // Ordinary cold-prefix sharing retains its minimum-work threshold.
+    const auto minimum_gain =
+        leader->runner_request.cached_prompt_tokens() > cached
+            ? std::size_t{1}
+            : TextRunnerPool::Request::kSharedPrefixMinTokens;
+    if (common < cached + minimum_gain)
       return false;
     const auto position = leader->runner_request.ShareCheckpoint(common);
-    if (position < cached + TextRunnerPool::Request::kSharedPrefixMinTokens)
+    if (position < cached + minimum_gain)
       return false;
     request->prefix_leader = std::move(leader);
     request->prefix_position = position;
@@ -1033,11 +1040,23 @@ struct TextGenerationScheduler::Impl {
         }
         request->prefix_leader.reset();
       }
-      if (request->publication_waiting &&
-          (Clock::now() - *request->publication_wait_start > kPublicationWait ||
-           !runner_pool->PublicationPending(request->prompt,
-                                            request->prompt_context.get())))
-        request->publication_waiting = false;
+      if (request->publication_waiting) {
+        const auto elapsed = Clock::now() - *request->publication_wait_start;
+        const bool timed_out = elapsed > kPublicationWait;
+        if (timed_out || !runner_pool->PublicationPending(
+                             request->prompt, request->prompt_context.get())) {
+          std::ostringstream line;
+          line << "event=publication_wait_end id=" << request->id
+               << " reason=" << (timed_out ? "timeout" : "pending_settled")
+               << " cached_tokens="
+               << runner_pool->CachedPrefixTokens(request->prompt,
+                                                  request->prompt_context.get())
+               << " wait_ms="
+               << std::chrono::duration<double, std::milli>(elapsed).count();
+          Logger::Info("cache", line.str());
+          request->publication_waiting = false;
+        }
+      }
       ++it;
     }
   }
@@ -1090,11 +1109,20 @@ struct TextGenerationScheduler::Impl {
           waiting.push_back(std::move(request));
           continue;
         }
+        std::size_t pending_publication_tokens = 0;
         if (request->cache_prompt && !request->publication_wait_start &&
             runner_pool->PublicationPending(request->prompt,
-                                            request->prompt_context.get())) {
+                                            request->prompt_context.get(),
+                                            &pending_publication_tokens)) {
           request->publication_wait_start = Clock::now();
           request->publication_waiting = true;
+          std::ostringstream line;
+          line << "event=publication_wait_begin id=" << request->id
+               << " pending_tokens=" << pending_publication_tokens
+               << " cached_tokens="
+               << runner_pool->CachedPrefixTokens(
+                      request->prompt, request->prompt_context.get());
+          Logger::Info("cache", line.str());
           waiting.push_back(std::move(request));
           continue;
         }

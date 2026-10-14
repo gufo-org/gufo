@@ -153,15 +153,21 @@ void CheckQwenIncrementalOracle(
   hip::QwenGpuExecutor incremental(model, 1024);
   incremental.ConfigureVision(prompt, model->VisionEncoder());
   const auto tokens = std::span(prompt->tokens);
-  // Replay the same execution history: the retained reply used decode
-  // arithmetic, not matrix prefill. The separate cold comparison below
-  // deliberately continues to check that stronger guarantee.
+  // Replay all published tokens with decode arithmetic. DFlash can retain
+  // one fewer computed row than it published; serving consumes that pending
+  // token through ResumeGeneratedToken before prefilling the new suffix.
+  const auto published_end = previous.prompt_tokens + previous.tokens.size();
+  Require(published_end <= tokens.size() &&
+              cached.cached_prompt_tokens >= previous.prompt_tokens &&
+              cached.cached_prompt_tokens <= published_end &&
+              std::equal(previous.tokens.begin(), previous.tokens.end(),
+                         tokens.begin() + previous.prompt_tokens),
+          "continued image fixture must retain the published token history");
   (void)incremental.ForwardPromptBatch(tokens.first(previous.prompt_tokens));
-  for (std::size_t i = previous.prompt_tokens; i < cached.cached_prompt_tokens;
-       ++i)
+  for (std::size_t i = previous.prompt_tokens; i < published_end; ++i)
     (void)incremental.ForwardToken(tokens[i], i);
-  auto next = incremental.ForwardPromptBatch(
-      tokens.subspan(cached.cached_prompt_tokens), cached.cached_prompt_tokens);
+  auto next = incremental.ForwardPromptBatch(tokens.subspan(published_end),
+                                             published_end);
   std::vector<tokenization::TokenId> generated;
   for (std::size_t i = 0; i < cached.tokens.size(); ++i) {
     generated.push_back(next);
@@ -360,6 +366,9 @@ int main(int argc, char** argv) {
                           : flash ? server::TextSpeculativeBackend::kMtp
                                   : server::TextSpeculativeBackend::kDFlash;
     speculative.draft_model_path = draft;
+    // Exact C1/C4 proposal accounting needs a fixed width. The adaptive
+    // greedy controller is allowed to choose a different width for each batch.
+    speculative.dflash_policy = speculative::DFlashDraftPolicy::kFixed;
     std::shared_ptr<const hip::QwenGpuModel> qwen;
     std::shared_ptr<models::qwen38_flash_next::Model> qfn;
     if (flash) {

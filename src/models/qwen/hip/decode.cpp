@@ -15,10 +15,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
   if (pos >= arena_.GetMaxContext()) {
     throw std::length_error("token position exceeds the GPU context length");
   }
+  models::qwen::ContinuationWrite write(continuation_hooks_, pos, pos + 1);
 
   if (replaying_ssm_state_ && !compute_logits) {
     if (arena_.CanReplaySsmPosition(pos)) {
       ReplaySsmState(pos);
+      write.Commit(pos + 1, false);
       return 0;
     }
     replaying_ssm_state_ = false;
@@ -95,6 +97,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
   }
 
   if (!compute_logits) {
+    write.Commit(pos + 1, false);
     return 0;
   }
 
@@ -103,7 +106,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
                            hipMemcpyDeviceToHost, arena_.stream));
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
 
-  return CheckedSampleToken(next_token_id, config.vocab_size);
+  const auto result = CheckedSampleToken(next_token_id, config.vocab_size);
+  write.Commit(pos + 1, true);
+  return result;
 }
 
 }  // namespace gufo::hip

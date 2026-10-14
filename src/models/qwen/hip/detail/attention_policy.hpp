@@ -17,6 +17,13 @@ inline constexpr std::size_t kSplitKDecodeAttentionMinContext{128};
 inline constexpr std::uint32_t kSplitKDecodeAttentionMaxSplits{32};
 inline constexpr std::uint32_t kFusedQkNormMaxHeadDim{256};
 
+// gfx1151 has 64 KiB LDS per workgroup. The baseline also reserves one
+// float per reduction lane, so a full 16K score row already exceeds it.
+[[nodiscard]] constexpr bool BatchedAttentionScoresFitLds(
+    std::size_t sequence_length) noexcept {
+  return sequence_length <= (64 * 1024 / sizeof(float) - 256);
+}
+
 struct AttentionSupportParams {
   std::size_t batch_size{0};
   std::uint32_t start_pos{0};

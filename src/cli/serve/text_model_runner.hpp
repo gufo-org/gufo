@@ -575,8 +575,9 @@ public:
       const TextPromptContext* context) const;
   /// A disk job is still writing a prefix of prompt much deeper than any
   /// restorable checkpoint; admission may wait for it instead of prefilling.
-  [[nodiscard]] bool PublicationPending(std::span<const TextRunnerToken> prompt,
-                                        const TextPromptContext* context) const;
+  [[nodiscard]] bool PublicationPending(
+      std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
+      std::size_t* pending_tokens = nullptr) const;
 
 private:
   struct Impl;

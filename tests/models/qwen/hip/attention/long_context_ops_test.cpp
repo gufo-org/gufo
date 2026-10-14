@@ -16,6 +16,7 @@
 
 #include "src/core/hip/detail/hip_graph_decode_executor.hpp"
 #include "src/core/hip/hip_utils.hpp"
+#include "src/core/hip/managed_alloc.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/ops.hpp"
@@ -28,6 +29,138 @@
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
 #include "tests/models/qwen/hip/support/comparisons.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
+
+void TestLongContextBatchedAttention(bool fp16) {
+  constexpr std::uint32_t heads = 2, kv_heads = 1, dim = 256;
+  constexpr std::size_t rows = 3, width = heads * dim;
+  constexpr std::uint32_t capacity = 100001;
+  const std::size_t cache_elements = std::size_t{capacity} * dim;
+  std::vector<float> keys(cache_elements), values(cache_elements);
+  std::vector<float> query(rows * width), gate(rows * width);
+  for (std::size_t i = 0; i < cache_elements; ++i) {
+    keys[i] = 0.07F * std::sin(float(i % 751) * 0.013F);
+    values[i] = 0.2F * std::cos(float(i % 509) * 0.017F);
+  }
+  for (std::size_t i = 0; i < query.size(); ++i) {
+    query[i] = 0.1F * std::sin(float(i % 257) * 0.023F);
+    gate[i] = 0.4F * std::cos(float(i % 193) * 0.019F);
+  }
+  std::vector<__half> half_keys, half_values;
+  if (fp16) {
+    half_keys.reserve(cache_elements);
+    half_values.reserve(cache_elements);
+    for (float& value : keys) {
+      half_keys.push_back(__float2half_rn(value));
+      value = __half2float(half_keys.back());
+    }
+    for (float& value : values) {
+      half_values.push_back(__float2half_rn(value));
+      value = __half2float(half_values.back());
+    }
+  }
+  const auto cache_bytes =
+      cache_elements * (fp16 ? sizeof(__half) : sizeof(float));
+  float *d_q = nullptr, *d_gate = nullptr;
+  void *d_k = nullptr, *d_v = nullptr;
+  float *d_batch = nullptr, *d_scalar = nullptr;
+  hip_bfloat16* d_bf16 = nullptr;
+  for (auto allocation :
+       {std::pair{&d_q, query.size()}, std::pair{&d_gate, gate.size()},
+        std::pair{&d_batch, query.size()}, std::pair{&d_scalar, query.size()}})
+    HIP_CHECK(gufo::hip::AllocateDevice(allocation.first,
+                                        allocation.second * sizeof(float)));
+  HIP_CHECK(gufo::hip::AllocateDevice(&d_k, cache_bytes));
+  HIP_CHECK(gufo::hip::AllocateDevice(&d_v, cache_bytes));
+  HIP_CHECK(
+      gufo::hip::AllocateDevice(&d_bf16, query.size() * sizeof(hip_bfloat16)));
+  HIP_CHECK(hipMemcpy(d_q, query.data(), query.size() * sizeof(float),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_gate, gate.data(), gate.size() * sizeof(float),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(
+      d_k, fp16 ? static_cast<const void*>(half_keys.data()) : keys.data(),
+      cache_bytes, hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(
+      d_v, fp16 ? static_cast<const void*>(half_values.data()) : values.data(),
+      cache_bytes, hipMemcpyHostToDevice));
+  for (const std::uint32_t first : {16125U, 16382U, 32766U, 99998U}) {
+    gufo::hip::LaunchBatchedAttention(
+        d_q, nullptr, nullptr, d_gate,
+        fp16 ? nullptr : static_cast<float*>(d_k),
+        fp16 ? nullptr : static_cast<float*>(d_v), fp16 ? d_k : nullptr,
+        fp16 ? d_v : nullptr, d_batch, 0, first, rows, capacity, heads,
+        kv_heads, dim, nullptr, true, d_bf16);
+    for (std::size_t row = 0; row < rows; ++row)
+      gufo::hip::LaunchAttention(
+          d_q + row * width, nullptr, nullptr, d_gate + row * width,
+          fp16 ? nullptr : static_cast<float*>(d_k),
+          fp16 ? nullptr : static_cast<float*>(d_v), fp16 ? d_k : nullptr,
+          fp16 ? d_v : nullptr, d_scalar + row * width, 0,
+          first + static_cast<std::uint32_t>(row), capacity, heads, kv_heads,
+          dim, nullptr, nullptr, true);
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> batch(query.size()), scalar(query.size());
+    std::vector<hip_bfloat16> bf16(query.size());
+    HIP_CHECK(hipMemcpy(batch.data(), d_batch, batch.size() * sizeof(float),
+                        hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(scalar.data(), d_scalar, scalar.size() * sizeof(float),
+                        hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(bf16.data(), d_bf16, bf16.size() * sizeof(hip_bfloat16),
+                        hipMemcpyDeviceToHost));
+    if (!gufo::hip::detail::BatchedAttentionScoresFitLds(first + rows))
+      gufo::test::Expect(std::ranges::equal(batch, scalar),
+                         "long rows changed scalar online arithmetic");
+    float max_error = 0;
+    for (std::size_t row = 0; row < rows; ++row) {
+      const auto visible = std::size_t{first} + row + 1;
+      std::vector<double> scores(visible);
+      for (std::uint32_t head = 0; head < heads; ++head) {
+        const auto offset = row * width + head * dim;
+        double maximum = -std::numeric_limits<double>::infinity();
+        for (std::size_t token = 0; token < visible; ++token) {
+          double dot = 0;
+          for (std::uint32_t d = 0; d < dim; ++d)
+            dot += double(query[offset + d]) * keys[token * dim + d];
+          scores[token] = dot / std::sqrt(double(dim));
+          maximum = std::max(maximum, scores[token]);
+        }
+        double sum = 0;
+        for (auto& score : scores) {
+          score = std::exp(score - maximum);
+          sum += score;
+        }
+        for (std::uint32_t d = 0; d < dim; ++d) {
+          double weighted = 0;
+          for (std::size_t token = 0; token < visible; ++token)
+            weighted += scores[token] * values[token * dim + d];
+          const auto expected =
+              float(weighted / sum / (1 + std::exp(-double(gate[offset + d]))));
+          gufo::test::ExpectNear(expected, batch[offset + d], 1e-5F,
+                                 "long batch differs from FP64 oracle");
+          max_error =
+              std::max(max_error, std::abs(expected - batch[offset + d]));
+          std::uint32_t bits = 0;
+          std::memcpy(&bits, &batch[offset + d], sizeof(bits));
+          const auto rounded = static_cast<std::uint16_t>(
+              (bits + 0x7fffU + ((bits >> 16) & 1U)) >> 16);
+          std::uint16_t actual_bits = 0;
+          std::memcpy(&actual_bits, &bf16[offset + d], sizeof(actual_bits));
+          gufo::test::Expect(actual_bits == rounded,
+                             "long batch changed BF16 output rounding");
+        }
+      }
+    }
+    std::cout << "Long " << (fp16 ? "FP16" : "FP32")
+              << " batch end=" << first + rows
+              << " max_FP64_error=" << max_error << '\n';
+  }
+  for (auto pointer : {d_q, d_gate, d_batch, d_scalar})
+    HIP_CHECK(hipFree(pointer));
+  HIP_CHECK(hipFree(d_k));
+  HIP_CHECK(hipFree(d_v));
+  HIP_CHECK(hipFree(d_bf16));
+}
 
 void TestLongContextDecodeAttention(bool fp16) {
   constexpr std::uint32_t max_position = 32767;
@@ -353,6 +486,8 @@ int main() {
     return device_status;
   }
 
+  TestLongContextBatchedAttention(false);
+  TestLongContextBatchedAttention(true);
   TestLongContextDecodeAttention(false);
   TestLongContextDecodeAttention(true);
   TestBaselineToTiledKvCacheTransition();

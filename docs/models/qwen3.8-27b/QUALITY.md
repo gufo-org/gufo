@@ -45,14 +45,53 @@ tolerances, not bit-identical upstream sampler parity.
 
 ## Vision
 
-Q4/Q8 AR and DFlash2 pass multi-image, sampled/greedy C4, cancellation,
-generated-history continuation and disk-restart checks. Q8 also requires exact
+Earlier Q4/Q8 AR and DFlash2 checks cover multi-image, sampled/greedy C4,
+cancellation, generated-history continuation and disk restart. The current
+component migration retains a strict Q4 cold-prefill versus decoded-history
+failure; see [the current status](#component-serving-migration). Q8 also requires exact
 cold/live/restored continuation logits. Encoder controls use official
 Transformers operators over the **same converted BF16 GGUF**; they cannot detect
 conversion errors. Flash-Next has a separate [vision limit](../qwen3.8-flash-next/QUALITY.md#vision).
 Q4/Q8 image snapshots restored after cancellation inside the image encoder or
 text prefill match all target logits exactly; token-limit endings and stripped
 tool reasoning retain the compatible conversation prefix.
+
+## Autoregressive component checkpoints
+
+October 10, 2026: the model-local component adapter passes Q4/Q8 checks in
+both FP16 and FP32 attention KV layouts. Every restored component byte and
+full continuation logit row matches uninterrupted execution. The checks cover
+earlier-boundary edits, pending generation tokens, leased-row preservation,
+committed recurrent replay, failed/discarded transfers and completion lifetime.
+Image regressions restore before the first image and between two images while
+retaining the matching request's future images and complete RoPE layout;
+those focused image checks use production FP16 KV.
+
+Production FP16 probes at 32K and 100K also match every restored byte and
+sixteen continuation logit rows/token decisions after transfer to another slot.
+These are Gufo execution-consistency checks. They do not extend upstream or
+weight-conversion parity, qualify alternate BF16 recurrence, or qualify the
+common checkpoint allocator. The [adapter inventory and commands](CONTINUATION-ADAPTER.md)
+and [card 15 results](../../cache-redesign/cards/15-qwen27b-ar-adapter.md)
+record the scope and retained evidence.
+
+## Long-context FP32 attention qualification (2026-10-13)
+
+A new capacity probe exposed an invalid FP32 prefill launch at 16K: its
+context-sized score array plus reduction scratch used 66,560 bytes of LDS,
+above gfx1151's 64 KiB limit. The bounded online fallback passes the existing
+attention controls and new three-row causal checks around the LDS boundary,
+32K and 100K in both KV representations. The worst absolute FP64-oracle error
+is 5.04e-7 (limit 1e-5); long rows match scalar online attention exactly, and
+BF16 output bits match independent rounding. The pinned `64639c28` Q4 FP32
+32K full-model probe also passes every restored component byte and sixteen
+continued full-logit/token checks. After the telemetry-only repair, the pinned
+`e008ffc7` binary passes Q4/Q8 FP16 and Q4 FP32 at both 32K and 100K,
+and Q8 FP32 at 32K. Every restored component byte and sixteen continued
+full-logit/token checks match. The user stopped the Q8 FP32 100K probe and
+skipped further long-capacity probes for both KV precisions. That case has no
+qualification result. Matched-main timing flags remain open. All original aborts and diagnostics remain retained in
+`/home/mixer/gufo-qualification/qwen27b-component-2026-10-13`.
 
 ## Reproduce
 
@@ -90,3 +129,16 @@ DFlash2 uses mixed/repetitive cases. Rates sum individual decode rates.
 Loading uses cold files, C1/DFlash2/capacity 262144; memory uses C1/AR peak HIP
 allocation. Commands, hashes and counts remain in [artifacts](artifacts/bench.json)
 and the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
+
+## Component serving migration
+
+The new component format adds sampled frontier state and DFlash2 ring KV,
+pending target features and controller metadata. AR and DFlash2 serving use
+adapter-owned slots and committed host backing. At `c7053529`, Q4/Q8 full cache-serving checks pass in both modes, including
+exact greedy/seeded forks, generated-frontier cancellation, disk restarts and
+artifact compatibility misses. Current DFlash component restore checks also pass.
+The vision suite restores image identity, sampling and cancellation exactly,
+but cold prefill differs from decoded-history continuation on a Q4 fixture;
+that strict failure remains open. Deep workloads and resource checks remain
+unqualified. Earlier capacity probes cover the earlier AR adapter format.
+Performance measurements are deferred until functional work ends.

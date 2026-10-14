@@ -42,7 +42,8 @@ void LaunchAttention(const float* q, const float* k, const float* v,
 /// Runs consecutive verification queries with scalar decode arithmetic.
 /// The selected KV cache must already contain all rows. Each row sees only
 /// its causal prefix. Scratch for batch_size rows batches split-K too; a
-/// smaller span retains the scalar split-K fallback.
+/// smaller span retains the scalar split-K fallback. Without scratch,
+/// supported GQA heads use bounded online attention at every causal depth.
 void LaunchCausalDecodeAttention(
     const float* q, const float* gate, float* k_cache, float* v_cache,
     void* k_cache_f16, void* v_cache_f16, float* out_context,
@@ -79,7 +80,8 @@ void LaunchFusedQKNormRoPEKvWrite(
 /// true the KV cache is assumed already written by the fused prefill kernel
 /// (opt-c010-qk-rope-kv). When out_context_bf16 is non-null the context is also
 /// written as BF16, which saves the caller a conversion launch when the next
-/// projection consumes BF16.
+/// projection consumes BF16. Score rows exceeding the gfx1151 LDS budget
+/// use bounded online attention for supported 256-element GQA heads.
 void LaunchBatchedAttention(const float* q, const float* k, const float* v,
                             const float* gate, float* k_cache, float* v_cache,
                             void* k_cache_f16, void* v_cache_f16,

@@ -1,4 +1,5 @@
 target_sources(gufo_core PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_layout.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/prompt.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/tokenizer.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/chat_template.cpp
@@ -24,7 +25,9 @@ target_sources(gufo_core PRIVATE
 if (ENGINE_ENABLE_HIP)
   find_package(OpenSSL REQUIRED COMPONENTS Crypto)
   target_link_libraries(gufo_core PRIVATE OpenSSL::Crypto)
+  target_link_libraries(gufo_core PRIVATE gufo_cache_hip)
   target_sources(gufo_core PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_adapter.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/encoder.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/device_input.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/attention.hip
@@ -106,4 +109,10 @@ if (ENGINE_ENABLE_HIP)
       ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
     TARGET_DIRECTORY gufo_core
     APPEND PROPERTY COMPILE_OPTIONS -fno-slp-vectorize)
+endif()
+
+if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
+  add_executable(qwen27b_continuation_probe EXCLUDE_FROM_ALL
+    ${PROJECT_SOURCE_DIR}/tests/models/qwen27b/continuation_probe.cpp)
+  target_link_libraries(qwen27b_continuation_probe PRIVATE gufo_core)
 endif()

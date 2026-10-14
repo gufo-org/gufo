@@ -3,6 +3,32 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+Qwen 27B deep-history recovery uses separate, explicitly selected workloads:
+
+```sh
+python3 tests/functional/deep_peers_qwen.py \
+  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --mode ar --source-revision BUILD_SHA --expect-component --out /tmp/qwen-deep
+python3 tests/functional/over_ram_qwen.py \
+  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --mode dflash2 --draft /path/to/dflash2.gguf \
+  --source-revision BUILD_SHA --expect-component --out /tmp/qwen-over-ram
+```
+
+Each starts its own loopback server, retains responses, loaded mode, actual draft
+counts and process/host memory samples, and removes only its owned disk cache
+after retaining an inventory. Use a new output directory for every invocation.
+The deep workload verifies 140K+ tokens, observes a published checkpoint before
+SIGKILL, checks newest compatible checkpoint selection after restarts and peers,
+and compares recovery with `cache_prompt: false` at temperature zero. The over-RAM
+workload verifies a completed cancellation frontier survives short peers and
+requires a rewritten final message to wait for successful deeper publication.
+It fails if that publication race was not exercised. These are correctness
+workloads outside hosted model CI; retained phase times do not qualify speed.
+CPU evidence-refusal checks run with
+`python3 -m unittest discover -s tests/functional -p test_qwen_recovery.py`;
+they do not establish model correctness.
+
 The cluster workflow uses [impact.json](impact.json) to select suites from changed
 paths. Inspect a plan locally without running Gufo:
 
@@ -117,6 +143,12 @@ DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
 Each invocation tests **one model and one mode**. Model-specific changes need
 only the affected target/modes. For shared text changes, run the affected suites
 once per row/mode below; no full benchmark sweep is needed.
+
+For correctness capture of slow cold prompts, `--request-timeout SECONDS` sets
+the SDK deadline (default 120); `--suite-timeout SECONDS` separately bounds the
+whole suite (default 900). The request deadline is retained in both reports and
+must match for baseline comparison. Longer deadlines do not change assertions
+or timing margins; retain the original timeout failure when investigating it.
 
 | Target | `--speculative` modes | Sidecar option |
 | --- | --- | --- |
