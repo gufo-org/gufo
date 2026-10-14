@@ -2501,10 +2501,9 @@ public:
       // Pages commit as captures need them. A payload cannot span segments,
       // so the edge of each one strands space a ~140 MB private state cannot
       // use; equal segments of about 1 GiB, and at least two private states,
-      // keep that small. A step costs about 200 ms of page faults and pinning
-      // (more when the host must reclaim page cache), so it runs ahead on a
-      // background thread; only a capture that outruns it grows on its own
-      // thread. Growth stops early when the host would keep less than its
+      // keep that small. Growth commits on the capture thread when needed:
+      // pinning ahead can hold HIP's launch lock during a decoder's next
+      // step. Growth stops early when the host would keep less than its
       // reserve.
       std::size_t largest = 0;
       for (const auto& [id, bytes] : backing->component_classes)
@@ -2594,10 +2593,9 @@ public:
                                    .count()));
       if (!block)
         throw cache::ResourceExhausted();
-      // Commit the next segment off the capturing thread, which otherwise
-      // stalls this and every peer request for the allocation (up to seconds
-      // while the host reclaims page cache).
-      backing->pool->GrowAhead();
+      // Grow only when capture needs another segment. Speculative pinning on
+      // a background thread can hold the HIP launch lock into the next decode
+      // step even when the current capture already has sufficient backing.
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
       return ComponentCaptureBuffer{
           owner->Bytes(),

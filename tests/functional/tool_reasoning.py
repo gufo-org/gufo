@@ -58,8 +58,9 @@ def response_result(client, request, streaming):
                 finish="tool_calls" if calls else "stop", usage=response.usage.to_dict())
 
 
-def check_reasoning_separator(client, model, checks, chat_result):
+def check_reasoning_separator(client, model, checks, chat_result, server_log=None):
     """Reasoning framing is not visible text, with or without constraints (#439)."""
+    from cache_growth import check_unchanged_retry, log_offset
     function = {"name": "unused", "description": "Not needed for arithmetic.",
                 "parameters": {"type": "object", "properties": {},
                                "additionalProperties": False}}
@@ -97,8 +98,10 @@ def check_reasoning_separator(client, model, checks, chat_result):
                     request["text"] = {"format": format_}
                 run = response_result
             previous = None
+            replay_start = log_offset(server_log)
             for streaming in (False, True):
                 name = f"reasoning_separator_{endpoint}_{mode}_{streaming}"
+                replay_end = log_offset(server_log)
                 result = save(name, run(client, request, streaming))
                 assert result["reasoning"] and not result["tools"], result
                 assert result["finish"] == "stop", result
@@ -116,7 +119,8 @@ def check_reasoning_separator(client, model, checks, chat_result):
                     usage = result["usage"]
                     details = usage.get("prompt_tokens_details", usage.get("input_tokens_details"))
                     total = usage.get("prompt_tokens", usage.get("input_tokens"))
-                    assert details["cached_tokens"] == total, result
+                    check_unchanged_retry(name, result, total - details["cached_tokens"],
+                                          server_log, replay_start, replay_end)
                 previous = result
             if endpoint == "chat" and mode == "tools":
                 # Feed the client-visible text back into the next turn. Removing

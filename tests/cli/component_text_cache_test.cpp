@@ -902,21 +902,13 @@ void PublishedResidentCheckpointKeepsDiskStep() {
     assert(lease->PublishSnapshot(first, lease->Capture(), false));
     assert(lease->Metrics().disk_queued_bytes > 0);
     lease->Invalidate();
+    // Invalidation releases the execution slot so the idle queue can publish.
+    // Wait for completion rather than guessing when a created file is attached.
+    for (int i = 0; i < 500 && lease->Metrics().persistence->completed == 0;
+         ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    assert(lease->Metrics().persistence->completed == 1);
   }
-  // The idle queue writes the job; wait until its files exist, then for the
-  // publication that follows them.
-  const auto files = [&] {
-    std::size_t count = 0;
-    if (std::filesystem::exists(directory / "v2" / "private"))
-      for (const auto& entry :
-           std::filesystem::directory_iterator(directory / "v2" / "private"))
-        count += entry.is_regular_file();
-    return count;
-  };
-  for (int i = 0; i < 500 && files() == 0; ++i)
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  assert(files() > 0);
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
   auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
   assert(lease->cached_tokens() == first.size() &&
          !lease->restored_from_disk());

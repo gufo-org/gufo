@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "src/cache/ledger.hpp"
 #include "src/cache/slot.hpp"
@@ -18,6 +19,7 @@ struct ComponentCacheMetrics {
   std::size_t deepest_live{}, deepest_ram{}, deepest_disk{}, selected{};
   std::size_t restored_bytes{}, prefilled{}, captures{}, captured_bytes{};
   std::size_t borrowed_capacity_bytes{}, copied_payload_bytes{};
+  std::vector<std::uint64_t> captured_checkpoint_ids;
   std::size_t disk_queued_bytes{};
   double disk_enqueue_ms{};
   cache::ResourceSnapshot ledger;
@@ -39,6 +41,10 @@ inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
   result["captured_capacity_bytes"] = value.captured_bytes;
   result["borrowed_capacity_bytes"] = value.borrowed_capacity_bytes;
   result["copied_payload_bytes"] = value.copied_payload_bytes;
+  auto checkpoints = json::Value::array();
+  for (const auto id : value.captured_checkpoint_ids)
+    checkpoints.push_back(id);
+  result["captured_checkpoint_ids"] = std::move(checkpoints);
   auto spill = json::Value::object();
   spill["idle_bytes"] = value.spill.idle_bytes;
   spill["foreground_bytes"] = value.spill.foreground_bytes;

@@ -29,7 +29,10 @@ def chat(url, model, messages):
                               usage["gufo"]["prefill_tokens"])
     assert cached + prefill == total, usage
     message = result["choices"][0]["message"]
-    return body, result, {"total": total, "cached": cached, "prefill": prefill,
+    component = usage["gufo"].get("component_cache", {})
+    provenance = ({"checkpoint_ids": component["captured_checkpoint_ids"]}
+                  if "captured_checkpoint_ids" in component else {})
+    return body, result, {**provenance, "total": total, "cached": cached, "prefill": prefill,
                           "disk": usage["gufo"]["cache_disk_hit"],
                           "text": message["content"].strip(),
                           "sha256": continuation.digest(result)}
@@ -84,14 +87,39 @@ def disk_events(log):
     return events
 
 
-def check_disk_spacing(grown_log, restored_log, report):
+def check_disk_spacing(grown_log, restored_log, report, restored_report=None):
     """Judge both drained server logs against the recorded conversation."""
     turns = [turn["measured"]["total"] for turn in report["turns"]]
     first, last = turns[0], turns[-1]
     owned = range(first - 64, last + 64)
-    stored = sorted(tokens for action, reason, tokens in disk_events(grown_log)
+    # A prior request's asynchronous write can complete after the fixture's
+    # log offset. Attribute component publications to the checkpoints actually
+    # captured by these HTTP requests, even if foreign token counts match.
+    checkpoint_ids = None
+    if all("checkpoint_ids" in turn["measured"] for turn in report["turns"]):
+        checkpoint_ids = {id_ for turn in report["turns"]
+                          for id_ in turn["measured"]["checkpoint_ids"]}
+
+    def events(log, ids):
+        if ids is None:
+            return disk_events(log)
+        result = []
+        for line in log.splitlines():
+            fields = dict(re.findall(r"(?:^|\s)(\w+)=([^\s]+)", line))
+            if fields.get("schema") != "component-cache-v1" or \
+                    int(fields.get("checkpoint_id", "0")) not in ids:
+                continue
+            if fields.get("event") == "published":
+                result.append(("stored", "saved", int(fields["tokens"])))
+            elif fields.get("event") == "persistence_refused" and \
+                    fields.get("reason") == "min_step":
+                result.append(("skipped", "min_step", int(fields["tokens"])))
+        return result
+
+    grown = events(grown_log, checkpoint_ids)
+    stored = sorted(tokens for action, reason, tokens in grown
                     if (action, reason) == ("stored", "saved") and tokens in owned)
-    skipped = [tokens for action, reason, tokens in disk_events(grown_log)
+    skipped = [tokens for action, reason, tokens in grown
                if reason == "min_step" and tokens in owned]
     summary = {"stored_tokens": stored, "min_step_skips": len(skipped)}
     if not stored or stored[0] > first:
@@ -105,7 +133,13 @@ def check_disk_spacing(grown_log, restored_log, report):
         raise ValueError(f"short turns were not skipped: {summary}")
     # The branch point is a learned shared boundary within one step of the
     # first checkpoint. It must be written despite the spacing gate.
-    branched = [tokens for action, reason, tokens in disk_events(restored_log)
+    restored_ids = None
+    if checkpoint_ids is not None:
+        if restored_report is None:
+            raise ValueError("missing restored checkpoint provenance")
+        restored_ids = {id_ for phase in ("replayed", "branched")
+                        for id_ in restored_report[phase]["checkpoint_ids"]}
+    branched = [tokens for action, reason, tokens in events(restored_log, restored_ids)
                 if (action, reason) == ("stored", "saved")
                 and stored[0] < tokens < stored[0] + MIN_STEP]
     if not branched:

@@ -41,7 +41,7 @@ from cache_compaction import check_cache_compaction
 from cache_workloads import check_cache_transforms, check_cache_pressure
 from cache_messages_loop import check_cache_messages_loop
 from system_injection import check_system_injection
-from cache_growth import check_cache_growth
+from cache_growth import check_cache_growth, check_unchanged_retry, log_offset
 from messages_tools import check_messages_tools
 from messages_count_tokens import check_messages_count_tokens, check_messages_image_counts
 from cache_depth import check_cache_depth
@@ -1732,7 +1732,7 @@ def check_tool_edges(client, model, checks, sampling_preset=None):
                 assert "text" not in order[order.index("tool"):], result
 
 
-def check_state_edges(client, model, checks, speculative, vision=False):
+def check_state_edges(client, model, checks, speculative, vision=False, server_log=None):
     """Mode proof and request-local grammar state across limits, errors and reuse."""
     common = dict(model=model, temperature=0, top_p=1, seed=91,
                   extra_body={"presence_penalty": 0, "frequency_penalty": 0,
@@ -1831,6 +1831,7 @@ def check_state_edges(client, model, checks, speculative, vision=False):
         literal + " ZZSTOP"), result
     checks["quoted_call_argument_complete"] = result
 
+    replay_start = log_offset(server_log)
     completed = chat_result(client, request, True)
     assert completed["finish"] == "tool_calls" and len(completed["tools"]) == 1, completed
     assert json.loads(completed["tools"][0]["function"]["arguments"]) == {
@@ -1847,9 +1848,12 @@ def check_state_edges(client, model, checks, speculative, vision=False):
         checks["cyclic_schema_rejected"] = {"status": 400, "code": error.code}
     else:
         raise AssertionError("nonproductive schema cycle was accepted")
+    replay_end = log_offset(server_log)
     replay = chat_result(client, request)
     assert replay["tools"][0]["function"] == completed["tools"][0]["function"], replay
-    assert replay["usage"]["gufo"]["prefill_tokens"] == 0, replay
+    check_unchanged_retry("schema_error_did_not_poison_cache", replay,
+                          replay["usage"]["gufo"]["prefill_tokens"],
+                          server_log, replay_start, replay_end)
     checks["schema_error_did_not_poison_cache"] = replay
 
 
@@ -2318,7 +2322,7 @@ def check_stream_start(client, model, checks, width, context):
     check(client, model, checks, width, context)
 
 
-def check_prompt_progress(client, model, checks, width, vision, allow_missing):
+def check_prompt_progress(client, model, checks, width, vision, allow_missing, server_log=None):
     from progress import ProgressTrace
     from server_metrics import ServerMetrics, assert_accounting
 
@@ -2345,12 +2349,16 @@ def check_prompt_progress(client, model, checks, width, vision, allow_missing):
         return result["text"], result["reasoning"], result["tools"], result["finish"]
 
     off = chat("progress_cold_off", common, False)
+    replay_start = log_offset(server_log)
     on = chat("progress_cold_on", common)
     assert signature(off) == signature(on), (off, on)
     cached = {**common, "extra_body": {**common["extra_body"], "cache_prompt": True}}
+    replay_end = log_offset(server_log)
     replay = chat("progress_cached", cached)
     assert signature(on) == signature(replay)
-    assert replay["usage"]["gufo"]["prefill_tokens"] == 0
+    check_unchanged_retry("progress_cached", replay,
+                          replay["usage"]["gufo"]["prefill_tokens"],
+                          server_log, replay_start, replay_end)
     sampled = {**cached, "temperature": .7, "top_p": .85, "presence_penalty": .3,
                "frequency_penalty": .2, "extra_body": {
                    **cached["extra_body"], "presence_penalty": .3, "top_k": 20, "min_p": .05}}
@@ -2446,7 +2454,7 @@ def check_prompt_progress(client, model, checks, width, vision, allow_missing):
     assert replay["usage"]["gufo"]["prefill_tokens"] == 0
 
 
-def check_server_metrics(client, model, checks, width, context, speculative):
+def check_server_metrics(client, model, checks, width, context, speculative, server_log=None):
     from server_metrics import (ServerMetrics, assert_accounting, PROMPT, GENERATED,
                                 PROCESSING, DEFERRED, PROMPT_SPEED, GENERATED_SPEED,
                                 KV_USAGE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, assert_slots)
@@ -2483,13 +2491,20 @@ def check_server_metrics(client, model, checks, width, context, speculative):
                         "slots": slots(idle=True)}
         return result, rows, after
 
+    replay_start = log_offset(server_log)
     first, _, cold = completed(
         "metrics_chat_cold", lambda: chat_result(client, common))
+    replay_end = log_offset(server_log)
     replay, rows, warm = completed(
         "metrics_chat_stream_cached", lambda: chat_result(client, common, True))
     assert first["text"] == replay["text"] and first["reasoning"] == replay["reasoning"]
-    assert rows[0]["metrics"]["cached_tokens"] > 0 and rows[0]["metrics"]["prefill_tokens"] == 0
-    assert warm[PROMPT_SPEED] == cold[PROMPT_SPEED] > 0
+    assert rows[0]["metrics"]["cached_tokens"] > 0
+    prefilled = rows[0]["metrics"]["prefill_tokens"]
+    check_unchanged_retry("metrics_chat_stream_cached", replay, prefilled,
+                          server_log, replay_start, replay_end)
+    assert warm[PROMPT_SPEED] > 0 and cold[PROMPT_SPEED] > 0
+    if not prefilled:
+        assert warm[PROMPT_SPEED] == cold[PROMPT_SPEED]
     assert warm[GENERATED_SPEED] > 0
 
     for streaming in (False, True):
@@ -2736,13 +2751,13 @@ def main():
             "tool-reasoning": lambda: check_tool_reasoning(
                 client, args.model, checks, chat_result, args.sampling_preset),
             "reasoning-separator": lambda: check_reasoning_separator(
-                client, args.model, checks, chat_result),
+                client, args.model, checks, chat_result, args.server_log),
             "tool-streaming": lambda: check_tool_streaming(client, args.model, checks, chat_result),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
             "tool-history": lambda: check_tool_history(
-                client, args.model, checks, chat_result, args.vision, image_content),
+                client, args.model, checks, chat_result, args.vision, image_content, args.server_log),
             "messages-tools": lambda: check_messages_tools(
                 client, args.model, checks, chat_result),
             "tool-untyped": lambda: check_untyped_agent_tools(
@@ -2757,9 +2772,9 @@ def main():
                 client, args.model, checks, chat_result,
                 image_content("red") if args.vision else None),
             "tool-schema-edges": lambda: check_tool_schema_edges(
-                client, args.model, checks, chat_result, args.vision, image_content),
+                client, args.model, checks, chat_result, args.vision, image_content, args.server_log),
             "state-edges": lambda: check_state_edges(
-                client, args.model, checks, args.speculative, args.vision),
+                client, args.model, checks, args.speculative, args.vision, args.server_log),
             "sampling-defaults": lambda: check_sampling_defaults(
                 client, args.model, checks, args.sampling_preset, args.sampling_overrides,
                 args.vision, args.server_thinking),
@@ -2770,13 +2785,13 @@ def main():
                 client, args.model, checks, args.context, args.vision),
             "progress": lambda: check_prompt_progress(
                 client, args.model, checks, args.concurrency, args.vision,
-                args.allow_missing_progress),
+                args.allow_missing_progress, args.server_log),
             "stream-start": lambda: check_stream_start(
                 client, args.model, checks, args.concurrency, args.context),
             "prefill-scheduling": lambda: check_prefill_scheduling(
                 client, args.model, checks, chat_result, args.concurrency, args.context),
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency,
-                                                     args.context, args.speculative),
+                                                     args.context, args.speculative, args.server_log),
             "cache-edits": lambda: check_cache_edits(
                 client, args.model, checks, chat_result, args.server_log),
             "cache-growth": lambda: check_cache_growth(

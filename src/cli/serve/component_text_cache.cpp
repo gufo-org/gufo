@@ -367,6 +367,7 @@ struct ComponentTextCache::Impl {
                   "cache",
                   "schema=component-cache-v1 event=published tokens=" +
                       std::to_string(description->Manifest().tokens.size()) +
+                      " checkpoint_id=" + std::to_string(id.value) +
                       " payload_bytes=" +
                       std::to_string(PayloadBytes(description->Manifest())));
             }
@@ -450,10 +451,12 @@ struct ComponentTextCache::Impl {
                                           queued->manifest.input))
             prior = std::max(prior, queued->manifest.tokens.size());
         if (prior && checkpoint->Boundary() - prior < disk_step) {
-          Logger::Info("cache",
-                       "schema=component-cache-v1 event=persistence_refused "
-                       "reason=min_step tokens=" +
-                           std::to_string(checkpoint->Boundary()));
+          Logger::Info(
+              "cache",
+              "schema=component-cache-v1 event=persistence_refused "
+              "reason=min_step tokens=" +
+                  std::to_string(checkpoint->Boundary()) +
+                  " checkpoint_id=" + std::to_string(checkpoint->Id().value));
           return 0;
         }
       }
@@ -819,6 +822,7 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
         });
   }
   ++metrics.captures;
+  metrics.captured_checkpoint_ids.push_back(durable->manifest.checkpoint.value);
   auto snapshot = std::make_unique<ComponentSnapshot>();
   snapshot->bytes = entry->history->NewPayloadBytes(positions);
   snapshot->durable = std::move(durable);
@@ -1382,6 +1386,7 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
     }
   }
   ++request.metrics.captures;
+  request.metrics.captured_checkpoint_ids.push_back(checkpoint->Id().value);
   request.metrics.captured_bytes += captured_capacity;
   request.metrics.borrowed_capacity_bytes += borrowed_capacity;
   request.metrics.copied_payload_bytes += copied_payload;

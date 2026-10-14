@@ -448,7 +448,7 @@ def main():
                             "--url", base_url, "--model", model, "--prefix-repetitions", "16",
                             "--output", str(output / (label + ".json")), *extra]):
                         ready_to_restore.append(label)
-                # Last, so the drained log after this offset belongs to it.
+                # Retain the window; checkpoint IDs identify fixture-owned writes.
                 spacing_offset = (output / "server.log").stat().st_size
                 spacing = run("disk-spacing", "cache_disk_spacing.py", [
                     "--url", base_url, "--model", model,
@@ -474,7 +474,8 @@ def main():
                 grown_log = log.read()
             report["disk_spacing"] = check_disk_spacing(
                 grown_log, (output / "server-restarted.log").read_text(),
-                json.loads((output / "disk-spacing.json").read_text())[0])
+                json.loads((output / "disk-spacing.json").read_text())[0],
+                json.loads((output / "disk-spacing-disk.json").read_text())[0])
     except Exception as error:
         report["error"] = str(error)
         report["traceback"] = traceback.format_exc()

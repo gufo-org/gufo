@@ -6,9 +6,10 @@ import json
 import sys
 
 from tool_reasoning import response_result
+from cache_growth import check_unchanged_retry, log_offset
 
 
-def check_tool_history(client, model, checks, chat_result, vision, image_content):
+def check_tool_history(client, model, checks, chat_result, vision, image_content, server_log=None):
     """Old names do not declare new tools or prevent the next turn (#357)."""
     import openai
 
@@ -50,6 +51,8 @@ def check_tool_history(client, model, checks, chat_result, vision, image_content
                      temperature=0, extra_body={"seed": 41}, reasoning={"effort": "none"},
                      max_output_tokens=128, store=False)
 
+    replay_start = log_offset(server_log)
+
     def verify(name, result, cached=False):
         checks[name] = result
         print(f"CHECK {name}", file=sys.stderr, flush=True)
@@ -62,11 +65,13 @@ def check_tool_history(client, model, checks, chat_result, vision, image_content
             usage = result["usage"]
             details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
             total = usage.get("input_tokens", usage.get("prompt_tokens"))
-            assert details["cached_tokens"] >= total - 1, result
+            check_unchanged_retry(name, result, total - details["cached_tokens"],
+                                  server_log, replay_start, replay_end)
         return function
 
     for endpoint, request in (("chat", chat), ("responses", responses)):
         generate = chat_result if endpoint == "chat" else response_result
+        replay_start = log_offset(server_log)
         first = verify(f"history_{endpoint}", generate(client, request, False))
         # The same name remains invalid as a NEW declaration.
         invalid = deepcopy(request)
@@ -87,6 +92,7 @@ def check_tool_history(client, model, checks, chat_result, vision, image_content
             raise AssertionError("empty historical tool name was accepted")
         except openai.BadRequestError as error:
             assert error.status_code == 400, error
+        replay_end = log_offset(server_log)
         again = verify(f"history_{endpoint}_retry", generate(client, request, True), cached=True)
         assert again == first, (again, first)
 
@@ -96,11 +102,13 @@ def check_tool_history(client, model, checks, chat_result, vision, image_content
     limited = chat_result(client, {**chat, "max_completion_tokens": 2}, True)
     checks["history_limit"] = limited
     assert limited["finish"] == "length" and not limited["tools"], limited
+    replay_end = log_offset(server_log)
     verify("history_resume", chat_result(client, chat, True), cached=True)
     with ThreadPoolExecutor(2) as pool:
         peers = list(pool.map(lambda _: chat_result(
             client, {**chat, "temperature": .7, "top_p": .8, "presence_penalty": .3}, True),
             range(2)))
+    replay_end = log_offset(server_log)
     for i, result in enumerate(peers):
         verify(f"history_sampled_peer_{i}", result, cached=True)
 
@@ -479,7 +487,7 @@ def check_union_continuation(client, model, checks, chat_result):
               "Replaced one block.")
 
 
-def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content):
+def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content, server_log=None):
     """Admitted arguments preserve JSON types; invalid schemas cannot dead-end."""
     wildcard = {"type": "object", "properties": {"value": {"type": "string"}},
                 "required": ["value"], "patternProperties": {"^x_": {}}}
@@ -556,12 +564,16 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
                          tools=[{"type": "function", **t["function"]} for t in tools])
         declared = {"wildcard": {"value"}, "conditional": {"kind"},
                     "dependency": {"kind"}}.get(name)
+        replay_start = log_offset(server_log)
         save(name + "_chat", chat_result(client, chat, bool(index % 2)), arguments, declared)
         save(name + "_responses", response_result(
             client, responses, not bool(index % 2)), arguments, declared)
         if name == "uri":
+            replay_end = log_offset(server_log)
             repeated = save(name + "_cached", chat_result(client, chat, True), arguments)
-            assert repeated["usage"]["gufo"]["prefill_tokens"] == 0, repeated
+            check_unchanged_retry("schema_edges_uri_cached", repeated,
+                                  repeated["usage"]["gufo"]["prefill_tokens"],
+                                  server_log, replay_start, replay_end)
             for label, update, finish in (
                     ("limit", {"max_completion_tokens": 2}, "length"),
                     ("stop", {"stop": "example.org"}, "stop")):
