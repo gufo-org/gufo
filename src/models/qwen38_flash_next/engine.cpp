@@ -1098,16 +1098,21 @@ bool Session::FinishDecode(const DecodeRequest& request,
   stats_.drafted += k - 1;
   stats_.accepted += keep - 1;
   stats_.small_head_cycles += pending.draft_subset;
-  // Copied proposals trail the MTP drafts; the length controller sees only
-  // the MTP part.
+  // Copied proposals trail the MTP drafts. After a fully accepted MTP part,
+  // the length controller also counts the accepted copied tokens as accepted
+  // drafts: a copy that ended drafting early would otherwise make a perfect
+  // chain look short, and the controller would probe shallower afterwards. A
+  // rejected copy says nothing about the MTP head, so it is not a failure.
   const std::uint32_t mtp_drafts = k - 1 - pending.lookup;
   const std::uint32_t mtp_accepted = std::min(keep - 1, mtp_drafts);
   stats_.lookup += pending.lookup;
   stats_.lookup_accepted += keep - 1 - mtp_accepted;
+  const bool mtp_all = mtp_accepted == mtp_drafts;
+  const std::uint32_t observed = mtp_all ? keep - 1 : mtp_accepted;
   // A target stop ends the request; it does not classify the remaining
   // proposals as failed predictions.
-  draft_length_.Observe(mtp_accepted, result->stop ? mtp_accepted : mtp_drafts,
-                        base);
+  draft_length_.Observe(observed,
+                        result->stop || mtp_all ? observed : mtp_drafts, base);
 
   // The next call knows the next sampled anchor. Defer draft catch-up until
   // then, retaining this session's target hidden rows across interleaving.
