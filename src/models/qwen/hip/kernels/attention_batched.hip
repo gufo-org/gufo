@@ -274,7 +274,7 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
                                 num_kv_heads, head_dim, stream);
     if (out_context_bf16 != nullptr)
       LaunchFloatToBfloat16(out_context, out_context_bf16,
-                             batch_size * num_heads * head_dim, stream);
+                            batch_size * num_heads * head_dim, stream);
     return;
   }
   const dim3 attn_grid(num_heads, static_cast<unsigned int>(batch_size));
