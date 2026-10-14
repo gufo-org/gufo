@@ -430,7 +430,8 @@ count under 128; only larger explicit budgets can reach the record limit. The st
 `disk_capacity_bytes`.
 
 Flash-Next prepares a bounded two-segment reserve before readiness and can
-prepare the next segment when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative
+prepare the next segment before a prefill with at least 512 tokens remaining
+or when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative
 growth; a capture still commits any backing it needs.
 
 A step of about 1 GiB took 56–58 ms on the capturing thread while the host had

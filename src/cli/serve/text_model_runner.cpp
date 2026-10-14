@@ -1336,6 +1336,11 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
         "text runner prefill budget must be at least one token");
   }
 
+  // Start pinning before prefill, while at least 512 tokens of GPU work
+  // remain. Cached decode and short final tails must not start registration.
+  if (impl_->prompt.size() - impl_->prefill_offset >= 512)
+    impl_->lease.PreparePrefill();
+
   // Stop exactly on the next shared-prefix boundary so it can be persisted.
   // Direct callers join any capture before mutating its borrowed state.
   impl_->CapturePromptSnapshot();

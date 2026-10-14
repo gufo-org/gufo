@@ -298,7 +298,12 @@ void CommittedBackingPool::GrowAhead(std::size_t segments) {
   const auto free_bytes =
       state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
           cache::ResourceCategory::kBackingFree)];
-  if (free_bytes >= state_->segment_blocks * state_->block_bytes)
+  const auto target_blocks =
+      segments >= 1 + (state_->capacity - 1) / state_->segment_blocks
+          ? state_->capacity
+          : segments * state_->segment_blocks;
+  const auto target_bytes = target_blocks * state_->block_bytes;
+  if (free_bytes >= target_bytes)
     return;
   const std::lock_guard lock(ahead_mutex_);
   if (state_->growing_ahead.exchange(true))
@@ -306,10 +311,11 @@ void CommittedBackingPool::GrowAhead(std::size_t segments) {
   if (ahead_.joinable())
     ahead_.join();
   try {
-    ahead_ = std::jthread([state = state_, committed, segments] {
+    ahead_ = std::jthread([state = state_, committed, target_bytes] {
       try {
         auto seen = committed;
-        for (std::size_t i = 0; i < segments; ++i) {
+        while (state->ledger->Snapshot().bytes[static_cast<std::size_t>(
+                   cache::ResourceCategory::kBackingFree)] < target_bytes) {
           if (!state->Grow(seen))
             break;
           seen = state->committed.load(std::memory_order_acquire);

@@ -1,5 +1,16 @@
 # Qwen3.8 Flash-Next quality
 
+**PR #596 repairs the complete functional inventory:** all 48 registered
+Flash-Next suites pass in AR and MTP at `9985ff0a`, including all four deferred
+cache workloads (122 expanded checks, 3,334 requests). The final allocation
+follow-up retains the same harness and logical cache fixes and receives focused
+continuation/cache revalidation. Existing numerical tolerances are unchanged;
+CPU regressions, GPU continuation/snapshot checks and actual Pi tool/image
+results are retained in [the qualification evidence](artifacts/functional-fixes.json).
+This is functional regression evidence, not upstream model/conversion accuracy
+or a clean global timing gate. The unreproduced five-minute MTP snapshot stall
+and individual timing flags remain visible.
+
 **PR #571's wave-owned prefill weights retain byte-exact logits:**
 99,328,000 F32 values after a 34,159-token code/prose prompt and 400 fixed
 continuation steps, batch 4096, capacity 65536, match the original PR control

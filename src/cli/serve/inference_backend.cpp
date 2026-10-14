@@ -2566,6 +2566,7 @@ public:
       backing->pool->GrowAhead(2);
       backing->pool->WaitForGrowth();
     };
+    result->prepare_prefill = [backing] { backing->pool->GrowAhead(2); };
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
       return backing->streams.TryAcquire();

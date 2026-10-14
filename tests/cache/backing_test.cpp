@@ -451,6 +451,9 @@ void OnDemandBacking() {
   hip::CommittedBackingPool startup(
       startup_ledger,
       {ahead_capacity, block_bytes, headroom, 2 * block_bytes, {}});
+  startup.GrowAhead();
+  startup.WaitForGrowth();
+  assert(startup.BlockCount() == 2);
   startup.GrowAhead(2);
   startup.WaitForGrowth();
   assert(startup.BlockCount() == 4 && startup.PageCommitAllocations() == 2);

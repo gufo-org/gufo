@@ -36,6 +36,8 @@ struct ComponentCacheResources {
   cache::StreamLease stream;
   std::function<ComponentCaptureBuffer(const cache::PayloadRequest&)> allocate;
   cache::StagingAllocator staging;
+  // Prepare on-demand backing while a substantial prefill can hide pinning.
+  std::function<void()> prepare_prefill;
   // Optional initialization step after slots allocate. The provider leaves
   // payload backing uncommitted until serving selects the post-slot budget.
   std::function<void(std::size_t)> commit_backing;
@@ -78,6 +80,7 @@ public:
     [[nodiscard]] std::size_t CaptureBytes() const;
     [[nodiscard]] std::size_t CaptureBytes(std::size_t boundary) const;
     [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Capture();
+    void PreparePrefill();
     [[nodiscard]] ComponentCacheMetrics Metrics() const;
     [[nodiscard]] std::vector<std::size_t> PlannedCaptures(
         std::size_t stable) const;
@@ -147,6 +150,7 @@ public:
   [[nodiscard]] std::size_t CaptureBytes() const;
   [[nodiscard]] std::size_t CaptureBytes(std::size_t boundary) const;
   [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Capture();
+  void PreparePrefill();
   [[nodiscard]] std::optional<ComponentCacheMetrics> Metrics() const;
   [[nodiscard]] std::vector<std::size_t> PlannedCaptures(
       std::size_t stable) const;

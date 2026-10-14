@@ -403,6 +403,45 @@ void CancelledPrefillKeepsCompletedSteps() {
     resend.Invalidate();
   }
 }
+void BackingPreparationAvoidsCachedDecodeAndShortTails() {
+  class PrepareRunner final : public Runner {
+  public:
+    mutable std::size_t preparations{};
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->prepare_prefill = [this] { ++preparations; };
+      return resources;
+    }
+    TextPrefillStep Prefill(TextRunnerState& state,
+                            std::span<const TextRunnerToken> prompt,
+                            std::size_t offset,
+                            std::size_t budget) const override {
+      if (prompt.size() == 600 && offset == 0)
+        assert(preparations == 1);
+      return Runner::Prefill(state, prompt, offset, budget);
+    }
+  };
+  auto runner = std::make_shared<PrepareRunner>();
+  TextRunnerPool pool(runner, 1);
+  auto short_request = pool.Acquire(std::vector<TextRunnerToken>(256, 7));
+  (void)short_request.Prefill(512);
+  (void)short_request.Commit();
+  assert(runner->preparations == 0);
+  const std::vector<TextRunnerToken> prompt(600, 8);
+  auto request = pool.Acquire(prompt);
+  assert(!request.Prefill(512).decode_ready);
+  assert(runner->preparations == 1);
+  assert(request.Prefill(512).decode_ready);
+  assert(runner->preparations == 1);
+  (void)request.Commit();
+  auto cached = pool.Acquire(prompt);
+  assert(cached.cached_prompt_tokens() == prompt.size());
+  assert(cached.Prefill(512).consumed_tokens == 0);
+  assert(runner->preparations == 1);
+  cached.Invalidate();
+}
+
 void CompletedCancelledPromptGetsARetrySnapshot() {
   auto runner = std::make_shared<Runner>();
   runner->partial = true;
@@ -1081,6 +1120,7 @@ void UnbackedDeepRowsSurviveDiskRestart() {
 int main() {
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
+  BackingPreparationAvoidsCachedDecodeAndShortTails();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
