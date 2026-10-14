@@ -51,6 +51,15 @@ def check_tool_history(client, model, checks, chat_result, vision, image_content
                      temperature=0, extra_body={"seed": 41}, reasoning={"effort": "none"},
                      max_output_tokens=128, store=False)
 
+    # Agent histories retain the prefix before the final user turn, which
+    # clients may replace. Count that turn plus its assistant opening with an
+    # independent, history-free request instead of widening a fixed allowance.
+    from messages_count_tokens import assert_count_response
+    suffix = client.post("/messages/count_tokens", body={
+        "model": model, "thinking": {"type": "disabled"},
+        "messages": [messages[-1]]}, cast_to=object)
+    checks["history_mutable_suffix_count"] = suffix
+    mutable_suffix_tokens = assert_count_response(suffix)
     replay_start = log_offset(server_log)
 
     def verify(name, result, cached=False):
@@ -66,7 +75,8 @@ def check_tool_history(client, model, checks, chat_result, vision, image_content
             details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
             total = usage.get("input_tokens", usage.get("prompt_tokens"))
             check_unchanged_retry(name, result, total - details["cached_tokens"],
-                                  server_log, replay_start, replay_end)
+                                  server_log, replay_start, replay_end,
+                                  mutable_suffix_tokens=mutable_suffix_tokens)
         return function
 
     for endpoint, request in (("chat", chat), ("responses", responses)):

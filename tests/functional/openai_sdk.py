@@ -2444,14 +2444,18 @@ def check_prompt_progress(client, model, checks, width, vision, allow_missing, s
             raise AssertionError("did not reach cancellation point")
     assert received or allow_missing
     checks["progress_cancel"] = {"progress_received": received}
+    replay_start = log_offset(server_log)
     recovered = chat("progress_cancel_resume", {
         **interrupted, "max_completion_tokens": 8,
         "extra_body": {**interrupted["extra_body"], "cache_prompt": True}})
+    replay_end = log_offset(server_log)
     replay = chat("progress_cancel_replay", {
         **interrupted, "max_completion_tokens": 8,
         "extra_body": {**interrupted["extra_body"], "cache_prompt": True}})
     assert signature(recovered) == signature(replay)
-    assert replay["usage"]["gufo"]["prefill_tokens"] == 0
+    check_unchanged_retry("progress_cancel_replay", replay,
+                          replay["usage"]["gufo"]["prefill_tokens"],
+                          server_log, replay_start, replay_end)
 
 
 def check_server_metrics(client, model, checks, width, context, speculative, server_log=None):
@@ -2505,6 +2509,8 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
     assert warm[PROMPT_SPEED] > 0 and cold[PROMPT_SPEED] > 0
     if not prefilled:
         assert warm[PROMPT_SPEED] == cold[PROMPT_SPEED]
+    else:
+        assert warm[PROMPT_SPEED] == replay["usage"]["prompt_tokens_per_second"]
     assert warm[GENERATED_SPEED] > 0
 
     for streaming in (False, True):

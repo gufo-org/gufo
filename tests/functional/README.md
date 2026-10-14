@@ -323,7 +323,9 @@ Unchanged retries in `cache-growth`, `cache-depth`, reasoning-separator,
 tool-history, schema edges, state edges, progress and metrics must prefill nothing,
 unless the runner's server log shows that memory pressure refused the retry
 copy; the retry may then prefill only the assistant opening after the stable
-boundary. Generic capture failures do not qualify for this exception.
+boundary. In agent histories the mutable suffix includes the final user turn;
+`tool-history` bounds it with an independent count-tokens request rather than
+extra slack. Generic capture failures do not qualify for this exception.
 Component disk-spacing checks correlate drained publication logs with the
 checkpoint IDs captured by their own requests, excluding delayed writes from
 earlier suites even when their token counts match.

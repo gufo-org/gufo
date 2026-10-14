@@ -444,7 +444,10 @@ def check_literal_history(client, model, checks, chat_result, image=None):
             assert done["text"].strip() == "DONE" and not done["tools"], done
             details = done["usage"].get("input_tokens_details",
                                        done["usage"].get("prompt_tokens_details"))
-            assert details["cached_tokens"] == first["usage"]["total_tokens"], (
+            # A repeated suite can retain a deeper checkpoint containing the
+            # tool result too. Require the entire generated call to survive;
+            # additional reuse of this identical history is valid.
+            assert details["cached_tokens"] >= first["usage"]["total_tokens"], (
                 label, "literal tool data invalidated unchanged history", first, done)
             print(f"CHECK {label}", file=sys.stderr, flush=True)
 

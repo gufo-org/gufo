@@ -441,6 +441,28 @@ class FunctionalRunnerTest(unittest.TestCase):
             with self.subTest(label), self.assertRaises(ValueError):
                 check_disk_spacing(grown_log, restored_log, report)
 
+    def test_pressure_retry_respects_the_counted_mutable_user_suffix(self):
+        from cache_growth import check_unchanged_retry
+        retry = {"usage": {"prompt_tokens": 1346}}
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "server.log"
+            log.write_text("schema=component-cache-v1 event=capture_refused "
+                           "reason=byte_capacity tokens=1346\n")
+            end = log.stat().st_size
+            check_unchanged_retry("history", retry, 24, log, 0, end,
+                                  mutable_suffix_tokens=24)
+            # The generic assistant opening remains bounded at 16; an extra
+            # lost history token cannot hide behind the independently counted 24.
+            for actual, bound in ((24, 16), (25, 24)):
+                with self.subTest(prefill=actual, bound=bound), self.assertRaises(AssertionError):
+                    check_unchanged_retry("history", retry, actual, log, 0, end,
+                                          mutable_suffix_tokens=bound)
+            log.write_text("schema=component-cache-v1 event=capture_failed "
+                           "reason=unknown tokens=1346\n")
+            with self.assertRaises(AssertionError):
+                check_unchanged_retry("history", retry, 24, log, 0, log.stat().st_size,
+                                      mutable_suffix_tokens=24)
+
     def test_disk_spacing_uses_capture_ids_for_delayed_publications(self):
         totals = (2400, 2680, 2960, 3240, 3520, 5960, 6240)
         report = {"turns": [{"measured": {"total": total, "checkpoint_ids": [i + 1]}}

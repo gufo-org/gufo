@@ -764,6 +764,11 @@ struct TextRunnerPool::Request::Impl {
     }
     if (lease.restored_from_disk() && prefill_offset == prompt.size())
       count = prompt.size();
+    // Cancellation can leave a component live frontier past the stable
+    // checkpoint. That earlier state cannot be captured here; keep its
+    // immutable fallback and freeze the complete prompt before decoding.
+    if (lease.component() && prefill_offset > count)
+      count = prompt.size();
     snapshot_tokens.reserve(prompt.size());
     snapshot_tokens.assign(prompt.begin(), prompt.begin() + count);
     // A live continuation can already be beyond the desired snapshot point.

@@ -403,6 +403,36 @@ void CancelledPrefillKeepsCompletedSteps() {
     resend.Invalidate();
   }
 }
+void CompletedCancelledPromptGetsARetrySnapshot() {
+  auto runner = std::make_shared<Runner>();
+  runner->partial = true;
+  runner->in_pass = true;
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  {
+    auto cancelled = pool.Acquire(prompt, {}, {}, {}, true, 35);
+    assert(cancelled.Prefill(64).decode_ready);
+    // Cancellation keeps the live prompt at 40 and an immutable fallback at
+    // 35, without starting a complete-prompt capture.
+    (void)cancelled.Cancel();
+  }
+  auto resumed = pool.Acquire(prompt, {}, {}, {}, true, 35);
+  assert(resumed.cached_prompt_tokens() == prompt.size());
+  const auto expected = Generate(resumed);
+  assert(resumed.Commit().snapshot_bytes > 0);
+  // Replace the execution slot so only immutable checkpoints can serve retry.
+  auto unrelated = prompt;
+  unrelated.front() = 999;
+  auto replacement = pool.Acquire(unrelated, {}, {}, {}, true, 35);
+  Prefill(replacement);
+  (void)replacement.Commit();
+  auto replay = pool.Acquire(prompt, {}, {}, {}, true, 35);
+  assert(replay.cached_prompt_tokens() == prompt.size());
+  assert(Generate(replay) == expected);
+  replay.Invalidate();
+}
+
 void ColdAssignmentKeepsLiveFrontiers() {
   // No checkpoints are borrowed, so every slot has completed preservation.
   // Requests that cannot continue a frontier take the empty slot, then the
@@ -1051,6 +1081,7 @@ void UnbackedDeepRowsSurviveDiskRestart() {
 int main() {
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
+  CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
   RestoreFromBusyBorrowedSource();

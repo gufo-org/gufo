@@ -2502,7 +2502,7 @@ public:
       // so the edge of each one strands space a ~140 MB private state cannot
       // use; equal segments of about 1 GiB, and at least two private states,
       // keep that small. Growth commits on the capture thread when needed:
-      // pinning ahead can hold HIP's launch lock during a decoder's next
+      // pinning ahead can delay kernel launches during a decoder's next
       // step. Growth stops early when the host would keep less than its
       // reserve.
       std::size_t largest = 0;
@@ -2594,7 +2594,7 @@ public:
       if (!block)
         throw cache::ResourceExhausted();
       // Grow only when capture needs another segment. Speculative pinning on
-      // a background thread can hold the HIP launch lock into the next decode
+      // a background thread can delay kernel launches in the next decode
       // step even when the current capture already has sufficient backing.
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
       return ComponentCaptureBuffer{

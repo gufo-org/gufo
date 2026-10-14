@@ -28,16 +28,20 @@ def retry_copy_refused(server_log, start, end, prompt_tokens):
     return legacy is not None or component is not None
 
 
-def check_unchanged_retry(label, retry, prefilled, server_log, start, end):
+def check_unchanged_retry(label, retry, prefilled, server_log, start, end, *,
+                          mutable_suffix_tokens=ASSISTANT_OPENING_TOKENS):
     """An unchanged retry reuses the complete prompt. Under memory pressure the
     previous request's complete-prompt copy is refused rather than displace
     another conversation's last checkpoint (docs/KV-CACHE.md); the retry then
-    restores the stable boundary and prefills only the assistant opening."""
+    restores the stable boundary and prefills only the mutable suffix. For
+    agent histories that includes the last user turn; its bound is measured
+    separately with the count-tokens endpoint, not padded with extra slack."""
     if not prefilled:
         return
     usage = retry["usage"]
     total = usage.get("prompt_tokens", usage.get("input_tokens"))
-    assert prefilled <= ASSISTANT_OPENING_TOKENS and \
+    assert type(mutable_suffix_tokens) is int and mutable_suffix_tokens > 0
+    assert prefilled <= mutable_suffix_tokens and \
         retry_copy_refused(server_log, start, end, total), retry
     print(f"NOTE {label}: retry copy refused under memory pressure; "
           f"prefilled {prefilled} of {total} tokens", file=sys.stderr, flush=True)
