@@ -28,6 +28,9 @@ public:
   explicit InputIdentity(Rows token_count = 0, Identity complete = {},
                          std::vector<InputPrefix> prefixes = {});
   [[nodiscard]] std::span<const std::uint8_t> At(Rows count) const;
+  // The identity of the first `count` tokens, keeping the boundaries within
+  // them. Counts past the prompt (generated tokens) keep the complete identity.
+  [[nodiscard]] InputIdentity Through(Rows count) const;
   [[nodiscard]] Rows TokenCount() const { return token_count_; }
   [[nodiscard]] std::span<const std::uint8_t> Complete() const {
     return complete_;

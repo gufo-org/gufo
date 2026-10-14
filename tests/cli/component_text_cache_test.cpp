@@ -65,6 +65,10 @@ public:
   std::unique_ptr<TextRunnerState> CreateState() const override {
     throw std::logic_error("legacy state must never be constructed");
   }
+  // Image prompts carry their cache identity in the context.
+  void SetPromptContext(
+      TextRunnerState&,
+      std::shared_ptr<const TextPromptContext>) const override {}
   std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
       cache::ResourceLedger& ledger, std::size_t) const override {
     struct Block {
@@ -345,6 +349,40 @@ void ColdAssignmentPrefersPreservedSlot() {
   assert(metrics.spill.foreground_bytes == 0);
   assert(metrics.ledger.reserved_bytes[static_cast<unsigned>(
              cache::ResourceCategory::kBackingAssigned)] == 320);
+}
+void ImageAfterCachedTextPrefixCaptures() {
+  // #584: a request that appends the first image after a cached text-only
+  // prefix restores that prefix, whose input identity is empty, and must
+  // still capture past the image.
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  std::vector<TextRunnerToken> text(40);
+  std::iota(text.begin(), text.end(), 10);
+  {
+    auto root = cache.Acquire(text, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(root->state());
+    runner->adapter->Append(state.slot, text, text);
+    assert(root->TryReserveSnapshot(root->CaptureBytes(), text.size(), false,
+                                    SnapshotPurpose::kContinuation, {}));
+    std::shared_ptr<const TextRunnerSnapshot> snapshot = root->Capture();
+    assert(root->PublishSnapshot(text, snapshot, false));
+  }
+  auto image = text;
+  image.insert(image.end(), {50, 51, 52, 53});
+  image.insert(image.end(), 16, 7);
+  image.insert(image.end(), {60, 61});
+  auto context = std::make_shared<TextPromptContext>();
+  context->cache_identity = {1, 2, 3};
+  context->cache_prefixes.push_back({44, {}});
+  auto lease = cache.Acquire(image, {}, context, true, 0, true);
+  assert(lease->cached_tokens() == text.size());
+  auto& state = dynamic_cast<State&>(lease->state());
+  const auto suffix = std::span(image).subspan(text.size());
+  runner->adapter->Append(state.slot, suffix, suffix);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), image.size(), false,
+                                   SnapshotPurpose::kContinuation, {}));
+  std::shared_ptr<const TextRunnerSnapshot> snapshot = lease->Capture();
+  assert(lease->PublishSnapshot(image, snapshot, false));
 }
 void CancelledPrefillKeepsCompletedSteps() {
   // A prefill cancelled between steps keeps the frontier it reached as a live
@@ -970,6 +1008,7 @@ int main() {
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
   RestoreFromBusyBorrowedSource();
+  ImageAfterCachedTextPrefixCaptures();
   ColdAssignmentPrefersPreservedSlot();
   ColdAssignmentKeepsLiveFrontiers();
   ReuseAndBranches();

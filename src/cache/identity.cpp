@@ -37,6 +37,18 @@ std::span<const std::uint8_t> InputIdentity::At(Rows count) const {
   return PrefixInputIdentity(complete_, prefixes_, count);
 }
 
+InputIdentity InputIdentity::Through(Rows count) const {
+  const auto complete =
+      PrefixInputIdentity(complete_, prefixes_, std::min(count, token_count_));
+  std::vector<InputPrefix> prefixes;
+  for (const auto& prefix : prefixes_) {
+    if (prefix.token_count <= count)
+      prefixes.push_back(prefix);
+  }
+  return InputIdentity(count, {complete.begin(), complete.end()},
+                       std::move(prefixes));
+}
+
 bool InputIdentity::Matches(const InputIdentity& other, Rows count) const {
   return std::ranges::equal(At(count), other.At(count));
 }

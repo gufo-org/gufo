@@ -388,6 +388,16 @@ void InputBoundaries() {
   Throws<std::invalid_argument>(
       [&] { (void)InputIdentity(8, image_a, {{5, {}}, {3, image_a}}); });
   Throws<std::invalid_argument>([&] { (void)first.At(9); });
+  // A capture keeps the identities of the boundaries it inherits (#584).
+  for (const Rows count : {0U, 3U, 4U, 5U, 6U, 8U}) {
+    const auto through = appended.Through(count);
+    assert(through.TokenCount() == count);
+    for (Rows i = 0; i <= count; ++i)
+      assert(through.Matches(appended, i));
+  }
+  const auto generated = appended.Through(10);
+  assert(std::ranges::equal(generated.At(10), appended.At(8)));
+  assert(generated.Matches(appended, 4) && generated.Matches(appended, 6));
 }
 }  // namespace
 int main() {

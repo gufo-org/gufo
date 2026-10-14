@@ -1263,8 +1263,7 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
       std::size_t next_buffer = 0;
       checkpoint = request.entry->history->Capture(
           {request.capture_tokens,
-           cache::InputIdentity(request.capture_tokens.size(), retain.input),
-           positions,
+           request.input.Through(request.capture_tokens.size()), positions,
            request.purpose == SnapshotPurpose::kHistory
                ? cache::CheckpointPurpose::kGrid
            : request.purpose == SnapshotPurpose::kBranchPoint
