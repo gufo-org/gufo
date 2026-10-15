@@ -1,8 +1,12 @@
+#include <sys/mman.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +27,7 @@ namespace {
 std::atomic<std::size_t> allocations{};
 std::atomic<std::size_t> host_allocations{};
 std::atomic<std::size_t> max_piece{};
+std::atomic<bool> fail_populate{};
 bool fail_copy{}, fail_record{}, fail_query{}, fail_wait{}, fail_alloc{};
 int copies_before_failure{};
 thread_local bool fail_stream_new{}, observe_allocation_cleanup{};
@@ -47,6 +52,14 @@ void operator delete(void* memory, std::size_t) noexcept {
 // Observe the actual HIP allocation/creation entry points, not just a counter
 // maintained by the implementation. Host bookkeeping is permitted on requests.
 extern "C" {
+int __real_madvise(void*, std::size_t, int);
+int __wrap_madvise(void* data, std::size_t bytes, int advice) {
+  if (advice == MADV_POPULATE_WRITE && fail_populate.exchange(false)) {
+    errno = ENOMEM;
+    return -1;
+  }
+  return __real_madvise(data, bytes, advice);
+}
 hipError_t __real_hipHostMalloc(void**, std::size_t, unsigned);
 hipError_t __wrap_hipHostMalloc(void** p, std::size_t n, unsigned flags) {
   ++allocations;
@@ -656,6 +669,60 @@ void AcquireAllocationFailure() {
   first.reset();
   assert(pool.TryAcquire());
 }
+void CheckBasePages(std::span<std::byte> data) {
+  constexpr std::size_t huge = 2ULL << 20;
+  assert(data.size() >= 2 * huge);
+  std::vector<unsigned char> resident(data.size() / 4096);
+  assert(mincore(data.data(), data.size(), resident.data()) == 0);
+  assert(std::all_of(resident.begin(), resident.end(),
+                     [](unsigned char page) { return page & 1; }));
+  assert(std::all_of(data.begin(), data.end(),
+                     [](std::byte b) { return b == std::byte{}; }));
+  const auto start = reinterpret_cast<std::uintptr_t>(data.data());
+  const auto aligned = (start + huge - 1) & ~(huge - 1);
+  assert(aligned + huge <= start + data.size());
+  errno = 0;
+  const auto collapse =
+      madvise(reinterpret_cast<void*>(aligned), huge, MADV_COLLAPSE);
+  const auto error = errno;
+  if (collapse != -1 || error != EINVAL)
+    std::fprintf(stderr, "cache backing collapse returned %d, errno %d\n",
+                 collapse, error);
+  assert(collapse == -1 && error == EINVAL);
+}
+void BasePageBacking() {
+  constexpr std::size_t bytes = 8ULL << 20;
+  cache::ResourceLedger ledger(Limits(bytes + metadata));
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+    auto block = pool.TryAcquire(Category::kPrivateState);
+    assert(block);
+    auto memory = block->Bytes();
+    CheckBasePages(memory);
+    void* device = nullptr;
+    assert(hipHostGetDevicePointer(&device, memory.data(), 0) == hipSuccess);
+    assert(hipMemset(device, 0x5a, memory.size()) == hipSuccess);
+    assert(hipDeviceSynchronize() == hipSuccess);
+    assert(std::all_of(memory.begin(), memory.end(),
+                       [](std::byte b) { return b == std::byte{0x5a}; }));
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
+void PopulationFailure() {
+  for (const std::size_t bytes : {8ULL << 20, 128ULL << 20}) {
+    cache::ResourceLedger ledger(Limits(bytes + metadata));
+    const auto before = allocations.load();
+    // One worker fails while its peers may still populate other ranges.
+    // No mapping may be registered or escape, and all charges must unwind.
+    fail_populate = true;
+    Throws<std::runtime_error>([&] {
+      hip::CommittedBackingPool pool(ledger,
+                                     {bytes + metadata, bytes, metadata});
+    });
+    assert(!fail_populate && allocations == before);
+    assert(ledger.Snapshot().total_bytes == 0);
+  }
+}
 void LargeBacking() {
   constexpr std::size_t block = 64ULL << 20;
   constexpr std::size_t bytes = 2 * block;
@@ -665,8 +732,7 @@ void LargeBacking() {
     auto backing = pool.TryAcquire(Category::kPrivateState, bytes);
     assert(backing && backing->Bytes().size() == bytes);
     auto memory = backing->Bytes();
-    assert(std::all_of(memory.begin(), memory.end(),
-                       [](std::byte b) { return b == std::byte{}; }));
+    CheckBasePages(memory);
     void* device = nullptr;
     assert(hipMalloc(&device, bytes) == hipSuccess);
     assert(hipMemset(device, 0x5b, bytes) == hipSuccess);
@@ -697,6 +763,8 @@ int main() {
   PendingStreams();
   AcquireAllocationFailure();
   BorrowedPoolLifetime();
+  BasePageBacking();
+  PopulationFailure();
   LargeBacking();
   std::puts(
       "PASS: precommitted and on-demand blocks, accounting, racing "

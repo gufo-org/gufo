@@ -4,6 +4,7 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(cache_backing_test PRIVATE gufo_cache_hip gufo_cache_fake)
   target_compile_options(cache_backing_test PRIVATE -UNDEBUG)
   target_link_options(cache_backing_test PRIVATE
+    -Wl,--wrap=madvise
     -Wl,--wrap=hipHostMalloc -Wl,--wrap=hipMalloc
     -Wl,--wrap=hipHostRegister -Wl,--wrap=hipMallocManaged
     -Wl,--wrap=hipStreamCreateWithFlags -Wl,--wrap=hipEventCreateWithFlags

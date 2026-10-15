@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -14,17 +15,27 @@
 namespace gufo::hip {
 namespace detail {
 namespace {
-// Ordinary anonymous pages, then pinned. hipHostMalloc asks the kernel for
-// high-order pages: when most host RAM belongs to the GPU, that compacts
-// memory and stalls running kernels for up to seconds per GiB. Zero-filled.
+// Ordinary anonymous pages, then registered with the GPU. Opt out of THP
+// before population: later huge-page promotion can invalidate GPU mappings.
 void* CommitPages(std::size_t bytes) {
   constexpr std::size_t page = 4096;
   const auto workers = std::min<std::size_t>(4, bytes / (32ULL << 20));
-  void* data = mmap(
-      nullptr, bytes, PROT_READ | PROT_WRITE,
-      MAP_PRIVATE | MAP_ANONYMOUS | (workers < 2 ? MAP_POPULATE : 0), -1, 0);
+  void* data = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (data == MAP_FAILED)
     return nullptr;
+  // Kernels built without THP reject this advice with EINVAL; their pages
+  // cannot be promoted. All other failures must release the mapping.
+  if (madvise(data, bytes, MADV_NOHUGEPAGE) != 0 && errno != EINVAL) {
+    munmap(data, bytes);
+    return nullptr;
+  }
+  std::atomic<bool> populated{true};
+  const auto populate = [&](std::size_t begin, std::size_t end) {
+    if (madvise(static_cast<std::byte*>(data) + begin, end - begin,
+                MADV_POPULATE_WRITE) != 0)
+      populated.store(false, std::memory_order_relaxed);
+  };
   if (workers >= 2) {
     // Large serial page faults can hold up inference even when growth runs
     // on a background thread. Populate disjoint ordinary-page ranges, then
@@ -34,19 +45,20 @@ void* CommitPages(std::size_t bytes) {
     for (std::size_t i = 0; i + 1 < workers; ++i) {
       const auto end = (bytes / page) * (i + 1) / workers * page;
       try {
-        faults[i] = std::jthread([data, begin = next, end] {
-          (void)madvise(static_cast<std::byte*>(data) + begin, end - begin,
-                        MADV_POPULATE_WRITE);
-        });
+        faults[i] = std::jthread(populate, next, end);
       } catch (...) {
         // Thread exhaustion falls back to populating the remaining range
-        // here. Registration still validates/pins every page afterwards.
+        // here. Every started worker still joins before registration.
         break;
       }
       next = end;
     }
-    (void)madvise(static_cast<std::byte*>(data) + next, bytes - next,
-                  MADV_POPULATE_WRITE);
+    populate(next, bytes);
+  } else
+    populate(0, bytes);
+  if (!populated.load(std::memory_order_relaxed)) {
+    munmap(data, bytes);
+    return nullptr;
   }
   if (hipHostRegister(data, bytes, hipHostRegisterDefault) != hipSuccess) {
     munmap(data, bytes);
