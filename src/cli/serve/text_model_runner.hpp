@@ -184,6 +184,9 @@ struct TextDecodeStep {
   std::size_t draft_rounds{0};
   std::size_t draft_tokens{0};
   std::size_t draft_accepted_tokens{0};
+  /// The share of the draft taken from the token history, not the predictor.
+  std::size_t suffix_draft_tokens{0};
+  std::size_t suffix_accepted_tokens{0};
   bool stop{false};
   /// Execution actually used for this request, including model-owned subgroup
   /// dispatch. A runner's advertised maximum is not evidence of batching.
