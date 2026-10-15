@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <map>
+#include <set>
 #include <stdexcept>
 
 #include "tests/cache/fake_adapter.hpp"
@@ -747,6 +748,112 @@ void InvalidInventoriesPreserveReplacement() {
     assert(f.log.events.back().ledger_bytes == before);
   }
 }
+void SharedChunkAccounting() {
+  for (const std::size_t chunks : {0, 1, 7, 64, 2048}) {
+    constexpr std::size_t capacity = 64ULL << 20;
+    ResourceLedger ledger({capacity, capacity, 0, capacity});
+    constexpr std::array<ComponentDescriptor, 3> components{
+        {{{1}, 1, ComponentKind::kAppendRows, 8, 4, 0},
+         {{2}, 1, ComponentKind::kAppendRows, 16, 8, 0},
+         {{3}, 1, ComponentKind::kPrivateState, 0, 0, 32}}};
+    PrefixIndex index(ledger);
+    index.Register({1}, components);
+    Log log;
+    RetentionPolicy policy(ledger, index, &log);
+    const auto capture = [&](ExecutionHistory& history,
+                             const std::vector<Token>& tokens) {
+      const auto end = tokens.size();
+      return history.Capture(
+          {tokens,
+           InputIdentity(end),
+           {{{1}, end}, {{2}, end}, {{3}, end}},
+           CheckpointPurpose::kPrompt,
+           3},
+          [&](const PayloadRequest& r) {
+            auto pool = ledger.Reserve(ResourceCategory::kBackingFree, r.bytes)
+                            .Convert();
+            return Payload::Committed(pool.ReserveBacking(r.category).Convert(),
+                                      std::make_shared<int>(0));
+          });
+    };
+    std::vector<std::shared_ptr<const Checkpoint>> retained;
+    const auto check = [&] {
+      // Independent exhaustive oracle: count each actual chunk identity once,
+      // without relying on lineage, prefix length or record insertion order.
+      std::set<std::uint64_t> seen;
+      std::size_t expected = 0;
+      for (const auto& checkpoint : retained)
+        for (const auto& c : checkpoint->Components()) {
+          if (c.private_state)
+            expected += c.private_state->Bytes();
+          if (c.tail)
+            expected += c.tail->Bytes();
+          for (const auto& chunk : c.chunks)
+            if (seen.insert(chunk.Id().value).second)
+              expected += chunk.Storage().Bytes();
+        }
+      assert(policy.RetainedPayloadBytes() == expected);
+      assert(log.events.back().retained_payload_bytes == expected);
+    };
+    const auto admit = [&](std::shared_ptr<const Checkpoint> checkpoint) {
+      assert(policy.Admit({checkpoint->Tokens(), {1}, {}},
+                          [&] { return checkpoint; }));
+      retained.push_back(std::move(checkpoint));
+      check();
+    };
+    auto history = ExecutionHistory::Cold(ledger, components, {1});
+    std::vector<Token> tokens(chunks * 4 + 1, 1);
+    const auto root = capture(history, tokens);
+    tokens.resize(tokens.size() + chunks * 4 + 3, 2);
+    const auto branch = capture(history, tokens);
+    admit(branch);  // Deepest first; shorter shared prefixes arrive later.
+    admit(root);
+    auto sibling = ExecutionHistory::Restored(ledger, *root);
+    tokens.assign(root->Tokens().begin(), root->Tokens().end());
+    tokens.resize(tokens.size() + chunks * 8 + 5, 3);
+    admit(capture(sibling, tokens));
+    auto child = ExecutionHistory::Restored(ledger, *branch);
+    tokens.assign(branch->Tokens().begin(), branch->Tokens().end());
+    tokens.resize(tokens.size() + chunks * 4 + 7, 4);
+    admit(capture(child, tokens));
+    auto unrelated = ExecutionHistory::Cold(ledger, components, {1});
+    tokens.assign(chunks * 4 + 11, 9);
+    admit(capture(unrelated, tokens));
+    // Removing records changes which owner accounts for shared bytes. External
+    // checkpoint handles keep storage alive, but no longer count as retained.
+    for (const std::size_t remove : {1, 0, 1, 0, 0}) {
+      const auto id = retained[remove]->Id();
+      retained.erase(retained.begin() + remove);
+      policy.Remove(id);
+      check();
+      if (!retained.empty()) {
+        policy.Touch(retained.back()->Id());
+        check();
+      }
+    }
+    assert(policy.Size() == 0);
+    if (chunks == 0) {
+      // A reader may retain only a late chunk after the source checkpoint
+      // disappears. Two restored histories then recreate earlier chunks
+      // independently while still sharing that late chunk.
+      auto source = ExecutionHistory::Cold(ledger, components, {1});
+      tokens.assign(8, 41);
+      auto original = capture(source, tokens);
+      auto left = ExecutionHistory::Restored(ledger, *original);
+      auto right = ExecutionHistory::Restored(ledger, *original);
+      auto late = original->Components()[0].chunks.back().PinReader();
+      original.reset();
+      tokens.push_back(42);
+      admit(capture(left, tokens));
+      tokens.back() = 43;
+      admit(capture(right, tokens));
+      assert(retained[0]->Components()[0].chunks[0].Id() !=
+             retained[1]->Components()[0].chunks[0].Id());
+      assert(retained[0]->Components()[0].chunks[1].Id() ==
+             retained[1]->Components()[0].chunks[1].Id());
+    }
+  }
+}
 void RealCapacityAndUniqueAdmission() {
   ResourceLedger ledger({32768, 32768, 0, 0});
   {
@@ -844,5 +951,6 @@ int main() {
   CapacityAndSharing();
   ImpossibleAndAllocationFailure();
   RealCapacityAndUniqueAdmission();
+  SharedChunkAccounting();
   InvalidInventoriesPreserveReplacement();
 }

@@ -265,7 +265,7 @@ std::size_t RetentionPolicy::UniqueBytes(std::size_t i) const {
         continue;
       std::size_t n = 0;
       while (n < c.chunks.size() && n < peers[k].chunks.size() &&
-             peers[k].chunks[n].Id() == c.chunks[n].Id())
+             c.chunks[n].SameChunk(peers[k].chunks[n]))
         ++n;
       shared = std::max(shared, n);
     }
@@ -561,7 +561,7 @@ std::size_t RetentionPolicy::RetainedPayloadBytes() const noexcept {
         bool shared = false;
         for (std::size_t peer = 0; peer < peer_count && !shared; ++peer)
           shared = peers[peer]->chunks.size() > n &&
-                   peers[peer]->chunks[n].Id() == c.chunks[n].Id();
+                   peers[peer]->chunks[n].SameChunk(c.chunks[n]);
         if (!shared)
           bytes += c.chunks[n].Storage().Bytes();
       }

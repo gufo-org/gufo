@@ -108,6 +108,11 @@ public:
   ChunkReference& operator=(ChunkReference&&) noexcept;
   ~ChunkReference();
   [[nodiscard]] ChunkId Id() const;
+  // Live references identify the same immutable chunk by its owner address,
+  // regardless of reader/checkpoint/persistence kind. No ownership changes.
+  [[nodiscard]] bool SameChunk(const ChunkReference& other) const noexcept {
+    return chunk_ == other.chunk_;
+  }
   [[nodiscard]] LineageId Lineage() const;
   [[nodiscard]] ComponentId Component() const;
   [[nodiscard]] Rows First() const;
