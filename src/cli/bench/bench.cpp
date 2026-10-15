@@ -1119,7 +1119,10 @@ int RunQwen38FlashNextBenchmark(
           std::cerr << "Qwen3.8-Flash-Next tg depth=" << depth
                     << " cycles=" << stats.cycles
                     << " drafted=" << stats.drafted
-                    << " accepted=" << stats.accepted << " output_sha256="
+                    << " accepted=" << stats.accepted
+                    << " lookup_proposed=" << stats.lookup
+                    << " lookup_accepted=" << stats.lookup_accepted
+                    << " output_sha256="
                     << crypto::Sha256Hex(
                            std::span(reinterpret_cast<const std::uint8_t*>(
                                          generated.data()),

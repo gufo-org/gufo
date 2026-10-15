@@ -53,6 +53,7 @@ struct SessionSnapshotHeader {
   std::uint32_t image_identity_bytes;
   std::uint32_t policy_concurrency;
   std::uint32_t reserved{0};
+  PromptLookup::State lookup;
 };
 static_assert(std::is_trivially_copyable_v<SessionSnapshotHeader>);
 
@@ -283,6 +284,7 @@ void Session::Reset() {
   valid_ = false;
   session_->Reset();
   tokens_.clear();
+  lookup_.Clear();
   hidden_base_ = 0;
   draft_length_.Reset();
   model_->executor_->MtpRewind(*session_, 0);
@@ -376,6 +378,7 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshotImpl(
       .draft_policy = draft_length_.State(),
       .image_identity_bytes = static_cast<std::uint32_t>(identity.size()),
       .policy_concurrency = model_->DecodeConcurrency(),
+      .lookup = lookup_.Save(),
   };
   std::memcpy(out, &header, sizeof(header));
   out += sizeof(header);
@@ -451,6 +454,10 @@ bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
     AssignError(error_msg, "session snapshot draft policy is invalid");
     return false;
   }
+  if (!PromptLookup::Valid(header.lookup, header.token_count)) {
+    AssignError(error_msg, "session snapshot prompt-lookup state is invalid");
+    return false;
+  }
   const std::uint8_t* in = payload.data() + sizeof(header);
   std::vector<std::uint8_t> image_identity(in,
                                            in + header.image_identity_bytes);
@@ -492,6 +499,7 @@ bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
     return false;
   }
   tokens_ = std::move(tokens);
+  lookup_.Restore(header.lookup);
   logits_ = std::move(logits);
   hidden_base_ = info.position - info.hidden_rows;
   draft_token_ = 0;
@@ -714,6 +722,7 @@ bool Session::SyncImpl(std::span<const std::int32_t> prompt,
     AssignError(error_msg, "prompt exceeds the session context");
     return false;
   }
+  lookup_.BeginRequest();
   if (!valid_)
     Reset();
   // Recurrent state cannot be rewound, so any divergence restarts the
@@ -768,6 +777,12 @@ struct Session::PendingDecode {
   std::uint64_t draft_rng{0};
   MtpCandidateLogits candidates;
   std::int32_t draft{0};
+  /// Trailing chain tokens copied by prompt lookup (after the MTP drafts).
+  std::uint32_t lookup{0};
+  /// Committed index the copied tokens were taken from.
+  std::size_t lookup_start{0};
+  /// The copy passed only the shorter resume gate.
+  bool lookup_resumed{false};
 };
 
 void Session::AppendDraft(PendingDecode& pending) {
@@ -778,6 +793,38 @@ void Session::AppendDraft(PendingDecode& pending) {
     pending.draft_sampler->Accept(pending.proposals.back().token);
   }
   pending.chain.push_back(pending.draft);
+}
+
+bool Session::AppendLookup(PendingDecode& pending, std::size_t cap) {
+  if (pending.chain.size() >= cap) {
+    return false;
+  }
+  const auto match = lookup_.Find(tokens_, pending.chain);
+  if (match.length == 0) {
+    return false;
+  }
+  const std::size_t count =
+      std::min(cap - pending.chain.size(), tokens_.size() - match.start);
+  for (std::size_t i = 0; i < count; ++i) {
+    const std::int32_t token = tokens_[match.start + i];
+    pending.chain.push_back(token);
+    if (pending.sampled) {
+      // A point-mass proposal: accepted with the target's p(token), and a
+      // rejection resamples from the target with the token removed.
+      MtpProposal proposal;
+      proposal.ids[0] = static_cast<sampling::TokenId>(token);
+      proposal.probabilities[0] = 1.0F;
+      proposal.size = 1;
+      proposal.token = proposal.ids[0];
+      proposal.probability = 1.0F;
+      pending.proposals.push_back(proposal);
+    }
+  }
+  pending.lookup = static_cast<std::uint32_t>(count);
+  pending.lookup_start = match.start;
+  pending.lookup_resumed = match.resumed;
+  pending.width = pending.chain.size();
+  return count != 0;
 }
 
 bool Session::PrepareDecode(const DecodeRequest& request,
@@ -854,9 +901,24 @@ bool Session::PrepareDecode(const DecodeRequest& request,
       verify_logits_.size() < exec.max_speculative() * model_->VocabSize()) {
     verify_logits_.resize(exec.max_speculative() * model_->VocabSize());
   }
+  // Prompt lookup (single session): after each MTP draft, a long enough
+  // match in the committed tokens fills the rest of the chain up to the
+  // verify width and ends drafting. Only a one-session model uses it: with
+  // more sessions, whether a request decodes alone depends on scheduler
+  // timing, and seeded output must not. A request's first step copies
+  // nothing (see PromptLookup).
+  const bool lookup_step = lookup_.Step();
+  const bool lookup = model_->options_.decode_concurrency == 1 &&
+                      !batch_drafts && !defer_head && lookup_step;
+  if (lookup) {
+    lookup_.Extend(tokens_);
+  }
   if (!defer_head) {
     while (pending->chain.size() < width) {
       AppendDraft(*pending);
+      if (lookup && AppendLookup(*pending, cap)) {
+        break;
+      }
       if (pending->chain.size() < width &&
           !exec.MtpForward(
               *session_, std::span<const std::int32_t>(&pending->draft, 1), -1,
@@ -981,9 +1043,25 @@ bool Session::FinishDecode(const DecodeRequest& request,
   stats_.cycles += 1;
   stats_.drafted += k - 1;
   stats_.accepted += keep - 1;
+  // Copied proposals trail the MTP drafts. After a fully accepted MTP part,
+  // the length controller also counts the accepted copied tokens as accepted
+  // drafts: a copy that ended drafting early would otherwise make a perfect
+  // chain look short, and the controller would probe shallower afterwards. A
+  // rejected copy says nothing about the MTP head, so it is not a failure.
+  const std::uint32_t mtp_drafts = k - 1 - pending.lookup;
+  const std::uint32_t mtp_accepted = std::min(keep - 1, mtp_drafts);
+  stats_.lookup += pending.lookup;
+  stats_.lookup_accepted += keep - 1 - mtp_accepted;
+  if (pending.lookup != 0) {
+    lookup_.Observe(pending.lookup_start, pending.lookup,
+                    keep - 1 - mtp_accepted, pending.lookup_resumed);
+  }
+  const bool mtp_all = mtp_accepted == mtp_drafts;
+  const std::uint32_t observed = mtp_all ? keep - 1 : mtp_accepted;
   // A target stop ends the request; it does not classify the remaining
   // proposals as failed predictions.
-  draft_length_.Observe(keep - 1, result->stop ? keep - 1 : k - 1, base);
+  draft_length_.Observe(observed,
+                        result->stop || mtp_all ? observed : mtp_drafts, base);
 
   // The next call knows the next sampled anchor. Defer draft catch-up until
   // then, retaining this session's target hidden rows across interleaving.

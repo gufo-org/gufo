@@ -33,11 +33,12 @@ bool Pool(ContinuationPart part) {
          part == ContinuationPart::kDraftPooledKeys;
 }
 struct Metadata {
-  std::uint32_t version{1};
+  std::uint32_t version{2};
   std::uint32_t target{}, draft{}, blocks{}, draft_blocks{}, hidden_base{};
   std::uint32_t residual_valid{}, image_bytes{};
   NgramHistory ngram;
   MtpLengthState policy;
+  PromptLookup::State lookup;
   std::array<std::uint8_t, 32> image{};
 };
 static_assert(sizeof(Metadata) <= kContinuationMetadataBytes);
@@ -420,6 +421,8 @@ void ContinuationAdapter::BeginRestore(
   state.metadata.fill(std::byte{});
   state.restoring = true;
   state.session->valid_ = false;
+  // The restore rewrites the tokens in place, not through RestoreSnapshot.
+  state.session->lookup_.Clear();
   state.session->tokens_.resize(target);
   state.session->logits_.resize(model_->VocabSize());
 }
@@ -560,6 +563,7 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     metadata.residual_valid = native.mtp_.residual_valid;
     metadata.ngram = native.ngram_;
     metadata.policy = session.draft_length_.State();
+    metadata.lookup = session.lookup_.Save();
     const auto identity = session.ImageIdentity(native.position_);
     metadata.image_bytes = static_cast<std::uint32_t>(identity.size());
     if (!identity.empty()) {
@@ -784,13 +788,14 @@ bool ContinuationAdapter::Validate(
   auto& session = *state.session;
   auto& native = *session.session_;
   auto policy = session.draft_length_;
-  if (metadata.version != 1 || metadata.hidden_base > metadata.target ||
+  if (metadata.version != 2 || metadata.hidden_base > metadata.target ||
       metadata.target - metadata.hidden_base >
           model_->executor_->max_speculative() ||
       metadata.residual_valid > 1 ||
       (metadata.residual_valid && !metadata.draft) ||
       (metadata.image_bytes != 0 && metadata.image_bytes != 32) ||
-      !policy.Restore(metadata.policy))
+      !policy.Restore(metadata.policy) ||
+      !PromptLookup::Valid(metadata.lookup, metadata.target))
     return refuse();
   try {
     if (layout_.Positions(metadata.target, metadata.draft, metadata.blocks,
@@ -824,6 +829,7 @@ bool ContinuationAdapter::Validate(
   native.snapshot_lineage_.reset();
   session.hidden_base_ = metadata.hidden_base;
   session.draft_length_ = policy;
+  session.lookup_.Restore(metadata.lookup);
   session.draft_token_ = 0;
   session.stats_ = {};
   session.valid_ = true;

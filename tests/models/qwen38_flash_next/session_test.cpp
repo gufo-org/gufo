@@ -1048,7 +1048,8 @@ int main(int argc, char** argv) {
         argv[2],
         {.max_context = execution_only ? execution_tokens + 16 : 6145,
          .mtp_model_path = argv[4],
-         .max_draft_tokens = 7},
+         .max_draft_tokens = 7,
+         .decode_concurrency = 8},
         &error);
     Require(model != nullptr, error);
     if (execution_only) {
@@ -1245,10 +1246,12 @@ int main(int argc, char** argv) {
     // Recreate device weights, executor and plans. Reverse request order so
     // a previous shape cannot silently determine this request's arithmetic.
     model.reset();
-    model = qfn::Model::Load(
-        argv[2],
-        {.max_context = 6145, .mtp_model_path = argv[4], .max_draft_tokens = 7},
-        &error);
+    model = qfn::Model::Load(argv[2],
+                             {.max_context = 6145,
+                              .mtp_model_path = argv[4],
+                              .max_draft_tokens = 7,
+                              .decode_concurrency = 8},
+                             &error);
     Require(model != nullptr, error);
     std::reverse(replays.begin(), replays.end());
     for (const auto& saved : replays) {

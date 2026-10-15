@@ -1502,6 +1502,17 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
       << "llamacpp:spec_decode_num_accepted_tokens_total "
       << detail::TotalDraftAcceptedTokens().load(std::memory_order_relaxed)
       << "\n"
+      << "# HELP gufo_spec_lookup_tokens_total Total prompt-lookup copies "
+         "proposed\n"
+      << "# TYPE gufo_spec_lookup_tokens_total counter\n"
+      << "gufo_spec_lookup_tokens_total "
+      << detail::TotalLookupTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP gufo_spec_lookup_accepted_tokens_total Total prompt-lookup "
+         "copies accepted\n"
+      << "# TYPE gufo_spec_lookup_accepted_tokens_total counter\n"
+      << "gufo_spec_lookup_accepted_tokens_total "
+      << detail::TotalLookupAcceptedTokens().load(std::memory_order_relaxed)
+      << "\n"
       << "# HELP llamacpp:prompt_tokens_seconds Prompt processing speed in "
          "tokens per second\n"
       << "# TYPE llamacpp:prompt_tokens_seconds gauge\n"

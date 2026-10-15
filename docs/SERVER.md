@@ -1074,7 +1074,9 @@ reads the result, it adds the request's cached prompt tokens
 speculative verification rounds (`llamacpp:spec_decode_num_drafts_total`),
 proposed and accepted draft tokens
 (`llamacpp:spec_decode_num_draft_tokens_total`,
-`llamacpp:spec_decode_num_accepted_tokens_total`), and raises
+`llamacpp:spec_decode_num_accepted_tokens_total`), proposed and accepted
+prompt-lookup copies (`gufo_spec_lookup_tokens_total`,
+`gufo_spec_lookup_accepted_tokens_total`), and raises
 `llamacpp:n_tokens_max` to its prompt plus generated tokens. A request counts
 even if the client disconnects before reading it; requests that fail in the
 scheduler, such as on a deadline or a runner error, add none of these.
