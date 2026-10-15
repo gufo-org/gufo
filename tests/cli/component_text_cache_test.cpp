@@ -375,6 +375,8 @@ void ImageAfterCachedTextPrefixCaptures() {
   auto context = std::make_shared<TextPromptContext>();
   context->cache_identity = {1, 2, 3};
   context->cache_prefixes.push_back({44, {}});
+  auto cold_runner = std::make_shared<Runner>();
+  ComponentTextCache cold_cache(cold_runner, 1, 1 << 22, {});
   std::size_t inherited = text.size();
   for (const bool second_image : {false, true}) {
     if (second_image) {
@@ -405,8 +407,20 @@ void ImageAfterCachedTextPrefixCaptures() {
     auto retry = cache.Acquire(retry_prompt, {}, context, true, 0, true);
     assert(retry->cached_tokens() == image.size());
     assert(retry->restored_snapshot_bytes() > 0);
-    const auto& restored = dynamic_cast<State&>(retry->state());
+    auto& restored = dynamic_cast<State&>(retry->state());
     assert(runner->adapter->RecurrentHash(restored.slot) == hash);
+    // Executing the suffix reads target/draft rows too; private state alone
+    // cannot establish that those payloads were restored correctly.
+    const auto tail = std::span(retry_prompt).last(1);
+    runner->adapter->Append(state.slot, tail, tail);
+    runner->adapter->Append(restored.slot, tail, tail);
+    auto cold = cold_cache.Acquire(retry_prompt, {}, context, true, 0, true);
+    assert(cold->cached_tokens() == 0);
+    auto& cold_state = dynamic_cast<State&>(cold->state());
+    cold_runner->adapter->Append(cold_state.slot, retry_prompt, retry_prompt);
+    const auto expected = cold_runner->adapter->RecurrentHash(cold_state.slot);
+    assert(runner->adapter->RecurrentHash(state.slot) == expected);
+    assert(runner->adapter->RecurrentHash(restored.slot) == expected);
     inherited = image.size();
   }
 
