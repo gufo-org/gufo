@@ -4,6 +4,14 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.15.1](https://github.com/gufo-org/gufo/compare/v0.15.0...v0.15.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* **cache:** avoid artifact hashing for RAM-only Flash-Next ([#602](https://github.com/gufo-org/gufo/issues/602)) ([43ad9a5](https://github.com/gufo-org/gufo/commit/43ad9a5a7133dabc820a66a825247331c5503bf4))
+* **cache:** repair flash-next functional cache regressions ([#596](https://github.com/gufo-org/gufo/issues/596)) ([ec69aa3](https://github.com/gufo-org/gufo/commit/ec69aa328ea78f00090c42a78034cc012eae151e))
+
 ## [0.15.0](https://github.com/gufo-org/gufo/compare/v0.14.0...v0.15.0) (2026-10-13)
 
 
