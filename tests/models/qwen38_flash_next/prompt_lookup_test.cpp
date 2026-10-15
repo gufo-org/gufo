@@ -174,7 +174,7 @@ void CheckResume() {
   lookup.Observe(20, 8, 0, false);
   const auto state = lookup.Save();
   Require(Lookup::Valid(state, committed.size()) && !Lookup::Valid(state, 19) &&
-              !Lookup::Valid({.resume = 20, .reserved = 1}, committed.size()),
+              !Lookup::Valid({.resume = 20, .first_step = 2}, committed.size()),
           "prompt-lookup state validation");
   Lookup restored;
   restored.Restore(state);
@@ -189,6 +189,23 @@ void CheckResume() {
   lookup.Extend(committed);
   Require(lookup.Find(committed, tail).length == 0,
           "Clear() kept the last copy");
+}
+
+// A request's first decode step copies nothing; the flag survives a
+// snapshot taken before that step and not one taken after it.
+void CheckFirstStep() {
+  Lookup lookup;
+  lookup.BeginRequest();
+  const auto before = lookup.Save();
+  Require(!lookup.Step() && lookup.Step() && lookup.Step(),
+          "only a request's first step skips copying");
+  Lookup restored;
+  restored.Restore(before);
+  Require(!restored.Step(), "a restored first step copied");
+  restored.Restore(lookup.Save());
+  Require(restored.Step(), "a restored later step skipped copying");
+  restored.BeginRequest();
+  Require(!restored.Step(), "a new request copied on its first step");
 }
 
 void CheckNoMatch() {
@@ -209,6 +226,7 @@ int main() {
     CheckRewrite();
     CheckProposalInsideCommitted();
     CheckResume();
+    CheckFirstStep();
     CheckNoMatch();
   } catch (const std::exception& e) {
     std::cerr << "prompt_lookup_test: " << e.what() << "\n";

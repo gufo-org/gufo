@@ -976,9 +976,11 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   // match in the committed tokens fills the rest of the chain up to the
   // verify width and ends drafting. Only a one-session model uses it: with
   // more sessions, whether a request decodes alone depends on scheduler
-  // timing, and seeded output must not.
-  const bool lookup =
-      model_->options_.decode_concurrency == 1 && !batch_drafts && !defer_head;
+  // timing, and seeded output must not. A request's first step copies
+  // nothing (see PromptLookup).
+  const bool lookup_step = lookup_.Step();
+  const bool lookup = model_->options_.decode_concurrency == 1 &&
+                      !batch_drafts && !defer_head && lookup_step;
   if (lookup) {
     lookup_.Extend(tokens_);
   }

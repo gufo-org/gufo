@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace gufo::models::qwen38_flash_next {
@@ -28,6 +29,10 @@ namespace gufo::models::qwen38_flash_next {
 /// needs kMinMatch again (2026-10-15: without this, extraction requests
 /// that quote scattered lines ran 6.5% slower). A new request starts with
 /// nothing to resume.
+///
+/// A request's first decode step copies nothing: a copy widens the step that
+/// produces the first token, which delayed it by 8 ms at 65k context and
+/// 20 ms at 115k (2026-10-15).
 ///
 /// Proposals depend only on the prefix, so rejection sampling (with the
 /// proposal as a point mass) keeps the target distribution exact.
@@ -54,7 +59,7 @@ public:
   /// seeded sampled output replays.
   struct State {
     std::uint32_t resume{kNoState};  ///< Observe()'s resume point
-    std::uint32_t reserved{0};
+    std::uint32_t first_step{0};     ///< 1 until the request's first Step()
   };
   static constexpr std::uint32_t kNoState =
       std::numeric_limits<std::uint32_t>::max();
@@ -66,22 +71,30 @@ public:
   }
 
   /// Called when a request starts: nothing to resume yet.
-  void BeginRequest() { resume_ = kNoResume; }
+  void BeginRequest() {
+    resume_ = kNoResume;
+    first_step_ = true;
+  }
+
+  /// Called once per decode step; false on a request's first step.
+  [[nodiscard]] bool Step() { return !std::exchange(first_step_, false); }
 
   [[nodiscard]] State Save() const {
     return {.resume = resume_ == kNoResume
                           ? kNoState
-                          : static_cast<std::uint32_t>(resume_)};
+                          : static_cast<std::uint32_t>(resume_),
+            .first_step = first_step_ ? 1U : 0U};
   }
   /// Whether `state` can belong to a history of `tokens` committed tokens.
   [[nodiscard]] static bool Valid(const State& state, std::size_t tokens) {
-    return state.reserved == 0 &&
+    return state.first_step <= 1 &&
            (state.resume == kNoState || state.resume <= tokens);
   }
   /// Clears the index and adopts `state` (checked with Valid()).
   void Restore(const State& state) {
     Clear();
     resume_ = state.resume == kNoState ? kNoResume : state.resume;
+    first_step_ = state.first_step != 0;
   }
 
   /// Records a verified copy of `proposed` tokens from committed index
@@ -264,6 +277,7 @@ private:
   std::vector<std::uint32_t> prev_;
   std::int32_t last_{0};           ///< committed[prev_.size() - 1] when indexed
   std::size_t resume_{kNoResume};  ///< where the last copy's source continues
+  bool first_step_{true};          ///< no Step() since BeginRequest()
 };
 
 }  // namespace gufo::models::qwen38_flash_next
