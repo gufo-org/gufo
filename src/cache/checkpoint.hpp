@@ -248,8 +248,13 @@ private:
   };
   ExecutionHistory(ResourceLedger&, std::span<const ComponentDescriptor>,
                    Identity, std::shared_ptr<const detail::Lineage>);
-  [[nodiscard]] std::shared_ptr<detail::Chunk> FindChunk(ComponentId,
-                                                         Rows first) const;
+  struct ChunkCursor {
+    std::vector<Entry>::const_iterator next, end;
+    ComponentId component;
+    // Capture and estimation visit rows in increasing order.
+    [[nodiscard]] std::shared_ptr<detail::Chunk> Find(Rows first);
+  };
+  [[nodiscard]] ChunkCursor Chunks(ComponentId) const;
   bool capturing_{false};
   ResourceLedger* ledger_;
   ResourceCharge metadata_, entries_metadata_, tokens_metadata_;

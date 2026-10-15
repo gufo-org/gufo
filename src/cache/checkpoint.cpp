@@ -458,10 +458,11 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
     } else {
       const auto full_end = end - end % d.rows_per_chunk;
       component.chunks.reserve(end / d.rows_per_chunk);
+      auto chunks = Chunks(d.id);
       for (Rows first = 0; first < full_end; first += d.rows_per_chunk) {
         // Every descriptor/range occurs once in this capture, so only the
         // published history can contain a shared predecessor.
-        auto chunk = FindChunk(d.id, first);
+        auto chunk = chunks.Find(first);
         if (!chunk) {
           const PayloadRequest r{d.id, ResourceCategory::kBackingAssigned,
                                  first, first + d.rows_per_chunk,
@@ -534,12 +535,17 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   tokens_metadata_ = std::move(tokens_metadata);
   return checkpoint;
 }
-std::shared_ptr<detail::Chunk> ExecutionHistory::FindChunk(ComponentId id,
-                                                           Rows first) const {
-  const auto key = std::pair{id.value, first};
-  const auto entry = std::ranges::lower_bound(entries_, key, {}, &Entry::Key);
-  return entry != entries_.end() && entry->Key() == key ? entry->chunk.lock()
-                                                        : nullptr;
+ExecutionHistory::ChunkCursor ExecutionHistory::Chunks(ComponentId id) const {
+  return {std::ranges::lower_bound(entries_, std::pair{id.value, Rows{0}}, {},
+                                   &Entry::Key),
+          entries_.end(), id};
+}
+std::shared_ptr<detail::Chunk> ExecutionHistory::ChunkCursor::Find(Rows first) {
+  while (next != end && next->component == component && next->first < first)
+    ++next;
+  if (next == end || next->component != component || next->first != first)
+    return nullptr;
+  return (next++)->chunk.lock();
 }
 std::size_t ExecutionHistory::NewPayloadBytes(
     std::span<const ComponentPosition> positions) const {
@@ -562,8 +568,9 @@ std::size_t ExecutionHistory::NewPayloadBytes(
     const auto full = p.valid_rows - p.valid_rows % d.rows_per_chunk;
     (void)Bytes(p.valid_rows, d.row_bytes);
     bytes = Add(bytes, Bytes(p.valid_rows - full, d.row_bytes));
+    auto chunks = Chunks(d.id);
     for (Rows first = 0; first < full; first += d.rows_per_chunk) {
-      const auto chunk = FindChunk(d.id, first);
+      const auto chunk = chunks.Find(first);
       if (chunk && !chunk->storage.IsValid())
         throw std::invalid_argument("cannot estimate retired rows");
       if (!chunk)

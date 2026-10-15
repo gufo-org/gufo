@@ -1,6 +1,7 @@
 #include "src/cache/slot.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
@@ -36,7 +37,17 @@ struct RowState {
   mutable std::mutex mutex;
   std::condition_variable_any changed;
   std::size_t readers{};
-  bool closing{false}, materialized{false}, retired{false};
+  bool closing{false};
+  enum Completion : unsigned { kMaterialized = 1, kRetired = 2 };
+  // Completion bits only accumulate. Publish after the copy and accounting
+  // conversion so validity checks of completed rows need no reader mutex.
+  std::atomic<unsigned> completion{0};
+  bool Materialized() const {
+    return completion.load(std::memory_order_relaxed) & kMaterialized;
+  }
+  bool Retired() const {
+    return completion.load(std::memory_order_relaxed) & kRetired;
+  }
   bool idle_copy_failed{false};
 };
 struct LeaseState final : MutationGuard {
@@ -114,7 +125,7 @@ struct LeaseState final : MutationGuard {
     std::span<std::byte> buffer;
     {
       std::lock_guard lock(r->mutex);
-      if (r->materialized || r->retired)
+      if (r->Materialized() || r->Retired())
         return true;
       first = r->first + r->copied;
       const auto count =
@@ -177,7 +188,8 @@ struct LeaseState final : MutationGuard {
       auto charge = r->reservation.Convert();
       r->charge = std::move(charge);
       r->category = r->charge.Info().category;
-      r->materialized = true;
+      r->completion.fetch_or(RowState::kMaterialized,
+                             std::memory_order_release);
       r->idle_copy_failed = false;
       r->closing = false;
       r->changed.notify_all();
@@ -190,11 +202,11 @@ struct LeaseState final : MutationGuard {
       // A discardable disk source promises no RAM preservation. Closing it
       // rejects future pieces; the one already reading must finish before the
       // adapter can overwrite/free its allocation.
-      r->retired = true;
+      r->completion.fetch_or(RowState::kRetired, std::memory_order_release);
       r->closing = false;
       r->changed.notify_all();
     }
-    if (!r->materialized && !r->retired) {
+    if (!r->Materialized() && !r->Retired()) {
       r->closing = true;
       lock.unlock();
       try {
@@ -203,7 +215,7 @@ struct LeaseState final : MutationGuard {
             CheckStop();
           (void)CopyPiece(r, false, release);
           lock.lock();
-          if (r->materialized)
+          if (r->Materialized())
             break;
           lock.unlock();
         }
@@ -212,7 +224,7 @@ struct LeaseState final : MutationGuard {
           lock.lock();
         r->closing = false;
         if (release)
-          r->retired = true;
+          r->completion.fetch_or(RowState::kRetired, std::memory_order_release);
         r->changed.notify_all();
         if (!release)
           throw;
@@ -246,7 +258,7 @@ struct LeaseState final : MutationGuard {
         }
         ++it;
         std::lock_guard row_lock(r->mutex);
-        if (!r->buffer.empty() && !r->materialized && !r->retired) {
+        if (!r->buffer.empty() && !r->Materialized() && !r->Retired()) {
           candidate = std::move(r);
           break;
         }
@@ -401,11 +413,11 @@ RowPin BorrowedRows::Pin(std::stop_token stop) const {
   if (!r.changed.wait(lock, stop, [&] { return !r.closing; }) ||
       stop.stop_requested())
     throw std::runtime_error("borrowed row read cancelled");
-  if (r.retired)
+  if (r.Retired())
     throw std::runtime_error("borrowed rows retired");
   RowPin pin;
   pin.state_ = state_;
-  if (r.materialized) {
+  if (r.Materialized()) {
     pin.owner_ = r.owner;
     pin.bytes_ = r.buffer;
   } else {
@@ -423,23 +435,26 @@ RowPin BorrowedRows::Pin(std::stop_token stop) const {
 }
 std::optional<BorrowedLocation> BorrowedRows::Location() const {
   std::lock_guard lock(state_->mutex);
-  return state_->materialized || state_->retired
+  return state_->Materialized() || state_->Retired()
              ? std::nullopt
              : std::optional(state_->location);
 }
 std::shared_ptr<const void> BorrowedRows::Owner() const {
   std::lock_guard lock(state_->mutex);
-  if (state_->retired)
+  if (state_->Retired())
     return {};
-  if (!state_->materialized)
+  if (!state_->Materialized())
     throw std::logic_error("borrowed rows require a source pin");
   return state_->owner;
 }
 bool BorrowedRows::IsValid() const {
+  const auto completion = state_->completion.load(std::memory_order_acquire);
+  if (completion)
+    return !(completion & detail::RowState::kRetired);
   std::lock_guard lock(state_->mutex);
-  if (state_->retired)
+  if (state_->Retired())
     return false;
-  if (state_->materialized)
+  if (state_->Materialized())
     return true;
   std::lock_guard source_lock(state_->slot->mutex);
   return state_->slot->alive &&
@@ -450,7 +465,7 @@ std::size_t BorrowedRows::Bytes() const {
 }
 bool BorrowedRows::PreservationFailed() const {
   std::lock_guard lock(state_->mutex);
-  return !state_->materialized && state_->idle_copy_failed;
+  return !state_->Materialized() && state_->idle_copy_failed;
 }
 ResourceCategory BorrowedRows::Category() const {
   std::lock_guard lock(state_->mutex);
@@ -460,17 +475,17 @@ PersistencePin BorrowedRows::PinPersistence() const {
   std::lock_guard lock(state_->mutex);
   if (state_->buffer.empty())
     return {};
-  if (state_->retired)
+  if (state_->Retired())
     throw std::runtime_error("borrowed rows retired");
-  return state_->materialized ? state_->charge.PinPersistence()
-                              : state_->reservation.PinPersistence();
+  return state_->Materialized() ? state_->charge.PinPersistence()
+                                : state_->reservation.PinPersistence();
 }
 bool BorrowedRows::PersistencePinned() const {
   std::lock_guard lock(state_->mutex);
-  if (state_->buffer.empty() || state_->retired)
+  if (state_->buffer.empty() || state_->Retired())
     return false;
-  return state_->materialized ? state_->charge.Info().persistence_pinned
-                              : state_->reservation.Info().persistence_pinned;
+  return state_->Materialized() ? state_->charge.Info().persistence_pinned
+                                : state_->reservation.Info().persistence_pinned;
 }
 bool BorrowedRows::HasBacking() const {
   return !state_->buffer.empty();
@@ -696,7 +711,7 @@ bool LeasedSlot::PreservationComplete() const {
   for (const auto& entry : state_->rows)
     if (auto r = entry.rows.lock()) {
       std::lock_guard row_lock(r->mutex);
-      if (!r->materialized && !r->retired)
+      if (!r->Materialized() && !r->Retired())
         return false;
     }
   return true;
