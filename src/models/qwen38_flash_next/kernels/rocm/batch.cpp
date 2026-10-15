@@ -317,6 +317,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
       attention.rope = session.vision_input_.rope();
       attention.k_cache = session.mtp_.k_cache;
       attention.v_cache = session.mtp_.v_cache;
+      attention.k_cache_q8 = session.mtp_.k_cache_q8;
+      attention.v_cache_q8 = session.mtp_.v_cache_q8;
       attention.index_k = session.mtp_.index_k;
       attention.block_k = session.mtp_.block_k;
       const bool sparse = session.mtp_.position + n > c.indexer_top_k;

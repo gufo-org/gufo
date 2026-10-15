@@ -209,7 +209,8 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
       context_(context),
       layout_(model_ ? model_->config() : Config{},
               mode == core::SessionMode::kSpeculative, context,
-              model_ ? model_->executor_->max_speculative() : 0),
+              model_ ? model_->executor_->max_speculative() : 0,
+              model_ ? model_->KvCacheInt8() : false),
       identity_(std::move(identity)) {
   if ((mode != core::SessionMode::kAutoregressive &&
        mode != core::SessionMode::kSpeculative) ||
@@ -227,6 +228,7 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
   put(model_->executor_->max_speculative());
   put(model_->PrefillCapacity());
   put(model_->DecodeConcurrency());
+  put(model_->KvCacheInt8() ? 1 : 0);  // F16 and Q8 snapshots must not mix.
   for (const auto& component : layout_.Components())
     descriptors_.push_back(component.descriptor);
 }
@@ -356,19 +358,30 @@ const ContinuationComponent& ContinuationAdapter::Component(
 void* ContinuationAdapter::RowData(
     State& state, const ContinuationComponent& component) const {
   auto& native = state.CaptureState();
+  // The slot facade's precision flag is not always populated, but the
+  // session allocates exactly one of the F16 / Q8 cache pairs: resolve by
+  // presence (the flag only breaks ties, which never occur in practice).
+  const bool q8flag = native.kv_cache_int8();
+  const auto pick = [&](void* f16, void* q8) -> void* {
+    if (f16 != nullptr && q8 != nullptr)
+      return q8flag ? q8 : f16;
+    return f16 != nullptr ? f16 : q8;
+  };
   switch (component.part) {
     case ContinuationPart::kTokens:
       return state.session->tokens_.data();
     case ContinuationPart::kKey:
-      return native.attention_[component.layer].k_cache;
+      return pick(native.attention_[component.layer].k_cache,
+                  native.attention_[component.layer].k_cache_q8);
     case ContinuationPart::kValue:
-      return native.attention_[component.layer].v_cache;
+      return pick(native.attention_[component.layer].v_cache,
+                  native.attention_[component.layer].v_cache_q8);
     case ContinuationPart::kPooledKeys:
       return native.attention_[component.layer].block_k;
     case ContinuationPart::kDraftKey:
-      return native.mtp_.k_cache;
+      return pick(native.mtp_.k_cache, native.mtp_.k_cache_q8);
     case ContinuationPart::kDraftValue:
-      return native.mtp_.v_cache;
+      return pick(native.mtp_.v_cache, native.mtp_.v_cache_q8);
     case ContinuationPart::kDraftPooledKeys:
       return native.mtp_.block_k;
     default:
