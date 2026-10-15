@@ -128,6 +128,69 @@ void CheckProposalInsideCommitted() {
   }
 }
 
+// After a verified copy, a match of kResumeMinMatch tokens is enough where
+// that copy's source continues: the output edited a few tokens and rejoined
+// the text it was copying. Elsewhere the kMinMatch gate still applies.
+void CheckResume() {
+  auto committed = Range(1000, 40);  // the "file"
+  const auto noise = Range(5000, 7);
+  committed.insert(committed.end(), noise.begin(), noise.end());
+  // The answer copied file[5, 20), then replaced file[20, 22) with an edit
+  // and rejoined at file[22].
+  committed.insert(committed.end(), committed.begin() + 5,
+                   committed.begin() + 20);
+  committed.insert(committed.end(), {7001, 7002, 1022, 1023, 1024});
+  const std::vector<std::int32_t> tail = {1025, 1026};
+  Lookup lookup;
+  lookup.Extend(committed);
+  Require(lookup.Find(committed, tail).length == 0,
+          "a 5-token match passed without a copy to resume");
+  // The last copy proposed file[20...] and none of it was kept.
+  lookup.Observe(20, 8, 0, false);
+  const auto match = lookup.Find(committed, tail);
+  Require(match.length == 5 && match.start == 27 && match.resumed,
+          "a resumed copy was not matched");
+  // A resumed copy that keeps half its tokens still resumes; one that keeps
+  // fewer has left the text, until a full match copies again.
+  lookup.Observe(match.start, 8, 4, true);
+  Require(lookup.Find(committed, tail).length == 5,
+          "a resumed copy that kept half stopped resuming");
+  lookup.Observe(match.start, 8, 3, true);
+  Require(lookup.Find(committed, tail).length == 0,
+          "a mostly rejected resumed copy kept resuming");
+  lookup.Observe(20, 8, 0, false);
+  Require(lookup.Find(committed, tail).length == 5,
+          "a full copy did not restart resuming");
+  const std::vector<std::int32_t> short_tail = {1025};
+  Require(lookup.Find(committed, short_tail).length == 0,
+          "a 4-token match resumed a copy");
+  // A copy whose source continues far from this match does not lower the
+  // gate, and Clear() forgets the copy.
+  lookup.Observe(600, 8, 0, false);
+  Require(lookup.Find(committed, tail).length == 0,
+          "a distant copy lowered the gate");
+  // A saved state resumes the same copy after a restore; a new request
+  // starts with nothing to resume.
+  lookup.Observe(20, 8, 0, false);
+  const auto state = lookup.Save();
+  Require(Lookup::Valid(state, committed.size()) && !Lookup::Valid(state, 19) &&
+              !Lookup::Valid({.resume = 20, .reserved = 1}, committed.size()),
+          "prompt-lookup state validation");
+  Lookup restored;
+  restored.Restore(state);
+  restored.Extend(committed);
+  Require(restored.Find(committed, tail).start == 27,
+          "a restored state did not resume the copy");
+  restored.BeginRequest();
+  Require(restored.Find(committed, tail).length == 0 &&
+              restored.Save().resume == Lookup::kNoState,
+          "a new request resumed the last copy");
+  lookup.Clear();
+  lookup.Extend(committed);
+  Require(lookup.Find(committed, tail).length == 0,
+          "Clear() kept the last copy");
+}
+
 void CheckNoMatch() {
   const auto committed = Range(1, 100);
   Lookup lookup;
@@ -145,6 +208,7 @@ int main() {
     CheckIncremental();
     CheckRewrite();
     CheckProposalInsideCommitted();
+    CheckResume();
     CheckNoMatch();
   } catch (const std::exception& e) {
     std::cerr << "prompt_lookup_test: " << e.what() << "\n";

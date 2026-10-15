@@ -20,6 +20,15 @@ namespace gufo::models::qwen38_flash_next {
 /// drafts (2026-09-25 study: an ungated 3-token rule cost 6-8% on every
 /// task; >= 12 matched tokens were accepted 82-94% of the time).
 ///
+/// Where the last verified copy left off, kResumeMinMatch tokens are
+/// enough: output that edits a line of the text it is copying rejoins it a
+/// few tokens later, and waiting for 12 fresh matching tokens would draft
+/// that stretch with MTP alone. A resumed copy that keeps fewer than half
+/// of its tokens means the output has left that text, so the next copy
+/// needs kMinMatch again (2026-10-15: without this, extraction requests
+/// that quote scattered lines ran 6.5% slower). A new request starts with
+/// nothing to resume.
+///
 /// Proposals depend only on the prefix, so rejection sampling (with the
 /// proposal as a point mass) keeps the target distribution exact.
 class PromptLookup {
@@ -28,15 +37,59 @@ public:
   static constexpr std::size_t kMinMatch = 12;
   static constexpr std::size_t kMaxMatch = 64;
   static constexpr std::size_t kMaxCandidates = 16;
+  static constexpr std::size_t kResumeMinMatch = 5;
+  /// A resumed copy continues at most this far past the last copy's end,
+  /// or kResumeBack tokens before it (the output repeated a few tokens).
+  static constexpr std::size_t kResumeWindow = 512;
+  static constexpr std::size_t kResumeBack = 8;
 
   struct Match {
     std::size_t start{0};   ///< committed index of the first proposal
     std::size_t length{0};  ///< matched context tokens (>= kKeyTokens)
+    bool resumed{false};    ///< shorter than kMinMatch: resumes the last copy
   };
+
+  /// Copy state the index cannot rebuild from the tokens. Session snapshots
+  /// carry it, so a restored session copies as the original would have and
+  /// seeded sampled output replays.
+  struct State {
+    std::uint32_t resume{kNoState};  ///< Observe()'s resume point
+    std::uint32_t reserved{0};
+  };
+  static constexpr std::uint32_t kNoState =
+      std::numeric_limits<std::uint32_t>::max();
 
   void Clear() {
     head_.Clear();
     prev_.clear();
+    resume_ = kNoResume;
+  }
+
+  /// Called when a request starts: nothing to resume yet.
+  void BeginRequest() { resume_ = kNoResume; }
+
+  [[nodiscard]] State Save() const {
+    return {.resume = resume_ == kNoResume
+                          ? kNoState
+                          : static_cast<std::uint32_t>(resume_)};
+  }
+  /// Whether `state` can belong to a history of `tokens` committed tokens.
+  [[nodiscard]] static bool Valid(const State& state, std::size_t tokens) {
+    return state.reserved == 0 &&
+           (state.resume == kNoState || state.resume <= tokens);
+  }
+  /// Clears the index and adopts `state` (checked with Valid()).
+  void Restore(const State& state) {
+    Clear();
+    resume_ = state.resume == kNoState ? kNoResume : state.resume;
+  }
+
+  /// Records a verified copy of `proposed` tokens from committed index
+  /// `start` of which `accepted` were kept; the copied text continues at
+  /// start + accepted. `resumed` is the copy's Match::resumed.
+  void Observe(std::size_t start, std::size_t proposed, std::size_t accepted,
+               bool resumed) {
+    resume_ = resumed && 2 * accepted < proposed ? kNoResume : start + accepted;
   }
 
   /// Indexes committed tokens appended since the last call. `committed`
@@ -92,17 +145,23 @@ public:
              committed[end - length - 1] == at(context - length - 1)) {
         ++length;
       }
-      if (end < committed.size() && length > best.length) {
-        best = {end, length};
+      const bool resumes = resume_ != kNoResume &&
+                           end + kResumeBack >= resume_ &&
+                           end <= resume_ + kResumeWindow;
+      if (end < committed.size() && length > best.length &&
+          (length >= kMinMatch || (resumes && length >= kResumeMinMatch))) {
+        best = {end, length, length < kMinMatch};
       }
       end = prev_[end];
     }
-    return best.length >= kMinMatch ? best : Match{};
+    return best;
   }
 
 private:
   static constexpr std::uint32_t kNone =
       std::numeric_limits<std::uint32_t>::max();
+  static constexpr std::size_t kNoResume =
+      std::numeric_limits<std::size_t>::max();
 
   /// Key -> end of its most recent occurrence: open addressing with linear
   /// probing, at most half full. Clear() keeps the capacity, so a session
@@ -203,7 +262,8 @@ private:
 
   Heads head_;
   std::vector<std::uint32_t> prev_;
-  std::int32_t last_{0};  ///< committed[prev_.size() - 1] when indexed
+  std::int32_t last_{0};           ///< committed[prev_.size() - 1] when indexed
+  std::size_t resume_{kNoResume};  ///< where the last copy's source continues
 };
 
 }  // namespace gufo::models::qwen38_flash_next

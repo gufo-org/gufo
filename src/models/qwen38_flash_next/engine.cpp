@@ -54,6 +54,7 @@ struct SessionSnapshotHeader {
   std::uint32_t image_identity_bytes;
   std::uint32_t policy_concurrency;
   std::uint32_t reserved{0};
+  PromptLookup::State lookup;
 };
 static_assert(std::is_trivially_copyable_v<SessionSnapshotHeader>);
 
@@ -426,6 +427,7 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshotImpl(
       .draft_policy = draft_length_.State(),
       .image_identity_bytes = static_cast<std::uint32_t>(identity.size()),
       .policy_concurrency = model_->DecodeConcurrency(),
+      .lookup = lookup_.Save(),
   };
   std::memcpy(out, &header, sizeof(header));
   out += sizeof(header);
@@ -501,6 +503,10 @@ bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
     AssignError(error_msg, "session snapshot draft policy is invalid");
     return false;
   }
+  if (!PromptLookup::Valid(header.lookup, header.token_count)) {
+    AssignError(error_msg, "session snapshot prompt-lookup state is invalid");
+    return false;
+  }
   const std::uint8_t* in = payload.data() + sizeof(header);
   std::vector<std::uint8_t> image_identity(in,
                                            in + header.image_identity_bytes);
@@ -543,7 +549,7 @@ bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
   }
   tokens_ = std::move(tokens);
   ForgetDraftVocab();
-  lookup_.Clear();
+  lookup_.Restore(header.lookup);
   logits_ = std::move(logits);
   hidden_base_ = info.position - info.hidden_rows;
   draft_token_ = 0;
@@ -767,6 +773,7 @@ bool Session::SyncImpl(std::span<const std::int32_t> prompt,
     AssignError(error_msg, "prompt exceeds the session context");
     return false;
   }
+  lookup_.BeginRequest();
   if (!valid_)
     Reset();
   // Recurrent state cannot be rewound, so any divergence restarts the
@@ -824,6 +831,10 @@ struct Session::PendingDecode {
   bool draft_subset{false};  ///< this cycle drafts through the subset head
   /// Trailing chain tokens copied by prompt lookup (after the MTP drafts).
   std::uint32_t lookup{0};
+  /// Committed index the copied tokens were taken from.
+  std::size_t lookup_start{0};
+  /// The copy passed only the shorter resume gate.
+  bool lookup_resumed{false};
 };
 
 void Session::AppendDraft(PendingDecode& pending) {
@@ -862,6 +873,8 @@ bool Session::AppendLookup(PendingDecode& pending, std::size_t cap) {
     }
   }
   pending.lookup = static_cast<std::uint32_t>(count);
+  pending.lookup_start = match.start;
+  pending.lookup_resumed = match.resumed;
   pending.width = pending.chain.size();
   return count != 0;
 }
@@ -1110,6 +1123,10 @@ bool Session::FinishDecode(const DecodeRequest& request,
   const std::uint32_t mtp_accepted = std::min(keep - 1, mtp_drafts);
   stats_.lookup += pending.lookup;
   stats_.lookup_accepted += keep - 1 - mtp_accepted;
+  if (pending.lookup != 0) {
+    lookup_.Observe(pending.lookup_start, pending.lookup,
+                    keep - 1 - mtp_accepted, pending.lookup_resumed);
+  }
   const bool mtp_all = mtp_accepted == mtp_drafts;
   const std::uint32_t observed = mtp_all ? keep - 1 : mtp_accepted;
   // A target stop ends the request; it does not classify the remaining
