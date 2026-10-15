@@ -495,6 +495,13 @@ void ConcurrentValidityDuringTeardown() {
             assert(rows->IsValid() == backed);
         });
       ready.arrive_and_wait();
+      // Completed backing must remain valid across later source generations;
+      // unbacked observations retire on the first reset.
+      for (int generation = 0; generation < 8; ++generation) {
+        f.lease.Reset();
+        const std::array<Token, 4> replacement{9, 8, 7, 6};
+        f.adapter.Append(f.lease.Execution(), replacement, replacement);
+      }
       f.slots.reset();
       f.lease = {};
       finished.store(true);

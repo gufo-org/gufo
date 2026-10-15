@@ -17,8 +17,9 @@ namespace detail {
 struct SlotState {
   std::mutex mutex;
   SlotId id;
-  std::uint64_t generation{1};
-  bool alive{true};
+  // Zero denotes a destroyed source. Publish resets after preservation so
+  // readers that see a new generation can also see completed row copies.
+  std::atomic<std::uint64_t> generation{1};
 };
 struct RowState {
   ResourceCharge metadata;
@@ -106,7 +107,7 @@ struct LeaseState final : MutationGuard {
     // raw remains readable during the adapter's nonthrowing destruction guard.
     slot.reset();
     std::lock_guard lock(source->mutex);
-    source->alive = false;
+    source->generation.store(0, std::memory_order_release);
   }
   void CheckStop() const {
     if (stop.stop_requested())
@@ -134,7 +135,8 @@ struct LeaseState final : MutationGuard {
       buffer = r->buffer.subspan(r->copied * r->row_bytes,
                                  (end - first) * r->row_bytes);
       std::lock_guard source_lock(source->mutex);
-      if (!source->alive || source->generation != r->location.generation)
+      if (source->generation.load(std::memory_order_relaxed) !=
+          r->location.generation)
         throw std::logic_error("spill source generation mismatch");
       ++r->readers;
     }
@@ -346,9 +348,10 @@ struct LeaseState final : MutationGuard {
   }
   void AfterReset() noexcept override {
     std::lock_guard lock(source->mutex);
-    if (source->generation == std::numeric_limits<std::uint64_t>::max())
+    const auto generation = source->generation.load(std::memory_order_relaxed);
+    if (!generation || generation == std::numeric_limits<std::uint64_t>::max())
       std::terminate();
-    ++source->generation;
+    source->generation.store(generation + 1, std::memory_order_release);
   }
   void Invalidate() noexcept {
     live = false;
@@ -422,8 +425,8 @@ RowPin BorrowedRows::Pin(std::stop_token stop) const {
     pin.bytes_ = r.buffer;
   } else {
     std::lock_guard source_lock(r.slot->mutex);
-    const bool valid =
-        r.slot->alive && r.slot->generation == r.location.generation;
+    const bool valid = r.slot->generation.load(std::memory_order_relaxed) ==
+                       r.location.generation;
     assert(valid && "adapter overwrote borrowed rows without a guard");
     if (!valid)
       throw std::logic_error("borrowed slot generation mismatch");
@@ -448,17 +451,18 @@ std::shared_ptr<const void> BorrowedRows::Owner() const {
   return state_->owner;
 }
 bool BorrowedRows::IsValid() const {
+  // This observes validity; Pin still serializes reads with preservation.
   const auto completion = state_->completion.load(std::memory_order_acquire);
   if (completion)
     return !(completion & detail::RowState::kRetired);
-  std::lock_guard lock(state_->mutex);
-  if (state_->Retired())
-    return false;
-  if (state_->Materialized())
+  if (state_->slot->generation.load(std::memory_order_acquire) ==
+      state_->location.generation)
     return true;
-  std::lock_guard source_lock(state_->slot->mutex);
-  return state_->slot->alive &&
-         state_->slot->generation == state_->location.generation;
+  // Preservation may have finished between the two reads. A reset/death
+  // publishes after completion, so recheck before rejecting the old source.
+  const auto completed = state_->completion.load(std::memory_order_acquire);
+  return (completed & detail::RowState::kMaterialized) &&
+         !(completed & detail::RowState::kRetired);
 }
 std::size_t BorrowedRows::Bytes() const {
   return state_->bytes;
@@ -532,7 +536,8 @@ Slot& SlotLease::Execution() const {
 BorrowedLocation SlotLease::Location() const {
   (void)Execution();
   std::lock_guard lock(state_->source->mutex);
-  return {state_->source->id, state_->source->generation};
+  return {state_->source->id,
+          state_->source->generation.load(std::memory_order_relaxed)};
 }
 std::shared_ptr<BorrowedRows> SlotLease::Borrow(
     ComponentId c, Rows first, Rows end, ResourceReservation reservation,
@@ -662,7 +667,8 @@ SlotLease LeasedSlot::Acquire(std::optional<BorrowedLocation> live,
     if (live) {
       std::lock_guard source_lock(state_->source->mutex);
       if (!state_->live || live->slot != state_->source->id ||
-          live->generation != state_->source->generation)
+          live->generation !=
+              state_->source->generation.load(std::memory_order_relaxed))
         throw std::logic_error("stale live frontier");
     }
     // Claim first so the worker cannot queue another piece. Drain the current
