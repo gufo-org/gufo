@@ -656,6 +656,34 @@ void AcquireAllocationFailure() {
   first.reset();
   assert(pool.TryAcquire());
 }
+void LargeBacking() {
+  constexpr std::size_t block = 64ULL << 20;
+  constexpr std::size_t bytes = 2 * block;
+  cache::ResourceLedger ledger(Limits(bytes + metadata));
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, block, metadata});
+    auto backing = pool.TryAcquire(Category::kPrivateState, bytes);
+    assert(backing && backing->Bytes().size() == bytes);
+    auto memory = backing->Bytes();
+    assert(std::all_of(memory.begin(), memory.end(),
+                       [](std::byte b) { return b == std::byte{}; }));
+    void* device = nullptr;
+    assert(hipMalloc(&device, bytes) == hipSuccess);
+    assert(hipMemset(device, 0x5b, bytes) == hipSuccess);
+    assert(hipMemcpy(memory.data(), device, bytes, hipMemcpyDeviceToHost) ==
+           hipSuccess);
+    assert(std::all_of(memory.begin(), memory.end(),
+                       [](std::byte b) { return b == std::byte{0x5b}; }));
+    assert(hipFree(device) == hipSuccess);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+  fail_alloc = true;
+  Throws<std::runtime_error>([&] {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, block, metadata});
+  });
+  fail_alloc = false;
+  assert(ledger.Snapshot().total_bytes == 0);
+}
 }  // namespace
 int main() {
   hipDeviceProp_t properties{};
@@ -669,6 +697,7 @@ int main() {
   PendingStreams();
   AcquireAllocationFailure();
   BorrowedPoolLifetime();
+  LargeBacking();
   std::puts(
       "PASS: precommitted and on-demand blocks, accounting, racing "
       "borrowers, pinned lifetime, bounded copies, leases and failure "

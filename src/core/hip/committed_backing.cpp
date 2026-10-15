@@ -4,6 +4,7 @@
 #include <sys/mman.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <stdexcept>
@@ -17,10 +18,36 @@ namespace {
 // high-order pages: when most host RAM belongs to the GPU, that compacts
 // memory and stalls running kernels for up to seconds per GiB. Zero-filled.
 void* CommitPages(std::size_t bytes) {
-  void* data = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+  constexpr std::size_t page = 4096;
+  const auto workers = std::min<std::size_t>(4, bytes / (32ULL << 20));
+  void* data = mmap(
+      nullptr, bytes, PROT_READ | PROT_WRITE,
+      MAP_PRIVATE | MAP_ANONYMOUS | (workers < 2 ? MAP_POPULATE : 0), -1, 0);
   if (data == MAP_FAILED)
     return nullptr;
+  if (workers >= 2) {
+    // Large serial page faults can hold up inference even when growth runs
+    // on a background thread. Populate disjoint ordinary-page ranges, then
+    // join before registering or exposing any of the backing.
+    std::array<std::jthread, 3> faults;
+    std::size_t next = 0;
+    for (std::size_t i = 0; i + 1 < workers; ++i) {
+      const auto end = (bytes / page) * (i + 1) / workers * page;
+      try {
+        faults[i] = std::jthread([data, begin = next, end] {
+          (void)madvise(static_cast<std::byte*>(data) + begin, end - begin,
+                        MADV_POPULATE_WRITE);
+        });
+      } catch (...) {
+        // Thread exhaustion falls back to populating the remaining range
+        // here. Registration still validates/pins every page afterwards.
+        break;
+      }
+      next = end;
+    }
+    (void)madvise(static_cast<std::byte*>(data) + next, bytes - next,
+                  MADV_POPULATE_WRITE);
+  }
   if (hipHostRegister(data, bytes, hipHostRegisterDefault) != hipSuccess) {
     munmap(data, bytes);
     return nullptr;
