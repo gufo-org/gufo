@@ -961,8 +961,11 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   }
   // Prompt lookup (single session): after each MTP draft, a long enough
   // match in the committed tokens fills the rest of the chain up to the
-  // verify width and ends drafting.
-  const bool lookup = !batch_drafts && !defer_head;
+  // verify width and ends drafting. Only a one-session model uses it: with
+  // more sessions, whether a request decodes alone depends on scheduler
+  // timing, and seeded output must not.
+  const bool lookup =
+      model_->options_.decode_concurrency == 1 && !batch_drafts && !defer_head;
   if (lookup) {
     lookup_.Extend(tokens_);
   }
