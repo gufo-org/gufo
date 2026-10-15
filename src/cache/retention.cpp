@@ -255,7 +255,8 @@ std::size_t RetentionPolicy::UniqueBytes(std::size_t i) const {
       bytes += c.private_state->Bytes();
     if (c.tail)
       bytes += c.tail->Bytes();
-    // Only one execution branch shares chunks, always from its first row.
+    // Admission age uses the longest shared-prefix estimate. Exact retained
+    // payload accounting below also handles sharing after a recreated hole.
     std::size_t shared = 0;
     for (std::size_t j = 0; j < limit_; ++j) {
       if (j == i || !records_[j].checkpoint)
@@ -271,6 +272,45 @@ std::size_t RetentionPolicy::UniqueBytes(std::size_t i) const {
     }
     for (std::size_t n = shared; n < c.chunks.size(); ++n)
       bytes += c.chunks[n].Storage().Bytes();
+  }
+  return bytes;
+}
+std::size_t RetentionPolicy::UniquePayloadBytes(std::size_t i) const noexcept {
+  std::size_t bytes = 0;
+  for (const auto& c : records_[i].checkpoint->Components()) {
+    if (c.private_state)
+      bytes += c.private_state->Bytes();
+    if (c.tail)
+      bytes += c.tail->Bytes();
+    if (c.chunks.empty())
+      continue;
+    std::array<const CheckpointComponent*, kRecordLimit> peers;
+    std::size_t count = 0;
+    for (std::size_t j = 0; j < limit_; ++j) {
+      if (j == i || !records_[j].checkpoint)
+        continue;
+      for (const auto& peer : records_[j].checkpoint->Components())
+        if (peer.descriptor.id == c.descriptor.id && !peer.chunks.empty()) {
+          peers[count++] = &peer;
+          break;
+        }
+    }
+    // Try the longest peers first; shorter peers cannot own later rows.
+    std::sort(peers.begin(), peers.begin() + count,
+              [](const auto* a, const auto* b) {
+                return a->chunks.size() > b->chunks.size();
+              });
+    for (std::size_t n = 0; n < c.chunks.size(); ++n) {
+      const auto& chunk = c.chunks[n];
+      bool shared = false;
+      for (std::size_t j = 0; j < count && peers[j]->chunks.size() > n; ++j)
+        if (chunk.SameChunk(peers[j]->chunks[n])) {
+          shared = true;
+          break;
+        }
+      if (!shared)
+        bytes += chunk.Storage().Bytes();
+    }
   }
   return bytes;
 }
@@ -395,6 +435,7 @@ void RetentionPolicy::Emit(RetentionAction action, RetentionReason reason,
 }
 void RetentionPolicy::Erase(std::size_t i, RetentionReason reason,
                             std::uint32_t rank) {
+  const auto unique = retained_payload_bytes_ ? UniquePayloadBytes(i) : 0;
   const auto before = ledger_.Snapshot().total_bytes;
   auto& e = records_[i];
   const auto id = e.checkpoint->Id();
@@ -406,7 +447,8 @@ void RetentionPolicy::Erase(std::size_t i, RetentionReason reason,
   for (auto& peer : records_)
     peer.below.reset(i);
   --size_;
-  retained_payload_bytes_.reset();
+  if (retained_payload_bytes_)
+    *retained_payload_bytes_ -= unique;
   const auto after = ledger_.Snapshot().total_bytes;
   Emit(RetentionAction::kRemoved, reason, id, boundary, purpose, rank, used,
        before > after ? before - after : 0);
@@ -501,7 +543,10 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       auto& e = records_[target];
       e = {std::move(checkpoint), entry, purpose, r.stable, ++clock_};
       ++size_;
-      retained_payload_bytes_.reset();
+      // Keep each event's exact total without recounting every retained
+      // checkpoint after each individual eviction or insertion.
+      if (retained_payload_bytes_)
+        *retained_payload_bytes_ += UniquePayloadBytes(target);
       admitted_bytes_ += UniqueBytes(target);
       Relate(target);
       if (r.reused || reused_at)

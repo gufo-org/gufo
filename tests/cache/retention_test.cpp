@@ -832,6 +832,37 @@ void SharedChunkAccounting() {
       }
     }
     assert(policy.Size() == 0);
+    if (chunks == 7) {
+      // Exercise repeated incremental additions/removals across many shared
+      // checkpoints. Keep external owners alive so ledger release cannot
+      // stand in for the logical retained-byte total.
+      auto growing = ExecutionHistory::Cold(ledger, components, {1});
+      std::vector<std::shared_ptr<const Checkpoint>> saved;
+      tokens.clear();
+      for (std::size_t n = 0; n < 40; ++n) {
+        tokens.resize((n + 1) * 4 + 1, 71);
+        saved.push_back(capture(growing, tokens));
+        admit(saved.back());
+      }
+      for (std::size_t n = 0; n < saved.size(); ++n) {
+        const auto& checkpoint = saved[n * 17 % saved.size()];
+        const auto found =
+            std::find(retained.begin(), retained.end(), checkpoint);
+        assert(found != retained.end());
+        retained.erase(found);
+        policy.Remove(checkpoint->Id());
+        check();
+      }
+      for (auto it = saved.rbegin(); it != saved.rend(); ++it)
+        admit(*it);
+      while (!retained.empty()) {
+        const auto id = retained.back()->Id();
+        retained.pop_back();
+        policy.Remove(id);
+        check();
+      }
+      assert(policy.Size() == 0);
+    }
     if (chunks == 0) {
       // A reader may retain only a late chunk after the source checkpoint
       // disappears. Two restored histories then recreate earlier chunks
