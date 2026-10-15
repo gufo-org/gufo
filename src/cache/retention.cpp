@@ -546,24 +546,49 @@ std::size_t RetentionPolicy::RetainedPayloadBytes() const noexcept {
         bytes += c.tail->Bytes();
       if (c.chunks.empty())
         continue;
-      std::array<const CheckpointComponent*, kRecordLimit> peers;
-      std::size_t peer_count = 0;
-      for (std::size_t earlier = 0; earlier < i; ++earlier) {
+      // Count a component across all retained checkpoints once. Reading each
+      // chunk ID once per row avoids repeatedly walking other checkpoints'
+      // cold chunk objects. Sharing need not be a prefix: a reader can keep
+      // a later chunk alive while earlier chunks are recreated.
+      bool counted = false;
+      for (std::size_t earlier = 0; earlier < i && !counted; ++earlier) {
         if (!records_[earlier].checkpoint)
           continue;
         for (const auto& peer : records_[earlier].checkpoint->Components())
-          if (peer.descriptor.id == c.descriptor.id) {
-            peers[peer_count++] = &peer;
+          if (peer.descriptor.id == c.descriptor.id && !peer.chunks.empty()) {
+            counted = true;
             break;
           }
       }
-      for (std::size_t n = 0; n < c.chunks.size(); ++n) {
-        bool shared = false;
-        for (std::size_t peer = 0; peer < peer_count && !shared; ++peer)
-          shared = peers[peer]->chunks.size() > n &&
-                   peers[peer]->chunks[n].SameChunk(c.chunks[n]);
-        if (!shared)
-          bytes += c.chunks[n].Storage().Bytes();
+      if (counted)
+        continue;
+      std::array<const CheckpointComponent*, kRecordLimit> peers;
+      std::size_t peer_count = 0;
+      std::size_t rows = 0;
+      for (std::size_t j = i; j < limit_; ++j) {
+        if (!records_[j].checkpoint)
+          continue;
+        for (const auto& peer : records_[j].checkpoint->Components())
+          if (peer.descriptor.id == c.descriptor.id) {
+            peers[peer_count++] = &peer;
+            rows = std::max(rows, peer.chunks.size());
+            break;
+          }
+      }
+      for (std::size_t n = 0; n < rows; ++n) {
+        std::array<ChunkId, kRecordLimit> seen;
+        std::size_t seen_count = 0;
+        for (std::size_t peer = 0; peer < peer_count; ++peer) {
+          if (peers[peer]->chunks.size() <= n)
+            continue;
+          const auto& chunk = peers[peer]->chunks[n];
+          const auto id = chunk.Id();
+          const auto end = seen.begin() + seen_count;
+          if (std::find(seen.begin(), end, id) == end) {
+            seen[seen_count++] = id;
+            bytes += chunk.Storage().Bytes();
+          }
+        }
       }
     }
   }
