@@ -375,15 +375,48 @@ void ImageAfterCachedTextPrefixCaptures() {
   auto context = std::make_shared<TextPromptContext>();
   context->cache_identity = {1, 2, 3};
   context->cache_prefixes.push_back({44, {}});
-  auto lease = cache.Acquire(image, {}, context, true, 0, true);
-  assert(lease->cached_tokens() == text.size());
-  auto& state = dynamic_cast<State&>(lease->state());
-  const auto suffix = std::span(image).subspan(text.size());
-  runner->adapter->Append(state.slot, suffix, suffix);
-  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), image.size(), false,
-                                   SnapshotPurpose::kContinuation, {}));
-  std::shared_ptr<const TextRunnerSnapshot> snapshot = lease->Capture();
-  assert(lease->PublishSnapshot(image, snapshot, false));
+  std::size_t inherited = text.size();
+  for (const bool second_image : {false, true}) {
+    if (second_image) {
+      // A second image must preserve the first image's prefix identity too.
+      image.insert(image.end(), {62, 63, 64, 65});
+      context = std::make_shared<TextPromptContext>(*context);
+      context->cache_prefixes.push_back({image.size(), {1, 2, 3}});
+      context->cache_identity = {4, 5, 6};
+      image.insert(image.end(), 16, 8);
+      image.insert(image.end(), {70, 71});
+    }
+    auto lease = cache.Acquire(image, {}, context, true, 0, true);
+    assert(lease->cached_tokens() == inherited);
+    auto& state = dynamic_cast<State&>(lease->state());
+    const auto suffix = std::span(image).subspan(inherited);
+    runner->adapter->Append(state.slot, suffix, suffix);
+    const auto hash = runner->adapter->RecurrentHash(state.slot);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), image.size(), false,
+                                     SnapshotPurpose::kContinuation, {}));
+    std::shared_ptr<const TextRunnerSnapshot> snapshot = lease->Capture();
+    assert(lease->PublishSnapshot(image, snapshot, false));
+
+    // Model the retry after discarding a cancelled assistant: the image prompt
+    // is unchanged and only a short text suffix is appended. Keep the source
+    // lease active so the retry must restore a checkpoint in the other slot.
+    auto retry_prompt = image;
+    retry_prompt.push_back(99);
+    auto retry = cache.Acquire(retry_prompt, {}, context, true, 0, true);
+    assert(retry->cached_tokens() == image.size());
+    assert(retry->restored_snapshot_bytes() > 0);
+    const auto& restored = dynamic_cast<State&>(retry->state());
+    assert(runner->adapter->RecurrentHash(restored.slot) == hash);
+    inherited = image.size();
+  }
+
+  // Image placeholders alone cannot establish a reusable multimodal prefix.
+  // Changing the first image permits only the original text checkpoint.
+  auto changed = std::make_shared<TextPromptContext>();
+  changed->cache_identity = {9, 9, 9};
+  changed->cache_prefixes.push_back({44, {}});
+  auto replacement = cache.Acquire(image, {}, changed, true, 0, true);
+  assert(replacement->cached_tokens() == text.size());
 }
 void CancelledPrefillKeepsCompletedSteps() {
   // A prefill cancelled between steps keeps the frontier it reached as a live
