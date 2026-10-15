@@ -466,12 +466,18 @@ void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
 /// Per-token attention (decode and narrow batches). With `partials`
 /// (n_tokens * heads * splits * (d + 2) floats) the key tiles are split
 /// across `splits` blocks per row and merged in a second launch.
+/// With `lists` (n_tokens * list_capacity entries), `counts` (n_tokens) and a
+/// mask at ratio 4, each row's selected blocks are first compacted once into
+/// `lists`; `list_capacity` is the selection budget (blocks per row). The
+/// output is bitwise identical to the mask walk. Null lists use the mask walk.
 void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                const std::uint32_t* mask, std::uint32_t mask_words, float* out,
                float* partials, std::uint32_t splits, std::uint32_t n_tokens,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
-               hipStream_t stream);
+               hipStream_t stream, std::uint32_t* lists = nullptr,
+               std::uint32_t* counts = nullptr,
+               std::uint32_t list_capacity = 0);
 
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows

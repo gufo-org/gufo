@@ -623,7 +623,9 @@ private:
     std::uint32_t* mask;
     float* scores;
     float* ctx;
-    float* attn_partials;  ///< split-key partials of a narrow batch
+    float* attn_partials;        ///< split-key partials of a narrow batch
+    std::uint32_t* attn_lists;   ///< [row][selection budget] compacted blocks
+    std::uint32_t* attn_counts;  ///< selected blocks per narrow-batch row
     // ple
     float* ple_emb;
     float* ple_key;

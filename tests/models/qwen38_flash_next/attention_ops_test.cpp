@@ -498,6 +498,7 @@ void CheckStructured(const char* name, std::uint32_t n_tokens,
                                   mask_words);
   std::vector<std::uint32_t> blocks;
   std::size_t selected = 0;
+  std::size_t most = 1;
   for (std::uint32_t t = 0; t < n_tokens; ++t) {
     const std::uint32_t complete = (start_pos + t + 1) / ratio;
     blocks.clear();
@@ -509,9 +510,18 @@ void CheckStructured(const char* name, std::uint32_t n_tokens,
       mask[static_cast<std::size_t>(t) * mask_words + b / 32] |= 1U << (b % 32);
     }
     selected += blocks.size();
+    most = std::max(most, blocks.size());
   }
   const auto exact = Fp64Attention(qv, gate, kh, vh, mask.data(), mask_words,
                                    n_tokens, start_pos, ratio);
+  // The list path (ratio 4 only) is compared bitwise with the mask walk. The
+  // adversarial patterns select more than the indexer's 512-block budget, so
+  // the lists get room for the largest row: that keeps every carry and window
+  // edge in play, and the capacity guard is not what is being tested here.
+  const std::uint32_t list_capacity = static_cast<std::uint32_t>(most);
+  HipBuffer<std::uint32_t> d_lists(static_cast<std::size_t>(n_tokens) *
+                                   list_capacity);
+  HipBuffer<std::uint32_t> d_counts(n_tokens);
 
   HipBuffer<float> d_q(q_count);
   HipBuffer<float> d_gate(q_count);
@@ -539,6 +549,19 @@ void CheckStructured(const char* name, std::uint32_t n_tokens,
     q::SigmoidMul(d_out.get(), d_gate.get(), q_count, nullptr);
     CheckHip(hipDeviceSynchronize(), "structured attention");
     const auto out = Download(&d_out, q_count);
+    if (ratio == kRatio) {
+      HipBuffer<float> d_list(q_count);
+      q::Attention(d_q.get(), d_k.get(), d_v.get(), d_mask.get(), mask_words,
+                   d_list.get(), splits == 0 ? nullptr : d_partials.get(),
+                   splits, n_tokens, d_pos.get(), kHeads, kKvHeads, kDim, ratio,
+                   nullptr, d_lists.get(), d_counts.get(), list_capacity);
+      q::SigmoidMul(d_list.get(), d_gate.get(), q_count, nullptr);
+      CheckHip(hipDeviceSynchronize(), "structured list attention");
+      const auto list = Download(&d_list, q_count);
+      if (std::memcmp(out.data(), list.data(), q_count * sizeof(float)) != 0) {
+        throw std::runtime_error("structured list attention differs from walk");
+      }
+    }
     double error = 0.0;
     for (std::size_t i = 0; i < q_count; ++i) {
       if (!std::isfinite(out[i])) {
@@ -555,6 +578,108 @@ void CheckStructured(const char* name, std::uint32_t n_tokens,
   if (worst > kFp64Limit) {
     throw std::runtime_error("structured attention exceeds its FP64 limit");
   }
+}
+
+/// The compacted-selection route against the mask walk. Random masks of at
+/// most the 512-block budget per row (a short context selects every block):
+/// the outputs must match bit for bit, single-block and split eight ways, and
+/// stay within the FP64 limit.
+void CheckLists(std::uint32_t n_tokens, std::uint32_t start_pos,
+                std::uint32_t seed) {
+  constexpr std::uint32_t kBudget = 512;
+  const std::uint32_t n_kv = start_pos + n_tokens;
+  const std::uint32_t max_blocks = (n_kv + kRatio - 1) / kRatio;
+  const std::uint32_t mask_words = (max_blocks + 31) / 32;
+  const std::size_t q_count = static_cast<std::size_t>(n_tokens) * kQWidth;
+  const std::size_t kv_count = static_cast<std::size_t>(n_kv) * kKvWidth;
+  const auto qv = MakeValues(q_count, seed, 4.0F);
+  const auto gate = MakeValues(q_count, seed ^ 0x5555U, 3.0F);
+  std::vector<__half> kh(kv_count);
+  std::vector<__half> vh(kv_count);
+  {
+    const auto kf = MakeValues(kv_count, seed ^ 0xAAAAU, 1.0F);
+    const auto vf = MakeValues(kv_count, seed ^ 0x3333U, 1.0F);
+    for (std::size_t i = 0; i < kv_count; ++i) {
+      kh[i] = __float2half(kf[i]);
+      vh[i] = __float2half(vf[i]);
+    }
+  }
+  std::vector<std::uint32_t> mask(static_cast<std::size_t>(n_tokens) *
+                                  mask_words);
+  std::uint32_t state = seed ^ 0x77777777U;
+  for (std::uint32_t t = 0; t < n_tokens; ++t) {
+    const std::uint32_t complete = (start_pos + t + 1) / kRatio;
+    std::uint32_t* row = mask.data() + static_cast<std::size_t>(t) * mask_words;
+    if (complete <= kBudget) {
+      // The selector marks every word of a row that fits its budget.
+      std::fill(row, row + mask_words, 0xFFFFFFFFU);
+      continue;
+    }
+    // Rows alternate between the full budget and a random smaller count.
+    const std::uint32_t want =
+        t % 2 == 0 ? kBudget : 1 + NextRandom(&state) % kBudget;
+    for (std::uint32_t selected = 0; selected < want;) {
+      const auto block = NextRandom(&state) % complete;
+      if ((row[block / 32] & (1U << (block % 32))) == 0) {
+        row[block / 32] |= 1U << (block % 32);
+        ++selected;
+      }
+    }
+  }
+  const auto exact = Fp64Attention(qv, gate, kh, vh, mask.data(), mask_words,
+                                   n_tokens, start_pos);
+
+  HipBuffer<float> d_q(q_count);
+  HipBuffer<float> d_gate(q_count);
+  HipBuffer<__half> d_k(kv_count);
+  HipBuffer<__half> d_v(kv_count);
+  HipBuffer<std::uint32_t> d_mask(mask.size());
+  HipBuffer<std::uint32_t> d_pos(1);
+  HipBuffer<std::uint32_t> d_lists(static_cast<std::size_t>(n_tokens) *
+                                   kBudget);
+  HipBuffer<std::uint32_t> d_counts(n_tokens);
+  Upload(&d_q, qv);
+  Upload(&d_gate, gate);
+  Upload(&d_k, kh);
+  Upload(&d_v, vh);
+  Upload(&d_mask, mask);
+  Upload(&d_pos, std::vector<std::uint32_t>{start_pos});
+  std::cout << "lists n=" << n_tokens << " start=" << start_pos;
+  for (const std::uint32_t splits : {0U, 8U}) {
+    const std::uint32_t z = std::max(splits, 1U);
+    HipBuffer<float> d_partials(static_cast<std::size_t>(n_tokens) * kHeads *
+                                z * (kDim + 2));
+    HipBuffer<float> d_walk(q_count);
+    HipBuffer<float> d_list(q_count);
+    float* partials = splits == 0 ? nullptr : d_partials.get();
+    q::Attention(d_q.get(), d_k.get(), d_v.get(), d_mask.get(), mask_words,
+                 d_walk.get(), partials, splits, n_tokens, d_pos.get(), kHeads,
+                 kKvHeads, kDim, kRatio, nullptr);
+    q::Attention(d_q.get(), d_k.get(), d_v.get(), d_mask.get(), mask_words,
+                 d_list.get(), partials, splits, n_tokens, d_pos.get(), kHeads,
+                 kKvHeads, kDim, kRatio, nullptr, d_lists.get(), d_counts.get(),
+                 kBudget);
+    q::SigmoidMul(d_walk.get(), d_gate.get(), q_count, nullptr);
+    q::SigmoidMul(d_list.get(), d_gate.get(), q_count, nullptr);
+    CheckHip(hipDeviceSynchronize(), "list attention");
+    const auto walk = Download(&d_walk, q_count);
+    const auto list = Download(&d_list, q_count);
+    if (std::memcmp(walk.data(), list.data(), q_count * sizeof(float)) != 0) {
+      throw std::runtime_error("list attention differs from the mask walk");
+    }
+    double error = 0.0;
+    for (std::size_t i = 0; i < q_count; ++i) {
+      if (!std::isfinite(list[i])) {
+        throw std::runtime_error("list attention output is not finite");
+      }
+      error = std::max(error, std::abs(list[i] - exact[i]));
+    }
+    std::cout << (splits == 0 ? " single " : " split8 ") << error;
+    if (error > kFp64Limit) {
+      throw std::runtime_error("list attention exceeds its FP64 limit");
+    }
+  }
+  std::cout << " bitwise-equal\n";
 }
 
 void CheckChunks(std::uint32_t n, std::uint32_t split) {
@@ -665,6 +790,14 @@ int main() {
         {"513-total", 131069, spread(513)},
         {"576-total", 131069, spread(576)},
     };
+    // Compacted selections: a short context that selects every block, then
+    // the budgeted rows at increasing depth, up to the 160K decode target.
+    std::uint32_t list_seed = 0x115700U;
+    for (const std::uint32_t depth : {1500U, 8192U, 32768U, 163840U}) {
+      for (const std::uint32_t n : {1U, 3U, 8U}) {
+        CheckLists(n, depth, list_seed++);
+      }
+    }
     std::uint32_t structured_seed = 0x5EED0000U;
     for (const Structured& c : structured) {
       for (const std::uint32_t n : {1U, 3U}) {
