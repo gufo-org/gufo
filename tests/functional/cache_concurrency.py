@@ -22,6 +22,11 @@ CODES = ("ALPHA", "BETA", "GAMMA", "DELTA")
 TAIL_ALLOWANCE = 96
 
 
+def skip_check(checks, name, reason):
+    checks[name] = {"skipped": reason}
+    print(f"SKIP {name}: {reason}", file=sys.stderr, flush=True)
+
+
 def system_prompt(label, lines):
     return (f"{label}\nReply with only the requested code word.\n" +
             "".join(f"Reference note {index}: the build uses CMake presets and every "
@@ -48,7 +53,7 @@ def abandon_request(client, body, delay):
 
 
 def check_cache_concurrency(client, model, checks, chat_result, concurrency,
-                            abandon=abandon_request):
+                            abandon=abandon_request, preset=None):
     failures = []
     width = max(2, min(concurrency, len(CODES)))
     request = dict(model=model, temperature=0, seed=31, max_completion_tokens=16,
@@ -105,10 +110,11 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
     reuse = chat("probe_warm", body_for(probe))["usage"]["cached_tokens"] > 0
     sharing = reuse and concurrency > 1
 
-    def group(label, conversations, codes, share, streaming=()):
+    def group(label, conversations, codes, share, streaming=(), answers=True):
         results = together(label, [body_for(m) for m in conversations], streaming)
         for result, code in zip(results, codes):
-            answer(result, code)
+            if answers:
+                answer(result, code)
         waited = [index for index, result in enumerate(results) if wait_ms(result) > 0]
         if not (share and sharing):
             if waited:
@@ -163,7 +169,14 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
                      {"role": "user", "content": background(code, 60) +
                       f"Reply with only the code {code}."}]
                     for code in CODES[:width]]
-    group("short_shared", short_shared, CODES[:width], share=False)
+    # Gemma 4 summarizes this repetitive background instead of answering, even
+    # uncached and alone; llama.cpp b11069 does for DELTA (ALPHA 0.77, GAMMA 0.65).
+    paraphrases = preset == "gemma4"
+    if paraphrases:
+        skip_check(checks, "short_shared_answers",
+                   "model paraphrases the background; uncached answers are compared")
+    group("short_shared", short_shared, CODES[:width], share=False,
+          answers=not paraphrases)
 
     # Unrelated prompts share nothing beyond template framing.
     unrelated = [[{"role": "system", "content": system_prompt(f"cache_concurrency_{code}", 120)},

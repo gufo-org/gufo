@@ -9,7 +9,7 @@ grid checkpoint, and must answer as uncached controls do.
 from copy import deepcopy
 import sys
 
-from cache_concurrency import background, system_prompt
+from cache_concurrency import background, skip_check, system_prompt
 
 CODES = ("ALPHA", "BETA", "GAMMA", "DELTA")
 # Tokens around the divergence point a restore may still miss: template
@@ -18,9 +18,12 @@ BOUNDARY_ALLOWANCE = 96
 # Below this gain the server keeps the nearest existing checkpoint instead of
 # capturing another one (TextRunnerPool::Request::kSharedPrefixMinTokens).
 LEARN_MIN_TOKENS = 512
+# Gemma 4 copies the last background label into the short DELTA task: uncached
+# Gufo and llama.cpp b11069 also answer "DELTA.3" ("." 0.503 vs end 0.497).
+COPIED_LABEL_ANSWERS = {"gemma4": {("short_tasks", "DELTA")}}
 
 
-def check_cache_shared_prefix(client, model, checks, chat_result):
+def check_cache_shared_prefix(client, model, checks, chat_result, preset=None):
     failures = []
     request = dict(model=model, temperature=0, seed=31, max_completion_tokens=16,
                    reasoning_effort="none")
@@ -54,7 +57,11 @@ def check_cache_shared_prefix(client, model, checks, chat_result):
         results = []
         for index, (messages, code) in enumerate(zip(conversations, CODES)):
             result = chat(f"{label}_{index}", messages)
-            answer(result, code)
+            if (label, code) in COPIED_LABEL_ANSWERS.get(preset, ()):
+                skip_check(checks, f"{label}_{index}_answer",
+                           "model copies the background label; uncached answers match")
+            else:
+                answer(result, code)
             results.append(result)
         # The shared prefix ends where the user message starts. An uncached
         # probe with a one-word user message measures it.

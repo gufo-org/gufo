@@ -9,6 +9,8 @@ required. The message then stays put, so the following turn must reuse it all.
 from copy import deepcopy
 import sys
 
+from templates import THINKING_OFF_OPENING_TOKENS
+
 
 def history(label):
     # A long conversation body after a short system prompt, as in agent
@@ -27,8 +29,10 @@ REMINDER = ("Reminder: the status word changed. From now on, whenever the user "
 QUESTION = "Reply with only the status word."
 
 
-def check_system_injection(client, model, checks, chat_result):
+def check_system_injection(client, model, checks, chat_result, sampling_preset="qwen38"):
     failures = []
+    # Thinking-off framing that history does not render (templates.py).
+    opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset, 0)
 
     def record(name, result):
         checks[name] = result
@@ -56,7 +60,7 @@ def check_system_injection(client, model, checks, chat_result):
             "previous_prompt_tokens": previous_total, "prompt_tokens": total,
             "cached_tokens": reused, "prefill_tokens": prefilled,
             "full_reuse_required": required}
-        if required and reused < previous_total:
+        if required and reused < previous_total - opening:
             failures.append(f"{label}: earlier prompt was not reused: "
                             f"{checks[label + '_evidence']}")
 

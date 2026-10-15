@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .artifacts import artifact_path, load_artifact
-from .config import BenchConfig, TableSpec
+from .config import BenchConfig, TableSpec, table_id
 
 TODO = "TODO"
 NA = "N/A"  # unavailable comparison (see artifacts/unavailable.json)
@@ -263,7 +263,7 @@ def _row_values(config: BenchConfig, table: TableSpec) -> dict[str, dict[str, st
 
     gufo = load_artifact(artifact_path(config, table, "gufo"))
     if kind == "single" and table.speculative and not config.reference_speculative:
-        ar_table = config.table("single-ar" + (f"-{table.variant}" if table.variant else ""))
+        ar_table = config.table(table_id("single-ar", table.variant))
         reference = load_artifact(artifact_path(config, ar_table, "reference"))
     else:
         reference = load_artifact(artifact_path(config, table, "reference"))

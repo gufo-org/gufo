@@ -48,6 +48,17 @@ void TestExplicitFlags() {
   assert(sampling.temperature == 0 && sampling.top_k == 0 &&
          sampling.presence_penalty == 0 && sampling.seed == 0);
   assert(sampling.top_p == 0.8F);
+  // Gemma 4: its generation config, thinking or not; supplied values win.
+  for (const bool thinking : {false, true}) {
+    const auto gemma = gufo::sampling::ResolveTextSampling(
+        gufo::sampling::TextModelPreset::kGemma4, thinking, {}, {});
+    assert(gemma.temperature == 1.0F && gemma.top_p == 0.95F &&
+           gemma.top_k == 64 && gemma.presence_penalty == 0.0F);
+  }
+  const auto gemma_zero = gufo::sampling::ResolveTextSampling(
+      gufo::sampling::TextModelPreset::kGemma4, false, zero->sampling,
+      zero->sampling_supplied);
+  assert(gemma_zero.temperature == 0 && gemma_zero.top_k == 0);
 }
 
 void TestFlashMtpFlags() {
