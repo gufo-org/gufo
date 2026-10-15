@@ -546,10 +546,10 @@ std::size_t RetentionPolicy::RetainedPayloadBytes() const noexcept {
         bytes += c.tail->Bytes();
       if (c.chunks.empty())
         continue;
-      // Count a component across all retained checkpoints once. Reading each
-      // chunk ID once per row avoids repeatedly walking other checkpoints'
-      // cold chunk objects. Sharing need not be a prefix: a reader can keep
-      // a later chunk alive while earlier chunks are recreated.
+      // Count a component across all retained checkpoints once. Compare live
+      // references directly instead of reading IDs from cold chunk objects.
+      // Sharing need not be a prefix: a reader can keep a later chunk alive
+      // while earlier chunks are recreated.
       bool counted = false;
       for (std::size_t earlier = 0; earlier < i && !counted; ++earlier) {
         if (!records_[earlier].checkpoint)
@@ -576,16 +576,17 @@ std::size_t RetentionPolicy::RetainedPayloadBytes() const noexcept {
           }
       }
       for (std::size_t n = 0; n < rows; ++n) {
-        std::array<ChunkId, kRecordLimit> seen;
+        std::array<const ChunkReference*, kRecordLimit> seen;
         std::size_t seen_count = 0;
         for (std::size_t peer = 0; peer < peer_count; ++peer) {
           if (peers[peer]->chunks.size() <= n)
             continue;
           const auto& chunk = peers[peer]->chunks[n];
-          const auto id = chunk.Id();
           const auto end = seen.begin() + seen_count;
-          if (std::find(seen.begin(), end, id) == end) {
-            seen[seen_count++] = id;
+          if (std::find_if(seen.begin(), end, [&](const auto* previous) {
+                return chunk.SameChunk(*previous);
+              }) == end) {
+            seen[seen_count++] = &chunk;
             bytes += chunk.Storage().Bytes();
           }
         }

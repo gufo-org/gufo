@@ -298,31 +298,25 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
             cache::ResourceCategory::kBackingFree)];
     const bool may_fit = free_bytes >= blocks * state_->block_bytes;
     for (std::size_t tried = 0; may_fit && blocks <= count && tried < count;) {
-      // An occupied page rules out every candidate run that crosses it, and
-      // a run ends with its segment. Skip without allocating assignment
-      // bookkeeping, including full exhaustion.
+      // Search one physical segment under one ledger lock instead of locking
+      // separately for each block in a large, fragmented cache.
       const auto limit = std::min(count, (i / segment + 1) * segment);
-      std::size_t free = 0;
-      while (free < blocks && i + free < limit &&
-             state_->blocks[i + free].Info().category ==
-                 cache::ResourceCategory::kBackingFree)
-        ++free;
-      if (free == blocks) {
+      const auto range =
+          std::span(state_->blocks.get(), count).subspan(i, limit - i);
+      const auto offset = cache::ResourceCharge::FindFreeBacking(range, blocks);
+      if (offset < range.size()) {
         try {
           auto reservation = cache::ResourceCharge::ReserveBacking(
-              std::span(state_->blocks.get(), count).subspan(i, blocks),
-              category);
-          state_->next.store(i + blocks == count ? 0 : i + blocks,
+              range.subspan(offset, blocks), category);
+          const auto first = i + offset;
+          state_->next.store(first + blocks == count ? 0 : first + blocks,
                              std::memory_order_relaxed);
-          return BackingBlock(state_, i, blocks, std::move(reservation));
+          return BackingBlock(state_, first, blocks, std::move(reservation));
         } catch (const std::bad_alloc&) {
           // A racing assignment or injected bookkeeping failure is atomic.
         }
       }
-      const auto step =
-          free < blocks
-              ? std::min(i + free == limit ? free : free + 1, count - i)
-              : 1;
+      const auto step = offset < range.size() ? offset + 1 : range.size();
       tried += step;
       i = i + step >= count ? 0 : i + step;
     }

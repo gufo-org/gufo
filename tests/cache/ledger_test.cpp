@@ -170,6 +170,59 @@ void GroupedBacking() {
   Empty(ledger);
   Empty(foreign);
 }
+void FreeBackingSearch() {
+  constexpr std::size_t count = 9;
+  ResourceLedger ledger({count * 64, count * 64, 0, count * 64});
+  std::array<ResourceCharge, count> pages;
+  for (auto& page : pages)
+    page = ledger.Reserve(Free, 64).Convert();
+  // Exhaust independent occupied/free layouts and subspans, including runs
+  // ending at a segment boundary and requests larger than the whole span.
+  for (unsigned mask = 0; mask < (1U << count); ++mask) {
+    std::array<ResourceCharge, count> owners;
+    for (std::size_t i = 0; i < count; ++i)
+      if (mask & (1U << i))
+        owners[i] = pages[i].ReserveBacking(Spill).Convert();
+    const auto before = ledger.Snapshot();
+    for (std::size_t begin = 0; begin <= count; ++begin) {
+      const auto range = std::span(pages).subspan(begin);
+      for (std::size_t wanted = 1; wanted <= count + 1; ++wanted) {
+        auto expected = range.size();
+        for (std::size_t first = 0; first + wanted <= range.size(); ++first) {
+          bool free = true;
+          for (std::size_t j = 0; j < wanted; ++j)
+            free &= (mask & (1U << (begin + first + j))) == 0;
+          if (free) {
+            expected = first;
+            break;
+          }
+        }
+        assert(ResourceCharge::FindFreeBacking(range, wanted) == expected);
+      }
+    }
+    assert(ledger.Snapshot() == before);
+  }
+  auto reservation = pages[0].ReserveBacking(Spill);
+  auto pin = reservation.PinPersistence();
+  assert(ResourceCharge::FindFreeBacking(pages, count) == count);
+  reservation = {};
+  assert(ResourceCharge::FindFreeBacking(pages, count) == count);
+  pin = {};
+  assert(ResourceCharge::FindFreeBacking(pages, count) == 0);
+  Throws<std::invalid_argument>(
+      [&] { (void)ResourceCharge::FindFreeBacking(pages, 0); });
+  std::array<ResourceCharge, 1> invalid;
+  Throws<std::logic_error>(
+      [&] { (void)ResourceCharge::FindFreeBacking(invalid, 1); });
+  auto owner = pages[0].ReserveBacking(Private).Convert();
+  invalid[0] = owner;
+  Throws<std::logic_error>(
+      [&] { (void)ResourceCharge::FindFreeBacking(invalid, 1); });
+  ResourceLedger foreign({64, 64, 0, 0});
+  auto mixed = std::array{pages[0], foreign.Reserve(Free, 64).Convert()};
+  Throws<std::invalid_argument>(
+      [&] { (void)ResourceCharge::FindFreeBacking(mixed, 1); });
+}
 void LimitsAndFaults() {
   ResourceLedger ledger({100, 80, 30, 20});
   auto retained = ledger.Reserve(Private, 70).Convert();
@@ -562,6 +615,8 @@ void AdmissionRace() {
     std::vector<std::thread> threads;
     for (unsigned t = 0; t != 8; ++t)
       threads.emplace_back([&] {
+        if (spill)
+          assert(ResourceCharge::FindFreeBacking(std::span(&pool, 1), 1) == 0);
         start.arrive_and_wait();
         ResourceReservation reservation;
         try {
@@ -591,6 +646,7 @@ void AdmissionRace() {
 int main() {
   BackingAndPins();
   GroupedBacking();
+  FreeBackingSearch();
   LimitsAndFaults();
   ConstrainedStartupLimits();
   RandomSequences();
