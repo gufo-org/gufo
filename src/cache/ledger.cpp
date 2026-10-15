@@ -267,18 +267,19 @@ std::size_t ResourceCharge::FindFreeBacking(
     throw std::invalid_argument("empty backing run");
   if (blocks.empty())
     return 0;
-  for (const auto& block : blocks)
-    if (!block.token_ || block.token_->pooled ||
-        !block.token_->allocation->backing)
-      throw std::logic_error("search requires original pool backing handles");
-  const auto& ledger = blocks.front().token_->allocation->ledger;
-  for (const auto& block : blocks)
-    if (block.token_->allocation->ledger != ledger)
-      throw std::invalid_argument("backing search spans ledgers");
+  const auto& first = blocks.front().token_;
+  if (!first || first->pooled || !first->allocation->backing)
+    throw std::logic_error("search requires original pool backing handles");
+  const auto& ledger = first->allocation->ledger;
   const std::lock_guard lock(ledger->mutex);
   std::size_t run = 0;
   for (std::size_t i = 0; i < blocks.size(); ++i) {
-    run = blocks[i].token_->allocation->category == Free ? run + 1 : 0;
+    const auto& block = blocks[i].token_;
+    if (!block || block->pooled || !block->allocation->backing)
+      throw std::logic_error("search requires original pool backing handles");
+    if (block->allocation->ledger != ledger)
+      throw std::invalid_argument("backing search spans ledgers");
+    run = block->allocation->category == Free ? run + 1 : 0;
     if (run == count)
       return i + 1 - count;
   }
