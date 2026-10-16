@@ -2372,6 +2372,162 @@ __global__ void PrepareAttentionKernel(
   }
 }
 
+// Q8 twin of PrepareAttentionKernel: identical RMS/RoPE/q/gate math, but K
+// rows go to INT8 + per-(token,head) scales. V rows are quantized by
+// QuantizeKvRowsQ8 over the packed projections; q/gate are unchanged.
+template<std::uint32_t kHeadsPerBlock>
+__global__ void PrepareAttentionQ8Kernel(
+    const float* __restrict__ packed, std::uint32_t stride,
+    const float* __restrict__ q_gamma, const float* __restrict__ k_gamma,
+    float* __restrict__ q, float* __restrict__ gate,
+    std::int8_t* __restrict__ k_cache, std::int8_t* __restrict__ v_cache,
+    std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
+    std::uint32_t rotary, const std::uint32_t* start_pos, float theta,
+    float eps, const qwen::vision::DeviceRope* rope) {
+  __shared__ float partial[kHeadsPerBlock][8];
+  __shared__ float norm[kHeadsPerBlock][256];
+  const std::uint32_t t = blockIdx.x, first = blockIdx.y * kHeadsPerBlock,
+                      tid = threadIdx.x;
+  const std::uint32_t lane = tid % 32, wave = tid / 32;
+  const std::uint32_t live = min(kHeadsPerBlock, heads + kv_heads - first);
+  const std::size_t width = std::size_t(heads) * d,
+                    kv_width = std::size_t(kv_heads) * d;
+  const std::uint32_t ppos = *start_pos + t;
+  const float* row = packed + std::size_t(t) * stride;
+  float values[kHeadsPerBlock];
+#pragma unroll
+  for (std::uint32_t j = 0; j < kHeadsPerBlock; ++j) {
+    const std::uint32_t h = first + j;
+    const bool query = h < heads;
+    const std::uint32_t head = query ? h : h - heads;
+    values[j] = j < live && tid < d
+                    ? row[(query ? head * 2 * d : 2 * width + head * d) + tid]
+                    : 0.0f;
+    float ss = values[j] * values[j];
+    // Match the separate RMS kernel's rounded square before its reduction.
+    asm volatile("" : "+v"(ss));
+    ss = WaveSum(ss);
+    if (lane == 0)
+      partial[j][wave] = ss;
+  }
+  __syncthreads();
+#pragma unroll
+  for (std::uint32_t j = 0; j < kHeadsPerBlock; ++j) {
+    if (j >= live)
+      continue;
+    const std::uint32_t h = first + j;
+    const bool query = h < heads;
+    const std::uint32_t head = query ? h : h - heads;
+    float total = 0.0f;
+    for (int w = 0; w < static_cast<int>(blockDim.x / warpSize); ++w)
+      total += partial[j][w];
+    const float scale = rsqrtf(total / static_cast<float>(d) + eps);
+    const float* gamma = query ? q_gamma : k_gamma;
+    if (tid < d) {
+      norm[j][tid] = values[j] * scale * (gamma != nullptr ? gamma[tid] : 1.0f);
+      if (query)
+        gate[std::size_t(t) * width + head * d + tid] =
+            row[head * 2 * d + d + tid];
+      // NOTE (q8): K/V cache stores deferred to the quantize phases below.
+    }
+  }
+  __syncthreads();
+  const std::uint32_t half = rotary / 2;
+  float sine = 0.0f, cosine = 0.0f;
+  if (tid < half) {
+    const float freq = powf(
+        theta, -2.0f * static_cast<float>(tid) / static_cast<float>(rotary));
+    sincosf(qwen::vision::RopePosition(rope, *start_pos + t, tid) * freq, &sine,
+            &cosine);
+  }
+// Phase 1: rotate K rows, stash back into norm.
+#pragma unroll
+  for (std::uint32_t j = 0; j < kHeadsPerBlock; ++j) {
+    if (j >= live)
+      continue;
+    const std::uint32_t h = first + j;
+    const bool query = h < heads;
+    const std::uint32_t head = query ? h : h - heads;
+    if (tid < half) {
+      const float a = norm[j][tid], b = norm[j][tid + half];
+      const float lo = __fmaf_rn(a, cosine, -__fmul_rn(b, sine)),
+                  hi = __fmaf_rn(a, sine, __fmul_rn(b, cosine));
+      if (query) {
+        q[std::size_t(t) * width + head * d + tid] = lo;
+        q[std::size_t(t) * width + head * d + tid + half] = hi;
+      } else {
+        norm[j][tid] = lo;
+        norm[j][tid + half] = hi;
+      }
+    }
+    if (tid >= rotary && tid < d) {
+      if (query)
+        q[std::size_t(t) * width + head * d + tid] = norm[j][tid];
+      // else: tail already staged in norm.
+    }
+  }
+  __syncthreads();
+// Phase 2: per-(token,head) scale + INT8 store.
+#pragma unroll
+  for (std::uint32_t j = 0; j < kHeadsPerBlock; ++j) {
+    if (j >= live)
+      continue;
+    const std::uint32_t h = first + j;
+    if (h < heads)
+      continue;
+    const std::uint32_t head = h - heads;
+    float mx = tid < d ? fabsf(norm[j][tid]) : 0.0f;
+    mx = BlockMax(mx, partial[j]);
+    const float sc = mx > 0.0f ? mx / 127.0f : 1.0f;
+    if (tid < d) {
+      float qv = norm[j][tid] / sc;
+      qv = qv > 127.0f ? 127.0f : (qv < -127.0f ? -127.0f : qv);
+      // Q8_0 blocked layout; the row scale repeats per 32-block.
+      const std::uint32_t head_blocks = (d + 31) / 32;
+      const std::uint32_t row_blocks =
+          static_cast<std::uint32_t>((kv_width + 31) / 32);
+      std::int8_t* out = k_cache + std::size_t(ppos) * row_blocks * 34 +
+                         std::size_t(head) * head_blocks * 34;
+      out[(tid / 32) * 34 + (tid % 32)] = static_cast<std::int8_t>(rintf(qv));
+      if (tid < head_blocks) {
+        *reinterpret_cast<__half*>(out + std::size_t(tid) * 34 + 32) =
+            __float2half(sc);
+      }
+    }
+  }
+  __syncthreads();
+// Phase 3: V rows (raw packed values, no norm/RoPE) -> Q8_0 blocks.
+#pragma unroll
+  for (std::uint32_t j = 0; j < kHeadsPerBlock; ++j) {
+    if (j >= live)
+      continue;
+    const std::uint32_t h = first + j;
+    if (h < heads)
+      continue;
+    const std::uint32_t head = h - heads;
+    const float* vrow = row + 2 * width + kv_width + std::size_t(head) * d;
+    float mx = 0.0f;
+    for (std::uint32_t i = tid; i < d; i += blockDim.x)
+      mx = fmaxf(mx, fabsf(vrow[i]));
+    mx = BlockMax(mx, partial[j]);
+    const float sc = mx > 0.0f ? mx / 127.0f : 1.0f;
+    const std::uint32_t head_blocks = (d + 31) / 32;
+    const std::uint32_t row_blocks =
+        static_cast<std::uint32_t>((kv_width + 31) / 32);
+    std::int8_t* out = v_cache + std::size_t(ppos) * row_blocks * 34 +
+                       std::size_t(head) * head_blocks * 34;
+    for (std::uint32_t i = tid; i < d; i += blockDim.x) {
+      float qv = vrow[i] / sc;
+      qv = qv > 127.0f ? 127.0f : (qv < -127.0f ? -127.0f : qv);
+      out[(i / 32) * 34 + (i % 32)] = static_cast<std::int8_t>(rintf(qv));
+    }
+    if (tid < head_blocks) {
+      *reinterpret_cast<__half*>(out + std::size_t(tid) * 34 + 32) =
+          __float2half(sc);
+    }
+  }
+}
+
 __global__ void RopeKernel(float* x, std::uint32_t heads, std::uint32_t d,
                            std::uint32_t rotary_dim,
                            const std::uint32_t* start_pos, float theta,
@@ -2401,6 +2557,41 @@ __global__ void StoreKvKernel(const float* src, __half* cache,
   for (std::uint32_t i = threadIdx.x; i < row_dim; i += blockDim.x) {
     cache[static_cast<std::size_t>(*start_pos + t) * row_dim + i] =
         __float2half(src[static_cast<std::size_t>(t) * row_dim + i]);
+  }
+}
+
+// Per-(token,head) symmetric INT8 quantize of float rows.
+// src row (t,h) = src + t*src_tok_stride + h*src_head_stride, length d.
+// dst[(start_pos+t)*kv_width + h*d + i], scales[(start_pos+t)*kv_heads + h].
+__global__ void QuantizeKvRowsQ8Kernel(
+    const float* __restrict__ src, std::uint32_t src_tok_stride,
+    std::uint32_t src_head_stride, std::int8_t* __restrict__ dst,
+    std::uint32_t kv_width, std::uint32_t kv_heads, std::uint32_t d,
+    std::uint32_t n_tokens, const std::uint32_t* start_pos) {
+  const std::uint32_t t = blockIdx.x, h = blockIdx.y;
+  const std::uint32_t tid = threadIdx.x;
+  const float* row =
+      src + std::size_t(t) * src_tok_stride + std::size_t(h) * src_head_stride;
+  float mx = 0.0f;
+  for (std::uint32_t i = tid; i < d; i += blockDim.x)
+    mx = fmaxf(mx, fabsf(row[i]));
+  __shared__ float smax[32];
+  mx = BlockMax(mx, smax);
+  const float sc = mx > 0.0f ? mx / 127.0f : 1.0f;
+  const std::uint32_t ppos = *start_pos + t;
+  // Q8_0 blocked layout; the row scale repeats in every 32-block.
+  const std::uint32_t row_blocks = (kv_width + 31) / 32;
+  const std::uint32_t head_blocks = (d + 31) / 32;
+  std::int8_t* out = dst + std::size_t(ppos) * row_blocks * 34 +
+                     std::size_t(h) * head_blocks * 34;
+  for (std::uint32_t i = tid; i < d; i += blockDim.x) {
+    float q = row[i] / sc;
+    q = q > 127.0f ? 127.0f : (q < -127.0f ? -127.0f : q);
+    out[(i / 32) * 34 + (i % 32)] = static_cast<std::int8_t>(rintf(q));
+  }
+  if (tid < head_blocks) {
+    *reinterpret_cast<__half*>(out + std::size_t(tid) * 34 + 32) =
+        __float2half(sc);
   }
 }
 
@@ -2909,6 +3100,292 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
         if (w != 0.0f) {
           float vv[8];
           unpack8(rows[b], vv);
+#pragma unroll
+          for (std::uint32_t x = 0; x < 8; ++x) {
+            acc[x] = fmaf(w, vv[x], acc[x]);
+          }
+        }
+      }
+    }
+    __syncthreads();
+  };
+
+  if (words == nullptr) {
+    for (std::uint32_t tile = split * kTile; tile < n_kv;
+         tile += kTile * splits) {
+      keys[i] = tile + i < n_kv ? tile + i : n_kv;
+      __syncthreads();
+      tile_step();
+    }
+  } else {
+    const std::uint32_t n_complete = tail_start / ratio;
+    const std::uint32_t lane = i & 31u;
+    const std::uint32_t wave = i >> 5u;
+    // Tiles are cut from the running compacted list, not per window: the
+    // budget's ~512 selected blocks make the same eight full tiles at any
+    // depth, dealt round-robin over the splits. Cut per window, a deep
+    // context scattered them into dozens of mostly empty tiles, and every
+    // window holding fewer than one tile's blocks landed on split 0 alone,
+    // so decode attention grew with the context instead of the budget.
+    const std::uint32_t per_tile = kTile / ratio;
+    std::uint32_t carry = 0;    // compacted blocks not yet cut into a tile
+    std::uint32_t tile_no = 0;  // tiles cut so far (the same in every split)
+    for (std::uint32_t w0 = 0; w0 < n_complete; w0 += kWindow) {
+      // Thread i owns blocks w0 + 4i .. +3 of the window: flag the selected
+      // ones and compact their indices with a block-wide exclusive scan,
+      // appending after the carried-over blocks.
+      // The four blocks share one mask word: read it once.
+      std::uint32_t flags = 0;
+      std::uint32_t count = 0;
+      const std::uint32_t b0 = w0 + (i * 4);
+      const std::uint32_t word = b0 < n_complete ? words[b0 / 32] : 0u;
+      for (std::uint32_t k = 0; k < 4; ++k) {
+        const std::uint32_t b = b0 + k;
+        const bool set = b < n_complete && ((word >> (b % 32)) & 1u);
+        flags |= (set ? 1u : 0u) << k;
+        count += set ? 1u : 0u;
+      }
+      std::uint32_t incl = count;
+      for (std::uint32_t off = 1; off < 32; off <<= 1) {
+        const std::uint32_t v = __shfl_up(incl, off);
+        incl += lane >= off ? v : 0u;
+      }
+      if (lane == 31) {
+        wave_total[wave] = incl;
+      }
+      __syncthreads();
+      std::uint32_t base = 0;
+      for (std::uint32_t w = 0; w < wave; ++w) {
+        base += wave_total[w];
+      }
+      std::uint32_t total = 0;
+      for (std::uint32_t w = 0; w < 8; ++w) {
+        total += wave_total[w];
+      }
+      std::uint32_t slot = carry + base + incl - count;
+      for (std::uint32_t k = 0; k < 4; ++k) {
+        if ((flags >> k) & 1u) {
+          list[slot++] = w0 + (i * 4) + k;
+        }
+      }
+      __syncthreads();
+      const std::uint32_t n = carry + total;
+      std::uint32_t t0 = 0;
+      for (; t0 < n; t0 += per_tile, ++tile_no) {
+        const std::uint32_t len = min(per_tile, n - t0);
+        if (len < per_tile && len <= kCarry) {
+          break;  // carried into the next window
+        }
+        if (tile_no % splits != split) {
+          continue;
+        }
+        const std::uint32_t entry = i / ratio;
+        keys[i] = entry < len ? (list[t0 + entry] * ratio) + (i % ratio) : n_kv;
+        __syncthreads();
+        tile_step();
+      }
+      // Move the partial tile's blocks to the front for the next window.
+      carry = t0 < n ? n - t0 : 0;
+      if (t0 > 0) {
+        const std::uint32_t moved = i < carry ? list[t0 + i] : 0u;
+        __syncthreads();
+        if (i < carry) {
+          list[i] = moved;
+        }
+      }
+      __syncthreads();
+    }
+    if (carry > 0 && tile_no % splits == split) {
+      const std::uint32_t entry = i / ratio;
+      keys[i] = entry < carry ? (list[entry] * ratio) + (i % ratio) : n_kv;
+      __syncthreads();
+      tile_step();
+    }
+    // The incomplete tail block is always visible.
+    if (tail_start < n_kv && split == 0) {
+      keys[i] = tail_start + i < n_kv ? tail_start + i : n_kv;
+      __syncthreads();
+      tile_step();
+    }
+  }
+  // Sum the eight wave partials: wave w's lane holds dims 8*lane..+7.
+  __shared__ float red[8][256];
+#pragma unroll
+  for (std::uint32_t x = 0; x < 8; ++x) {
+    red[wave][(lane * 8) + x] = acc[x];
+  }
+  __syncthreads();
+  float total = 0.0f;
+  for (std::uint32_t w = 0; w < 8; ++w) {
+    total += red[w][i];
+  }
+  if (splits == 1) {
+    if (i < d) {
+      out[(static_cast<std::size_t>(t) * heads + h) * d + i] = total / l;
+    }
+    return;
+  }
+  float* part =
+      partials +
+      ((static_cast<std::size_t>(t) * heads + h) * splits + split) * (d + 2);
+  if (i < d) {
+    part[2 + i] = total;
+  }
+  if (i == 0) {
+    part[0] = m;
+    part[1] = l;
+  }
+}
+
+__global__ void AttentionKernelQ8(
+    const float* q, const std::int8_t* k_cache, const std::int8_t* v_cache,
+    const std::uint32_t* mask, std::uint32_t mask_words, float* out,
+    float* partials, const std::uint32_t* start_pos, std::uint32_t heads,
+    std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio) {
+  constexpr std::uint32_t kTile = 256;
+  constexpr std::uint32_t kWindow = 1024;  // blocks compacted per pass
+  const std::uint32_t split = blockIdx.z;
+  const std::uint32_t splits = gridDim.z;
+  __shared__ float qs[256];
+  __shared__ float p[kTile];
+  __shared__ float shared[32];
+  __shared__ std::uint32_t keys[kTile];
+  // Room for one carried partial tile at the model's ratio of 4 (under a
+  // tile's worth of blocks). A whole tile of keys would push the kernel past
+  // 16 KiB of LDS and cost a resident block per CU on multi-row calls; below
+  // ratio 4 a partial tile too big to carry is attended in its window.
+  constexpr std::uint32_t kCarry = kTile / 4;
+  __shared__ std::uint32_t list[kWindow + kCarry];
+  __shared__ std::uint32_t wave_total[8];
+  const std::uint32_t h = blockIdx.x;
+  const std::uint32_t t = blockIdx.y;
+  const std::uint32_t pos = *start_pos + t;
+  const std::uint32_t kvh = h / (heads / kv_heads);
+  const std::uint32_t n_kv = pos + 1;
+  const std::uint32_t tail_start = (n_kv / ratio) * ratio;
+  const std::uint32_t* words =
+      mask == nullptr ? nullptr
+                      : mask + static_cast<std::size_t>(t) * mask_words;
+  const float scale = rsqrtf(static_cast<float>(d));
+  const std::uint32_t i = threadIdx.x;
+  const std::uint32_t lane = i & 31u;
+  const std::uint32_t wave = i >> 5u;
+  qs[i] = i < d ? q[(static_cast<std::size_t>(t) * heads + h) * d + i] : 0.0f;
+  __syncthreads();
+  float m = -INFINITY;
+  float l = 0.0f;
+  // Every wave accumulates its own 32 keys of each tile into a partial
+  // context row (eight dims per lane); the partials are summed at the end.
+  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  // Q8_0 blocked rows: (kv_heads*d/32) blocks of 34 bytes.
+  const std::size_t kv_stride =
+      static_cast<std::size_t>(kv_heads) * d / 32 * 34;
+  const std::int8_t* k_head = k_cache + kvh * (d / 32 * 34);
+  const std::int8_t* v_head = v_cache + kvh * (d / 32 * 34);
+
+  // Rows are read eight contiguous halves per lane, one 16-byte load, so a
+  // wave reads a whole 256-wide row at once. A wave issues the rows of
+  // `kBatch` consecutive keys of its 32 before using any, so their loads
+  // overlap instead of each waiting out its own latency. Empty lanes read
+  // the last key's row and are never used; a batch with no key at all is
+  // skipped (returns false).
+  constexpr std::uint32_t kBatch = 8;
+  const auto load_batch_q8 = [&](const std::int8_t* head, std::uint32_t base,
+                                 uint64_t* rows, float* sc8) {
+    bool any = false;
+#pragma unroll
+    for (std::uint32_t b = 0; b < kBatch; ++b) {
+      any = any || keys[base + b] < n_kv;
+    }
+    if (!any) {
+      return false;
+    }
+#pragma unroll
+    for (std::uint32_t b = 0; b < kBatch; ++b) {
+      const std::uint32_t j = min(keys[base + b], n_kv - 1);
+      // Q8_0 block holding this lane’s 8 dims; fp16 scale trails it.
+      // The 8-byte chunk may straddle 8-alignment (34-byte blocks), so
+      // memcpy lets the compiler emit safe loads; the scale is 2-aligned.
+      const std::int8_t* blk =
+          head + (static_cast<std::size_t>(j) * kv_stride) + (lane / 4) * 34;
+      __builtin_memcpy(&rows[b], blk + ((lane * 8) % 32),
+                       sizeof(std::uint64_t));
+      sc8[b] = static_cast<float>(*reinterpret_cast<const __half*>(blk + 32));
+    }
+    return true;
+  };
+  const auto unpack8q = [](const uint64_t& packed, float sc, float* out8) {
+    const auto* q8 = reinterpret_cast<const std::int8_t*>(&packed);
+#pragma unroll
+    for (std::uint32_t j = 0; j < 8; ++j) {
+      out8[j] = static_cast<float>(q8[j]) * sc;
+    }
+  };
+
+  // One tile: lane i holds key position keys[i] (n_kv marks an empty lane).
+  // Scores: wave w takes keys 32w..32w+31, a wave-wide dot product per key.
+  // Values: the same split, eight dims per lane.
+  const auto tile_step = [&]() {
+    float qv[8];
+#pragma unroll
+    for (std::uint32_t j = 0; j < 8; ++j) {
+      qv[j] = qs[(lane * 8) + j];
+    }
+    float s_mine = -INFINITY;
+    for (std::uint32_t k0 = 0; k0 < 32; k0 += kBatch) {
+      uint64_t rows[kBatch];
+      float ksc[kBatch];
+      if (!load_batch_q8(k_head, (wave * 32) + k0, rows, ksc)) {
+        continue;
+      }
+#pragma unroll
+      for (std::uint32_t b = 0; b < kBatch; ++b) {
+        const std::uint32_t ju = keys[(wave * 32) + k0 + b];
+        const std::uint32_t j = min(ju, n_kv - 1);
+        float kv[8];
+        unpack8q(rows[b], ksc[b], kv);
+        // The lane's eight products in the order fast-math has always
+        // summed them, spelled out so the scores stay bitwise.
+        float dot = qv[7] * kv[7];
+        dot = fmaf(qv[3], kv[3], dot);
+        dot = fmaf(qv[5], kv[5], dot);
+        dot = fmaf(qv[1], kv[1], dot);
+        dot = fmaf(qv[6], kv[6], dot);
+        dot = fmaf(qv[2], kv[2], dot);
+        dot = fmaf(qv[4], kv[4], dot);
+        dot = fmaf(qv[0], kv[0], dot);
+        dot = WaveSum(dot);
+        if (lane == k0 + b) {
+          s_mine = ju < n_kv ? dot * scale : -INFINITY;
+        }
+      }
+    }
+    const float tile_max = BlockMax(s_mine, shared);
+    const float m_new = fmaxf(m, tile_max);
+    const float rescale = m == -INFINITY ? 0.0f : __expf(m - m_new);
+    const float pj = s_mine == -INFINITY ? 0.0f : __expf(s_mine - m_new);
+    p[i] = pj;
+    const float tile_sum = BlockSum(pj, shared);
+    l = l * rescale + tile_sum;
+#pragma unroll
+    for (std::uint32_t x = 0; x < 8; ++x) {
+      acc[x] *= rescale;
+    }
+    m = m_new;
+    __syncthreads();
+    for (std::uint32_t k0 = 0; k0 < 32; k0 += kBatch) {
+      uint64_t rows[kBatch];
+      float vsc[kBatch];
+      if (!load_batch_q8(v_head, (wave * 32) + k0, rows, vsc)) {
+        continue;
+      }
+#pragma unroll
+      for (std::uint32_t b = 0; b < kBatch; ++b) {
+        const float w = p[(wave * 32) + k0 + b];
+        if (w != 0.0f) {
+          const std::uint32_t jv = min(keys[(wave * 32) + k0 + b], n_kv - 1);
+          float vv[8];
+          unpack8q(rows[b], vsc[b], vv);
 #pragma unroll
           for (std::uint32_t x = 0; x < 8; ++x) {
             acc[x] = fmaf(w, vv[x], acc[x]);
@@ -5939,6 +6416,8 @@ struct AttentionProjectionOutput {
   float theta;
   float eps;
   const qwen::vision::DeviceRope* rope;
+  std::int8_t* keys_q8{nullptr};    ///< Q8_0 blocks (fused Q8 path)
+  std::int8_t* values_q8{nullptr};  ///< Q8_0 blocks (fused Q8 path)
 };
 
 /// Dense F16 WMMA GEMM over Q8_0 or F16 weights: block = BM rows x BN tokens,
@@ -5951,7 +6430,8 @@ struct AttentionProjectionOutput {
 /// skip decoding and use the same ordered K16 products. y is [batch][m].
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
-         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false>
+         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false,
+         bool kQ8Out = false>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
@@ -6349,13 +6829,69 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
               attention.query[tok * width + head * dim + col] = v[c];
             else if (gate)
               attention.gate[tok * width + head * dim + col] = v[c];
-            else if (key)
-              attention.keys[std::size_t(*attention.position + tok) * kvwidth +
-                             head * dim + col] = __float2half_rn(v[c]);
-            else
-              attention
-                  .values[std::size_t(*attention.position + tok) * kvwidth +
+            else if (key) {
+              // Compile-time Q8/F16 split: the F16 arm is the untouched
+              // pre-Q8 body, so its codegen (VGPR/occupancy) cannot drift
+              // from main. Only AttentionQ8Gemm instantiates kQ8Out.
+              if constexpr (kQ8Out) {
+              if (attention.keys_q8 != nullptr) {
+                // Fused Q8_0: the wave's lanes hold block c (lane l = elem l),
+                // so the per-block max is a wave-local shuffle reduction.
+                float amax = fabsf(v[c]);
+                amax = fmaxf(amax, XorLane(amax, 16));
+                amax = fmaxf(amax, XorLane(amax, 8));
+                amax = fmaxf(amax, XorLane(amax, 4));
+                amax = fmaxf(amax, XorLane(amax, 2));
+                amax = fmaxf(amax, XorLane(amax, 1));
+                const float dd = amax > 0.0F ? amax / 127.0F : 1.0F;
+                int qi = static_cast<int>(rintf(v[c] / dd));
+                qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
+                std::int8_t* blk =
+                    attention.keys_q8 +
+                    (std::size_t(*attention.position + tok) * 16 + head * 8 +
+                     c) *
+                        34;
+                blk[lane_id] = static_cast<std::int8_t>(qi);
+                if (lane_id == 0)
+                  *reinterpret_cast<__half*>(blk + 32) = __float2half(dd);
+                }
+              } else {
+                attention
+                    .keys[std::size_t(*attention.position + tok) * kvwidth +
                           head * dim + col] = __float2half_rn(v[c]);
+              }
+            } else {
+              // Compile-time Q8/F16 split: the F16 arm is the untouched
+              // pre-Q8 body, so its codegen (VGPR/occupancy) cannot drift
+              // from main. Only AttentionQ8Gemm instantiates kQ8Out.
+              if constexpr (kQ8Out) {
+              if (attention.values_q8 != nullptr) {
+                // Fused Q8_0: the wave's lanes hold block c (lane l = elem l),
+                // so the per-block max is a wave-local shuffle reduction.
+                float amax = fabsf(v[c]);
+                amax = fmaxf(amax, XorLane(amax, 16));
+                amax = fmaxf(amax, XorLane(amax, 8));
+                amax = fmaxf(amax, XorLane(amax, 4));
+                amax = fmaxf(amax, XorLane(amax, 2));
+                amax = fmaxf(amax, XorLane(amax, 1));
+                const float dd = amax > 0.0F ? amax / 127.0F : 1.0F;
+                int qi = static_cast<int>(rintf(v[c] / dd));
+                qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
+                std::int8_t* blk =
+                    attention.values_q8 +
+                    (std::size_t(*attention.position + tok) * 16 + head * 8 +
+                     c) *
+                        34;
+                blk[lane_id] = static_cast<std::int8_t>(qi);
+                if (lane_id == 0)
+                  *reinterpret_cast<__half*>(blk + 32) = __float2half(dd);
+                }
+              } else {
+                attention
+                    .values[std::size_t(*attention.position + tok) * kvwidth +
+                            head * dim + col] = __float2half_rn(v[c]);
+              }
+            }
           }
         }
       }
@@ -6588,6 +7124,31 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
   // 7.3 ms); the K order is unchanged.
   hipLaunchKernelGGL(
       (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true>),
+      dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
+      input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr, nullptr,
+      nullptr, output);
+  return true;
+}
+
+// Q8 twin of the fused projection: identical GEMM + norm + RoPE math,
+// K/V rows land directly as Q8_0 blocks (no s_.qg staging traffic).
+bool AttentionQ8Gemm(const void* weights, const __half* input,
+                     const float* q_gamma, const float* k_gamma, float* query,
+                     float* gate, std::int8_t* keys, std::int8_t* values,
+                     std::uint32_t n_tokens, const std::uint32_t* position,
+                     float theta, float eps, hipStream_t stream,
+                     const qwen::vision::DeviceRope* rope) {
+  if (n_tokens < 1024 || weights == nullptr || input == nullptr ||
+      q_gamma == nullptr || k_gamma == nullptr || query == nullptr ||
+      gate == nullptr || keys == nullptr || values == nullptr ||
+      position == nullptr)
+    return false;
+  const AttentionProjectionOutput output{q_gamma, k_gamma, query,    gate,
+                                         nullptr, nullptr, position, theta,
+                                         eps,     rope,    keys,     values};
+  hipLaunchKernelGGL(
+      (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true,
+                          false, false, false, true>),
       dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
       input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr, nullptr,
       nullptr, output);
@@ -7043,6 +7604,78 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
   return true;
 }
 
+bool PrepareAttentionQ8(const float* packed, std::uint32_t stride,
+                        const float* q_gamma, const float* k_gamma, float* q,
+                        float* gate, std::int8_t* k_cache, std::int8_t* v_cache,
+                        std::uint32_t n_tokens, std::uint32_t heads,
+                        std::uint32_t kv_heads, std::uint32_t d,
+                        std::uint32_t rotary_dim,
+                        const std::uint32_t* start_pos, float theta, float eps,
+                        hipStream_t stream,
+                        const qwen::vision::DeviceRope* rope, bool prefill) {
+  if (d == 0 || d > 256 || rotary_dim == 0 || rotary_dim > d ||
+      rotary_dim % 2 != 0 || kv_heads == 0 ||
+      stride < static_cast<std::size_t>(2) * (heads + kv_heads) * d) {
+    return false;
+  }
+  if (n_tokens == 0)
+    return true;
+  if (!prefill && n_tokens < 32) {
+    hipLaunchKernelGGL((PrepareAttentionQ8Kernel<1>),
+                       dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
+                       stream, packed, stride, q_gamma, k_gamma, q, gate,
+                       k_cache, v_cache, heads, kv_heads, d, rotary_dim,
+                       start_pos, theta, eps, rope);
+  } else {
+    hipLaunchKernelGGL((PrepareAttentionQ8Kernel<4>),
+                       dim3(n_tokens, (heads + kv_heads + 3) / 4),
+                       dim3(kThreads), 0, stream, packed, stride, q_gamma,
+                       k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
+                       rotary_dim, start_pos, theta, eps, rope);
+  }
+  return true;
+}
+
+// Dual-buffer dequant (one launch for K+V staging; halves launches).
+__global__ void DequantizeQ8KVRowsKernel(
+    const std::int8_t* __restrict__ src_k, __half* __restrict__ dst_k,
+    const std::int8_t* __restrict__ src_v, __half* __restrict__ dst_v,
+    std::uint32_t row_blocks, std::uint32_t d, std::uint32_t n_rows) {
+  const std::uint32_t r = blockIdx.x;
+  const std::uint32_t b = blockIdx.y;
+  const std::uint32_t l = threadIdx.x;
+  if (r >= n_rows)
+    return;
+  const std::uint32_t base = b * 32;
+  const std::uint32_t n = base + 32 <= d ? 32 : (base < d ? d - base : 0);
+  if (l >= n)
+    return;
+  const std::size_t blk_off = (std::size_t(r) * row_blocks + b) * 34;
+  const std::int8_t* kb = src_k + blk_off;
+  const std::int8_t* vb = src_v + blk_off;
+  const float sk = __half2float(*reinterpret_cast<const __half*>(kb + 32));
+  const float sv = __half2float(*reinterpret_cast<const __half*>(vb + 32));
+  const std::size_t out_off = std::size_t(r) * d + base + l;
+  dst_k[out_off] = __float2half(static_cast<float>(kb[l]) * sk);
+  dst_v[out_off] = __float2half(static_cast<float>(vb[l]) * sv);
+}
+
+bool DequantizeQ8KVRows(const std::int8_t* src_k, __half* dst_k,
+                        const std::int8_t* src_v, __half* dst_v,
+                        std::uint32_t n_rows, std::uint32_t row_elems,
+                        hipStream_t stream) {
+  if (src_k == nullptr || dst_k == nullptr || src_v == nullptr ||
+      dst_v == nullptr || n_rows == 0 || row_elems == 0)
+    return false;
+  const std::uint32_t blocks = (row_elems + 31) / 32;
+  if (blocks == 0)
+    return false;
+  hipLaunchKernelGGL(DequantizeQ8KVRowsKernel, dim3(n_rows, blocks), dim3(32),
+                     0, stream, src_k, dst_k, src_v, dst_v, blocks, row_elems,
+                     n_rows);
+  return true;
+}
+
 void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
           std::uint32_t d, std::uint32_t rotary_dim,
           const std::uint32_t* start_pos, float theta, hipStream_t stream,
@@ -7056,6 +7689,19 @@ void StoreKv(const float* src, __half* cache, std::uint32_t n_tokens,
              hipStream_t stream) {
   hipLaunchKernelGGL(StoreKvKernel, dim3(n_tokens), dim3(kThreads), 0, stream,
                      src, cache, row_dim, start_pos);
+}
+
+void QuantizeKvRowsQ8(const float* src, std::uint32_t src_tok_stride,
+                      std::uint32_t src_head_stride, std::int8_t* dst,
+                      std::uint32_t kv_width, std::uint32_t kv_heads,
+                      std::uint32_t d, std::uint32_t n_tokens,
+                      const std::uint32_t* start_pos, hipStream_t stream) {
+  if (n_tokens == 0 || kv_heads == 0 || d == 0)
+    return;
+  hipLaunchKernelGGL(QuantizeKvRowsQ8Kernel, dim3(n_tokens, kv_heads),
+                     dim3(kThreads), 0, stream, src, src_tok_stride,
+                     src_head_stride, dst, kv_width, kv_heads, d, n_tokens,
+                     start_pos);
 }
 
 void StoreRows(const float* src, float* dst, std::uint32_t n_tokens,
@@ -7118,6 +7764,27 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
   hipLaunchKernelGGL(AttentionKernel, dim3(heads, n_tokens, z), dim3(kThreads),
                      0, stream, q, k_cache, v_cache, mask, mask_words, out,
                      partials, start_pos, heads, kv_heads, d, ratio);
+  if (z > 1) {
+    hipLaunchKernelGGL(AttentionMergeKernel, dim3(heads, n_tokens),
+                       dim3(kThreads), 0, stream, partials, out, heads, d, z);
+  }
+}
+
+void AttentionQ8(const float* q, const std::int8_t* k_cache,
+                 const std::int8_t* v_cache, const std::uint32_t* mask,
+                 std::uint32_t mask_words, float* out, float* partials,
+                 std::uint32_t splits, std::uint32_t n_tokens,
+                 const std::uint32_t* start_pos, std::uint32_t heads,
+                 std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
+                 hipStream_t stream) {
+  if (d != 256) {
+    return;
+  }
+  const std::uint32_t z = partials != nullptr ? std::max(splits, 1u) : 1u;
+  hipLaunchKernelGGL(AttentionKernelQ8, dim3(heads, n_tokens, z),
+                     dim3(kThreads), 0, stream, q, k_cache, v_cache, mask,
+                     mask_words, out, partials, start_pos, heads, kv_heads, d,
+                     ratio);
   if (z > 1) {
     hipLaunchKernelGGL(AttentionMergeKernel, dim3(heads, n_tokens),
                        dim3(kThreads), 0, stream, partials, out, heads, d, z);
