@@ -24,10 +24,25 @@ MTP=/path/to/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
 
 The loader discovers the remaining shards. Omit the speculative options for AR;
 AR sessions allocate no predictor state even if a shared model has MTP loaded.
-Adaptive MTP is default, with `--draft-tokens` capping 1–7 proposals. Sampled
-requests use deterministic acceptance/cost control for seeded replay; all-greedy
-C>1 batches may use measured cycle costs. Each request keeps private caches,
-rollback and RNG. See [MTP qualification](QUALITY.md).
+Adaptive MTP is default, with `--draft-tokens` capping 1–7 proposals. Eligible
+requests draft over the first 98,304 token IDs plus a 1,024-row table containing
+special tokens and other tokens already used by the request. The full head
+remains the fallback when the anchor or two of the last 32 committed tokens
+fall outside this vocabulary.
+
+Single-session sampling, including the default thinking-on and thinking-off
+presets, can use this smaller head with the existing acceptance/length
+controller and AR backoff. Greedy requests without penalties or constraints
+can use it in C1 and jointly planned batches. Greedy penalties/constraints and
+unplanned C>1 requests retain the full head.
+
+The existing length controller and AR backoff apply to every request. The
+target always verifies with its full vocabulary, including
+exact sampled acceptance and residual correction. Sampled text can differ
+across builds when proposals change. All-greedy C>1 batches retain their shared
+planner and may use measured cycle costs. Each request keeps private caches,
+rollback and RNG; snapshots preserve the learned acceptance history.
+See [MTP qualification](QUALITY.md).
 
 The official template defaults to thinking on, `xhigh` effort and preserving
 prior reasoning. Use the [reasoning controls](../../SERVER.md#reasoning-controls)

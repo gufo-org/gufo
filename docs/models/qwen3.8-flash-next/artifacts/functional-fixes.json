@@ -1,0 +1,524 @@
+{
+  "date": "2026-10-14",
+  "scope": "Flash-Next functional failures, PR #596; runtime reduction and other models excluded",
+  "platform": "AMD Strix Halo gfx1151, Linux x86-64, 128 GiB",
+  "toolchain": {
+    "compiler": "GCC 15.3",
+    "rocm": "7.2.3",
+    "build_preset": "release",
+    "dependencies": "/nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3\n2.41.1 0.28.1 12.3.0\n"
+  },
+  "weights": [
+    {
+      "path": "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      "bytes": 10946624,
+      "mtime_ns": 1789396482288344802
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+      "bytes": 49859583136,
+      "mtime_ns": 1789396791259688456
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+      "bytes": 49376141504,
+      "mtime_ns": 1789396909393969680
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+      "bytes": 12087983520,
+      "mtime_ns": 1789396643273085413
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/mmproj-BF16.gguf",
+      "bytes": 907542944,
+      "mtime_ns": 1790069108027671858
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "bytes": 2786568256,
+      "mtime_ns": 1789396358070004780
+    }
+  ],
+  "correctness": {
+    "revision": "9985ff0aefa538237b2ecd074091af75340e211f",
+    "binary_sha256": "74caa1dbbbabdc6dcb5439338503755164c0c811badf2efa4e1a7aae8086d318",
+    "coverage": {
+      "mtp": {
+        "registered": 48,
+        "attempted": 48,
+        "passed": 48,
+        "failed": [],
+        "missing": []
+      },
+      "off": {
+        "registered": 48,
+        "attempted": 48,
+        "passed": 48,
+        "failed": [],
+        "missing": []
+      }
+    },
+    "expanded_checks": 122,
+    "requests": 3334,
+    "all_47_harness_hashes_match_final": true,
+    "groups": [
+      {
+        "mode": "mtp",
+        "group": "standard",
+        "status": "passed",
+        "seconds": 1733.076288651
+      },
+      {
+        "mode": "mtp",
+        "group": "single-session",
+        "status": "passed",
+        "seconds": 197.041577799
+      },
+      {
+        "mode": "mtp",
+        "group": "cache-pressure",
+        "status": "passed",
+        "seconds": 67.813719461
+      },
+      {
+        "mode": "mtp",
+        "group": "deferred-cache-compaction",
+        "status": "passed",
+        "seconds": 86.936432271
+      },
+      {
+        "mode": "mtp",
+        "group": "deferred-cache-transforms",
+        "status": "passed",
+        "seconds": 166.458606263
+      },
+      {
+        "mode": "mtp",
+        "group": "deferred-cache-pressure",
+        "status": "passed",
+        "seconds": 208.09429111
+      },
+      {
+        "mode": "mtp",
+        "group": "deferred-cache-messages-loop",
+        "status": "passed",
+        "seconds": 168.131287845
+      },
+      {
+        "mode": "off",
+        "group": "standard",
+        "status": "passed",
+        "seconds": 1706.824421587
+      },
+      {
+        "mode": "off",
+        "group": "single-session",
+        "status": "passed",
+        "seconds": 195.30061875
+      },
+      {
+        "mode": "off",
+        "group": "cache-pressure",
+        "status": "passed",
+        "seconds": 65.609863351
+      },
+      {
+        "mode": "off",
+        "group": "deferred-cache-compaction",
+        "status": "passed",
+        "seconds": 84.605234238
+      },
+      {
+        "mode": "off",
+        "group": "deferred-cache-transforms",
+        "status": "passed",
+        "seconds": 161.18343462
+      },
+      {
+        "mode": "off",
+        "group": "deferred-cache-pressure",
+        "status": "passed",
+        "seconds": 204.29437725
+      },
+      {
+        "mode": "off",
+        "group": "deferred-cache-messages-loop",
+        "status": "passed",
+        "seconds": 178.348230178
+      }
+    ]
+  },
+  "final_allocation_candidate": {
+    "revision": "c19601adda4b273519fc3ec830fcd2585ae50363",
+    "binary_sha256": "ee5bf3e686eec986100c0532571e0325b60ac565f655f66bc4a8292fbd8d4c14",
+    "base_correctness_revision": "9985ff0aefa538237b2ecd074091af75340e211f",
+    "main_revision": "942999e727fde9c1dc59a48eadd03fd72acf8e16",
+    "main_binary_sha256": "754d3194c40e8cf6de01876801a93913389513f263920e28f4a773ce080159a5",
+    "cache_ram_bytes": 17179869184,
+    "production_source_sha256": {
+      "src/cache/identity.cpp": "e1cc8896979a9599e13494dc546828d0cef06df229211ea30f24b11abcedbaaf",
+      "src/cache/identity.hpp": "3e74461a84cba9b3d91c840934500927bc7fda2447cfa3bf902c72fe2116b2ef",
+      "src/cli/serve/component_cache_metrics.hpp": "7ce2f117c145abcda4f91626d064f8e60376f0be5755830a2203d99c9fd4119f",
+      "src/cli/serve/component_text_cache.cpp": "b2518d9260419ac1f1072067de5972aef55c1d410732ab09e886b7b0d09ae1ac",
+      "src/cli/serve/component_text_cache.hpp": "2f2445601593ace4a33512329d3917a8f75c4a82933e8803921f4e8a2bf433f4",
+      "src/cli/serve/inference_backend.cpp": "e9d960e6a0ce955995a0024476d2340603f67b2d328fb5645b7dbea4d47294f3",
+      "src/cli/serve/text_model_runner.cpp": "4a6d8ab27ac42400cc7fd409f403764d76a5a81df1c26b8329ee5e2eb4319c1b",
+      "src/core/hip/committed_backing.cpp": "6f529750bd6bb30676da4b43f7762749e6f0742341c9ea730fe1c8bb77247d24",
+      "src/core/hip/committed_backing.hpp": "0a5ed39f81e3b0f83e4c4ba910dfeed082842db77fc0311e72772ae8a1c393f2"
+    },
+    "affected_revalidation": {
+      "off": {
+        "status": "passed",
+        "suites": {
+          "long-context": {
+            "status": "passed",
+            "report": "long-context.json",
+            "seconds": 25.242
+          },
+          "text-cancel": {
+            "status": "passed",
+            "report": "text-cancel.json",
+            "seconds": 3.168
+          },
+          "thinking-tool-cancel": {
+            "status": "passed",
+            "report": "thinking-tool-cancel.json",
+            "seconds": 3.971
+          },
+          "legacy-tool-cancel": {
+            "status": "passed",
+            "report": "legacy-tool-cancel.json",
+            "seconds": 2.719
+          },
+          "image-cancel": {
+            "status": "passed",
+            "report": "image-cancel.json",
+            "seconds": 3.62
+          },
+          "image-thinking-cancel": {
+            "status": "passed",
+            "report": "image-thinking-cancel.json",
+            "seconds": 3.72
+          },
+          "disk-spacing": {
+            "status": "passed",
+            "report": "disk-spacing.json",
+            "seconds": 6.324
+          },
+          "text-cancel-disk": {
+            "status": "passed",
+            "report": "text-cancel-disk.json",
+            "seconds": 1.166
+          },
+          "thinking-tool-cancel-disk": {
+            "status": "passed",
+            "report": "thinking-tool-cancel-disk.json",
+            "seconds": 1.065
+          },
+          "legacy-tool-cancel-disk": {
+            "status": "passed",
+            "report": "legacy-tool-cancel-disk.json",
+            "seconds": 0.615
+          },
+          "image-cancel-disk": {
+            "status": "passed",
+            "report": "image-cancel-disk.json",
+            "seconds": 1.516
+          },
+          "image-thinking-cancel-disk": {
+            "status": "passed",
+            "report": "image-thinking-cancel-disk.json",
+            "seconds": 1.266
+          },
+          "disk-spacing-disk": {
+            "status": "passed",
+            "report": "disk-spacing-disk.json",
+            "seconds": 1.516
+          }
+        },
+        "command": [
+          "/nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3",
+          "/home/mixer/gufo-qualification/issue593-reserve-final/snapshot/tests/functional/run.py",
+          "--record-baseline",
+          "--output",
+          "/home/mixer/gufo-qualification/issue593-reserve-final/affected-off",
+          "--sampling-preset",
+          "qwen38",
+          "--suite",
+          "long-context",
+          "--suite",
+          "cache",
+          "--expected-input-modalities",
+          "text,image",
+          "--",
+          "/home/mixer/gufo-qualification/issue593-reserve-final/gufo",
+          "serve",
+          "llm",
+          "--model",
+          "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+          "--mmproj",
+          "/persist/models/qwen38-flash-next/mmproj-BF16.gguf",
+          "--mtp-model",
+          "/persist/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+          "--speculative",
+          "off",
+          "--context",
+          "32768",
+          "--sessions",
+          "1",
+          "--cache-ram-bytes",
+          "17179869184"
+        ]
+      },
+      "mtp": {
+        "status": "passed",
+        "suites": {
+          "long-context": {
+            "status": "passed",
+            "report": "long-context.json",
+            "seconds": 23.706
+          },
+          "text-cancel": {
+            "status": "passed",
+            "report": "text-cancel.json",
+            "seconds": 2.117
+          },
+          "thinking-tool-cancel": {
+            "status": "passed",
+            "report": "thinking-tool-cancel.json",
+            "seconds": 3.47
+          },
+          "legacy-tool-cancel": {
+            "status": "passed",
+            "report": "legacy-tool-cancel.json",
+            "seconds": 2.519
+          },
+          "image-cancel": {
+            "status": "passed",
+            "report": "image-cancel.json",
+            "seconds": 2.768
+          },
+          "image-thinking-cancel": {
+            "status": "passed",
+            "report": "image-thinking-cancel.json",
+            "seconds": 2.969
+          },
+          "disk-spacing": {
+            "status": "passed",
+            "report": "disk-spacing.json",
+            "seconds": 11.884
+          },
+          "text-cancel-disk": {
+            "status": "passed",
+            "report": "text-cancel-disk.json",
+            "seconds": 0.865
+          },
+          "thinking-tool-cancel-disk": {
+            "status": "passed",
+            "report": "thinking-tool-cancel-disk.json",
+            "seconds": 0.965
+          },
+          "legacy-tool-cancel-disk": {
+            "status": "passed",
+            "report": "legacy-tool-cancel-disk.json",
+            "seconds": 0.665
+          },
+          "image-cancel-disk": {
+            "status": "passed",
+            "report": "image-cancel-disk.json",
+            "seconds": 1.215
+          },
+          "image-thinking-cancel-disk": {
+            "status": "passed",
+            "report": "image-thinking-cancel-disk.json",
+            "seconds": 1.066
+          },
+          "disk-spacing-disk": {
+            "status": "passed",
+            "report": "disk-spacing-disk.json",
+            "seconds": 1.616
+          }
+        },
+        "command": [
+          "/nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3",
+          "/home/mixer/gufo-qualification/issue593-reserve-final/snapshot/tests/functional/run.py",
+          "--record-baseline",
+          "--output",
+          "/home/mixer/gufo-qualification/issue593-reserve-final/affected-mtp",
+          "--sampling-preset",
+          "qwen38",
+          "--suite",
+          "long-context",
+          "--suite",
+          "cache",
+          "--expected-input-modalities",
+          "text,image",
+          "--",
+          "/home/mixer/gufo-qualification/issue593-reserve-final/gufo",
+          "serve",
+          "llm",
+          "--model",
+          "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+          "--mmproj",
+          "/persist/models/qwen38-flash-next/mmproj-BF16.gguf",
+          "--mtp-model",
+          "/persist/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+          "--speculative",
+          "mtp",
+          "--context",
+          "32768",
+          "--sessions",
+          "1",
+          "--cache-ram-bytes",
+          "17179869184"
+        ]
+      }
+    }
+  },
+  "validation": {
+    "python_harness_tests": 119,
+    "focused_cpu_cache_tests": 6,
+    "final_prefill_integration_test": "passed; long prefill prepares backing, cached decode and short tails do not",
+    "final_gpu_backing_test": "passed; two-segment free reserve prepared even when one segment is already free",
+    "shared_format": "571 files pass",
+    "continuation_adapter": "AR/MTP image, boundary, pending/failure and ownership checks pass on correctness revision",
+    "snapshot": "AR/MTP exact round trips, checkpoint retention and host fallback pass on correctness revision",
+    "pi": "installed 0.99.2 actual tools, image-read and literal-protocol tasks pass on correctness revision; unavailable 0.87.0 not qualified"
+  },
+  "standard_benchmark_observation": {
+    "workload": "pp2048/tg128 d0",
+    "revision": "9985ff0aefa538237b2ecd074091af75340e211f",
+    "ar_pp_tps": 1683.13,
+    "ar_tg_tps": 28.79,
+    "mtp_pp_tps": 1668.08,
+    "mtp_tg_tps": 47.59,
+    "matched_gain_claim": false
+  },
+  "timing_gate": {
+    "slowdown_fraction": 0.05,
+    "noise_ms": 3,
+    "status": "AR C2 passed; MTP C2 and C1 snapshot phases visibly inconclusive; no global timing pass",
+    "global_pass_claim": false,
+    "unresolved_outlier": "MTP image-count: 328.7-second request, 327.9-second snapshot; backing growth 472 ms. Exact-prefix replay did not reproduce the long stall.",
+    "focused_results": {
+      "cold-off": {
+        "status": "inconclusive",
+        "counts": {
+          "passed": 14,
+          "failed": 0,
+          "inconclusive": 1
+        },
+        "unqualified_measurements": [
+          {
+            "case": "long-context.requests.json:long_schema_cold:0",
+            "metric": "cache_snapshot_ms",
+            "status": "inconclusive",
+            "baseline_range": [
+              16.163064000000002,
+              17.823934
+            ],
+            "candidate_range": [
+              25.121853,
+              25.121853
+            ],
+            "reason": "variable or overlapping observations; inspect stalls"
+          }
+        ]
+      },
+      "cold-mtp": {
+        "status": "inconclusive",
+        "counts": {
+          "passed": 14,
+          "failed": 0,
+          "inconclusive": 1
+        },
+        "unqualified_measurements": [
+          {
+            "case": "long-context.requests.json:long_schema_cold:0",
+            "metric": "cache_snapshot_ms",
+            "status": "inconclusive",
+            "baseline_range": [
+              16.371187,
+              16.77366
+            ],
+            "candidate_range": [
+              25.158220999999998,
+              25.158220999999998
+            ],
+            "reason": "variable or overlapping observations; inspect stalls"
+          }
+        ]
+      },
+      "c2-off": {
+        "status": "passed",
+        "counts": {
+          "passed": 255,
+          "failed": 0,
+          "inconclusive": 0
+        },
+        "unqualified_measurements": []
+      },
+      "c2-mtp": {
+        "status": "inconclusive",
+        "counts": {
+          "passed": 252,
+          "failed": 0,
+          "inconclusive": 3
+        },
+        "unqualified_measurements": [
+          {
+            "case": "cache-concurrency.requests.json:long_tasks:0",
+            "metric": "cache_snapshot_ms",
+            "status": "inconclusive",
+            "baseline_range": [
+              29.112693,
+              34.518263000000005
+            ],
+            "candidate_range": [
+              32.19164,
+              32.19164
+            ],
+            "reason": "variable or overlapping observations; inspect stalls"
+          },
+          {
+            "case": "cache-concurrency.requests.json:identical:0",
+            "metric": "decode_ms",
+            "status": "inconclusive",
+            "baseline_range": [
+              58.098391,
+              70.903572
+            ],
+            "candidate_range": [
+              71.12716099999999,
+              71.12716099999999
+            ],
+            "reason": "variable or overlapping observations; inspect stalls"
+          },
+          {
+            "case": "cache-concurrency.requests.json:identical:0",
+            "metric": "decode_ms_per_token",
+            "status": "inconclusive",
+            "baseline_range": [
+              29.0491955,
+              35.451786
+            ],
+            "candidate_range": [
+              35.56358049999999,
+              35.56358049999999
+            ],
+            "reason": "variable or overlapping observations; inspect stalls"
+          }
+        ]
+      }
+    },
+    "cold_snapshot_work": "Candidate captures 6 checkpoints versus main 4 and copies 269,995,372 additional bytes; observed snapshot time about 25 ms versus 16-18 ms. The raw phase flag is retained, not relabeled as a pass."
+  },
+  "raw_evidence_roots": [
+    "/home/mixer/gufo-qualification/issue593-all-final",
+    "/home/mixer/gufo-qualification/issue593-reserve-final",
+    "/home/mixer/gufo-qualification/issue593-all",
+    "/home/mixer/gufo-qualification/issue593-startup-reserve",
+    "/home/mixer/gufo-qualification/issue593-prefill-final"
+  ]
+}

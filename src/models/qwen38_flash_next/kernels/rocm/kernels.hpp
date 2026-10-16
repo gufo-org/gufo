@@ -65,10 +65,13 @@ void RmsNormRows(const float* x, const float* gamma, float* out,
 /// n_tokens * streams * HcInjectParts(hidden) floats.
 std::uint32_t HcInjectParts(std::uint32_t hidden);
 std::uint32_t HcInjectPartsVec4(std::uint32_t hidden);
+/// A non-null `mixed_q8` (hidden % 32 == 0) also receives mixed as the
+/// small-batch projections' Q8_1 rows, byte-identical to
+/// qfn_mmq_quantize_q8_1.
 void HcMixEpilogue(const float* xn, const float* gate, const float* inject_w,
                    float* mixed, float* inject, std::uint32_t n_tokens,
                    std::uint32_t hidden, std::uint32_t streams,
-                   hipStream_t stream);
+                   hipStream_t stream, void* mixed_q8 = nullptr);
 /// Four adjacent hidden lanes per thread. The model's four-stream geometry
 /// emits HcInjectPartsVec4(hidden) partial sums per inject logit.
 void HcMixEpilogueVec4(const float* xn, const float* gate,
@@ -95,31 +98,63 @@ void HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
                bool decode = false);
+/// The one-block-per-stream HcCombine that also writes xn's Q8_1 rows (as
+/// qfn_mmq_quantize_q8_1 would) to `xn_q8` for a small-batch mixer down
+/// projection. False, with nothing launched, without `gamma` or unless
+/// hidden % 32 == 0.
+bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
+                   std::uint32_t inject_parts, const float* gamma, float* xn,
+                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
+                   std::uint32_t streams, float eps, hipStream_t stream);
 /// HcCombine writing the normalized output as F16, the width the next
 /// mixer's projection and epilogue consume on the F16 mixer input route.
 /// A non-null `xn_q8` also receives the norm quantized into the tiled Q8
 /// layout (`Q8TiledBytes(n_tokens, streams * hidden)`) for the W8A8 down
-/// projection; hidden must be a multiple of 32.
-void HcCombineF16(float* res, const float* block_out, const float* inject,
+/// projection; hidden must be a multiple of 32. A non-null `defer_w`
+/// ([tokens][streams]) defers the residual update: res is left unchanged,
+/// the stream weights land in defer_w, and true is returned. The update is
+/// then owed by HcCombineMoeF16 (prior_out, prior_w) or HcApplyDeferred.
+/// A deferring combine given `inject_w` also writes the next mixer's
+/// inject partials to `inject_out` (see HcCombineMoeF16).
+bool HcCombineF16(float* res, const float* block_out, const float* inject,
                   std::uint32_t inject_parts, const float* gamma, __half* xn,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
-                  std::uint32_t streams, float eps, hipStream_t stream);
+                  std::uint32_t streams, float eps, hipStream_t stream,
+                  float* defer_w = nullptr, float* inject_out = nullptr,
+                  const float* inject_w = nullptr);
+/// Applies the residual update a deferring HcCombineF16 left out (four
+/// streams), with the same arithmetic.
+void HcApplyDeferred(float* res, const float* block_out, const float* w,
+                     std::uint32_t n_tokens, std::uint32_t hidden,
+                     hipStream_t stream);
 /// HcCombineF16 with the MoE epilogue fused in: the block output is
 /// MoeEpilogueVec4F16's result over `expert_out` ([tokens][used][hidden]
 /// F16 rows), `weights`, the gated shared expert; it is formed in
 /// registers and never written. Returns false (launching nothing) for a
-/// geometry the fused kernel does not cover (four 2,560-wide streams with a
-/// norm and the tiled Q8 output are required).
-bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
-                     const float* shared_out, const float* gate,
-                     std::uint32_t gate_stride, std::uint32_t used,
-                     const float* inject, std::uint32_t inject_parts,
-                     const float* gamma, __half* xn, void* xn_q8,
-                     std::uint32_t n_tokens, std::uint32_t hidden,
-                     std::uint32_t streams, float eps, hipStream_t stream);
+/// geometry the fused kernel does not cover (four 2,560-wide streams).
+/// A null gamma updates only the residual; otherwise xn_q8 is required.
+/// A non-null `prior_out` first applies a deferred HcCombineF16 update
+/// (its block output and `prior_w` stream weights). A non-null `inject_w`
+/// (with gamma and `prior_out`) also writes the next mixer's inject partials
+/// to `inject_out`, as HcMixF16Gemm would from the F16 norm; they may
+/// replace this combine's own `inject` logits.
+bool HcCombineMoeF16(
+    float* res, const __half* expert_out, const float* weights,
+    const float* shared_out, const float* gate, std::uint32_t gate_stride,
+    std::uint32_t used, const float* inject, std::uint32_t inject_parts,
+    const float* gamma, __half* xn, void* xn_q8, std::uint32_t n_tokens,
+    std::uint32_t hidden, std::uint32_t streams, float eps, hipStream_t stream,
+    const float* prior_out = nullptr, const float* prior_w = nullptr,
+    float* inject_out = nullptr, const float* inject_w = nullptr);
 
 /// x[i] = silu(x[i] * scale), in place over `count` floats.
 void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream);
+/// SiluScale over `rows` rows of `k` that also writes x's Q8_1 rows, each
+/// `k_padded` wide, to `x_q8` as qfn_mmq_quantize_q8_1 would (the padding
+/// blocks are left as they are). False, with nothing launched, unless k and
+/// k_padded >= k are multiples of 32.
+bool SiluScaleQ8_1(float* x, float scale, std::uint32_t rows, std::uint32_t k,
+                   std::uint32_t k_padded, void* x_q8, hipStream_t stream);
 /// gate[i] = silu(gate[i]) * up[i], in place in `gate`.
 void Swiglu(float* gate, const float* up, std::size_t count,
             hipStream_t stream);
@@ -133,6 +168,11 @@ bool SwigluQ8Tiled(const float* gate, const float* up, void* out_q8,
 /// x[i] *= sigmoid(g[i]).
 void SigmoidMul(float* x, const float* g, std::size_t count,
                 hipStream_t stream);
+/// SigmoidMul that also writes x's Q8_1 rows to `x_q8` as
+/// qfn_mmq_quantize_q8_1 would for unpadded rows. False, with nothing
+/// launched, unless count is a multiple of 32.
+bool SigmoidMulQ8_1(float* x, const float* g, std::size_t count, void* x_q8,
+                    hipStream_t stream);
 
 /// out[t][m] = sum_k W[m][k] * x[t][k] for F32/BF16/F16 weights; meant for
 /// the narrow projections (routers, alpha/beta, indexer, inject) that the
@@ -188,8 +228,17 @@ bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
                         hipStream_t stream);
+/// input_stride is in half elements; zero means k. Padded rows are supported
+/// by the wide SSM output projection (batch >= 1024, m=2560, k=6144).
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
-                  std::size_t m, std::size_t k, hipStream_t stream);
+                  std::size_t m, std::size_t k, hipStream_t stream,
+                  std::size_t input_stride = 0);
+/// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
+/// F32 K16 chain per output. Token t's chain starts ((t / 32) % 4) * 128
+/// elements into K and wraps: hipBLASLt's MT32x32x64 order (BlasLt::Gemm).
+/// out is [batch][m].
+bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
+                   std::size_t m, std::size_t k, hipStream_t stream);
 
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains
@@ -202,7 +251,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream);
+                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0);
 
 /// Routed expert GEMMs. RoutedCompact sorts the (token, slot) assignments
 /// by expert into `rows_token`/`rows_slot` (RoutedCompactRows(slots,
@@ -235,12 +284,11 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
 /// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
-/// routing layout as RoutedF16Gemm, with 64 or 128 token rows per tile. The two
+/// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two
 /// projections share one launch and never materialize the gate output.
 bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const __half* x, const std::int32_t* tiles,
-                        std::uint32_t n_tiles, std::uint32_t tile_rows,
-                        const std::int32_t* pad_bounds,
+                        std::uint32_t n_tiles, const std::int32_t* pad_bounds,
                         const std::int32_t* rows_in,
                         const std::int32_t* rows_out, __half* out,
                         std::size_t m, std::size_t k, hipStream_t stream);
@@ -274,6 +322,18 @@ void PleConv(const float* in, const float* w, float* history,
 void PleInject(float* res, const float* gated, const float* conv,
                std::size_t count, hipStream_t stream);
 
+/// Copies rolling history at a prefix without advancing the live history.
+void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
+                   float* destination, std::uint32_t tokens,
+                   std::uint32_t channels, std::uint32_t history_rows,
+                   hipStream_t stream);
+
+struct GdnCheckpoint {
+  float* state = nullptr;
+  float* history = nullptr;
+  std::uint32_t tokens = 0;
+};
+
 /// Gated DeltaNet over a chunk of tokens for one layer. Runs the causal
 /// conv (with rolling `conv_state`, [kernel-1][channels]) and the recurrence
 /// on `state` ([v_heads][d][d]) sequentially over tokens, parallel over heads
@@ -290,7 +350,9 @@ void PleInject(float* res, const float* gated, const float* conv,
 /// stacked [qkv|z] projection feeds both without unpacking. A non-null
 /// `out_q8` receives the rows quantized into the W8A8 tiled layout
 /// (K = v_heads * d) instead of `out`. With null `out_q8`, a non-null
-/// `out_half` receives F16 rows instead of `out`. `convolved` consumes
+/// `out_half` receives F16 rows instead of `out`. With both null, a non-null
+/// `out_q8_1` also receives the rows' unpadded Q8_1 rows (as
+/// qfn_mmq_quantize_q8_1 writes them; d == 128). `convolved` consumes
 /// convolution rows already in conv_scratch; it requires null speculative
 /// snapshots.
 void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
@@ -303,7 +365,8 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t k_heads, std::uint32_t v_heads,
                    std::uint32_t d, std::uint32_t kernel, bool row_split,
                    bool convolved, float eps, hipStream_t stream,
-                   __half* out_half = nullptr);
+                   __half* out_half = nullptr, GdnCheckpoint checkpoint = {},
+                   std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr);
 
 /// Private rows for one request in a decode batch. Scratch regions and all
 /// recurrent/history/rollback buffers must be disjoint between requests.
@@ -398,22 +461,31 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
 /// b visible). Every block is visible when the count fits the budget.
 /// Queries retain F32 precision; pooled cache keys are F16. Scores
 /// still accumulate in FP32. `scores` holds n_tokens * max_blocks floats.
+/// `live_blocks`, when nonzero, bounds the complete blocks of the last
+/// query (eager launches only: a captured graph must cover max_blocks).
 void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
                   float* scores, std::uint32_t n_tokens,
                   const std::uint32_t* start_pos, std::uint32_t first_token,
                   std::uint32_t heads, std::uint32_t dim, std::uint32_t ratio,
                   std::uint32_t budget, std::uint32_t mask_words,
-                  std::uint32_t max_blocks, hipStream_t stream);
+                  std::uint32_t max_blocks, hipStream_t stream,
+                  std::uint32_t live_blocks = 0);
 
 /// Per-token attention (decode and narrow batches). With `partials`
 /// (n_tokens * heads * splits * (d + 2) floats) the key tiles are split
 /// across `splits` blocks per row and merged in a second launch.
+/// With `lists` (n_tokens * list_capacity entries), `counts` (n_tokens) and a
+/// mask at ratio 4, each row's selected blocks are first compacted once into
+/// `lists`; `list_capacity` is the selection budget (blocks per row). The
+/// output is bitwise identical to the mask walk. Null lists use the mask walk.
 void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                const std::uint32_t* mask, std::uint32_t mask_words, float* out,
                float* partials, std::uint32_t splits, std::uint32_t n_tokens,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
-               hipStream_t stream);
+               hipStream_t stream, std::uint32_t* lists = nullptr,
+               std::uint32_t* counts = nullptr,
+               std::uint32_t list_capacity = 0);
 
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows
@@ -505,6 +577,22 @@ void PenalizedArgmax(const float* logits, GreedyPenaltyRows penalties,
 void GatherArgmaxCandidates(const float* logits, const std::uint32_t* ids,
                             ArgmaxCandidate* out, std::uint32_t rows,
                             std::uint32_t vocab, hipStream_t stream);
+
+/// Draft logits of empty table slots (table[i] < 0) become -infinity.
+void MaskDraftLogits(float* logits, const std::int32_t* table, std::uint32_t n,
+                     hipStream_t stream);
+
+/// Full-vocabulary logits to the small-head layout, in place: row
+/// prefix + i becomes logits[table[i]], or -infinity for an empty slot
+/// (table[i] < 0). n is at most 1024 (one block).
+void GatherDraftLogits(float* logits, const std::int32_t* table,
+                       std::uint32_t prefix, std::uint32_t n,
+                       hipStream_t stream);
+
+/// Draft head rows back to token IDs: ids[i] >= prefix (a table row) becomes
+/// table[ids[i] - prefix]; prefix rows are already token IDs.
+void RemapDraftIds(std::uint32_t* ids, std::uint32_t n, std::uint32_t prefix,
+                   const std::int32_t* table, hipStream_t stream);
 
 /// Number of IDs in each of the two selection buffers.
 std::uint32_t MtpCandidateWorkspaceSize(std::uint32_t vocab);

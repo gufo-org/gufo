@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "src/core/crypto/sha256.hpp"
+#include "src/models/qwen/control_tokens.hpp"
 
 namespace gufo::models::qwen::vision {
 namespace {
@@ -151,8 +152,9 @@ std::span<const std::uint8_t> Prompt::IdentityForPrefix(
 }
 
 void RopeLayout::Validate(std::uint32_t max_context) const {
-  if (images.size() > 256)
-    throw std::invalid_argument("too many image grids");
+  // Every non-overlapping image occupies at least one context position.
+  if (images.size() > max_context)
+    throw std::invalid_argument("image grids exceed model context");
   std::uint64_t previous_end = 0;
   for (const auto& image : images) {
     const std::uint64_t count = std::uint64_t{image.height} * image.width;
@@ -250,10 +252,12 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
                const tokenization::ChatTemplateOptions& options,
                std::string_view encoder_identity, std::uint32_t max_context) {
   std::vector<std::size_t> offsets;
+  std::vector<tokenization::ContentSpan> content_spans;
   std::size_t stable_prefix_bytes = 0;
   std::string error;
   const auto rendered = tokenization::QwenChatTemplate::Render(
-      messages, tools, options, &error, &offsets, &stable_prefix_bytes);
+      messages, tools, options, &error, &offsets, &stable_prefix_bytes,
+      &content_spans);
   if (!rendered)
     throw std::invalid_argument(error);
   Prompt prompt;
@@ -261,8 +265,9 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
   tok_options.add_bos = false;
   tok_options.add_eos = false;
   tok_options.parse_special_tokens = true;
-  const auto append = [&](std::string_view text) {
-    auto tokens = tokenizer.Encode(text, tok_options);
+  const auto append = [&](std::size_t begin, std::size_t end) {
+    auto tokens = tokenization::QwenChatTemplate::EncodeRendered(
+        tokenizer, *rendered, begin, end, content_spans, tok_options);
     if (tokens.size() > max_context - prompt.tokens.size()) {
       throw std::length_error(
           "prompt exceeds the " + std::to_string(max_context) +
@@ -287,8 +292,7 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
       }
       if (index >= offsets.size())
         throw std::logic_error("image rendering lost a part");
-      append(
-          std::string_view(*rendered).substr(cursor, offsets[index] - cursor));
+      append(cursor, offsets[index]);
       auto pixels = ResizeImage(core::DecodeImage(*image.bytes));
       const ImageGrid grid{static_cast<std::uint32_t>(prompt.tokens.size()),
                            pixels.height / kResizeFactor,
@@ -304,14 +308,16 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
       prompt.tokens.insert(prompt.tokens.end(), count, kImageToken);
       prompt.rope.images.push_back(grid);
       prompt.images.push_back({std::move(pixels), grid, identity.Digest()});
-      cursor = offsets[index++] + std::string_view("<|image_pad|>").size();
+      cursor = offsets[index++] + tokenization::kImagePad.size();
     }
   }
-  append(std::string_view(*rendered).substr(cursor));
-  // The boundary starts an assistant special token, after every image.
+  append(cursor, rendered->size());
+  // The boundary starts a special token (the assistant turn, or a final user
+  // turn an agent replaces each request), after every image.
   // Encode only the mutable suffix; never decode or resize images twice.
-  const auto suffix = tokenizer.Encode(
-      std::string_view(*rendered).substr(stable_prefix_bytes), tok_options);
+  const auto suffix = tokenization::QwenChatTemplate::EncodeRendered(
+      tokenizer, *rendered, stable_prefix_bytes, rendered->size(),
+      content_spans, tok_options);
   if (suffix.size() > prompt.tokens.size() ||
       !std::ranges::equal(suffix, std::span(prompt.tokens).last(suffix.size())))
     throw std::logic_error("Qwen stable prefix is not a token boundary");

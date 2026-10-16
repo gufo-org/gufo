@@ -22,6 +22,8 @@ struct BlasLt::Plan {
   hipblasLtMatrixLayout_t input{nullptr};
   hipblasLtMatrixLayout_t output{nullptr};
   hipblasLtMatmulAlgo_t algorithm{};
+  // DenseBf16Gemm reproduces the library kernel's summation order bitwise.
+  bool own_bf16{false};
 
   ~Plan() {
     if (output != nullptr)
@@ -110,6 +112,17 @@ std::unique_ptr<BlasLt::Plan> BlasLt::MakePlan(hipDataType type, int m, int n,
       if (candidates[i].state == HIPBLAS_STATUS_SUCCESS &&
           candidates[i].workspaceSize == 0 && usable(candidates[i].algo)) {
         p->algorithm = candidates[i].algo;
+        // The indexer projections' MT32x32x64 kernel runs at ~5 TFLOPS;
+        // DenseBf16Gemm reproduces its K order (including the StaggerU
+        // rotation) at about 4x the speed. Only the shapes, token counts (up
+        // to one 4096-token prefill chunk) and library kernel checked bitwise
+        // by dense_gemm_bench take it.
+        p->own_bf16 =
+            type == HIP_R_16BF && k == 2560 &&
+            (m == 512 || m == 256 || m == 128 || m == 64) && n <= 4096 &&
+            hipblaslt_ext::getIndexFromAlgo(p->algorithm) == 4438 &&
+            hipblaslt_ext::getKernelNameFromAlgo(handle_, p->algorithm)
+                    .find("_MT32x32x64_MI16x16x1_") != std::string::npos;
         return p;
       }
     }
@@ -131,21 +144,45 @@ bool BlasLt::Gemm(const void* weights, const void* input, float* out,
     return UnquantizedF16Gemm(weights, static_cast<const __half*>(input), out,
                               n, m, k, stream_);
   }
+  Plan* p = FindPlan(type, m, n, k, error);
+  if (p == nullptr)
+    return false;
+  if (p->own_bf16)
+    return DenseBf16Gemm(weights, input, out, n, m, k, stream_);
+  return Run(*p, weights, input, out, error);
+}
+
+BlasLt::Plan* BlasLt::FindPlan(hipDataType type, int m, int n, int k,
+                               std::string* error) {
   // Exact dimensions prevent the first ragged request from determining
   // which kernel later requests in the same size bucket receive.
   const std::array<int, 4> key{static_cast<int>(type), m, n, k};
   auto& p = plans_[key];
-  if (!p) {
+  if (!p)
     p = MakePlan(type, m, n, k, error);
-    if (!p) {
-      return false;
-    }
-  }
+  return p.get();
+}
+
+bool BlasLt::UsesOwnKernel(hipDataType type, int m, int n, int k,
+                           std::string* error) {
+  const Plan* p = FindPlan(type, m, n, k, error);
+  return p != nullptr && p->own_bf16;
+}
+
+bool BlasLt::LibraryGemm(const void* weights, const void* input, float* out,
+                         hipDataType type, int m, int n, int k,
+                         std::string* error) {
+  Plan* p = FindPlan(type, m, n, k, error);
+  return p != nullptr && Run(*p, weights, input, out, error);
+}
+
+bool BlasLt::Run(Plan& p, const void* weights, const void* input, float* out,
+                 std::string* error) {
   const float one = 1.0F;
   const float zero = 0.0F;
-  if (hipblasLtMatmul(handle_, p->operation, &one, weights, p->weights, input,
-                      p->input, &zero, out, p->output, out, p->output,
-                      &p->algorithm, nullptr, 0,
+  if (hipblasLtMatmul(handle_, p.operation, &one, weights, p.weights, input,
+                      p.input, &zero, out, p.output, out, p.output,
+                      &p.algorithm, nullptr, 0,
                       stream_) != HIPBLAS_STATUS_SUCCESS) {
     AssignError(error, "hipBLASLt GEMM failed");
     return false;

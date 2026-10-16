@@ -9,6 +9,12 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen/control_tokens.hpp"
+
+using gufo::tokenization::kEndOfText;
+using gufo::tokenization::kImagePad;
+using gufo::tokenization::kImEnd;
+using gufo::tokenization::kImStart;
 
 namespace {
 
@@ -94,9 +100,9 @@ private:
 
 void TestDirectVocabularyTokenizer() {
   std::vector<std::string> tokens = {
-      "<|endoftext|>",  // 0
-      "<|im_start|>",   // 1
-      "<|im_end|>",     // 2
+      std::string(kEndOfText),  // 0
+      std::string(kImStart),    // 1
+      std::string(kImEnd),      // 2
       "H",
       "e",
       "l",
@@ -121,9 +127,9 @@ void TestDirectVocabularyTokenizer() {
   };
 
   std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
-      {"<|endoftext|>", 0},
-      {"<|im_start|>", 1},
-      {"<|im_end|>", 2},
+      {std::string(kEndOfText), 0},
+      {std::string(kImStart), 1},
+      {std::string(kImEnd), 2},
   };
 
   std::string err;
@@ -167,8 +173,8 @@ void TestGgufTokenizerLoading() {
   }
   vocab.emplace_back("th");
   vocab.emplace_back("the");
-  vocab.emplace_back("<|im_start|>");
-  vocab.emplace_back("<|im_end|>");
+  vocab.emplace_back(kImStart);
+  vocab.emplace_back(kImEnd);
   const auto tool_call_start =
       static_cast<gufo::tokenization::TokenId>(vocab.size());
   vocab.emplace_back("<tool_call>");
@@ -235,13 +241,14 @@ void TestGgufTokenizerLoading() {
 }
 
 void TestStopTokensFollowVocabulary() {
-  const std::vector<std::string> vocab{"text", "<|endoftext|>", "<|im_start|>",
-                                       "<|im_end|>", "<|image_pad|>"};
+  const std::vector<std::string> vocab{
+      "text", std::string(kEndOfText), std::string(kImStart),
+      std::string(kImEnd), std::string(kImagePad)};
   const std::unordered_map<std::string, gufo::tokenization::TokenId> specials{
-      {"<|endoftext|>", 1},
-      {"<|im_start|>", 2},
-      {"<|im_end|>", 3},
-      {"<|image_pad|>", 4}};
+      {std::string(kEndOfText), 1},
+      {std::string(kImStart), 2},
+      {std::string(kImEnd), 3},
+      {std::string(kImagePad), 4}};
   auto direct = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       vocab, {}, specials);
   Expect(direct && direct->IsStopToken(1) && direct->IsStopToken(3),
@@ -288,11 +295,11 @@ void TestUnicodeContractionBoundary() {
 }
 
 void TestEmptyAndSpecialEdgeCases() {
-  std::vector<std::string> tokens = {"<|endoftext|>", "a", "b", "c"};
+  std::vector<std::string> tokens = {std::string(kEndOfText), "a", "b", "c"};
   std::vector<std::string> merges = {};
   std::string err;
   auto tok = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
-      tokens, merges, {{"<|endoftext|>", 0}}, &err);
+      tokens, merges, {{std::string(kEndOfText), 0}}, &err);
   Expect(tok != nullptr, "Tokenizer initialized");
 
   gufo::tokenization::TokenizerOptions opts;
@@ -311,15 +318,18 @@ void TestCorpusConformance() {
   for (int i = 0; i < 256; ++i) {
     vocab.emplace_back(1, static_cast<char>(i));
   }
-  vocab.emplace_back("<|im_start|>");
-  vocab.emplace_back("<|im_end|>");
-  vocab.emplace_back("<|endoftext|>");
+  vocab.emplace_back(kImStart);
+  vocab.emplace_back(kImEnd);
+  vocab.emplace_back(kEndOfText);
   vocab.emplace_back("<think>");
   vocab.emplace_back("</think>");
 
   std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
-      {"<|im_start|>", 256}, {"<|im_end|>", 257}, {"<|endoftext|>", 258},
-      {"<think>", 259},      {"</think>", 260},
+      {std::string(kImStart), 256},
+      {std::string(kImEnd), 257},
+      {std::string(kEndOfText), 258},
+      {"<think>", 259},
+      {"</think>", 260},
   };
 
   std::string err;

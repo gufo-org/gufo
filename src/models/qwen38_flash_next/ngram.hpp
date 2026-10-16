@@ -25,6 +25,7 @@ struct NgramHistory {
   std::array<std::int32_t, Config::kMaxPleNgram - 1> prev{kNone, kNone};
 
   void Reset() noexcept { prev.fill(kNone); }
+  bool operator==(const NgramHistory&) const = default;
 };
 
 /// Computes the table rows every token gathers: `ple_heads` rows per token,

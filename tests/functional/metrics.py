@@ -32,16 +32,18 @@ def canonical(value):
             return item
         protocol = item.get("type") in (
             "function", "function_call", "function_call_output",
+            "tool_use", "tool_result",
             "message", "reasoning", "item_reference") or item.get("role") in (
                 "assistant", "tool") or item.get("object") in (
                     "response", "chat.completion", "chat.completion.chunk", "text_completion")
         result = {}
         for key, child in sorted(item.items()):
-            if (protocol and key in ("id", "call_id", "tool_call_id")
+            if (protocol and key in ("id", "call_id", "tool_call_id", "tool_use_id")
                     or key == "previous_response_id") \
                     and isinstance(child, str):
                 child = identifiers.setdefault(child, f"identifier-{len(identifiers)}")
-            result[key] = child if key in payloads else visit(child)
+            opaque = key in payloads or item.get("type") == "tool_use" and key == "input"
+            result[key] = child if opaque else visit(child)
         return result
 
     return json.dumps(visit(value), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -49,6 +51,12 @@ def canonical(value):
 
 def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def integer_number(value):
+    """JSON integers may use exponent notation; booleans are never counts."""
+    return type(value) is int or (
+        type(value) is float and math.isfinite(value) and value.is_integer())
 
 
 def validate_tool_events(events, output):
@@ -159,9 +167,10 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
                     "incomplete response is missing details")
     else:
         input_count, output_count = usage.get("prompt_tokens"), usage.get("completion_tokens")
-    require(type(input_count) is int and type(output_count) is int
+    require(integer_number(input_count) and integer_number(output_count)
             and input_count >= 0 and output_count >= 0, "invalid token counts")
-    require(usage.get("total_tokens") == input_count + output_count, "inconsistent usage total")
+    require(integer_number(usage.get("total_tokens"))
+            and usage["total_tokens"] == input_count + output_count, "inconsistent usage total")
     limit = body.get("max_completion_tokens", body.get("max_tokens", body.get("max_output_tokens")))
     if limit is not None:
         require(output_count <= limit, "output exceeds the request token limit")
@@ -174,14 +183,15 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         value = timing.get(field)
         require(type(value) in (int, float) and math.isfinite(value) and value >= 0,
                 f"missing or invalid {field}")
-    require(type(timing.get("prefill_tokens")) is int, "missing prefill token count")
+    require(integer_number(timing.get("prefill_tokens")) and timing["prefill_tokens"] >= 0,
+            "missing or invalid prefill token count")
     if output_count:
         require(timing["decode_ms"] > 0, "generated tokens have no decode time")
     if timing["prefill_tokens"]:
         require(timing["prefill_ms"] > 0, "prefilled tokens have no prefill time")
     cached = usage.get("cached_tokens", usage.get(
         "prompt_tokens_details", usage.get("input_tokens_details", {})).get("cached_tokens"))
-    require(type(cached) is int and 0 <= cached <= input_count, "invalid cached token count")
+    require(integer_number(cached) and 0 <= cached <= input_count, "invalid cached token count")
     definitions = {tool.get("function", tool).get("name"): tool.get("function", tool)
                    for tool in body.get("tools", []) if tool.get("type") == "function"}
     calls = [call for choice in choices.values() for call in choice["tools"].values()]
@@ -202,7 +212,21 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         require(name in definitions, "undeclared generated tool")
         if isinstance(choice, dict) and choice.get("type") == "function":
             require(name == choice.get("function", choice).get("name"), "wrong named tool")
-        arguments = json.loads(call["arguments"])
+        try:
+            arguments = json.loads(call["arguments"])
+        except json.JSONDecodeError:
+            interrupted = (
+                output is not None and output["status"] == "incomplete"
+                and call.get("status") == "incomplete"
+            ) or (
+                output is None and any(
+                    item.get("finish") == "length" or
+                    (item.get("finish") == "stop" and body.get("stop"))
+                    for item in choices.values())
+            )
+            require(body.get("stream") and interrupted and call is calls[-1],
+                    "unfinished tool arguments in a successful response")
+            continue
         require(isinstance(arguments, dict), "tool arguments must be a JSON object")
         definition = definitions[name]
         if definition.get("strict"):
@@ -272,6 +296,7 @@ def summarize(parts, streaming, ended, contract=None):
     elif data:
         events = [json.loads(data)]
     usage, output, choices, timings = {}, None, {}, {}
+    message_output = None
     for event in events:
         final = event.get("response", event)
         timings.update(final.get("timings", {}))
@@ -280,6 +305,10 @@ def summarize(parts, streaming, ended, contract=None):
         if "output" in final and final.get("status") in ("completed", "incomplete"):
             output = {"output": final["output"], "status": final["status"],
                       "incomplete_details": final.get("incomplete_details")}
+        if not streaming and final.get("type") == "message" and final.get("role") == "assistant":
+            # Buffered /v1/messages: keep its ordered blocks and stop metadata,
+            # excluding the generated message ID. Streamed events stay as events.
+            message_output = {key: final[key] for key in ("content", "stop_reason", "stop_sequence")}
         for choice in event.get("choices", []):
             index = str(choice.get("index", 0))
             target = choices.setdefault(index, {"text": "", "reasoning": "", "tools": {}})
@@ -302,6 +331,14 @@ def summarize(parts, streaming, ended, contract=None):
         usage["gufo"] = {aliases.get(key, key): value for key, value in timings.items()}
     if contract:
         validate_response(events, *contract, ended, usage, output, choices)
+        if contract[0] == "/v1/messages/count_tokens":
+            assert ended and not streaming and len(events) == 1, "incomplete count response"
+            value = events[0]
+            if contract[2] == 200:
+                assert set(value) == {"input_tokens"}, value
+                assert type(value["input_tokens"]) is int and value["input_tokens"] >= 0, value
+                return {"prompt_tokens": value["input_tokens"]}, digest(value)
+            return {}, digest(value)
         if contract[0] in DISCOVERY_ENDPOINTS:
             assert ended and not streaming and len(events) == 1, "incomplete discovery response"
             value = events[0]
@@ -325,13 +362,19 @@ def summarize(parts, streaming, ended, contract=None):
             if alternative in usage:
                 measured[key] = usage[alternative]
                 break
-    measured["cached_tokens"] = usage.get("cached_tokens", usage.get(
-        "prompt_tokens_details", usage.get("input_tokens_details", {})).get("cached_tokens", 0))
+    if "cache_read_input_tokens" in usage:
+        # Messages input_tokens excludes cache reads and writes; the prompt is their sum.
+        measured["prompt_tokens"] = sum(usage.get(field, 0) for field in (
+            "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    measured["cached_tokens"] = usage.get("cached_tokens", usage.get("cache_read_input_tokens",
+        usage.get("prompt_tokens_details", usage.get("input_tokens_details", {})).get("cached_tokens", 0)))
     if first_output_ms is not None:
         measured["client_ttft_ms"] = first_output_ms
     for phase, tokens in (("prefill", "prefill_tokens"), ("decode", "completion_tokens")):
         if measured.get(tokens, 0) > 0 and measured.get(phase + "_ms", 0) > 0:
             measured[phase + "_ms_per_token"] = measured[phase + "_ms"] / measured[tokens]
+    if message_output is not None:
+        return measured, digest(message_output) if usage else None
     completed = bool(usage) and (output is not None or bool(choices))
     return measured, digest(output if output is not None else choices) if completed else None
 
@@ -501,13 +544,23 @@ def compare(baseline, candidate):
                 if not groups or groups[-1][0] != label:
                     groups.append((label, []))
                 groups[-1][1].append(row)
-            histories = {}
+            histories, ordered = {}, []
             for label, group in groups:
                 history.append([label, sorted(row.get("request_sha256", "") for row in group
                                              if isinstance(row, dict))])
                 for row in group:
                     histories[id(row)] = digest(history)
-            for row in payload["requests"]:
+                # Identical simultaneous bodies can exchange leader/follower
+                # roles. Match their cache work, never their observed timings.
+                # Different bodies and different cohorts retain exact identity.
+                peers = {}
+                for row in group:
+                    peers.setdefault(row.get("request_sha256", ""), []).append(row)
+                for requests in peers.values():
+                    ordered.extend(sorted(requests, key=lambda row: (
+                        -row.get("metrics", {}).get("prefill_tokens", 0),
+                        row.get("metrics", {}).get("cached_tokens", 0))))
+            for row in ordered:
                 if not isinstance(row, dict) or row.get("status") not in ("complete", "disconnected"):
                     raise ValueError(f"unfinished/invalid request in {path}")
                 measured = row.get("metrics", {})
@@ -641,7 +694,8 @@ def join_server_timings(directory):
                     if not math.isfinite(value) or value < 0:
                         raise ValueError(f"invalid {field} in {log}")
                     measured.setdefault("server_" + field if field == "duration_ms" else field, value)
-            for field, alias in (("draft_proposed", "draft_tokens"),
+            for field, alias in (("draft_rounds", "draft_rounds"),
+                                 ("draft_proposed", "draft_tokens"),
                                  ("draft_accepted", "draft_tokens_accepted")):
                 if field in fields:
                     value = int(fields[field])

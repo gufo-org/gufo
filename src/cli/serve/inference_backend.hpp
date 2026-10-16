@@ -119,9 +119,11 @@ public:
   /// Stable model identifier used in API responses.
   [[nodiscard]] std::string model_id() const override;
   [[nodiscard]] bool ready() const override;
+  [[nodiscard]] bool device_lost() const override;
   [[nodiscard]] bool supports_images() const override;
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] std::uint32_t max_context() const override;
+  [[nodiscard]] std::vector<SessionState> session_states() const override;
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;
   [[nodiscard]] InitialOutputState initial_output_state(
       const ChatRequest& request) const override;
@@ -138,7 +140,8 @@ public:
                   const CancellationCheck& is_cancelled = {},
                   const TokenCallback& on_token = {},
                   std::string_view client_id = "anonymous",
-                  const std::vector<std::string>& stop_sequences = {}) override;
+                  const std::vector<std::string>& stop_sequences = {},
+                  bool cache_prompt = true) override;
 
   /// Framed chat conversation; returns the assistant reply.
   Result chat(const ChatRequest& request, std::size_t max_tokens,
@@ -158,7 +161,7 @@ public:
       const CancellationCheck& is_cancelled = {}, bool stream_output = false,
       bool ignore_eos = false, std::string_view client_id = "anonymous",
       const std::vector<std::string>& stop_sequences = {},
-      bool return_progress = false) override;
+      bool return_progress = false, bool cache_prompt = true) override;
 
   Result chat(const std::vector<tokenization::ChatMessage>& messages,
               std::size_t max_tokens, const sampling::SamplingConfig& sampling,
@@ -166,6 +169,10 @@ public:
 
   /// Token count of raw text (no generation).
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override;
+
+  /// Prompt tokens of a chat request as generation would prepare them.
+  [[nodiscard]] std::optional<std::size_t> count_chat_tokens(
+      const ChatRequest& request) const override;
 
 private:
   struct Impl;

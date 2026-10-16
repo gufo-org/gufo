@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "src/models/minimax_h3/json.hpp"
+#include "src/models/qwen/control_tokens.hpp"
 
 namespace gufo::minimax_h3 {
 namespace {
@@ -310,20 +311,20 @@ bool OptionalFalse(const json::Value& object, std::string_view name) {
 void Tokenizer::ValidatePinnedContract(const Tokenizer& tokenizer) {
   static constexpr std::array<std::pair<std::string_view, std::uint32_t>, 14>
       kSpecials = {{
-          {"<|endoftext|>", 151643},
-          {"<|im_start|>", 151644},
-          {"<|im_end|>", 151645},
-          {"<|object_ref_start|>", 151646},
-          {"<|object_ref_end|>", 151647},
-          {"<|box_start|>", 151648},
-          {"<|box_end|>", 151649},
-          {"<|quad_start|>", 151650},
-          {"<|quad_end|>", 151651},
-          {"<|vision_start|>", 151652},
-          {"<|vision_end|>", 151653},
-          {"<|vision_pad|>", 151654},
-          {"<|image_pad|>", 151655},
-          {"<|video_pad|>", 151656},
+          {tokenization::kEndOfText, 151643},
+          {tokenization::kImStart, 151644},
+          {tokenization::kImEnd, 151645},
+          {tokenization::kObjectRefStart, 151646},
+          {tokenization::kObjectRefEnd, 151647},
+          {tokenization::kBoxStart, 151648},
+          {tokenization::kBoxEnd, 151649},
+          {tokenization::kQuadStart, 151650},
+          {tokenization::kQuadEnd, 151651},
+          {tokenization::kVisionStart, 151652},
+          {tokenization::kVisionEnd, 151653},
+          {tokenization::kVisionPad, 151654},
+          {tokenization::kImagePad, 151655},
+          {tokenization::kVideoPad, 151656},
       }};
   if (tokenizer.vocab_.size() != kBaseVocabularySize ||
       tokenizer.vocabulary_size() != kTokenizerVocabularySize) {

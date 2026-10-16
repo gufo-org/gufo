@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -77,6 +78,26 @@ public:
   const Config& config() const noexcept { return config_; }
   const DeviceTensor& token_embd() const noexcept { return token_embd_; }
   const DeviceTensor& output() const noexcept { return output_; }
+  /// The leading output() rows the MTP draft head scores in place (see
+  /// draft_vocab.hpp); empty when the draft projects the full vocabulary.
+  const DeviceTensor& draft_output() const noexcept { return draft_output_; }
+  /// Special tokens above the prefix: the first rows of each session's
+  /// draft table.
+  std::span<const std::int32_t> draft_specials() const noexcept {
+    return draft_specials_;
+  }
+  /// Bytes of one output() row.
+  std::size_t output_row_bytes() const noexcept {
+    return output_.rows == 0 ? 0 : output_bytes_ / output_.rows;
+  }
+  /// Drafts score output() rows [0, prefix_rows) in place plus a
+  /// per-session table that starts with `specials`. Draft proposals only
+  /// steer speculation: the target still verifies every token, so greedy
+  /// text is unchanged. Sampled text can differ: a smaller head changes
+  /// acceptance, and so the later random draws.
+  [[nodiscard]] bool SetDraftVocab(std::uint32_t prefix_rows,
+                                   std::vector<std::int32_t> specials,
+                                   std::string* error_msg);
   const DeviceMixer& hc_head() const noexcept { return hc_head_; }
   const std::vector<DeviceLayer>& layers() const noexcept { return layers_; }
   [[nodiscard]] bool has_mtp() const noexcept { return has_mtp_; }
@@ -97,6 +118,9 @@ private:
   Config config_;
   DeviceTensor token_embd_;
   DeviceTensor output_;
+  std::size_t output_bytes_{0};
+  DeviceTensor draft_output_;
+  std::vector<std::int32_t> draft_specials_;
   DeviceMixer hc_head_;
   std::vector<DeviceLayer> layers_;
   DeviceLayer mtp_;

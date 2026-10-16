@@ -35,6 +35,9 @@ public:
   }
   virtual bool CacheTransitions() const { return false; }
   virtual void CanonicalMaskState(std::string&, std::size_t) const {}
+  // Native reasoning can consume any nonempty token without '<' while neither
+  // reasoning terminator has a pending prefix. Other lexemes must opt out.
+  virtual bool PlainReasoning(std::string_view) const { return false; }
   virtual bool AcceptValue(const json::Value& value) const {
     return Check(value.dump()).complete;
   }
@@ -45,6 +48,9 @@ public:
   static std::shared_ptr<const JsonSchemaLexeme> Number(
       const json::Value& schema, bool integer);
   static std::shared_ptr<const JsonSchemaLexeme> Whitespace();
+  enum class ReasoningEnd { kExplicit, kTool, kUnfinished };
+  static std::shared_ptr<const JsonSchemaLexeme> Reasoning(
+      std::string tool_prefix, ReasoningEnd end);
   static json::Value IntersectMultipleOf(const json::Value& a,
                                          const json::Value& b);
   static json::Value Format(std::string_view format);

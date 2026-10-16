@@ -82,10 +82,16 @@ The supported modalities are LLM, image, video, and audio (TTS, ASR).
 
 - `cacheDisk` — enable an on-disk cache of computed prompt state, reused
   across requests and restarts. In practice: repeated or shared prompts get
-  much faster; costs disk space.
-- `cacheDiskBytes` — the maximum size of that cache on disk.
-- `cacheDiskStagingBytes` — scratch space used while writing new cache
-  entries. Must fit alongside `cacheDiskBytes`.
+  much faster; costs disk space. Give each Flash-Next server its own
+  directory: one Flash-Next server owns it, and a second one fails at
+  startup.
+- `cacheDiskBytes` — the maximum size of that cache on disk. Flash-Next also
+  counts unfinished writes, and lowering it removes its oldest checkpoints
+  (by creation) at the next start.
+- `cacheDiskStagingBytes` — RAM used to move cache entries to and from disk.
+  Flash-Next streams entries of any size through a 1 MiB buffer by default;
+  other models need it to hold a whole entry. See
+  [the server guide](SERVER.md) for the defaults.
 
 **Speculative decoding**
 
@@ -111,14 +117,25 @@ seed. Speed depends on acceptance and verification cost.
 
 - `maxPending` — maximum requests waiting in the queue. Over the limit,
   clients wait or are refused rather than exhausting memory.
-- `maxPendingPerClient` — the same cap but per client, so one client cannot
-  hog the whole queue.
+- `maxPendingPerClient` — the same cap but per client IP. It defaults to
+  `maxPending`; set it lower so one client cannot hog the whole queue.
 - `requestTimeoutMs` — requests are killed after this many milliseconds. In
   practice: prevents stuck requests from holding GPU sessions forever.
+- `stallTimeoutMs` — the server exits as `device_lost` when generation makes
+  no progress for this many milliseconds, so the service manager restarts
+  it. Off unless set; at least 60000.
 - `maxOutputBytes` — maximum response size per request.
 - `maxBufferedOutputBytes` — maximum generated-but-not-yet-delivered output
   buffered for one request; protects against slow clients.
 - `maxBufferedOutputTotal` — the same buffer budget across all requests.
+
+**Diagnostics**
+
+- `trace` — a file that receives every text request body, the prompt as the
+  model reads it, the raw generated text and the reply sent back, as JSON
+  Lines. In practice: turn it on to see why a client received broken output,
+  then delete the file, because it holds whole conversations. See
+  [content trace](SERVER.md#content-trace).
 
 **Hardware**
 
@@ -169,7 +186,7 @@ These apply to every modality, before or after the subcommand:
 
 - `host` / `port` — where to listen (`-i` / `-p`). In practice: set
   `--host 0.0.0.0` if you serve from inside a container, or the published
-  port will not answer.
+  port will not answer. Use `--host ::` to listen on IPv6 and IPv4 together.
 - `sessions` (`-j`) — preallocated GPU request sessions. In practice: more
   sessions means more requests can compute at once, at the cost of memory
   per session. This option applies to LLM serving; image and speech servers
@@ -188,8 +205,9 @@ These apply to every modality, before or after the subcommand:
   shorthand for `--log-level=debug`; passing both is a usage error. The tier is
   a threshold all the way down, and the `event=listening` startup confirmation
   is INFO-tier, so `warn` and `error` boot and stop silently. Prompt text,
-  message bodies and the API key are never logged at any level; debug admission
-  lines do name the client by the peer IP address of its connection. See
+  message bodies and the API key are never logged at any level; only the
+  separate, opt-in `trace` file records content. Debug admission lines do name
+  the client by the peer IP address of its connection. See
   [server logs](SERVER.md#troubleshooting-logs).
 
 ## Commands

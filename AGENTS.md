@@ -80,6 +80,9 @@ quality; successful optimizations become the default, without extra switches.
 ## Development
 
 - Keep model code, tests, tools and numerical contracts with their model.
+- Use the shared Qwen control-token constants for framing; see
+  [src/models/qwen/AGENTS.md](src/models/qwen/AGENTS.md). Inspect their definitions
+  when reviewing or changing behavior, and keep reference fixtures independent.
 - Use one canonical long option and backend name per behavior; avoid aliases.
 - Use `gh` for GitHub operations after checking `gh auth status`.
 - Follow Conventional Commits with a single-line message. Title pull requests

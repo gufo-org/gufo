@@ -1,0 +1,7 @@
+# Functional client for hosts without `nix develop`; matches the flake's pins.
+# Covers every third-party import in tests/functional.
+openai==2.41.1
+httpx==0.28.1
+pydantic==2.13.4
+jsonschema==4.26.0
+pillow==12.3.0

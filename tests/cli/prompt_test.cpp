@@ -68,6 +68,13 @@ void TestImageFlags() {
   assert(opt && opt->add_vision_id);
   assert((opt->image_paths == std::vector<std::string>{"a.png", "b.jpg"}));
   assert(!gufo::cli::ParsePromptOptions(std::array{"Compare"})->add_vision_id);
+  std::vector<const char*> many;
+  for (unsigned i = 0; i < 17; ++i)
+    many.insert(many.end(), {"--image", "a.png"});
+  many.push_back("Compare");
+  const auto parsed = gufo::cli::ParsePromptOptions(many);
+  assert(parsed && parsed->image_paths.size() == 17);
+  assert(!gufo::cli::ParsePromptOptions(std::array{"--image", ""}));
 }
 
 void TestInvalidFlags() {

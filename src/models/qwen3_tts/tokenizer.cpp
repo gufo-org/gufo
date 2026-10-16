@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "src/core/json.hpp"
+#include "src/models/qwen/control_tokens.hpp"
 
 namespace gufo::models::qwen3_tts {
 namespace {
@@ -549,27 +550,28 @@ bool Tokenizer::Encode(std::string_view text, std::vector<std::uint32_t>* ids,
 bool Tokenizer::EncodeAssistantPrompt(std::string_view text,
                                       std::vector<std::uint32_t>* ids,
                                       std::string* error) const {
-  std::string prompt = "<|im_start|>assistant\n";
-  prompt.append(text);
-  prompt.append("<|im_end|>\n<|im_start|>assistant\n");
+  std::string prompt;
+  prompt.append(tokenization::kImStart).append("assistant\n").append(text);
+  prompt.append(tokenization::kImEnd).append("\n");
+  prompt.append(tokenization::kImStart).append("assistant\n");
   return Encode(prompt, ids, error);
 }
 
 bool Tokenizer::EncodeInstructionPrompt(std::string_view instruction,
                                         std::vector<std::uint32_t>* ids,
                                         std::string* error) const {
-  std::string prompt = "<|im_start|>user\n";
-  prompt.append(instruction);
-  prompt.append("<|im_end|>\n");
+  std::string prompt;
+  prompt.append(tokenization::kImStart).append("user\n").append(instruction);
+  prompt.append(tokenization::kImEnd).append("\n");
   return Encode(prompt, ids, error);
 }
 
 bool Tokenizer::EncodeReferencePrompt(std::string_view text,
                                       std::vector<std::uint32_t>* ids,
                                       std::string* error) const {
-  std::string prompt = "<|im_start|>assistant\n";
-  prompt.append(text);
-  prompt.append("<|im_end|>\n");
+  std::string prompt;
+  prompt.append(tokenization::kImStart).append("assistant\n").append(text);
+  prompt.append(tokenization::kImEnd).append("\n");
   return Encode(prompt, ids, error);
 }
 

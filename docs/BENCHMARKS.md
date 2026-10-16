@@ -134,10 +134,10 @@ end-to-end model measurements. Collect profiler traces separately and use
 ## Reporting and artifact retention
 
 Record model/engine revisions, artifact hashes, hardware/software fingerprint,
-input identity, context, output count, sampling, concurrency, cache state,
-oracle identity, and the exact timed scope. A numerical mismatch or device
-failure is not a passing result. Add repetitions when timing noise or a
-suspected regression requires them.
+power profile and CPU/GPU temperatures, input identity, context, output count,
+sampling, concurrency, cache state, oracle identity, and the exact timed scope.
+A numerical mismatch or device failure is not a passing result. Add repetitions
+when timing noise or a suspected regression requires them.
 
 Checked-in JSON retains fixtures, model provenance, controller calibration,
 and bounded result summaries. Serving summaries preserve aggregate metrics,

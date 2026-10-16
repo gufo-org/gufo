@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import safetensors
+from . import control_tokens, safetensors
 
 SCHEMA = "gufo.minimax-h3-source.v1"
 REPOSITORY = "MiniMaxAI/MiniMax-H3"
@@ -223,25 +223,14 @@ def _validate_indexes_and_configs(root: Path) -> dict:
     for key, expected in expected_text.items():
         _require_equal(text_config.get(key), expected, f"text encoder {key}")
 
-    _require_equal(tokenizer.get("eos_token"), "<|im_end|>", "tokenizer EOS")
+    _require_equal(tokenizer.get("eos_token"), control_tokens.kImEnd, "tokenizer EOS")
     _require_equal(
-        tokenizer.get("pad_token"), "<|endoftext|>", "tokenizer padding token"
+        tokenizer.get("pad_token"), control_tokens.kEndOfText, "tokenizer padding token"
     )
     special_tokens = tokenizer.get("additional_special_tokens")
     if not isinstance(special_tokens, list):
         raise H3ManifestError("tokenizer special-token list is missing")
-    required_special = {
-        "<|im_start|>",
-        "<|im_end|>",
-        "<|vision_start|>",
-        "<|vision_end|>",
-        "<|image_pad|>",
-        "<|video_pad|>",
-        "<|lyrics_start|>",
-        "<|lyrics_end|>",
-        "<|caption_start|>",
-        "<|caption_end|>",
-    }
+    required_special = set(control_tokens.H3_SPECIAL_TOKENS)
     missing_special = required_special - set(special_tokens)
     if missing_special:
         raise H3ManifestError(

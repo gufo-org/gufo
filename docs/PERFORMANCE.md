@@ -88,6 +88,8 @@ cost in the result.
 - Compile production kernels for `gfx1151` and treat Wave32 as explicit.
 - Prove alignment before vector loads and provide bounded tail paths.
 - Track VGPR, LDS, occupancy, and scratch for retained kernels.
+  `kernel_resources_test` fails if a kernel uses more scratch than
+  `tools/ci/kernel-resources.json` allows (see "Kernel resource check").
 - Keep distinct decode and prefill routes where their reuse differs.
 - Read only live KV spans and reuse GQA/MQA K/V across query heads.
 - Retain hipBLASLt or rocBLAS as the baseline for supported matrix shapes.
@@ -227,6 +229,27 @@ prompt text, generated text, model paths, timestamps, and token IDs are never
 written to the artifact. `gufo bench` remains the direct model-path
 microbenchmark; use this serving harness for TTFT, ITL, queueing, and
 concurrency decisions.
+
+### Kernel resource check
+
+The check reads the code objects in a binary. It does not use a GPU. Run it
+after each compiler or ROCm update, and after each kernel change:
+
+```sh
+python3 tools/ci/check-kernel-resources.py result/bin/gufo \
+  --baseline tools/ci/kernel-resources.json
+```
+
+To compare two builds, for example two compilers, use `--compare`. It lists
+each kernel that has more scratch, more spilled VGPRs or less VGPR occupancy
+than in the base build:
+
+```sh
+python3 tools/ci/check-kernel-resources.py new/bin/gufo --compare old/bin/gufo
+```
+
+Change the baseline only after you decide that a new allowance is correct.
+Use `--write-baseline` and record the reason with `--note`.
 
 ### HIP allocation diagnostic
 

@@ -353,6 +353,48 @@ void TestCompactPersistentSnapshotRoundTrip() {
   Expect(rejected, "incompatible compact snapshot must be rejected");
 }
 
+void TestCompactImageLayout() {
+  // A compact layout-only payload isolates validation from device allocation.
+  constexpr std::uint32_t images = 257, header = 80;
+  std::vector<std::uint8_t> payload(header + images * 12);
+  std::memcpy(payload.data(), "GQKVSNP1", 8);
+  const auto put = [&](std::size_t offset, std::uint32_t value) {
+    for (unsigned byte = 0; byte < 4; ++byte)
+      payload[offset + byte] = value >> (byte * 8);
+  };
+  put(8, 2);
+  put(12, header);
+  put(24, images);
+  put(28, images);
+  put(64, payload.size());
+  put(72, images);
+  for (std::uint32_t i = 0; i < images; ++i) {
+    put(header + i * 12, i);
+    put(header + i * 12 + 4, 1);
+    put(header + i * 12 + 8, 1);
+  }
+  const auto layout = gufo::hip::QwenGpuSnapshot::ReadRopeLayout(payload);
+  Expect(layout.images.size() == images &&
+             layout.images.back().offset == images - 1,
+         "compact snapshots retain every image beyond 256");
+  const auto rejected = [&] {
+    try {
+      gufo::hip::QwenGpuSnapshot::ReadRopeLayout(payload);
+      return false;
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+  };
+  put(28, images - 1);
+  Expect(rejected(), "image count cannot exceed populated tokens");
+  put(28, images);
+  put(8, 1);
+  Expect(rejected(), "version one cannot contain image grids");
+  put(8, 2);
+  payload.pop_back();
+  Expect(rejected(), "truncated image grids must be rejected");
+}
+
 void FillDecodeInputs(std::vector<float>* query, std::vector<float>* key,
                       std::vector<float>* value, std::vector<float>* gate,
                       std::size_t positions, std::uint32_t num_heads,
@@ -618,6 +660,7 @@ int main() {
   TestProductionMemoryScaling();
   TestCanonicalMemoryAccountingAndSnapshot();
   TestCompactPersistentSnapshotRoundTrip();
+  TestCompactImageLayout();
   TestOnlineAndGraphDecodeFp16Equivalence();
   TestSplitKDecodeFp16Equivalence();
   std::cout << "Qwen FP16 KV storage tests passed.\n";

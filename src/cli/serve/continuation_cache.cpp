@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -23,6 +24,11 @@ bool IsPrefix(std::span<const ContinuationToken> prefix,
          std::equal(prefix.begin(), prefix.end(), tokens.begin());
 }
 
+bool IsContinuation(SnapshotPurpose purpose) {
+  return purpose == SnapshotPurpose::kContinuation ||
+         purpose == SnapshotPurpose::kBranchPoint;
+}
+
 int MaxRemovalPriority(SnapshotPurpose purpose) {
   switch (purpose) {
     case SnapshotPurpose::kRetry:
@@ -30,6 +36,7 @@ int MaxRemovalPriority(SnapshotPurpose purpose) {
     case SnapshotPurpose::kHistory:
       return 1;
     case SnapshotPurpose::kContinuation:
+    case SnapshotPurpose::kBranchPoint:
       return 3;
   }
   return 0;
@@ -90,10 +97,70 @@ struct ContinuationCache::Impl {
   // Rank extra copies before the last useful checkpoint of a prefix family.
   // Exact tokens and input identity, not client IDs or hashes, establish that
   // another continuation can keep the family reusable after this removal.
+  /// A continuation that two retained continuations extend and then diverge
+  /// after is the prefix they share, such as a system prompt. No copy
+  /// replaces it, so it is never ranked as redundant. A learned branch point
+  /// stays one after the older branch is gone: a client that rewrote the
+  /// prompt there, such as a chat bridge replaying its last user message
+  /// without metadata, diverges there again. A deeper learned branch point of
+  /// the same family supersedes it.
+  [[nodiscard]] bool IsBranchPoint(std::size_t candidate) const {
+    const auto& entry = *entries[candidate];
+    if (!IsContinuation(entry.purpose))
+      return false;
+    bool learned = entry.purpose == SnapshotPurpose::kBranchPoint;
+    std::optional<ContinuationToken> next;
+    for (std::size_t other = state_count; other < entries.size(); ++other) {
+      const auto& peer = *entries[other];
+      if (other == candidate || !peer.valid || !IsContinuation(peer.purpose) ||
+          peer.input_identity != entry.input_identity ||
+          peer.tokens.size() <= entry.tokens.size() ||
+          !IsPrefix(entry.tokens, peer.tokens))
+        continue;
+      if (peer.purpose == SnapshotPurpose::kBranchPoint)
+        learned = false;
+      const auto token = peer.tokens[entry.tokens.size()];
+      if (next.has_value() && *next != token)
+        return true;
+      next = token;
+    }
+    return learned;
+  }
+
+  /// A prompt that restores `source` and then differs from a deeper retained
+  /// checkpoint or live frontier of the same family branches at `source`, as
+  /// conversations sharing a system prompt do. Later conversations restore
+  /// it as well, so it is learned like a published branch point; otherwise a
+  /// grid checkpoint stays history and yields to any frontier frozen later.
+  /// A prompt inside the deeper tokens retries it and teaches nothing.
+  [[nodiscard]] bool RestoreDiverges(
+      std::size_t source, std::span<const ContinuationToken> prompt) const {
+    const auto& entry = *entries[source];
+    if (entry.purpose != SnapshotPurpose::kHistory &&
+        entry.purpose != SnapshotPurpose::kContinuation)
+      return false;
+    const auto diverges = [&](const auto& tokens, const auto& identity) {
+      if (identity != entry.input_identity ||
+          tokens.size() <= entry.tokens.size() ||
+          !IsPrefix(entry.tokens, tokens))
+        return false;
+      const auto common = static_cast<std::size_t>(
+          std::ranges::mismatch(tokens, prompt).in1 - tokens.begin());
+      return common < std::min(tokens.size(), prompt.size());
+    };
+    return std::ranges::any_of(entries, [&](const auto& peer) {
+      return (peer->valid && peer->snapshot &&
+              diverges(peer->tokens, peer->input_identity)) ||
+             diverges(peer->live_tokens, peer->live_identity);
+    });
+  }
+
   [[nodiscard]] int RemovalPriority(
       std::size_t candidate, std::span<const ContinuationToken> incoming = {},
       std::span<const std::uint8_t> incoming_identity = {}) const {
     const auto& entry = *entries[candidate];
+    if (IsBranchPoint(candidate))
+      return 3;
     // A new continuation also makes its own earlier copies redundant. During
     // cold prefill those may all be history snapshots, so no retained
     // continuation yet exists to protect another conversation's last copy.
@@ -106,8 +173,7 @@ struct ContinuationCache::Impl {
     }
     for (std::size_t other = state_count; other < entries.size(); ++other) {
       const auto& peer = *entries[other];
-      if (other == candidate || !peer.valid ||
-          peer.purpose != SnapshotPurpose::kContinuation ||
+      if (other == candidate || !peer.valid || !IsContinuation(peer.purpose) ||
           peer.input_identity != entry.input_identity)
         continue;
       if (entry.purpose == SnapshotPurpose::kRetry &&
@@ -118,7 +184,7 @@ struct ContinuationCache::Impl {
           (IsPrefix(entry.tokens, peer.tokens) ||
            IsPrefix(peer.tokens, entry.tokens)))
         return 1;
-      if (entry.purpose == SnapshotPurpose::kContinuation &&
+      if (IsContinuation(entry.purpose) &&
           peer.tokens.size() > entry.tokens.size() &&
           IsPrefix(entry.tokens, peer.tokens))
         return 2;
@@ -505,6 +571,18 @@ ContinuationCache::Lease ContinuationCache::Acquire(
       std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
       for (std::size_t index = 0; index < impl_->entries.size(); ++index) {
         const auto& entry = *impl_->entries[index];
+        // Borrowed rows save the restore a copy, never another
+        // conversation's live frontier, whose loss costs its whole prefill.
+        // A prompt inside the frontier retries that conversation and
+        // replaces the reply the frontier holds.
+        if (entry.available &&
+            (entry.live_tokens.empty() ||
+             IsPrefix(prompt, entry.live_tokens)) &&
+            cache_hit && impl_->entries[source]->snapshot &&
+            impl_->entries[source]->snapshot->PrefersState(*entry.state)) {
+          selected = index;
+          break;
+        }
         if (entry.available && entry.state_last_used < oldest) {
           selected = index;
           oldest = entry.state_last_used;
@@ -535,6 +613,8 @@ ContinuationCache::Lease ContinuationCache::Acquire(
           auto& source_entry = *impl_->entries[source];
           snapshot = source_entry.snapshot;
           source_entry.snapshot_last_used = ++impl_->clock;
+          if (impl_->RestoreDiverges(source, prompt))
+            source_entry.purpose = SnapshotPurpose::kBranchPoint;
         }
       } else {
         entry.valid = false;
@@ -622,6 +702,60 @@ ContinuationCache::Lease ContinuationCache::Acquire(
   }
 }
 
+std::size_t ContinuationCache::CachedPrefixTokens(
+    std::span<const ContinuationToken> prompt,
+    std::span<const std::uint8_t> input_identity,
+    std::span<const ContinuationInputPrefix> input_prefixes) const {
+  const auto matches = [&](const auto& tokens, const auto& identity) {
+    return IsPrefix(tokens, prompt) &&
+           std::ranges::equal(
+               identity, PrefixInputIdentity(input_identity, input_prefixes,
+                                             tokens.size()));
+  };
+  // Same candidates as Acquire: retained checkpoints, and live frontiers
+  // whose state is not leased.
+  const std::lock_guard<std::mutex> lock(impl_->mutex);
+  std::size_t longest = 0;
+  for (const auto& entry : impl_->entries) {
+    if (entry->valid && (impl_->snapshot_mode() || entry->available) &&
+        entry->tokens.size() > longest &&
+        matches(entry->tokens, entry->input_identity))
+      longest = entry->tokens.size();
+    if (impl_->snapshot_mode() && entry->available &&
+        entry->live_tokens.size() > longest &&
+        matches(entry->live_tokens, entry->live_identity))
+      longest = entry->live_tokens.size();
+  }
+  return longest;
+}
+
+std::size_t ContinuationCache::CommonPrefixTokens(
+    std::span<const ContinuationToken> prompt,
+    std::span<const std::uint8_t> input_identity,
+    std::span<const ContinuationInputPrefix> input_prefixes) const {
+  // Records store one identity for their complete token list. Requiring it to
+  // match the prompt's identity at that length conservatively skips records
+  // whose images differ anywhere, so a boundary never spans an image change.
+  const auto common = [&](const auto& tokens, const auto& identity) {
+    if (tokens.empty() ||
+        !std::ranges::equal(
+            identity,
+            PrefixInputIdentity(input_identity, input_prefixes, tokens.size())))
+      return std::size_t{0};
+    return static_cast<std::size_t>(std::ranges::mismatch(tokens, prompt).in1 -
+                                    tokens.begin());
+  };
+  const std::lock_guard<std::mutex> lock(impl_->mutex);
+  std::size_t longest = 0;
+  for (const auto& entry : impl_->entries) {
+    if (entry->valid)
+      longest = std::max(longest, common(entry->tokens, entry->input_identity));
+    longest =
+        std::max(longest, common(entry->live_tokens, entry->live_identity));
+  }
+  return longest;
+}
+
 std::size_t ContinuationCache::capacity() const noexcept {
   return impl_->state_count;
 }
@@ -653,14 +787,14 @@ ContinuationState& ContinuationCache::StateAt(std::size_t index) {
 
 bool ContinuationCache::ReserveSnapshot(
     std::size_t source_index, std::size_t snapshot_bytes,
-    std::size_t token_count, bool preserve_source, SnapshotPurpose purpose,
+    std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
     std::span<const ContinuationToken> replacement_prefix,
     std::span<const std::uint8_t> input_identity) {
   std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
   std::vector<SnapshotEvent> events;
   bool admitted = false;
   const int max_priority = MaxRemovalPriority(purpose);
-  const auto incoming = purpose == SnapshotPurpose::kContinuation
+  const auto incoming = IsContinuation(purpose)
                             ? replacement_prefix
                             : std::span<const ContinuationToken>{};
   const auto priority_for = [&](std::size_t candidate) {
@@ -687,7 +821,7 @@ bool ContinuationCache::ReserveSnapshot(
       return snapshot_bytes != 0 && used <= impl_->snapshot_capacity_bytes &&
              snapshot_bytes <= impl_->snapshot_capacity_bytes - used;
     };
-    if (purpose != SnapshotPurpose::kContinuation &&
+    if (!IsContinuation(purpose) &&
         std::ranges::none_of(impl_->entries.begin() + impl_->state_count,
                              impl_->entries.end(),
                              [](const auto& entry) { return !entry->valid; }) &&
@@ -727,24 +861,60 @@ bool ContinuationCache::ReserveSnapshot(
       };
 
       const auto can_replace_source = [&] {
-        if (preserve_source || purpose != SnapshotPurpose::kContinuation ||
+        if (preserve_source || !IsContinuation(purpose) ||
             source_index >= impl_->entries.size() || replacement_prefix.empty())
           return false;
         const auto& source = *impl_->entries[source_index];
         return source.valid && source.snapshot &&
+               priority_for(source_index) < 3 &&
                source.tokens.size() < replacement_prefix.size() &&
                std::ranges::equal(source.input_identity, input_identity) &&
                IsPrefix(source.tokens, replacement_prefix);
       };
+
+      // Publishing a retained prefix again replaces that copy, so reclaim it
+      // before another family's and keep a learned branch point learned.
+      std::size_t exact = impl_->entries.size();
+      if (replacement_prefix.size() == token_count) {
+        for (std::size_t candidate = impl_->state_count;
+             candidate < impl_->entries.size(); ++candidate) {
+          const auto& entry = *impl_->entries[candidate];
+          if (candidate != source_index && entry.valid && entry.snapshot &&
+              std::ranges::equal(entry.tokens, replacement_prefix) &&
+              std::ranges::equal(entry.input_identity, input_identity)) {
+            exact = candidate;
+            break;
+          }
+        }
+      }
 
       const bool can_fit_after_eviction =
           snapshot_bytes != 0 &&
           impl_->reserved_snapshot_bytes <= impl_->snapshot_capacity_bytes &&
           snapshot_bytes <=
               impl_->snapshot_capacity_bytes - impl_->reserved_snapshot_bytes;
+      const auto remove = [&](std::size_t target, SnapshotEventReason reason) {
+        auto& entry = *impl_->entries[target];
+        const std::size_t removed_bytes = entry.snapshot_bytes;
+        const std::size_t removed_tokens = entry.tokens.size();
+        removed_snapshots.push_back(std::move(entry.snapshot));
+        entry.tokens.clear();
+        entry.snapshot_bytes = 0;
+        entry.valid = false;
+        impl_->retained_snapshot_bytes -= removed_bytes;
+        events.push_back(make_event(SnapshotEventAction::kRemoved, reason,
+                                    removed_bytes, removed_tokens));
+      };
       while (can_fit_after_eviction && !fits()) {
+        if (exact < impl_->entries.size() && impl_->entries[exact]->valid) {
+          if (impl_->entries[exact]->purpose == SnapshotPurpose::kBranchPoint)
+            purpose = SnapshotPurpose::kBranchPoint;
+          remove(exact, SnapshotEventReason::kExactReplacement);
+          continue;
+        }
         std::size_t target = oldest_snapshot(false);
-        // Advance this family before sacrificing another family's last copy.
+        // Advance this family before sacrificing another family's last copy,
+        // unless the source is a branch point other prompts still diverge at.
         // Verify the source: another lease may have replaced its record.
         if (can_replace_source() &&
             (target == impl_->entries.size() || priority_for(target) == 3))
@@ -755,17 +925,7 @@ bool ContinuationCache::ReserveSnapshot(
         if (target == impl_->entries.size()) {
           break;
         }
-        auto& entry = *impl_->entries[target];
-        const std::size_t removed_bytes = entry.snapshot_bytes;
-        const std::size_t removed_tokens = entry.tokens.size();
-        removed_snapshots.push_back(std::move(entry.snapshot));
-        entry.tokens.clear();
-        entry.snapshot_bytes = 0;
-        entry.valid = false;
-        impl_->retained_snapshot_bytes -= removed_bytes;
-        events.push_back(make_event(SnapshotEventAction::kRemoved,
-                                    SnapshotEventReason::kByteCapacity,
-                                    removed_bytes, removed_tokens));
+        remove(target, SnapshotEventReason::kByteCapacity);
       }
 
       if (fits()) {
@@ -820,7 +980,7 @@ std::size_t ContinuationCache::Commit(
     SnapshotPurpose purpose) {
   const std::size_t token_count = tokens.size();
   const int max_priority = MaxRemovalPriority(purpose);
-  const auto incoming = purpose == SnapshotPurpose::kContinuation
+  const auto incoming = IsContinuation(purpose)
                             ? std::span<const ContinuationToken>(tokens)
                             : std::span<const ContinuationToken>{};
   const auto priority_for = [&](std::size_t candidate) {
@@ -934,7 +1094,7 @@ std::size_t ContinuationCache::Commit(
                candidate < impl_->entries.size(); ++candidate) {
             if (candidate == source_index &&
                 (impl_->entries.size() - impl_->state_count > 1 ||
-                 purpose != SnapshotPurpose::kContinuation)) {
+                 !IsContinuation(purpose))) {
               continue;
             }
             const auto& entry = *impl_->entries[candidate];
@@ -950,10 +1110,11 @@ std::size_t ContinuationCache::Commit(
           }
           last_copy_eviction = priority == 3;
         }
-        if (last_copy_eviction && purpose == SnapshotPurpose::kContinuation &&
+        if (last_copy_eviction && IsContinuation(purpose) &&
             source_index < impl_->entries.size()) {
           const auto& source = *impl_->entries[source_index];
-          if (source.valid && source.input_identity == input_identity &&
+          if (source.valid && priority_for(source_index) < 3 &&
+              source.input_identity == input_identity &&
               source.tokens.size() < tokens.size() &&
               IsPrefix(source.tokens, tokens))
             target = source_index;
@@ -966,6 +1127,11 @@ std::size_t ContinuationCache::Commit(
         }
         if (target != no_entry) {
           auto& snapshot_entry = *impl_->entries[target];
+          // Republishing the same prefix, as an uncached request for exactly
+          // a learned branch point does, keeps the learned divergence.
+          const bool learned =
+              exact_replacement &&
+              snapshot_entry.purpose == SnapshotPurpose::kBranchPoint;
           if (snapshot_entry.snapshot != nullptr) {
             const std::size_t removed_bytes = snapshot_entry.snapshot_bytes;
             const std::size_t removed_tokens = snapshot_entry.tokens.size();
@@ -992,7 +1158,8 @@ std::size_t ContinuationCache::Commit(
             snapshot_entry.snapshot = std::move(retained_snapshot);
             snapshot_entry.snapshot_bytes = snapshot_bytes;
             snapshot_entry.stable_prefix_tokens = stable_prefix_tokens;
-            snapshot_entry.purpose = purpose;
+            snapshot_entry.purpose =
+                learned ? SnapshotPurpose::kBranchPoint : purpose;
             snapshot_entry.valid = !snapshot_entry.tokens.empty();
             snapshot_entry.snapshot_last_used = ++impl_->clock;
             impl_->retained_snapshot_bytes += snapshot_bytes;

@@ -146,6 +146,9 @@ __global__ void FusedAttention(const std::uint16_t* queries,
 #pragma unroll
       for (int x = 0; x < 8; x++)
         accum[y][x] *= stats[tid / 16 + y * 16][2];
+    // Unroll so that each current_v index is a constant. With a runtime
+    // index, clang 23 selects each value with a chain of compares.
+#pragma unroll
     for (int half = 0; half < 2; half++) {
 #pragma unroll
       for (int z = 0; z < 8; z++) {

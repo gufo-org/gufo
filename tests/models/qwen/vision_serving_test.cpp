@@ -559,6 +559,31 @@ int main(int argc, char** argv) {
       cache.draft_model_artifact_fingerprint =
           core::GgufIdentityHex(*draft_reader);
     }
+    // Disk spacing may retain the stable user frontier rather than another
+    // snapshot just a few assistant-prefix tokens later. Bound re-prefill by
+    // that actual template suffix, while keeping token equality strict.
+    // The in-memory retries above still require zero prefill.
+    std::array<std::size_t, 2> disk_frontiers{};
+    for (std::size_t i = 0; i < disk_frontiers.size(); ++i) {
+      const auto prompt = models::qwen::vision::Prepare(
+          flash ? qfn->tokenizer() : qwen->GetTokenizer(), requests[i].messages,
+          {},
+          tokenization::ResolveQwenChatOptions(requests[i].reasoning,
+                                               requests[i].add_vision_id),
+          (flash ? qfn->VisionEncoder() : qwen->VisionEncoder())->identity(),
+          context);
+      disk_frontiers[i] = prompt.stable_prefix_tokens;
+      Require(
+          disk_frontiers[i] > 0 && disk_frontiers[i] <= prompt.tokens.size(),
+          "image prompt has no stable disk frontier");
+    }
+    const auto restored_prompt = [&](const Backend::Result& result,
+                                     std::size_t i) {
+      return result.cache_disk_hit &&
+             result.cached_prompt_tokens >= disk_frontiers[i] &&
+             result.cached_prompt_tokens + result.prefill_tokens ==
+                 result.prompt_tokens;
+    };
     for (const bool use_spec : {false, true}) {
       if (use_spec && draft.empty())
         continue;
@@ -581,7 +606,15 @@ int main(int argc, char** argv) {
         auto replay = load(use_spec, cache);
         for (const auto i : {0U, 1U}) {
           const auto result = replay->chat(requests[i], 16, sampled);
-          Require(result.cache_disk_hit && result.prefill_tokens == 0 &&
+          std::cout << "sampled disk image=" << i << " speculative=" << use_spec
+                    << " hit=" << result.cache_disk_hit
+                    << " prefill=" << result.prefill_tokens
+                    << " cached=" << result.cached_prompt_tokens
+                    << " prompt=" << result.prompt_tokens << " exact="
+                    << (result.tokens ==
+                        (i == 0 ? sampled_red.tokens : sampled_blue.tokens))
+                    << '\n';
+          Require(restored_prompt(result, i) &&
                       result.tokens ==
                           (i == 0 ? sampled_red.tokens : sampled_blue.tokens),
                   "disk-restored sampled image replay differs");
@@ -595,7 +628,7 @@ int main(int argc, char** argv) {
                   << " prefill=" << result.prefill_tokens << " exact="
                   << (result.tokens == (i == 0 ? red.tokens : blue.tokens))
                   << '\n';
-        Require(result.cache_disk_hit && result.prefill_tokens == 0 &&
+        Require(restored_prompt(result, i) &&
                     result.tokens == (i == 0 ? red.tokens : blue.tokens),
                 "disk-restored image state or identity differs");
       }

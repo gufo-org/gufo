@@ -86,6 +86,13 @@ public:
       std::string_view token_str) const noexcept;
   [[nodiscard]] bool IsSpecialToken(TokenId id) const noexcept;
 
+  /// Vocabulary entries the tokenizer matches before BPE. Text that spells one
+  /// of these is a control token only where the server itself writes it.
+  [[nodiscard]] const std::vector<std::pair<std::string, TokenId>>&
+  SpecialTokens() const noexcept {
+    return special_token_list_;
+  }
+
 private:
   enum class PreTokenizer : std::uint8_t {
     kNone,

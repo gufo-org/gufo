@@ -1,0 +1,148 @@
+"""Cache accounting must not mistake a client history edit for full reuse."""
+
+import json
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+
+from agent_long import check_continuation, interruption_ready, prepare_turn, resume_prompt
+from opencode_agent import sse_output
+
+
+class ContinuationTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.output = Path(self.directory.name) / "reply.sse"
+        self.output.write_text('data: {"choices":[{"delta":{"reasoning_content":"Done."}}]}\n\n')
+        self.previous = {
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
+            "metrics": {"prefill_chunks": 2, "prefill_tokens": 27, "max_prefill_chunk_tokens": 22},
+        }
+        self.old = {"messages": [{"role": "tool", "content": "done"}]}
+        self.omitted = {"messages": self.old["messages"] + [{"role": "user", "content": "next"}]}
+
+    def check(self, cached, body=None):
+        return check_continuation(
+            self.previous, {"index": 2, "usage": {"cached_tokens": cached}},
+            self.old, body or self.omitted, self.output)
+
+    def test_full_reuse(self):
+        self.assertEqual(self.check(110)["status"], "full")
+
+    def test_omitted_reasoning_reuses_exact_boundary(self):
+        result = self.check(95)
+        self.assertEqual(result["status"], "client_omitted_reasoning_only_reply")
+        self.assertEqual(result["omitted_generation_tokens"], 10)
+        self.assertEqual(result["generation_header_tokens"], 5)
+
+    def test_omission_does_not_excuse_lost_history(self):
+        with self.assertRaisesRegex(AssertionError, "lost preserved history"):
+            self.check(94)
+
+    def test_preserved_assistant_must_be_fully_reused(self):
+        body = {"messages": self.old["messages"] + [
+            {"role": "assistant", "reasoning_content": "Done.", "content": ""},
+            {"role": "user", "content": "next"}]}
+        with self.assertRaisesRegex(AssertionError, "not fully cached"):
+            self.check(95, body)
+
+    def test_visible_reply_is_not_a_reasoning_only_omission(self):
+        self.output.write_text("data: " + json.dumps(
+            {"choices": [{"delta": {"content": "Done.", "reasoning_content": "Done."}}]}) + "\n\n")
+        with self.assertRaisesRegex(AssertionError, "not fully cached"):
+            self.check(95)
+
+    def test_split_native_header_is_visible_in_both_reasoning_transports(self):
+        parts = ["Read it.\n<tool_", "call>\n<function=read>"]
+        for responses in (False, True):
+            events = [
+                {"type": "response.reasoning_summary_text.delta", "delta": part}
+                if responses else {"choices": [{"delta": {"reasoning_content": part}}]}
+                for part in parts]
+            self.output.write_text("".join(
+                "data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n")
+            reasoning = []
+            content, calls = sse_output(self.output, reasoning=reasoning)
+            self.assertEqual(content, "")
+            self.assertEqual(calls, [])
+            self.assertIn("<tool_call>\n<function=", "".join(reasoning))
+
+    def test_interrupt_targets_live_thinking_or_tool_fragments(self):
+        for response in (False, True):
+            for phase in ("thinking", "tool"):
+                if response:
+                    event = {"type": "response.reasoning_summary_text.delta"
+                             if phase == "thinking" else "response.function_call_arguments.delta",
+                             "delta": "partial"}
+                    done = {"type": "response.completed"}
+                else:
+                    delta = {"reasoning_content": "partial"} if phase == "thinking" else {
+                        "tool_calls": [{"index": 0, "function": {"arguments": '{"text":"par'}}]}
+                    event = {"choices": [{"delta": delta}]}
+                    done = {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
+                raw = ("data: " + json.dumps(event) + "\n\n").encode()
+                self.output.write_bytes(raw + b'data: {"unfinished":"\xc3')
+                self.assertTrue(interruption_ready(self.output, phase))
+                other = "tool" if phase == "thinking" else "thinking"
+                self.assertFalse(interruption_ready(self.output, other))
+                self.output.write_bytes(raw + ("data: " + json.dumps(done) + "\n\n").encode())
+                self.assertFalse(interruption_ready(self.output, phase))
+
+    def test_interrupt_does_not_mislabel_a_finished_phase(self):
+        for response in (False, True):
+            events = [
+                {"type": "response.reasoning_summary_text.delta", "delta": "thought"},
+                {"type": "response.function_call_arguments.delta", "output_index": 1,
+                 "delta": '{"text":"part'},
+                {"type": "response.function_call_arguments.delta", "output_index": 1,
+                 "delta": 'ial"}'},
+            ] if response else [
+                {"choices": [{"delta": {"reasoning_content": "thought"}}]},
+                {"choices": [{"delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": '{"text":"part'}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": 'ial"}'}}]}}]},
+            ]
+            raw = b""
+            for index, event in enumerate(events):
+                raw += ("data: " + json.dumps(event) + "\n\n").encode()
+                self.output.write_bytes(raw)
+                self.assertEqual(interruption_ready(self.output, "thinking"), index == 0)
+                self.assertEqual(interruption_ready(self.output, "tool"), index == 1)
+
+    def test_resume_preserves_the_pending_task_and_completed_work(self):
+        root = Path(self.directory.name)
+        args = SimpleNamespace(agent="pi", complex_tools=True)
+        task = prepare_turn(args, root, 2, True)
+        state = root / "catalog-state.json"
+        state.write_text('{"revision":1,"already_committed":true}')
+        fixture = root / "transaction-2.json"
+        before = fixture.read_bytes()
+        resumed = prepare_turn(args, root, 2, True, task)
+        self.assertEqual(resumed["expected"], task["expected"])
+        self.assertEqual(fixture.read_bytes(), before)
+        self.assertEqual(json.loads(state.read_text())["revision"], 1)
+        self.assertFalse((root / "transaction-3.json").exists())
+        with self.assertRaises(AssertionError):
+            prepare_turn(args, root, 3, True, task)
+        self.assertFalse((root / "transaction-3.json").exists())
+
+    def test_resume_distinguishes_this_task_from_earlier_transactions(self):
+        task = {"turn": 30, "prompt": "Read transaction-30.json, query, then apply.",
+                "completed_calls": []}
+        prompt = resume_prompt(task)
+        self.assertIn(task["prompt"], prompt)
+        self.assertIn("No tool calls completed for this task", prompt)
+        self.assertIn("Results from earlier tasks do not complete steps", prompt)
+        task["completed_calls"] = [
+            {"name": "catalog_apply", "arguments": '{"id":42,"dry_run":false}'}]
+        prompt = resume_prompt(task)
+        self.assertNotIn("No tool calls completed", prompt)
+        self.assertIn(json.dumps(task["completed_calls"]), prompt)
+        self.assertIn("do not repeat committed changes", prompt)
+
+
+if __name__ == "__main__":
+    unittest.main()

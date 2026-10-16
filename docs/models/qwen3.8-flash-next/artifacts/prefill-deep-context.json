@@ -1,0 +1,92 @@
+{
+  "date": "2026-10-06",
+  "base_revision": "0772482e1f3c8e1674beb5fc963e7ac21dc5b722",
+  "branch": "perf/flash-next-prefill",
+  "change": "Compact temporary selector score rows to populated context and bound each score/selection chunk; attention arithmetic and persistent state are unchanged.",
+  "hardware": "AMD Strix Halo gfx1151",
+  "flake_lock_sha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+  "builds": {
+    "baseline": "/nix/store/clm388l4zvw03zjbyqcqzm18iinmrd1g-gufo-0-unstable-ba97a2b-dirty",
+    "candidate": "/nix/store/nbnf24vxmblqbnbl4sip6iy21465cmnz-gufo-0-unstable-0772482-dirty",
+    "executor_cpp_sha256": "da241c9171de349e67f56c52f0dd9d034a7d906a53825f7141ca97ddd8fa0750",
+    "executor_hpp_sha256": "2fc1d811b14cb7754d3975382082fd34d1096a88744d9f739f5faa09c6c5ca5a"
+  },
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+    "target": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+    "mtp": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+  },
+  "method": {
+    "command": "gufo bench --model TARGET --speculative off -p 2048 -d 0,65536,131072 -r 1",
+    "mtp_arguments": "--speculative mtp --mtp-model MTP",
+    "prompt": "CLI benchmark's deterministic repeated-text pattern, not the HTTP mixed/repetitive prompts.",
+    "samples_per_point": 1,
+    "scope": "Prefill only; no -n argument. Model loading and the depth prefix are outside the measured pp2048 suffix.",
+    "isolation": "Sequential GPU runs without concurrent builds or other model inference.",
+    "interpretation": "Modest observed gains in single-run controls, not a new HTTP benchmark sweep. The 1750 tok/s d0 and flat d0-to-d128K objectives remain unmet."
+  },
+  "measurements": [
+    {"mode": "AR", "depth": 0, "baseline_pp_tok_s": 1691.83, "candidate_pp_tok_s": 1702.78},
+    {"mode": "AR", "depth": 65536, "baseline_pp_tok_s": 1526.42, "candidate_pp_tok_s": 1534.34},
+    {"mode": "AR", "depth": 131072, "baseline_pp_tok_s": 1455.35, "candidate_pp_tok_s": 1475.27},
+    {"mode": "MTP", "depth": 0, "baseline_pp_tok_s": 1655.11, "candidate_pp_tok_s": 1659.35},
+    {"mode": "MTP", "depth": 65536, "baseline_pp_tok_s": 1493.09, "candidate_pp_tok_s": 1496.90},
+    {"mode": "MTP", "depth": 131072, "baseline_pp_tok_s": 1430.48, "candidate_pp_tok_s": 1447.60}
+  ],
+  "shared_selector_scratch": {
+    "native_context": 262144,
+    "baseline_mib": 128,
+    "candidate_mib": 20,
+    "scope": "One executor allocation, not per-session memory. Captured verification retains capacity for every row at maximum context."
+  },
+  "quality": {
+    "selector": {
+      "test": "qwen38_flash_next.select_ops",
+      "result": "Pass; exact masks across ragged score chunks, different strides, ties, partial words and the dense/sparse boundary. Existing explicit F32 reduction and independent FP64 formula checks remain unchanged.",
+      "max_relative_score_error": 1.66032e-6,
+      "relative_score_error_limit": 1e-5
+    },
+    "full_logits": {
+      "prompt_tokens": 133824,
+      "batch": 2048,
+      "context": 140000,
+      "rows": 64,
+      "vocabulary": 248320,
+      "values": 15892480,
+      "byte_identical": true,
+      "baseline_and_candidate_sha256": "c2764a064ceb7cdca554af532bee2e17fadb682921a89debc1ab8650c3e937e5",
+      "prompt_sha256": "5092cf952a62995ba309901db20b64193bdf33fbbe2361bfd3793ff53462704d",
+      "prompt_recipe": "Repeat 68 times: 'Review this configuration validator and explain the constraints.\\n' + the first 6500 characters of src/models/qwen38_flash_next/config.cpp at base_revision + '\\nSummarize the necessary metadata checks.\\n'.",
+      "command": "qwen38_flash_next_gpu_probe --model TARGET --prompt-file PROMPT --batch 2048 --context 140000 --dump LOGITS",
+      "scope": "Matched full-model quantized prefill; no new unquantized-teacher qualification."
+    },
+    "sessions": {
+      "command": "qwen38_flash_next_session_test --model TARGET --mtp-model MTP --prefill-only",
+      "result": "Pass: peer snapshot bytes, graph capture/replay logits, independent AR/MTP modes and mixed-batch logits are exact. Eight prefill split cases through 4096 tokens retain full logits, sampled MTP tokens and RNG replay."
+    }
+  },
+  "selector_screening": {
+    "flags": "-O3 -ffast-math -fno-finite-math-only --offload-arch=gfx1151",
+    "scope": "Score plus exact selection over 2048 queries, 65536-float score stride, three timed iterations after warmup. All mask bits match; these component timings are not full-model speed.",
+    "measurements_ms": [
+      {"depth": 65536, "chunk": 512, "ms": 4.0831},
+      {"depth": 65536, "chunk": 256, "ms": 3.9286},
+      {"depth": 65536, "chunk": 128, "ms": 4.0427},
+      {"depth": 65536, "chunk": 64, "ms": 4.6771},
+      {"depth": 65536, "chunk": 512, "ms": 4.2541, "control": true},
+      {"depth": 131072, "chunk": 512, "ms": 8.9697},
+      {"depth": 131072, "chunk": 256, "ms": 8.6339},
+      {"depth": 131072, "chunk": 128, "ms": 7.9507},
+      {"depth": 131072, "chunk": 64, "ms": 8.8168},
+      {"depth": 131072, "chunk": 512, "ms": 9.1211, "control": true}
+    ]
+  },
+  "other_experiments": [
+    "Shared global attention union lists: exact output, slower at both 64K and 128K with production math flags.",
+    "Skip entirely masked attention row blocks: exact output, 28-32% slower with production math flags.",
+    "Conditional accumulator rescaling and LDS fragment prefetch: exact outputs, about 1% isolated attention improvement at most; no production change retained.",
+    "Cache the final attention denominator reciprocal: exact output, no material gain.",
+    "Initial O3 screening of key transposition, packed selector registers, V packing, direct mask scanning and packed tile metadata found no convincing win; those kernels were not retained."
+  ]
+}

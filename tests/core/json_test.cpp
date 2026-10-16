@@ -3,10 +3,12 @@
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <locale>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -36,6 +38,27 @@ void TestNumbers() {
                               std::numeric_limits<double>::quiet_NaN()}) {
     assert(Value(number).as_size(777) == 777);
   }
+  // Integers keep their decimal spelling (Python's json.dumps, chat
+  // templates), not the shortest round-trip form 1e+05.
+  for (const auto& [input, expected] :
+       std::initializer_list<std::pair<const char*, const char*>>{
+           {"100000", "100000"},
+           {"-1000000", "-1000000"},
+           {"1e+05", "100000"},
+           {"1E5", "100000"},
+           {"1.0", "1"},
+           {"1e15", "1000000000000000"},
+           {"9007199254740992", "9007199254740992"},
+           {"-0", "-0"},
+           {"0.5", "0.5"},
+           {"12345.678", "12345.678"},
+           {"1e16", "1e+16"},
+           {"1e-7", "1e-07"}}) {
+    assert(parse(input).dump() == expected);
+    assert(parse(input).tojson() == expected);
+  }
+  assert(Value(100000).dump() == "100000");
+  assert(parse(R"({"limit":100000})").tojson() == R"({"limit": 100000})");
   assert(Value(0).as_size(777) == 0);
   assert(Value(4096).as_size(777) == 4096);
   const double largest = std::nextafter(std::ldexp(1.0, 64), 0.0);
@@ -86,6 +109,11 @@ void TestStructures() {
   assert(ordered.members()[0].first == "z");
   assert(ordered.members()[1].first == "a");
   assert(ordered.dump() == R"({"z":1,"a":[true,null,{"n":2}]})");
+  // Jinja tojson, as Python json.dumps(ensure_ascii=False) and llama.cpp's
+  // Jinja runtime write it: spaced separators, raw UTF-8, ordered keys.
+  assert(ordered.tojson() == R"({"z": 1, "a": [true, null, {"n": 2}]})");
+  assert(parse(R"({"e":[],"o":{},"t":"\u00e9\n"})").tojson() ==
+         "{\"e\": [], \"o\": {}, \"t\": \"\xC3\xA9\\n\"}");
 
   const auto bounded = std::string(128, '[') + "null" + std::string(128, ']');
   assert(parse(bounded).is_array());

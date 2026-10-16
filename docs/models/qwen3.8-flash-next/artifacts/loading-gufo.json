@@ -1,35 +1,5 @@
 {
   "artifactType": "model-bench-table",
-  "coldFiles": {
-    "files": [
-      {
-        "bytes": 10946624,
-        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
-        "residentPagesAfter": 0
-      },
-      {
-        "bytes": 49859583136,
-        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
-        "residentPagesAfter": 0
-      },
-      {
-        "bytes": 49376141504,
-        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
-        "residentPagesAfter": 0
-      },
-      {
-        "bytes": 12087983520,
-        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
-        "residentPagesAfter": 0
-      },
-      {
-        "bytes": 2786568256,
-        "file": "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
-        "residentPagesAfter": 0
-      }
-    ],
-    "method": "POSIX_FADV_DONTNEED + mincore"
-  },
   "fingerprint": {
     "canonical": {
       "cppStandard": "C++20",
@@ -44,15 +14,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "memoryTotalBytes": 134309875712,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "fe5929d418cfe1f7e3aa4a09199012c1fa064859f1fc762a8cbcda970358f158",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-23",
+  "measuredOn": "2026-10-16",
   "mode": "mtp",
   "model": {
     "id": "Qwen3.8-Flash-Next",
@@ -65,8 +35,8 @@
   "referenceName": "llama.cpp",
   "rows": {
     "default": {
-      "command": "gufo serve --port 41739 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
-      "ready_s": 15.45,
+      "command": "gufo serve --port 41287 --sessions 1 --host 127.0.0.1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "ready_s": 15.274,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -77,9 +47,11 @@
       "gufo",
       "serve",
       "--port",
-      "41739",
+      "41287",
       "--sessions",
       "1",
+      "--host",
+      "127.0.0.1",
       "llm",
       "--model",
       "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
@@ -99,8 +71,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "c650f786e08b07ab2476308cf20e7af59ab6f87f"
+    "dirty": false,
+    "revision": "fdc2184941a19867fb2d643030717fec344b7280"
   },
   "table": "loading",
   "target": "gufo"

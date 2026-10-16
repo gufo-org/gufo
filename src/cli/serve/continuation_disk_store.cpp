@@ -1,6 +1,7 @@
 #include "src/cli/serve/continuation_disk_store.hpp"
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -160,6 +161,34 @@ public:
 
 private:
   std::binary_semaphore& gate_;
+  bool acquired_{false};
+};
+
+class ScopedFileLock {
+public:
+  ScopedFileLock(int descriptor, int operation) noexcept
+      : descriptor_(descriptor) {
+    int result;
+    do {
+      result = ::flock(descriptor_, operation);
+    } while (result != 0 && errno == EINTR);
+    acquired_ = result == 0;
+  }
+
+  ~ScopedFileLock() {
+    if (acquired_) {
+      while (::flock(descriptor_, LOCK_UN) != 0 && errno == EINTR) {
+      }
+    }
+  }
+
+  explicit operator bool() const noexcept { return acquired_; }
+
+  ScopedFileLock(const ScopedFileLock&) = delete;
+  ScopedFileLock& operator=(const ScopedFileLock&) = delete;
+
+private:
+  int descriptor_;
   bool acquired_{false};
 };
 
@@ -612,11 +641,10 @@ struct ContinuationDiskStore::Impl {
     }
     if (options.staging_capacity_bytes == 0) {
       // The host snapshot budget already leaves half of available RAM free.
-      // Disk staging gets a quarter of that budget and a conservative hard cap.
+      // Disk staging gets a quarter of that budget. It allocates nothing
+      // upfront, so a fixed cap would only refuse checkpoints larger than it.
       options.staging_capacity_bytes =
-          std::min({options.capacity_bytes,
-                    TextRunnerDiskCacheOptions::kAutomaticStagingMaxBytes,
-                    HostSnapshotBudgetBytes() / 4});
+          std::min(options.capacity_bytes, HostSnapshotBudgetBytes() / 4);
     }
     if (options.staging_capacity_bytes < kHeaderBytes) {
       throw std::invalid_argument(
@@ -814,7 +842,12 @@ struct ContinuationDiskStore::Impl {
     for (const auto& directory_entry : iterator) {
       const std::string filename = directory_entry.path().filename().string();
       if (filename.starts_with(kTemporaryPrefix)) {
-        RemoveFileOnly(filename);
+        // Publishers hold a shared directory lock from before temporary-file
+        // creation through rename. Defer orphan cleanup while any is active;
+        // readers must not wait for another store's potentially long write.
+        const ScopedFileLock cleanup_lock(directory_fd, LOCK_EX | LOCK_NB);
+        if (cleanup_lock)
+          RemoveFileOnly(filename);
         continue;
       }
       if (!HasSuffix(filename, kFileSuffix)) {
@@ -1022,6 +1055,12 @@ struct ContinuationDiskStore::Impl {
                                   const TextModelRunner& runner,
                                   const TextRunnerSnapshot& snapshot,
                                   std::size_t payload_bytes) {
+    // Save serializes publishers in this instance with write_mutex, and
+    // startup indexing completes before its worker starts. Thus no two lock
+    // owners in this instance can share directory_fd's open file description.
+    const ScopedFileLock publication_lock(directory_fd, LOCK_SH);
+    if (!publication_lock)
+      return false;
     const std::string temporary_filename =
         std::string(kTemporaryPrefix) + UniqueSuffix();
     ScopedFileDescriptor temporary(

@@ -15,11 +15,15 @@
 #include <string_view>
 #include <vector>
 
+#include "src/cache/adapter.hpp"
+#include "src/cache/ledger.hpp"
 #include "src/cli/serve/continuation_cache.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/core/sampling.hpp"
 
 namespace gufo::server {
+
+struct ComponentCacheResources;
 
 using TextRunnerToken = ContinuationToken;
 
@@ -46,19 +50,17 @@ struct TextRunnerRamCacheOptions {
   static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
   static constexpr std::size_t kMaxEntries = 128;
   /// Zero selects min(model snapshot budget, 32 GiB), after session allocation.
-  /// Explicit limits are still clamped to the model's snapshot budget.
+  /// Explicit limits may exceed that budget up to the model's ceiling, which
+  /// keeps kHostSnapshotHeadroomBytes of host RAM free.
   std::size_t capacity_bytes{0};
 };
 
 struct TextRunnerDiskCacheOptions {
   static constexpr std::size_t kDefaultCapacityBytes =
       std::size_t{8} * 1024U * 1024U * 1024U;
-  static constexpr std::size_t kAutomaticStagingMaxBytes =
-      std::size_t{1} * 1024U * 1024U * 1024U;
   std::filesystem::path directory;
   std::size_t capacity_bytes{kDefaultCapacityBytes};
-  /// Zero selects 1/8 of available host RAM, capped at 1 GiB and
-  /// capacity_bytes.
+  /// Zero selects 1/8 of available host RAM, capped at capacity_bytes.
   std::size_t staging_capacity_bytes{0};
   /// Shared prefixes shorter than this are cheaper to prefill than to restore.
   std::size_t shared_prefix_min_tokens{128};
@@ -73,8 +75,21 @@ struct TextRunnerDiskCacheOptions {
   std::size_t min_checkpoint_step_tokens{2048};
 };
 
-/// Host snapshot budget after accounting for cgroup limits and headroom.
+/// MemAvailable from /proc/meminfo text minus CmaFree, in bytes. Free CMA
+/// pages count as available but only hold movable pages, not GPU
+/// allocations; the kernel's KHO scratch area can make that several GiB.
+/// Nullopt when MemAvailable is missing.
+[[nodiscard]] std::optional<std::uint64_t> MeminfoAvailableBytes(
+    std::string_view meminfo);
+/// Automatic snapshot budget: half the host RAM available after loading
+/// (excluding free CMA pages), after cgroup limits.
 [[nodiscard]] std::size_t HostSnapshotBudgetBytes();
+/// RAM always left to the OS and other processes by an explicit cache limit.
+inline constexpr std::uint64_t kHostSnapshotHeadroomBytes = std::uint64_t{4}
+                                                            << 30;
+/// Most an explicit --cache-ram-bytes may claim: available host RAM minus
+/// kHostSnapshotHeadroomBytes.
+[[nodiscard]] std::size_t HostSnapshotCeilingBytes();
 
 enum class TextExecutionPlanKind : std::uint8_t {
   kSerial,
@@ -99,6 +114,10 @@ struct TextRunnerCapabilities {
   /// Zero means no physical-width limit.
   std::size_t batched_multi_token_decode_max_width{0};
   bool prefix_reuse{true};
+  bool in_pass_checkpoint{false};
+  /// A completed prefill step leaves a consistent state, so a cancelled
+  /// request can keep it as a live prefix for a superseding request.
+  bool partial_prefill_retention{false};
 };
 
 /// Model-owned compatibility identity for restart-safe snapshots.
@@ -136,6 +155,9 @@ struct TextRunnerResourceClaim {
   ///
   /// The pool queries this again after creating all mutable request states.
   std::optional<std::size_t> retained_snapshot_capacity_bytes;
+  /// Most an explicit RAM-cache limit may claim. Missing means the automatic
+  /// retained_snapshot_capacity_bytes is also the ceiling.
+  std::optional<std::size_t> retained_snapshot_ceiling_bytes;
   bool requires_device_runtime_lock{false};
 };
 
@@ -147,6 +169,7 @@ struct TextRunnerMeasuredResources {
 struct TextPrefillStep {
   std::size_t consumed_tokens{0};
   bool decode_ready{false};
+  double checkpoint_ms{0};
 };
 
 struct TextDecodeSelection {
@@ -157,6 +180,8 @@ struct TextDecodeSelection {
 
 struct TextDecodeStep {
   std::vector<TextDecodeSelection> selections;
+  /// Number of speculative verification rounds actually executed.
+  std::size_t draft_rounds{0};
   std::size_t draft_tokens{0};
   std::size_t draft_accepted_tokens{0};
   bool stop{false};
@@ -245,6 +270,7 @@ public:
       const {
     return sampling::JsonConstraint::ToolFormat::kJson;
   }
+  /// Reuse a compiled grammar bound to this runner's vocabulary.
   [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
       std::shared_ptr<const sampling::JsonConstraint> grammar) const;
 
@@ -264,6 +290,17 @@ public:
       return std::nullopt;
     return TextPreparedPrompt{std::move(*tokens), {}};
   }
+  /// Size a prompt without execution-context admission or inference. Image
+  /// runners override this to include their model's visual token expansion.
+  [[nodiscard]] virtual std::optional<std::size_t> CountPromptTokens(
+      const ChatRequest& request) const {
+    // Use the text-only preparation here, including its capability check,
+    // without constructing a derived runner's cache metadata.
+    const auto prompt = TextModelRunner::PreparePrompt(request);
+    if (!prompt)
+      return std::nullopt;
+    return prompt->tokens.size();
+  }
   /// Called before cache restoration, prefill or selection, including
   /// a complete prefix hit. Must replace, never inherit, the previous request.
   virtual void SetPromptContext(
@@ -282,6 +319,13 @@ public:
 
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> CreateState()
       const = 0;
+
+  [[nodiscard]] virtual bool UsesComponentCache() const { return false; }
+  [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
+  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const;
+  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
+      cache::Adapter&, cache::Slot&) const;
+  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const;
 
   /// Optional first-token preview without advancing model state. The caller
   /// supplies a copy of the sampler; normal decoding must reproduce the token.
@@ -308,6 +352,23 @@ public:
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;
+  /// Returns a claim only when this chunk can capture the boundary and keep
+  /// prefilling beyond it. Admission happens before allocating checkpoint
+  /// state.
+  [[nodiscard]] virtual std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+      std::size_t, std::size_t) const {
+    return std::nullopt;
+  }
+  /// Component runners invoke the consumer synchronously while the coherent
+  /// boundary is readable. It must drain captures before execution resumes.
+  /// Native snapshot runners leave the consumer empty.
+  [[nodiscard]] virtual TextPrefillStep PrefillThrough(
+      TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*,
+      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& = {}) const {
+    throw std::logic_error("runner does not support in-pass checkpoints");
+  }
   [[nodiscard]] virtual TextDecodeSelection SelectNext(
       TextRunnerState& state, sampling::SamplerState& sampler) const = 0;
   virtual void Advance(TextRunnerState& state, TextRunnerToken token) const = 0;
@@ -322,6 +383,17 @@ public:
   /// Retain a safe executed frontier when cancellation interrupts publication
   /// of a completed speculative block. Called with cancellation checks cleared.
   virtual void PrepareCancellation(TextRunnerState&) const {}
+  enum class DeviceProbeStatus { kUsable, kPending, kLost };
+  /// Submit or poll one private device probe without waiting. Called only by
+  /// the scheduler between work units. Pending work is reused, never queued
+  /// again.
+  [[nodiscard]] virtual DeviceProbeStatus PollDevice() const {
+    return DeviceProbeStatus::kUsable;
+  }
+  /// Bounded check, run only after a failed work unit, that the execution
+  /// device still accepts work. False means the context is permanently lost;
+  /// a probe that is still pending at its bound reports true.
+  [[nodiscard]] virtual bool DeviceUsable() const { return true; }
 
   /// Captures an immutable exact continuation at CheckpointPosition(state).
   ///
@@ -333,6 +405,11 @@ public:
   /// shared execution scratch; other sessions may execute concurrently.
   [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
       const TextRunnerState& state) const;
+  /// Complete state before returning so export cannot introduce device copies
+  /// while the session resumes prefill. Defaults to the ordinary snapshot.
+  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot>
+  SnapshotForPersistence(const TextRunnerState& state) const;
+
   virtual void RestoreOrFork(TextRunnerState& state,
                              const TextRunnerSnapshot& snapshot) const;
 
@@ -378,6 +455,7 @@ public:
   class Request {
   public:
     struct CommitMetrics {
+      std::optional<ComponentCacheMetrics> component_cache;
       std::size_t snapshot_bytes{0};
       double snapshot_ms{0.0};
       std::size_t disk_queued_bytes{0};
@@ -404,8 +482,32 @@ public:
     [[nodiscard]] std::size_t cache_restore_bytes() const noexcept;
     [[nodiscard]] double cache_restore_ms() const noexcept;
     [[nodiscard]] bool cache_disk_hit() const noexcept;
+    [[nodiscard]] std::optional<ComponentCacheMetrics> component_cache_metrics()
+        const;
     [[nodiscard]] std::size_t prompt_tokens() const noexcept;
     [[nodiscard]] bool prefill_complete() const noexcept;
+    [[nodiscard]] std::span<const TextRunnerToken> prompt() const noexcept;
+    /// Prompt tokens already in model state, restored or prefilled.
+    [[nodiscard]] std::size_t prefill_position() const noexcept;
+    [[nodiscard]] std::span<const std::uint8_t> input_identity(
+        std::size_t token_count) const;
+
+    /// Lets another request reuse this prompt's first common_tokens.
+    ///
+    /// Returns the position, at most common_tokens, where this request will
+    /// publish a RAM checkpoint before prefilling past it, reusing a planned
+    /// checkpoint within kSharedCheckpointSlack tokens. Zero when the runner
+    /// cannot snapshot or this request is no longer before that position.
+    /// Other requests depend on it, waiting now or arriving later, so it is
+    /// retained with continuation priority rather than as an optional copy.
+    [[nodiscard]] std::size_t ShareCheckpoint(std::size_t common_tokens);
+    /// A planned checkpoint this close to the shared position is cheaper to
+    /// use than capturing another one: followers prefill the gap themselves.
+    static constexpr std::size_t kSharedCheckpointSlack = 64;
+    /// A shared prefix must add at least this many tokens to what a request
+    /// can already restore before it waits for a peer or captures an extra
+    /// checkpoint for later requests. Shorter gaps cost less to prefill again.
+    static constexpr std::size_t kSharedPrefixMinTokens = 512;
 
     void PrepareBatchExecution();
     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
@@ -466,11 +568,27 @@ public:
       bool stop_at_eos = true);
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
+  /// Longest RAM-retained prefix of prompt that Acquire could reuse, without
+  /// leasing a state. An upper bound: Acquire may still prefer a shorter one.
+  [[nodiscard]] std::size_t CachedPrefixTokens(
+      std::span<const TextRunnerToken> prompt,
+      const TextPromptContext* context) const;
+  /// A disk job is still writing a prefix of prompt much deeper than any
+  /// restorable checkpoint; admission may wait for it instead of prefilling.
+  [[nodiscard]] bool PublicationPending(std::span<const TextRunnerToken> prompt,
+                                        const TextPromptContext* context) const;
 
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
+
+/// Build output constraints and attach server-authored instructions as framing,
+/// preserving client message content and the model's native prompt layout.
+[[nodiscard]] std::optional<ChatRequest> ConstrainChatRequest(
+    const ChatRequest& request, const TextModelRunner& runner,
+    sampling::SamplingConfig* sampling,
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr);
 
 }  // namespace gufo::server
 

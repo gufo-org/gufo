@@ -1,0 +1,92 @@
+{
+  "date": "2026-10-06",
+  "base_revision": "ba97a2b33f3ab0ca3864b9b7b51c62dff199268f",
+  "branch": "perf/flash-next-prefill",
+  "change": "Skip unused final HC normalization while retaining fused MoE residual arithmetic.",
+  "hardware": "AMD Strix Halo gfx1151",
+  "flake_lock_sha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+  "builds": {
+    "baseline": "/nix/store/bybc1nba9b06ks96rcvy1lmfg7rxzyv8-gufo-0-unstable-ba97a2b",
+    "candidate": "/nix/store/clm388l4zvw03zjbyqcqzm18iinmrd1g-gufo-0-unstable-ba97a2b-dirty"
+  },
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+    "target": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+    "mtp": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+  },
+  "method": {
+    "command": "gufo bench --model TARGET --speculative off -p 2048 -n 128 -d 0,32768 -r 1",
+    "mtp_arguments": "--speculative mtp --mtp-model MTP",
+    "prompt": "CLI benchmark's deterministic repeated-text pattern; not the HTTP mixed/repetitive prompts.",
+    "sampling": "Greedy benchmark defaults.",
+    "samples_per_point": 1,
+    "warmup": "CLI's built-in warmup; model loading excluded.",
+    "isolation": "Sequential GPU runs, no concurrent builds during the retained timing controls.",
+    "interpretation": "PP differences are within 0.3%; no significant speedup demonstrated. The 1750 tok/s d0 target remains unmet."
+  },
+  "measurements": [
+    {
+      "mode": "AR", "depth": 0,
+      "baseline_pp_tok_s": 1697.70, "candidate_pp_tok_s": 1699.81,
+      "baseline_tg_tok_s": 26.58, "candidate_tg_tok_s": 26.61
+    },
+    {
+      "mode": "AR", "depth": 32768,
+      "baseline_pp_tok_s": 1566.38, "candidate_pp_tok_s": 1567.29,
+      "baseline_tg_tok_s": 25.79, "candidate_tg_tok_s": 25.82
+    },
+    {
+      "mode": "MTP", "depth": 0,
+      "baseline_pp_tok_s": 1656.53, "candidate_pp_tok_s": 1656.75,
+      "baseline_tg_tok_s": 44.07, "candidate_tg_tok_s": 44.20
+    },
+    {
+      "mode": "MTP", "depth": 32768,
+      "baseline_pp_tok_s": 1530.09, "candidate_pp_tok_s": 1526.88,
+      "baseline_tg_tok_s": 68.14, "candidate_tg_tok_s": 68.17
+    }
+  ],
+  "quality": {
+    "full_logits": {
+      "prompt_tokens": 1968,
+      "batch": 2048,
+      "context": 4096,
+      "rows": 64,
+      "vocabulary": 248320,
+      "values": 15892480,
+      "baseline_and_candidate_sha256": "3a8048d2fd8d586e58377641ab784ceab6bf3d54659a7bf39a118204bdb45f82",
+      "byte_identical": true,
+      "scope": "Final candidate versus clean-main GPU probe; no new unquantized-model qualification."
+    },
+    "residual": "Final moe_epilogue_ops test passes: 37 ragged rows, ten experts, four 2560-wide streams; residual-only fusion matches both normalized fusion and separate epilogue/combine.",
+    "snapshots": "AR/MTP in-pass and borrowed checkpoints, persistent-byte restore and sampled replay passed with this change plus an exact GDN experiment later reverted. Final residual/full-logit checks were rerun after removing the GDN experiment."
+  },
+  "profile": {
+    "scope": "Representative d0 pp2048 target pass, excluding model loading.",
+    "gpu_kernel_ms": 1195,
+    "gpu_span_ms": 1198.9,
+    "dominant_kernel_time_percent": {
+      "routed_moe_f16": 34,
+      "dense_f16": 29,
+      "hc_combine": 10.7,
+      "gdn": 8.7,
+      "int8_dense": 7.4
+    }
+  },
+  "rejected": [
+    "Smaller dense SSM tiles: exact outputs, slower on the actual 2048-row projection.",
+    "Routed prefetch/unrolling: exact outputs, no gain over unchanged controls.",
+    "96-row and mixed 64/96/128-row expert tiles: exact full logits; end-to-end PP about 1.1% slower at both depths.",
+    "More permissive 128-row expert dispatch: neutral end-to-end PP.",
+    "Streaming expert loads: about 20% slower in the isolated projection.",
+    "GDN checkpoint specialization and coalesced output: exact output/state, no repeatable gain against the original kernel.",
+    "Fixed-width HC specialization: unchanged isolated speed and different arithmetic; removed."
+  ],
+  "source_study": {
+    "repository": "https://github.com/halo-box/strix-llama.cpp",
+    "revision": "ad219f329a0850ef7b37dd08ad49e4ba28716d2f",
+    "areas": ["gated_delta_net.cu", "mmq.cuh", "qsa-prefill.cu"],
+    "code_imported": false
+  }
+}

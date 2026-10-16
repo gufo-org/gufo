@@ -1,0 +1,129 @@
+{
+  "date": "2026-10-06",
+  "branch": "perf/flash-next-prefill",
+  "base_revision": "5a0a0ed75009ad56f9eee7cdd92f3b1752dfee64",
+  "change": "After updating every cache row, AR prefill keeps only the final FFN tiles needed by requested logits and checkpoints. A large, single-logit pass without an in-pass checkpoint also computes only the final attention tile. MTP retains all target hidden rows.",
+  "hardware": "AMD Strix Halo gfx1151",
+  "flake_lock_sha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+  "builds": {
+    "baseline": "/nix/store/nbnf24vxmblqbnbl4sip6iy21465cmnz-gufo-0-unstable-0772482-dirty",
+    "ffn_only": "/nix/store/kjd5f4in47l670ans37703dkniy6fbym-gufo-0-unstable-5a0a0ed-dirty",
+    "candidate": "/nix/store/z6w8198c9cnnhps818azj79yd7hp7pxk-gufo-0-unstable-5a0a0ed-dirty",
+    "executor_cpp_sha256": "64d2af07c88c3d1110a3249f57a2764e1f7fe70616a8d92dd360c66e9104baa1"
+  },
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+    "target": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+    "mtp": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+  },
+  "method": {
+    "ar_command": "gufo bench --model TARGET --speculative off -p 2048 -d 0,131072 -r 1",
+    "scope": "One warmed CLI pp2048 sample per depth. Loading and depth-prefix processing are outside the measured suffix. These are repeated-text controls, not replacements for HTTP mixed/repetitive benchmark tables.",
+    "isolation": "Sequential GPU measurements without concurrent builds or inference.",
+    "memory": "No additional allocation or persistent-state format change.",
+    "mtp_command": "gufo bench --model TARGET --speculative mtp --mtp-model MTP -p 2048 -d 0,65536,131072 -r 1",
+    "mtp_baseline": "Reuse the candidate measurements in prefill-deep-context.json: identical baseline store path, model, lockfile, CLI harness, ordered depths, settings and cache history.",
+    "interpretation": "AR gains are single-run observations. MTP retains its full target path and stays within 0.3% of the matched control; the AR optimization cannot discard hidden rows needed by its predictor."
+  },
+  "ar_pp_tok_s": [
+    {
+      "depth": 0,
+      "baseline": 1692.44,
+      "ffn_only": 1704.52,
+      "candidate": 1713.11
+    },
+    {
+      "depth": 131072,
+      "baseline": 1474.94,
+      "ffn_only": 1481.71,
+      "candidate": 1501.84
+    }
+  ],
+  "quality": {
+    "matched_execution_modes": {
+      "command": "qwen38_flash_next_session_test --model TARGET --mtp-model MTP --execution-only TOKENS",
+      "prompt_tokens": [
+        224,
+        1025,
+        4096,
+        133120
+      ],
+      "reference": "The same quantized target with MTP enabled, which bypasses AR output pruning and retains all target hidden rows. Both paths request one logit row.",
+      "result": "Full-vocabulary prefill and mixed AR/MTP batch logits match exactly. AR sampling, RNG state and resumed logits match after borrowed and serialized snapshot restores.",
+      "sampling": {
+        "temperature": 0.8,
+        "top_k": 20,
+        "top_p": 0.95,
+        "seed": 73
+      },
+      "fixture": "Repetitive text in the original retained run."
+    },
+    "ffn_full_logits": {
+      "build": "ffn_only",
+      "prompt_tokens": 3569,
+      "logit_rows": 64,
+      "vocabulary": 248320,
+      "values": 15892480,
+      "byte_identical_to_baseline": true
+    },
+    "prefill_sessions": {
+      "build": "candidate",
+      "command": "qwen38_flash_next_session_test --model TARGET --mtp-model MTP --prefill-only",
+      "result": "Pass: graph/peer snapshot replay, independent modes, eight chunk-boundary cases and sampled MTP replay through 4096 tokens."
+    },
+    "checkpoint_suite": {
+      "build": "ffn_only",
+      "command": "qwen38_flash_next_snapshot_test --model TARGET --mtp-model MTP",
+      "result": "Pass: in-pass checkpoints, warm/overflow boundaries, branches, retention, reset/destruction and serialized round trips. Final attention pruning remains disabled for in-pass checkpoints."
+    },
+    "scope": "No new unquantized-teacher or GGUF-conversion qualification. No attention, projection, normalization or sampling arithmetic was changed.",
+    "mixed_text_and_image": {
+      "revision": "eecb008a909ca299c13d1ef773765c7e2e24d395",
+      "command": "qwen38_flash_next_session_test --model TARGET --mtp-model MTP --prefill-only",
+      "test_source_sha256": "0c07a0ac08a27c31dc9fda913a7303b90cd37a379a7d46cb107ea82b0a7d1689",
+      "prompt_tokens": {
+        "mixed_text": 4096,
+        "image_and_mixed_text": 2048
+      },
+      "fixture": "Code, JSON, arithmetic and Unicode text; the image case includes a nonuniform 64x64 RGB image processed by the actual encoder.",
+      "reference": "Full target execution with MTP enabled bypasses AR pruning. Both modes use the same logit-row count.",
+      "result": "Byte-identical full-vocabulary prefill and mixed-batch logits. Sampled token, RNG state and resumed logits match after borrowed and serialized AR snapshot restores.",
+      "scope": "Additional numerical regression coverage; not a new semantic vision benchmark or unquantized upstream comparison."
+    }
+  },
+  "baseline_profile_128k_ms": {
+    "gpu_kernels": 1382.52,
+    "gpu_span": 1388.42,
+    "dense_f16": 374.34,
+    "routed_moe": 390.1,
+    "hyperconnection_residual": 143.83,
+    "gated_delta_net": 110.59,
+    "dense_int8": 85.8,
+    "sparse_attention": 126.47,
+    "selector_scoring": 77.99,
+    "exact_selection": 17.84
+  },
+  "rejected_experiments": [
+    "Attention LDS reuse, compact union entries and splitting output row tiles retained exact outputs but were slower.",
+    "FP32-expanded selector keys, four/eight-lane scoring and forced vector-register scheduling retained scores and masks but were slower.",
+    "Paired selector heads, alternate launch sizes and aggregated histogram tails did not improve the complete score/selection operation."
+  ],
+  "mtp_pp_tok_s": [
+    {
+      "depth": 0,
+      "baseline": 1659.35,
+      "candidate": 1658.76
+    },
+    {
+      "depth": 65536,
+      "baseline": 1496.9,
+      "candidate": 1495.54
+    },
+    {
+      "depth": 131072,
+      "baseline": 1447.6,
+      "candidate": 1443.86
+    }
+  ]
+}

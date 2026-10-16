@@ -49,6 +49,64 @@ static __global__ void quantize_q8_1(
     y[ib].ds = make_half2(d, sum);
 }
 
+// quantize_q8_1 for one-expert slot rows (the decode down projection's
+// view). Slot i1 is written at its rank among the slots ordered by expert
+// and then slot, so slots that share an expert are adjacent; the first
+// column block also records each rank's expert and source slot. Every row
+// keeps quantize_q8_1's values; only its position changes.
+__launch_bounds__(HIP_QUANTIZE_BLOCK_SIZE, 1)
+static __global__ void quantize_q8_1_by_expert(
+        const float * __restrict__ x, const int32_t * __restrict__ ids,
+        void * __restrict__ vy, int32_t * __restrict__ sorted_ids,
+        int32_t * __restrict__ slot_of_rank, const int64_t ne00,
+        const int64_t s01, const int64_t ne0, const int slots) {
+    const int64_t i0 = (int64_t)blockDim.x*blockIdx.x + threadIdx.x;
+    const int i1 = blockIdx.y;
+    const int lane = threadIdx.x % 32;
+    const int32_t expert = ids[i1];
+    int rank = 0;
+    for (int base = 0; base < slots; base += 32) {
+        const int j = base + lane;
+        const int32_t other = j < slots ? ids[j] : 0;
+        rank += __popc(static_cast<uint32_t>(__ballot(
+            j < slots && (other < expert || (other == expert && j < i1)))));
+    }
+
+    if (i0 >= ne0) {
+        return;
+    }
+
+    const int64_t i_cont = (int64_t)rank * ne0 + i0;
+
+    block_q8_1 * y = (block_q8_1 *) vy;
+
+    const int64_t ib  = i_cont / QK8_1; // block index
+    const int64_t iqs = i_cont % QK8_1; // quant index
+
+    const float xi = i0 < ne00 ? x[i1*s01 + i0] : 0.0f;
+    float amax = fabsf(xi);
+    float sum = xi;
+
+    amax = warp_reduce_max<QK8_1>(amax);
+    sum  = warp_reduce_sum<QK8_1>(sum);
+
+    const float  d = amax / 127.0f;
+    const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+
+    y[ib].qs[iqs] = q;
+
+    if (i0 == 0) {
+        sorted_ids[rank] = expert;
+        slot_of_rank[rank] = i1;
+    }
+
+    if (iqs > 0) {
+        return;
+    }
+
+    y[ib].ds = make_half2(d, sum);
+}
+
 template <mmq_q8_1_ds_layout ds_layout>
 static __global__ void quantize_mmq_q8_1(
         const float * __restrict__ x, const int32_t * __restrict__ ids, void * __restrict__ vy,
@@ -161,6 +219,18 @@ void quantize_row_q8_1_hip(
     const dim3 block_size(HIP_QUANTIZE_BLOCK_SIZE, 1, 1);
     quantize_q8_1<<<num_blocks, block_size, 0, stream>>>(x, vy, ne00, s01, s02, s03, ne0, ne1, ne2_fastdiv);
     GGML_UNUSED(type_src0);
+}
+
+void quantize_row_q8_1_by_expert_hip(
+        const float * x, const int32_t * ids, void * vy, int32_t * sorted_ids,
+        int32_t * slot_of_rank, const int64_t ne00, const int64_t s01,
+        const int64_t ne0, const int slots, hipStream_t stream) {
+    GGML_ASSERT(ne0 % QK8_1 == 0 && slots > 0);
+    const int64_t block_num_x = (ne0 + HIP_QUANTIZE_BLOCK_SIZE - 1) / HIP_QUANTIZE_BLOCK_SIZE;
+    const dim3 num_blocks(block_num_x, slots, 1);
+    const dim3 block_size(HIP_QUANTIZE_BLOCK_SIZE, 1, 1);
+    quantize_q8_1_by_expert<<<num_blocks, block_size, 0, stream>>>(
+        x, ids, vy, sorted_ids, slot_of_rank, ne00, s01, ne0, slots);
 }
 
 void quantize_mmq_q8_1_hip(

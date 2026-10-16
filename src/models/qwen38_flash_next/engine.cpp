@@ -1,8 +1,5 @@
 #include "src/models/qwen38_flash_next/engine.hpp"
 
-#include <sys/mman.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -10,10 +7,11 @@
 #include <cstring>
 #include <limits>
 #include <optional>
-#include <thread>
 #include <type_traits>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen38_flash_next/continuation_hooks.hpp"
+#include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -24,9 +22,15 @@
 namespace gufo::models::qwen38_flash_next {
 namespace {
 
-// gfx1151 pp4096 at depths 0/4096: the 512/1024/2048/4096 sweep favored
-// 2048; larger chunks used more scratch without improving throughput.
-constexpr std::uint32_t kPrefillChunkTokens = 2048;
+// gfx1151, served repository prompts: 4096-token chunks prefill 24K-102K
+// tokens 6-11% faster than 2048 (pp4096 +5% at d0, +6% at d32K). Each
+// chunk's n-gram gather doubles; next-chunk prefetch overlaps that read.
+// Prefill logits do not depend on the chunk size
+// (pre-budget queries always take the dense attention tiles).
+constexpr std::uint32_t kPrefillChunkTokens = 4096;
+// A prompt ending this close past a chunk finishes in that chunk: a separate
+// tail pass costs about as much as this many more chunk rows.
+constexpr std::uint32_t kPrefillTailTokens = 128;
 
 void AssignError(std::string* error_msg, std::string_view message) {
   if (error_msg != nullptr) {
@@ -146,8 +150,24 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   if (!m->device_) {
     return nullptr;
   }
+  if (m->mtp_weights_ && m->device_->output().rows > kMtpDraftVocab) {
+    std::vector<std::int32_t> specials;
+    for (std::uint32_t id = kMtpDraftVocab; id < m->device_->output().rows;
+         ++id)
+      if (m->tokenizer_->IsSpecialToken(id))
+        specials.push_back(static_cast<std::int32_t>(id));
+    // A vocabulary with more special tokens than table rows drafts over the
+    // full head.
+    if (specials.size() < kMtpDraftExtraRows) {
+      m->draft_specials_ = static_cast<std::uint32_t>(specials.size());
+      if (!m->device_->SetDraftVocab(kMtpDraftVocab, std::move(specials),
+                                     error_msg))
+        return nullptr;
+      m->draft_subset_ = true;
+    }
+  }
   rocm::Executor::Options exec;
-  exec.max_batch = m->PrefillCapacity();
+  exec.max_batch = m->PrefillThroughCapacity();
   exec.max_logit_rows =
       m->mtp_weights_
           ? static_cast<std::uint32_t>(std::min<std::uint64_t>(
@@ -211,8 +231,19 @@ std::uint32_t Model::PrefillCapacity() const noexcept {
   return std::min(kPrefillChunkTokens, options_.max_context);
 }
 
+std::uint32_t Model::PrefillThroughCapacity() const noexcept {
+  return std::min(kPrefillChunkTokens + kPrefillTailTokens,
+                  options_.max_context);
+}
+
 bool Model::HasMtp() const noexcept {
   return device_->has_mtp();
+}
+
+bool Model::InDraftSubset(std::int32_t token) const {
+  return token >= 0 && (static_cast<std::uint32_t>(token) < kMtpDraftVocab ||
+                        tokenizer_->IsSpecialToken(
+                            static_cast<tokenization::TokenId>(token)));
 }
 
 std::string Model::ModelName() const {
@@ -259,11 +290,38 @@ Session::Session(std::shared_ptr<Model> model,
     : model_(std::move(model)),
       session_(std::move(session)),
       draft_length_(model_->options_.max_draft_tokens,
-                    model_->DecodeConcurrency()) {
+                    model_->DecodeConcurrency()),
+      draft_vocab_(kMtpDraftExtraRows - model_->draft_specials_) {
   logits_.resize(model_->VocabSize());
 }
 
+bool Session::SyncDraftVocab(std::string* error_msg) {
+  if (!model_->draft_subset_ || !MtpEnabled())
+    return true;
+  auto& exec = *model_->executor_;
+  const auto first = model_->draft_specials_;
+  if (draft_vocab_stale_ || draft_vocab_.scanned() > tokens_.size()) {
+    if (!exec.ClearDraftRows(*session_, first, error_msg))
+      return false;
+    draft_vocab_.Reset();
+    draft_vocab_stale_ = false;
+  }
+  const auto tabled = static_cast<std::uint32_t>(draft_vocab_.rare().size());
+  draft_added_.clear();
+  draft_vocab_.CatchUp(
+      tokens_, [&](std::int32_t token) { return model_->InDraftSubset(token); },
+      &draft_added_);
+  return exec.AppendDraftRows(*session_, first + tabled, draft_added_,
+                              error_msg);
+}
+
 Session::~Session() = default;
+
+void Session::ResetDraftPolicy() {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
+  draft_length_.Reset();
+}
 
 std::uint32_t Session::Position() const noexcept {
   return session_->position();
@@ -273,12 +331,17 @@ std::uint32_t Session::ContextSize() const noexcept {
 }
 
 void Session::Reset() {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeReset();
   valid_ = false;
   session_->Reset();
   tokens_.clear();
+  ForgetDraftVocab();
   hidden_base_ = 0;
   draft_length_.Reset();
   model_->executor_->MtpRewind(*session_, 0);
+  if (continuation_hooks_)
+    continuation_hooks_->AfterReset();
   valid_ = true;
 }
 
@@ -288,6 +351,8 @@ void Session::SetCancellationCheck(std::function<bool()> check) {
 
 void Session::ConfigureVision(
     std::shared_ptr<const qwen::vision::Prompt> prompt) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
   const auto identity = prompt ? prompt->IdentityForPrefix(tokens_.size())
                                : std::span<const std::uint8_t>{};
   if (!tokens_.empty() &&
@@ -322,8 +387,15 @@ std::uint64_t Session::SnapshotBytes() const {
          model_->executor_->SnapshotBytes(*session_, KeptHiddenRows());
 }
 
+std::uint64_t Session::PrefillCheckpointBytes(std::uint32_t position) const {
+  if (!session_->VisionLayout().images.empty())
+    return 0;
+  return SessionSnapshotHostBytes(position, model_->VocabSize(), 0) +
+         model_->executor_->PrefillCheckpointBytes(*session_, position);
+}
+
 std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
-    std::string* error_msg) const {
+    std::string* error_msg, SnapshotMode mode) const {
   if (!valid_ || tokens_.empty() || tokens_.size() != session_->position() ||
       tokens_.size() > std::numeric_limits<std::uint32_t>::max()) {
     AssignError(error_msg, "snapshot needs a synced, non-empty context");
@@ -331,11 +403,18 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   }
   if (!session_->CheckCancellation(error_msg))
     return nullptr;
-  const auto token_count = static_cast<std::uint32_t>(tokens_.size());
+  return SaveSnapshotImpl(*session_, tokens_, logits_, KeptHiddenRows(),
+                          error_msg, mode);
+}
+
+std::unique_ptr<SessionSnapshot> Session::SaveSnapshotImpl(
+    const rocm::Session& state, std::span<const std::int32_t> tokens,
+    std::span<const float> logits, std::uint32_t hidden_rows,
+    std::string* error_msg, SnapshotMode mode) const {
+  const auto token_count = static_cast<std::uint32_t>(tokens.size());
   const auto identity = ImageIdentity(token_count);
-  const std::uint32_t hidden_rows = KeptHiddenRows();
   const std::uint64_t executor_bytes =
-      model_->executor_->SnapshotBytes(*session_, hidden_rows);
+      model_->executor_->SnapshotBytes(state, hidden_rows);
   const std::uint64_t host_bytes = SessionSnapshotHostBytes(
       token_count, model_->VocabSize(), identity.size());
   std::unique_ptr<SessionSnapshot> snapshot(
@@ -357,15 +436,17 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   if (!identity.empty())
     std::memcpy(out, identity.data(), identity.size());
   out += identity.size();
-  std::memcpy(out, tokens_.data(), tokens_.size() * sizeof(std::int32_t));
-  out += tokens_.size() * sizeof(std::int32_t);
-  std::memcpy(out, logits_.data(), logits_.size() * sizeof(float));
-  out += logits_.size() * sizeof(float);
+  std::memcpy(out, tokens.data(), tokens.size_bytes());
+  out += tokens.size_bytes();
+  std::memcpy(out, logits.data(), logits.size_bytes());
+  out += logits.size_bytes();
   if (!model_->executor_->SaveSnapshot(
-          *session_, hidden_rows,
+          state, hidden_rows,
           std::span<std::uint8_t>(out,
                                   static_cast<std::size_t>(executor_bytes)),
-          error_msg)) {
+          error_msg,
+          mode == SnapshotMode::kBorrowed ? &snapshot->deferred_ : nullptr,
+          snapshot->data_)) {
     return nullptr;
   }
   return snapshot;
@@ -373,11 +454,30 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
 
 bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
                               std::string* error_msg) {
-  return RestoreSnapshot(snapshot.bytes(), error_msg);
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeRestore();
+  return RestoreSnapshotImpl({snapshot.data_.get(), snapshot.size_},
+                             snapshot.deferred_.get(), error_msg);
+}
+
+bool Session::OwnsSnapshot(const SessionSnapshot& snapshot) const noexcept {
+  return snapshot.deferred_ && session_->OwnsSnapshot(*snapshot.deferred_);
+}
+
+std::uint64_t SessionSnapshot::DeviceBytes() const {
+  return deferred_ ? deferred_->DeviceBytes() : 0;
 }
 
 bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
                               std::string* error_msg) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeRestore();
+  return RestoreSnapshotImpl(payload, nullptr, error_msg);
+}
+
+bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
+                                  const rocm::SnapshotState* deferred,
+                                  std::string* error_msg) {
   SessionSnapshotHeader header{};
   if (payload.size() < sizeof(header)) {
     AssignError(error_msg, "session snapshot is truncated");
@@ -435,7 +535,7 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
           *session_,
           std::span<const std::uint8_t>(
               in, static_cast<std::size_t>(header.executor_bytes)),
-          &info, error_msg, next_drafts)) {
+          &info, error_msg, next_drafts, deferred)) {
     Reset();
     return false;
   }
@@ -446,6 +546,7 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
     return false;
   }
   tokens_ = std::move(tokens);
+  ForgetDraftVocab();
   logits_ = std::move(logits);
   hidden_base_ = info.position - info.hidden_rows;
   draft_token_ = 0;
@@ -457,49 +558,29 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
 
 SessionSnapshot::SessionSnapshot(std::uint64_t size)
     : data_(new std::uint8_t[size]), size_(size) {
-  // Populate before asking for huge pages: first-touching an advised buffer
-  // can synchronously compact fragmented UMA memory for seconds. Background
-  // collapse may still promote the populated pages. Restrict both hints to
-  // complete pages owned by this allocation; neither changes the payload.
-  const long page = sysconf(_SC_PAGESIZE);
-  if (page > 0) {
-    const auto address = reinterpret_cast<std::uintptr_t>(data_.get());
-    const auto skip = (page - address % page) % page;
-    if (size > skip) {
-      const auto length = (size - skip) / page * page;
-      if (length != 0) {
-        // Bound the fault workers to four, with at least 32 MiB each. This
-        // avoids replacing compaction stalls with serial base-page faults.
-        const auto workers = std::min<std::size_t>(4, length / (32ULL << 20));
-        if (workers > 1) {
-          const auto pages = length / page;
-          std::vector<std::jthread> faults;
-          for (std::size_t worker = 0; worker < workers; ++worker) {
-            const auto begin = pages * worker / workers * page;
-            const auto end = pages * (worker + 1) / workers * page;
-            faults.emplace_back([this, skip, begin, end] {
-              (void)madvise(data_.get() + skip + begin, end - begin,
-                            MADV_POPULATE_WRITE);
-            });
-          }
-          // Join before huge-page advice or any snapshot writer uses the
-          // buffer.
-        } else {
-          (void)madvise(data_.get() + skip, length, MADV_POPULATE_WRITE);
-        }
-        (void)madvise(data_.get() + skip, length, MADV_HUGEPAGE);
-      }
-    }
-  }
+  // Leave append-only sections untouched: a warm checkpoint borrows those
+  // rows from the live session, so faulting their pages here is wasted work.
+}
+
+SessionSnapshot::~SessionSnapshot() = default;
+
+std::span<const std::uint8_t> SessionSnapshot::bytes() const {
+  if (deferred_)
+    deferred_->Materialize();
+  return {data_.get(), size_};
 }
 
 bool SessionSnapshot::CopyTo(
     std::span<std::uint8_t> destination) const noexcept {
-  if (destination.size() != size_) {
+  if (destination.size() != size_)
+    return false;
+  try {
+    const auto payload = bytes();
+    std::memcpy(destination.data(), payload.data(), payload.size());
+    return true;
+  } catch (...) {
     return false;
   }
-  std::memcpy(destination.data(), data_.get(), size_);
-  return true;
 }
 
 bool Session::DraftReplay(std::int32_t next_token,
@@ -528,7 +609,7 @@ bool Session::DraftReplay(std::int32_t next_token,
 
 bool Session::DraftCatchUp(std::int32_t next_token, bool propose,
                            std::string* error_msg,
-                           MtpCandidateLogits* candidates) {
+                           MtpCandidateLogits* candidates, bool draft_subset) {
   std::vector<std::int32_t> replay;
   std::int32_t hidden_row = 0;
   if (!DraftReplay(next_token, &replay, &hidden_row, error_msg))
@@ -539,7 +620,8 @@ bool Session::DraftCatchUp(std::int32_t next_token, bool propose,
   if (!exec.MtpForward(
           *session_, replay, hidden_row,
           {.token = propose && candidates == nullptr ? &draft_token_ : nullptr,
-           .candidates = candidates},
+           .candidates = candidates,
+           .draft_subset = draft_subset},
           error_msg)) {
     return false;
   }
@@ -569,11 +651,17 @@ bool Session::DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
 }
 
 bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
-                   bool prefill) {
+                   bool prefill, std::uint32_t boundary,
+                   std::unique_ptr<SessionSnapshot>* checkpoint,
+                   double* capture_ms, std::span<const std::int32_t> after,
+                   const PrefillCapture& consume) {
   rocm::Executor& exec = *model_->executor_;
-  for (std::size_t off = 0; off < tokens.size(); off += exec.max_batch()) {
-    const std::size_t n =
-        std::min<std::size_t>(exec.max_batch(), tokens.size() - off);
+  for (std::size_t off = 0; off < tokens.size();) {
+    const auto remaining = tokens.size() - off;
+    const auto capacity = remaining <= exec.max_batch()
+                              ? exec.max_batch()
+                              : model_->PrefillCapacity();
+    const std::size_t n = std::min<std::size_t>(capacity, remaining);
     const auto chunk = tokens.subspan(off, n);
     if (MtpEnabled() && !tokens_.empty() &&
         !DraftCatchUp(chunk[0], false, error_msg)) {
@@ -581,18 +669,99 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     }
     const auto mode = prefill ? rocm::Executor::ForwardMode::kPrefill
                               : rocm::Executor::ForwardMode::kDecode;
-    if (!exec.Forward(*session_, chunk, 1, logits_.data(), mode, error_msg)) {
+    std::unique_ptr<rocm::PrefillCheckpoint> capture;
+    if ((checkpoint || consume) && boundary > tokens_.size() &&
+        boundary <= tokens_.size() + n) {
+      capture = exec.MakePrefillCheckpoint(
+          *session_, chunk,
+          static_cast<std::uint32_t>(boundary - tokens_.size()), error_msg);
+      if (!capture)
+        return false;
+    }
+    // The chunk this loop, or the following Sync, takes next.
+    const auto rest = off + n < tokens.size() ? tokens.subspan(off + n) : after;
+    const auto next = rest.first(std::min<std::size_t>(
+        rest.size() <= exec.max_batch() ? exec.max_batch()
+                                        : model_->PrefillCapacity(),
+        rest.size()));
+    if (!exec.Forward(*session_, chunk, 1, logits_.data(), mode, error_msg,
+                      capture.get(), next)) {
       return false;
     }
+    const auto kept = capture && capture->tokens < n ? n - capture->tokens : n;
     hidden_base_ = static_cast<std::uint32_t>(
-        tokens_.size() + n - std::min<std::size_t>(n, exec.max_speculative()));
+        tokens_.size() + n -
+        std::min<std::size_t>(kept, exec.max_speculative()));
     tokens_.insert(tokens_.end(), chunk.begin(), chunk.end());
+    if (capture) {
+      const auto started = std::chrono::steady_clock::now();
+      if (consume) {
+        consume(*capture);
+      } else {
+        *checkpoint = SaveSnapshotImpl(
+            *capture->state,
+            std::span<const std::int32_t>(tokens_).first(boundary),
+            capture->logits, capture->hidden_rows, error_msg,
+            SnapshotMode::kBorrowed);
+        if (capture_ms)
+          *capture_ms += std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+        if (!*checkpoint)
+          return false;
+      }
+    }
+    off += n;
   }
   return true;
 }
 
-bool Session::Sync(std::span<const std::int32_t> prompt,
-                   std::string* error_msg) {
+bool Session::Sync(std::span<const std::int32_t> prompt, std::string* error_msg,
+                   std::span<const std::int32_t> next) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
+  return SyncImpl(prompt, error_msg, 0, nullptr, nullptr, next);
+}
+
+bool Session::SyncThrough(std::span<const std::int32_t> prompt,
+                          std::uint32_t boundary,
+                          std::unique_ptr<SessionSnapshot>* checkpoint,
+                          std::string* error_msg, double* capture_ms) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
+  if (!checkpoint || boundary == 0 || boundary > prompt.size() ||
+      prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
+    AssignError(error_msg,
+                "checkpoint must extend the frontier in the text tail");
+    return false;
+  }
+  checkpoint->reset();
+  if (capture_ms)
+    *capture_ms = 0;
+  return SyncImpl(prompt, error_msg, boundary, checkpoint, capture_ms);
+}
+
+bool Session::SyncThroughComponents(std::span<const std::int32_t> prompt,
+                                    std::uint32_t boundary,
+                                    const PrefillCapture& capture,
+                                    std::string* error_msg) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
+  if (!capture || boundary == 0 || boundary > prompt.size() ||
+      prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
+    AssignError(
+        error_msg,
+        "component checkpoint must extend the frontier in the text tail");
+    return false;
+  }
+  return SyncImpl(prompt, error_msg, boundary, nullptr, nullptr, {}, capture);
+}
+
+bool Session::SyncImpl(std::span<const std::int32_t> prompt,
+                       std::string* error_msg, std::uint32_t boundary,
+                       std::unique_ptr<SessionSnapshot>* checkpoint,
+                       double* capture_ms, std::span<const std::int32_t> next,
+                       const PrefillCapture& capture) {
   if (prompt.empty()) {
     AssignError(error_msg, "prompt is empty");
     return false;
@@ -618,12 +787,15 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     common = 0;
   }
   valid_ = false;
-  const bool ok = Feed(prompt.subspan(common), error_msg, true);
+  const bool ok = Feed(prompt.subspan(common), error_msg, true, boundary,
+                       checkpoint, capture_ms, next, capture);
   valid_ = ok;
   return ok;
 }
 
 bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
   if (!valid_) {
     AssignError(error_msg,
                 "session needs a successful Sync after a failed operation");
@@ -652,6 +824,7 @@ struct Session::PendingDecode {
   std::uint64_t draft_rng{0};
   MtpCandidateLogits candidates;
   std::int32_t draft{0};
+  bool draft_subset{false};  ///< this cycle drafts through the subset head
 };
 
 void Session::AppendDraft(PendingDecode& pending) {
@@ -686,6 +859,18 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   const std::size_t room = ContextSize() - tokens_.size();
   const std::size_t cap =
       std::min<std::size_t>({max_tokens, room, exec.max_speculative()});
+  const auto concurrency = model_->DecodeConcurrency();
+  // C1 sampled requests use the subset, including penalties and constraints;
+  // verification corrects their proposals against the full target distribution.
+  // Greedy penalties/constraints retain the full head. Unplanned multi-session
+  // requests also retain it so changed proposal chains cannot delay peers.
+  // Every request keeps the established length controller and AR backoff.
+  const bool unmodified = !sampler.config().uses_random_sampling() &&
+                          !sampler.config().penalties_enabled() &&
+                          !sampler.config().constraint;
+  const bool allow_subset =
+      (unmodified && (concurrency == 1 || batch_drafts.has_value())) ||
+      (concurrency == 1 && sampler.config().uses_random_sampling());
   const std::size_t width =
       MtpEnabled() && cap > 1
           ? 1 + (batch_drafts ? std::min<std::uint32_t>(*batch_drafts, cap - 1)
@@ -716,8 +901,15 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   const bool sampled = sampler.config().uses_random_sampling();
   const bool gpu_greedy = sampler.config().temperature == 0.0F;
   const bool gpu_verification = gpu_greedy;
+  if (allow_subset && !SyncDraftVocab(error_msg))
+    return false;
+  pending->draft_subset = allow_subset && model_->draft_subset_ &&
+                          draft_vocab_.Fits(anchor, [&](std::int32_t token) {
+                            return model_->InDraftSubset(token);
+                          });
   if (!defer_head && !DraftCatchUp(anchor, true, error_msg,
-                                   sampled ? &pending->candidates : nullptr)) {
+                                   sampled ? &pending->candidates : nullptr,
+                                   pending->draft_subset)) {
     return false;
   }
   // A cycle-local proposal stream needs no pending RNG state in snapshots.
@@ -745,7 +937,8 @@ bool Session::PrepareDecode(const DecodeRequest& request,
           !exec.MtpForward(
               *session_, std::span<const std::int32_t>(&pending->draft, 1), -1,
               {.token = sampled ? nullptr : &pending->draft,
-               .candidates = sampled ? &pending->candidates : nullptr},
+               .candidates = sampled ? &pending->candidates : nullptr,
+               .draft_subset = pending->draft_subset},
               error_msg)) {
         return false;
       }
@@ -865,6 +1058,7 @@ bool Session::FinishDecode(const DecodeRequest& request,
   stats_.cycles += 1;
   stats_.drafted += k - 1;
   stats_.accepted += keep - 1;
+  stats_.small_head_cycles += pending.draft_subset;
   // A target stop ends the request; it does not classify the remaining
   // proposals as failed predictions.
   draft_length_.Observe(keep - 1, result->stop ? keep - 1 : k - 1, base);
@@ -883,6 +1077,8 @@ bool Session::FinishDecode(const DecodeRequest& request,
 bool Session::DecodeStep(std::size_t max_tokens,
                          sampling::SamplerState& sampler, DecodeResult* result,
                          std::string* error_msg, bool stop_at_eos) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
   if (!valid_) {
     AssignError(error_msg,
                 "session needs a successful Sync after a failed operation");
@@ -953,6 +1149,13 @@ bool Session::RunIsolatedBatch(std::span<const Request> requests,
       valid = false;
     if (!valid) {
       outcome.error = "invalid or non-independent batch request";
+      continue;
+    }
+    try {
+      if (r.session->continuation_hooks_)
+        r.session->continuation_hooks_->BeforeExecution();
+    } catch (const std::exception& exception) {
+      outcome.error = exception.what();
       continue;
     }
     if (!r.session->session_->CheckCancellation(&outcome.error))
@@ -1095,7 +1298,8 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
           p.chain.size() < p.width) {
         heads.push_back({requests[i].session->session_.get(),
                          {.token = p.sampled ? nullptr : &p.draft,
-                          .candidates = p.sampled ? &p.candidates : nullptr}});
+                          .candidates = p.sampled ? &p.candidates : nullptr,
+                          .draft_subset = p.draft_subset}});
       }
     }
     if (heads.empty())

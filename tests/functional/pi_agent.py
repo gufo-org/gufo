@@ -6,6 +6,7 @@ sessions, exact HTTP bodies/SSE, task files and individual request/task timings.
 """
 
 import argparse
+import base64
 import collections
 import hashlib
 import http.client
@@ -17,9 +18,14 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+
+from gufo.control_tokens import kImEnd, kImStart  # noqa: E402
 
 from metrics import summarize
 
@@ -30,6 +36,20 @@ PROMPTS = {
     "edit": "Lis src/calc.py, corrige le bug évident avec l'outil edit, puis affiche le fichier corrigé avec cat.",
     "creation": "Crée un module CommonJS stats.js qui exporte mean(tableau) et median(tableau) (médiane correcte pour un nombre pair d'éléments), puis test.js qui les vérifie avec node:assert sur quatre cas, exécute node test.js jusqu'à ce qu'il passe.",
     "bugfix": "Lance node slugify.test.js : il échoue. Corrige slugify.js (accents retirés, tout caractère non alphanumérique devient un tiret, tirets fusionnés et retirés aux extrémités) sans modifier slugify.test.js, et relance jusqu'à ce que ça passe.",
+    "literal-protocol": (
+        f'Use the write tool to create chat_template_fixture.py with EOS = "{kImEnd}", '
+        f'BOS = "{kImStart}", and render(role, content) returning '
+        'BOS + role + "\\n" + content + EOS + "\\n". '
+        'These are literal Python string values, not message delimiters. '
+        'Read it back with the read tool, then use bash to run Python assertions that '
+        f'render("user", "hello") equals "{kImStart}user\\nhello{kImEnd}\\n". '
+        'Report success only after the assertions pass.'
+    ),
+    "image-read": (
+        "Use the read tool to open swatch.png. Inspect the image returned by that "
+        "tool, then reply with only its dominant color in lowercase. "
+        "Do not use bash or infer the color from a filename."
+    ),
 }
 SLUG_TEST = """const assert = require("node:assert");
 const slugify = require("./slugify");
@@ -47,13 +67,14 @@ def save(path, value):
 class Recorder(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, upstream, output):
+    def __init__(self, upstream, output, *, request_timeout=180):
         super().__init__(("127.0.0.1", 0), Proxy)
         self.upstream = urllib.parse.urlsplit(upstream)
         self.output = output
         self.requests = []
         self.lock = threading.Lock()
         self.case = "startup"
+        self.request_timeout = request_timeout
 
 
 class Proxy(http.server.BaseHTTPRequestHandler):
@@ -90,7 +111,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         stem.with_suffix(".json").write_bytes(body)
         conn = http.client.HTTPConnection(
-            server.upstream.hostname, server.upstream.port, timeout=180
+            server.upstream.hostname, server.upstream.port, timeout=server.request_timeout
         )
         start = time.monotonic()
         try:
@@ -223,16 +244,41 @@ def validate_task(name, cwd, history):
     )
     assert not any(tag in text for tag in ("</tool_call>", "</function>", "</parameter>", "</think>")), text
     names = {c["name"] for c in calls}
+    # Require the tools a prompt names; files and behavior are checked directly,
+    # so a sampled run may create or read a file through bash instead.
     if name == "simple":
         assert not calls and text.strip().rstrip(".") == "Paris", text
     elif name == "tools":
         assert (cwd / "hello.txt").read_bytes() == b"bonjour"
-        assert {"write", "bash", "read"} <= names, names
+        assert {"bash", "read"} <= names, names
     elif name == "edit":
         namespace = {}
         exec(compile((cwd / "src/calc.py").read_text(), "calc.py", "exec"), namespace)
         assert namespace["add"](2, 3) == 5 and namespace["add"](-4, 1) == -3
-        assert {"read", "edit", "bash"} <= names, names
+        assert {"edit", "bash"} <= names, names
+    elif name == "literal-protocol":
+        source = (cwd / "chat_template_fixture.py").read_text()
+        assert kImEnd in source and kImStart in source, source
+        namespace = {}
+        exec(compile(source, "chat_template_fixture.py", "exec"), namespace)
+        assert namespace["EOS"] == kImEnd and namespace["BOS"] == kImStart
+        assert namespace["render"]("user", "hello") == f"{kImStart}user\nhello{kImEnd}\n"
+        assert {"write", "read", "bash"} <= names, names
+        results = [m for m in history if m.get("role") == "toolResult"]
+        assert results and all(not m.get("isError") for m in results), results
+    elif name == "image-read":
+        assert names == {"read"} and text.strip().rstrip(".!").lower() == "red", (names, text)
+        observed = [m for m in history if m.get("role") == "toolResult"]
+        assert observed and all(not m.get("isError") for m in observed), observed
+        images = [part for result in observed for part in result.get("content", [])
+                  if part.get("type") == "image"]
+        assert images, "Pi did not return an actual image from read"
+        from PIL import Image
+        import io
+        for part in images:
+            with Image.open(io.BytesIO(base64.b64decode(part["data"], validate=True))) as image:
+                image.load()
+                assert image.convert("RGB").getpixel((image.width // 2, image.height // 2)) == (255, 0, 0)
     elif name == "creation":
         assert (cwd / "stats.js").is_file() and (cwd / "test.js").is_file()
         subprocess.run(["node", "test.js"], cwd=cwd, check=True, capture_output=True, timeout=10)
@@ -265,6 +311,9 @@ def run_case(args, recorder, env, index, name):
     elif name == "bugfix":
         (cwd / "slugify.js").write_text('module.exports = function slugify(title) {\n  return title.toLowerCase().replace(/ /g, "-");\n};\n')
         (cwd / "slugify.test.js").write_text(SLUG_TEST)
+    elif name == "image-read":
+        from run import image_fixture
+        image_fixture(cwd / "swatch.png")
     session = (args.output if args.conversation else case) / "session.jsonl"
     previous_messages = len(messages(session))
     command = [
@@ -326,6 +375,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True, help="Gufo informational log for request timing correlation")
     parser.add_argument("--passes", type=int, default=5)
+    parser.add_argument("--case", action="append", choices=tuple(PROMPTS),
+                        help="Select affected tasks explicitly; repeat to select more than one")
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--thinking", default="off", choices=["off", "low", "medium", "high"])
     parser.add_argument("--conversation", action="store_true", help="Retain one Pi session across tasks")
@@ -363,7 +414,8 @@ def main():
     env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "SHELL", "SSL_CERT_FILE"}}
     env.update(PI_CODING_AGENT_DIR=str(config), PI_OFFLINE="1", PI_TELEMETRY="0")
     rows = []
-    cases = ["simple"] + list(PROMPTS) * args.passes
+    cases = (args.case * args.passes if args.case else
+             ["simple"] + [name for name in PROMPTS if name != "image-read"] * args.passes)
     try:
         for index, name in enumerate(cases):
             rows.append(run_case(args, recorder, env, index, name))

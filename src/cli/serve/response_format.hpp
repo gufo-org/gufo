@@ -66,8 +66,8 @@ inline std::shared_ptr<const sampling::JsonConstraint> ParseResponseFormat(
   const auto* schema = specification->find("schema");
   if (!schema)
     invalid("json_schema.schema is required");
-  return sampling::JsonConstraint::Compile(*schema,
-                                           strict && strict->as_bool());
+  return sampling::JsonConstraint::Compile(*schema, strict && strict->as_bool(),
+                                           true);
 }
 }  // namespace gufo::server
 

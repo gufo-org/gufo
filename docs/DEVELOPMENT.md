@@ -43,10 +43,19 @@ nix develop                            # GPU development, profilers, reference t
 The same CMake commands work without Nix once the documented dependencies are
 installed; `nix develop -c <command>` runs them inside the pinned environment.
 
+Alongside the pinned compiler, `nix develop` carries the tools the loop needs:
+`gdb` for the assertion-enabled test presets, `git` and `jj` for the repository,
+`ripgrep` for searching, `radeontop` for live GPU load, and `ccache` for rebuilds.
+
 ```sh
 cmake --preset release
 cmake --build --preset release --parallel 4
 ```
+
+CMake compiles C and C++ through `ccache` when it is on `PATH`, so reconfigured
+builds and header changes reuse cached objects; the configure log reports either
+`gufo: compiling C and CXX through ...` or `gufo: ccache not found`. HIP kernels
+are not launched through the cache.
 
 ### Presets
 

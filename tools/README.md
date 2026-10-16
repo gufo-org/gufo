@@ -17,6 +17,7 @@ benchmark/tuning executables; Python tools run from this source tree.
 | `h3/` | MiniMax inventory and quality-artifact commands |
 | `audio/` | Audio reference and quality tools |
 | `ci/` | Repository, dependency, and documentation checks |
+| `llama_parity/` | Regenerates the llama.cpp tool-grammar verdicts `json_constraint_test` replays |
 | `gufo/` | Shared Python helpers and model-specific reference implementations |
 
 `gufo/gguf.py` reads metadata and decodes existing GGUF tensors for independent

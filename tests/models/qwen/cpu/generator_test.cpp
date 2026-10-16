@@ -7,6 +7,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "src/models/qwen/control_tokens.hpp"
+
+using gufo::tokenization::kImEnd;
+
 void TestSyntheticGeneration() {
   gufo::core::ModelConfig config;
   config.architecture = "qwen35";
@@ -61,11 +65,11 @@ void TestSyntheticGeneration() {
   weights.layers[0].ffn_down = make_ref(down_w);
 
   const std::vector<std::string> vocab = {
-      "<unk>", "hello", "world", "!", "a", "b", "c", "<|im_end|>"};
+      "<unk>", "hello", "world", "!", "a", "b", "c", std::string(kImEnd)};
   const std::vector<std::string> merges = {};
   const std::unordered_map<std::string, gufo::tokenization::TokenId> specials =
       {
-          {"<|im_end|>", 7},
+          {std::string(kImEnd), 7},
       };
 
   auto tokenizer = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(

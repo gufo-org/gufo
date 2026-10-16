@@ -14,6 +14,11 @@ import subprocess
 import sys
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from gufo.control_tokens import kImEnd, kImStart  # noqa: E402
+
+
 GENERATED_RE = re.compile(
     # Qwen reports "on GPU"; DeepSeek V4 Flash reports "on ROCm".
     r"Generated\s+(?P<tokens>\d+)\s+tokens on (?:GPU|ROCm) in\s+"
@@ -258,9 +263,9 @@ def run_llama_completion(args: argparse.Namespace, prompt: str) -> dict[str, obj
     else:
         system = args.system_prompt if args.system_prompt is not None else QWEN_SYSTEM_PROMPT
         rendered = (
-            f"<|im_start|>system\n{system}<|im_end|>\n"
-            f"<|im_start|>user\n{prompt.strip()}<|im_end|>\n"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            f"{kImStart}system\n{system}{kImEnd}\n"
+            f"{kImStart}user\n{prompt.strip()}{kImEnd}\n"
+            f"{kImStart}assistant\n<think>\n\n</think>\n\n"
         )
     command = [
         args.llama_binary, "--model", args.model, "--prompt", rendered,

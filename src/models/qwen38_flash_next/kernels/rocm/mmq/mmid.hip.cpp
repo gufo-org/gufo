@@ -1,4 +1,5 @@
 #include "qfn_mmq_prelude.h"
+#include "src/core/hip/managed_alloc.hpp"
 namespace qfn_mmq {
 #include "common.hpp"
 #include "mmid.hpp"
@@ -147,7 +148,7 @@ static void launch_mm_ids_helper_scan(
         // the old allocation is left to the process (it happens once per
         // widest shape).
         int32_t * grown = nullptr;
-        HIP_CHECK(hipMalloc(&grown, need * sizeof(int32_t)));
+        HIP_CHECK(gufo::hip::AllocateDevice(&grown, need * sizeof(int32_t)));
         g_ids_scratch = grown;
         g_ids_scratch_elems = need;
     }

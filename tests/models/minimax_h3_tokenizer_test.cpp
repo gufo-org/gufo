@@ -9,6 +9,9 @@
 
 #include "src/models/minimax_h3/prompt_encoder.hpp"
 #include "src/models/minimax_h3/tokenizer.hpp"
+#include "src/models/qwen/control_tokens.hpp"
+
+using gufo::tokenization::kImStart;
 
 namespace {
 
@@ -141,7 +144,7 @@ void CheckSynthetic(const std::filesystem::path& directory) {
     CHECK(tokenizer.Encode("e\xCC\x81", true, &ids, &error));
     CHECK(ids == std::vector<std::uint32_t>({195, 169}));
   }
-  CheckIds(tokenizer, "<|im_start|>", {151644});
+  CheckIds(tokenizer, kImStart, {151644});
   {
     std::vector<std::uint32_t> ids;
     CHECK(tokenizer.Encode("", false, &ids, &error));
@@ -202,7 +205,7 @@ void CheckPinnedCheckpoint() {
       tokenizer, "Hello, WORLD!  2026\n中文 café's",
       {9707, 11, 50891, 0, 220, 220, 17, 15, 17, 21, 198, 104811, 51950, 594});
   CheckIds(tokenizer, "🙂a!\n", {145080, 64, 4894});
-  CheckIds(tokenizer, "<|im_start|>", {151644});
+  CheckIds(tokenizer, kImStart, {151644});
   CheckIds(
       tokenizer, "A cinematic close-up of a clockwork bird taking flight.",
       {32, 64665, 3265, 5239, 315, 264, 8866, 1778, 11958, 4633, 10971, 13});

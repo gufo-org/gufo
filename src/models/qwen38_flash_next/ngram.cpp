@@ -15,11 +15,13 @@ namespace gufo::models::qwen38_flash_next {
 namespace {
 
 constexpr std::size_t kPage = 4096;
-// Keep enough direct reads outstanding while layer 0 runs.
-constexpr std::size_t kWorkers = 32;
+// Next-chunk prefetch hides later gathers behind the current transformer
+// pass, but a prefill's first chunk waits for its own gather. Readers block
+// in `pread`, so the pool sets that gather's queue depth.
+constexpr std::size_t kWorkers = 128;
 constexpr std::size_t kReadBatch = 8;
 constexpr std::size_t kBatchJobs = 1024;
-constexpr std::size_t kCacheBytes = 8 * 1024 * 1024;
+constexpr std::size_t kCacheBytes = 128 * 1024 * 1024;
 
 }  // namespace
 
@@ -109,9 +111,7 @@ std::unique_ptr<NgramTable> NgramTable::Open(
     }
     return nullptr;
   }
-  const std::size_t workers = std::min(
-      kWorkers, static_cast<std::size_t>(std::thread::hardware_concurrency()));
-  for (std::size_t i = 0; i < std::max<std::size_t>(1, workers); ++i) {
+  for (std::size_t i = 0; i < kWorkers; ++i) {
     t->workers_.emplace_back([raw = t.get()] { raw->Worker(); });
   }
   return t;
@@ -273,8 +273,13 @@ bool NgramTable::StartRead(std::span<const std::uint32_t> rows,
   pending_ = jobs_.size();
   failed_ = false;
   active_ = true;
-  if (pending_ != 0) {
+  // A decode gather has a handful of reads: wake one reader per read, not
+  // the whole pool. Readers keep taking jobs until the queue is empty.
+  if (pending_ >= workers_.size()) {
     wake_.notify_all();
+  } else {
+    for (std::size_t i = 0; i < pending_; ++i)
+      wake_.notify_one();
   }
   return true;
 }

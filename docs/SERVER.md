@@ -11,7 +11,7 @@ fields return explicit errors.
 
 Chat Completions is the main API, including streaming, images and tools.
 Responses supports text, images and function tools with optional streaming.
-Anthropic Messages exposes a synchronous text subset.
+Anthropic Messages supports text, images and custom tools.
 The reference protocols are:
 
 - https://developers.openai.com/api/reference/resources/responses/methods/create/
@@ -91,7 +91,7 @@ available memory.
 Text sampling follows each model's recommended defaults in `serve`, `prompt`
 and `chat`. Explicit request values override explicit server options, which
 otherwise inherit the effective thinking preset. Null request values inherit
-where supported; explicit zero values are preserved (`top_p` must remain positive).
+where supported; explicit zero values, including `top_p: 0`, are preserved.
 The startup sampling log reports server defaults; requests can override each
 setting independently, including when changing thinking mode.
 
@@ -181,19 +181,35 @@ between active decode rounds without changing a lone request's kernel policy.
 
 `--cache-ram-bytes 0` (the default) selects an automatic snapshot budget capped
 at 32 GiB and half the available host RAM after model/state allocation, respecting
-container limits. 27B also checks HIP free memory. A positive value sets a byte
-cap, still clamped to that model budget; it cannot bypass the host-memory cap.
-Disk staging and temporary disk-save buffers are separate from this RAM budget.
+container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
+pages, such as the kernel's KHO scratch area on Ubuntu 26.04, only hold
+movable pages, not GPU allocations. 27B also checks HIP free memory. A
+positive value sets a byte cap that may exceed the automatic budget, up to the
+available host RAM minus 4 GiB; the startup line reports both as
+`automatic_bytes` and `max_bytes`.
+On Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
+`max_bytes` excludes it. Other models' disk staging and temporary disk-save
+buffers are separate from this RAM budget.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
-Payloads are allocated only when captured. Under pressure, optional copies
-give way before another conversation's last useful checkpoint.
+Qwen3.8-Flash-Next pins pages for up to about 89% of its budget as captures
+need them, about 1 GiB at a time, and keeps them; the rest covers cache metadata as
+it grows. The first step runs at startup and later ones on a background thread
+ahead of need. Each takes about 200 ms while the host has free pages and longer
+when the kernel must reclaim page cache. Segments use ordinary pages that are
+registered with HIP: `hipHostMalloc` asks for high-order pages, and compacting
+host memory for them stalled decode for seconds when most RAM belonged to the GPU.
+Growth stops early while the host would keep less than 4 GiB available. The pages hold checkpoint state and KV rows, partial
+tails and idle-session spill; there is no separate spill option.
+Other models allocate payloads only when captured. Under pressure, optional
+copies give way before another conversation's last useful checkpoint.
 
 Prompt reuse is enabled by default; how the cache finds, retains and
 evicts that state is described in [the KV cache](KV-CACHE.md).
 `cache_prompt: false` on
-`/v1/chat/completions` or `/v1/responses` bypasses memory and disk lookup for
-that request; the result can still populate the cache. DeepSeek and Qwen tool
+`/v1/chat/completions`, `/v1/responses`, `/v1/completions` or `/completion`
+bypasses memory and disk lookup for that request; the result can still
+populate the cache. `null` keeps the default, `true`. DeepSeek and Qwen tool
 requests retain a checkpoint before the assistant-generation suffix, including
 when a client drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
 also accounts for tokenization changes where adjacent user/tool turns join.
@@ -215,20 +231,47 @@ With `preserve_thinking=false`, a new user turn removes reasoning from the
 preceding tool cycle. Gufo retains the state before that cycle and processes
 its changed suffix again.
 
+A loaded Qwen vision sidecar is prepared while the model loads, before the RAM
+cache is sized and before readiness: Gufo hashes the complete sidecar for image
+cache identities and uploads the encoder weights, so neither happens in the
+first image request and admission's free device memory already excludes them.
+The weights stay resident even if no image arrives, including a sidecar
+auto-discovered as `mmproj-BF16.gguf` in the model's directory or its parent.
+The startup line `event=vision_prepared` reports `resident_bytes`,
+`identity_ms` and `upload_ms`. Startup fails if the upload does not fit. Image
+encoding scratch is still allocated per image.
+
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
-`--cache-disk-staging-bytes 0` (the default) selects the smallest of 1 GiB,
-one eighth of available host RAM after model/session loading (including cgroup
-limits), and the disk budget. This bounds queued captures/writes and each disk
-read separately; it allocates nothing upfront. Live model state and retained
-RAM snapshots have separate budgets.
 
+On Flash-Next, `--cache-disk-bytes` counts every file the cache manages,
+including temporary files of unfinished writes and files a crash left
+unreferenced. Restarting with a lower budget removes those first, then the
+oldest checkpoints by creation order, until the directory fits; use history does not
+survive a restart. One Flash-Next server owns the directory: a second one fails
+at startup, after loading its model but before committing its RAM budget, with
+an ownership error naming the directory. The lock does not wait: a restarted
+server fails if its predecessor is still draining disk writes when the new one
+finishes loading its model. Other models do not take this lock.
+The first start on a directory written by an earlier release removes its old
+checkpoint files (`*.kvc`), and the cache refills as conversations run. Do not
+share a directory between Flash-Next and other models; Flash-Next removes
+their checkpoint and temporary files too, including writes in progress.
+Flash-Next ignores `--cache-disk-staging-bytes` and logs
+`event=option_ignored`. Writes and restores stream each checkpoint through an
+internal 1 MiB pinned buffer, piece by piece; a larger buffer did not change
+restore or write speed and took pinned RAM and device heap from the cache and
+the sessions. Remove the option from Flash-Next command lines.
+
+For the other models, `--cache-disk-staging-bytes 0` (the default) selects the
+smaller of one eighth of available host RAM after model/session loading
+(including cgroup limits) and the disk budget. This bounds queued
+captures/writes and each disk read separately; it allocates nothing upfront.
+Live model state and retained RAM snapshots have separate budgets.
 Snapshots that exceed either limit are skipped with their required size and
 available budget logged; live conversation reuse remains available. Existing
 files that exceed the current staging limit are preserved subject to disk LRU
 eviction and can be reused after restarting with sufficient staging.
-For Flash-Next/MTP at full 262K context, explicitly set
-`--cache-disk-staging-bytes 8589934592` (8 GiB) if RAM permits.
 Qwen27B at full context needs larger staging and `--cache-disk-bytes` limits;
 use the required size reported in the skip log.
 
@@ -236,7 +279,7 @@ For a focused cancellation check, run
 `python3 tests/functional/continuation.py --output /tmp/cache-check.json`
 against a private server named `cache-test` on port 5815.
 It checks interruption during reasoning and visible output, with and without
-reasoning replay, greedy/seeded sampling, and explicit cache bypass. Use
+reasoning replay, and greedy/seeded sampling. Use
 `--tools --discard-assistant` to exercise interrupted agent tool turns; add
 `--prefix-repetitions 5500` for a roughly 50K-token prefix.
 For persistence, enable `--cache-disk` before the check, restart the same server,
@@ -246,10 +289,11 @@ Add `--append-image` to introduce the image after a cached text turn, and
 `--reasoning-effort high` to check a specific thinking effort.
 Each case continues for a third turn; repeat `--case NAME` to select only the
 cases needed for a change.
-The check requires exact snapshot and matched-history replay. It separately
-reports equality to a fresh full prefill, whose different matrix shapes and
-prefill/decode history can change rounding; that comparison is not silently
-counted as an exact cache replay.
+The check requires exact snapshot and matched-history replay in memory. After a
+restart, sampled output may vary when a disk restore re-prefills a gap; greedy
+and zero-prefill restores still require equality. The report separates successful
+validation (`status`) from observed assistant-message equality (`exact`) and its
+requirement (`exact_required`). The SDK conversation suite checks cache bypass.
 
 ### Hardware compute queues
 
@@ -297,6 +341,11 @@ official Jinja: thinking enabled, `xhigh` effort, prior reasoning preserved.
 Use `--think off` or `chat_template_kwargs.enable_thinking=false` for direct
 answers. DeepSeek defaults to thinking with `high` effort. Quality comparisons
 must use the same reasoning mode and effort.
+
+Keep `reasoning_effort` (Chat) or `output_config.effort` (Messages) consistent
+across turns while thinking is enabled: Qwen and DeepSeek render the effort
+instruction into the prompt, so changing it changes the prompt prefix and can
+force a full conversation prefill.
 
 `POST /v1/chat/completions` accepts top-level `reasoning_effort` (`none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`) and Pi/llama.cpp-style
@@ -363,7 +412,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/responses` | Text/images, structured output, optional SSE streaming |
 | `POST` | `/v1/chat/completions` | Main chat, streaming, image and tool API |
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
-| `GET` | `/health` | Process liveness (aliases: `/v1/health`, `/healthz`) |
+| `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`) |
 | `GET` | `/ready` | Model and backend readiness (aliases: `/v1/ready`, `/readyz`) |
 | `GET` | `/metrics` | Prometheus-format operational metrics (text LLM serving only) |
 
@@ -543,9 +592,33 @@ Image uploads accept PNG, JPEG and WebP. Base64 data URLs also accept
 Clients supply the complete conversation, including prior Gufo `output` items
 when retaining reasoning. Replay `function_call` items with their `call_id`,
 then supply `function_call_output` items using the same ID. Function tools use
-the flat `{type:"function",name,parameters,strict}` shape.
+the flat `{type:"function",name,parameters,strict}` shape. The Responses API
+also defines hosted tool types (`web_search`, `file_search`, `code_interpreter`,
+`mcp`, ...) that only OpenAI can execute; they are accepted and skipped so
+the function tools still reach the model. A `namespace` entry is not hosted:
+it groups client-executed function tools for organization only, and its
+functions are flattened into the function list. Their `function_call` items
+keep the plain `name` and add the owning `namespace`, so clients can route
+them. Function names that collide across namespaces or with top-level
+functions are rejected. Mid-conversation `system` and `developer` message
+items are accepted as in Chat Completions. Standard Responses request fields
+with
+no native effect are accepted and ignored so conforming clients interoperate
+(for example Codex): `include`, `reasoning.summary`, `text.verbosity`,
+`client_metadata` and `prompt_cache_key`.
 `store` and `background` must be false when present; server-side conversations
 and `previous_response_id` remain unsupported.
+
+Function-call output accepts either a text string or an array of `input_text`
+and `input_image` parts. Images stay inside the corresponding tool result;
+image-only output and interleaved text/images are supported. Historical
+`custom_tool_call` items and their `custom_tool_call_output` use the same
+association and output parts; the custom call's free-form `input` is retained
+as literal tool-history data. This does not enable custom-tool generation.
+Chat Completions also accepts `image_url` parts in `role:"tool"` content.
+Existing text-string outputs keep their prompt representation. Images remain
+unsupported in assistant/system/developer messages; only `detail:"auto"` is
+accepted, and file IDs and `input_file` parts remain unsupported.
 
 Responses report `incomplete` with reason `max_output_tokens` when generation
 hits its limit. Otherwise they report `completed`. `stream: true` sends typed
@@ -576,17 +649,50 @@ The other compatibility routes are deliberately limited:
 | Route | Supported request | Output limit |
 | --- | --- | --- |
 | `/v1/completions` | One prompt string, buffered or SSE completion | `max_tokens` |
-| `/v1/messages` | Text messages and optional text system instructions | `max_tokens` |
+| `/v1/messages` | Text, image, thinking and tool blocks, optional text system instructions and custom tools; buffered or SSE | `max_tokens` |
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
-sampling controls. Messages and `/completion` reject streaming; all reject
-multiple candidates. Responses and Messages honor the server's thinking defaults.
-Native Messages rejects tools, `thinking`, and `output_config`; use Chat
-Completions for tool/reasoning controls. Completions routes accept `stop`;
+sampling controls. `/completion` rejects streaming; all reject multiple
+candidates. Streamed Messages send Anthropic SSE events: `message_start`,
+`content_block_start`/`content_block_delta`/`content_block_stop` for
+`thinking` (`thinking_delta`), `text` (`text_delta`) and `tool_use`
+(`input_json_delta`) blocks, then `message_delta` with `stop_reason` and the
+complete usage, and `message_stop`. `message_start` reports zero usage because
+prompt accounting is final only at the end. A failure after the headers sends
+an `error` event. Responses and Messages honor the server's thinking defaults.
+Messages accepts `thinking.type` (`enabled`, `adaptive` or `disabled`);
+`adaptive` keeps the server's thinking default, and `budget_tokens` has no
+native equivalent, so the effort stays the server's unless
+`output_config.effort` sets it. Reasoning is returned as a `thinking` block
+before the `text` block, with an empty `signature`, for every accepted
+`thinking.display` (`summarized`, `omitted` or `updates`). Replay assistant
+`thinking` blocks unchanged so later turns reuse the cached prompt.
+`output_config.effort` (`low`, `medium`, `high`, `xhigh` or `max`) sets the
+reasoning effort used while thinking is on; it never enables thinking. Other
+`output_config` members are rejected. Messages maps custom `tools`
+(`input_schema`) and `tool_choice` (`auto`, `any`, `tool`, `none`, with
+`disable_parallel_tool_use`) onto the Chat tool path, so framing, schema
+constraints and cache reuse match Chat Completions. Calls are returned as
+`tool_use` blocks with `stop_reason: "tool_use"`; replay them unchanged with
+the following `tool_result` blocks. Server tools such as `web_search` are
+rejected. Messages accepts `image` blocks in user turns and in `tool_result`
+content, with a `base64` source (PNG, JPEG or WebP) or an HTTPS `url` source,
+under the same limits and model requirements as Chat Completions images;
+images in assistant turns, `file` sources and `document` blocks are rejected.
+Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
-`/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
-and template-aware message counting are not implemented.
+`POST /v1/messages/count_tokens` accepts the same text, images, system, thinking and
+tool history as Messages and returns `{"input_tokens": N}` after rendering the
+model's chat template. `max_tokens` is optional; `stream: true` is rejected.
+The count includes cached prompt tokens and does not generate, prefill or
+change the conversation cache. Prompts may exceed the configured execution
+context so clients can size them before trimming; generation still enforces
+the context limit. Images use the same resizing and visual token expansion as
+generation, without running the vision encoder; the matching projector must
+be loaded. Models without image support reject image counts with 400.
+Backends without chat counting support return 501. `/infill` still returns 501 because
+suffix-conditioned infill is not implemented.
 
 Raw Completions accepts `stream: true` and
 `stream_options: {"include_usage": true}`. The final usage event reports prompt,
@@ -608,7 +714,13 @@ ordinary continuation.
 `POST /v1/chat/completions` accepts the common compatibility subset:
 
 - `model`
-- `messages`
+- `messages`: `system` and `developer` messages may appear at any position.
+  Agent clients such as Codex send them mid-conversation after context
+  compaction or when session settings change. DeepSeek renders them in place.
+  Qwen's template accepts only one leading system turn, so Qwen models hoist
+  them into it in their original relative order. That changes the prompt head:
+  the request that introduces such a message is prefilled again, and later
+  requests that keep it reuse the whole prompt
 - `max_tokens` or `max_completion_tokens`
 - `temperature`
 - `top_p`
@@ -671,21 +783,40 @@ omitted controls keep their model/CLI defaults.
 
 Tool calls are emitted only for declared functions when `tool_choice` allows
 calling tools. With `auto`, ordinary text and reasoning remain allowed; once a
-call starts, decoding constrains its name and argument format. Non-strict tools
+call starts, decoding constrains its name and argument format. As in llama.cpp,
+a DeepSeek call block ends the output: parallel calls share one block, and no
+text follows it. Other DeepSeek output, including client call markup written in
+place of a native call, is returned as content. Non-strict tools
 keep optional arguments optional. Open nested objects retain native syntax and
 declared requirements/types, including nested fields; unsupported schema
 keywords remain guidance. Unsupported property-admitting rules, including
 conditional branches, leave those objects open without discarding declared
-requirements. Qwen wildcard fields and ambiguous string/null unions use JSON
-to preserve types. Constrained JSON keys follow schema order, with additional
-keys last. Impossible non-strict schemas fall back to JSON-object arguments;
-impossible strict schemas are rejected before generation.
+requirements. Union and untyped arguments keep the native syntax, as in
+llama.cpp: when the union admits strings the value is raw text, and its typed
+alternatives (such as `null` or an object) are tried before the string, so Qwen
+cannot return the literal string `"null"` for a string/null union.
+A model with a native call syntax (Qwen, DeepSeek) never switches to a JSON
+envelope, whatever the schema, strict flag or tool choice: as in llama.cpp
+`common/parsers/qwen3-coder.cpp` and `deepseek.cpp`, every call uses the chat
+template's syntax and no instruction is added to the prompt. Native tags enforce
+what they can carry. A string parameter whose `pattern` cannot be enforced is
+raw text; other values follow the supported parts of their schema, or any JSON
+value of their types when nothing can be enforced. Qwen tags carry no type, so
+Qwen generates declared parameters only; DeepSeek's `string` flag also carries
+wildcard fields. A value that must contain the native closing tag cannot be
+written natively. Only runners without a native syntax use the JSON envelope.
+Historical calls render typed argument values with the chat template's
+`tojson` spelling (`", "` and `": "` separators, raw UTF-8), as llama.cpp's
+Jinja runtime does. Cache reuse requires identical tokens; normalizing an
+assistant's formatting can require replaying that suffix.
+Constrained JSON keys follow schema order, with additional
+keys last. Impossible strict schemas are rejected before generation.
 `tool_choice: "required"` and named choices constrain decoding to a declared
-call. Extended schemas retain compact JSON on this path, avoiding extra
-native framing tokens; ordinary native calls keep their existing format. Where
+call, with the same argument syntax as `auto`. Where
 the backend cannot constrain sampling, an unmet `required` choice still returns
 `tool_choice_unsatisfied` (HTTP 502, or an SSE error after streaming starts).
-Stops and token limits terminate normally without emitting incomplete calls.
+Stops and token limits terminate normally. Responses streams may retain a partial
+call with `status: "incomplete"`; clients must execute only completed calls.
 With no tools or `tool_choice:"none"`, tool markers are ordinary text and do
 not interrupt reasoning or delay streaming.
 
@@ -719,12 +850,11 @@ Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, includi
 streaming, images and concurrent requests. Reasoning stays separate from JSON
 and counts toward the output budget. Changing the schema changes the cache prefix.
 
-For constrained tool or JSON output, only `</think>` ends the initial reasoning
-phase. Literal tool markers such as `<tool_call>` quoted during reasoning remain
-reasoning data; they do not start a call or move reasoning into visible content.
-This boundary is identical for buffered responses and SSE deltas in Chat
-Completions and Responses. Tool parsing starts after the reasoning delimiter,
-and markers inside tool argument strings remain argument data.
+`</think>` ends reasoning before constrained JSON. Native tools also accept an
+unquoted function header as the boundary when the model omits `</think>`.
+Bare marker mentions and quoted examples remain reasoning; markers inside
+arguments remain data. Buffered and streamed Chat Completions and Responses
+use the same boundaries.
 
 Parse the returned content: leading whitespace is valid JSON, and stops or token
 limits can leave it incomplete. `finish_reason: "stop"` includes matched stop
@@ -736,8 +866,12 @@ Supported: objects, arrays, nullable types, `enum`/`const`, `anyOf`, recursive l
 array length bounds. Formats include date/time, duration, email, hostname,
 IP addresses and UUID.
 
-The root must resolve to an object. Objects require `additionalProperties:false`;
-strict schemas require every property (use null for optional values).
+The root must resolve to an object. As in llama.cpp, an object that declares
+`properties` admits no other keys unless `additionalProperties` is `true` or a
+schema for their values; extra keys then follow the declared properties. An
+object without `properties` admits any keys unless `additionalProperties` is
+`false`. Strict schemas require every property (use null for optional values).
+Tool parameter schemas keep their separate rules below.
 Unsupported keywords, external references and unusable cycles are rejected.
 Schemas are limited to 2 MiB, 5,000 properties, 1,000 enum values and 120,000
 characters in names and enum/const strings. Patterns use ECMA-262 Unicode
@@ -800,7 +934,7 @@ Use appropriate HTTP status codes:
 - `429` admission queue full or rate limit exceeded
 - `499` internally recorded client cancellation
 - `500` internal failure
-- `503` model or backend unavailable
+- `503` model or backend unavailable, or GPU context lost (`device_lost`)
 
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
@@ -815,8 +949,10 @@ Authorization: Bearer <local-token>
 
 Authentication covers every route, including health, metrics, audio, and video.
 CORS preflight (`OPTIONS`) does not require credentials. Select the listen
-address with `--host`; it must be an IPv4 address. TLS termination belongs in
-a reverse proxy.
+address with `--host`; it must be a numeric IPv4 or IPv6 address, not a host
+name. `--host ::` is dual-stack: it accepts IPv6 clients and IPv4 clients, and
+an IPv4 client keeps its IPv4 address as its client ID. `--host ::1` accepts
+only IPv6 loopback clients. TLS termination belongs in a reverse proxy.
 
 Request bodies, prompts, generated text and credentials are not logged.
 
@@ -830,6 +966,10 @@ and API key for inference and metrics.
 as the bearer credential when it is set.
 
 ## Lifecycle and limits
+
+Qwen image inputs have no fixed image-count cap. Their expanded tokens must fit
+the model context; image-byte, pixel, request-body and read-time budgets still
+apply to the submitted history, including base64 images.
 
 The HTTP transport bounds connection count and request-body size. The scheduler
 bounds admission and output buffering and propagates client cancellation to
@@ -847,9 +987,99 @@ state; the prompt snapshot remains available for safe replay. Image identity,
 positions and speculative state participate in restoration and cache isolation.
 
 `GET /health` reports process liveness. `GET /ready` returns 503 until a model
-service is ready, then reports `status` and the active model. It does not expose
-a GPU health matrix. HTTP model replacement and persistent Responses
+service is ready, then reports `status` and the active model. Both read the
+recorded device state without performing GPU work on each poll. HTTP model replacement and persistent Responses
 conversations are not implemented.
+
+While `gufo serve llm` loads its model and walks the disk cache tier, the port
+already answers every request, `/health` included, with 503
+`{"error":{"message":"Loading model","type":"unavailable_error","code":"loading"}}`
+and `Retry-After: 1`, as llama-server does. A refused connection therefore
+means the process is not running; supervisors such as llama-swap, which treat
+only a 200 health check as ready, keep waiting until the model is loaded. If
+the address cannot be bound early, the port stays closed until the load ends.
+
+A GPU reset (for example `amdgpu` recovering from a MES hang) permanently
+invalidates the process's HIP context. The text scheduler checks it after five
+seconds of continuous idle time, then every five seconds while idle. The probe
+uses a preallocated four-byte buffer and private stream. Submission and polling
+never wait for completion; an outstanding probe is reused. Arriving requests
+interrupt the idle wait and execute without waiting for that probe. Active
+inference performs no periodic device checks.
+
+After a generation failure the scheduler also runs a bounded device probe
+(at most 5 s), before invalidating request state.
+Only a hard HIP error from the probe
+marks the device lost. A probe still pending after 5 s may be queued behind
+long kernels, so it logs `event=device_probe_timeout` and counts as usable. A
+usable device leaves the original failure unchanged. A lost device logs
+`event=device_lost remedy=restart reason=<driver error>` once and makes the
+loss permanent for the process:
+
+- the failing request reports `device_lost`: a 503 with
+  `GPU context lost; restart required` and no `Retry-After` before the
+  response starts, or the same code in the stream's terminal error event
+  after it started. `/v1/responses` streams end with `response.failed`
+  carrying the Responses `server_error` code, since that code enum is closed;
+  the message names the device loss;
+- `/health`, `/ready` and their aliases return 503 with
+  `{"status":"device_lost","error":{...,"code":"device_lost"}}`;
+- every text-backend `POST` route, including unimplemented stubs that would
+  otherwise answer 501, returns 503 `device_lost` without reaching the device;
+- `gufo serve` logs `event=device_lost_shutdown`, runs the `SIGTERM` shutdown
+  and exits with status 75 (`EX_TEMPFAIL`), also when an external `SIGTERM`
+  stops it after the loss. Teardown can block on the dead device, so the
+  process exits with status 75 after 10 s regardless.
+
+A device call that never returns is a different failure: nothing fails, so
+nothing is probed, and the server keeps answering `/health` and sending stream
+heartbeats while generation has stopped. `--stall-timeout-ms MS` bounds that.
+Progress means a request being admitted, a work unit starting, a pending
+checkpoint capture completing or the idle wait returning. When the scheduler has work but none of those
+happens for `MS`, it logs
+`event=device_lost remedy=restart reason=scheduler made no progress for <MS> ms`
+and follows the lost-device path above, including the exit with status 75 and
+the `gufo_device_lost_total` increment. This covers a hang on the scheduler
+thread, in a capture the scheduler is waiting for, and in the idle device
+probe. Detection takes between `MS` and about 1.5 times `MS`. Requests already
+in flight end when the process exits. The default, 0, disables the check;
+other values must be at least 60000, because a deep checkpoint capture or a
+post-failure device probe can legitimately hold progress for tens of seconds.
+An idle server and a queued request never count as stalled. While any other
+request is still progressing, a hung capture is not reported; it is once
+nothing else can run. A disk-cache write that never completes is not detected
+while generation continues.
+
+Text streams defer HTTP headers until the scheduler admits the request and
+starts its prompt, or until the request has waited five seconds in the queue,
+whichever comes first. Chat's initial role and Responses lifecycle events are
+sent with them. Failures before that point return a JSON error with an
+appropriate 5xx status; device loss is 503 `device_lost`. Later failures, even
+before the first token, use terminal SSE errors. Heartbeats begin once headers
+commit, so long prefills and queue waits keep sending bytes. Explicit
+`return_progress: true` sends headers immediately and adds live prefill
+progress.
+
+`/metrics` exposes `gufo_device_lost_total`, incremented once per confirmed
+context loss, including idle detection. It stays unchanged for recoverable
+errors and pending probes. The counter resets when the process restarts; the
+fatal loss log and supervisor exit status remain useful when a metrics scrape
+misses the brief period before exit.
+
+`gufo diagnose` inspects system availability in a separate process. It cannot
+validate the serving process's existing HIP context; use the serving health
+endpoints and a supervisor restart policy for this failure mode.
+
+The listener observes the sticky loss independently of response writes, so
+a blocked streaming client cannot delay arming that watchdog. Failed resident
+requests retain their state and snapshot workers until process exit, avoiding
+HIP resets, frees and transfer joins on the lost context. The watchdog is armed
+before logging or shutdown; the fatal exit bypasses model destructors and log
+flushing. The operating system reclaims those resources.
+
+Run the server under a supervisor that restarts on failure, such as systemd
+`Restart=on-failure` or a container `restart: always`/`on-failure` policy;
+a restart is the only recovery.
 
 ## Metrics
 
@@ -859,18 +1089,42 @@ executes, so their rates show live throughput; prompt tokens exclude cache
 hits. `llamacpp:requests_processing` counts admitted requests, including cache
 preparation and cleanup; `llamacpp:requests_deferred` counts requests waiting
 for a session. The speed gauges retain the latest nonzero request rates.
+When the scheduler finishes or cancels a request, whether or not the client
+reads the result, it adds the request's cached prompt tokens
+(`llamacpp:prompt_tokens_cached_total`), prefill and decode seconds
+(`llamacpp:prompt_seconds_total`, `llamacpp:tokens_predicted_seconds_total`),
+speculative verification rounds (`llamacpp:spec_decode_num_drafts_total`),
+proposed and accepted draft tokens
+(`llamacpp:spec_decode_num_draft_tokens_total`,
+`llamacpp:spec_decode_num_accepted_tokens_total`), and raises
+`llamacpp:n_tokens_max` to its prompt plus generated tokens. A request counts
+even if the client disconnects before reading it; requests that fail in the
+scheduler, such as on a deadline or a runner error, add none of these.
+`llamacpp:kv_cache_usage_ratio` is the in-flight prompt and generated tokens
+over sessions times context; retained cache entries are not counted.
 `Server-Timing`, generation `timings`, and Chat Completions `usage.gufo`
-provide request-level measurements. The legacy KV-utilization
-metric and `/slots`/`/props` metadata are placeholders; do not use them for
-capacity or admission decisions.
+provide request-level measurements.
+
+`GET /slots` (alias `/v1/slots`) lists one llama-server slot per `--sessions`
+entry. A session is processing from admission, including cache preparation,
+until the request ends, so the processing slots match
+`llamacpp:requests_processing`; queued requests do not appear.
+`id_task` is the request id, or -1 when idle. `n_prompt_tokens` is the whole
+prompt, `n_prompt_tokens_cache` the tokens restored from cache, and
+`n_prompt_tokens_processed` the uncached tokens prefilled so far, as in
+`timings.prompt_n`. `next_token[0].n_decoded` counts generated tokens and
+`n_remain` the remaining token budget. Idle slots report zero counts and
+`n_remain` -1. `task_id` and `state` (0 idle, 1 processing) remain for older
+clients; `prompt` is always empty. `/props` metadata is a placeholder.
+Slots and metrics are separate snapshots; requests can advance between polls.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed
 tokens; `cache_n` counts reused tokens. llama-swap uses these fields on every
 turn. Gufo-specific details stay in `usage.gufo`.
 
-TODO: real slot/KV metrics, a validated administrative reload/drain interface,
-and automatic recovery after device reset or suspend/resume.
+TODO: retained-cache KV metrics, a validated administrative reload/drain
+interface, and in-process recovery after device reset or suspend/resume.
 
 ## Troubleshooting logs
 
@@ -924,7 +1178,8 @@ lines (the ROCm model-cache and managed-KV lines, DSpark attachment, the shared
 batch workspace) are suppressed by `--log-level=warn`/`error` too.
 
 Prompt text, message bodies and API keys stay unlogged at every level, and debug
-lines use the same escaping and redaction as the rest of the log. Client
+lines use the same escaping and redaction as the rest of the log. Only the
+opt-in [content trace](#content-trace), a separate file, records content. Client
 identity is the exception: scheduler admission lines name a client by the peer
 address of its socket (`client_id=127.0.0.1` on the default loopback bind), so a
 public `--host` writes client IP addresses into the debug tier.
@@ -936,6 +1191,50 @@ speed. Speculative requests also include accepted and proposed drafts. Progress
 lines are INFO-tier: `--log-level=warn` or `--log-level=error` would discard
 them, so the server rejects that combination at startup instead of ignoring the
 flag.
+
+### Content trace
+
+Some failures only show in the content itself, such as tool-call markup leaking
+into `content` or a history that the template renders differently. For those,
+start `gufo serve llm` with `--trace <PATH>`. The server appends one JSON
+object per line to `PATH` and logs `event=trace_enabled` at WARN. A new file is
+created readable and writable by its owner only; an existing file keeps its
+permissions. A path that cannot be opened fails startup before the model loads.
+
+Each request to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
+`/v1/messages` or `/completion` writes three records. Every record has `time`,
+`event` and the `request` id shown in the `X-Request-ID` header and in the
+`request=rN` log lines:
+
+- `request`: `method`, `path` and the `body` as received.
+- `generation`, written by the scheduler shared by every text model: its
+  `generation` number (the `request=` value of scheduler debug and progress
+  lines), `max_tokens` after clamping to the context, the effective `sampling`,
+  `prompt_tokens`, `cache` (`memory`, `disk` or `miss`), `cached_tokens`, the
+  miss detail the completion log also reports, `generated_tokens`, `finish`,
+  `error` when generation failed, the `prompt` decoded from its tokens with
+  special tokens spelled out, and the raw `output` before reasoning and
+  tool-call parsing.
+- `response`: `status`, `outcome`, whether the reply was a `stream`, and the
+  `body` the client received. For a stream this is the event stream as
+  written, `: ping` keepalives included, so a difference between streaming and
+  non-streaming parsing shows up in the trace.
+
+A request that fails before generation, for example with invalid JSON, has
+no `generation` record. Requests refused before routing (malformed HTTP or an
+oversized body), unauthenticated requests and other routes are not traced.
+Malformed UTF-8 is replaced with U+FFFD. A record that cannot be written in
+full, for example on a full disk, is cut from the file and the first failure is
+logged as `event=trace_write_failed`; a file that cannot be cut back, such as a
+pipe, stops tracing with `event=trace_disabled`. To read one request:
+
+```sh
+jq 'select(.request == "r12")' trace.jsonl
+```
+
+The file holds prompts, tool results and generated text in full: treat it
+like the conversations themselves and delete it when done. It is never
+rotated or truncated.
 
 Text completion logs include stop/length/cancellation, queue and first-token
 latency, prefill/decode speed, execution width, memory/disk cache hits and reused

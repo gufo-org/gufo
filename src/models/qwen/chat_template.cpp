@@ -4,6 +4,7 @@
 #include <unicode/utf8.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -16,6 +17,7 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
 namespace gufo::tokenization {
@@ -156,6 +158,69 @@ void AppendReasoningInstruction(std::string& output,
   }
 }
 
+// Message text is text. Content spans are tokenized without special matching,
+// so a vocabulary token a client sends — or the model itself wrote — reaches
+// the model as the characters it contains, never as a control token that ends
+// a turn in the middle of a conversation (#383).
+void AppendContent(std::string& output, std::vector<ContentSpan>* spans,
+                   std::string_view text) {
+  const auto begin = output.size();
+  output.append(text);
+  if (spans != nullptr && !text.empty()) {
+    spans->push_back({begin, output.size() - begin});
+  }
+}
+
+// Keep images inside their owning message, including grouped tool results.
+// Only the inserted vision markers are framing; surrounding text stays literal.
+bool AppendMessageContent(std::string& output, const ChatMessage& message,
+                          const ChatTemplateOptions& options,
+                          std::size_t& image_count,
+                          std::vector<std::size_t>* image_offsets,
+                          std::vector<ContentSpan>* content_spans) {
+  if (message.images.empty()) {
+    const auto content = Trim(message.content);
+    AppendContent(output, content_spans, content);
+    return !content.empty();
+  }
+  std::string rendered;
+  std::vector<ContentSpan> spans;
+  std::vector<std::size_t> offsets;
+  std::size_t cursor = 0;
+  for (const auto& image : message.images) {
+    AppendContent(rendered, &spans,
+                  std::string_view(message.content)
+                      .substr(cursor, image.offset - cursor));
+    ++image_count;
+    if (options.add_vision_id)
+      rendered.append("Picture " + std::to_string(image_count) + ": ");
+    rendered.append(kVisionStart);
+    offsets.push_back(rendered.size());
+    rendered.append(kImagePad).append(kVisionEnd);
+    cursor = image.offset;
+  }
+  AppendContent(rendered, &spans,
+                std::string_view(message.content).substr(cursor));
+  const auto content = Trim(rendered);
+  const auto removed =
+      static_cast<std::size_t>(content.data() - rendered.data());
+  const auto start = output.size();
+  if (image_offsets != nullptr)
+    for (const auto offset : offsets)
+      image_offsets->push_back(start + offset - removed);
+  if (content_spans != nullptr) {
+    for (const auto& span : spans) {
+      const auto begin = std::max(span.offset, removed);
+      const auto end =
+          std::min(span.offset + span.size, removed + content.size());
+      if (end > begin)
+        content_spans->push_back({start + begin - removed, end - begin});
+    }
+  }
+  output.append(content);
+  return !content.empty();
+}
+
 void AppendJsonString(std::string& output, std::string_view value) {
   output.push_back('"');
   for (const unsigned char character : value) {
@@ -218,11 +283,26 @@ void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools,
   }
   output.append(
       "\n</tools>\n\nIf you choose to call a function ONLY reply in the "
-      "following format with NO suffix:\n\n<tool_call>\n"
-      "<function=example_function_name>\n<parameter=example_parameter_1>\n"
-      "value_1\n</parameter>\n<parameter=example_parameter_2>\n"
-      "This is the value for the second parameter\nthat can span\nmultiple "
-      "lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\n"
+      "following format with NO suffix:\n\n");
+  output.append(QwenToolSyntax::kCallOpen);
+  output.push_back('\n');
+  output.append(QwenToolSyntax::kFunctionOpen);
+  output.append("example_function_name>\n");
+  output.append(QwenToolSyntax::kParameterOpen);
+  output.append("example_parameter_1>\nvalue_1\n");
+  output.append(QwenToolSyntax::kParameterClose);
+  output.push_back('\n');
+  output.append(QwenToolSyntax::kParameterOpen);
+  output.append(
+      "example_parameter_2>\nThis is the value for the second "
+      "parameter\nthat can span\nmultiple lines\n");
+  output.append(QwenToolSyntax::kParameterClose);
+  output.push_back('\n');
+  output.append(QwenToolSyntax::kFunctionClose);
+  output.push_back('\n');
+  output.append(QwenToolSyntax::kCallClose);
+  output.append(
+      "\n\n<IMPORTANT>\n"
       "Reminder:\n- Function calls MUST follow the specified format: an inner "
       "<function=...></function> block must be nested within "
       "<tool_call></tool_call> XML tags\n- Required parameters MUST be "
@@ -239,28 +319,221 @@ void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools,
 }
 
 void AppendToolCalls(std::string& output,
-                     std::span<const ChatMessage::ToolCall> calls) {
+                     std::span<const ChatMessage::ToolCall> calls,
+                     std::vector<ContentSpan>* content_spans) {
   bool first_call = true;
   for (const auto& call : calls) {
     if (!first_call) {
       output.push_back('\n');
     }
     first_call = false;
-    output.append("<tool_call>\n<function=");
+    output.append(QwenToolSyntax::kCallOpen);
+    output.push_back('\n');
+    output.append(QwenToolSyntax::kFunctionOpen);
     output.append(call.name);
     output.append(">\n");
     for (const auto& argument : call.arguments) {
-      output.append("<parameter=");
+      output.append(QwenToolSyntax::kParameterOpen);
       output.append(argument.name);
       output.append(">\n");
-      output.append(argument.value);
-      output.append("\n</parameter>\n");
+      AppendContent(output, content_spans, argument.value);
+      output.push_back('\n');
+      output.append(QwenToolSyntax::kParameterClose);
+      output.push_back('\n');
     }
-    output.append("</function>\n</tool_call>");
+    output.append(QwenToolSyntax::kFunctionClose);
+    output.push_back('\n');
+    output.append(QwenToolSyntax::kCallClose);
   }
 }
 
 }  // namespace
+
+namespace {
+
+// The API surface trims framing with ASCII whitespace; the scanner keeps the
+// same reading so parser decisions do not depend on Unicode table updates.
+std::string_view TrimAscii(std::string_view value) {
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.front())) != 0)
+    value.remove_prefix(1);
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.back())) != 0)
+    value.remove_suffix(1);
+  return value;
+}
+
+// Qwen writes a parameter as "<parameter=name>\nVALUE\n</parameter>": one
+// newline on each side is framing, everything else (a file's final newline,
+// indentation, blank lines) belongs to the value.
+std::string_view StripFramingNewlines(std::string_view value) {
+  const std::string_view frame = value.starts_with("\r\n") ? "\r\n" : "\n";
+  if (value.starts_with(frame)) {
+    value.remove_prefix(frame.size());
+    if (value.ends_with(frame))
+      value.remove_suffix(frame.size());
+  }
+  return value;
+}
+
+// Hold a possible closing delimiter until its next byte disambiguates it.
+std::string_view BeforePartialDelimiter(std::string_view value,
+                                        std::string_view delimiter) {
+  for (auto size = std::min(value.size(), delimiter.size()); size > 0; --size)
+    if (delimiter.starts_with(value.substr(value.size() - size)))
+      return value.substr(0, value.size() - size);
+  return value;
+}
+
+}  // namespace
+
+QwenToolCallScan ScanQwenToolCall(std::string_view text) {
+  QwenToolCallScan result;
+  if (!text.starts_with(QwenToolSyntax::kCallOpen))
+    return result;
+  result.matched = true;
+  const std::size_t begin = QwenToolSyntax::kCallOpen.size();
+  result.progress = begin;
+  result.end = begin;
+
+  QwenToolCallSyntax call;
+  call.canonical_header = text.starts_with(QwenToolSyntax::kNativeCallOpen);
+  std::string_view body = text.substr(begin);
+  const auto consume = [&](std::string_view tag) {
+    body = TrimAscii(body);
+    if (!body.starts_with(tag))
+      return false;
+    body.remove_prefix(tag.size());
+    return true;
+  };
+  body = TrimAscii(body);
+  if (consume(QwenToolSyntax::kFunctionOpen)) {
+    const auto name_end = body.find('>');
+    if (name_end == std::string_view::npos)
+      return result;
+    call.name = std::string(TrimAscii(body.substr(0, name_end)));
+    body.remove_prefix(name_end + 1);
+    if (call.name.empty())
+      return result;
+    bool valid = true;
+    bool canonical_parameters = call.canonical_header;
+    while (consume(QwenToolSyntax::kParameterOpen)) {
+      const auto parameter_name_end = body.find('>');
+      if (parameter_name_end == std::string_view::npos) {
+        valid = false;
+        break;
+      }
+      const std::string spelled(body.substr(0, parameter_name_end));
+      body.remove_prefix(parameter_name_end + 1);
+      auto close = body.find(QwenToolSyntax::kParameterClose);
+      const bool framed_value =
+          body.starts_with('\n') || body.starts_with("\r\n");
+      canonical_parameters &= framed_value;
+      if (framed_value) {
+        // The canonical Qwen delimiter includes the following newline. A line
+        // such as "</parameter> is literal" is argument data.
+        auto framed = body.find("\n</parameter>");
+        while (framed != std::string_view::npos) {
+          const auto tail =
+              body.substr(framed + std::string_view("\n</parameter>").size());
+          // Compact legacy headers also admit compact closers. A canonical
+          // header uses the complete delimiter: apparent tags on the same
+          // line remain argument data, as in llama.cpp.
+          if (tail.starts_with('\n') || tail.starts_with("\r\n") ||
+              (!canonical_parameters &&
+               (TrimAscii(tail).starts_with(QwenToolSyntax::kFunctionClose) ||
+                TrimAscii(tail).starts_with(QwenToolSyntax::kParameterOpen))))
+            break;
+          framed = body.find("\n</parameter>", framed + 1);
+        }
+        close = framed == std::string_view::npos ? framed : framed + 1;
+        // Never recover a nested example from inside an unfinished value.
+        result.progress =
+            close == std::string_view::npos
+                ? text.size()
+                : static_cast<std::size_t>(body.data() - text.data()) + close +
+                      QwenToolSyntax::kParameterClose.size();
+        result.end = result.progress;
+      }
+      if (close == std::string_view::npos || spelled.empty()) {
+        if (framed_value && !spelled.empty()) {
+          auto value = body;
+          const auto frame = body.starts_with("\r\n") ? std::string_view("\r\n")
+                                                      : std::string_view("\n");
+          value.remove_prefix(frame.size());
+          value = BeforePartialDelimiter(value, "\n</parameter>\n");
+          value = BeforePartialDelimiter(value, "\n</parameter>\r\n");
+          if (frame == "\r\n" && value.ends_with('\r'))
+            value.remove_suffix(1);
+          call.unfinished = QwenToolCallParameter{.name = spelled,
+                                                  .value = std::string(value),
+                                                  .framed = true,
+                                                  .progress = result.progress};
+        }
+        valid = false;
+        break;
+      }
+      const auto nested = body.find(QwenToolSyntax::kCallOpen);
+      if (!body.starts_with('\n') && !body.starts_with("\r\n") &&
+          nested < close &&
+          TrimAscii(body.substr(nested + QwenToolSyntax::kCallOpen.size()))
+              .starts_with(QwenToolSyntax::kFunctionOpen)) {
+        // Recover an unframed, unterminated legacy call at the next complete
+        // opener. A literal <tool_call> alone is always argument data.
+        valid = false;
+        break;
+      }
+      const auto value = StripFramingNewlines(body.substr(0, close));
+      call.parameters.push_back(
+          QwenToolCallParameter{.name = spelled,
+                                .value = std::string(value),
+                                .framed = framed_value,
+                                .progress = result.progress});
+      body.remove_prefix(close + QwenToolSyntax::kParameterClose.size());
+    }
+    call.complete = valid && consume(QwenToolSyntax::kFunctionClose) &&
+                    consume(QwenToolSyntax::kCallClose);
+    if (call.complete)
+      result.end = static_cast<std::size_t>(body.data() - text.data());
+  } else {
+    // Recovery boundaries belong to the envelope, not quoted JSON data. An
+    // unfinished string owns the remaining bytes, including tool tags.
+    bool in_string = false;
+    bool escaped = false;
+    std::size_t close = 0;
+    for (; close < body.size(); ++close) {
+      const char byte = body[close];
+      if (in_string) {
+        if (escaped)
+          escaped = false;
+        else if (byte == '\\')
+          escaped = true;
+        else if (byte == '"')
+          in_string = false;
+        continue;
+      }
+      if (byte == '"') {
+        in_string = true;
+        continue;
+      }
+      if (body.substr(close).starts_with(QwenToolSyntax::kCallClose) ||
+          body.substr(close).starts_with(QwenToolSyntax::kCallOpen))
+        break;
+    }
+    result.progress =
+        static_cast<std::size_t>(body.data() - text.data()) + close;
+    result.end = result.progress;
+    if (body.substr(close).starts_with(QwenToolSyntax::kCallClose)) {
+      result.progress += QwenToolSyntax::kCallClose.size();
+      result.end = result.progress;
+      call.native = false;
+      call.json_payload = std::string(TrimAscii(body.substr(0, close)));
+      call.complete = true;
+    }
+  }
+  result.call = std::move(call);
+  return result;
+}
 
 std::unique_ptr<QwenChatTemplate> QwenChatTemplate::CreateFromGguf(
     const core::GgufReader& reader, std::string* error_msg) {
@@ -335,9 +608,12 @@ std::optional<std::string> QwenChatTemplate::Render(
 std::optional<std::string> QwenChatTemplate::Render(
     std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
     const ChatTemplateOptions& options, std::string* error_msg,
-    std::vector<std::size_t>* image_offsets, std::size_t* stable_prefix_bytes) {
+    std::vector<std::size_t>* image_offsets, std::size_t* stable_prefix_bytes,
+    std::vector<ContentSpan>* content_spans) {
   if (image_offsets != nullptr)
     image_offsets->clear();
+  if (content_spans != nullptr)
+    content_spans->clear();
   if (messages.empty()) {
     if (error_msg != nullptr) {
       *error_msg = "No messages provided";
@@ -345,18 +621,34 @@ std::optional<std::string> QwenChatTemplate::Render(
     return std::nullopt;
   }
 
+  // The reference template accepts one leading system turn, but OpenAI clients
+  // such as Codex send system/developer messages mid-conversation. Hoist them,
+  // in order, into that turn; templates that allow them keep them in place.
+  const auto is_system = [](const ChatMessage& message) {
+    return message.role == ChatRole::kSystem ||
+           message.role == ChatRole::kDeveloper;
+  };
+  std::vector<ChatMessage> hoisted;
+  if (std::any_of(std::find_if_not(messages.begin(), messages.end(), is_system),
+                  messages.end(), is_system)) {
+    hoisted.assign(messages.begin(), messages.end());
+    std::stable_partition(hoisted.begin(), hoisted.end(), is_system);
+    messages = hoisted;
+  }
+
   std::string output;
 
   std::size_t estimated_len = 0;
   for (const auto& msg : messages) {
-    estimated_len +=
-        msg.content.size() + msg.thought.size() + 32 + msg.images.size() * 64;
+    estimated_len += msg.content.size() + msg.framing_suffix.size() +
+                     msg.thought.size() + 32 + msg.images.size() * 64;
     std::size_t previous = 0;
     for (const auto& image : msg.images) {
-      if (msg.role != ChatRole::kUser || image.bytes == nullptr ||
-          image.offset < previous || image.offset > msg.content.size()) {
+      if ((msg.role != ChatRole::kUser && msg.role != ChatRole::kTool) ||
+          image.bytes == nullptr || image.offset < previous ||
+          image.offset > msg.content.size()) {
         if (error_msg != nullptr)
-          *error_msg = "invalid user image content";
+          *error_msg = "invalid user or tool image content";
         return std::nullopt;
       }
       previous = image.offset;
@@ -394,29 +686,48 @@ std::optional<std::string> QwenChatTemplate::Render(
 
   std::size_t message_index = 0;
   std::string system_content;
+  std::vector<ContentSpan> system_content_spans;
   while (message_index < messages.size() &&
          (messages[message_index].role == ChatRole::kSystem ||
           messages[message_index].role == ChatRole::kDeveloper)) {
-    const auto content = Trim(messages[message_index].content);
+    const auto& message = messages[message_index];
+    const std::string untrimmed = message.content + message.framing_suffix;
+    const auto content = Trim(untrimmed);
     if (!content.empty()) {
       if (!system_content.empty())
         system_content.push_back('\n');
-      system_content.append(content);
+      const auto begin =
+          static_cast<std::size_t>(content.data() - untrimmed.data());
+      const auto client_end =
+          std::min(message.content.size(), begin + content.size());
+      const auto client_size = client_end > begin ? client_end - begin : 0;
+      AppendContent(system_content, &system_content_spans,
+                    content.substr(0, client_size));
+      system_content.append(content.substr(client_size));
     }
     ++message_index;
   }
 
   std::string system_prefix;
+  std::vector<ContentSpan> system_spans;
   AppendReasoningInstruction(system_prefix, options);
   AppendToolsPrompt(system_prefix, tools, options.require_tool_call);
   if (!system_prefix.empty() && !system_content.empty()) {
     system_prefix.append("\n\n");
   }
+  const auto system_content_offset = system_prefix.size();
   system_prefix.append(system_content);
+  for (const auto& span : system_content_spans)
+    system_spans.push_back({system_content_offset + span.offset, span.size});
   if (!system_prefix.empty()) {
-    output.append("<|im_start|>system\n");
+    output.append(kImStart).append("system\n");
+    const auto prefix_offset = output.size();
     output.append(system_prefix);
-    output.append("<|im_end|>\n");
+    output.append(kImEnd).append("\n");
+    if (content_spans != nullptr) {
+      for (const auto& span : system_spans)
+        content_spans->push_back({prefix_offset + span.offset, span.size});
+    }
   }
 
   std::size_t last_user_index = messages.size();
@@ -439,21 +750,30 @@ std::optional<std::string> QwenChatTemplate::Render(
 
   std::size_t image_count = 0;
   std::optional<std::size_t> mutable_reasoning;
+  // Agent clients may end every request with a user message that the next
+  // request replaces (per-turn runtime context) rather than keeps. A
+  // checkpoint at the end of the prompt then never prefixes the next request.
+  // Such context follows a tool result or another user message, not an
+  // assistant reply, so only then keep the checkpoint before the final
+  // text-only user turn. A client that keeps the message prefills it again.
+  const bool final_user_turn =
+      last_user_index + 1 == messages.size() &&
+      messages.back().images.empty() && messages.size() >= 2 &&
+      (messages[messages.size() - 2].role == ChatRole::kTool ||
+       messages[messages.size() - 2].role == ChatRole::kUser);
+  bool seen_assistant = false;
+  std::optional<std::size_t> final_user_start;
   for (; message_index < messages.size(); ++message_index) {
     const auto& msg = messages[message_index];
-    if (msg.role == ChatRole::kSystem || msg.role == ChatRole::kDeveloper) {
-      if (error_msg != nullptr)
-        *error_msg = "System message must be at the beginning.";
-      return std::nullopt;
-    }
     const bool tool_result = msg.role == ChatRole::kTool;
     if (tool_result) {
-      output.append("<|im_start|>user\n");
+      output.append(kImStart).append("user\n");
       while (message_index < messages.size() &&
              messages[message_index].role == ChatRole::kTool) {
         const auto& tool_message = messages[message_index];
         output.append("<tool_response>\n");
-        output.append(Trim(tool_message.content));
+        AppendMessageContent(output, tool_message, options, image_count,
+                             image_offsets, content_spans);
         output.append("\n</tool_response>");
         ++message_index;
         if (message_index < messages.size() &&
@@ -462,7 +782,7 @@ std::optional<std::string> QwenChatTemplate::Render(
         }
       }
       --message_index;
-      output.append("<|im_end|>\n");
+      output.append(kImEnd).append("\n");
       continue;
     }
     // Current tool-cycle assistants retain their reasoning even when older
@@ -471,57 +791,33 @@ std::optional<std::string> QwenChatTemplate::Render(
     if (!options.preserve_thinking && msg.role == ChatRole::kAssistant &&
         message_index > last_user_index && !mutable_reasoning)
       mutable_reasoning = output.size();
+    if (msg.role == ChatRole::kAssistant)
+      seen_assistant = true;
+    else if (final_user_turn && seen_assistant &&
+             message_index == last_user_index)
+      final_user_start = output.size();
     const auto role_name = ToString(msg.role);
-    output.append("<|im_start|>");
+    output.append(kImStart);
     output.append(role_name);
     output.push_back('\n');
 
-    std::string image_content;
-    std::vector<std::size_t> local_image_offsets;
-    if (!msg.images.empty()) {
-      std::size_t cursor = 0;
-      for (const auto& image : msg.images) {
-        image_content.append(std::string_view(msg.content)
-                                 .substr(cursor, image.offset - cursor));
-        ++image_count;
-        if (options.add_vision_id)
-          image_content.append("Picture " + std::to_string(image_count) + ": ");
-        image_content.append("<|vision_start|>");
-        local_image_offsets.push_back(image_content.size());
-        image_content.append("<|image_pad|><|vision_end|>");
-        cursor = image.offset;
-      }
-      image_content.append(std::string_view(msg.content).substr(cursor));
-    }
-    // Trim the fully rendered content, including image markers. Whitespace
-    // between text and images remains significant; image offsets follow the
-    // trim.
-    const std::string_view untrimmed = msg.images.empty()
-                                           ? std::string_view(msg.content)
-                                           : std::string_view(image_content);
-    const std::string_view content = Trim(untrimmed);
     const std::string_view thought = Trim(msg.thought);
     if (msg.role == ChatRole::kAssistant &&
         (options.preserve_thinking || message_index > last_user_index)) {
       output.append("<think>\n");
-      output.append(thought);
+      AppendContent(output, content_spans, thought);
       output.append("\n</think>\n\n");
     }
 
-    if (image_offsets != nullptr && !local_image_offsets.empty()) {
-      const auto removed =
-          static_cast<std::size_t>(content.data() - untrimmed.data());
-      for (const auto offset : local_image_offsets)
-        image_offsets->push_back(output.size() + offset - removed);
-    }
-    output.append(content);
+    const bool has_content = AppendMessageContent(
+        output, msg, options, image_count, image_offsets, content_spans);
     if (msg.role == ChatRole::kAssistant && !msg.tool_calls.empty()) {
-      if (!content.empty()) {
+      if (has_content) {
         output.append("\n\n");
       }
-      AppendToolCalls(output, msg.tool_calls);
+      AppendToolCalls(output, msg.tool_calls, content_spans);
     }
-    output.append("<|im_end|>\n");
+    output.append(kImEnd).append("\n");
 
     if (output.size() > options.max_output_bytes) {
       if (error_msg != nullptr) {
@@ -533,7 +829,8 @@ std::optional<std::string> QwenChatTemplate::Render(
   }
 
   if (stable_prefix_bytes != nullptr)
-    *stable_prefix_bytes = mutable_reasoning.value_or(output.size());
+    *stable_prefix_bytes = std::min(mutable_reasoning.value_or(output.size()),
+                                    final_user_start.value_or(output.size()));
   if (options.add_generation_prompt)
     output.append(GenerationPrompt(options.enable_thinking));
 
@@ -548,14 +845,72 @@ std::optional<std::string> QwenChatTemplate::Render(
 }
 
 std::string_view GenerationPrompt(bool enable_thinking) {
-  return enable_thinking ? "<|im_start|>assistant\n<think>\n"
-                         : "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+  static constexpr std::string_view kThinkingSuffix = "assistant\n<think>\n";
+  static constexpr std::string_view kAnsweredSuffix =
+      "assistant\n<think>\n\n</think>\n\n";
+  static constexpr auto kThinking =
+      ConcatControlText<kImStart, kThinkingSuffix>();
+  static constexpr auto kAnswered =
+      ConcatControlText<kImStart, kAnsweredSuffix>();
+  return enable_thinking ? std::string_view(kThinking.data(), kThinking.size())
+                         : std::string_view(kAnswered.data(), kAnswered.size());
 }
 
 std::optional<std::vector<TokenId>> QwenChatTemplate::RenderAndTokenize(
     const QwenTokenizer& tokenizer, std::span<const ChatMessage> messages,
     const ChatTemplateOptions& options, std::string* error_msg) {
   return RenderAndTokenize(tokenizer, messages, {}, options, error_msg);
+}
+
+std::vector<TokenId> QwenChatTemplate::EncodeRendered(
+    const QwenTokenizer& tokenizer, std::string_view rendered,
+    std::size_t begin, std::size_t end,
+    std::span<const ContentSpan> content_spans,
+    const TokenizerOptions& options) {
+  const auto slice = rendered.substr(begin, end - begin);
+  // Only split spans containing literal vocabulary-token spellings. Splitting
+  // every content span when a later message contains one changes earlier BPE
+  // merges at content/framing boundaries and invalidates unchanged history.
+  TokenizerOptions as_framing = options;
+  as_framing.parse_special_tokens = true;
+  TokenizerOptions as_content = options;
+  as_content.parse_special_tokens = false;
+  const auto encode = [&](std::size_t from, std::size_t to,
+                          const TokenizerOptions& opts) {
+    return tokenizer.Encode(rendered.substr(from, to - from), opts);
+  };
+
+  std::vector<TokenId> tokens;
+  std::size_t cursor = begin;
+  for (const auto& span : content_spans) {
+    const auto span_end = span.offset + span.size;
+    if (span_end <= begin || span.offset >= end) {
+      continue;
+    }
+    const auto from = std::max(span.offset, begin);
+    const auto to = std::min(span_end, end);
+    const auto content_text = rendered.substr(from, to - from);
+    if (std::none_of(tokenizer.SpecialTokens().begin(),
+                     tokenizer.SpecialTokens().end(), [&](const auto& token) {
+                       return content_text.find(token.first) !=
+                              std::string_view::npos;
+                     }))
+      continue;
+    if (from > cursor) {
+      const auto framing = encode(cursor, from, as_framing);
+      tokens.insert(tokens.end(), framing.begin(), framing.end());
+    }
+    const auto content = encode(from, to, as_content);
+    tokens.insert(tokens.end(), content.begin(), content.end());
+    cursor = to;
+  }
+  if (cursor == begin)
+    return tokenizer.Encode(slice, options);
+  if (cursor < end) {
+    const auto tail = encode(cursor, end, as_framing);
+    tokens.insert(tokens.end(), tail.begin(), tail.end());
+  }
+  return tokens;
 }
 
 std::optional<std::vector<TokenId>> QwenChatTemplate::RenderAndTokenize(
@@ -571,7 +926,9 @@ std::optional<std::vector<TokenId>> QwenChatTemplate::RenderAndTokenize(
     }
     return std::nullopt;
   }
-  const auto rendered = Render(messages, tools, options, error_msg);
+  std::vector<ContentSpan> content_spans;
+  const auto rendered = Render(messages, tools, options, error_msg, nullptr,
+                               nullptr, &content_spans);
   if (!rendered.has_value()) {
     return std::nullopt;
   }
@@ -580,8 +937,8 @@ std::optional<std::vector<TokenId>> QwenChatTemplate::RenderAndTokenize(
   tok_opts.add_bos = false;
   tok_opts.add_eos = false;
   tok_opts.parse_special_tokens = true;
-
-  return tokenizer.Encode(*rendered, tok_opts);
+  return EncodeRendered(tokenizer, *rendered, 0, rendered->size(),
+                        content_spans, tok_opts);
 }
 
 }  // namespace gufo::tokenization

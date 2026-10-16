@@ -343,10 +343,15 @@ int main(int argc, char** argv) {
     const auto rows = static_cast<std::uint32_t>(
         std::min<std::size_t>(n, options.max_logit_rows));
     std::vector<float> out(static_cast<std::size_t>(rows) * c.vocab_size);
+    // Name the following chunk as Session::Feed does, so its n-gram read
+    // overlaps this one.
+    const std::size_t next =
+        std::min<std::size_t>(batch, tokens.size() - off - n);
     if (!executor->Forward(
             *session, std::span<const std::int32_t>(tokens.data() + off, n),
-            rows, out.data(), q::rocm::Executor::ForwardMode::kPrefill,
-            &error)) {
+            rows, out.data(), q::rocm::Executor::ForwardMode::kPrefill, &error,
+            nullptr,
+            std::span<const std::int32_t>(tokens.data() + off + n, next))) {
       std::fprintf(stderr, "prefill failed: %s\n", error.c_str());
       return 1;
     }

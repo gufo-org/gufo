@@ -17,6 +17,7 @@
 #include "src/models/qwen/vision/encoder.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
+#include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 
 namespace gufo::core {
@@ -29,10 +30,14 @@ struct ModelWeights;
 struct MtpWeights;
 class NgramTable;
 struct MtpCandidateLogits;
+class ContinuationAdapter;
+class ContinuationHooks;
 namespace rocm {
 class DeviceModel;
 class Executor;
 class Session;
+class SnapshotState;
+struct PrefillCheckpoint;
 }  // namespace rocm
 
 struct ModelOptions {
@@ -79,6 +84,7 @@ public:
   [[nodiscard]] bool IsStopToken(std::int32_t token) const noexcept;
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
   [[nodiscard]] std::uint32_t PrefillCapacity() const noexcept;
+  [[nodiscard]] std::uint32_t PrefillThroughCapacity() const noexcept;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
@@ -115,8 +121,15 @@ private:
   std::unique_ptr<rocm::Executor> executor_;
   std::shared_ptr<qwen::vision::Encoder> vision_;
   MtpBatchController batch_policy_;
+  /// MTP drafts may use the small head (draft_vocab.hpp).
+  bool draft_subset_{false};
+  /// Special tokens at the start of every session's draft table.
+  std::uint32_t draft_specials_{0};
+  /// Prefix and special tokens: always in the small head.
+  [[nodiscard]] bool InDraftSubset(std::int32_t token) const;
 
   friend class Session;
+  friend class ContinuationAdapter;
 };
 
 /// One conversation's context. Sync feeds a prompt (reusing whatever prefix
@@ -129,9 +142,19 @@ public:
   Session& operator=(const Session&) = delete;
 
   /// Makes the session state equal to `prompt`: keeps the longest common
-  /// prefix with the current tokens, reprocesses the rest.
+  /// prefix with the current tokens, reprocesses the rest. `next` may name
+  /// the tokens the following Sync will append, so their n-gram rows can be
+  /// read during this one; it never changes the result.
   [[nodiscard]] bool Sync(std::span<const std::int32_t> prompt,
-                          std::string* error_msg = nullptr);
+                          std::string* error_msg = nullptr,
+                          std::span<const std::int32_t> next = {});
+  /// Prefills through a stable text boundary in the same forward, returning
+  /// a checkpoint of that boundary while the live session reaches prompt.
+  [[nodiscard]] bool SyncThrough(std::span<const std::int32_t> prompt,
+                                 std::uint32_t boundary,
+                                 std::unique_ptr<SessionSnapshot>* checkpoint,
+                                 std::string* error_msg = nullptr,
+                                 double* capture_ms = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
   struct DecodeResult {
@@ -189,26 +212,34 @@ public:
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
   void ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt);
   /// A new request reusing cached context starts its own acceptance history.
-  void ResetDraftPolicy() noexcept { draft_length_.Reset(); }
+  void ResetDraftPolicy();
 
   struct SpeculativeStats {
     std::uint64_t cycles{0};
     std::uint64_t drafted{0};
     std::uint64_t accepted{0};
+    /// Cycles whose draft scored the small head (draft_vocab.hpp).
+    std::uint64_t small_head_cycles{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
   }
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 17;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
-  /// Captures the whole context (tokens, device caches and recurrent
-  /// state, draft-block state, last logits) into host memory. The
-  /// speculative length controller is preserved for stochastic replay.
+  [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
+      std::uint32_t position) const;
+  /// Captures the whole context and speculative length controller. Mutable
+  /// state is copied immediately; append-only cache rows borrow this session
+  /// until a rewind, reset, destruction, fork or byte reader needs them.
+  enum class SnapshotMode { kBorrowed, kMaterialized };
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
-      std::string* error_msg = nullptr) const;
+      std::string* error_msg = nullptr,
+      SnapshotMode mode = SnapshotMode::kBorrowed) const;
+  [[nodiscard]] bool OwnsSnapshot(
+      const SessionSnapshot& snapshot) const noexcept;
   /// Replaces this session's context with a snapshot of the same model.
   /// Image snapshots require matching consumed images via ConfigureVision;
   /// the attached prompt may append future images. Pixels are not serialized.
@@ -220,15 +251,38 @@ public:
 
 private:
   friend class Model;
+  friend class ContinuationAdapter;
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
 
+  using PrefillCapture = std::function<void(const rocm::PrefillCheckpoint&)>;
+  bool SyncThroughComponents(std::span<const std::int32_t>, std::uint32_t,
+                             const PrefillCapture&, std::string*);
+
   bool Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
-            bool prefill = false);
+            bool prefill = false, std::uint32_t boundary = 0,
+            std::unique_ptr<SessionSnapshot>* checkpoint = nullptr,
+            double* capture_ms = nullptr,
+            std::span<const std::int32_t> after = {},
+            const PrefillCapture& capture = {});
+  bool SyncImpl(std::span<const std::int32_t> prompt, std::string* error_msg,
+                std::uint32_t boundary,
+                std::unique_ptr<SessionSnapshot>* checkpoint,
+                double* capture_ms = nullptr,
+                std::span<const std::int32_t> next = {},
+                const PrefillCapture& capture = {});
+  std::unique_ptr<SessionSnapshot> SaveSnapshotImpl(
+      const rocm::Session& state, std::span<const std::int32_t> tokens,
+      std::span<const float> logits, std::uint32_t hidden_rows,
+      std::string* error_msg, SnapshotMode mode) const;
+  bool RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
+                           const rocm::SnapshotState* deferred,
+                           std::string* error_msg);
   /// Trunk rows the draft block may still read: [hidden_base_, size).
   [[nodiscard]] std::uint32_t KeptHiddenRows() const noexcept;
   bool DraftCatchUp(std::int32_t next_token, bool propose,
                     std::string* error_msg,
-                    MtpCandidateLogits* candidates = nullptr);
+                    MtpCandidateLogits* candidates = nullptr,
+                    bool draft_subset = false);
   bool DraftReplay(std::int32_t next_token, std::vector<std::int32_t>* replay,
                    std::int32_t* hidden_row, std::string* error_msg) const;
   static bool DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
@@ -261,30 +315,43 @@ private:
   [[nodiscard]] std::span<const std::uint8_t> ImageIdentity(
       std::size_t token_count) const;
   bool valid_{true};
+  ContinuationHooks* continuation_hooks_{nullptr};
+  /// This request's draft vocabulary; the device table follows it.
+  MtpDraftVocab draft_vocab_;
+  bool draft_vocab_stale_{false};
+  std::vector<std::int32_t> draft_added_;
+  /// After the token history is replaced: the table restarts from it.
+  void ForgetDraftVocab() noexcept { draft_vocab_stale_ = true; }
+  /// Brings the draft table up to the committed tokens.
+  bool SyncDraftVocab(std::string* error_msg);
   [[nodiscard]] bool MtpEnabled() const noexcept;
 };
 
-/// Immutable host copy of a session context. The same bytes restore in
-/// memory and persist to disk.
+/// Immutable session checkpoint. Committed cache rows may still reside in
+/// the source session. The complete byte form restores in memory and on disk.
 class SessionSnapshot final {
 public:
-  ~SessionSnapshot() = default;
+  ~SessionSnapshot();
   SessionSnapshot(const SessionSnapshot&) = delete;
   SessionSnapshot& operator=(const SessionSnapshot&) = delete;
   SessionSnapshot(SessionSnapshot&&) = delete;
   SessionSnapshot& operator=(SessionSnapshot&&) = delete;
 
+  /// Complete payload size, including borrowed rows, for cache admission.
   [[nodiscard]] std::uint64_t SizeBytes() const noexcept { return size_; }
-  [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept {
-    return {data_.get(), size_};
-  }
+  /// Frozen device storage, counting each shared backing block once.
+  /// Borrowed live rows and allocator reservations are excluded.
+  [[nodiscard]] std::uint64_t DeviceBytes() const;
+  /// Materializes borrowed rows; may throw on a failed device transfer.
+  [[nodiscard]] std::span<const std::uint8_t> bytes() const;
   [[nodiscard]] bool CopyTo(std::span<std::uint8_t> destination) const noexcept;
 
 private:
   explicit SessionSnapshot(std::uint64_t size);
 
-  std::unique_ptr<std::uint8_t[]> data_;
+  std::shared_ptr<std::uint8_t[]> data_;
   std::uint64_t size_{0};
+  std::shared_ptr<rocm::SnapshotState> deferred_;
 
   friend class Session;
 };

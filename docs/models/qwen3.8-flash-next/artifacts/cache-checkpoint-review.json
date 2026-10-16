@@ -1,0 +1,1295 @@
+{
+  "date": "2026-10-16",
+  "scope": "PR #615: Flash-Next component-cache overhead after merged PR #603.",
+  "source": {
+    "revision": "fdc2184941a19867fb2d643030717fec344b7280",
+    "production_sha256": "b1ab0e9795df6fbac837cb00971dd021058cff045fc63178ccc3ac53265165f9",
+    "baseline_revision": "51a8b00d9dc5360688fc8642df94dfe1387ec2ca",
+    "baseline_production_sha256": "e165ca02431ba3f6eb581ba64e8422807a00684d81faecdf67ed99fb76d23c77",
+    "retained_benchmark_control": "c4177e37ffc97748cbb3774590674722fae8f78c has the same source tree as merged 51a8b00d.",
+    "toolchain": "Pinned flake.lock unchanged; clean production nix build."
+  },
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+    "target": "UD-Q4_K_XL",
+    "draft": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+    "projector": "mmproj-BF16.gguf"
+  },
+  "timing_gate": {
+    "slowdown_fraction": 0.05,
+    "noise_ms": 3,
+    "scope": "Every measured request/phase. No averaging across requests or widened margins.",
+    "qualification": "Correctness and cache work are separate from timing. Raw strict comparisons retain beneficial cache-work changes as differences; they are not relabelled passes."
+  },
+  "retained_numerical_evidence": {
+    "scope": "PR #603 target/sampling qualification, reused because this follow-up changes storage, bookkeeping and graph scheduling, not inference arithmetic. Final-build native replay and sampling checks also pass.",
+    "source": {
+      "base": "f6ca085a5091eed23541cde6fa1ff282cbd4c68b",
+      "staged_tree": "75169bac3b0ceb11d52e2b23a2963a65bbd9308c",
+      "patch_sha256": "26833cc1305057c7be781135254a569bbb5030fba9841ad15ce3aae3437417a8",
+      "production_sha256": "5964edfaf8a876078939fc2b34c7e460b0f60dddcec0ae5008b58ef4083d3e98",
+      "changed_files": {
+        "docs/models/qwen3.8-flash-next/EXPERIMENTS.md": "dac902b49c5a99d09496436df8394fced1b632b1908adbf85a6b7dd0b9bb255f",
+        "docs/models/qwen3.8-flash-next/README.md": "bd3cf651649460697e5f4fed9c759c2586714312100d2b3c55a7eccb15f705d4",
+        "src/models/qwen38_flash_next/continuation_adapter.cpp": "56f64e1417fcf4b9570be49259c0b8d2932946fe19974d3416a634fe8d3898b1",
+        "src/models/qwen38_flash_next/draft_vocab.hpp": "ac7cf22a72f2eeb0705a516c7b45fa322f7a584e6fe1e83d9adc38370fa22353",
+        "src/models/qwen38_flash_next/engine.cpp": "bcb422d6f1faa2b6faa78bcddfc61c4492e673c3ab3c213d35af2593c0780b38",
+        "src/models/qwen38_flash_next/engine.hpp": "71c6b6fa2cafc764ad4920f01bb217ef6b2a7b26d65a6e801e408adf638ab2c6",
+        "src/models/qwen38_flash_next/kernels/rocm/batch.cpp": "a4c50fb0f14e25cc55b5b5522663b38898b97892ed00c7db9351a10f9e2e27a7",
+        "src/models/qwen38_flash_next/kernels/rocm/device_model.cpp": "ed33387ebc57e85faa913c05b57e52e1a7d92a48d732615d7758683f8e053928",
+        "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp": "e7051b567f6d2f8185df0dd1e2ba21bbaa995fb8610daab86c7b547e09bef4e1",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": "8709ba9a7414f378cc1b21c18248046387a8c3798ca3d81adc5c87a0dfbdf630",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.hpp": "9a6b1c26840e69d3ce007beb45af0c676fa7a1d7743f31b2ea4be0cc418bbee3",
+        "src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp": "3465faa851fa983c7aaa5a4d8825567d6657080b292d8d3a5f486d6d2a179b6b",
+        "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp": "429754144b6e8fe35aa6f1b2f187110d2ec05011aba9730253a3b513948327aa",
+        "tests/models/qwen38_flash_next/CMakeLists.txt": "6db5c9e13bd7692014e184de94959cc1efb47eb10d167e7c4f5d12b9b855a174",
+        "tests/models/qwen38_flash_next/continuation_adapter_test.cpp": "dc062a436fa6cacbf7d5474901652c4f1bfb112375cb3738d744a38265983d3f",
+        "tests/models/qwen38_flash_next/draft_vocab_test.cpp": "bd8106bd363bd47ca247664752d8ba0bdb30d3996cc91a8c9e1a4c167ca2e3e1",
+        "tests/models/qwen38_flash_next/mtp_replay.hpp": "ccc98b3dea62654ebad4a95d9b4ee2686cd171708211a5b12e253a44cbcd6520",
+        "tests/models/qwen38_flash_next/session_test.cpp": "f728b7458a098b00f7ff47dd1ff9eb264da7603ea4ff8d7e3daa9cc2d7c01d85"
+      }
+    },
+    "target_logits": {
+      "status": "passed",
+      "main": "ready-logits-main.f32",
+      "candidate": "ready-logits-review-ready.f32",
+      "prompt_tokens": 28092,
+      "continuation_steps": 102,
+      "vocabulary": 248320,
+      "values_compared": 25328640,
+      "byte_equal": true,
+      "all_finite": true,
+      "max_absolute_error": 0.0,
+      "dump_sha256": [
+        "54c4a8b969f2bd7f8556c7d9b2207290f5e1a664b9560f18ba1921e831e40b2d",
+        "54c4a8b969f2bd7f8556c7d9b2207290f5e1a664b9560f18ba1921e831e40b2d"
+      ],
+      "continuation_ids_sha256": "9655160e3b14e20464fc24117d93dc1ae531ac968f968ada1eccbe35f57223c7"
+    },
+    "independent_mtp": {
+      "comparisons": 41,
+      "text_image_states": 8,
+      "worst_relative_rms": 0.0007655,
+      "limit": 0.002
+    },
+    "limits": [
+      "Regression evidence against main, not original unquantized-model/conversion accuracy.",
+      "Changed proposals may consume random numbers differently across builds.",
+      "No claim that every sampled answer or request becomes faster.",
+      "Pi smoke covers four actual coding tasks; it is not the original author's long agent replay.",
+      "Published BENCHMARKS.md, root README numbers, graphs and llama.cpp data are unchanged."
+    ],
+    "original_report_sha256": "e40b03581b0d57656f53d63657cb89e478f23ab27ef0b12e7233a5cc4f260710"
+  },
+  "snapshot_copy": {
+    "revision": "9f09ca6bfe627374b870053abfc3ebdf720f0553",
+    "scope": "Same retained integer-copy implementation.",
+    "independent_byte_cases": 150,
+    "model_boundaries": [
+      2047,
+      8203
+    ],
+    "modes": [
+      "AR",
+      "MTP"
+    ],
+    "checks": [
+      "Registered/pageable buffers, alignment, allocation boundaries and ragged tails.",
+      "Private state and row captures match pageable copies byte-for-byte.",
+      "Restored full logits, greedy/sampled continuation, learned drafts and images.",
+      "Mutation/failure guards and independent side-stream copying during thread-local graph capture."
+    ],
+    "adapter_status": {
+      "revision": "9f09ca6bfe627374b870053abfc3ebdf720f0553",
+      "returncode": 0,
+      "started": 1792118107.323908,
+      "finished": 1792118284.5398884
+    },
+    "peer_copy_status": 0
+  },
+  "native_regressions": {
+    "before_failures": [
+      "Released private states fragmented by surviving shared KV rows.",
+      "Reverse KV placement prevented contiguous restore transfers.",
+      "A large resumed retry displaced another conversation's covered history.",
+      "Finished preservation allowed shallow side traffic to evict a deep live frontier.",
+      "A longer resumed retry could not reclaim its own covered ancestors."
+    ],
+    "coverage": [
+      "Ledger capacity and competing reservations; bounded circular scan after injected failure.",
+      "Persistent pins, non-prefix sharing and inherited chunks across failed allocations.",
+      "Ascending KV restores with opposite-end private-state placement.",
+      "Source/current edit boundaries, forks and unrelated conversations remain protected.",
+      "Resident zeroed pages, refused THP collapse and population/registration cleanup."
+    ],
+    "status_files": {
+      "pp-lifetime-native-status.json": "c9bc2570b6f44934bbb89cdb8527117c8531f088c9987f9e09ab0207936eca43",
+      "pp-boundary-native-status.json": "0b4b3721ea9db7b200ed0b08e1d32f57684a70f4e465a4e7dbc80ae1f77206d5",
+      "pp-frontier-native-status.json": "ddbc73b0c82bdd88fd2811d8e2f43a4e24bca6d8a1cfa249886b2c7e558899b8",
+      "pp-ancestor-native-status.json": "44443bc80b56a58b8b078a16f283ac6025e9eb01f16b54dde6a38072e545e93c",
+      "pp-peer-copy-status.json": "0031a8d82e734627c152050b947207d093f6b660db9f53fbf59f957a9850ed4e",
+      "pp-snapshot-adapter-status.json": "69ad36b546e7595546627440a77b2cfc156f8a04b720eba6a599717ed441ccdf"
+    }
+  },
+  "functional": {
+    "continuation_mtp": {
+      "source_revision": "e0bead8bd2591b67978a555cf660e2facd79c77c",
+      "requests": 119,
+      "completed_exact_outputs": 108,
+      "request_output_draft_identity_changes": [],
+      "lost_cache_reuse": [],
+      "work_improvements": [
+        {
+          "suite": "cache-growth.requests",
+          "case": "cache_growth_messages_thinking_off_unchanged",
+          "index": 49,
+          "metric": "prefill_tokens",
+          "before": 7,
+          "after": 0
+        },
+        {
+          "suite": "image-cancel.requests",
+          "case": null,
+          "index": 3,
+          "metric": "prefill_tokens",
+          "before": 13,
+          "after": 0
+        },
+        {
+          "suite": "image-thinking-cancel.requests",
+          "case": null,
+          "index": 2,
+          "metric": "prefill_tokens",
+          "before": 5,
+          "after": 0
+        },
+        {
+          "suite": "image-thinking-cancel.requests",
+          "case": null,
+          "index": 4,
+          "metric": "prefill_tokens",
+          "before": 37,
+          "after": 5
+        },
+        {
+          "suite": "legacy-tool-cancel.requests",
+          "case": null,
+          "index": 6,
+          "metric": "prefill_tokens",
+          "before": 7,
+          "after": 0
+        },
+        {
+          "suite": "text-cancel.requests",
+          "case": null,
+          "index": 2,
+          "metric": "prefill_tokens",
+          "before": 7,
+          "after": 0
+        },
+        {
+          "suite": "text-cancel.requests",
+          "case": null,
+          "index": 4,
+          "metric": "prefill_tokens",
+          "before": 13,
+          "after": 7
+        },
+        {
+          "suite": "thinking-tool-cancel.requests",
+          "case": null,
+          "index": 6,
+          "metric": "prefill_tokens",
+          "before": 5,
+          "after": 0
+        }
+      ],
+      "strict_status": "failed",
+      "initial_phase_counts": {
+        "passed": 1646,
+        "inconclusive": 3
+      },
+      "initial_flags": [
+        {
+          "case": "image-cancel-disk.requests.json:0:0",
+          "metric": "queue_ms",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 448.756776,
+              "candidate": 476.020118,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            448.756776,
+            448.756776
+          ],
+          "candidate_range": [
+            476.020118,
+            476.020118
+          ]
+        },
+        {
+          "case": "image-thinking-cancel.requests.json:4:2",
+          "metric": "prefill_ms_per_token",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 6.233655432432433,
+              "candidate": 16.5800426,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            6.233655432432433,
+            6.233655432432433
+          ],
+          "candidate_range": [
+            16.5800426,
+            16.5800426
+          ]
+        },
+        {
+          "case": "text-cancel.requests.json:4:2",
+          "metric": "prefill_ms_per_token",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 8.561100538461538,
+              "candidate": 12.286397285714285,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            8.561100538461538,
+            8.561100538461538
+          ],
+          "candidate_range": [
+            12.286397285714285,
+            12.286397285714285
+          ]
+        }
+      ],
+      "raw_audit_sha256": "49e04c1f7bb1fc80b8c08d676f4a0788abd0ed394f0ae6076d17ade326ddade5"
+    },
+    "continuation_ar": {
+      "source_revision": "e0bead8bd2591b67978a555cf660e2facd79c77c",
+      "requests": 119,
+      "completed_exact_outputs": 108,
+      "request_output_draft_identity_changes": [],
+      "lost_cache_reuse": [],
+      "work_improvements": [
+        {
+          "suite": "cache-growth.requests",
+          "case": "cache_growth_messages_keep_thinking_unchanged",
+          "index": 40,
+          "metric": "prefill_tokens",
+          "before": 5,
+          "after": 0
+        },
+        {
+          "suite": "cache-growth.requests",
+          "case": "cache_growth_messages_thinking_off_unchanged",
+          "index": 49,
+          "metric": "prefill_tokens",
+          "before": 7,
+          "after": 0
+        },
+        {
+          "suite": "image-cancel.requests",
+          "case": null,
+          "index": 3,
+          "metric": "prefill_tokens",
+          "before": 13,
+          "after": 0
+        },
+        {
+          "suite": "legacy-tool-cancel.requests",
+          "case": null,
+          "index": 2,
+          "metric": "prefill_tokens",
+          "before": 7,
+          "after": 0
+        },
+        {
+          "suite": "legacy-tool-cancel.requests",
+          "case": null,
+          "index": 4,
+          "metric": "prefill_tokens",
+          "before": 23,
+          "after": 7
+        },
+        {
+          "suite": "legacy-tool-cancel.requests",
+          "case": null,
+          "index": 6,
+          "metric": "prefill_tokens",
+          "before": 7,
+          "after": 0
+        },
+        {
+          "suite": "text-cancel.requests",
+          "case": null,
+          "index": 2,
+          "metric": "prefill_tokens",
+          "before": 7,
+          "after": 0
+        },
+        {
+          "suite": "text-cancel.requests",
+          "case": null,
+          "index": 4,
+          "metric": "prefill_tokens",
+          "before": 13,
+          "after": 7
+        },
+        {
+          "suite": "thinking-tool-cancel.requests",
+          "case": null,
+          "index": 2,
+          "metric": "prefill_tokens",
+          "before": 5,
+          "after": 0
+        },
+        {
+          "suite": "thinking-tool-cancel.requests",
+          "case": null,
+          "index": 4,
+          "metric": "prefill_tokens",
+          "before": 24,
+          "after": 5
+        }
+      ],
+      "strict_status": "failed",
+      "initial_phase_counts": {
+        "passed": 1644,
+        "inconclusive": 5
+      },
+      "initial_flags": [
+        {
+          "case": "image-cancel-disk.requests.json:0:0",
+          "metric": "queue_ms",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 446.095378,
+              "candidate": 468.804238,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            446.095378,
+            446.095378
+          ],
+          "candidate_range": [
+            468.804238,
+            468.804238
+          ]
+        },
+        {
+          "case": "legacy-tool-cancel.requests.json:4:2",
+          "metric": "prefill_ms_per_token",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 6.095559260869566,
+              "candidate": 12.619387142857144,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            6.095559260869566,
+            6.095559260869566
+          ],
+          "candidate_range": [
+            12.619387142857144,
+            12.619387142857144
+          ]
+        },
+        {
+          "case": "text-cancel.requests.json:4:2",
+          "metric": "prefill_ms_per_token",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 8.65993023076923,
+              "candidate": 12.170243857142856,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            8.65993023076923,
+            8.65993023076923
+          ],
+          "candidate_range": [
+            12.170243857142856,
+            12.170243857142856
+          ]
+        },
+        {
+          "case": "thinking-tool-cancel.requests.json:4:2",
+          "metric": "prefill_ms_per_token",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 5.993528875,
+              "candidate": 16.5312782,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            5.993528875,
+            5.993528875
+          ],
+          "candidate_range": [
+            16.5312782,
+            16.5312782
+          ]
+        },
+        {
+          "case": "thinking-tool-cancel.requests.json:4:2",
+          "metric": "queue_ms",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 35.340001,
+              "candidate": 38.616568,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            35.340001,
+            35.340001
+          ],
+          "candidate_range": [
+            38.616568,
+            38.616568
+          ]
+        }
+      ],
+      "raw_audit_sha256": "a3dbb1589ab85faaace2c08fd1b5f57f17a4fffa928192929091fba45431f2f0"
+    },
+    "pressure_mtp": {
+      "source_revision": "e0bead8bd2591b67978a555cf660e2facd79c77c",
+      "requests": 100,
+      "completed_exact_outputs": 100,
+      "request_output_draft_identity_changes": [],
+      "lost_cache_reuse": [],
+      "work_improvements": [
+        {
+          "suite": "cache-pressure.requests",
+          "case": "pressure_fanout",
+          "index": 47,
+          "metric": "prefill_tokens",
+          "before": 34,
+          "after": 27
+        }
+      ],
+      "strict_status": "failed",
+      "initial_phase_counts": {
+        "passed": 1500,
+        "inconclusive": 1
+      },
+      "initial_flags": [
+        {
+          "case": "cache-pressure.requests.json:pressure_fanout:0",
+          "metric": "prefill_ms_per_token",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 5.056209294117647,
+              "candidate": 5.9380808518518515,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            5.056209294117647,
+            5.056209294117647
+          ],
+          "candidate_range": [
+            5.9380808518518515,
+            5.9380808518518515
+          ]
+        }
+      ],
+      "raw_audit_sha256": "72e0aef18463c81a6f68ca9e34938e40bb759d3cd9dda29ce7a53638426732fa"
+    },
+    "pressure_ar": {
+      "source_revision": "fdc2184941a19867fb2d643030717fec344b7280",
+      "requests": 100,
+      "completed_exact_outputs": 100,
+      "request_output_draft_identity_changes": [],
+      "lost_cache_reuse": [],
+      "work_improvements": [],
+      "strict_status": "inconclusive",
+      "initial_phase_counts": {
+        "passed": 1497,
+        "inconclusive": 4
+      },
+      "initial_flags": [
+        {
+          "case": "cache-pressure.requests.json:pressure_ui_tags_cold:0",
+          "metric": "decode_ms",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 73.05799499999999,
+              "candidate": 79.361956,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            73.05799499999999,
+            73.05799499999999
+          ],
+          "candidate_range": [
+            79.361956,
+            79.361956
+          ]
+        },
+        {
+          "case": "cache-pressure.requests.json:pressure_ui_tags_cold:0",
+          "metric": "decode_ms_per_token",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 36.528997499999996,
+              "candidate": 39.680978,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            36.528997499999996,
+            36.528997499999996
+          ],
+          "candidate_range": [
+            39.680978,
+            39.680978
+          ]
+        },
+        {
+          "case": "cache-pressure.requests.json:pressure_ui_tags_cold:0",
+          "metric": "max_inter_token_ms",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 40.732078,
+              "candidate": 47.927172,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            40.732078,
+            40.732078
+          ],
+          "candidate_range": [
+            47.927172,
+            47.927172
+          ]
+        },
+        {
+          "case": "cache-pressure.requests.json:pressure_ui_tags_cold:0",
+          "metric": "mean_inter_token_ms",
+          "samples": [
+            {
+              "comparison": 0,
+              "baseline": 40.732078,
+              "candidate": 47.927172,
+              "exceeds_margin": true
+            }
+          ],
+          "status": "inconclusive",
+          "reason": "confirmation required",
+          "baseline_range": [
+            40.732078,
+            40.732078
+          ],
+          "candidate_range": [
+            47.927172,
+            47.927172
+          ]
+        }
+      ],
+      "raw_audit_sha256": "e1e2c9fd1a77b1e1ee89e7a599863194badb75d25b5d2522e1cd7a41fbf7fd5a"
+    }
+  },
+  "benchmarks": {
+    "manifest": {
+      "revision": "fdc2184941a19867fb2d643030717fec344b7280",
+      "binary_sha256": "b1ab0e9795df6fbac837cb00971dd021058cff045fc63178ccc3ac53265165f9",
+      "binary_path": "/nix/store/x2jmw49iq1pkzw2yqcrcnhd1lq72dk1k-gufo-0-unstable-fdc2184/bin/gufo",
+      "platform_profile": "performance",
+      "starting_temperatures_c": {
+        "acpitz_2:temp1_input": 39.8,
+        "acpitz_1:temp1_input": 39.8,
+        "k10temp:Tctl": 69.0,
+        "nvme:Sensor 2": 40.85,
+        "nvme:Composite": 38.85,
+        "nvme:Sensor 1": 40.85,
+        "cros_ec:mainboard_ambient@4d": 39.85,
+        "cros_ec:cpu@4c": 67.85,
+        "cros_ec:mainboard_power@4d": 44.85,
+        "cros_ec:cpu_virtual@4c": 44.85,
+        "cros_ec:mainboard_memory@4d": 39.85,
+        "acpitz_3:temp1_input": 67.8,
+        "mt7925_phy0:temp1_input": 49.0,
+        "acpitz_0:temp1_input": 44.8,
+        "amdgpu:edge": 39.0
+      },
+      "started_unix": 1792136488.50991,
+      "target": "gufo",
+      "reference_results": "unchanged; not rerun",
+      "model_revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+      "repetitions": 1,
+      "power_control": "Recorded at least 90 s idle recovery and matching temperature limits before each independent AR, mixed MTP and repetitive MTP server; canonical requests, shared calibration, warmups and mixed/repetitive order unchanged; no power/profile changes.",
+      "tuned_profile": "Current active profile: accelerator-performance",
+      "status": "complete",
+      "scope": "All six Gufo card tables; reference data unchanged.",
+      "single_finished_unix": 1792137435.0187473,
+      "finished_unix": 1792137915.2058399
+    },
+    "single_request_output_work_checks": 32,
+    "concurrent_fresh_ar_matches": 63,
+    "single_phase_flags": [],
+    "reference_data": "September 22\u201323 llama.cpp artifacts and every reference table cell remain unchanged; no reference rerun or new equivalence qualification.",
+    "source_captures": {
+      "single-requests.json": "692c03a2a6d50f5843b3abcbc3afd45f9b1ba7b06bb225bf50c5ea8992bcc8ee",
+      "fresh-ar-quality-requests.json": "5d29bbadd157ef4487a702538e471de706bd60b6b7ef018fbff947c15940629d",
+      "multi-requests.json": "8adffd7739cce27df1a94dd35372777af6959abeb09d570aa2d080f911cf7c7b",
+      "loading-memory-requests.json": "7e3cd32e31ebf82435307c198f0a8f97d43000485ef3c2eb205c566e27c10623"
+    },
+    "phase_audit": {
+      "single": {
+        "requests": 32,
+        "exact_request_bodies": 32,
+        "exact_outputs": 32,
+        "exact_work": 32,
+        "identity_changes": [],
+        "capture_hashes": {
+          "before": "2b0c306628cb994ceb1d2a8b8506475888ef1c4d5291a3f6259583fd3294a627",
+          "after": "692c03a2a6d50f5843b3abcbc3afd45f9b1ba7b06bb225bf50c5ea8992bcc8ee"
+        },
+        "initial_flag_counts": {},
+        "initial_work_changes": []
+      },
+      "multi": {
+        "requests": 128,
+        "exact_request_bodies": 128,
+        "exact_outputs": 128,
+        "exact_work": 110,
+        "identity_changes": [],
+        "capture_hashes": {
+          "before": "937e79956cec6213aac32ba13ba76ea07cab6c080e6375319215407df3dcf9c5",
+          "after": "8adffd7739cce27df1a94dd35372777af6959abeb09d570aa2d080f911cf7c7b"
+        },
+        "initial_flag_counts": {
+          "client_ttft_ms": 63,
+          "queue_ms": 53,
+          "server_ttft_ms": 63,
+          "prefill_ms": 12,
+          "server_max_inter_token_ms": 5,
+          "wall_ms": 17,
+          "decode_ms": 7
+        },
+        "initial_work_changes": [
+          {
+            "request": 4,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 0,
+                "after": 2033
+              },
+              "prefill_tokens": {
+                "before": 2040,
+                "after": 7
+              }
+            }
+          },
+          {
+            "request": 5,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 2033,
+                "after": 0
+              },
+              "prefill_tokens": {
+                "before": 7,
+                "after": 2040
+              }
+            }
+          },
+          {
+            "request": 16,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 0,
+                "after": 2033
+              },
+              "prefill_tokens": {
+                "before": 2040,
+                "after": 7
+              }
+            }
+          },
+          {
+            "request": 17,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 2033,
+                "after": 0
+              },
+              "prefill_tokens": {
+                "before": 7,
+                "after": 2040
+              }
+            }
+          },
+          {
+            "request": 35,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 2033,
+                "after": 0
+              },
+              "prefill_tokens": {
+                "before": 7,
+                "after": 2040
+              }
+            }
+          },
+          {
+            "request": 28,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 0,
+                "after": 2033
+              },
+              "prefill_tokens": {
+                "before": 2040,
+                "after": 7
+              }
+            }
+          },
+          {
+            "request": 49,
+            "changes": {
+              "draft_tokens": {
+                "before": 55,
+                "after": 72
+              },
+              "draft_accepted_tokens": {
+                "before": 26,
+                "after": 41
+              }
+            }
+          },
+          {
+            "request": 48,
+            "changes": {
+              "draft_tokens": {
+                "before": 55,
+                "after": 72
+              },
+              "draft_accepted_tokens": {
+                "before": 26,
+                "after": 41
+              }
+            }
+          },
+          {
+            "request": 63,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 2033,
+                "after": 0
+              },
+              "prefill_tokens": {
+                "before": 7,
+                "after": 2040
+              }
+            }
+          },
+          {
+            "request": 58,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 0,
+                "after": 2033
+              },
+              "prefill_tokens": {
+                "before": 2040,
+                "after": 7
+              }
+            }
+          },
+          {
+            "request": 70,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 0,
+                "after": 2033
+              },
+              "prefill_tokens": {
+                "before": 2040,
+                "after": 7
+              }
+            }
+          },
+          {
+            "request": 73,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 2033,
+                "after": 0
+              },
+              "prefill_tokens": {
+                "before": 7,
+                "after": 2040
+              }
+            }
+          },
+          {
+            "request": 88,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 0,
+                "after": 2027
+              },
+              "prefill_tokens": {
+                "before": 2034,
+                "after": 7
+              }
+            }
+          },
+          {
+            "request": 89,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 2027,
+                "after": 0
+              },
+              "prefill_tokens": {
+                "before": 7,
+                "after": 2034
+              }
+            }
+          },
+          {
+            "request": 94,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 2027,
+                "after": 0
+              },
+              "prefill_tokens": {
+                "before": 7,
+                "after": 2034
+              }
+            }
+          },
+          {
+            "request": 92,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 0,
+                "after": 2027
+              },
+              "prefill_tokens": {
+                "before": 2034,
+                "after": 7
+              }
+            }
+          },
+          {
+            "request": 101,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 2027,
+                "after": 0
+              },
+              "prefill_tokens": {
+                "before": 7,
+                "after": 2034
+              }
+            }
+          },
+          {
+            "request": 100,
+            "changes": {
+              "cached_prompt_tokens": {
+                "before": 0,
+                "after": 2027
+              },
+              "prefill_tokens": {
+                "before": 2034,
+                "after": 7
+              }
+            }
+          }
+        ]
+      },
+      "loading-memory": {
+        "requests": 4,
+        "exact_request_bodies": 4,
+        "exact_outputs": 4,
+        "exact_work": 4,
+        "identity_changes": [],
+        "capture_hashes": {
+          "before": "7fb3bfe8513811806403c24004cd9eae62d21094be0ccf67f07a68bca57b1974",
+          "after": "7e3cd32e31ebf82435307c198f0a8f97d43000485ef3c2eb205c566e27c10623"
+        },
+        "initial_flag_counts": {},
+        "initial_work_changes": []
+      }
+    },
+    "phase_audit_sha256": "f44c049a74d167dbac64e16b0e6b8c3ef2800ab09f8735da83f97b6ef95726a7"
+  },
+  "final_native": {
+    "status": "passed",
+    "revision": "fdc2184941a19867fb2d643030717fec344b7280",
+    "full_logit_frontier_comparisons": 65,
+    "max_absolute_logit_difference": 0,
+    "fresh_load_exact_replays": 8,
+    "sampling_configurations_per_mode": 25,
+    "cache_replays_200_tokens": 8,
+    "concurrency": [
+      1,
+      2,
+      4,
+      6,
+      8
+    ],
+    "real_image_checks": "2048-token execution modes, attachment, replacement and text restore; models present.",
+    "lifecycle": "Reset, cancellation and failure release rollback; bounded warm reuse remains exact.",
+    "status_sha256": "5ea31a49b28219b0747699d9688db7369dedfe80e3658f7d3fa68824c84faef4"
+  },
+  "target_graph_recording": {
+    "change": "For an already-warm target shape needing its first or a replacement graph, enqueue execution once, restore host dispatch fields and record its graph concurrently with GPU execution. Do not launch the captured graph for that pass.",
+    "rejected": "Dropping warmed-shape keys removed the cold delay but moved more than 3 ms onto subsequent requests.",
+    "diagnostic": "Both revisions recorded the same 33 + 1421 graph nodes. Slow cold allocations/capture coincided with approximately 1.53 GHz CPU frequency versus 5.1 GHz in main; CPU time tracked wall time. This is not proof of thermal throttling.",
+    "prototype": "All 908 prefix phases passed with exact request/output/draft identities; cold 82 ms requests returned to approximately 75 ms.",
+    "ar_followup": "The same graph-setup delay affected short AR requests: 21 exact requests and all 316 phases pass after generalizing target overlap; decode 76.25 ms main versus 73.02 ms candidate. Final production pressure and card checks are recorded separately.",
+    "final_build": "See final functional timing qualification; retain previous confirmed failures as historical evidence."
+  },
+  "timing_followup": {
+    "revision": "fdc2184941a19867fb2d643030717fec344b7280",
+    "investigation_complete": false,
+    "slowdown_fraction": 0.05,
+    "noise_ms": 3,
+    "status": "accepted_startup_regression",
+    "confirmed_failures": [
+      {
+        "scope": "prepared concurrent MTP admission",
+        "concurrency": 6,
+        "phase": "server_ttft_ms",
+        "before_ms": [
+          22.661548,
+          23.05519
+        ],
+        "after_ms": [
+          34.738059,
+          35.074249
+        ],
+        "evidence": "pp-target-queue-repeat/comparison.json",
+        "note": "Repeats initial full card latency flag; output and measured cache/draft work exact; sustained decode unchanged."
+      },
+      {
+        "scope": "prepared concurrent MTP admission",
+        "concurrency": 8,
+        "phase": "server_ttft_ms",
+        "before_ms": [
+          30.680503,
+          31.227092
+        ],
+        "after_ms": [
+          58.636778,
+          59.038357
+        ],
+        "evidence": "pp-target-queue-repeat/comparison.json",
+        "note": "Repeats initial full card latency flag; output and measured cache/draft work exact; sustained decode unchanged."
+      }
+    ],
+    "raw_report_sha256": "f19df95478e5e8132d25847c5db92a5c5353d7b6ffbe6cd4927912de747d1778",
+    "interpretation": [
+      "All 32 depth-sweep request/output/work identities and 256 phases pass against post-603 main. All 63 concurrent measured completions match fresh AR.",
+      "Prepared MTP C6/C8 startup delay repeats at approximately +12/+28 ms. The user accepted this tradeoff. Sustained decode remains essentially unchanged.",
+      "The final AR pressure history has 100 exact outputs/work and no lost reuse. Four UI-cold timing flags remain inconclusive because fresh unchanged main itself reaches 79.06 ms versus 79.36 ms here, while the old control was 73.06 ms.",
+      "Initial concurrent preparation flags retain changed admission order: an identical peer takes the full shared prefill while the cohort total is unchanged. Other unrepeated individual queue/maximum-gap flags remain inconclusive; no global clean timing gate is claimed.",
+      "All rejected row-copy, all-copy fallback, queue-limit and blocking-event experiments are excluded from production. Raw logs, traces, requests, controls and every outlier remain retained."
+    ],
+    "publication_decision": "The measured C6/C8 first-token startup cost was explicitly accepted after reviewing milliseconds and aggregate throughput. It remains a timing-gate failure; no wider timing or quality waiver is claimed."
+  },
+  "pi": {
+    "passed": true,
+    "revision": "fdc2184941a19867fb2d643030717fec344b7280",
+    "checkout_revision": "e77e6a6e8f89c16387824afaf853ac9099b335ae",
+    "production_sha256": "b1ab0e9795df6fbac837cb00971dd021058cff045fc63178ccc3ac53265165f9",
+    "pi_version": "1.1.0",
+    "node_version": "v22.23.2",
+    "cases": 4,
+    "requests": 17,
+    "tool_calls": 13,
+    "tool_results": 13,
+    "assistant_content_types": {
+      "thinking": 17,
+      "toolCall": 13,
+      "text": 5
+    },
+    "tool_protocol_errors": 0,
+    "visible_control_tag_leaks": 0,
+    "actual_results_inspected": {
+      "edit_cases": "Two seeded subtraction bugs were read, replaced by addition with edit, and confirmed by cat. The harness independently verified both sums.",
+      "bugfix_cases": "Both intentional node test failures reached the agent; both repairs were written and the unchanged tests subsequently returned ok and exit=0. Final accent/punctuation handling was inspected.",
+      "pairing": "Every tool call has one subsequent matching result; unique IDs, no dangling calls."
+    },
+    "sampling": "Installed Pi defaults, thinking low; 2 passes in one continued conversation.",
+    "cache": {
+      "followup_requests": 16,
+      "followup_requests_reusing_cache": 16,
+      "full_reprefills_after_first_request": 0,
+      "largest_prompt_tokens": 4462
+    },
+    "timing_scope": "Final-build observational smoke. These are per-request observations, not a matched-main timing gate; qualified benchmark controls and the accepted C6/C8 startup failure are retained separately.",
+    "case_seconds": {
+      "00-edit": 7.008,
+      "01-bugfix": 13.055,
+      "02-edit": 8.514,
+      "03-bugfix": 10.056
+    },
+    "followup_ttft_ms_range": [
+      144.5,
+      487.7
+    ],
+    "request_timings": [
+      {
+        "index": 0,
+        "queue_ms": 37.9,
+        "ttft_ms": 1284.6,
+        "prefill_ms": 1245.827605,
+        "decode_ms": 1327.11757,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 5.088634,
+        "max_inter_token_ms": 91.933806
+      },
+      {
+        "index": 1,
+        "queue_ms": 1.4,
+        "ttft_ms": 155.8,
+        "prefill_ms": 154.268449,
+        "decode_ms": 1359.266575,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 3.939996,
+        "max_inter_token_ms": 112.10729
+      },
+      {
+        "index": 2,
+        "queue_ms": 1.5,
+        "ttft_ms": 161.6,
+        "prefill_ms": 159.998726,
+        "decode_ms": 689.28318,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 3.938182,
+        "max_inter_token_ms": 120.104476
+      },
+      {
+        "index": 3,
+        "queue_ms": 1.5,
+        "ttft_ms": 153.5,
+        "prefill_ms": 151.858281,
+        "decode_ms": 1355.947652,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 3.905987,
+        "max_inter_token_ms": 113.017575
+      },
+      {
+        "index": 4,
+        "queue_ms": 1.9,
+        "ttft_ms": 238.3,
+        "prefill_ms": 236.293977,
+        "decode_ms": 1002.186338,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 8.814896,
+        "max_inter_token_ms": 107.941107
+      },
+      {
+        "index": 5,
+        "queue_ms": 1.9,
+        "ttft_ms": 285.1,
+        "prefill_ms": 283.011928,
+        "decode_ms": 2575.390543,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 7.644592,
+        "max_inter_token_ms": 104.565532
+      },
+      {
+        "index": 6,
+        "queue_ms": 2.1,
+        "ttft_ms": 464.4,
+        "prefill_ms": 462.170207,
+        "decode_ms": 2048.536355,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 46.780007,
+        "max_inter_token_ms": 153.269538
+      },
+      {
+        "index": 7,
+        "queue_ms": 2.3,
+        "ttft_ms": 153.4,
+        "prefill_ms": 150.978147,
+        "decode_ms": 649.770278,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 5.23417,
+        "max_inter_token_ms": 111.462315
+      },
+      {
+        "index": 8,
+        "queue_ms": 2.4,
+        "ttft_ms": 146.8,
+        "prefill_ms": 144.280389,
+        "decode_ms": 4677.747342,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 5.1533,
+        "max_inter_token_ms": 83.460154
+      },
+      {
+        "index": 9,
+        "queue_ms": 2.8,
+        "ttft_ms": 183.2,
+        "prefill_ms": 180.269464,
+        "decode_ms": 1334.421805,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 5.367859,
+        "max_inter_token_ms": 86.465795
+      },
+      {
+        "index": 10,
+        "queue_ms": 2.6,
+        "ttft_ms": 166.3,
+        "prefill_ms": 163.582136,
+        "decode_ms": 1771.887272,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 5.203985,
+        "max_inter_token_ms": 100.571056
+      },
+      {
+        "index": 11,
+        "queue_ms": 2.4,
+        "ttft_ms": 169.1,
+        "prefill_ms": 166.611479,
+        "decode_ms": 1394.600812,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 5.103932,
+        "max_inter_token_ms": 68.533412
+      },
+      {
+        "index": 12,
+        "queue_ms": 3.3,
+        "ttft_ms": 161.3,
+        "prefill_ms": 157.897264,
+        "decode_ms": 2509.530576,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 83.331797,
+        "max_inter_token_ms": 192.511266
+      },
+      {
+        "index": 13,
+        "queue_ms": 3.0,
+        "ttft_ms": 249.8,
+        "prefill_ms": 246.731057,
+        "decode_ms": 1220.973887,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 8.769154,
+        "max_inter_token_ms": 114.572947
+      },
+      {
+        "index": 14,
+        "queue_ms": 3.0,
+        "ttft_ms": 487.7,
+        "prefill_ms": 484.545402,
+        "decode_ms": 2630.049767,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 33.168303,
+        "max_inter_token_ms": 122.152933
+      },
+      {
+        "index": 15,
+        "queue_ms": 3.8,
+        "ttft_ms": 153.2,
+        "prefill_ms": 149.301366,
+        "decode_ms": 719.036639,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 5.153904,
+        "max_inter_token_ms": 121.24795
+      },
+      {
+        "index": 16,
+        "queue_ms": 3.5,
+        "ttft_ms": 144.5,
+        "prefill_ms": 140.90441,
+        "decode_ms": 3676.984063,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 5.13433,
+        "max_inter_token_ms": 91.462236
+      }
+    ],
+    "session_sha256": "37700fcf3354e4f9984b641f4d5c7e14a737636b8288fc6a0c7836af3d6dc3ee",
+    "report_sha256": "31c44a0d820ed801dbb7a0719cf7ea8f7fdfdc4e4123fc9313c15d117fa57b79",
+    "server_log_sha256": "f755714a887cb6e036ac3769ccf09d42c07c88d7ec26efa5554008671cf4881e",
+    "harness_adaptation_sha256": "b0f310acd6686870f76e91e22b71ffad899105ec76f2e09d6f806491929ef20f",
+    "previous_cache_smoke": {
+      "passed": true,
+      "revision": "e0bead8bd2591b67978a555cf660e2facd79c77c",
+      "pi_version": "1.1.0",
+      "node_version": "v22.23.2",
+      "cases": 8,
+      "requests": 33,
+      "tool_calls": 25,
+      "tool_results": 25,
+      "assistant_content_types": {
+        "thinking": 33,
+        "toolCall": 25,
+        "text": 8
+      },
+      "tool_protocol_errors": 0,
+      "visible_control_tag_leaks": 0,
+      "actual_results_inspected": {
+        "edit_cases": "Four reads showed the seeded subtraction bug; edits succeeded and four subsequent reads showed addition.",
+        "bugfix_cases": "Four intentional failing slugify test executions were returned to the agent, followed by four successful file writes and four node test results equal to ok.",
+        "pairing": "Every real tool call has one matching result, with unique IDs; no dangling calls or protocol error flags."
+      },
+      "sampling": "Installed Pi defaults, thinking low; 4 passes in one continued conversation.",
+      "session_sha256": "70514092385d6d60e1314df182de61d0220b597b56c719f7a7bc7953820a87ab",
+      "report_sha256": "ea832a13f4445d020f825eb472a83d0d2cb5755abd97d3bfca91fcfa9aab7870"
+    }
+  },
+  "raw_evidence": {
+    "location": "Task-owned review archives retained outside Git on the editing and GPU hosts.",
+    "retained": "Commands, requests, server logs, sessions, power/clock/temperature telemetry, controls, outliers, rejected candidates and diagnostic profiles."
+  }
+}

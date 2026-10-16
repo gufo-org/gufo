@@ -33,16 +33,123 @@ struct FakeState final : gufo::server::ContinuationState {
 
 struct FakeSnapshot final : gufo::server::ContinuationSnapshot {
   explicit FakeSnapshot(std::size_t value,
-                        std::size_t payload_bytes = sizeof(std::size_t))
-      : value(value), payload_bytes(payload_bytes) {}
+                        std::size_t payload_bytes = sizeof(std::size_t),
+                        const gufo::server::ContinuationState* owner = nullptr)
+      : value(value), payload_bytes(payload_bytes), owner(owner) {}
 
   [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
     return payload_bytes;
   }
+  [[nodiscard]] bool PrefersState(
+      const gufo::server::ContinuationState& state) const noexcept override {
+    return owner == &state;
+  }
 
   std::size_t value;
   std::size_t payload_bytes;
+  const gufo::server::ContinuationState* owner;
 };
+
+void TestBorrowedSnapshotPrefersAvailableOwner() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore =
+           [](gufo::server::ContinuationState& state,
+              const gufo::server::ContinuationSnapshot& snapshot) {
+             dynamic_cast<FakeState&>(state).value =
+                 dynamic_cast<const FakeSnapshot&>(snapshot).value;
+           },
+       .capacity_bytes = [] { return 1024; },
+       .on_event = {}});
+  auto root = cache.Acquire(Tokens{1, 2, 3});
+  auto* owner = &root.state();
+  Expect(root.TryReserveSnapshot(sizeof(std::size_t), 3), "reserve root");
+  root.Commit({1, 2, 3},
+              std::make_unique<FakeSnapshot>(7, sizeof(std::size_t), owner));
+  auto first = cache.Acquire(Tokens{1, 2, 3, 4});
+  Expect(first.cache_hit() && &first.state() == owner &&
+             dynamic_cast<FakeState&>(first.state()).value == 7,
+         "restore prefers the owner over an older unused state");
+  auto second = cache.Acquire(Tokens{1, 2, 3, 5});
+  Expect(second.cache_hit() && &second.state() != owner &&
+             dynamic_cast<FakeState&>(second.state()).value == 7,
+         "a busy owner does not block a branch into another state");
+  first.Invalidate();
+  second.Invalidate();
+}
+
+void TestBorrowedSnapshotKeepsOwnersLiveFrontier() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore =
+           [](gufo::server::ContinuationState& state,
+              const gufo::server::ContinuationSnapshot& snapshot) {
+             dynamic_cast<FakeState&>(state).value =
+                 dynamic_cast<const FakeSnapshot&>(snapshot).value;
+           },
+       .capacity_bytes = [] { return 1024; },
+       .on_event = {}});
+  // A conversation leaves its prompt checkpoint and, in the state that owns
+  // the checkpoint's rows, its live frontier: prompt plus reply.
+  auto conversation = cache.Acquire(Tokens{1, 2, 3});
+  auto* owner = &conversation.state();
+  dynamic_cast<FakeState&>(*owner).value = 9;
+  Expect(conversation.TryReserveSnapshot(sizeof(std::size_t), 3),
+         "reserve the prompt checkpoint");
+  conversation.Commit(
+      {1, 2, 3}, std::make_unique<FakeSnapshot>(7, sizeof(std::size_t), owner),
+      {1, 2, 3, 4, 5});
+  // A branch from the checkpoint takes the other, free state.
+  auto branch = cache.Acquire(Tokens{1, 2, 3, 6});
+  Expect(branch.cache_hit() && &branch.state() != owner &&
+             dynamic_cast<FakeState&>(branch.state()).value == 7,
+         "a branch restores into a free state, not the owner's live frontier");
+  branch.Invalidate();
+  // The conversation's next turn still continues from its live frontier.
+  auto next = cache.Acquire(Tokens{1, 2, 3, 4, 5, 8});
+  Expect(next.cache_hit() && next.cached_tokens() == 5 &&
+             &next.state() == owner &&
+             dynamic_cast<FakeState&>(next.state()).value == 9,
+         "the next turn reuses the generated reply");
+  next.Invalidate();
+}
+
+void TestBorrowedSnapshotRetryReplacesOwnersReply() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore =
+           [](gufo::server::ContinuationState& state,
+              const gufo::server::ContinuationSnapshot& snapshot) {
+             dynamic_cast<FakeState&>(state).value =
+                 dynamic_cast<const FakeSnapshot&>(snapshot).value;
+           },
+       .capacity_bytes = [] { return 1024; },
+       .on_event = {}});
+  auto conversation = cache.Acquire(Tokens{1, 2, 3});
+  auto* owner = &conversation.state();
+  dynamic_cast<FakeState&>(*owner).value = 9;
+  Expect(conversation.TryReserveSnapshot(sizeof(std::size_t), 3),
+         "reserve the prompt checkpoint");
+  conversation.Commit(
+      {1, 2, 3}, std::make_unique<FakeSnapshot>(7, sizeof(std::size_t), owner),
+      {1, 2, 3, 4, 5});
+  // Retrying the prompt replaces the reply, so the owner's rows are reused
+  // and the other state, which may hold another conversation, is kept.
+  auto retry = cache.Acquire(Tokens{1, 2, 3});
+  Expect(retry.cache_hit() && &retry.state() == owner &&
+             dynamic_cast<FakeState&>(retry.state()).value == 7,
+         "a retry restores into the owner whose reply it replaces");
+  retry.Invalidate();
+}
 
 void TestColdMissThenExactExtensionHit() {
   std::vector<std::size_t> invalidations(1);
@@ -160,6 +267,226 @@ void TestWaitingAcquireCanBeCancelled() {
                     [&] { return cancelled.load(); });
   Expect(!cancelled_lease, "cancelled waiter does not acquire a state");
   held.Commit({1, 2, 3});
+}
+
+void TestCachedPrefixTokensPeeksWithoutLeasing() {
+  std::vector<std::size_t> invalidations(1);
+  std::size_t next_id = 0;
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {
+          .restore = [](gufo::server::ContinuationState&,
+                        const gufo::server::ContinuationSnapshot&) {},
+          .capacity_bytes = [] { return 1024; },
+          .on_event = {},
+      });
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2, 3}) == 0,
+         "an empty cache has no reusable prefix");
+  {
+    auto root = cache.Acquire(Tokens{1, 2, 3});
+    Expect(root.TryReserveSnapshot(sizeof(std::size_t), 3),
+           "root snapshot reserves capacity");
+    root.Commit({1, 2, 3}, std::make_unique<FakeSnapshot>(7));
+  }
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2, 3, 4}) == 3,
+         "a retained prefix of the prompt is reported");
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2}) == 0 &&
+             cache.CachedPrefixTokens(Tokens{1, 9, 3, 4}) == 0,
+         "shorter or diverging prompts do not reuse the checkpoint");
+  const std::vector<std::uint8_t> image{5};
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2, 3, 4}, image) == 0,
+         "a different input identity does not match");
+  // Peeking leases nothing: the single state slot remains available.
+  auto lease = cache.Acquire(Tokens{1, 2, 3, 4});
+  Expect(lease.cache_hit() && lease.cached_tokens() == 3,
+         "a peek does not consume the checkpoint or the state slot");
+  lease.Invalidate();
+}
+
+void TestBranchPointOutlivesOlderTurnsUnderPressure() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  for (const bool branched : {false, true}) {
+    std::vector<std::size_t> invalidations(1);
+    std::size_t next_id = 0;
+    // Room for four snapshots; the fifth evicts one.
+    gufo::server::ContinuationCache cache(
+        1,
+        [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+        {
+            .restore = [](gufo::server::ContinuationState&,
+                          const gufo::server::ContinuationSnapshot&) {},
+            .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+            .on_event = {},
+        },
+        8);
+    const auto retain = [&](const Tokens& tokens) {
+      auto lease = cache.Acquire(tokens);
+      Expect(lease.TryReserveSnapshot(sizeof(std::size_t), tokens.size()),
+             "test snapshot is admitted");
+      lease.Commit(tokens, std::make_unique<FakeSnapshot>(tokens.size()));
+    };
+    retain({9, 9, 9});        // An older, unrelated conversation.
+    retain({1, 2, 3});        // The shared system prompt.
+    retain({1, 2, 3, 4, 4});  // A conversation continuing from it.
+    if (branched)
+      retain({1, 2, 3, 5, 5});  // A second one diverging after it.
+    else
+      retain({7, 7});
+    retain({8, 8, 8, 8});  // Pressure: one checkpoint must go.
+    const auto prefix = cache.CachedPrefixTokens(Tokens{1, 2, 3, 6});
+    const auto unrelated = cache.CachedPrefixTokens(Tokens{9, 9, 9, 1});
+    Expect(branched ? prefix == 3 && unrelated == 0
+                    : prefix == 0 && unrelated == 3,
+           "a shared prefix outlives older checkpoints only once it branches");
+  }
+}
+
+void TestLearnedBranchPointOutlivesItsOlderBranch() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  using gufo::server::SnapshotPurpose;
+  // A chat bridge replays its last user message without the metadata it sent,
+  // so each request diverges where the previous user turn starts. Its own new
+  // boundary extends the learned point; neither a warm turn advancing from it
+  // nor a cold turn publishing it may evict it before other families' copies.
+  for (const bool warm : {true, false}) {
+    std::vector<std::size_t> invalidations(1);
+    gufo::server::ContinuationCache cache(
+        1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+        {.restore =
+             [](auto& state, const auto& snapshot) {
+               dynamic_cast<FakeState&>(state).value =
+                   dynamic_cast<const FakeSnapshot&>(snapshot).value;
+             },
+         .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+         .on_event = {}},
+        8);
+    const auto retain = [&](const Tokens& tokens, std::size_t value,
+                            SnapshotPurpose purpose) {
+      auto lease = cache.Acquire(tokens);
+      Expect(lease.TryReserveSnapshot(sizeof(std::size_t), tokens.size(), true,
+                                      purpose),
+             "initial checkpoint fits without eviction");
+      lease.Commit(tokens, std::make_unique<FakeSnapshot>(value));
+    };
+    retain({9, 9, 9}, 9003, SnapshotPurpose::kContinuation);
+    retain({7, 7, 7}, 7003, SnapshotPurpose::kContinuation);
+    // The previous turn's boundary ends in the live message the next request
+    // rewrites; the turn before it already diverged at the learned point.
+    retain({1, 2, 3}, 1003, SnapshotPurpose::kBranchPoint);
+    retain({1, 2, 3, 4, 4}, 2005, SnapshotPurpose::kContinuation);
+
+    const Tokens incoming{1, 2, 3, 5, 5};
+    auto turn = cache.Acquire(incoming, {}, {}, {}, warm);
+    Expect(turn.cached_tokens() == (warm ? 3 : 0),
+           "a warm turn restores the learned branch point");
+    Expect(turn.TryReserveSnapshot(sizeof(std::size_t), incoming.size(), !warm,
+                                   SnapshotPurpose::kContinuation, incoming),
+           "the new boundary evicts another checkpoint");
+    turn.Commit(incoming, std::make_unique<FakeSnapshot>(3005));
+
+    auto next = cache.Acquire(Tokens{1, 2, 3, 6, 6});
+    Expect(next.cached_tokens() == 3 &&
+               dynamic_cast<FakeState&>(next.state()).value == 1003,
+           "the learned branch point outlives its own family's new boundary");
+    next.Invalidate();
+    Expect(cache.CachedPrefixTokens(Tokens{9, 9, 9, 1}) == 0 &&
+               cache.CachedPrefixTokens(Tokens{7, 7, 7, 1}) == 3,
+           "the oldest other family's checkpoint yields instead");
+  }
+}
+
+void TestDeeperLearnedBranchPointSupersedesShallower() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](gufo::server::ContinuationState&,
+                     const gufo::server::ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+       .on_event = {}},
+      8);
+  const auto retain = [&](const Tokens& tokens, SnapshotPurpose purpose) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(sizeof(std::size_t), tokens.size(), true,
+                                    purpose),
+           "test snapshot is admitted");
+    lease.Commit(tokens, std::make_unique<FakeSnapshot>(tokens.size()));
+  };
+  retain({9, 9, 9}, SnapshotPurpose::kContinuation);
+  retain({1, 2, 3}, SnapshotPurpose::kBranchPoint);
+  retain({1, 2, 3, 4, 5}, SnapshotPurpose::kBranchPoint);
+  retain({1, 2, 3, 4, 5, 6}, SnapshotPurpose::kContinuation);
+  retain({8, 8, 8}, SnapshotPurpose::kContinuation);  // Pressure.
+  Expect(cache.CachedPrefixTokens(Tokens{1, 2, 3, 7}) == 0 &&
+             cache.CachedPrefixTokens(Tokens{1, 2, 3, 4, 5, 7}) == 5 &&
+             cache.CachedPrefixTokens(Tokens{9, 9, 9, 1}) == 3,
+         "only the deepest learned branch point of a family stays protected");
+}
+
+void TestRestoredSharedPrefixOutlivesFrozenFrontiers() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  using gufo::server::SnapshotPurpose;
+  // Conversations share a system prompt whose grid checkpoint is history.
+  // Once a second conversation restores it and diverges, it is a branch point:
+  // freezing a continued frontier under byte pressure must evict an older
+  // turn's checkpoint, not the prefix every new conversation restores.
+  for (const bool restored : {false, true}) {
+    std::vector<std::size_t> invalidations(2);
+    std::size_t next_id = 0;
+    gufo::server::ContinuationCache cache(
+        2,
+        [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+        {.restore = [](gufo::server::ContinuationState&,
+                       const gufo::server::ContinuationSnapshot&) {},
+         .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+         .on_event = {}},
+        8);
+    const Tokens unrelated{9, 9, 9};
+    auto other = cache.Acquire(unrelated);
+    Expect(other.TryReserveSnapshot(sizeof(std::size_t), unrelated.size()),
+           "the unrelated checkpoint fits");
+    other.Commit(unrelated, std::make_unique<FakeSnapshot>(9));
+
+    const Tokens shared{1, 2, 3};
+    const Tokens first{1, 2, 3, 4, 4};
+    auto a = cache.Acquire(first);
+    Expect(a.TryReserveSnapshot(sizeof(std::size_t), shared.size(), true,
+                                SnapshotPurpose::kHistory),
+           "the shared grid checkpoint fits");
+    a.PublishSnapshot(shared, std::make_unique<FakeSnapshot>(3), true);
+    Expect(a.TryReserveSnapshot(sizeof(std::size_t), first.size(), false,
+                                SnapshotPurpose::kContinuation, first),
+           "the first prompt checkpoint fits");
+    a.Commit(first, std::make_unique<FakeSnapshot>(5), {1, 2, 3, 4, 4, 8, 8});
+
+    const Tokens second{1, 2, 3, 5, 5};
+    auto b = cache.Acquire(second, {}, {}, {}, restored);
+    Expect(b.cached_tokens() == (restored ? shared.size() : 0),
+           "the second conversation restores the shared prefix when allowed");
+    Expect(b.TryReserveSnapshot(sizeof(std::size_t), second.size(), false,
+                                SnapshotPurpose::kContinuation, second),
+           "the second prompt checkpoint fits");
+    b.Commit(second, std::make_unique<FakeSnapshot>(6), {1, 2, 3, 5, 5, 8});
+
+    // The first conversation continues from its live frontier and freezes it.
+    const Tokens next{1, 2, 3, 4, 4, 8, 8, 6};
+    auto turn = cache.Acquire(next);
+    Expect(turn.cached_tokens() == 7, "the next turn continues the frontier");
+    Expect(turn.TryReserveSnapshot(sizeof(std::size_t), next.size(), false,
+                                   SnapshotPurpose::kContinuation, next),
+           "the frozen frontier evicts one checkpoint");
+    turn.Commit(next, std::make_unique<FakeSnapshot>(8));
+
+    Expect(
+        cache.CachedPrefixTokens(Tokens{1, 2, 3, 7, 7}) ==
+            (restored ? shared.size() : 0),
+        "a restored shared prefix outlives a frozen frontier under pressure");
+    Expect(cache.CachedPrefixTokens(first) ==
+               (restored ? shared.size() : first.size()),
+           "the continued conversation's older checkpoint yields instead");
+  }
 }
 
 void TestSnapshotCanBranchIntoTwoIndependentStateSlots() {
@@ -982,6 +1309,60 @@ void TestAppendedImagesReuseOnlyCompatiblePrefixes() {
          "image mismatch diagnostics retain the actual token agreement");
 }
 
+void TestNewBranchPreservesSharedSourceUnderBytePressure() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {
+          .restore =
+              [](gufo::server::ContinuationState& state,
+                 const gufo::server::ContinuationSnapshot& snapshot) {
+                dynamic_cast<FakeState&>(state).value =
+                    dynamic_cast<const FakeSnapshot&>(snapshot).value;
+              },
+          .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+          .on_event = {},
+      },
+      8);
+  const auto retain = [&](const Tokens& tokens, std::size_t value) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(sizeof(std::size_t), tokens.size(), false,
+                                    SnapshotPurpose::kContinuation, tokens),
+           "initial checkpoint fits without eviction");
+    lease.Commit(tokens, std::make_unique<FakeSnapshot>(value));
+  };
+  const Tokens unrelated{9, 9, 9};
+  const Tokens shared{1, 2, 3};
+  retain(unrelated, 9003);
+  retain(shared, 1003);
+  retain({1, 2, 3, 4, 4}, 2005);
+  retain({1, 2, 3, 5, 5}, 3005);
+
+  const Tokens incoming{1, 2, 3, 6, 6};
+  auto branch = cache.Acquire(incoming);
+  Expect(branch.cache_hit() && branch.cached_tokens() == shared.size() &&
+             dynamic_cast<FakeState&>(branch.state()).value == 1003,
+         "the new conversation restores the shared branch point");
+  Expect(branch.TryReserveSnapshot(sizeof(std::size_t), incoming.size(), false,
+                                   SnapshotPurpose::kContinuation, incoming),
+         "the new continuation can replace an older unrelated checkpoint");
+  branch.Commit(incoming, std::make_unique<FakeSnapshot>(4005));
+  Expect(cache.retained_snapshot_bytes() == 4 * sizeof(std::size_t) &&
+             cache.reserved_snapshot_bytes() == 0,
+         "the new branch stays within the checkpoint byte budget");
+
+  const Tokens next_prompt{1, 2, 3, 7, 7};
+  auto next = cache.Acquire(next_prompt);
+  Expect(next.cache_hit() && next.cached_tokens() == shared.size() &&
+             dynamic_cast<FakeState&>(next.state()).value == 1003,
+         "a new branch must not replace the shared source needed by its peers");
+  next.Invalidate();
+  Expect(cache.CachedPrefixTokens(unrelated) == 0,
+         "the oldest unrelated continuation yields to the shared branch point");
+}
+
 int main() {
   TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
@@ -991,6 +1372,15 @@ int main() {
   TestLongestAvailablePrefixWins();
   TestWaitingAcquireCanBeCancelled();
   TestSnapshotCanBranchIntoTwoIndependentStateSlots();
+  TestBorrowedSnapshotPrefersAvailableOwner();
+  TestBorrowedSnapshotKeepsOwnersLiveFrontier();
+  TestBorrowedSnapshotRetryReplacesOwnersReply();
+  TestCachedPrefixTokensPeeksWithoutLeasing();
+  TestBranchPointOutlivesOlderTurnsUnderPressure();
+  TestNewBranchPreservesSharedSourceUnderBytePressure();
+  TestLearnedBranchPointOutlivesItsOlderBranch();
+  TestDeeperLearnedBranchPointSupersedesShallower();
+  TestRestoredSharedPrefixOutlivesFrozenFrontiers();
   TestByteCapacityEvictsBeforeSnapshotAllocation();
   TestConcurrentReservationsCannotOvercommitBudget();
   TestImpossibleReservationPreservesRetainedEntries();

@@ -2,6 +2,7 @@
 #define GUFO_SERVER_WEBSOCKET_HPP_
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -37,6 +38,10 @@ private:
   std::string buffered_;
   std::size_t offset_{0};
   std::atomic<bool> closed_{false};
+  // Receive timeout inherited from the server; the session is idle only when
+  // neither side has sent anything for this long.
+  std::chrono::steady_clock::duration idle_{};
+  std::atomic<std::chrono::steady_clock::rep> last_send_{0};
   std::mutex send_mutex_;
   std::mutex queue_mutex_;
   std::condition_variable ready_;

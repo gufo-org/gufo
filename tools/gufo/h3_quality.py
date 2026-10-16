@@ -17,7 +17,7 @@ from typing import Any
 
 import numpy as np
 
-from . import safetensors
+from . import control_tokens, safetensors
 
 SCHEMA = "gufo.minimax-h3-quality-artifact.v1"
 CONTRACT_SCHEMA = "gufo.minimax-h3-quality-contract.v1"
@@ -728,14 +728,14 @@ def validate_contract(contract: dict) -> dict:
         tokenizer["special_tokens"], "tokenizer.special_tokens"
     )
     expected_special_tokens = {
-        "<|endoftext|>": 151643,
-        "<|im_start|>": 151644,
-        "<|im_end|>": 151645,
-        "<|vision_start|>": 151652,
-        "<|vision_end|>": 151653,
-        "<|image_pad|>": 151655,
-        "<|video_pad|>": 151656,
-        "<|lyrics_start|>": 151672,
+        control_tokens.kEndOfText: 151643,
+        control_tokens.kImStart: 151644,
+        control_tokens.kImEnd: 151645,
+        control_tokens.kVisionStart: 151652,
+        control_tokens.kVisionEnd: 151653,
+        control_tokens.kImagePad: 151655,
+        control_tokens.kVideoPad: 151656,
+        control_tokens.kLyricsStart: 151672,
     }
     if special_tokens != expected_special_tokens:
         raise H3QualityError("quality contract special-token IDs changed")

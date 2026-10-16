@@ -1,6 +1,6 @@
 ---
 name: benchmark-model
-description: Measure every retained number in docs/models/<model>/BENCHMARKS.md for one Gufo model on Strix Halo gfx1151 over HTTP, run the same workload against the reference project's OpenAI-compatible server (llama.cpp, audio.cpp, ...), and report the gain per cell.
+description: Measure every retained number in a Gufo model's BENCHMARKS.md on Strix Halo gfx1151 over HTTP, run the same workload against the reference project's OpenAI-compatible server (llama.cpp, audio.cpp, ...), and report the gain per cell.
 metadata:
   origin: gufo
 ---
@@ -20,6 +20,12 @@ conversation before asking for missing information. Existing authorization and
 paths remain valid. Prefer one warmed sample per point, run only the requested
 sweeps, and repeat only to investigate a concrete discrepancy. Prefix setup at
 64K/128K dominates runtime; avoid rebuilding it for unrelated checks.
+
+Record the power profile and starting CPU/GPU temperatures. Paired runs need
+the same profile and comparable thermal/warmup conditions. On this host,
+check `/sys/firmware/acpi/platform_profile`: Balanced and Performance can
+differ materially with identical binaries. Monitor the profile throughout
+long sweeps and retain their warmup/cache history.
 
 Start long runs in the background with output redirected to a log. Inspect
 progress and process status at short intervals while continuing independent

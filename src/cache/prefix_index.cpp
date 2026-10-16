@@ -1,0 +1,842 @@
+#include "src/cache/prefix_index.hpp"
+
+#include <algorithm>
+#include <limits>
+#include <map>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
+
+namespace gufo::cache {
+namespace {
+std::size_t Add(std::size_t a, std::size_t b) {
+  if (b > std::numeric_limits<std::size_t>::max() - a)
+    throw std::overflow_error("prefix index size overflow");
+  return a + b;
+}
+std::size_t Bytes(Rows rows, std::size_t bytes) {
+  if (bytes && rows > std::numeric_limits<std::size_t>::max() / bytes)
+    throw std::overflow_error("prefix index transfer size overflow");
+  return static_cast<std::size_t>(rows) * bytes;
+}
+bool Same(const ComponentDescriptor& a, const ComponentDescriptor& b) {
+  return a.id == b.id && a.kind == b.kind &&
+         a.layout_version == b.layout_version && a.row_bytes == b.row_bytes &&
+         a.rows_per_chunk == b.rows_per_chunk && a.state_bytes == b.state_bytes;
+}
+void ValidateAvailability(std::span<const ComponentAvailability> list,
+                          std::span<const ComponentDescriptor> descriptors) {
+  for (std::size_t i = 0; i < list.size(); ++i) {
+    if (std::ranges::none_of(descriptors,
+                             [&](const auto& d) { return d.id == list[i].id; }))
+      throw std::invalid_argument("unknown availability component");
+    for (std::size_t j = 0; j < i; ++j)
+      if (list[i].id == list[j].id)
+        throw std::invalid_argument("duplicate availability component");
+  }
+}
+}  // namespace
+PrefixLookup& PrefixLookup::operator=(PrefixLookup&& other) noexcept {
+  if (this != &other) {
+    auto previous = std::move(metadata);
+    selected = std::move(other.selected);
+    candidates = std::move(other.candidates);
+    reason = other.reason;
+    metadata = std::move(other.metadata);
+  }
+  return *this;
+}
+struct PrefixIndex::Impl {
+  struct Tree;
+  struct Record {
+    ResourceCharge metadata;
+    IndexEntryId id;
+    std::shared_ptr<const Checkpoint> checkpoint;
+    std::optional<LiveFrontier> live;
+    std::shared_ptr<const CandidateAvailability> availability;
+    std::shared_ptr<const DiskDescription> durable;
+    Tree* tree{};
+    Rows stable{};
+    std::size_t bytes{};
+    [[nodiscard]] Rows Boundary() const {
+      if (checkpoint)
+        return checkpoint->Boundary();
+      if (live)
+        return live->tokens.size();
+      if (durable)
+        return durable->Manifest().tokens.size();
+      throw std::logic_error("empty prefix index record");
+    }
+    [[nodiscard]] const Identity& Input() const {
+      if (checkpoint)
+        return checkpoint->Input();
+      if (live)
+        return live->input;
+      if (durable)
+        return durable->Manifest().input;
+      throw std::logic_error("empty prefix index record");
+    }
+  };
+  struct Node {
+    ResourceCharge metadata;
+    Node* parent{};
+    std::vector<Token> edge;
+    std::map<Token, std::unique_ptr<Node>> children;
+    std::map<std::uint64_t, Record> records;
+    std::size_t bytes{};
+  };
+  struct Tree {
+    ResourceCharge metadata;
+    std::vector<ComponentDescriptor> descriptors;
+    std::optional<CompatibilityDigest> digest;
+    std::unique_ptr<Node> root;
+    std::size_t bytes{};
+  };
+  ResourceLedger* ledger;
+  ResourceCharge metadata;
+  std::map<Identity, Tree> trees;
+  std::map<std::uint64_t, Node*> directory;
+  std::uint64_t next{1};
+  Impl(ResourceLedger& l, ResourceReservation reservation)
+      : ledger(&l), metadata(reservation.Convert()) {}
+  ~Impl() {
+    for (auto& [identity, tree] : trees) {
+      (void)identity;
+      auto* node = tree.root.get();
+      while (true) {
+        if (!node->children.empty()) {
+          node = node->children.begin()->second.get();
+          continue;
+        }
+        if (node == tree.root.get())
+          break;
+        auto* parent = node->parent;
+        parent->children.erase(node->edge.front());
+        node = parent;
+      }
+    }
+  }
+  Impl(const Impl&) = delete;
+  Impl& operator=(const Impl&) = delete;
+  Impl(Impl&&) = delete;
+  Impl& operator=(Impl&&) = delete;
+  ResourceCharge Charge(std::size_t size) {
+    return ledger->Reserve(ResourceCategory::kMetadata, size).Convert();
+  }
+  static std::size_t NodeBytes(std::size_t token_capacity) {
+    return Add(sizeof(Node) + sizeof(decltype(Node::children)::value_type),
+               Bytes(token_capacity, sizeof(Token)));
+  }
+  static std::vector<Token> Edge(std::span<const Token> tokens) {
+    std::vector<Token> edge(tokens.begin(), tokens.end());
+    // The pinned standard library creates exact-capacity range vectors. Fail
+    // closed if a different implementation adds unadmitted spare capacity.
+    if (edge.capacity() != tokens.size())
+      throw std::logic_error("unexpected prefix edge capacity");
+    return edge;
+  }
+  std::unique_ptr<Node> MakeNode(std::span<const Token> tokens, Node* parent) {
+    const auto bytes = NodeBytes(tokens.size());
+    auto reservation = ledger->Reserve(ResourceCategory::kMetadata, bytes);
+    auto node = std::make_unique<Node>();
+    node->parent = parent;
+    node->edge = Edge(tokens);
+    node->bytes = bytes;
+    node->metadata = reservation.Convert();
+    return node;
+  }
+  Tree& Get(const Identity& identity) {
+    auto it = trees.find(identity);
+    if (it == trees.end())
+      throw std::invalid_argument("unregistered compatibility identity");
+    return it->second;
+  }
+  Record& Get(IndexEntryId id) {
+    auto it = directory.find(id.value);
+    if (it == directory.end())
+      throw std::invalid_argument("unknown prefix index entry");
+    return it->second->records.at(id.value);
+  }
+  // All allocation/admission happens before changing an existing edge.
+  Node* Place(Tree& tree, std::span<const Token> tokens) {
+    auto* node = tree.root.get();
+    while (!tokens.empty()) {
+      auto child = node->children.find(tokens.front());
+      if (child == node->children.end()) {
+        auto fresh = MakeNode(tokens, node);
+        auto* result = fresh.get();
+        node->children.emplace(tokens.front(), std::move(fresh));
+        return result;
+      }
+      auto& old = child->second;
+      const auto common = static_cast<std::size_t>(
+          std::ranges::mismatch(old->edge, tokens).in1 - old->edge.begin());
+      if (common == old->edge.size()) {
+        tokens = tokens.subspan(common);
+        node = old.get();
+        continue;
+      }
+      auto split = MakeNode(tokens.first(common), node);
+      const auto remainder = std::span<const Token>(old->edge).subspan(common);
+      const auto narrowed_bytes = NodeBytes(remainder.size());
+      auto narrowed_reservation =
+          ledger->Reserve(ResourceCategory::kMetadata, narrowed_bytes);
+      ResourceCharge narrowed_charge;
+      auto suffix = Edge(remainder);
+      narrowed_charge = narrowed_reservation.Convert();
+      const auto old_key = suffix.front();
+      // Preallocate the map entry, so linking the old subtree cannot fail.
+      split->children.emplace(old_key, nullptr);
+      Node* result = split.get();  // NOLINT(misc-const-correctness): returned
+                                   // for record insertion
+      if (common < tokens.size()) {
+        auto fresh = MakeNode(tokens.subspan(common), split.get());
+        result = fresh.get();
+        split->children.emplace(tokens[common], std::move(fresh));
+      }
+      // Release the former edge before its charge. Shrinking capacity matters
+      // when long histories are inserted before their shorter checkpoints.
+      // Existing directory pointers remain valid throughout the split.
+      old->edge = std::move(suffix);
+      old->metadata = std::move(narrowed_charge);
+      old->bytes = narrowed_bytes;
+      old->parent = split.get();
+      split->children.at(old_key) = std::move(old);
+      child->second = std::move(split);
+      return result;
+    }
+    return node;
+  }
+  void Prune(Node* node) {
+    while (node->parent && node->records.empty()) {
+      auto* parent = node->parent;
+      if (node->children.empty()) {
+        parent->children.erase(node->edge.front());
+      } else if (node->children.size() == 1) {
+        // Compact the edge without replacing the surviving record's node.
+        // Erasure must still succeed when headroom cannot fund this temporary
+        // replacement; a later erasure can retry the harmless unary path.
+        auto& child = node->children.begin()->second;
+        const auto count = Add(node->edge.size(), child->edge.size());
+        const auto bytes = NodeBytes(count);
+        try {
+          auto reservation =
+              ledger->Reserve(ResourceCategory::kMetadata, bytes);
+          std::vector<Token> merged(count);
+          if (merged.capacity() != count)
+            throw std::logic_error("unexpected prefix edge capacity");
+          std::ranges::copy(node->edge, merged.begin());
+          std::ranges::copy(
+              child->edge,
+              merged.begin() + static_cast<std::ptrdiff_t>(node->edge.size()));
+          auto charge = reservation.Convert();
+          child->edge = std::move(merged);
+          child->bytes = bytes;
+          child->metadata = std::move(charge);
+          child->parent = parent;
+          auto promoted = std::move(child);
+          parent->children.at(node->edge.front()) = std::move(promoted);
+        } catch (const std::bad_alloc&) {
+          return;
+        }
+      } else {
+        return;
+      }
+      node = parent;
+    }
+  }
+  IndexEntryId Publish(Tree& tree, std::span<const Token> tokens,
+                       Record record) {
+    if (next == std::numeric_limits<std::uint64_t>::max())
+      throw std::overflow_error("prefix index identifiers exhausted");
+    record.id = {next};
+    // Preallocate publication map nodes before touching the token tree. Node
+    // handle insertion below cannot allocate after a successful edge split.
+    std::map<std::uint64_t, Record> pending;
+    pending.emplace(next, std::move(record));
+    auto entry = pending.extract(next);
+    directory.emplace(next, nullptr);
+    Node* node = nullptr;
+    try {
+      node = Place(tree, tokens);
+    } catch (...) {
+      directory.erase(next);
+      throw;
+    }
+    node->records.insert(std::move(entry));
+    directory.at(next) = node;
+    return {next++};
+  }
+  std::size_t RecordBytes(const Record& r) const {
+    auto bytes = sizeof(decltype(directory)::value_type) +
+                 sizeof(decltype(Node::records)::value_type);
+
+    if (r.live) {
+      bytes = Add(bytes, Bytes(r.live->tokens.capacity(), sizeof(Token)));
+      bytes = Add(bytes, r.live->compatibility.capacity());
+      bytes = Add(bytes, r.live->input.capacity());
+      bytes = Add(bytes, Bytes(r.live->positions.capacity(),
+                               sizeof(ComponentPosition)));
+    }
+    return bytes;
+  }
+  bool CheckpointCoherent(const Tree& tree,
+                          const Checkpoint& checkpoint) const {
+    if (checkpoint.Components().size() != tree.descriptors.size())
+      return false;
+    for (const auto& d : tree.descriptors) {
+      auto c = std::ranges::find_if(
+          checkpoint.Components(),
+          [&](const auto& c) { return Same(d, c.descriptor); });
+      if (c == checkpoint.Components().end() ||
+          (d.kind == ComponentKind::kPrivateState &&
+           c->position.valid_rows != checkpoint.Boundary()))
+        return false;
+    }
+    return true;
+  }
+  bool CheckpointResident(const Tree& tree,
+                          const Checkpoint& checkpoint) const {
+    return checkpoint.IsValid() && CheckpointCoherent(tree, checkpoint);
+  }
+  std::shared_ptr<const CandidateAvailability> Availability(
+      std::vector<ComponentAvailability> components) {
+    auto reservation = ledger->Reserve(
+        ResourceCategory::kMetadata,
+        Add(sizeof(CandidateAvailability) + 64,
+            Bytes(components.capacity(), sizeof(ComponentAvailability))));
+    auto result = std::make_shared<CandidateAvailability>();
+    result->components = std::move(components);
+    result->metadata = reservation.Convert();
+    return result;
+  }
+  std::shared_ptr<const CandidateAvailability> DurableAvailability(
+      const Tree& tree, const CandidateAvailability* existing = nullptr) {
+    auto reservation = ledger->Reserve(
+        ResourceCategory::kMetadata,
+        Add(sizeof(CandidateAvailability) + 64,
+            Bytes(tree.descriptors.size(), sizeof(ComponentAvailability))));
+    auto result = std::make_shared<CandidateAvailability>();
+    result->components.reserve(tree.descriptors.size());
+    if (result->components.capacity() != tree.descriptors.size())
+      throw std::logic_error("unexpected availability capacity");
+    for (const auto& descriptor : tree.descriptors) {
+      bool resident{};
+      if (existing) {
+        const auto component = std::ranges::find(
+            existing->components, descriptor.id, &ComponentAvailability::id);
+        resident =
+            component != existing->components.end() && component->resident;
+      }
+      result->components.push_back({descriptor.id, resident, true});
+    }
+    result->metadata = reservation.Convert();
+    return result;
+  }
+  bool DurableCoherent(const Tree& tree,
+                       const DiskDescription& description) const {
+    const auto& manifest = description.Manifest();
+    if (!tree.digest || *tree.digest != manifest.compatibility ||
+        tree.descriptors.size() != manifest.components.size())
+      return false;
+    for (const auto& descriptor : tree.descriptors)
+      if (std::ranges::none_of(manifest.components, [&](const auto& component) {
+            return Same(descriptor, component.descriptor) &&
+                   (descriptor.kind != ComponentKind::kPrivateState ||
+                    component.position.valid_rows == manifest.tokens.size());
+          }))
+        return false;
+    return true;
+  }
+  bool Resident(const Tree& tree, const Record& r) const {
+    if (r.live) {
+      if (!r.live->available ||
+          r.live->positions.size() != tree.descriptors.size())
+        return false;
+      for (const auto& d : tree.descriptors) {
+        auto p =
+            std::ranges::find(r.live->positions, d.id, &ComponentPosition::id);
+        if (p == r.live->positions.end() ||
+            (d.kind == ComponentKind::kPrivateState &&
+             p->valid_rows != r.Boundary()))
+          return false;
+      }
+      return true;
+    }
+    if (!r.checkpoint || !CheckpointResident(tree, *r.checkpoint))
+      return false;
+    for (const auto& d : tree.descriptors) {
+      auto a = std::ranges::find(r.availability->components, d.id,
+                                 &ComponentAvailability::id);
+      if (a == r.availability->components.end() || !a->resident)
+        return false;
+    }
+    return true;
+  }
+  std::optional<PrefixCandidate> Candidate(const Tree& tree,
+                                           const Record& r) const {
+    PrefixCandidate result;
+    result.entry = r.id;
+    result.boundary = r.Boundary();
+    if (r.live) {
+      if (!Resident(tree, r))
+        return {};
+      result.live = r.live->location;
+      return result;
+    }
+    if (r.durable && r.durable->Quarantined())
+      return {};
+    const bool ram = r.checkpoint && CheckpointCoherent(tree, *r.checkpoint);
+    bool need_disk{}, use_ram{}, resolve_plan{};
+    for (const auto& descriptor : tree.descriptors) {
+      auto availability =
+          std::ranges::find(r.availability->components, descriptor.id,
+                            &ComponentAvailability::id);
+      if (availability == r.availability->components.end())
+        return {};
+      const auto component =
+          ram ? std::ranges::find(r.checkpoint->Components(), descriptor.id,
+                                  [](const auto& c) { return c.descriptor.id; })
+              : std::span<const CheckpointComponent>::iterator{};
+      if (ram && availability->resident && component->IsValid())
+        use_ram = true;
+      else if (r.durable && availability->durable) {
+        need_disk = true;
+        resolve_plan |= availability->resident;
+      } else
+        return {};
+    }
+    if (need_disk) {
+      result.disk_pin = r.durable->Pin();
+      if (!result.disk_pin)
+        return {};
+      result.durable = r.durable;
+    }
+    if (use_ram)
+      result.checkpoint = r.checkpoint;
+    result.availability = r.availability;
+    if (resolve_plan && use_ram) {
+      auto admission =
+          ledger->Reserve(ResourceCategory::kMetadata,
+                          Add(sizeof(CandidateAvailability) + 64,
+                              Bytes(r.availability->components.size(),
+                                    sizeof(ComponentAvailability))));
+      auto plan = std::make_shared<CandidateAvailability>();
+      plan->metadata = admission.Convert();
+      plan->components.reserve(r.availability->components.size());
+      for (auto component : r.availability->components) {
+        const auto payload =
+            std::ranges::find(r.checkpoint->Components(), component.id,
+                              [](const auto& c) { return c.descriptor.id; });
+        component.resident = component.resident && payload->IsValid();
+        plan->components.push_back(component);
+      }
+      result.availability = std::move(plan);
+    }
+    for (const auto& descriptor : tree.descriptors) {
+      const auto rows =
+          r.checkpoint
+              ? std::ranges::find_if(r.checkpoint->Components(),
+                                     [&](const auto& c) {
+                                       return c.descriptor.id == descriptor.id;
+                                     })
+                    ->position.valid_rows
+              : std::ranges::find_if(r.durable->Manifest().components,
+                                     [&](const auto& c) {
+                                       return c.descriptor.id == descriptor.id;
+                                     })
+                    ->position.valid_rows;
+      result.transfer_bytes = Add(
+          result.transfer_bytes, descriptor.kind == ComponentKind::kPrivateState
+                                     ? descriptor.state_bytes
+                                     : Bytes(rows, descriptor.row_bytes));
+    }
+    return result;
+  }
+  template<class Visit>
+  void Path(const Tree& tree, std::span<const Token> tokens,
+            Visit visit) const {
+    auto* node = tree.root.get();
+    visit(*node);
+    while (!tokens.empty()) {
+      auto it = node->children.find(tokens.front());
+      if (it == node->children.end())
+        return;
+      node = it->second.get();
+      auto common =
+          std::ranges::mismatch(node->edge, tokens).in1 - node->edge.begin();
+      if (static_cast<std::size_t>(common) != node->edge.size())
+        return;
+      tokens = tokens.subspan(node->edge.size());
+      visit(*node);
+    }
+  }
+};
+PrefixIndex::PrefixIndex(ResourceLedger& ledger) {
+  auto reservation = ledger.Reserve(ResourceCategory::kMetadata, sizeof(Impl));
+  impl_ = std::make_unique<Impl>(ledger, std::move(reservation));
+}
+PrefixIndex::~PrefixIndex() = default;
+void PrefixIndex::Register(Identity identity,
+                           std::span<const ComponentDescriptor> descriptors,
+                           std::optional<CompatibilityDigest> digest) {
+  if (descriptors.empty())
+    throw std::invalid_argument("prefix index has no required components");
+  for (std::size_t i = 0; i < descriptors.size(); ++i) {
+    const auto& d = descriptors[i];
+    if ((d.kind == ComponentKind::kAppendRows &&
+         (!d.row_bytes || !d.rows_per_chunk || d.state_bytes)) ||
+        (d.kind == ComponentKind::kPrivateState &&
+         (!d.state_bytes || d.row_bytes || d.rows_per_chunk)) ||
+        (d.kind != ComponentKind::kAppendRows &&
+         d.kind != ComponentKind::kPrivateState))
+      throw std::invalid_argument("invalid prefix index component geometry");
+    for (std::size_t j = 0; j < i; ++j)
+      if (d.id == descriptors[j].id)
+        throw std::invalid_argument("duplicate prefix index component");
+  }
+  auto it = impl_->trees.find(identity);
+  if (it != impl_->trees.end()) {
+    if (descriptors.size() != it->second.descriptors.size() ||
+        std::ranges::any_of(descriptors, [&](const auto& d) {
+          return std::ranges::none_of(
+              it->second.descriptors,
+              [&](const auto& other) { return Same(d, other); });
+        }))
+      throw std::invalid_argument("compatibility inventory changed");
+    if (it->second.digest && digest && it->second.digest != digest)
+      throw std::invalid_argument("persistent compatibility digest changed");
+    if (digest)
+      it->second.digest = digest;
+    return;
+  }
+  const auto bytes =
+      Add(sizeof(decltype(impl_->trees)::value_type),
+          Add(identity.capacity(),
+              Bytes(descriptors.size(), sizeof(ComponentDescriptor))));
+  auto reservation = impl_->ledger->Reserve(ResourceCategory::kMetadata, bytes);
+  Impl::Tree tree;
+  tree.digest = digest;
+  tree.descriptors =
+      std::vector<ComponentDescriptor>(descriptors.begin(), descriptors.end());
+  if (tree.descriptors.capacity() != descriptors.size())
+    throw std::logic_error("unexpected prefix inventory capacity");
+  tree.bytes = bytes;
+  tree.root = impl_->MakeNode({}, nullptr);
+  tree.metadata = reservation.Convert();
+  impl_->trees.emplace(std::move(identity), std::move(tree));
+}
+IndexEntryId PrefixIndex::Insert(
+    std::shared_ptr<const Checkpoint> checkpoint,
+    std::vector<ComponentAvailability> availability, Rows stable) {
+  if (!checkpoint || stable > checkpoint->Boundary())
+    throw std::invalid_argument("invalid indexed checkpoint");
+  auto& tree = impl_->Get(checkpoint->Compatibility());
+  ValidateAvailability(availability, tree.descriptors);
+  Impl::Record r;
+  r.checkpoint = std::move(checkpoint);
+  r.availability = impl_->Availability(std::move(availability));
+  r.tree = &tree;
+  r.stable = stable;
+  r.bytes = impl_->RecordBytes(r);
+  r.metadata = impl_->Charge(r.bytes);
+  auto tokens = r.checkpoint->Tokens();
+  return impl_->Publish(tree, tokens, std::move(r));
+}
+IndexEntryId PrefixIndex::Insert(LiveFrontier frontier) {
+  auto& tree = impl_->Get(frontier.compatibility);
+  Impl::Record r;
+  r.live = std::move(frontier);
+  r.tree = &tree;
+  r.bytes = impl_->RecordBytes(r);
+  r.metadata = impl_->Charge(r.bytes);
+  auto tokens = std::span<const Token>(r.live->tokens);
+  return impl_->Publish(tree, tokens, std::move(r));
+}
+IndexEntryId PrefixIndex::Insert(Identity compatibility,
+                                 std::shared_ptr<const DiskDescription> durable,
+                                 Rows stable) {
+  auto& tree = impl_->Get(compatibility);
+  if (!durable || stable > durable->Manifest().tokens.size() ||
+      !impl_->DurableCoherent(tree, *durable) || !durable->Pin())
+    throw std::invalid_argument("invalid durable checkpoint description");
+  Impl::Record record;
+  record.availability = impl_->DurableAvailability(tree);
+  record.durable = std::move(durable);
+  record.tree = &tree;
+  record.stable = stable;
+  record.bytes = impl_->RecordBytes(record);
+  record.metadata = impl_->Charge(record.bytes);
+  auto tokens = std::span<const Token>(record.durable->Manifest().tokens);
+  return impl_->Publish(tree, tokens, std::move(record));
+}
+void PrefixIndex::AttachDurable(
+    IndexEntryId id, std::shared_ptr<const DiskDescription> durable) {
+  auto& record = impl_->Get(id);
+  if (record.live || !durable ||
+      !impl_->DurableCoherent(*record.tree, *durable) || !durable->Pin())
+    throw std::invalid_argument("invalid durable checkpoint attachment");
+  const auto& manifest = durable->Manifest();
+  if (record.checkpoint) {
+    const auto& checkpoint = *record.checkpoint;
+    if (checkpoint.Id() != manifest.checkpoint ||
+        checkpoint.Lineage() != manifest.lineage ||
+        checkpoint.Input() != manifest.input ||
+        !std::ranges::equal(checkpoint.Tokens(), manifest.tokens) ||
+        checkpoint.Components().size() != manifest.components.size())
+      throw std::invalid_argument("durable checkpoint identity mismatch");
+    for (const auto& component : checkpoint.Components()) {
+      auto other =
+          std::ranges::find_if(manifest.components, [&](const auto& c) {
+            return Same(component.descriptor, c.descriptor);
+          });
+      if (other == manifest.components.end() ||
+          other->position != component.position)
+        throw std::invalid_argument("durable component position mismatch");
+    }
+  } else if (!record.durable || record.durable->Epoch() != durable->Epoch() ||
+             &record.durable->Store() != &durable->Store() ||
+             record.durable->Manifest().checkpoint != manifest.checkpoint) {
+    throw std::invalid_argument("durable publication identity mismatch");
+  }
+  auto admitted =
+      impl_->DurableAvailability(*record.tree, record.availability.get());
+  record.availability = std::move(admitted);
+  record.durable = std::move(durable);
+}
+void PrefixIndex::DropResident(IndexEntryId id) {
+  if (!impl_->directory.contains(id.value))
+    return;
+  auto& record = impl_->Get(id);
+  if (!record.durable || !record.availability) {
+    Erase(id);
+    return;
+  }
+  bool complete = bool(record.durable->Pin());
+  for (const auto& descriptor : record.tree->descriptors) {
+    const auto availability =
+        std::ranges::find(record.availability->components, descriptor.id,
+                          &ComponentAvailability::id);
+    complete = complete &&
+               availability != record.availability->components.end() &&
+               availability->durable;
+  }
+  if (!complete) {
+    Erase(id);
+    return;
+  }
+  record.checkpoint.reset();
+}
+void PrefixIndex::RemoveDurable(const DiskDescription& description,
+                                bool corrupt) {
+  corrupt = corrupt || description.Quarantined();
+  for (auto it = impl_->directory.begin(); it != impl_->directory.end();) {
+    auto& record = impl_->Get(IndexEntryId{it->first});
+    const auto id = record.id;
+    ++it;
+    if (!record.durable || &record.durable->Store() != &description.Store() ||
+        record.durable->Epoch() != description.Epoch() ||
+        record.durable->Manifest().checkpoint !=
+            description.Manifest().checkpoint)
+      continue;
+    if (corrupt || !record.checkpoint)
+      Erase(id);
+    else
+      record.durable.reset();
+  }
+}
+void PrefixIndex::SetAvailability(
+    IndexEntryId id, std::vector<ComponentAvailability> availability) {
+  auto& r = impl_->Get(id);
+  if (r.live)
+    throw std::invalid_argument("live frontier has no checkpoint availability");
+  ValidateAvailability(availability, r.tree->descriptors);
+  r.availability = impl_->Availability(std::move(availability));
+}
+void PrefixIndex::SetLiveAvailable(IndexEntryId id, bool available) {
+  auto& r = impl_->Get(id);
+  if (!r.live)
+    throw std::invalid_argument("entry is not a live frontier");
+  r.live->available = available;
+}
+void PrefixIndex::Erase(IndexEntryId id) {
+  auto it = impl_->directory.find(id.value);
+  if (it == impl_->directory.end())
+    return;
+  auto* node = it->second;
+  node->records.erase(id.value);
+  impl_->directory.erase(it);
+  impl_->Prune(node);
+}
+PrefixLookup PrefixIndex::Lookup(const PrefixQuery& query) const {
+  if (query.stable_prefix_tokens > query.tokens.size() ||
+      query.input.TokenCount() != query.tokens.size())
+    throw std::invalid_argument("invalid prefix query boundaries");
+  PrefixLookup result;
+  if (!query.reuse) {
+    result.reason = SelectionReason::kDisabled;
+    return result;
+  }
+  auto it = impl_->trees.find(query.compatibility);
+  if (it == impl_->trees.end()) {
+    result.reason = SelectionReason::kUnknownCompatibility;
+    return result;
+  }
+  const auto& tree = it->second;
+  std::size_t count{};
+  impl_->Path(tree, query.tokens, [&](const auto& node) {
+    count = Add(count, node.records.size());
+  });
+  if (count) {
+    auto reservation = impl_->ledger->Reserve(
+        ResourceCategory::kMetadata, Bytes(count, sizeof(PrefixCandidate)));
+    std::vector<PrefixCandidate> candidates;
+    candidates.reserve(count);
+    if (candidates.capacity() != count)
+      throw std::logic_error("unexpected prefix candidate capacity");
+    auto charge = reservation.Convert();
+    result.candidates = std::move(candidates);
+    result.metadata = std::move(charge);
+  }
+  bool fallback = query.stable_prefix_tokens == 0;
+  bool input_rejected = false, missing = false, stable_rejected = false;
+  impl_->Path(tree, query.tokens, [&](const auto& node) {
+    for (const auto& [id, r] : node.records) {
+      (void)id;
+      if (!std::ranges::equal(r.Input(), query.input.At(r.Boundary()))) {
+        input_rejected = true;
+        continue;
+      }
+      auto candidate = impl_->Candidate(tree, r);
+      if (!candidate) {
+        missing = true;
+        continue;
+      }
+      if (!r.live &&
+          (r.Boundary() <= query.stable_prefix_tokens ||
+           (r.stable != 0 && r.stable <= query.stable_prefix_tokens)))
+        fallback = true;
+      result.candidates.push_back(std::move(*candidate));
+    }
+  });
+  std::erase_if(result.candidates, [&](const auto& c) {
+    const bool rejected = !fallback && c.boundary > query.stable_prefix_tokens;
+    stable_rejected |= rejected;
+    return rejected;
+  });
+  std::ranges::sort(result.candidates, [](const auto& a, const auto& b) {
+    const auto key = [](const auto& c) {
+      return std::tuple{std::numeric_limits<Rows>::max() - c.boundary,
+                        c.live      ? 0
+                        : c.durable ? (c.checkpoint ? 2 : 3)
+                                    : 1,
+                        c.live         ? c.live->slot.value
+                        : c.checkpoint ? c.checkpoint->Id().value
+                                       : c.durable->Manifest().checkpoint.value,
+                        c.live ? c.live->generation : 0, c.entry.value};
+    };
+    return key(a) < key(b);
+  });
+  if (result.candidates.empty()) {
+    result.reason = stable_rejected  ? SelectionReason::kStablePrefixBoundary
+                    : missing        ? SelectionReason::kMissingComponent
+                    : input_rejected ? SelectionReason::kInputIdentity
+                                     : SelectionReason::kNoCompatibleBoundary;
+    return result;
+  }
+  result.selected = result.candidates.front();
+  result.reason = result.selected->live
+                      ? SelectionReason::kExactLiveContinuation
+                  : result.selected->durable
+                      ? (result.selected->checkpoint
+                             ? SelectionReason::kDeepestMixedCheckpoint
+                             : SelectionReason::kDeepestDurableCheckpoint)
+                      : SelectionReason::kDeepestCheckpoint;
+  return result;
+}
+bool PrefixIndex::IsResidentCoherent(const Checkpoint& checkpoint) const {
+  const auto it = impl_->trees.find(checkpoint.Compatibility());
+  return it != impl_->trees.end() &&
+         impl_->CheckpointResident(it->second, checkpoint);
+}
+Rows PrefixIndex::CachedPrefixTokens(const PrefixQuery& query) const {
+  auto copy = query;
+  copy.stable_prefix_tokens = 0;
+  copy.reuse = true;
+  const auto result = Lookup(copy);
+  return result.selected ? result.selected->boundary : 0;
+}
+Rows PrefixIndex::CommonPrefixTokens(const PrefixQuery& query) const {
+  if (query.input.TokenCount() != query.tokens.size())
+    throw std::invalid_argument("invalid prefix query boundaries");
+  auto it = impl_->trees.find(query.compatibility);
+  if (it == impl_->trees.end())
+    return 0;
+  // Follow token agreement once, then inspect only the matching subtree. A
+  // stored record's complete identity gates learning, even if its state is
+  // unavailable or its boundary is longer than the incoming prompt.
+  Rows longest = 0;
+  struct Pending {
+    const Impl::Node* node;
+    Rows depth, common;
+    bool diverged;
+  };
+  std::vector<Pending> pending{{it->second.root.get(), 0, 0, false}};
+  while (!pending.empty()) {
+    const auto current = pending.back();
+    pending.pop_back();
+    for (const auto& [id, r] : current.node->records) {
+      (void)id;
+      const auto input = r.Boundary() <= query.tokens.size()
+                             ? query.input.At(r.Boundary())
+                             : query.input.Complete();
+      if (std::ranges::equal(input, r.Input()))
+        longest = std::max(longest, current.common);
+    }
+    for (const auto& [token, child] : current.node->children) {
+      (void)token;
+      Rows common = current.common;
+      bool diverged = current.diverged;
+      if (!diverged) {
+        const auto suffix =
+            query.tokens.subspan(static_cast<std::size_t>(current.depth));
+        const auto matched =
+            static_cast<Rows>(std::ranges::mismatch(child->edge, suffix).in1 -
+                              child->edge.begin());
+        common += matched;
+        diverged = matched != child->edge.size();
+      }
+      // Descendants cannot improve agreement after a branch has diverged.
+      if (common > longest)
+        pending.push_back({child.get(), current.depth + child->edge.size(),
+                           common, diverged});
+    }
+  }
+  return longest;
+}
+std::size_t PrefixIndex::MetadataBytes() const {
+  std::size_t bytes = sizeof(Impl);
+  std::vector<const Impl::Node*> pending;
+  for (const auto& [identity, tree] : impl_->trees) {
+    (void)identity;
+    bytes = Add(bytes, tree.bytes);
+    pending.push_back(tree.root.get());
+  }
+  while (!pending.empty()) {
+    const auto* node = pending.back();
+    pending.pop_back();
+    bytes = Add(bytes, node->bytes);
+    for (const auto& [id, r] : node->records) {
+      (void)id;
+      bytes = Add(bytes, r.bytes);
+      if (r.availability)
+        bytes = Add(bytes, r.availability->metadata.Info().bytes);
+    }
+    for (const auto& [token, child] : node->children) {
+      (void)token;
+      pending.push_back(child.get());
+    }
+  }
+  return bytes;
+}
+}  // namespace gufo::cache

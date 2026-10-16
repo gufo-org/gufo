@@ -2,12 +2,25 @@
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target and
 shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.
-Gufo single-user tg: September 27, 2026 (`f797b5b`); pp and other results:
-September 22–23. Concurrency uses the unchanged short-context attention path.
+Gufo single-user and concurrency tables measured October 16, 2026, with
+PR #622 (compacted sparse-attention selections) rebased on `22e36769`; loading
+and memory retain the same-day `fdc21849` captures.
+Reference results remain unchanged from September 22–23.
 llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
 
 Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
+
+Gufo numerical regression checks pass; individual functional timing limits
+remain documented in [QUALITY.md](QUALITY.md). Historical llama.cpp MTP values are retained as requested:
+a separate check of that pin did not match its own AR output, so this review
+does not requalify those comparisons. [Review evidence](artifacts/decode-kernels-review.json).
+
+PR #622 speeds up decode at depth: at 128K, tg improves 0.7% AR, 1.9% mixed
+MTP and 2.1% repetitive MTP over the `fdc21849` rows, with identical completions
+and draft counts. Prefill is unchanged by the PR; pp differences are run-level
+variation. Mixed MTP C2 alternates between two draft-controller trajectories
+(about 54 and 60 tok/s, identical text) on main and the PR alike.
 
 ## Single user, autoregressive
 
@@ -17,14 +30,14 @@ Context capacities differ between engines; see the measurement details.
 <!-- bench:single-ar -->
 | Flash-Next Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1628.52 | 489.59 | +232.6% | 25.87 | 22.20 | +16.5% |
-| 4,096 | 1523.39 | 455.24 | +234.6% | 25.84 | 21.21 | +21.8% |
-| 8,192 | 1499.13 | 428.85 | +249.6% | 25.84 | 20.40 | +26.7% |
-| 12,288 | 1477.98 | 400.21 | +269.3% | 25.80 | 19.64 | +31.4% |
-| 16,384 | 1457.16 | 375.89 | +287.7% | 25.79 | 18.95 | +36.1% |
-| 32,768 | 1421.93 | 301.31 | +371.9% | 25.69 | 16.54 | +55.3% |
-| 65,536 | 1304.01 | 221.94 | +487.6% | 25.41 | 11.62 | +118.7% |
-| 131,072 | 1292.02 | 144.78 | +792.4% | 22.89 | 7.98 | +186.8% |
+| 0 | 1768.66 | 489.59 | +261.3% | 28.31 | 22.20 | +27.5% |
+| 4,096 | 1697.96 | 455.24 | +273.0% | 28.27 | 21.21 | +33.3% |
+| 8,192 | 1691.35 | 428.85 | +294.4% | 28.28 | 20.40 | +38.6% |
+| 12,288 | 1672.13 | 400.21 | +317.8% | 28.25 | 19.64 | +43.8% |
+| 16,384 | 1672.92 | 375.89 | +345.1% | 28.22 | 18.95 | +48.9% |
+| 32,768 | 1643.71 | 301.31 | +445.5% | 28.10 | 16.54 | +69.9% |
+| 65,536 | 1577.99 | 221.94 | +611.0% | 27.90 | 11.62 | +140.1% |
+| 131,072 | 1517.44 | 144.78 | +948.1% | 27.49 | 7.98 | +244.5% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar.svg)
@@ -37,14 +50,14 @@ text, including Gufo predictor catch-up.
 <!-- bench:single-mtp -->
 | Flash-Next Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1602.82 | 468.76 | +241.9% | 32.20 | 31.73 | +1.5% | 59.30 | 48.12 | +23.2% |
-| 4,096 | 1506.32 | 423.79 | +255.4% | 32.50 | 34.48 | -5.7% | 46.74 | 45.71 | +2.3% |
-| 8,192 | 1492.95 | 394.98 | +278.0% | 36.08 | 32.20 | +12.0% | 50.26 | 44.31 | +13.4% |
-| 12,288 | 1488.03 | 365.91 | +306.7% | 34.26 | 32.32 | +6.0% | 44.81 | 43.53 | +2.9% |
-| 16,384 | 1471.81 | 341.98 | +330.4% | 35.41 | 32.07 | +10.4% | 53.53 | 43.66 | +22.6% |
-| 32,768 | 1449.56 | 277.61 | +422.2% | 31.03 | 25.41 | +22.1% | 44.96 | 39.28 | +14.5% |
-| 65,536 | 1316.70 | 208.04 | +532.9% | 32.63 | 19.65 | +66.1% | 46.12 | 27.75 | +66.2% |
-| 131,072 | 1335.91 | 135.42 | +886.5% | 34.20 | 14.63 | +133.8% | 45.01 | 20.96 | +114.7% |
+| 0 | 1722.29 | 468.76 | +267.4% | 35.71 | 31.73 | +12.5% | 73.44 | 48.12 | +52.6% |
+| 4,096 | 1655.05 | 423.79 | +290.5% | 37.62 | 34.48 | +9.1% | 70.47 | 45.71 | +54.2% |
+| 8,192 | 1641.90 | 394.98 | +315.7% | 36.85 | 32.20 | +14.4% | 58.12 | 44.31 | +31.2% |
+| 12,288 | 1624.20 | 365.91 | +343.9% | 39.18 | 32.32 | +21.2% | 48.55 | 43.53 | +11.5% |
+| 16,384 | 1611.73 | 341.98 | +371.3% | 40.53 | 32.07 | +26.4% | 59.96 | 43.66 | +37.3% |
+| 32,768 | 1594.19 | 277.61 | +474.3% | 39.72 | 25.41 | +56.3% | 52.59 | 39.28 | +33.9% |
+| 65,536 | 1531.42 | 208.04 | +636.1% | 38.99 | 19.65 | +98.4% | 52.68 | 27.75 | +89.8% |
+| 131,072 | 1477.08 | 135.42 | +990.7% | 39.36 | 14.63 | +169.0% | 53.77 | 20.96 | +156.5% |
 <!-- /bench -->
 
 ![Single user, MTP](artifacts/charts/single-mtp.svg)
@@ -58,11 +71,11 @@ llama.cpp re-evaluates its four-token checkpoint tail.
 <!-- bench:multi-ar -->
 | Flash-Next Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | 25.85 | 22.34 | +15.7% |
-| 2 | 45.70 | 37.08 | +23.2% |
-| 4 | 76.29 | 54.82 | +39.2% |
-| 6 | 95.66 | 65.34 | +46.4% |
-| 8 | 108.67 | 68.79 | +58.0% |
+| 1 | 28.27 | 22.34 | +26.5% |
+| 2 | 50.68 | 37.08 | +36.7% |
+| 4 | 85.65 | 54.82 | +56.2% |
+| 6 | 107.53 | 65.34 | +64.6% |
+| 8 | 125.08 | 68.79 | +81.8% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar.svg)
@@ -76,11 +89,11 @@ request decode rates. C1 cross-checks the single-user table.
 <!-- bench:multi-mtp -->
 | Flash-Next Q4 MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 32.09 | 31.77 | +1.0% | 59.20 | 46.93 | +26.1% |
-| 2 | 51.68 | 42.79 | +20.8% | 93.16 | 52.57 | +77.2% |
-| 4 | 75.92 | 48.78 | +55.6% | 127.91 | 48.23 | +165.2% |
-| 6 | 89.18 | 52.59 | +69.6% | 142.14 | 48.51 | +193.0% |
-| 8 | 106.47 | 61.92 | +71.9% | 157.22 | 58.13 | +170.5% |
+| 1 | 35.66 | 31.77 | +12.2% | 73.17 | 46.93 | +55.9% |
+| 2 | 54.35 | 42.79 | +27.0% | 97.55 | 52.57 | +85.6% |
+| 4 | 86.42 | 48.78 | +77.2% | 157.76 | 48.23 | +227.1% |
+| 6 | 108.58 | 52.59 | +106.5% | 176.70 | 48.51 | +264.3% |
+| 8 | 125.47 | 61.92 | +102.6% | 194.29 | 58.13 | +234.2% |
 <!-- /bench -->
 
 ![Multiple users, MTP](artifacts/charts/multi-mtp.svg)
@@ -92,7 +105,7 @@ C1, context capacity 262144, MTP. Cold target/sidecar files to HTTP readiness.
 <!-- bench:loading -->
 | Flash-Next Q4<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
-| Q4 | 15.45 | 117.83 | +662.7% |
+| Q4 | 15.27 | 117.83 | +671.6% |
 <!-- /bench -->
 
 ![Loading time](artifacts/charts/loading.svg)
@@ -104,8 +117,8 @@ C1, context capacity 133121, AR. Peak memory reported by HIP.
 <!-- bench:memory -->
 | Flash-Next Q4 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 85.55 | 84.84 | -0.8% |
-| 16K prefix, pp4096 + tg128 | 86.27 | 85.31 | -1.1% |
+| pp2048 + tg128 | 88.75 | 84.84 | -4.4% |
+| 16K prefix, pp4096 + tg128 | 90.73 | 85.31 | -6.0% |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory.svg)

@@ -44,5 +44,194 @@
       "build": "nix build, production gfx1151 binary"
     },
     "qualification": "attention-tiles-review.json"
+  },
+  "benchmarks-2026-10-06": {
+    "scope": "Gufo single-user AR and MTP mixed/repetitive HTTP pp2048/tg128 at 0, 4096, 8192, 12288, 16384, 32768, 65536 and 131072 cached tokens.",
+    "gufo": {
+      "revision": "4c5a00d2d609846cb73e79aa33de324624aa9c2c",
+      "binarySourceRevision": "eecb008a909ca299c13d1ef773765c7e2e24d395",
+      "binarySha256": "2ebf7a2cf22eae84b0c78bf87bc39adda3336fc59f9ecb4e3f1b7c06227571d4",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+      "build": "Existing Nix release binary, built from 5a0a0ed plus the subsequently committed final-prefill patch. Production sources match eecb008a and 4c5a00d2."
+    },
+    "measurement": "One warmed valid sample per point, no repetitions. All 24 requests generated 128 tokens and passed the documented cache/prefill count tolerances. Token-count calibration attempts are retained in raw logs and excluded from the tables.",
+    "quality": "The d0 mixed MTP completion matches the fresh AR sweep; repetitive d0 matches the retained fresh AR control. Full-vocabulary pruning and sampled snapshot replay are qualified separately in prefill-final-rows.json, including mixed text, images and 128K. Deep HTTP AR/MTP frontiers differ by one token, so their free-running completion hashes are not an exact-parity test.",
+    "retained": "Reference, concurrency, loading and memory results retain their September 22-23 measurements."
+  },
+  "benchmarks-2026-10-07": {
+    "scope": "Gufo single-user AR and MTP mixed/repetitive HTTP pp2048/tg128 at 0, 4096, 8192, 12288, 16384, 32768, 65536 and 131072 cached tokens.",
+    "gufo": {
+      "revision": "def2ed1e904f912e69550344aa7c13a99f535d0e",
+      "binarySha256": "1ea59e9bfb214b5cdd4d4b6bcc896058df43a06f9c5e180086ea6a8d4301ca58",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+      "build": "Production CMake release preset (RelWithDebInfo), pinned Nix toolchain."
+    },
+    "conditions": {
+      "powerProfile": "performance",
+      "profileVerifiedThroughoutSweep": true,
+      "temperatureScope": "Entire ordered AR, mixed MTP and repetitive MTP sweep.",
+      "sweepStartGpuEdgeC": 48.0,
+      "sweepStartCpuTctlC": 54.0,
+      "gpuEdgeRangeC": [
+        48.0,
+        85.0
+      ],
+      "cpuTctlRangeC": [
+        55.25,
+        96.125
+      ]
+    },
+    "measurement": "One warmed valid sample per point. Ordered full depth sweep; cache/prefill count calibration attempts are retained in private raw logs.",
+    "quality": "All 24 requests generate 128 tokens and retain the October 6 prompt/cache/output counts, completion hashes and speculative counts. This checks consistency, not original unquantized-model accuracy.",
+    "retained": "Reference, concurrency, loading and memory retain September 22-23 measurements."
+  },
+  "benchmarks-2026-10-08-09": {
+    "scope": "Gufo single-user AR/MTP mixed/repetitive pp2048/tg128 at d0/4K/8K/12K/16K/32K/64K/128K; C1/2/4/6/8 AR/MTP; both memory rows.",
+    "gufo": {
+      "baseRevision": "50900eb717925cc8e85ed952e1a75e522958a7f6",
+      "branch": "perf/qwen-flash-long-prefill",
+      "dirty": true,
+      "build": "nix build, production gfx1151",
+      "binarySha256": "e462fc4fdca5718aece434fedd2391f5734c5609e0d3fbd294ca0baf769a9a99",
+      "derivation": "/nix/store/bcigl89m146dgiwgnkygzmhd0dsvsfvn-gufo-0-unstable-50900eb-dirty.drv",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+      "productionSourceSha256": {
+        "src/models/qwen38_flash_next/kernels/rocm/batch.cpp": "0c5d93133dd2377fd150512ce3fa7aa11e0df67fdeb07d9187d3cdc429004b14",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": "1356388f360634399cbf551e0daa0774e182cb5b6a05c2113cf78afea5bc6f46",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.hpp": "0b6c337fd16874bc4d46a4555f062bba68b9adbeb7fd733bd7ee669dbf3f2bbe",
+        "src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp": "cfe9bcc6b928ab35c07313b19f5b18c4142f4c5aa87badd6f21ec006a32d0aff",
+        "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp": "cc29f19e149153e224a5fa6e45f970b4d13c6c840e65c870077b297ba6c539db",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/mmvq.hip.cpp": "cc772ba28ee1a8d9b5a5b9700c518930b35eda32785b9178a052acc5285b6e92",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.hip.cpp": "1d756110b8599e40064997a9e6aca43969f4a4e905305b5124a08e12c30084d7"
+      }
+    },
+    "measurement": "One measured sample per point using the complete ordered depth sweep; exact prompt/cache/output counts retained. MTP pp is the maximum of mixed and repetitive. Concurrency prefills every session before timed tg128 and sums individual request decode rates.",
+    "quality": "All 24 depth-sweep outputs and prompt/cache/draft counts match the previous published sweep. All 63 concurrent requests match fresh isolated AR outputs and reuse the prompt. Native real-image regression checks, cancellation, sampled replay and RAM/disk restoration pass. Independent upstream vision parity remains unresolved.",
+    "timingControl": "C2 repetitive: 84.52 tok/s in the sweep versus 84.46 on current main and 84.40 in a focused candidate repeat. The original measurement is retained; the historical 93.16 tok/s did not reproduce on current main.",
+    "retained": "Loading and all llama.cpp measurements retain their September 22-23 provenance.",
+    "evidence": "prefill-long-context.json"
+  },
+  "benchmarks-2026-10-10": {
+    "scope": "Gufo full AR/MTP depth and C1/2/4/6/8 sweep, cold-file loading, both memory rows; matched main controls.",
+    "gufo": {
+      "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe",
+      "binary_sha256": "5b000aa50220c68d6a0156afbacab9eb687324c799b8d1a73ae11fdcf271a17e",
+      "model_source_tree": "77af3d5a995a03c3cbf5bc879cc77406b8290adf"
+    },
+    "mainControl": {
+      "revision": "a41e88da229441f31b49cef5ea1cbfc5f2704dc3",
+      "binary_sha256": "1aa49f8929309fd1619ed9da591f08ec75883c25a45d33230428fa79b697e88d",
+      "model_source_tree": "c0a33be9af558d0394bb82dbab251773788cf8f8"
+    },
+    "originalPrRevision": "8190ee5f86da4601e27021b278b43027a4b60114",
+    "rebase": "All 16 patches unchanged after clean rebase onto the pinned main.",
+    "build": "nix build, production gfx1151; same pinned toolchain and dependencies on both builds.",
+    "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+    "measurement": "One warmed measured sample per point; ordered full depth lists and prepared concurrent decoding. MTP pp is the maximum of mixed and repetitive rates. Raw per-request timings and every original flag retained.",
+    "quality": "All 24 depth outputs and counts match main. All 63 concurrent tg128 outputs match fresh AR; independent operators, sampled/cache replay and fixed-history full-vocabulary checks pass. This is not original-unquantized-model qualification.",
+    "timingGate": "Two functional request phases still fail; noisy benchmark/setup/queue/gap timings remain inconclusive. See review evidence; no blanket no-regression claim.",
+    "reference": "All existing llama.cpp artifacts, displayed values and September 22\u201323 dates preserved at user request. A separate MTP own-AR control failed; historical reference numbers were not requalified or refreshed.",
+    "conditions": {
+      "profile": "performance",
+      "allModelJobsSerialized": true,
+      "buildsDuringBenchmarks": false,
+      "referencePolicy": "Existing llama.cpp measurements and dates preserved unchanged at user request.",
+      "runs": {
+        "main-sweep-1": {
+          "utc": "2026-10-10T09:28:27.645583+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 56.625,
+            "amdgpu:edge": 42.0
+          },
+          "returncode": 0,
+          "seconds": 721.4217913890025
+        },
+        "main-sweep-2": {
+          "utc": "2026-10-10T09:58:31.312157+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 58.125,
+            "amdgpu:edge": 42.0
+          },
+          "returncode": 0,
+          "seconds": 372.9397837650031
+        },
+        "main-sweep-3": {
+          "utc": "2026-10-10T10:04:44.253265+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 57.5,
+            "amdgpu:edge": 42.0
+          },
+          "returncode": 0,
+          "seconds": 62.73534694701084
+        },
+        "candidate-sweep-1": {
+          "utc": "2026-10-10T09:40:29.076906+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 63.625,
+            "amdgpu:edge": 50.0
+          },
+          "returncode": 0,
+          "seconds": 717.1319539480028
+        },
+        "candidate-sweep-2": {
+          "utc": "2026-10-10T09:52:26.210715+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 63.25,
+            "amdgpu:edge": 50.0
+          },
+          "returncode": 0,
+          "seconds": 365.09954650799045
+        },
+        "candidate-sweep-3": {
+          "utc": "2026-10-10T10:05:46.989786+00:00",
+          "profile": "performance",
+          "startingTemperaturesC": {
+            "k10temp:Tctl": 57.25,
+            "amdgpu:edge": 43.0
+          },
+          "returncode": 0,
+          "seconds": 61.820584646979114
+        }
+      },
+      "profileVerifiedThroughout": true,
+      "monitorSamples": 230,
+      "k10temp:TctlRangeC": [
+        57.125,
+        92.5
+      ],
+      "amdgpu:edgeRangeC": [
+        42.0,
+        79.0
+      ],
+      "minimumAvailableGiB": 21.738788604736328
+    },
+    "evidence": "decode-kernels-review.json",
+    "ppRetry": "C1 at64K, exact saved prompts and token/cache counts, one output token: AR1467.30 to1497.60tok/s (+2.1%); MTP1451.39 to1463.63tok/s (+0.8%). Fresh prefix pairs; original ordered-sweep samples retained separately. All single-user PP rows audited: no drop over5% versus main or the previous published table."
+  },
+  "benchmarks-2026-10-16": {
+    "scope": "Complete Gufo-only HTTP single-user AR/MTP, concurrency, cold-file loading and memory refresh after PR #603, including the cache overhead follow-up.",
+    "gufo": {
+      "revision": "fdc2184941a19867fb2d643030717fec344b7280",
+      "binarySha256": "b1ab0e9795df6fbac837cb00971dd021058cff045fc63178ccc3ac53265165f9",
+      "build": "nix build; clean production source; pinned flake.lock unchanged"
+    },
+    "measurement": "One warmed sample per point; greedy, thinking off, canonical ordered pp2048/tg128 histories; automatic cache RAM budget; performance platform profile and accelerator-performance tuned profile. Recorded at least 90-second idle recovery and matching temperature limits before each independent AR, mixed MTP and repetitive MTP server; no power/profile changes. Raw requests, phase timings, telemetry, controls, outliers and diagnostic traces retained outside Git.",
+    "reference": "All retained September 22\u201323 llama.cpp data unchanged; not rerun or requalified."
+  },
+  "benchmarks-2026-10-16-pr622": {
+    "scope": "Gufo-only HTTP single-user AR/MTP and concurrency refresh with PR #622 (compacted sparse-attention selections); loading and memory retain benchmarks-2026-10-16.",
+    "gufo": {
+      "revision": "32c4ece8",
+      "source": "PR #622 head adfa4fd7 rebased on main 22e36769",
+      "binarySha256": "2361bcffddf74773e282da717494703c3e5be74b62fdc1a50efdb30fba0db128",
+      "build": "nix build; clean production source; pinned flake.lock unchanged"
+    },
+    "measurement": "One warmed sample per point; greedy, thinking off, canonical ordered pp2048/tg128 histories; automatic cache RAM budget; performance platform profile; 90-second idle before each table. Completion hashes match benchmarks-2026-10-16 in every row. Matched controls use main 22e36769 (binary SHA-256 prefix 1316bbc609fa09f6).",
+    "reference": "All retained September 22\u201323 llama.cpp data unchanged; not rerun or requalified."
   }
 }

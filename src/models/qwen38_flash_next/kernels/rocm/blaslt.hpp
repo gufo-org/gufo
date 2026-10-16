@@ -28,6 +28,14 @@ public:
   [[nodiscard]] bool Gemm(const void* weights, const void* input, float* out,
                           hipDataType type, int m, int n, int k,
                           std::string* error_msg);
+  /// Gemm through the library kernel even where DenseBf16Gemm reproduces it
+  /// (tests compare the two).
+  [[nodiscard]] bool LibraryGemm(const void* weights, const void* input,
+                                 float* out, hipDataType type, int m, int n,
+                                 int k, std::string* error_msg);
+  /// Whether Gemm runs DenseBf16Gemm for this shape (tests).
+  [[nodiscard]] bool UsesOwnKernel(hipDataType type, int m, int n, int k,
+                                   std::string* error_msg);
 
 private:
   BlasLt() = default;
@@ -35,6 +43,9 @@ private:
   struct Plan;
   std::unique_ptr<Plan> MakePlan(hipDataType type, int m, int n, int k,
                                  std::string* error_msg) const;
+  Plan* FindPlan(hipDataType type, int m, int n, int k, std::string* error_msg);
+  bool Run(Plan& plan, const void* weights, const void* input, float* out,
+           std::string* error_msg);
 
   hipblasLtHandle_t handle_{nullptr};
   hipStream_t stream_{nullptr};

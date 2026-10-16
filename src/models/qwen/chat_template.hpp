@@ -53,6 +53,9 @@ struct ChatMessage {
 
   ChatRole role{ChatRole::kUser};
   std::string content;
+  /// Internal server-authored instructions following system/developer content.
+  /// These bytes are template framing, never supplied by the HTTP message API.
+  std::string framing_suffix;
   std::string name;     ///< Optional function/tool name
   std::string thought;  ///< Optional thinking/reasoning prefix
   std::string tool_call_id;
@@ -87,6 +90,65 @@ struct ChatTool {
   std::string definition_json;
 };
 
+/// The literals that frame a native Qwen tool call. QwenChatTemplate renders
+/// historical calls with these, and ScanQwenToolCall reads the same bytes
+/// back, so the wire format cannot change in one direction only (#290).
+struct QwenToolSyntax {
+  static constexpr std::string_view kCallOpen = "<tool_call>";
+  static constexpr std::string_view kCallClose = "</tool_call>";
+  static constexpr std::string_view kFunctionOpen = "<function=";
+  static constexpr std::string_view kFunctionClose = "</function>";
+  static constexpr std::string_view kParameterOpen = "<parameter=";
+  static constexpr std::string_view kParameterClose = "</parameter>";
+  /// The exact canonical opener the renderer writes. Requests constrained to
+  /// the native dialect admit this spelling as an implicit reasoning boundary.
+  static constexpr std::string_view kNativeCallOpen = "<tool_call>\n<function=";
+};
+
+/// One parameter exactly as the model wrote it, before the API surface decides
+/// whether it is a string or JSON.
+struct QwenToolCallParameter {
+  std::string name;    ///< Spelled between "<parameter=" and ">".
+  std::string value;   ///< Canonical framing newlines removed; all else kept.
+  bool framed{false};  ///< The opening newline frame was present.
+  /// Bytes of the scanned text consumed through this parameter. Recovery
+  /// resumes here when the API surface rejects this parameter.
+  std::size_t progress{0};
+};
+
+/// One call exactly as written, before schema interpretation.
+struct QwenToolCallSyntax {
+  std::string name;
+  std::vector<QwenToolCallParameter> parameters;
+  /// The parameter whose value ran to the end of the scan without a closing
+  /// delimiter. `value` holds back a possible partial closing delimiter.
+  std::optional<QwenToolCallParameter> unfinished;
+  /// False for the "<tool_call>{json}</tool_call>" compatibility form.
+  bool native{true};
+  /// Payload of a JSON-form call whose closing envelope was found.
+  std::string json_payload;
+  /// Opened as the canonical QwenToolSyntax::kNativeCallOpen form.
+  bool canonical_header{false};
+  /// Both closing tags and every parameter delimiter were present.
+  bool complete{false};
+};
+
+/// One scan step over a response. The caller keeps quote state and schema
+/// interpretation; this result carries only the dialect bytes.
+struct QwenToolCallScan {
+  bool matched{false};  ///< `text` begins with QwenToolSyntax::kCallOpen.
+  /// Bytes of `text` consumed before scanning resumes when the call is not
+  /// accepted into the API output.
+  std::size_t progress{0};
+  /// Bytes of `text` belonging to a complete envelope.
+  std::size_t end{0};
+  std::optional<QwenToolCallSyntax> call;  ///< Absent when nothing parsed.
+};
+
+/// Scans the Qwen call beginning at `text[0]`, if any. Schema interpretation,
+/// argument coercion and OpenAI shaping stay with the API surface.
+[[nodiscard]] QwenToolCallScan ScanQwenToolCall(std::string_view text);
+
 enum class QwenReasoningEffort : std::uint8_t {
   kLow,
   kMedium,
@@ -102,6 +164,14 @@ struct ChatTemplateOptions {
   bool add_vision_id{false};
   bool require_tool_call{false};
   std::size_t max_output_bytes{1024ULL * 1024ULL};  ///< 1 MiB upper bound
+};
+
+/// A byte span of the rendered prompt that came from a message. Content is
+/// tokenized as text, never as framing: a `<|im_end|>` a client sends is the
+/// character string the client wrote, not a turn end inside the prompt (#383).
+struct ContentSpan {
+  std::size_t offset{0};
+  std::size_t size{0};
 };
 
 /// Longest Qwen3.8 vocabulary entry in bytes (Flash-Next GGUF, 248,320
@@ -179,7 +249,8 @@ public:
       std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
       const ChatTemplateOptions& options = {}, std::string* error_msg = nullptr,
       std::vector<std::size_t>* image_offsets = nullptr,
-      std::size_t* stable_prefix_bytes = nullptr);
+      std::size_t* stable_prefix_bytes = nullptr,
+      std::vector<ContentSpan>* content_spans = nullptr);
 
   /// Formats messages and tokenizes the rendered prompt with the given
   /// tokenizer.
@@ -192,6 +263,17 @@ public:
       const QwenTokenizer& tokenizer, std::span<const ChatMessage> messages,
       std::span<const ChatTool> tools, const ChatTemplateOptions& options = {},
       std::string* error_msg = nullptr);
+
+  /// The rendered prompt's bytes from `begin` to `end` as tokens: message
+  /// content is read as text and everything else as framing (#383), so a
+  /// control token a client spelled stays the characters it wrote. `begin` must
+  /// fall on a token boundary. A slice that spells no vocabulary token gets the
+  /// plain framing reading, which is what ordinary prompts get.
+  [[nodiscard]] static std::vector<TokenId> EncodeRendered(
+      const QwenTokenizer& tokenizer, std::string_view rendered,
+      std::size_t begin, std::size_t end,
+      std::span<const ContentSpan> content_spans,
+      const TokenizerOptions& options);
 
 private:
   QwenChatTemplate(std::string template_str, std::string template_sha256,
