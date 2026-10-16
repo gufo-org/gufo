@@ -358,7 +358,9 @@ the `max_bytes` an explicit value may claim.
 
 Both are sampled after weights and execution states are allocated, then fixed
 for the server run. Flash-Next and Qwen3.8-27B use half the available
-host RAM, respecting container/cgroup limits. 27B also clamps this to HIP's free
+host RAM, respecting container/cgroup limits. Inactive page cache, such as
+recently read model files, counts as available because the kernel reclaims it
+before failing an allocation. Dirty and writeback pages do not. 27B also clamps this to HIP's free
 device memory. CPU and GPU allocations compete for the same physical RAM on
 Strix Halo, so HIP's free-memory estimate alone is not enough.
 For example, 44 GiB available at load gives a 22 GiB automatic RAM cache and

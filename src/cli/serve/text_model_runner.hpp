@@ -82,6 +82,13 @@ struct TextRunnerDiskCacheOptions {
 /// Nullopt when MemAvailable is missing.
 [[nodiscard]] std::optional<std::uint64_t> MeminfoAvailableBytes(
     std::string_view meminfo);
+/// `host_available` bounded by every cgroup v2 memory limit from the process's
+/// cgroup (named in `membership_text`, the /proc/self/cgroup contents) up to
+/// `root`. Inactive file pages in memory.stat are reclaimable page cache and
+/// are not counted as used; without that line, memory.current is used as is.
+[[nodiscard]] std::uint64_t CgroupAvailableBytes(
+    const std::filesystem::path& root, std::string_view membership_text,
+    std::uint64_t host_available);
 /// Automatic snapshot budget: half the host RAM available after loading
 /// (excluding free CMA pages), after cgroup limits.
 [[nodiscard]] std::size_t HostSnapshotBudgetBytes();
