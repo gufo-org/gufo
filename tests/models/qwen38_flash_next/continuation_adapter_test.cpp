@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -53,7 +54,7 @@ void Wait(cache::Completion done) {
   Require(done.Wait() == cache::TransferResult::kSucceeded, "transfer failed");
 }
 Checkpoint Capture(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
-                   gufo::hip::TransferPool& streams) {
+                   gufo::hip::TransferPool& streams, bool registered = false) {
   Checkpoint result{adapter.Positions(slot), {}};
   constexpr std::size_t piece = (1 << 20) + 13;
   for (const auto& component : adapter.Components()) {
@@ -61,6 +62,16 @@ Checkpoint Capture(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
     auto& bytes = result.bytes.emplace_back(component.row_bytes
                                                 ? rows * component.row_bytes
                                                 : component.state_bytes);
+    void* mapped{};
+    if (registered && !bytes.empty())
+      Require(hipHostMalloc(&mapped, bytes.size(), hipHostMallocDefault) ==
+                  hipSuccess,
+              "registered capture allocation failed");
+    const std::unique_ptr<void, decltype(&hipHostFree)> mapping(mapped,
+                                                                hipHostFree);
+    const auto buffer =
+        mapped ? std::span(static_cast<std::byte*>(mapped), bytes.size())
+               : std::span(bytes);
     if (component.row_bytes) {
       for (cache::Rows first = 0; first < rows;) {
         const auto end = std::min(rows, first + 97);
@@ -68,8 +79,8 @@ Checkpoint Capture(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
         Require(bool(stream), "stream exhausted");
         Wait(adapter.CopyRowsOut(
             slot, component.id, first, end,
-            std::span(bytes).subspan(first * component.row_bytes,
-                                     (end - first) * component.row_bytes),
+            buffer.subspan(first * component.row_bytes,
+                           (end - first) * component.row_bytes),
             *stream));
         first = end;
       }
@@ -78,12 +89,14 @@ Checkpoint Capture(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
         const auto count = std::min(piece, bytes.size() - offset);
         auto stream = streams.TryAcquire();
         Require(bool(stream), "stream exhausted");
-        Wait(adapter.CapturePrivatePiece(
-            slot, component.id, offset, std::span(bytes).subspan(offset, count),
-            *stream));
+        Wait(adapter.CapturePrivatePiece(slot, component.id, offset,
+                                         buffer.subspan(offset, count),
+                                         *stream));
         offset += count;
       }
     }
+    if (mapped)
+      std::memcpy(bytes.data(), mapped, bytes.size());
   }
   return result;
 }
@@ -523,8 +536,11 @@ void Check(const std::shared_ptr<qfn::Model>& model, bool mtp,
     std::cout << (mtp ? "MTP" : "AR") << ",boundary," << boundary << std::endl;
     Require(a.Sync(prompt.first(boundary), &error), error);
     const auto checkpoint = Capture(adapter, *source, streams);
+    const auto registered = Capture(adapter, *source, streams, true);
+    Require(registered.bytes == checkpoint.bytes,
+            "registered capture differs from pageable HIP capture");
     source_guard.Borrow(checkpoint);
-    Load(adapter, *destination, checkpoint, streams);
+    Load(adapter, *destination, registered, streams);
     Require(adapter.Validate(*destination, checkpoint.positions),
             "complete restore rejected");
     Require(Capture(adapter, *destination, streams).bytes == checkpoint.bytes,

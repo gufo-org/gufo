@@ -12,6 +12,7 @@
 
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/snapshot_copy.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
@@ -609,8 +610,8 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
           if (piece.host)
             std::memcpy(destination, source, end - first);
           else
-            Check(hipMemcpyAsync(destination, source, end - first,
-                                 hipMemcpyDeviceToHost, transfer.Native()));
+            Check(rocm::CopySnapshotToHost(destination, source, end - first,
+                                           transfer.Native()));
         }
       });
 }
@@ -696,8 +697,8 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
         if (component.part == ContinuationPart::kTokens && !bytes.empty())
           std::memcpy(bytes.data(), source, bytes.size());
         else if (!bytes.empty())
-          Check(hipMemcpyAsync(bytes.data(), source, bytes.size(),
-                               hipMemcpyDeviceToHost, transfer.Native()));
+          Check(rocm::CopySnapshotToHost(bytes.data(), source, bytes.size(),
+                                         transfer.Native()));
       });
 }
 std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
