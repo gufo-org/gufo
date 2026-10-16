@@ -50,6 +50,8 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  /// KV cache precision: "f16" (default) or "q8" (per-row symmetric INT8).
+  std::string kv_cache_quant = "f16";
 };
 
 class Session;
@@ -85,6 +87,9 @@ public:
   [[nodiscard]] bool HasMtp() const noexcept;
   [[nodiscard]] std::uint32_t DecodeConcurrency() const noexcept {
     return options_.decode_concurrency;
+  }
+  [[nodiscard]] bool KvCacheInt8() const noexcept {
+    return options_.kv_cache_quant == "q8";
   }
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] const Config& config() const noexcept;

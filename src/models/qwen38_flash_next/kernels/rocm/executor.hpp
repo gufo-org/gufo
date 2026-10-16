@@ -105,6 +105,7 @@ public:
   Session& operator=(const Session&) = delete;
 
   [[nodiscard]] bool mtp_enabled() const noexcept { return mtp_enabled_; }
+  [[nodiscard]] bool kv_cache_int8() const noexcept { return kv_cache_int8_; }
   [[nodiscard]] std::uint32_t position() const noexcept { return position_; }
   [[nodiscard]] std::uint32_t max_context() const noexcept {
     return max_context_;
@@ -145,8 +146,10 @@ private:
   };
   struct AttentionState {
     const qwen::vision::DeviceRope* rope{nullptr};
-    __half* k_cache{nullptr};  ///< [max_context][kv_heads*d]
-    __half* v_cache{nullptr};  ///< [max_context][kv_heads*d]
+    __half* k_cache{nullptr};          ///< [max_context][kv_heads*d]
+    __half* v_cache{nullptr};          ///< [max_context][kv_heads*d]
+    std::int8_t* k_cache_q8{nullptr};  ///< Q8_0 blocks (q8)
+    std::int8_t* v_cache_q8{nullptr};  ///< Q8_0 blocks (q8)
     float* index_k{nullptr};   ///< [index_capacity_][indexer_dim] raw ring
     __half* block_k{nullptr};  ///< [max_context/ratio][indexer_dim]
   };
@@ -162,6 +165,8 @@ private:
   struct MtpState {
     __half* k_cache{nullptr};
     __half* v_cache{nullptr};
+    std::int8_t* k_cache_q8{nullptr};  ///< (q8 mode)
+    std::int8_t* v_cache_q8{nullptr};  ///< (q8 mode)
     float* index_k{nullptr};
     __half* block_k{nullptr};
     std::uint32_t blocks{0};
@@ -181,6 +186,7 @@ private:
   qwen::vision::DeviceInput vision_input_;
   std::uint32_t max_context_{0};
   bool mtp_enabled_{false};
+  bool kv_cache_int8_{false};        ///< Q8 KV cache mode (Phase 2)
   std::uint32_t index_capacity_{0};  ///< power-of-two raw indexer ring rows
   std::uint32_t position_{0};
   ContinuationHooks* continuation_hooks_{nullptr};
@@ -235,6 +241,8 @@ public:
     std::uint32_t max_logit_rows{1};
     /// Longest speculative batch; bounds the recurrent snapshot storage.
     std::uint32_t max_speculative{1};
+    /// INT8 KV cache (per-row symmetric); false keeps the FP16 path.
+    bool kv_cache_int8{false};
   };
 
   ~Executor();

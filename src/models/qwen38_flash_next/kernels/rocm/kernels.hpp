@@ -414,6 +414,16 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
                       const qwen::vision::DeviceRope* rope = nullptr,
                       bool prefill = false);
 
+/// Q8 twin of PrepareAttention: identical math, K rows to Q8_0 blocks.
+/// V rows are quantized separately via QuantizeKvRowsQ8 over packed rows.
+bool PrepareAttentionQ8(
+    const float* packed, std::uint32_t stride, const float* q_gamma,
+    const float* k_gamma, float* q, float* gate, std::int8_t* k_cache,
+    std::int8_t* v_cache, std::uint32_t n_tokens, std::uint32_t heads,
+    std::uint32_t kv_heads, std::uint32_t d, std::uint32_t rotary_dim,
+    const std::uint32_t* start_pos, float theta, float eps, hipStream_t stream,
+    const qwen::vision::DeviceRope* rope = nullptr, bool prefill = false);
+
 /// NEOX partial rotary on x [t][heads][d] at positions start_pos + t.
 /// Positions are read from device memory (`start_pos` points at the
 /// session's control block) so a captured decode graph replays at any
@@ -428,6 +438,13 @@ void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
 void StoreKv(const float* src, __half* cache, std::uint32_t n_tokens,
              std::uint32_t row_dim, const std::uint32_t* start_pos,
              hipStream_t stream);
+
+/// Symmetric INT8 quantize of float rows into Q8_0 blocks (see .hip).
+void QuantizeKvRowsQ8(const float* src, std::uint32_t src_tok_stride,
+                      std::uint32_t src_head_stride, std::int8_t* dst,
+                      std::uint32_t kv_width, std::uint32_t kv_heads,
+                      std::uint32_t d, std::uint32_t n_tokens,
+                      const std::uint32_t* start_pos, hipStream_t stream);
 /// Stores raw indexer rows in a power-of-two ring of `capacity` rows.
 void StoreRows(const float* src, float* dst, std::uint32_t n_tokens,
                std::uint32_t row_dim, const std::uint32_t* start_pos,
@@ -472,6 +489,28 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                hipStream_t stream);
+/// Fused Q/K/V projection + norm + RoPE + Q8_0 KV store for wide batches
+/// (mirrors AttentionF16Gemm; skips the s_.qg staging traffic in Q8 mode).
+bool AttentionQ8Gemm(const void* weights, const __half* input,
+                     const float* q_gamma, const float* k_gamma, float* query,
+                     float* gate, std::int8_t* keys, std::int8_t* values,
+                     std::uint32_t n_tokens, const std::uint32_t* position,
+                     float theta, float eps, hipStream_t stream,
+                     const qwen::vision::DeviceRope* rope);
+
+/// Dual-buffer Q8_0 -> F16 (one launch for K+V staging).
+bool DequantizeQ8KVRows(const std::int8_t* src_k, __half* dst_k,
+                        const std::int8_t* src_v, __half* dst_v,
+                        std::uint32_t n_rows, std::uint32_t row_elems,
+                        hipStream_t stream);
+/// Q8 twin: Q8_0 blocked INT8 caches, fused dequant on read.
+void AttentionQ8(const float* q, const std::int8_t* k_cache,
+                 const std::int8_t* v_cache, const std::uint32_t* mask,
+                 std::uint32_t mask_words, float* out, float* partials,
+                 std::uint32_t splits, std::uint32_t n_tokens,
+                 const std::uint32_t* start_pos, std::uint32_t heads,
+                 std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
+                 hipStream_t stream);
 
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows
