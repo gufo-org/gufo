@@ -1,6 +1,6 @@
-// `gufo serve llm --prepare-vision` relies on Encoder::Upload: the sidecar
-// weights upload once, ResidentBytes accounts for exactly them, and a later
-// Encode reuses them instead of uploading again on the first image.
+// `gufo serve llm` uploads the vision sidecar while loading through
+// Encoder::Upload: the weights upload once, ResidentBytes accounts for exactly
+// them, and a later Encode reuses them instead of uploading again.
 #include <hip/hip_runtime.h>
 
 #include <cstdint>

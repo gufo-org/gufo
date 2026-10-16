@@ -612,7 +612,6 @@ void PrintServeHelp(std::string_view program_name,
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
-    bool prepare_vision = false;
     std::string trace_path;
 
     gufo::cli::ArgParser parser(
@@ -625,11 +624,6 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--mmproj", "PATH",
                      "Qwen BF16 vision sidecar (auto-discovered beside model)",
                      "Model", &vision_model_path);
-    parser.AddFlag(
-        "", "--prepare-vision",
-        "Hash and upload the Qwen vision sidecar before serving, not in the "
-        "first image request; startup fails if the model has none",
-        "Model", &prepare_vision);
     parser.AddOption("", "--served-model-name", "ID",
                      "Model identifier exposed by the OpenAI API", "Model",
                      &served_model_name);
@@ -1165,7 +1159,6 @@ int RunServe(std::span<const char* const> args) {
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
-    bool prepare_vision = false;
     std::string trace_path;
 
     gufo::cli::ArgParser llm_parser(
@@ -1177,11 +1170,6 @@ int RunServe(std::span<const char* const> args) {
         "", "--mmproj", "PATH",
         "Qwen BF16 vision sidecar (auto-discovered beside model)", "Model",
         &vision_model_path);
-    llm_parser.AddFlag(
-        "", "--prepare-vision",
-        "Hash and upload the Qwen vision sidecar before serving, not in the "
-        "first image request; startup fails if the model has none",
-        "Model", &prepare_vision);
     llm_parser.AddOption("", "--served-model-name", "ID",
                          "Model identifier exposed by the OpenAI API", "Model",
                          &served_model_name);
@@ -1435,7 +1423,6 @@ int RunServe(std::span<const char* const> args) {
                     static_cast<std::chrono::milliseconds::rep>(
                         stall_timeout_ms)},
             .log_progress = log_progress,
-            .prepare_vision = prepare_vision,
         },
         speculative_config,
         server::TextDiskCacheConfig{

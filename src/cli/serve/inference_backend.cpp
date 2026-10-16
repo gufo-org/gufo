@@ -157,14 +157,15 @@ std::shared_ptr<const models::qwen::vision::Prompt> QwenPrompt(
   return image->prompt;
 }
 
-// Otherwise the first image request hashes the whole sidecar in its queue time
-// and uploads the weights in its prefill, after admission and the RAM cache
-// were sized without them.
+// Hash the sidecar and upload its weights while the model loads, before the
+// runner claims state capacity and the RAM cache is sized. Otherwise the first
+// image request hashes the whole sidecar in its queue time and uploads the
+// weights in its prefill, after admission and the cache were sized without
+// them.
 void PrepareVision(
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder) {
   if (!encoder)
-    throw std::invalid_argument(
-        "--prepare-vision needs a Qwen vision sidecar (--mmproj)");
+    return;
   const auto started = Clock::now();
   (void)encoder->identity();
   const auto hashed = Clock::now();
@@ -172,8 +173,7 @@ void PrepareVision(
     encoder->Upload();
   } catch (const std::exception& e) {
     throw std::runtime_error(
-        std::string("--prepare-vision could not upload the vision sidecar: ") +
-        e.what());
+        std::string("could not upload the Qwen vision sidecar: ") + e.what());
   }
   const auto uploaded = Clock::now();
   std::size_t heap_free = 0, heap_total = 0;
@@ -3525,8 +3525,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
       speculative_options.enable_adaptive_draft_length = false;
     }
 
-    if (scheduler_policy.prepare_vision)
-      PrepareVision(model->VisionEncoder());
+    PrepareVision(model->VisionEncoder());
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model =
         sampling::TextPreset(model->GetConfig());
@@ -3616,8 +3615,6 @@ bool InferenceBackend::load(
   }
 
   try {
-    if (scheduler_policy.prepare_vision)
-      PrepareVision({});
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model =
         sampling::TextModelPreset::kDeepSeekV4Flash;
@@ -3703,9 +3700,7 @@ bool InferenceBackend::load(
     return false;
   }
   try {
-    // Before the runner claims state capacity and the pool sizes the cache.
-    if (scheduler_policy.prepare_vision)
-      PrepareVision(model->VisionEncoder());
+    PrepareVision(model->VisionEncoder());
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
     new_state->sampling_defaults.supplied = {};
