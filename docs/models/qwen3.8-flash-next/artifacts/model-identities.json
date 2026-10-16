@@ -212,5 +212,15 @@
     },
     "evidence": "decode-kernels-review.json",
     "ppRetry": "C1 at64K, exact saved prompts and token/cache counts, one output token: AR1467.30 to1497.60tok/s (+2.1%); MTP1451.39 to1463.63tok/s (+0.8%). Fresh prefix pairs; original ordered-sweep samples retained separately. All single-user PP rows audited: no drop over5% versus main or the previous published table."
+  },
+  "benchmarks-2026-10-16": {
+    "scope": "Complete Gufo-only HTTP single-user AR/MTP, concurrency, cold-file loading and memory refresh after PR #603, including the cache overhead follow-up.",
+    "gufo": {
+      "revision": "fdc2184941a19867fb2d643030717fec344b7280",
+      "binarySha256": "b1ab0e9795df6fbac837cb00971dd021058cff045fc63178ccc3ac53265165f9",
+      "build": "nix build; clean production source; pinned flake.lock unchanged"
+    },
+    "measurement": "One warmed sample per point; greedy, thinking off, canonical ordered pp2048/tg128 histories; automatic cache RAM budget; performance platform profile and accelerator-performance tuned profile. Recorded at least 90-second idle recovery and matching temperature limits before each independent AR, mixed MTP and repetitive MTP server; no power/profile changes. Raw requests, phase timings, telemetry, controls, outliers and diagnostic traces retained outside Git.",
+    "reference": "All retained September 22\u201323 llama.cpp data unchanged; not rerun or requalified."
   }
 }
