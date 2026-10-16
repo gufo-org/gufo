@@ -86,11 +86,14 @@ comparisons, eight bitwise fresh-load replays, 25 sampling configurations per
 mode, eight 200-token cache replays, image attachment/replacement, cancellation,
 rollback release and C2/4/6/8 isolation. The focused cache, backing, retention,
 component-runner and snapshot tests pass without relaxed tolerances or missing
-model skips. Pi on the preceding `e0bead8b` revision completes eight continued
-coding tasks with 33 HTTP requests
-and 25 paired tool calls/results. Actual edits, expected failing tests and
-successful repairs were inspected; no orphan tool results or literal framing
-tags appear in assistant text.
+model skips. Pi on the final `fdc21849` production binary completes four
+continued coding tasks with 17 HTTP requests and 13 paired tool calls/results,
+using default sampling and low thinking. All 16 follow-up requests reuse cache;
+their first-token times are 145–488 ms. Tasks take 7.0–13.1 seconds. These are
+observed smoke timings, not a matched-main timing gate. Actual edits, expected
+failing tests and successful repairs were inspected; no orphan tool results or
+literal framing tags appear in assistant text. The preceding `e0bead8b` run's
+eight tasks, 33 requests and 25 tool pairs remain in the retained evidence.
 
 The final production depth sweep has 32 captured requests with exact outputs,
 prompt/cache/draft counts and all 256 timing phases passing against post-#603
