@@ -556,6 +556,9 @@ const std::string& Encoder::identity() const {
 std::size_t Encoder::ResidentBytes() const noexcept {
   return impl_->resident_bytes.load();
 }
+void Encoder::Upload() {
+  impl_->Upload();
+}
 Encoder::Embedding::~Embedding() {
   if (data_ != nullptr)
     (void)hipFree(data_);

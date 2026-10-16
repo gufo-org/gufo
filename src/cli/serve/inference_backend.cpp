@@ -157,6 +157,38 @@ std::shared_ptr<const models::qwen::vision::Prompt> QwenPrompt(
   return image->prompt;
 }
 
+// Otherwise the first image request hashes the whole sidecar in its queue time
+// and uploads the weights in its prefill, after admission and the RAM cache
+// were sized without them.
+void PrepareVision(
+    const std::shared_ptr<models::qwen::vision::Encoder>& encoder) {
+  if (!encoder)
+    throw std::invalid_argument(
+        "--prepare-vision needs a Qwen vision sidecar (--mmproj)");
+  const auto started = Clock::now();
+  (void)encoder->identity();
+  const auto hashed = Clock::now();
+  try {
+    encoder->Upload();
+  } catch (const std::exception& e) {
+    throw std::runtime_error(
+        std::string("--prepare-vision could not upload the vision sidecar: ") +
+        e.what());
+  }
+  const auto uploaded = Clock::now();
+  std::size_t heap_free = 0, heap_total = 0;
+  (void)hipMemGetInfo(&heap_free, &heap_total);
+  using Milliseconds = std::chrono::duration<double, std::milli>;
+  Logger::Info("loader",
+               "event=vision_prepared resident_bytes=" +
+                   std::to_string(encoder->ResidentBytes()) + " identity_ms=" +
+                   std::to_string(Milliseconds(hashed - started).count()) +
+                   " upload_ms=" +
+                   std::to_string(Milliseconds(uploaded - hashed).count()) +
+                   " device_heap_free_bytes=" + std::to_string(heap_free) +
+                   " " + Logger::MemoryStatus());
+}
+
 constexpr std::string_view kDeepSeekStateAbi =
     "deepseek-v4-flash-gfx1151-state-v4";
 constexpr std::array<std::uint8_t, 8> kQwenPersistentSnapshotMagic = {
@@ -3493,6 +3525,8 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
       speculative_options.enable_adaptive_draft_length = false;
     }
 
+    if (scheduler_policy.prepare_vision)
+      PrepareVision(model->VisionEncoder());
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model =
         sampling::TextPreset(model->GetConfig());
@@ -3582,6 +3616,8 @@ bool InferenceBackend::load(
   }
 
   try {
+    if (scheduler_policy.prepare_vision)
+      PrepareVision({});
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model =
         sampling::TextModelPreset::kDeepSeekV4Flash;
@@ -3667,6 +3703,9 @@ bool InferenceBackend::load(
     return false;
   }
   try {
+    // Before the runner claims state capacity and the pool sizes the cache.
+    if (scheduler_policy.prepare_vision)
+      PrepareVision(model->VisionEncoder());
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
     new_state->sampling_defaults.supplied = {};

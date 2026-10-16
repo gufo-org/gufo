@@ -55,6 +55,10 @@ struct TextSchedulerPolicy {
   /// disables it.
   std::chrono::milliseconds stall_timeout{0};
   bool log_progress{false};
+  /// Hash the Qwen vision sidecar and upload its weights while the model
+  /// loads, before admission and the RAM cache are sized, instead of in the
+  /// first image request. Loading fails if the model has no sidecar.
+  bool prepare_vision{false};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.

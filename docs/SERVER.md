@@ -223,6 +223,18 @@ Appending an image reuses the preceding text/image state in RAM or on disk;
 changing, removing or moving an earlier image invalidates checkpoints after it.
 New images get a checkpoint before assistant framing so later turns do not
 encode or prefill them again.
+
+Image input to a Qwen model otherwise prepares its vision sidecar inside the
+first image request of each process. It hashes the complete sidecar for image
+cache identities, in that request's queue time; the sidecar's file pages then
+count in the process RSS. It uploads the encoder weights after admission and
+the RAM cache were sized without them. `gufo serve llm --prepare-vision` hashes
+and uploads while the model loads, before the cache is sized and before
+readiness, so admission's free device memory already excludes the weights. The
+weights stay resident even if no image arrives. The startup line
+`event=vision_prepared` reports `resident_bytes`, `identity_ms` and
+`upload_ms`. Startup fails if the model has no vision sidecar or the upload
+does not fit. Image encoding scratch is still allocated per image.
 With `preserve_thinking=false`, a new user turn removes reasoning from the
 preceding tool cycle. Gufo retains the state before that cycle and processes
 its changed suffix again.

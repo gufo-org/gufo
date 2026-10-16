@@ -51,6 +51,9 @@ if (ENGINE_ENABLE_HIP)
   set_tests_properties(qwen_vision_serving_test PROPERTIES
     LABELS "qwen27b;qwen38-flash-next;hip;gpu;vision;external-model"
     SKIP_RETURN_CODE 77)
+  add_qwen27b_test(qwen_vision_prepare_test ../qwen/vision_prepare_test.cpp
+    "qwen38-flash-next;gpu;hip;vision;external-model")
+  target_link_libraries(qwen_vision_prepare_test PRIVATE hip::host)
   add_test(NAME inference_backend_gpu_test COMMAND inference_backend_gpu_test)
   set_tests_properties(inference_backend_gpu_test PROPERTIES
     LABELS "qwen27b;hip;gpu;server;correctness;external-model"
