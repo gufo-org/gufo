@@ -3719,13 +3719,22 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   // K and V^T have their own buffers so the next tile's S overlaps this
   // tile's PV (see the key sweep below).
   __shared__ __half k_lds[kKeys * kWmmaKStride];
-  __shared__ __half v_lds[kHeadDim * kVtStride];
+  __shared__ __attribute__((aligned(16))) __half v_lds[kHeadDim * kVtStride];
   // Pad score rows for the four-lane softmax reads and probability rows
   // for the WMMA fragments. Both transposes otherwise repeat LDS banks.
-  __shared__ float s_lds[2][kSTiles][16][17];
-  __shared__ __half p_lds[kRows][kKeys + 8];
+  // Dense score rows are padded to 20 floats: the WMMA scatter stays nearly
+  // conflict-free and each softmax lane reads its four scores as a float4.
+  // The sparse window keeps 17-float rows and scalar reads (faster there).
+  constexpr bool kVectorSoftmax = !kPackHeads;
+  constexpr std::uint32_t kScoreStride = kVectorSoftmax ? 20 : 17;
+  static_assert(kKeys / kSoftmaxLanes == 4, "one float4 of scores per lane");
+  __shared__
+      __attribute__((aligned(16))) float s_lds[2][kSTiles][16][kScoreStride];
+  __shared__ __attribute__((aligned(16))) __half p_lds[kRows][kKeys + 8];
   __shared__ float row_sum[kRows];
-  __shared__ float row_scale[kRows];
+  // Rescale factors grouped as [row block][row parity][row / 2]: a lane of
+  // the PV phase needs the eight rows of its parity, read as two float4.
+  __shared__ __attribute__((aligned(16))) float row_scale[kRows];
 
   const std::uint32_t s_tile = wave % kSTiles;
   const std::uint32_t s_kh = wave / kSTiles;
@@ -3888,6 +3897,15 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   // Gathers the next tile starting the search at block `b`; returns the
   // block to continue from.
   const auto gather_tile = [&](std::uint32_t b, Tile& tile) {
+    if constexpr (!sparse) {
+      // The dense window's tiles are four consecutive blocks.
+      tile.count = min(kBlocksPerTile, n_blocks - min(b, n_blocks));
+      tile.members = 0;
+#pragma unroll
+      for (std::uint32_t i = 0; i < kBlocksPerTile; ++i)
+        tile.block[i] = b + i < n_blocks ? b + i : n_blocks;
+      return b + tile.count;
+    }
     if (compact) {
       tile.count = min(kBlocksPerTile, selected - min(b, selected));
       tile.members = 0;
@@ -3914,6 +3932,10 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   };
   // Key position of tile row `r` (0..15), or context_end past the tile.
   const auto tile_key = [&](const Tile& tile, std::uint32_t r) {
+    if constexpr (!sparse) {
+      const std::uint32_t blk = tile.block[0] + (r / ratio);
+      return blk < n_blocks ? (blk * ratio) + (r % ratio) : context_end;
+    }
     const std::uint32_t i = r / ratio;
     std::uint32_t blk = n_blocks;
 #pragma unroll
@@ -3976,12 +3998,26 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
     }
   };
   const auto stage_v = [&](const uint4* regs) {
+    // Neighbouring lanes hold neighbouring keys of the same dims. Swapping
+    // one half with the partner lets each lane store a key pair of one dim
+    // as a word: the even lane the even dim, the odd lane the odd dim.
+    const bool odd = (v_key & 1u) != 0u;
 #pragma unroll
     for (std::uint32_t j = 0; j < kVRegs; ++j) {
-      const auto* packed = reinterpret_cast<const __half*>(&regs[j]);
+      const std::uint32_t words[4] = {regs[j].x, regs[j].y, regs[j].z,
+                                      regs[j].w};
 #pragma unroll
-      for (std::uint32_t i = 0; i < 8; ++i) {
-        v_lds[((v_slice + (j * 8) + i) * kVtStride) + v_key] = packed[i];
+      for (std::uint32_t w = 0; w < 4; ++w) {
+        const std::uint32_t own = words[w];
+        const auto partner =
+            static_cast<std::uint32_t>(__builtin_amdgcn_mov_dpp(
+                static_cast<int>(own), 0xB1, 0xF, 0xF, false));
+        const std::uint32_t pair =
+            odd ? __builtin_amdgcn_perm(partner, own, 0x03020706U)
+                : __builtin_amdgcn_perm(partner, own, 0x05040100U);
+        const std::uint32_t dim = v_slice + (j * 8) + (2 * w) + (odd ? 1 : 0);
+        *reinterpret_cast<std::uint32_t*>(
+            &v_lds[(dim * kVtStride) + (v_key & ~1u)]) = pair;
       }
     }
   };
@@ -4020,12 +4056,23 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       // Keys in the query's own incomplete block are always visible; earlier
       // blocks follow the selection mask.
       const std::uint32_t tail_start = ((absolute_query + 1) / ratio) * ratio;
+      // The dense window runs without a selection mask.
       const std::uint32_t* words =
-          mask == nullptr || !live_row
+          !sparse || mask == nullptr || !live_row
               ? nullptr
               : mask + static_cast<std::size_t>(local_query) * mask_words;
       float part_max = -INFINITY;
       float vals[kPerLane];
+      float s0v[kPerLane];
+      float s1v[kPerLane];
+      if constexpr (kVectorSoftmax) {
+        const float4 s0 = *reinterpret_cast<const float4*>(
+            &s_lds[0][rb][row][seg * kPerLane]);
+        const float4 s1 = *reinterpret_cast<const float4*>(
+            &s_lds[1][rb][row][seg * kPerLane]);
+        s0v[0] = s0.x, s0v[1] = s0.y, s0v[2] = s0.z, s0v[3] = s0.w;
+        s1v[0] = s1.x, s1v[1] = s1.y, s1v[2] = s1.z, s1v[3] = s1.w;
+      }
 #pragma unroll
       for (std::uint32_t m = 0; m < kPerLane; ++m) {
         const std::uint32_t col = (seg * kPerLane) + m;
@@ -4042,10 +4089,14 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
             valid = ((words[b / 32] >> (b % 32)) & 1u) != 0u;
           }
         }
-        const std::uint32_t s_index = ((col / 16) * kRowBlocks) + rb;
-        vals[m] = valid ? (s_lds[0][s_index][row][col % 16] +
-                           s_lds[1][s_index][row][col % 16])
-                        : -INFINITY;
+        if constexpr (kVectorSoftmax) {
+          vals[m] = valid ? (s0v[m] + s1v[m]) : -INFINITY;
+        } else {
+          const std::uint32_t s_index = ((col / 16) * kRowBlocks) + rb;
+          vals[m] = valid ? (s_lds[0][s_index][row][col % 16] +
+                             s_lds[1][s_index][row][col % 16])
+                          : -INFINITY;
+        }
         part_max = fmaxf(part_max, vals[m]);
       }
 #pragma unroll
@@ -4057,12 +4108,17 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       const float prior_scale =
           isfinite(prev_max) ? __expf(prev_max - next_max) : 0.0F;
       float part_sum = 0.0F;
+      __half p[kPerLane];
 #pragma unroll
       for (std::uint32_t m = 0; m < kPerLane; ++m) {
         const float w = isfinite(vals[m]) ? __expf(vals[m] - next_max) : 0.0F;
         part_sum += w;
-        p_lds[rg][(seg * kPerLane) + m] = static_cast<__half>(w);
+        p[m] = static_cast<__half>(w);
+        if constexpr (!kVectorSoftmax)
+          p_lds[rg][(seg * kPerLane) + m] = p[m];
       }
+      if constexpr (kVectorSoftmax)
+        __builtin_memcpy(&p_lds[rg][seg * kPerLane], p, sizeof(p));
 #pragma unroll
       for (std::uint32_t off = 1; off < kSoftmaxLanes; off <<= 1) {
         part_sum += XorLane(part_sum, off);
@@ -4072,7 +4128,8 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       // fast-math cannot reassociate the reduction into the update.
       running_sum = __fmaf_rn(prior_scale, running_sum, part_sum);
       if (seg == 0) {
-        row_scale[rg] = prior_scale;
+        row_scale[kVectorSoftmax ? (rb * 16) + ((row % 2) * 8) + (row / 2)
+                                 : rg] = prior_scale;
       }
     }
   };
@@ -4084,9 +4141,17 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 #pragma unroll
     for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
       float scale[8];
+      if constexpr (kVectorSoftmax) {
+        const auto* factors = reinterpret_cast<const float4*>(
+            &row_scale[(rb * 16) + (half_id * 8)]);
+        const float4 f0 = factors[0];
+        const float4 f1 = factors[1];
+        scale[0] = f0.x, scale[1] = f0.y, scale[2] = f0.z, scale[3] = f0.w;
+        scale[4] = f1.x, scale[5] = f1.y, scale[6] = f1.z, scale[7] = f1.w;
+      } else {
 #pragma unroll
-      for (std::uint32_t i = 0; i < 8; ++i) {
-        scale[i] = row_scale[(rb * 16) + (2 * i) + half_id];
+        for (std::uint32_t i = 0; i < 8; ++i)
+          scale[i] = row_scale[(rb * 16) + (2 * i) + half_id];
       }
 #pragma unroll
       for (std::uint32_t t = 0; t < 2; ++t) {
