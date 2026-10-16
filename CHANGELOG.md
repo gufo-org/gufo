@@ -4,6 +4,24 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.16.0](https://github.com/gufo-org/gufo/compare/v0.15.1...v0.16.0) (2026-10-16)
+
+
+### Features
+
+* **serve:** keep /health answering while the model and disk tier load ([#610](https://github.com/gufo-org/gufo/issues/610)) ([f6ca085](https://github.com/gufo-org/gufo/commit/f6ca085a5091eed23541cde6fa1ff282cbd4c68b))
+
+
+### Performance
+
+* **cache:** reduce long-context checkpoint overhead ([#615](https://github.com/gufo-org/gufo/issues/615)) ([f8be547](https://github.com/gufo-org/gufo/commit/f8be5474228095dd0eec6cec14cbc6ba7f070f90))
+* **qwen-flash:** score MTP drafts over request vocabulary ([#603](https://github.com/gufo-org/gufo/issues/603)) ([51a8b00](https://github.com/gufo-org/gufo/commit/51a8b00d9dc5360688fc8642df94dfe1387ec2ca))
+
+
+### Code Refactoring
+
+* **serve:** move tool-call dialect parsing next to its renderers ([#592](https://github.com/gufo-org/gufo/issues/592)) ([b6ba33d](https://github.com/gufo-org/gufo/commit/b6ba33d48c7a2749a2e0b98e891a22e27d17cbdb))
+
 ## [0.15.1](https://github.com/gufo-org/gufo/compare/v0.15.0...v0.15.1) (2026-10-15)
 
 
