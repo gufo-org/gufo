@@ -381,6 +381,17 @@ struct ComponentTextCache::Impl {
             const auto bytes = PayloadBytes(manifest);
             if (bytes > disk_capacity)
               return false;
+            // Startup orphan reclamation holds the store lock asynchronously
+            // and eviction only tries that lock, so a write racing it would
+            // be dropped. Only this worker joins it once the queue exists.
+            try {
+              disk->WaitForReclamation();
+            } catch (const std::exception& error) {
+              Logger::Warn("cache", std::string("schema=component-cache-v1 "
+                                                "event=disk_reclamation_failed "
+                                                "reason=") +
+                                        error.what());
+            }
             const std::lock_guard lock(mutex);
             return catalog->EvictOne();
           });
