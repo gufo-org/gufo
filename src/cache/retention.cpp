@@ -344,6 +344,11 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
   const bool resumed_tail = r.reused && r.reused_tokens &&
                             r.reused_tokens <= r.tokens.size() &&
                             r.tokens.size() - r.reused_tokens <= kRetryFraming;
+  const bool reused_source =
+      !record_pressure && r.purpose == RetentionPurpose::kRetry && r.reused &&
+      !resumed_tail && source != limit_ &&
+      records_[source].checkpoint->Boundary() <= r.reused_tokens &&
+      Prefix(records_[source].checkpoint->Tokens(), r.tokens);
   const bool replaces_source =
       !record_pressure && r.purpose == RetentionPurpose::kRetry &&
       source != limit_ && !Persisting(source) &&
@@ -359,18 +364,31 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
     // to retain its complete retry state; faster captures can otherwise fill
     // the pool with older ancestors before this final boundary is reached.
     // Retry admission still protects last copies, forks and current edit
-    // boundaries. Cold retries, larger continuations/compactions and record
-    // pressure keep their existing limits.
+    // boundaries. A larger resumed turn can reclaim its own covered prefix
+    // history, without taking another conversation's history for compaction.
+    // Cold retries and record pressure keep their existing limits.
     const auto maximum =
         !record_pressure && r.purpose == RetentionPurpose::kHistory ? 3
         : !record_pressure && r.purpose == RetentionPurpose::kRetry &&
                 resumed_tail
             ? 2
             : MaxRank(r.purpose);
-    return records_[i].checkpoint && !Persisting(i) && priority(i) <= maximum &&
-           std::ranges::find(r.protected_checkpoints,
-                             records_[i].checkpoint->Id()) ==
-               r.protected_checkpoints.end();
+    if (!records_[i].checkpoint || Persisting(i) ||
+        std::ranges::find(r.protected_checkpoints,
+                          records_[i].checkpoint->Id()) !=
+            r.protected_checkpoints.end())
+      return false;
+    const auto level = priority(i);
+    if (level <= maximum)
+      return true;
+    const auto& checkpoint = *records_[i].checkpoint;
+    return !record_pressure && r.purpose == RetentionPurpose::kRetry &&
+           r.reused && r.reused_tokens && r.reused_tokens <= r.tokens.size() &&
+           level <= 2 && checkpoint.Boundary() <= r.reused_tokens &&
+           checkpoint.Compatibility() == r.compatibility &&
+           checkpoint.Input() == r.input &&
+           (reused_source ? i == source || records_[i].below[source]
+                          : Prefix(checkpoint.Tokens(), r.tokens));
   };
   // Full-record publication first replaces an incompatible edited tail of the
   // leased source's family, as the current cache does.

@@ -466,6 +466,33 @@ void ResumedRetryReclaimsCoveredHistory() {
   // remain protected even if a full-prompt retry would still need more space.
   assert(!f.policy.Reclaim(request));
 }
+void LongResumedRetryReclaimsOnlyOwnAncestors() {
+  for (const bool named_source : {false, true}) {
+    PressureFixture f;
+    const auto unrelated = Conversation(1, 16);
+    f.Add({unrelated.begin(), unrelated.begin() + 8});
+    f.Add(unrelated);
+    const auto current = Conversation(2, 16);
+    const auto ancestor = f.Add({current.begin(), current.begin() + 8});
+    const auto source = f.Add(current);
+    auto prompt = current;
+    prompt.resize(216, 77);
+    const auto stable = f.Add({prompt.begin(), prompt.end() - 5});
+    const std::array protected_ids{source, stable};
+    RetentionRequest request{prompt, {1}, {}, RetentionPurpose::kRetry, 211};
+    request.reused = true;
+    request.reused_tokens = current.size();
+    request.source = named_source ? source : CheckpointId{};
+    request.protected_checkpoints = protected_ids;
+    assert(f.policy.Reclaim(request) &&
+           "long resumed retry starved behind its own covered ancestor");
+    assert(f.log.events.back().checkpoint == ancestor);
+    assert(f.Cached(current) == current.size());
+    assert(f.Cached(unrelated) == unrelated.size());
+    // The older, unrelated ancestor remains ineligible for this larger turn.
+    assert(!f.policy.Reclaim(request));
+  }
+}
 void SharedShortPrefixIsNotCheap() {
   // A new conversation sharing a short system/tools prefix must not evict
   // that prefix to admit itself (tool-agent peers).
@@ -1051,6 +1078,7 @@ int main() {
   PersistingCheckpointIsNotAVictim();
   RetryCopyReplacesItsNearbySource();
   ResumedRetryReclaimsCoveredHistory();
+  LongResumedRetryReclaimsOnlyOwnAncestors();
   SharedShortPrefixIsNotCheap();
   UnreusedConversationKeepsItsStem();
   ForkedParentOutlivesItsChildren();
