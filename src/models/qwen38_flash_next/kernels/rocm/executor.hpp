@@ -554,7 +554,8 @@ private:
                    std::uint32_t start_pos, std::uint32_t pool_grid,
                    std::uint32_t first_layer, std::uint32_t end_layer,
                    std::string* error_msg,
-                   PrefillCheckpoint* checkpoint = nullptr) const;
+                   PrefillCheckpoint* checkpoint = nullptr,
+                   bool embeddings_ready = false) const;
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
                const float* hidden_source, MtpTrace* trace, bool kv_only,

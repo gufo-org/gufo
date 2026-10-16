@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -2804,10 +2805,31 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
   // grows the GEMM tier's arena, which capture forbids.
   if (graph && session.warmed_.contains(key)) {
     hipGraphExec_t exec = nullptr;
+    bool enqueued = false;
     if (const auto it = session.graphs_.find(key);
         it != session.graphs_.end()) {
       exec = it->second;
     } else {
+      // A verifier graph discarded with rollback storage must be rebuilt on
+      // a cold request. Queue this pass first, then record the identical
+      // commands while the GPU executes it. No second device pass is launched.
+      if (synchronize && (key & (std::uint64_t{1} << 32)) != 0 &&
+          (key & (std::uint64_t{1} << 40)) == 0) {
+        auto dispatch = std::tie(
+            moe_pending_, defer_residual_, res_deferred_, shexp_half_ready_,
+            q8t_src_, q8t_rows_, q8t_cols_, half_src_, half_rows_, half_cols_,
+            half_bf16_, xn_half_, inject_parts_, inject_fused_, q8_slot_,
+            xn_q8_ready_, mixed_q8_ready_);
+        const auto before = std::apply(
+            [](const auto&... fields) { return std::make_tuple(fields...); },
+            dispatch);
+        if (!body())
+          return false;
+        // Producer readiness and alternating scratch addresses must match
+        // the executed pass when the graph records its kernel arguments.
+        dispatch = before;
+        enqueued = true;
+      }
       hipGraph_t captured = nullptr;
       // Frozen peer sessions can copy snapshots on independent nonblocking
       // streams while the scheduler records this session's decode graph.
@@ -2834,7 +2856,8 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
       }
       session.graphs_.emplace(key, exec);
     }
-    if (!Check(hipGraphLaunch(exec, stream_), "graph launch", error_msg)) {
+    if (!enqueued &&
+        !Check(hipGraphLaunch(exec, stream_), "graph launch", error_msg)) {
       return false;
     }
   } else {
@@ -2988,12 +3011,11 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   const auto body = [&] {
     return ForwardBody(session, n, n_logits, logits != nullptr, speculative,
                        sparse, start_pos, graph ? graph_pool_grid : pool_grid,
-                       first_layer, c.num_layers, error_msg, checkpoint);
+                       first_layer, c.num_layers, error_msg, checkpoint, graph);
   };
-  // Only the suffix waits for its pinned n-gram rows. During eager
-  // execution and capture, Ple performs this wait at the same boundary.
-  if (graph && session.graphs_.contains(key) && ple_pending_ &&
-      !WaitPle(error_msg)) {
+  // The prefix is already queued. Wait once before the suffix so recording
+  // its graph can reuse these pinned rows while the eager pass executes.
+  if (graph && ple_pending_ && !WaitPle(error_msg)) {
     return false;
   }
   if (!Run(session, key, graph, body, error_msg)) {
@@ -3027,7 +3049,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            std::uint32_t start_pos, std::uint32_t pool_grid,
                            std::uint32_t first_layer, std::uint32_t end_layer,
                            std::string* error_msg,
-                           PrefillCheckpoint* checkpoint) const {
+                           PrefillCheckpoint* checkpoint,
+                           bool embeddings_ready) const {
   const Config& c = config();
   if (first_layer == 0) {
     if (!Check(hipMemcpyAsync(session.control_, control_host_,
@@ -3051,7 +3074,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
       return false;
     const DeviceLayer& l = layers[il];
     if (c.IsPleLayer(il) && !Ple(l, session, n, s_.res, speculative, error_msg,
-                                 false, checkpoint)) {
+                                 embeddings_ready, checkpoint)) {
       return false;
     }
     // Both stacked SSM projections consume the same F16 input. Avoid writing
