@@ -222,5 +222,16 @@
     },
     "measurement": "One warmed sample per point; greedy, thinking off, canonical ordered pp2048/tg128 histories; automatic cache RAM budget; performance platform profile and accelerator-performance tuned profile. Recorded at least 90-second idle recovery and matching temperature limits before each independent AR, mixed MTP and repetitive MTP server; no power/profile changes. Raw requests, phase timings, telemetry, controls, outliers and diagnostic traces retained outside Git.",
     "reference": "All retained September 22\u201323 llama.cpp data unchanged; not rerun or requalified."
+  },
+  "benchmarks-2026-10-16-pr622": {
+    "scope": "Gufo-only HTTP single-user AR/MTP and concurrency refresh with PR #622 (compacted sparse-attention selections); loading and memory retain benchmarks-2026-10-16.",
+    "gufo": {
+      "revision": "32c4ece8",
+      "source": "PR #622 head adfa4fd7 rebased on main 22e36769",
+      "binarySha256": "2361bcffddf74773e282da717494703c3e5be74b62fdc1a50efdb30fba0db128",
+      "build": "nix build; clean production source; pinned flake.lock unchanged"
+    },
+    "measurement": "One warmed sample per point; greedy, thinking off, canonical ordered pp2048/tg128 histories; automatic cache RAM budget; performance platform profile; 90-second idle before each table. Completion hashes match benchmarks-2026-10-16 in every row. Matched controls use main 22e36769 (binary SHA-256 prefix 1316bbc609fa09f6).",
+    "reference": "All retained September 22\u201323 llama.cpp data unchanged; not rerun or requalified."
   }
 }

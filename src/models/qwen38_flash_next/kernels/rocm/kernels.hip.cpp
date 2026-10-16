@@ -2761,7 +2761,7 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
 /// grid n_tokens rows, block 256. Writes row t's selected complete blocks, in
 /// ascending order, to lists[t * capacity ..] and their number to counts[t].
 /// AttentionKernel would otherwise rebuild this list in every (head, split)
-/// block, walking all of the row's mask words each time. SelectMarkKernel
+/// block, walking all of the row's mask words each time.
 /// Invariant: a row has at most `capacity` selected blocks. SelectMarkKernel
 /// marks at most budget = indexer_top_k / compress_ratio blocks per row and
 /// the executor passes that budget as `capacity`, so the guards below never

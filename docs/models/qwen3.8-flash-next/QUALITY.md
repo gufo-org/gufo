@@ -239,8 +239,16 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 ## Benchmark method
 
 All six Gufo benchmark sections were refreshed on October 16, 2026.
-Measurements use clean production Nix build `fdc21849` of PR #615
-(binary SHA-256 prefix `b1ab0e9795df6fba`), using the unchanged pinned toolchain.
+Loading and memory use clean production Nix build `fdc21849` of PR #615
+(binary SHA-256 prefix `b1ab0e9795df6fba`). Single-user and concurrency tables
+were then remeasured with clean production build `32c4ece8`, PR #622 rebased on
+`22e36769` (binary SHA-256 prefix `2361bcffddf74773`), with the unchanged pinned
+toolchain. Every row reproduced the `fdc21849` completion hashes; single-user
+draft counts were also identical. Alternating native `gufo bench -p 16 -n 64`
+controls against main `22e36769` measured decode +2.9% MTP and +0.8% AR at 128K,
++0.8% MTP at 32K and no change at depth 0. Four alternating mixed MTP C2
+repeats gave 110 drafts (about 54 tok/s) on main twice and the PR once, and 144
+drafts (about 60 tok/s) on the PR once, all with identical text.
 The platform profile is `performance`, with tuned `accelerator-performance`;
 temperatures and the profile are monitored throughout. Each independent AR,
 mixed MTP and repetitive MTP depth server starts after at least 90 seconds of
