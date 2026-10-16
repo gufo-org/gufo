@@ -648,7 +648,8 @@ struct ComponentTextCache::Lease::Impl {
                       cache->resources->adapter->Positions(slot.Execution())),
         .protected_checkpoints =
             std::span(edit_boundaries).first(edit_boundary_count),
-        .reused = cached != 0};
+        .reused = cached != 0,
+        .reused_tokens = cached};
   }
   std::unique_ptr<TextRunnerSnapshot> CaptureDurable();
 };

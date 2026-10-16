@@ -106,6 +106,9 @@ struct RetentionRequest {
   // The turn restored or continued a cached prefix. Its admitted checkpoint
   // marks the conversation as reused (see RetentionPolicy byte pressure).
   bool reused{false};
+  // Frontier actually reused by this turn, before its new prefill. This
+  // distinguishes a short retry tail from a larger continuation/compaction.
+  Rows reused_tokens{};
 };
 // Caller serializes policy, index and history operations. Ledger and index
 // outlive this object; sink, if present, does too. Callbacks/sinks cannot

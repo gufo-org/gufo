@@ -444,7 +444,16 @@ void ResumedRetryReclaimsCoveredHistory() {
   request.protected_checkpoints = protected_ids;
   // An optional cold retry cannot evict another conversation's history.
   assert(!f.policy.Reclaim(request));
+  auto longer = prompt;
+  longer.resize(prompt.size() + 65, 77);
+  RetentionRequest distant{longer, {1}, {}, RetentionPurpose::kRetry, 7};
+  distant.reused = true;
+  distant.reused_tokens = 4;
+  distant.protected_checkpoints = protected_ids;
+  assert(!f.policy.Reclaim(distant) &&
+         "large resumed prompt displaced covered history for a retry");
   request.reused = true;
+  request.reused_tokens = current.size();
   assert(f.policy.Reclaim(request) &&
          "resumed retry starved behind covered history");
   assert(f.log.events.back().checkpoint == ancestor);

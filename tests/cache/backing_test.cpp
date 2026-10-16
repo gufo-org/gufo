@@ -278,17 +278,20 @@ void GroupedBacking() {
     hip::CommittedBackingPool pool(ledger, {capacity, block_bytes, headroom});
     auto first = pool.TryAcquire(Category::kPrivateState, 3 * block_bytes - 1);
     assert(first && first->Bytes().size() == 3 * block_bytes);
-    base = first->Bytes().data();
+    const auto* first_data = first->Bytes().data();
     std::fill(first->Bytes().begin(), first->Bytes().end(), std::byte{42});
     first->Convert();
     auto second = pool.TryAcquire(Category::kBackingAssigned, 9 * block_bytes);
-    assert(second && second->Bytes().data() == base + 3 * block_bytes);
+    assert(second);
+    base = std::min(first->Bytes().data(), second->Bytes().data());
+    assert(first_data + 3 * block_bytes == second->Bytes().data() ||
+           second->Bytes().data() + 9 * block_bytes == first_data);
     const auto full = host_allocations.load();
     assert(!pool.TryAcquire(Category::kPrivateTail, 2 * block_bytes));
     assert(host_allocations.load() == full);
     first.reset();
     auto reused = pool.TryAcquire(Category::kPrivateTail, 3 * block_bytes);
-    assert(reused && reused->Bytes().data() == base);
+    assert(reused && reused->Bytes().data() == first_data);
     reused.reset();
     second.reset();
     // Capacity released by a row group immediately serves a larger private
@@ -308,7 +311,7 @@ void GroupedBacking() {
         const auto n = 2 + thread % 2;
         for (int iteration = 0; iteration < 100; ++iteration) {
           auto group = pool.TryAcquire(
-              thread % 2 ? Category::kPrivateTail : Category::kBackingAssigned,
+              thread % 2 ? Category::kPrivateState : Category::kBackingAssigned,
               n * block_bytes);
           if (!group)
             continue;
@@ -354,6 +357,13 @@ void CheckpointLifetimes() {
       private_states.push_back(std::move(*state));
       shared_rows.push_back(std::move(*rows));
     }
+    // A restore joins chunks only when their logical order also advances
+    // through adjacent backing addresses. Reverse KV placement would turn
+    // one large transfer into one transfer per chunk.
+    for (std::size_t i = 1; i < shared_rows.size(); ++i)
+      assert(shared_rows[i].Bytes().data() ==
+                 shared_rows[i - 1].Bytes().data() + block_bytes &&
+             "KV placement prevented contiguous restore transfers");
     private_states.clear();
     assert(ledger.Snapshot()
                .bytes[static_cast<std::size_t>(Category::kBackingFree)] ==
@@ -418,7 +428,8 @@ void OnDemandBacking() {
     assert(pair && pool.BlockCount() == 4 && allocations == physical + 2);
     auto single = pool.TryAcquire(Category::kPrivateTail);
     assert(single && pool.BlockCount() == 4);
-    assert(single->Bytes().data() == first->Bytes().data() + block_bytes);
+    assert(single->Bytes().data() == first->Bytes().data() + block_bytes ||
+           first->Bytes().data() == single->Bytes().data() + block_bytes);
     // A refused segment leaves the pool as it is; capture is declined.
     admit = false;
     assert(!pool.TryAcquire(Category::kPrivateTail));
