@@ -36,6 +36,13 @@ def request(model, api, thinking=False):
         "Call record exactly once, with text, count, and values matching the "
         "constants in its schema. Keep all literal characters. No visible prose."
     )
+    if thinking:
+        # Asked to match the constants, greedy reasoning transcribes the long
+        # text (DeepSeek loops on its repeats); the call is what this streams.
+        prompt = (
+            "Call record exactly once. Its arguments are fixed by the constants "
+            "in its schema; copy them exactly in the call. No visible prose."
+        )
     common = dict(model=model, temperature=0)
     if api == "chat":
         return {**common, "messages": [{"role": "user", "content": prompt}],

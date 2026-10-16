@@ -572,7 +572,7 @@ def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
     # required tool choice.
     typing = (
         ("str_null", {"type": ["string", "null"]}, "null", None,
-         "Call record with value set to the JSON null."),
+         "Call record with value set to the JSON null literal, not an empty string."),
         ("union_integer", {"anyOf": [{"type": "string"}, {"type": "integer"}]}, "7", 7,
          "Call record with value set to the integer 7."),
         ("all_of_string", {"allOf": [{"type": "string"}, {"minLength": 1}]}, "42", "42",
