@@ -175,51 +175,60 @@ void UnorderedDescriptorsShareAcrossRestoreAndPrune() {
   assert(fork.NewPayloadBytes(f.adapter.Positions(*f.slot)) == 32);
 }
 void SparseHistoryChunks() {
-  for (bool prune : {false, true}) {
-    Fixture f;
-    const auto original = f.adapter.Components();
-    const std::array<ComponentDescriptor, 3> descriptors{
-        original[1], original[2], original[0]};
-    auto history = ExecutionHistory::Cold(f.ledger, descriptors,
-                                          f.adapter.CompatibilityIdentity());
-    f.Append(512);
-    auto first = f.Capture(history);
-    std::vector<ChunkReference> retained;
-    std::array<std::vector<ChunkId>, 2> ids;
-    std::size_t shared_bytes = 0;
-    for (std::size_t component = 0; component < 2; ++component) {
-      const auto& chunks = first->Components()[component == 0 ? 0 : 2].chunks;
-      for (std::size_t n = 0; n < chunks.size(); ++n) {
-        ids[component].push_back(chunks[n].Id());
-        if ((n + component) % 3 == 1) {
-          retained.push_back(chunks[n]);
-          shared_bytes += chunks[n].Storage().Bytes();
+  for (const std::size_t appended : {0, 9}) {
+    for (bool prune : {false, true}) {
+      Fixture f;
+      const auto original = f.adapter.Components();
+      const std::array<ComponentDescriptor, 3> descriptors{
+          original[1], original[2], original[0]};
+      auto history = ExecutionHistory::Cold(f.ledger, descriptors,
+                                            f.adapter.CompatibilityIdentity());
+      f.Append(512);
+      auto first = f.Capture(history);
+      std::vector<ChunkReference> retained;
+      std::array<std::vector<ChunkId>, 2> ids;
+      std::size_t shared_bytes = 0;
+      const auto keep = [appended](std::size_t row, std::size_t component) {
+        // The unchanged-size case starts with a live chunk before its first
+        // expired hole, so rebuilding must retain that already-visited prefix.
+        return appended ? (row + component) % 3 == 1
+                        : (row + component) % 3 != 1;
+      };
+      for (std::size_t component = 0; component < 2; ++component) {
+        const auto& chunks = first->Components()[component == 0 ? 0 : 2].chunks;
+        for (std::size_t n = 0; n < chunks.size(); ++n) {
+          ids[component].push_back(chunks[n].Id());
+          if (keep(n, component)) {
+            retained.push_back(chunks[n]);
+            shared_bytes += chunks[n].Storage().Bytes();
+          }
         }
       }
+      first.reset();
+      if (prune)
+        history.Prune();
+      f.Append(appended);
+      const auto count = 512 + appended;
+      // Two token-row components plus one private state; only the externally
+      // retained chunks may be reused, whether expired holes were pruned or
+      // not.
+      assert(history.NewPayloadBytes(f.adapter.Positions(*f.slot)) ==
+             2 * count * sizeof(Token) + 32 - shared_bytes);
+      auto next = f.Capture(history);
+      for (std::size_t component = 0; component < 2; ++component) {
+        const auto& chunks = next->Components()[component == 0 ? 0 : 2].chunks;
+        assert(chunks.size() == count / 4);
+        for (std::size_t n = 0; n < ids[component].size(); ++n)
+          assert((chunks[n].Id() == ids[component][n]) == keep(n, component));
+      }
+      assert(history.NewPayloadBytes(f.adapter.Positions(*f.slot)) ==
+             2 * (count % 4) * sizeof(Token) + 32);
+      const auto expected = f.Read(kTarget);
+      const auto hash = f.adapter.RecurrentHash(*f.slot);
+      f.Restore(*next);
+      assert(f.Read(kTarget) == expected);
+      assert(f.adapter.RecurrentHash(*f.slot) == hash);
     }
-    first.reset();
-    if (prune)
-      history.Prune();
-    f.Append(9);
-    // Two token-row components plus one private state; only the externally
-    // retained chunks may be reused, whether expired holes were pruned or not.
-    assert(history.NewPayloadBytes(f.adapter.Positions(*f.slot)) ==
-           2 * 521 * sizeof(Token) + 32 - shared_bytes);
-    auto next = f.Capture(history);
-    for (std::size_t component = 0; component < 2; ++component) {
-      const auto& chunks = next->Components()[component == 0 ? 0 : 2].chunks;
-      assert(chunks.size() == 130);
-      for (std::size_t n = 0; n < ids[component].size(); ++n)
-        assert((chunks[n].Id() == ids[component][n]) ==
-               ((n + component) % 3 == 1));
-    }
-    assert(history.NewPayloadBytes(f.adapter.Positions(*f.slot)) ==
-           2 * sizeof(Token) + 32);
-    const auto expected = f.Read(kTarget);
-    const auto hash = f.adapter.RecurrentHash(*f.slot);
-    f.Restore(*next);
-    assert(f.Read(kTarget) == expected);
-    assert(f.adapter.RecurrentHash(*f.slot) == hash);
   }
 }
 void EmptyAndShortCheckpoints() {

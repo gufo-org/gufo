@@ -398,8 +398,11 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   // above. Rebuild the history alongside the checkpoint, retaining each live
   // predecessor once and replacing holes with newly captured chunks.
   const auto entry_capacity = chunk_count;
+  // Adjacent prompt/framing checkpoints often have identical complete chunks.
+  // Keep their existing weak index unless a predecessor actually expired.
+  bool reuse_entries = entry_capacity == entries_.size();
   auto entries_reservation =
-      entry_capacity == 0
+      entry_capacity == 0 || reuse_entries
           ? ResourceReservation{}
           : ledger_->Reserve(ResourceCategory::kMetadata,
                              Bytes(entry_capacity, sizeof(Entry)));
@@ -419,7 +422,22 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   checkpoint->rank_ = request.rank;
   checkpoint->components_.reserve(descriptors_.size());
   std::vector<Entry> entries;
-  entries.reserve(entry_capacity);
+  if (!reuse_entries)
+    entries.reserve(entry_capacity);
+  const auto replace_entries = [&] {
+    if (!reuse_entries)
+      return;
+    entries_reservation = ledger_->Reserve(
+        ResourceCategory::kMetadata, Bytes(entry_capacity, sizeof(Entry)));
+    entries.reserve(entry_capacity);
+    // A hole requires a new index. The already-built checkpoint pins every
+    // earlier chunk, including those whose former external owner disappeared.
+    for (const auto& component : checkpoint->components_)
+      for (const auto& ref : component.chunks)
+        entries.push_back(
+            {ref.chunk_->metadata, ref.Component(), ref.First(), ref.chunk_});
+    reuse_entries = false;
+  };
   std::vector<ComponentPosition> positions;
   positions.reserve(descriptors_.size());
   auto preparation_metadata =
@@ -464,6 +482,7 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
         // published history can contain a shared predecessor.
         auto chunk = chunks.Find(first);
         if (!chunk) {
+          replace_entries();
           const PayloadRequest r{d.id, ResourceCategory::kBackingAssigned,
                                  first, first + d.rows_per_chunk,
                                  Bytes(d.rows_per_chunk, d.row_bytes)};
@@ -475,7 +494,8 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
           chunk->metadata = metadata_reservation.Convert();
         } else if (!chunk->storage.IsValid())
           throw std::invalid_argument("cannot publish retired checkpoint rows");
-        entries.push_back({chunk->metadata, d.id, first, chunk});
+        if (!reuse_entries)
+          entries.push_back({chunk->metadata, d.id, first, chunk});
         component.chunks.push_back(ChunkReference(
             std::move(chunk), ChunkReference::Kind::kCheckpoint));
       }
@@ -523,11 +543,13 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   auto tokens_metadata = tokens_reservation.Convert();
   // Each component's rows are already ordered. Preserve arbitrary adapter
   // descriptor order, but avoid sorting the whole history when IDs ascend.
-  if (!std::ranges::is_sorted(descriptors_, {},
+  if (!reuse_entries &&
+      !std::ranges::is_sorted(descriptors_, {},
                               [](const auto& d) { return d.id.value; }))
     std::ranges::sort(entries, {}, &Entry::Key);
   // Publication is nonthrowing. No checkpoint or new history escapes earlier.
-  entries_.swap(entries);
+  if (!reuse_entries)
+    entries_.swap(entries);
   tokens_.swap(tokens);
   positions_.swap(positions);
   input_.swap(new_input);
@@ -535,7 +557,8 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   std::vector<Token>().swap(tokens);
   std::vector<ComponentPosition>().swap(positions);
   Identity().swap(new_input);
-  entries_metadata_ = std::move(entries_metadata);
+  if (!reuse_entries)
+    entries_metadata_ = std::move(entries_metadata);
   tokens_metadata_ = std::move(tokens_metadata);
   return checkpoint;
 }
