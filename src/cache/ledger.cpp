@@ -262,26 +262,27 @@ ResourceAllocationInfo ResourceCharge::Info() const {
   return cache::Info(token_);
 }
 std::size_t ResourceCharge::FindFreeBacking(
-    std::span<const ResourceCharge> blocks, std::size_t count) {
+    std::span<const ResourceCharge> blocks, std::size_t count, bool from_end) {
   if (!count)
     throw std::invalid_argument("empty backing run");
   if (blocks.empty())
     return 0;
-  const auto& first = blocks.front().token_;
+  const auto& first = (from_end ? blocks.back() : blocks.front()).token_;
   if (!first || first->pooled || !first->allocation->backing)
     throw std::logic_error("search requires original pool backing handles");
   const auto& ledger = first->allocation->ledger;
   const std::lock_guard lock(ledger->mutex);
   std::size_t run = 0;
   for (std::size_t i = 0; i < blocks.size(); ++i) {
-    const auto& block = blocks[i].token_;
+    const auto index = from_end ? blocks.size() - 1 - i : i;
+    const auto& block = blocks[index].token_;
     if (!block || block->pooled || !block->allocation->backing)
       throw std::logic_error("search requires original pool backing handles");
     if (block->allocation->ledger != ledger)
       throw std::invalid_argument("backing search spans ledgers");
     run = block->allocation->category == Free ? run + 1 : 0;
     if (run == count)
-      return i + 1 - count;
+      return from_end ? index : index + 1 - count;
   }
   return blocks.size();
 }

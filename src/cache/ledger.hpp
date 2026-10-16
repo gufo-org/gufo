@@ -137,11 +137,13 @@ public:
   // input is a distinct original free pool handle from the same ledger.
   [[nodiscard]] static ResourceReservation ReserveBacking(
       std::span<const ResourceCharge>, ResourceCategory);
-  // Find the first free run under one ledger lock. The span contains original
-  // pool handles from one ledger, in physical order. Returns span.size() when
-  // no run fits. This is only a search: ReserveBacking still arbitrates races.
+  // Find a free run under one ledger lock, scanning from either end. The span
+  // contains original pool handles from one ledger, in physical order.
+  // Returns span.size() when no run fits. This is only a search:
+  // ReserveBacking still arbitrates races.
   [[nodiscard]] static std::size_t FindFreeBacking(
-      std::span<const ResourceCharge>, std::size_t blocks);
+      std::span<const ResourceCharge>, std::size_t blocks,
+      bool from_end = false);
   // Only retained payload (assigned spill, chunks, private state/tails) counts
   // as persistence-pinned bytes. Staging and metadata use their own admission
   // categories; retain their charges directly for queued-job lifetimes.

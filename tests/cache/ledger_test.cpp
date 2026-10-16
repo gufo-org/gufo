@@ -198,6 +198,18 @@ void FreeBackingSearch() {
           }
         }
         assert(ResourceCharge::FindFreeBacking(range, wanted) == expected);
+        auto reverse_expected = range.size();
+        for (std::size_t end = range.size(); end >= wanted; --end) {
+          bool free = true;
+          for (std::size_t j = end - wanted; j < end; ++j)
+            free &= (mask & (1U << (begin + j))) == 0;
+          if (free) {
+            reverse_expected = end - wanted;
+            break;
+          }
+        }
+        assert(ResourceCharge::FindFreeBacking(range, wanted, true) ==
+               reverse_expected);
       }
     }
     assert(ledger.Snapshot() == before);
@@ -205,10 +217,13 @@ void FreeBackingSearch() {
   auto reservation = pages[0].ReserveBacking(Spill);
   auto pin = reservation.PinPersistence();
   assert(ResourceCharge::FindFreeBacking(pages, count) == count);
+  assert(ResourceCharge::FindFreeBacking(pages, count, true) == count);
   reservation = {};
   assert(ResourceCharge::FindFreeBacking(pages, count) == count);
+  assert(ResourceCharge::FindFreeBacking(pages, count, true) == count);
   pin = {};
   assert(ResourceCharge::FindFreeBacking(pages, count) == 0);
+  assert(ResourceCharge::FindFreeBacking(pages, count, true) == 0);
   Throws<std::invalid_argument>(
       [&] { (void)ResourceCharge::FindFreeBacking(pages, 0); });
   std::array<ResourceCharge, 1> invalid;

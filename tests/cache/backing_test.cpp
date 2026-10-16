@@ -307,7 +307,9 @@ void GroupedBacking() {
       threads.emplace_back([&, thread] {
         const auto n = 2 + thread % 2;
         for (int iteration = 0; iteration < 100; ++iteration) {
-          auto group = pool.TryAcquire(Category::kPrivateTail, n * block_bytes);
+          auto group = pool.TryAcquire(
+              thread % 2 ? Category::kPrivateTail : Category::kBackingAssigned,
+              n * block_bytes);
           if (!group)
             continue;
           const auto index = (group->Bytes().data() - base) / block_bytes;
@@ -328,6 +330,57 @@ void GroupedBacking() {
   base[4 * block_bytes - 1] = std::byte{17};
   assert(ledger.Snapshot().total_bytes == capacity);
   pin.reset();
+  assert(ledger.Snapshot().total_bytes == 0);
+}
+void CheckpointLifetimes() {
+  constexpr std::size_t pages = 12, headroom = 16 << 10;
+  constexpr std::size_t capacity = pages * block_bytes + headroom;
+  cache::ResourceLedger ledger(Limits(capacity));
+  {
+    hip::CommittedBackingPool pool(ledger, {capacity, block_bytes, headroom});
+    const auto physical = allocations.load();
+    std::vector<hip::BackingBlock> private_states, shared_rows;
+    // Adjacent checkpoints replace private state but keep sharing older KV
+    // rows. Even allocating each larger state first can scatter the holes
+    // between those long-lived rows when both use one allocation cursor.
+    for (unsigned checkpoint = 0; checkpoint < 3; ++checkpoint) {
+      auto state = pool.TryAcquire(Category::kPrivateState, 2 * block_bytes);
+      auto rows = pool.TryAcquire(Category::kBackingAssigned, block_bytes);
+      assert(state && rows);
+      state->Convert();
+      rows->Convert();
+      std::fill(rows->Bytes().begin(), rows->Bytes().end(),
+                std::byte(checkpoint + 1));
+      private_states.push_back(std::move(*state));
+      shared_rows.push_back(std::move(*rows));
+    }
+    private_states.clear();
+    assert(ledger.Snapshot()
+               .bytes[static_cast<std::size_t>(Category::kBackingFree)] ==
+           9 * block_bytes);
+    // All free capacity must remain usable by the next private state, with
+    // the same physical budget and the shared rows still live and unmodified.
+    auto replacement =
+        pool.TryAcquire(Category::kPrivateState, 9 * block_bytes);
+    assert(replacement && "shared rows fragmented released private states");
+    replacement->Convert();
+    std::fill(replacement->Bytes().begin(), replacement->Bytes().end(),
+              std::byte{0x7f});
+    for (unsigned i = 0; i < shared_rows.size(); ++i)
+      assert(std::all_of(
+          shared_rows[i].Bytes().begin(), shared_rows[i].Bytes().end(),
+          [&](std::byte value) { return value == std::byte(i + 1); }));
+    assert(allocations.load() == physical);
+    assert(!pool.TryAcquire(Category::kPrivateTail));
+    replacement.reset();
+    shared_rows.clear();
+    // Neither allocation category has a fixed share of the pool.
+    for (const auto category :
+         {Category::kBackingAssigned, Category::kPrivateTail}) {
+      auto whole = pool.TryAcquire(category, pages * block_bytes);
+      assert(whole);
+    }
+  }
   assert(ledger.Snapshot().total_bytes == 0);
 }
 void OnDemandBacking() {
@@ -820,6 +873,7 @@ int main() {
   assert(std::strncmp(properties.gcnArchName, "gfx1151", 7) == 0);
   Backing();
   GroupedBacking();
+  CheckpointLifetimes();
   OnDemandBacking();
   CaptureCapacity();
   Transfers();

@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -78,6 +79,10 @@ struct BackingState {
   std::unique_ptr<void*[]> segments;
   std::size_t capacity{}, segment_blocks{}, block_bytes{};
   std::atomic<std::size_t> committed{}, next{};
+  // Shared KV rows tend to outlive several private-state captures. Allocate
+  // them from the other end so releasing private states leaves large runs.
+  // Both cursors can use the whole pool; there is no partition or extra budget.
+  std::atomic<std::size_t> next_rows{std::numeric_limits<std::size_t>::max()};
   cache::ResourceLedger* ledger{};
   std::function<bool(std::size_t)> admit_segment;
   std::mutex growth;
@@ -309,11 +314,13 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
   const auto segment = state_->segment_blocks;
   if (blocks > std::min(segment, state_->capacity))
     return std::nullopt;
+  const bool from_end = category == cache::ResourceCategory::kBackingAssigned;
+  auto& cursor = from_end ? state_->next_rows : state_->next;
   while (true) {
     const auto count = state_->committed.load(std::memory_order_acquire);
-    auto i = state_->next.load(std::memory_order_relaxed);
+    auto i = cursor.load(std::memory_order_relaxed);
     if (i >= count)
-      i = 0;
+      i = from_end && count ? count - 1 : 0;
     // A growing pool is usually full when a capture misses. The ledger's free
     // backing bounds this pool's, so skip a scan that cannot succeed: it
     // costs one ledger lock per committed block.
@@ -324,25 +331,34 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
     for (std::size_t tried = 0; may_fit && blocks <= count && tried < count;) {
       // Search one physical segment under one ledger lock instead of locking
       // separately for each block in a large, fragmented cache.
-      const auto limit = std::min(count, (i / segment + 1) * segment);
+      const auto begin = from_end ? i / segment * segment : i;
+      const auto limit =
+          from_end ? i + 1 : std::min(count, (i / segment + 1) * segment);
       const auto range =
-          std::span(state_->blocks.get(), count).subspan(i, limit - i);
-      const auto offset = cache::ResourceCharge::FindFreeBacking(range, blocks);
+          std::span(state_->blocks.get(), count).subspan(begin, limit - begin);
+      const auto offset =
+          cache::ResourceCharge::FindFreeBacking(range, blocks, from_end);
       if (offset < range.size()) {
         try {
           auto reservation = cache::ResourceCharge::ReserveBacking(
               range.subspan(offset, blocks), category);
-          const auto first = i + offset;
-          state_->next.store(first + blocks == count ? 0 : first + blocks,
-                             std::memory_order_relaxed);
+          const auto first = begin + offset;
+          cursor.store(from_end
+                           ? (first ? first - 1
+                                    : std::numeric_limits<std::size_t>::max())
+                           : (first + blocks == count ? 0 : first + blocks),
+                       std::memory_order_relaxed);
           return BackingBlock(state_, first, blocks, std::move(reservation));
         } catch (const std::bad_alloc&) {
           // A racing assignment or injected bookkeeping failure is atomic.
         }
       }
-      const auto step = offset < range.size() ? offset + 1 : range.size();
+      const auto step = offset == range.size() ? range.size()
+                        : from_end ? range.size() - (offset + blocks) + 1
+                                   : offset + 1;
       tried += step;
-      i = i + step >= count ? 0 : i + step;
+      i = from_end ? (step > i ? count - 1 : i - step)
+                   : (i + step >= count ? 0 : i + step);
     }
     if (!state_->Grow(count))
       return std::nullopt;
