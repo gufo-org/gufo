@@ -749,6 +749,51 @@ void FailedCaptureKeepsPublishedBoundary() {
   auto& restored_state = dynamic_cast<State&>(restored->state());
   assert(runner->adapter->RecurrentHash(restored_state.slot) == hash);
 }
+void BackingPressureKeepsSharedPrefix() {
+  struct PressureRunner final : Runner {
+    mutable std::size_t inherited_boundary{}, recopied_prefixes{};
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->allocate = [this, allocate = std::move(resources->allocate)](
+                                const cache::PayloadRequest& request) {
+        if (request.category == cache::ResourceCategory::kBackingAssigned &&
+            request.first < inherited_boundary)
+          ++recopied_prefixes;
+        return allocate(request);
+      };
+      return resources;
+    }
+  };
+  auto runner = std::make_shared<PressureRunner>();
+  // The next private frontier cannot fit until the old checkpoint is evicted.
+  runner->private_blocks = 1;
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  std::vector<TextRunnerToken> prompt(80);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, std::span(prompt).first(64),
+                          std::span(prompt).first(64));
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), 64, false,
+                                   SnapshotPurpose::kContinuation, {}));
+  assert(lease->PublishSnapshot({prompt.begin(), prompt.begin() + 64},
+                                lease->Capture(), false));
+  runner->inherited_boundary = 64;
+  runner->adapter->Append(state.slot, std::span(prompt).subspan(64),
+                          std::span(prompt).subspan(64));
+  const auto hash = runner->adapter->RecurrentHash(state.slot);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, {}));
+  assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+  assert(!runner->recopied_prefixes);
+  assert(!lease->HasSnapshotFor(std::span(prompt).first(64)));
+  lease->Invalidate();
+  auto restored = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(restored->cached_tokens() == prompt.size());
+  auto& restored_state = dynamic_cast<State&>(restored->state());
+  assert(runner->adapter->RecurrentHash(restored_state.slot) == hash);
+}
 void DiskBudgetEvictsAnUnpinnedConversation() {
   char pattern[] = "/tmp/gufo-component-budget-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
@@ -1180,6 +1225,7 @@ int main() {
   ReusedConversationOutlivesOneUseRequests();
   RestartAndCorruption();
   FailedCaptureKeepsPublishedBoundary();
+  BackingPressureKeepsSharedPrefix();
   DiskBudgetEvictsAnUnpinnedConversation();
   LoweredDiskBudgetEvictsOldestAtStartup();
   OrphansLeaveBeforeCheckpoints();

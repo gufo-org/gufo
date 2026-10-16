@@ -394,7 +394,10 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   // Charge old and replacement history buffers simultaneously until
   // publication. reserve() is exact with the pinned libstdc++; verify
   // capacities before commit.
-  const auto entry_capacity = Add(entries_.size(), chunk_count);
+  // All inherited full chunks lie within the nondecreasing positions checked
+  // above. Rebuild the history alongside the checkpoint, retaining each live
+  // predecessor once and replacing holes with newly captured chunks.
+  const auto entry_capacity = chunk_count;
   auto entries_reservation =
       entry_capacity == 0
           ? ResourceReservation{}
@@ -417,9 +420,6 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   checkpoint->components_.reserve(descriptors_.size());
   std::vector<Entry> entries;
   entries.reserve(entry_capacity);
-  for (const auto& entry : entries_)
-    if (!entry.chunk.expired())
-      entries.push_back(entry);
   std::vector<ComponentPosition> positions;
   positions.reserve(descriptors_.size());
   auto preparation_metadata =
@@ -473,9 +473,9 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
               ResourceCharge{}, lineage_, d.id, r.first, r.end, Payload{});
           save(chunk->storage, r);
           chunk->metadata = metadata_reservation.Convert();
-          entries.push_back({chunk->metadata, d.id, first, chunk});
         } else if (!chunk->storage.IsValid())
           throw std::invalid_argument("cannot publish retired checkpoint rows");
+        entries.push_back({chunk->metadata, d.id, first, chunk});
         component.chunks.push_back(ChunkReference(
             std::move(chunk), ChunkReference::Kind::kCheckpoint));
       }
@@ -521,7 +521,11 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   auto entries_metadata =
       entries_reservation ? entries_reservation.Convert() : ResourceCharge{};
   auto tokens_metadata = tokens_reservation.Convert();
-  std::ranges::sort(entries, {}, &Entry::Key);
+  // Each component's rows are already ordered. Preserve arbitrary adapter
+  // descriptor order, but avoid sorting the whole history when IDs ascend.
+  if (!std::ranges::is_sorted(descriptors_, {},
+                              [](const auto& d) { return d.id.value; }))
+    std::ranges::sort(entries, {}, &Entry::Key);
   // Publication is nonthrowing. No checkpoint or new history escapes earlier.
   entries_.swap(entries);
   tokens_.swap(tokens);

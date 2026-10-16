@@ -629,19 +629,25 @@ struct ComponentTextCache::Lease::Impl {
                           .Reserve(cache::ResourceCategory::kMetadata,
                                    sizeof(edit_boundaries))
                           .Convert()) {}
-  cache::RetentionRequest Retain(std::span<const cache::Token> tokens) const {
-    return {.tokens = tokens,
-            .compatibility = cache->identity,
-            .input = At(input, std::min(tokens.size(), prompt.size())),
-            .purpose = Purpose(purpose),
-            .stable = std::min(stable, tokens.size()),
-            .source = source,
-            .preserve_source = preserve_source,
-            .new_payload_bytes = entry->history->NewPayloadBytes(
-                cache->resources->adapter->Positions(slot.Execution())),
-            .protected_checkpoints =
-                std::span(edit_boundaries).first(edit_boundary_count),
-            .reused = cached != 0};
+  cache::RetentionRequest Retain(
+      std::span<const cache::Token> tokens,
+      std::optional<std::size_t> new_payload_bytes = {}) const {
+    return {
+        .tokens = tokens,
+        .compatibility = cache->identity,
+        .input = At(input, std::min(tokens.size(), prompt.size())),
+        .purpose = Purpose(purpose),
+        .stable = std::min(stable, tokens.size()),
+        .source = source,
+        .preserve_source = preserve_source,
+        .new_payload_bytes =
+            new_payload_bytes
+                ? *new_payload_bytes
+                : entry->history->NewPayloadBytes(
+                      cache->resources->adapter->Positions(slot.Execution())),
+        .protected_checkpoints =
+            std::span(edit_boundaries).first(edit_boundary_count),
+        .reused = cached != 0};
   }
   std::unique_ptr<TextRunnerSnapshot> CaptureDurable();
 };
@@ -1266,10 +1272,14 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   auto& cache = *request.cache;
   auto positions =
       cache.resources->adapter->Positions(request.slot.Execution());
-  const auto bytes = CaptureBytes();
-  const auto retain = request.Retain(request.capture_tokens);
+  const auto bytes = request.entry->history->NewPayloadBytes(positions);
+  const auto retain = request.Retain(request.capture_tokens, bytes);
   if (bytes > cache.ledger.Limits().ram_bytes)
     return request.CaptureDurable();
+  const auto reclaim = [&] {
+    const std::lock_guard lock(cache.mutex);
+    return cache.retention.Reclaim(retain);
+  };
   std::shared_ptr<const cache::Checkpoint> checkpoint;
   std::size_t captured_capacity = 0;
   std::size_t borrowed_capacity = 0, copied_payload = 0;
@@ -1308,16 +1318,30 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
                                    sizeof(std::span<const std::byte>)));
             buffers.reserve(payloads.size());
             borrowed.reserve(payloads.size());
-            for (const auto& payload : payloads) {
-              buffers.push_back(cache.resources->allocate(payload));
-              borrowed.push_back(
-                  buffers.back().borrow &&
-                          payload.category ==
-                              cache::ResourceCategory::kBackingAssigned
-                      ? cache.resources->adapter->BorrowRowsView(
-                            request.slot.Execution(), payload.component,
-                            payload.first, payload.end)
-                      : std::span<const std::byte>{});
+            while (true) {
+              try {
+                for (const auto& payload : payloads) {
+                  buffers.push_back(cache.resources->allocate(payload));
+                  borrowed.push_back(
+                      buffers.back().borrow &&
+                              payload.category ==
+                                  cache::ResourceCategory::kBackingAssigned
+                          ? cache.resources->adapter->BorrowRowsView(
+                                request.slot.Execution(), payload.component,
+                                payload.first, payload.end)
+                          : std::span<const std::byte>{});
+                }
+                break;
+              } catch (const cache::ResourceExhausted&) {
+                // No transfer has started. Release partial allocations before
+                // eviction, but keep the plan's shared chunks alive. Rebuilding
+                // the whole checkpoint can otherwise lose those predecessors
+                // and allocate their rows again after their last owner leaves.
+                borrowed.clear();
+                buffers.clear();
+                if (!reclaim())
+                  throw;
+              }
             }
             TransferBatch transfers(cache.resources->transfer_batch_size);
             for (std::size_t i = 0; i < payloads.size();) {
@@ -1364,12 +1388,7 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
           });
       break;
     } catch (const cache::ResourceExhausted&) {
-      bool reclaimed;
-      {
-        const std::lock_guard lock(cache.mutex);
-        reclaimed = cache.retention.Reclaim(retain);
-      }
-      if (!reclaimed) {
+      if (!reclaim()) {
         if (cache.queue && request.purpose != SnapshotPurpose::kHistory)
           if (auto durable = request.CaptureDurable())
             return durable;
