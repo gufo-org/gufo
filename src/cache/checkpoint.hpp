@@ -79,6 +79,7 @@ public:
 
 private:
   friend class ChunkReference;
+  friend class CheckpointChunk;
   friend class ExecutionHistory;
   [[nodiscard]] PersistencePin PinPersistence() const;
   Payload() = default;
@@ -100,8 +101,10 @@ struct Lineage;
 // Copies preserve the handle's reference kind. Reader and persistence handles
 // retain both the chunk and its actual storage even after checkpoint eviction.
 // Distinct handles are thread safe; history mutation remains caller serialized.
+class CheckpointChunk;
 class ChunkReference {
 public:
+  ChunkReference(const CheckpointChunk&);
   ChunkReference(const ChunkReference&);
   ChunkReference& operator=(const ChunkReference&);
   ChunkReference(ChunkReference&&) noexcept;
@@ -110,6 +113,45 @@ public:
   [[nodiscard]] ChunkId Id() const;
   // Live references identify the same immutable chunk by its owner address,
   // regardless of reader/checkpoint/persistence kind. No ownership changes.
+  [[nodiscard]] bool SameChunk(const ChunkReference& other) const noexcept {
+    return chunk_ == other.chunk_;
+  }
+  [[nodiscard]] bool SameChunk(const CheckpointChunk&) const noexcept;
+  [[nodiscard]] LineageId Lineage() const;
+  [[nodiscard]] ComponentId Component() const;
+  [[nodiscard]] Rows First() const;
+  [[nodiscard]] Rows End() const;
+  [[nodiscard]] const Payload& Storage() const;
+  [[nodiscard]] ChunkReferences References() const;
+  [[nodiscard]] ChunkReference PinReader() const;
+  [[nodiscard]] ChunkReference PinPersistence() const;
+
+private:
+  friend class ExecutionHistory;
+  friend class CheckpointChunk;
+  enum class Kind : std::uint8_t { kCheckpoint, kReader, kPersistence };
+  ChunkReference(std::shared_ptr<detail::Chunk>, Kind, PersistencePin = {},
+                 RowPin = {});
+  void Release() noexcept;
+  std::shared_ptr<detail::Chunk> chunk_;
+  Kind kind_;
+  PersistencePin pin_;
+  RowPin rows_pin_;
+};
+// Checkpoints retain immutable chunk ownership, not active source readers.
+// Keep their large vectors compact; acquire the full storage pin only for an
+// actual reader or persistence job, without allocating another handle object.
+class CheckpointChunk {
+public:
+  CheckpointChunk(const CheckpointChunk&);
+  CheckpointChunk& operator=(const CheckpointChunk&);
+  CheckpointChunk(CheckpointChunk&&) noexcept;
+  CheckpointChunk& operator=(CheckpointChunk&&) noexcept;
+  ~CheckpointChunk();
+  [[nodiscard]] ChunkId Id() const;
+  [[nodiscard]] bool SameChunk(const CheckpointChunk& other) const noexcept {
+    return chunk_ == other.chunk_;
+  }
   [[nodiscard]] bool SameChunk(const ChunkReference& other) const noexcept {
     return chunk_ == other.chunk_;
   }
@@ -124,20 +166,16 @@ public:
 
 private:
   friend class ExecutionHistory;
-  enum class Kind : std::uint8_t { kCheckpoint, kReader, kPersistence };
-  ChunkReference(std::shared_ptr<detail::Chunk>, Kind, PersistencePin = {},
-                 RowPin = {});
+  friend class ChunkReference;
+  explicit CheckpointChunk(std::shared_ptr<detail::Chunk>);
   void Release() noexcept;
   std::shared_ptr<detail::Chunk> chunk_;
-  Kind kind_;
-  PersistencePin pin_;
-  RowPin rows_pin_;
 };
 struct CheckpointComponent {
   [[nodiscard]] bool IsValid() const;
   ComponentDescriptor descriptor;
   ComponentPosition position;
-  std::vector<ChunkReference> chunks;
+  std::vector<CheckpointChunk> chunks;
   std::optional<Payload> tail;
   std::optional<Payload> private_state;
 };

@@ -629,7 +629,7 @@ std::size_t RetentionPolicy::RetainedPayloadBytes() const noexcept {
           }
       }
       for (std::size_t n = 0; n < rows; ++n) {
-        std::array<const ChunkReference*, kRecordLimit> seen;
+        std::array<const CheckpointChunk*, kRecordLimit> seen;
         std::size_t seen_count = 0;
         for (std::size_t peer = 0; peer < peer_count; ++peer) {
           if (peers[peer]->chunks.size() <= n)
