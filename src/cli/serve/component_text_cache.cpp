@@ -1320,6 +1320,9 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
             borrowed.reserve(payloads.size());
             while (true) {
               try {
+                if (cache.resources->can_capture &&
+                    !cache.resources->can_capture(payloads))
+                  throw cache::ResourceExhausted();
                 for (const auto& payload : payloads) {
                   buffers.push_back(cache.resources->allocate(payload));
                   borrowed.push_back(

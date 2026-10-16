@@ -274,6 +274,30 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
   }
   state_ = std::move(state);
 }
+bool CommittedBackingPool::CanFit(
+    std::span<const cache::PayloadRequest> payloads) const {
+  std::size_t needed = 0;
+  for (const auto& payload : payloads) {
+    const auto blocks =
+        payload.bytes ? 1 + (payload.bytes - 1) / state_->block_bytes : 1;
+    if (blocks > std::min(state_->segment_blocks, state_->capacity) ||
+        blocks > state_->capacity - needed)
+      return false;
+    needed += blocks;
+  }
+  // Read the committed frontier first. Concurrent growth can then only
+  // overestimate available space, leaving final admission to TryAcquire.
+  const auto uncommitted =
+      state_->capacity - state_->committed.load(std::memory_order_acquire);
+  if (needed <= uncommitted)
+    return true;
+  // Other pools on this ledger can also make this bound optimistic. It must
+  // never reject a capture whose physical allocations could fit.
+  const auto free = state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
+                        cache::ResourceCategory::kBackingFree)] /
+                    state_->block_bytes;
+  return needed - uncommitted <= free;
+}
 std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
     cache::ResourceCategory category, std::size_t payload_bytes) {
   if (category != cache::ResourceCategory::kBackingAssigned &&

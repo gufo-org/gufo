@@ -1,5 +1,6 @@
 #include "src/cli/serve/component_text_cache.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstring>
@@ -749,9 +750,11 @@ void FailedCaptureKeepsPublishedBoundary() {
   auto& restored_state = dynamic_cast<State&>(restored->state());
   assert(runner->adapter->RecurrentHash(restored_state.slot) == hash);
 }
-void BackingPressureKeepsSharedPrefix() {
+void BackingPressureKeepsSharedPrefix(bool capacity_check = false) {
   struct PressureRunner final : Runner {
-    mutable std::size_t inherited_boundary{}, recopied_prefixes{};
+    bool capacity_check{};
+    mutable std::size_t inherited_boundary{}, recopied_prefixes{},
+        rejected_plans{}, failed_allocations{};
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
         cache::ResourceLedger& ledger, std::size_t ram) const override {
       auto resources = Runner::CreateComponentCacheResources(ledger, ram);
@@ -760,12 +763,31 @@ void BackingPressureKeepsSharedPrefix() {
         if (request.category == cache::ResourceCategory::kBackingAssigned &&
             request.first < inherited_boundary)
           ++recopied_prefixes;
-        return allocate(request);
+        try {
+          return allocate(request);
+        } catch (const cache::ResourceExhausted&) {
+          ++failed_allocations;
+          throw;
+        }
       };
+      if (capacity_check)
+        resources->can_capture = [this, &ledger](auto payloads) {
+          const bool needs_private =
+              std::ranges::any_of(payloads, [](const auto& payload) {
+                return payload.category ==
+                       cache::ResourceCategory::kPrivateState;
+              });
+          const bool fits = !needs_private ||
+                            !ledger.Snapshot().bytes[static_cast<std::size_t>(
+                                cache::ResourceCategory::kPrivateState)];
+          rejected_plans += !fits;
+          return fits;
+        };
       return resources;
     }
   };
   auto runner = std::make_shared<PressureRunner>();
+  runner->capacity_check = capacity_check;
   // The next private frontier cannot fit until the old checkpoint is evicted.
   runner->private_blocks = 1;
   ComponentTextCache cache(runner, 1, 1 << 22, {});
@@ -787,6 +809,10 @@ void BackingPressureKeepsSharedPrefix() {
                                    SnapshotPurpose::kContinuation, {}));
   assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
   assert(!runner->recopied_prefixes);
+  if (capacity_check)
+    assert(runner->rejected_plans && !runner->failed_allocations);
+  else
+    assert(runner->failed_allocations);
   assert(!lease->HasSnapshotFor(std::span(prompt).first(64)));
   lease->Invalidate();
   auto restored = cache.Acquire(prompt, {}, {}, true, 0, true);
@@ -1226,6 +1252,7 @@ int main() {
   RestartAndCorruption();
   FailedCaptureKeepsPublishedBoundary();
   BackingPressureKeepsSharedPrefix();
+  BackingPressureKeepsSharedPrefix(true);
   DiskBudgetEvictsAnUnpinnedConversation();
   LoweredDiskBudgetEvictsOldestAtStartup();
   OrphansLeaveBeforeCheckpoints();

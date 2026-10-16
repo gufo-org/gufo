@@ -781,8 +781,11 @@ struct TextRunnerPool::Request::Impl {
           std::span<const TextRunnerToken>(prompt).first(prefill_offset));
     }
     const auto capabilities = runner->Descriptor().capabilities;
-    if (capabilities.incremental_prefill && capabilities.prefix_reuse &&
-        capabilities.snapshot && capabilities.fork) {
+    // Component adapters supply their own pass boundaries below. Building the
+    // generic plan first only repeats prefix lookups before discarding it.
+    if (!lease.component() && capabilities.incremental_prefill &&
+        capabilities.prefix_reuse && capabilities.snapshot &&
+        capabilities.fork) {
       // A reused frontier already bounds the work lost on an edit. Do not
       // split a short continuation just to copy a nearby grid checkpoint.
       // Cold long prompts still retain the last grid point for late edits.

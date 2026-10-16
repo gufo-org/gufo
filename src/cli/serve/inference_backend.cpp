@@ -2567,6 +2567,9 @@ public:
       backing->pool->WaitForGrowth();
     };
     result->prepare_prefill = [backing] { backing->pool->GrowAhead(2); };
+    result->can_capture = [backing](auto payloads) {
+      return backing->pool->CanFit(payloads);
+    };
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
       return backing->streams.TryAcquire();

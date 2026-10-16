@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -478,6 +479,68 @@ void OnDemandBacking() {
   assert(startup_first && startup_second &&
          allocations.load() == committed_allocations);
 }
+void CaptureCapacity() {
+  constexpr std::size_t pages = 6, headroom = 16 << 10;
+  constexpr std::size_t capacity = pages * block_bytes + headroom;
+  cache::ResourceLedger ledger(Limits(capacity));
+  hip::CommittedBackingPool pool(
+      ledger, {capacity, block_bytes, headroom, 3 * block_bytes, {}});
+  std::array<cache::PayloadRequest, 2> capture{{
+      {{1}, Category::kPrivateState, 0, 0, 2 * block_bytes - 1},
+      {{2}, Category::kBackingAssigned, 0, 8, block_bytes + 1},
+  }};
+  const auto before = ledger.Snapshot();
+  const auto physical = allocations.load(), host = host_allocations.load();
+  assert(pool.CanFit(capture));
+  assert(pool.CanFit({}));
+  // Capacity checks must neither commit pages nor allocate metadata.
+  assert(pool.BlockCount() == 0 && ledger.Snapshot() == before);
+  assert(allocations.load() == physical && host_allocations.load() == host);
+  auto first = pool.TryAcquire(Category::kPrivateState, 2 * block_bytes);
+  assert(first && pool.BlockCount() == 3 && pool.CanFit(capture));
+  auto second = pool.TryAcquire(Category::kPrivateTail, block_bytes);
+  assert(second && !pool.CanFit(capture));  // only three uncommitted blocks
+  first->Convert();
+  auto pin = std::optional(first->PinPersistence());
+  first.reset();
+  assert(!pool.CanFit(capture));  // persistence retains the assignment
+  pin.reset();
+  assert(pool.CanFit(capture));
+  // Released groups can serve a later capture without another page commit.
+  auto third = pool.TryAcquire(Category::kPrivateState, 3 * block_bytes);
+  assert(third && pool.BlockCount() == pages);
+  third.reset();
+  const auto saved = ledger.Snapshot();
+  assert(pool.CanFit(capture));
+  assert(ledger.Snapshot() == saved);
+  capture[0].bytes = 3 * block_bytes + 1;
+  assert(!pool.CanFit(capture));  // a payload cannot cross a segment
+  capture[0].bytes = std::numeric_limits<std::size_t>::max();
+  assert(!pool.CanFit(capture));
+  capture[0].bytes = 3 * block_bytes;
+  capture[1].bytes = 3 * block_bytes;
+  assert(!pool.CanFit(capture));
+  second.reset();
+  assert(pool.CanFit(capture));
+  const auto committed = allocations.load();
+  auto a = pool.TryAcquire(capture[0].category, capture[0].bytes);
+  auto b = pool.TryAcquire(capture[1].category, capture[1].bytes);
+  assert(a && b && !pool.CanFit(capture));
+  assert(allocations.load() == committed);
+  a.reset();
+  b.reset();
+  std::array<std::optional<hip::BackingBlock>, pages> scattered;
+  for (auto& block : scattered) {
+    block = pool.TryAcquire(Category::kPrivateTail);
+    assert(block);
+  }
+  for (const auto i : {1, 3, 5})
+    scattered[i].reset();
+  capture[0].bytes = 2 * block_bytes;
+  const auto fragmented = std::span(capture).first(1);
+  assert(pool.CanFit(fragmented));
+  assert(!pool.TryAcquire(capture[0].category, capture[0].bytes));
+}
 void Transfers() {
   cache::ResourceLedger ledger(Limits());
   hip::CommittedBackingPool backing(ledger, {budget, block_bytes, metadata});
@@ -758,6 +821,7 @@ int main() {
   Backing();
   GroupedBacking();
   OnDemandBacking();
+  CaptureCapacity();
   Transfers();
   LifetimeAndFailures();
   PendingStreams();
