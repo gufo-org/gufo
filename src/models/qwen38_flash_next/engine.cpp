@@ -77,6 +77,10 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     AssignError(error_msg, "decode concurrency must be between one and eight");
     return nullptr;
   }
+  if (options.kv_cache_quant != "f16" && options.kv_cache_quant != "q8") {
+    AssignError(error_msg, "kv cache quant must be f16 or q8");
+    return nullptr;
+  }
   if (options.max_draft_tokens == 0) {
     AssignError(error_msg, "draft token limit must be positive");
     return nullptr;
@@ -166,6 +170,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                 exec.max_batch, std::uint64_t{options.max_draft_tokens} + 1))
           : 1;
   exec.max_speculative = exec.max_logit_rows;
+  exec.kv_cache_int8 = (options.kv_cache_quant == "q8");
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
   if (!m->executor_) {
@@ -538,6 +543,7 @@ bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
   }
   tokens_ = std::move(tokens);
   ForgetDraftVocab();
+  lookup_ = LookupIndex{};
   logits_ = std::move(logits);
   hidden_base_ = info.position - info.hidden_rows;
   draft_token_ = 0;
@@ -600,7 +606,8 @@ bool Session::DraftReplay(std::int32_t next_token,
 
 bool Session::DraftCatchUp(std::int32_t next_token, bool propose,
                            std::string* error_msg,
-                           MtpCandidateLogits* candidates, bool draft_subset) {
+                           MtpCandidateLogits* candidates, bool with_token,
+                           bool draft_subset) {
   std::vector<std::int32_t> replay;
   std::int32_t hidden_row = 0;
   if (!DraftReplay(next_token, &replay, &hidden_row, error_msg))
@@ -610,7 +617,9 @@ bool Session::DraftCatchUp(std::int32_t next_token, bool propose,
   auto& exec = *model_->executor_;
   if (!exec.MtpForward(
           *session_, replay, hidden_row,
-          {.token = propose && candidates == nullptr ? &draft_token_ : nullptr,
+          {.token = propose && (candidates == nullptr || with_token)
+                        ? &draft_token_
+                        : nullptr,
            .candidates = candidates,
            .draft_subset = draft_subset},
           error_msg)) {
@@ -802,7 +811,35 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
   return ok;
 }
 
+namespace {
+
+/// Retrieval drafting from the token history: when the context ends in a phrase
+/// that occurred earlier, the tokens that followed it replace the MTP chain for
+/// that cycle. The target still verifies every token, so a wrong guess only
+/// costs the verify width.
+constexpr std::uint32_t kSuffixMinMatch = 16;
+
+MtpProposal PointMassProposal(std::int32_t token) {
+  MtpProposal proposal;
+  proposal.size = 1;
+  proposal.ids[0] = static_cast<sampling::TokenId>(token);
+  proposal.probabilities[0] = 1.0F;
+  proposal.token = proposal.ids[0];
+  proposal.probability = 1.0F;
+  return proposal;
+}
+
+}  // namespace
+
+void Session::SyncLookup() {
+  if (lookup_.size() > tokens_.size())
+    lookup_ = LookupIndex{};
+  for (std::size_t i = lookup_.size(); i < tokens_.size(); ++i)
+    lookup_.Append(tokens_[i]);
+}
+
 struct Session::PendingDecode {
+  bool suffix{false};  ///< chain came from the token history, not the predictor
   std::vector<std::int32_t> chain;
   std::vector<MtpProposal> proposals;
   std::uint32_t base{0};
@@ -878,6 +915,44 @@ bool Session::PrepareDecode(const DecodeRequest& request,
     result->stop = true;
     return true;
   }
+  // Retrieval drafts: the token history may already contain what follows this
+  // phrase. The index includes the anchor, which is committed in every outcome.
+  std::vector<std::int32_t> history_draft;
+  if (MtpEnabled() && cap > 1) {
+    SyncLookup();
+    lookup_.Append(anchor);
+    std::uint32_t matched = 0;
+    // After a poor round only a long match is trusted for a while.
+    const std::uint32_t needed = tokens_.size() < suffix_cooldown_until_
+                                     ? std::max(kSuffixMinMatch, 48U)
+                                     : kSuffixMinMatch;
+    history_draft = lookup_.Draft(
+        needed, std::min<std::size_t>(cap - 1, kMaxMtpDraftTokens), &matched);
+  }
+  if (!history_draft.empty()) {
+    const bool sampled = sampler.config().uses_random_sampling();
+    const bool gpu_greedy = sampler.config().temperature == 0.0F;
+    if (!defer_head && !DraftCatchUp(anchor, false, error_msg))
+      return false;
+    pending->suffix = true;
+    pending->chain = {anchor};
+    for (const auto token : history_draft) {
+      pending->chain.push_back(token);
+      if (sampled)
+        pending->proposals.push_back(PointMassProposal(token));
+    }
+    pending->width = pending->chain.size();
+    pending->base = static_cast<std::uint32_t>(tokens_.size());
+    pending->speculative = true;
+    pending->sampled = sampled;
+    pending->gpu_greedy = gpu_greedy;
+    pending->gpu_verification = gpu_greedy;
+    if (!pending->gpu_verification &&
+        verify_logits_.size() < exec.max_speculative() * model_->VocabSize()) {
+      verify_logits_.resize(exec.max_speculative() * model_->VocabSize());
+    }
+    return true;
+  }
   if (!MtpEnabled() || width < 2) {
     if (MtpEnabled() && !defer_head &&
         !DraftCatchUp(anchor, false, error_msg)) {
@@ -898,9 +973,9 @@ bool Session::PrepareDecode(const DecodeRequest& request,
                           draft_vocab_.Fits(anchor, [&](std::int32_t token) {
                             return model_->InDraftSubset(token);
                           });
-  if (!defer_head && !DraftCatchUp(anchor, true, error_msg,
-                                   sampled ? &pending->candidates : nullptr,
-                                   pending->draft_subset)) {
+  if (!defer_head &&
+      !DraftCatchUp(anchor, true, error_msg, &pending->candidates, !sampled,
+                    pending->draft_subset)) {
     return false;
   }
   // A cycle-local proposal stream needs no pending RNG state in snapshots.
@@ -924,14 +999,24 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   if (!defer_head) {
     while (pending->chain.size() < width) {
       AppendDraft(*pending);
-      if (pending->chain.size() < width &&
-          !exec.MtpForward(
-              *session_, std::span<const std::int32_t>(&pending->draft, 1), -1,
-              {.token = sampled ? nullptr : &pending->draft,
-               .candidates = sampled ? &pending->candidates : nullptr,
-               .draft_subset = pending->draft_subset},
-              error_msg)) {
-        return false;
+      if (pending->chain.size() < width) {
+        if (!exec.MtpForward(*session_,
+                             std::span<const std::int32_t>(&pending->draft, 1),
+                             -1,
+                             {.token = sampled ? nullptr : &pending->draft,
+                              .candidates = &pending->candidates,
+                              .draft_subset = pending->draft_subset},
+                             error_msg)) {
+          return false;
+        }
+        // Stop before a slot the predictor is unlikely to win. Verification is
+        // unchanged, so this only gives up speculative positions.
+        if (!sampled) {
+          const float confidence = DraftConfidence(pending->candidates);
+          if (kMinDraftConfidence > 0.0F && confidence < kMinDraftConfidence) {
+            break;
+          }
+        }
       }
     }
   }
@@ -957,6 +1042,11 @@ bool Session::FinishDecode(const DecodeRequest& request,
     return request.stop_at_eos && model_->IsStopToken(token);
   };
   if (!pending.speculative) {
+    // Ordinary decode is a cycle too. Leaving it uncounted made `cycles` a
+    // speculative-only denominator, so any configuration that fell back to
+    // plain decode reported an inflated per-cycle cost.
+    stats_.cycles += 1;
+    stats_.widths[0] += 1;
     draft_length_.ObserveArToken();
     hidden_base_ = base;
     tokens_.push_back(anchor);
@@ -1050,9 +1140,18 @@ bool Session::FinishDecode(const DecodeRequest& request,
   stats_.drafted += k - 1;
   stats_.accepted += keep - 1;
   stats_.small_head_cycles += pending.draft_subset;
-  // A target stop ends the request; it does not classify the remaining
-  // proposals as failed predictions.
-  draft_length_.Observe(keep - 1, result->stop ? keep - 1 : k - 1, base);
+  stats_.widths[std::min<std::size_t>(k - 1, kMaxMtpDraftTokens)] += 1;
+  if (pending.suffix) {
+    stats_.suffix_cycles += 1;
+    stats_.suffix_drafted += k - 1;
+    stats_.suffix_accepted += keep - 1;
+    if ((keep - 1) * 2 < k - 1)
+      suffix_cooldown_until_ = base + keep + 32;
+  } else {
+    // A target stop ends the request; it does not classify the remaining
+    // proposals as failed predictions.
+    draft_length_.Observe(keep - 1, result->stop ? keep - 1 : k - 1, base);
+  }
 
   // The next call knows the next sampled anchor. Defer draft catch-up until
   // then, retaining this session's target hidden rows across interleaving.

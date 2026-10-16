@@ -14,6 +14,19 @@ namespace gufo::models::qwen38_flash_next {
 
 inline constexpr std::uint32_t kMaxMtpDraftTokens = 7;
 
+/// Top-1 mass below which another draft slot is not spent. A wide verify batch
+/// is not free on a model with hundreds of experts: verifying n tokens touches
+/// far more distinct experts than one token does, so slots the predictor is
+/// unlikely to win are better left unspent. Verification is unchanged, so the
+/// gate only gives up speculative positions.
+///
+/// This is a property of the loaded target. 0.60 is tuned on UD-Q5K_HCP, where
+/// it won 3 of 4 interleaved 32k+64k rounds against 0.70 and 0.80 and beat 0.45
+/// in both. UD-Q4_K_XL prefers 0.45 (+9.7 %), and the signal is not on the same
+/// scale across targets, so a per-target value needs the confidence mapped onto
+/// the controller's observed acceptance first.
+inline constexpr float kMinDraftConfidence = 0.60F;
+
 struct MtpLengthState {
   std::array<float, kMaxMtpDraftTokens> successes;
   std::array<float, kMaxMtpDraftTokens> failures;

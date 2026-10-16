@@ -50,7 +50,7 @@ struct ContinuationBackingClass {
 class ContinuationLayout {
 public:
   ContinuationLayout(const Config&, bool mtp, std::uint32_t context,
-                     std::uint32_t kept_rows);
+                     std::uint32_t kept_rows, bool kv_int8 = false);
   [[nodiscard]] std::span<const ContinuationComponent> Components() const {
     return components_;
   }

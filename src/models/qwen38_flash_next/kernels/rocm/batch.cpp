@@ -318,6 +318,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
       attention.rope = session.vision_input_.rope();
       attention.k_cache = session.mtp_.k_cache;
       attention.v_cache = session.mtp_.v_cache;
+      attention.k_cache_q8 = session.mtp_.k_cache_q8;
+      attention.v_cache_q8 = session.mtp_.v_cache_q8;
       attention.index_k = session.mtp_.index_k;
       attention.block_k = session.mtp_.block_k;
       const bool sparse = session.mtp_.position + n > c.indexer_top_k;
@@ -326,7 +328,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
       if (!Attention(l, attention, s_.mixed, s_.block_out, n,
                      &session.control_->mtp_position,
                      &session.control_->mtp_blocks, session.mtp_.position, pool,
-                     session.max_context_, sparse, error, false, true, false))
+                     session.max_context_, sparse, error, false, true, false, 0,
+                     session))
         return false;
     }
     // Attention retains every catch-up KV row. Only each final residual
@@ -990,7 +993,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
                          &session.control_->position, &session.control_->blocks,
                          session.position_, pool, session.max_context_,
-                         sparse[i], error, false, true, false)) {
+                         sparse[i], error, false, true, false, 0, session)) {
             return false;
           }
         }

@@ -16,7 +16,11 @@ add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(continuation_layout gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(mtp_sampling gufo_core "cpu")
+<<<<<<< HEAD
 add_qwen38_flash_next_test(draft_vocab gufo_core "cpu")
+=======
+add_qwen38_flash_next_test(lookup_draft gufo_qwen38_flash_next "cpu")
+>>>>>>> fdb7a8a8 (feat(qwen38-flash-next): token-history drafting and a draft confidence gate)
 
 add_executable(qwen38_flash_next_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)
 target_link_libraries(qwen38_flash_next_reference_probe PRIVATE

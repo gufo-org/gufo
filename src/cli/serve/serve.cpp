@@ -1141,6 +1141,7 @@ int RunServe(std::span<const char* const> args) {
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
+    std::string kv_cache_quant = "f16";
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
@@ -1220,6 +1221,9 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--min-draft-tokens", "N",
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
+    llm_parser.AddOption("", "--kv-quant", "MODE",
+                         "KV cache precision: f16 or q8 (default: f16)",
+                         "Model", &kv_cache_quant);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
@@ -1376,6 +1380,10 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;
     }
+    if (kv_cache_quant != "f16" && kv_cache_quant != "q8") {
+      std::cerr << "Error: --kv-quant must be f16 or q8\n";
+      return 2;
+    }
     if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&
         (dflash_model_path.empty() || min_draft_tokens != 1)) {
       std::cerr << "Error: DFlash2 requires --dflash-model and "
@@ -1432,7 +1440,8 @@ int RunServe(std::span<const char* const> args) {
             .model_artifact_fingerprint = {},
         },
         vision_model_path,
-        server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes});
+        server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes},
+        kv_cache_quant);
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
