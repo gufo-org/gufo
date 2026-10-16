@@ -170,7 +170,8 @@ private:
   bool Related(std::size_t, std::size_t) const;
   void Relate(std::size_t);
   std::array<std::uint64_t, 4> PressureOrder(std::size_t,
-                                             const RetentionRequest&) const;
+                                             const RetentionRequest&,
+                                             std::uint32_t priority) const;
   std::size_t UniqueBytes(std::size_t) const;
   std::size_t UniquePayloadBytes(std::size_t) const noexcept;
   bool Persisting(std::size_t) const;

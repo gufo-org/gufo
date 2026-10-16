@@ -118,11 +118,10 @@ bool RetentionPolicy::Branch(std::size_t candidate) const {
   std::optional<Token> next;
   for (std::size_t i = 0; i < limit_; ++i) {
     const auto& peer = records_[i];
-    if (i == candidate || !peer.checkpoint || !Continuation(peer.purpose) ||
-        peer.checkpoint->Compatibility() != e.checkpoint->Compatibility() ||
-        peer.checkpoint->Input() != e.checkpoint->Input() ||
-        peer.checkpoint->Boundary() <= e.checkpoint->Boundary() ||
-        !Prefix(e.checkpoint->Tokens(), peer.checkpoint->Tokens()))
+    // Relate records the same immutable compatibility/input/strict-prefix
+    // relation. Rechecking long token arrays for every priority query adds no
+    // information; Erase removes the corresponding relation bits.
+    if (!e.below[i] || !peer.checkpoint || !Continuation(peer.purpose))
       continue;
     if (peer.purpose == RetentionPurpose::kBranchPoint)
       learned = false;
@@ -148,8 +147,14 @@ std::uint32_t RetentionPolicy::Priority(
                                                      : 2;
   for (std::size_t i = 0; i < limit_; ++i) {
     const auto& peer = records_[i];
-    if (i == candidate || !peer.checkpoint || !Continuation(peer.purpose) ||
-        peer.checkpoint->Compatibility() != e.checkpoint->Compatibility() ||
+    if (i == candidate || !peer.checkpoint || !Continuation(peer.purpose))
+      continue;
+    if (Continuation(e.purpose)) {
+      if (e.below[i])
+        return 2;
+      continue;
+    }
+    if (peer.checkpoint->Compatibility() != e.checkpoint->Compatibility() ||
         peer.checkpoint->Input() != e.checkpoint->Input())
       continue;
     if (e.purpose == RetentionPurpose::kRetry &&
@@ -159,10 +164,6 @@ std::uint32_t RetentionPolicy::Priority(
     if (e.purpose == RetentionPurpose::kHistory &&
         Prefix(e.checkpoint->Tokens(), peer.checkpoint->Tokens()))
       return 1;
-    if (Continuation(e.purpose) &&
-        peer.checkpoint->Boundary() > e.checkpoint->Boundary() &&
-        Prefix(e.checkpoint->Tokens(), peer.checkpoint->Tokens()))
-      return 2;
   }
   return 3;
 }
@@ -197,9 +198,9 @@ void RetentionPolicy::Relate(std::size_t added) {
         records_[parent].forked = true;
 }
 std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
-    std::size_t i, const RetentionRequest& r) const {
+    std::size_t i, const RetentionRequest& r, std::uint32_t priority) const {
   const auto& e = records_[i];
-  if (!Priority(i, &r))
+  if (!priority)
     return {0, e.last_used, 0, 0};
   std::size_t rows = 0, state = 0;
   for (const auto& c : e.checkpoint->Components())
@@ -326,6 +327,15 @@ bool RetentionPolicy::Persisting(std::size_t i) const {
 std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
                                     bool record_pressure) const {
   const auto source = Find(r.source);
+  // Records and the incoming request do not change during selection. Reuse
+  // each rank across eligibility, ordering and source-fallback decisions.
+  std::array<std::optional<std::uint32_t>, kRecordLimit> priorities{};
+  const auto priority = [&](std::size_t i) {
+    auto& value = priorities[i];
+    if (!value)
+      value = Priority(i, &r);
+    return *value;
+  };
   // An unchanged retry's full-prompt copy may replace the checkpoint it was
   // restored from when only the assistant framing separates them: the copy
   // covers every prompt the source did except an edit inside those few
@@ -348,8 +358,7 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
         !record_pressure && r.purpose == RetentionPurpose::kHistory
             ? 3
             : MaxRank(r.purpose);
-    return records_[i].checkpoint && !Persisting(i) &&
-           Priority(i, &r) <= maximum &&
+    return records_[i].checkpoint && !Persisting(i) && priority(i) <= maximum &&
            std::ranges::find(r.protected_checkpoints,
                              records_[i].checkpoint->Id()) ==
                r.protected_checkpoints.end();
@@ -382,14 +391,14 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
     if (!eligible(i) || i == source)
       continue;
     if (!record_pressure) {
-      lowest = std::min(lowest, Priority(i, &r));
-      const auto candidate = PressureOrder(i, r);
+      lowest = std::min(lowest, priority(i));
+      const auto candidate = PressureOrder(i, r, priority(i));
       if (target == limit_ || candidate < order) {
         target = i;
         order = candidate;
       }
-    } else if (target == limit_ || Priority(i, &r) < Priority(target, &r) ||
-               (Priority(i, &r) == Priority(target, &r) &&
+    } else if (target == limit_ || priority(i) < priority(target) ||
+               (priority(i) == priority(target) &&
                 records_[i].last_used < records_[target].last_used)) {
       target = i;
     }
@@ -400,13 +409,12 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
   // full-record publication, advance a redundant source before another
   // family's last copy regardless of that flag (ContinuationCache::Commit).
   if ((record_pressure || !r.preserve_source) && source != limit_ &&
-      eligible(source) && Continuation(r.purpose) && Priority(source, &r) < 3 &&
+      eligible(source) && Continuation(r.purpose) && priority(source) < 3 &&
       records_[source].checkpoint->Compatibility() == r.compatibility &&
       records_[source].checkpoint->Input() == r.input &&
       records_[source].checkpoint->Boundary() < r.tokens.size() &&
       Prefix(records_[source].checkpoint->Tokens(), r.tokens) &&
-      (target == limit_ ||
-       (record_pressure ? Priority(target, &r) : lowest) == 3))
+      (target == limit_ || (record_pressure ? priority(target) : lowest) == 3))
     return source;
   if (target == limit_ && source != limit_ && eligible(source) &&
       ((!record_pressure && !r.preserve_source) ||

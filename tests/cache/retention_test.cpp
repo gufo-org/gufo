@@ -190,6 +190,37 @@ void RanksAndSources() {
     assert(g.policy.Rank(a) == 3);  // image identities never cover each other
   }
 }
+void LongPrefixRelationsAfterReplacement() {
+  Fixture f(4);
+  const std::vector<Token> prefix(131072, 7);
+  auto left = prefix, right = prefix;
+  left.push_back(8);
+  right.push_back(9);
+  const auto root = f.Add(prefix);
+  const auto a = f.Add(left);
+  const auto b = f.Add(right);
+  assert(f.policy.Rank(root) == 3);  // both continuations need their fork
+  f.policy.Remove(a);
+  assert(f.policy.Rank(root) == 2);
+  // Reuse the removed record's slot with a shorter, unrelated conversation.
+  // Its tokens cannot be indexed at the old parent's boundary.
+  const auto unrelated = f.Add({1, 2});
+  assert(f.policy.Rank(root) == 2);
+  f.policy.Remove(b);
+  assert(f.policy.Rank(root) == 3);
+  (void)f.Add(right, RetentionPurpose::kContinuation, 0, {}, true, {42});
+  assert(f.policy.Rank(root) == 3);  // another input cannot cover the prefix
+  f.policy.Remove(unrelated);
+  f.Add(right);
+  assert(f.policy.Rank(root) == 2);
+  f.Add(right, RetentionPurpose::kBranchPoint);  // replace the same boundary
+  assert(f.policy.Rank(root) == 2);
+  f.Add({10, 11});
+  f.Add({12, 13});
+  assert(f.Cached(prefix) == 0);  // covered root still loses at record pressure
+  assert(f.Cached(right) == right.size());
+  assert(f.Cached(right, {42}) == right.size());
+}
 void ShortPeersDoNotCoverHistory() {
   for (const auto purpose :
        {RetentionPurpose::kContinuation, RetentionPurpose::kBranchPoint}) {
@@ -965,6 +996,7 @@ int main() {
   Planning();
   Branches();
   RanksAndSources();
+  LongPrefixRelationsAfterReplacement();
   ShortPeersDoNotCoverHistory();
   HistoryBytePressureCanReplaceOldFamilies();
   CurrentTurnKeepsItsEditBoundaries();
