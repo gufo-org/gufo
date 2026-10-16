@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -1314,25 +1315,39 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
           [&](std::span<const cache::PayloadRequest> payloads) {
             buffer_metadata = cache.ledger.Reserve(
                 cache::ResourceCategory::kMetadata,
-                payloads.size() * (sizeof(ComponentCaptureBuffer) +
-                                   sizeof(std::span<const std::byte>)));
+                payloads.size() *
+                    (sizeof(ComponentCaptureBuffer) +
+                     sizeof(std::span<const std::byte>) + sizeof(std::size_t)));
             buffers.reserve(payloads.size());
             borrowed.reserve(payloads.size());
+            // Small row/tail allocations must not split the remaining runs
+            // that larger private states require. Keep equal-size requests
+            // in their original order; transfers still follow component order.
+            std::vector<std::size_t> allocation_order(payloads.size());
+            std::iota(allocation_order.begin(), allocation_order.end(), 0);
+            std::ranges::sort(allocation_order, [&](auto a, auto b) {
+              return payloads[a].bytes != payloads[b].bytes
+                         ? payloads[a].bytes > payloads[b].bytes
+                         : a < b;
+            });
             while (true) {
               try {
                 if (cache.resources->can_capture &&
                     !cache.resources->can_capture(payloads))
                   throw cache::ResourceExhausted();
-                for (const auto& payload : payloads) {
-                  buffers.push_back(cache.resources->allocate(payload));
-                  borrowed.push_back(
-                      buffers.back().borrow &&
+                buffers.resize(payloads.size());
+                borrowed.resize(payloads.size());
+                for (const auto i : allocation_order) {
+                  const auto& payload = payloads[i];
+                  buffers[i] = cache.resources->allocate(payload);
+                  borrowed[i] =
+                      buffers[i].borrow &&
                               payload.category ==
                                   cache::ResourceCategory::kBackingAssigned
                           ? cache.resources->adapter->BorrowRowsView(
                                 request.slot.Execution(), payload.component,
                                 payload.first, payload.end)
-                          : std::span<const std::byte>{});
+                          : std::span<const std::byte>{};
                 }
                 break;
               } catch (const cache::ResourceExhausted&) {
