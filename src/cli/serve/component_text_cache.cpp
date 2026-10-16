@@ -884,8 +884,10 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       // whose captures are refused: take it last. Then completed
       // preservation first: it needs no foreground copy. Among those, a live
       // frontier holds generated tokens no checkpoint covers, such as the
-      // tool call the next turn replays, so take a slot without one, then
-      // the least recently used.
+      // tool call the next turn replays. Take a slot without one, then a
+      // shallow frontier before a deep one, then the least recently used.
+      // Faster idle preservation must not make short side requests evict a
+      // deep conversation merely because its backing copy finished earlier.
       constexpr std::size_t kUncoveredTokens = 4096;
       const auto uncovered = [&](const Impl::Entry& e) {
         if (!e.live || e.live_tokens.size() <= kUncoveredTokens)
@@ -902,7 +904,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       };
       const auto rank = [&](const Impl::Entry& e) {
         return std::tuple{uncovered(e), !e.slot->PreservationComplete(),
-                          bool(e.live), e.used};
+                          bool(e.live),
+                          e.live_tokens.size() >= kUncoveredTokens, e.used};
       };
       for (auto& candidate : impl_->entries)
         if (!candidate->busy && (!entry || rank(*candidate) < rank(*entry)))

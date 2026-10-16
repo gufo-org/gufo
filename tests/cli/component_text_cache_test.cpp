@@ -546,6 +546,48 @@ void ColdAssignmentKeepsLiveFrontiers() {
     assert(turn(conversation) == frontier);
   }
 }
+void ColdSideRequestsKeepPreservedDeepFrontier() {
+  auto runner = std::make_shared<Runner>();
+  runner->defer_idle = true;
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  std::vector<TextRunnerToken> conversation(4096);
+  std::iota(conversation.begin(), conversation.end(), 10);
+  {
+    auto source = cache.Acquire(conversation, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(source->state());
+    const auto prefix = std::span(conversation).first(4088);
+    runner->adapter->Append(state.slot, prefix, prefix);
+    assert(source->TryReserveSnapshot(source->CaptureBytes(), prefix.size(),
+                                      false, SnapshotPurpose::kContinuation,
+                                      prefix));
+    auto snapshot = source->Capture();
+    assert(snapshot);
+    assert(source->PublishSnapshot({prefix.begin(), prefix.end()},
+                                   std::move(snapshot), false));
+    // Deterministically finish preservation. A faster idle worker must not
+    // remove the only protection of this live reply against short traffic.
+    runner->adapter->GuardRows(state.slot, cache::testing::kTarget, 0,
+                               prefix.size());
+    runner->adapter->GuardRows(state.slot, cache::testing::kDraft, 0,
+                               prefix.size());
+    assert(source->Metrics().ledger.reserved_bytes[static_cast<unsigned>(
+               cache::ResourceCategory::kBackingAssigned)] == 0);
+    const auto reply = std::span(conversation).last(8);
+    runner->adapter->Append(state.slot, reply, reply);
+    (void)source->Commit({}, {}, conversation);
+  }
+  for (const TextRunnerToken code : {100, 101, 102}) {
+    const std::vector<TextRunnerToken> short_prompt(12, code);
+    auto side = cache.Acquire(short_prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(side->state());
+    runner->adapter->Append(state.slot, short_prompt, short_prompt);
+    (void)side->Commit({}, {}, short_prompt);
+  }
+  auto resumed = cache.Acquire(conversation, {}, {}, true, 0, true);
+  assert(resumed->cached_tokens() == conversation.size() &&
+         !resumed->restored_snapshot_bytes() &&
+         "short side requests evicted a preserved deep live frontier");
+}
 void ReuseAndBranches() {
   auto runner = std::make_shared<Runner>();
   TextRunnerPool pool(runner, 2);
@@ -1322,6 +1364,7 @@ int main() {
   ImageAfterCachedTextPrefixCaptures();
   ColdAssignmentPrefersPreservedSlot();
   ColdAssignmentKeepsLiveFrontiers();
+  ColdSideRequestsKeepPreservedDeepFrontier();
   ReuseAndBranches();
   EditBoundariesSurviveActualBackingPressure();
   ReusedConversationOutlivesOneUseRequests();
