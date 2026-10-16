@@ -103,6 +103,38 @@ void Check(bool mtp) {
   Require(layout.PrivateBytes() - no_ple_layout.PrivateBytes() == 368640,
           "PLE history inventory is incorrect");
 }
+void CheckExtendedContext(bool mtp) {
+  const auto native = ProductionGeometry();
+  Reject([&] {
+    qfn::ContinuationLayout layout(native, mtp, native.context_length + 1, 8);
+  });
+  for (const auto context : {409600U, 655360U}) {
+    auto scaled = native;
+    scaled.rope_scaling = {.factor = context == 409600 ? 1.5625F : 2.5F,
+                           .original_context = 262144};
+    const qfn::ContinuationLayout layout(scaled, mtp, context, 8);
+    Require(scaled.context_length == 262144,
+            "continuation scaling rewrote the native context");
+    Require(layout.Components().size() == (mtp ? 130 : 124),
+            "extended context changed the state inventory");
+    Require(layout.RawCapacity() == 2048,
+            "extended context inflated the bounded raw ring");
+    for (const auto target : {262145U, context}) {
+      const auto draft = mtp ? target - 1 : 0;
+      // Twelve layers of 2048 KV bytes per token and 256 pooled bytes per
+      // complete four-token block, plus four history bytes per token.
+      const auto expected =
+          std::size_t{target} * 24580 + std::size_t{target / 4} * 3072 +
+          (mtp ? std::size_t{draft} * 2048 + std::size_t{draft / 4} * 256 : 0);
+      Require(layout.RowBytes(target, draft, target / 4, draft / 4) == expected,
+              "extended frontier lost target or predictor rows");
+    }
+    Reject([&] {
+      qfn::ContinuationLayout too_large(scaled, mtp, context + 1, 8);
+    });
+    Reject([&] { (void)layout.Positions(context + 1, 0, context / 4, 0); });
+  }
+}
 void CheckBacking(bool mtp, std::uint32_t context, std::uint32_t concurrency,
                   std::size_t ram, std::size_t checkpoints,
                   std::size_t independent_rows) {
@@ -158,6 +190,7 @@ int main() {
     Check(false);
     Check(true);
     for (const auto mtp : {false, true}) {
+      CheckExtendedContext(mtp);
       CheckBacking(mtp, 32768, 2, 8ULL << 30, 32, 2 * 32768);
       CheckBacking(mtp, 32768, 2, 2ULL << 30, 8, 2 * 4096);
       CheckBacking(mtp, 4096, 8, 8ULL << 30, 8, 8 * 4096);
