@@ -2810,11 +2810,11 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
         it != session.graphs_.end()) {
       exec = it->second;
     } else {
-      // A verifier graph discarded with rollback storage must be rebuilt on
-      // a cold request. Queue this pass first, then record the identical
-      // commands while the GPU executes it. No second device pass is launched.
-      if (synchronize && (key & (std::uint64_t{1} << 32)) != 0 &&
-          (key & (std::uint64_t{1} << 40)) == 0) {
+      // A warmed target shape may need its first graph or a replacement
+      // after rollback storage was released. Queue this pass first, then
+      // record identical commands while the GPU executes it. Short prefix
+      // and draft graphs keep their existing route. No second pass is launched.
+      if (synchronize && (key & (std::uint64_t{1} << 40)) == 0) {
         auto dispatch = std::tie(
             moe_pending_, defer_residual_, res_deferred_, shexp_half_ready_,
             q8t_src_, q8t_rows_, q8t_cols_, half_src_, half_rows_, half_cols_,
