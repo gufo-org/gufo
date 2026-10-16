@@ -3,6 +3,7 @@
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <future>
 #include <mutex>
@@ -367,6 +368,91 @@ void Failure() {
     f.Verify();
   }
 }
+void ManyRangesAndForegroundEdits() {
+  constexpr std::size_t count = 2048;
+  ResourceLedger ledger{{32 << 20, 32 << 20, 0, 32 << 20}};
+  LedgerAudit audit{ledger};
+  AdapterFixture adapter;
+  FakeStream foreground;
+  LeasedSlot slot{
+      ledger, adapter, foreground, SlotId{1},
+      IdleSpillConfig{8, [] { return std::make_unique<FakeStream>(true); },
+                      [] { return true; }}};
+  auto lease = slot.Acquire();
+  std::vector<Token> tokens(2 * count + 5);
+  for (std::size_t i = 0; i < tokens.size(); ++i)
+    tokens[i] = static_cast<Token>(i + 1);
+  adapter.fake.Append(lease.Execution(), tokens, tokens);
+  struct Kept {
+    Rows first, end;
+    std::shared_ptr<BorrowedRows> rows;
+    std::shared_ptr<std::vector<std::byte>> buffer;
+  };
+  std::vector<ResourceCharge> pools;
+  const auto borrow = [&](Rows first, Rows end) {
+    auto buffer =
+        std::make_shared<std::vector<std::byte>>((end - first) * sizeof(Token));
+    auto pool = ledger.Reserve(ResourceCategory::kBackingFree, buffer->size())
+                    .Convert();
+    auto rows =
+        lease.Borrow(kTarget, first, end,
+                     pool.ReserveBacking(ResourceCategory::kBackingAssigned),
+                     buffer, *buffer);
+    pools.push_back(std::move(pool));
+    return Kept{first, end, std::move(rows), std::move(buffer)};
+  };
+  std::vector<Kept> kept;
+  for (std::size_t i = 0; i < count; ++i) {
+    kept.push_back(borrow(2 * i, 2 * i + 2));
+    if (i % 113 == 0)
+      (void)borrow(2 * i, 2 * i + 1);  // Expired registry holes.
+  }
+  // This last range needs three pieces; advancing after its first piece
+  // would leave an incomplete copy even though later registrations finish.
+  kept.push_back(borrow(2 * count, tokens.size()));
+  auto reader = kept.front().rows->Pin();
+  const auto live = lease.Location();
+  adapter.gate.Allow(count + 3);
+  const auto started = std::chrono::steady_clock::now();
+  lease.Commit();
+  adapter.gate.WaitFor(count + 3);
+  while (!slot.PreservationComplete())
+    std::this_thread::yield();
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - started)
+                           .count();
+  std::printf("idle %zu retained ranges: %.3f ms\n", kept.size(), elapsed);
+  for (const auto& item : kept) {
+    assert(item.rows->IsValid() && !item.rows->Location());
+    assert(std::memcmp(item.buffer->data(), tokens.data() + item.first,
+                       (item.end - item.first) * sizeof(Token)) == 0);
+  }
+  assert(slot.Metrics().idle_bytes == tokens.size() * sizeof(Token));
+  // A reader admitted before materialization still prevents overwrite.
+  // Foreground erasure can invalidate the parked idle cursor or leave it at
+  // end; releasing this lease must discover the new registration either way.
+  assert(reader.Location());
+  lease = slot.Acquire(live);
+  kept.back().rows.reset();
+  auto guard = std::async(std::launch::async, [&] {
+    adapter.fake.GuardRows(lease.Execution(), kTarget, 0, tokens.size());
+  });
+  assert(guard.wait_for(20ms) == std::future_status::timeout);
+  reader = {};
+  guard.get();
+  auto next = borrow(0, 3);
+  adapter.gate.Allow(2);
+  lease.Commit();
+  adapter.gate.WaitFor(count + 5);
+  while (!slot.PreservationComplete())
+    std::this_thread::yield();
+  assert(!next.rows->Location());
+  assert(std::memcmp(next.buffer->data(), tokens.data(), 3 * sizeof(Token)) ==
+         0);
+  assert(slot.Metrics().idle_bytes == (tokens.size() + 3) * sizeof(Token));
+  assert(slot.Metrics().foreground_bytes == 0);
+  slot.StopIdleSpill();
+}
 void RetainedCheckpoints() {
   for (int mode = 0; mode < 3; ++mode) {
     Fixture f;
@@ -470,6 +556,7 @@ int main() {
   CancellationAndPins();
   PriorityAndPoolExhaustion();
   Failure();
+  ManyRangesAndForegroundEdits();
   ForegroundStreamWait();
   CancelForegroundStreamWait();
   CancelColdReassignment();

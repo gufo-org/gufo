@@ -67,6 +67,9 @@ struct LeaseState final : MutationGuard {
   std::shared_ptr<SlotState> source;
   std::mutex mutex;
   std::list<Entry> rows;
+  // Foreground mutation can erase registrations. Reset this cursor whenever
+  // execution releases the slot; the idle worker never uses it while leased.
+  std::list<Entry>::iterator idle_next{rows.end()};
   // Conservative per-component upper bound of registered ends. Appends at
   // or beyond it skip the registry scan on every execution step.
   std::unordered_map<std::uint32_t, Rows> borrowed_end;
@@ -252,18 +255,22 @@ struct LeaseState final : MutationGuard {
       if (leased || !live || idle_failed)
         continue;
       std::shared_ptr<RowState> candidate;
-      for (auto it = rows.begin(); it != rows.end();) {
+      for (auto& it = idle_next; it != rows.end();) {
         auto r = it->rows.lock();
         if (!r) {
           it = rows.erase(it);
           continue;
         }
-        ++it;
-        std::lock_guard row_lock(r->mutex);
-        if (!r->buffer.empty() && !r->Materialized() && !r->Retired()) {
-          candidate = std::move(r);
-          break;
+        // Buffer geometry is immutable; completion only accumulates. Keep
+        // the cursor on a partial range, but visit completed predecessors
+        // once instead of locking and rescanning them for every idle piece.
+        if (r->buffer.empty() ||
+            r->completion.load(std::memory_order_acquire)) {
+          ++it;
+          continue;
         }
+        candidate = std::move(r);
+        break;
       }
       if (!candidate) {
         idle_pending = false;
@@ -521,6 +528,7 @@ void SlotLease::Release() noexcept {
   {
     std::lock_guard lock(state_->mutex);
     state_->leased = false;
+    state_->idle_next = state_->rows.begin();
     state_->idle_failed = false;
     state_->idle_pending = true;
     state_->changed.notify_all();
@@ -677,6 +685,7 @@ SlotLease LeasedSlot::Acquire(std::optional<BorrowedLocation> live,
     if (!state_->changed.wait(lock, stop, [&] { return !state_->spilling; }) ||
         stop.stop_requested()) {
       state_->leased = false;
+      state_->idle_next = state_->rows.begin();
       state_->changed.notify_all();
       throw std::runtime_error("slot acquisition cancelled during idle spill");
     }
@@ -705,6 +714,7 @@ SlotLease LeasedSlot::Acquire(std::optional<BorrowedLocation> live,
     std::lock_guard lock(state_->mutex);
     state_->stop = {};
     state_->leased = false;
+    state_->idle_next = state_->rows.begin();
     state_->changed.notify_all();
     throw;
   }
@@ -715,11 +725,9 @@ bool LeasedSlot::PreservationComplete() const {
   if (state_->leased)
     return false;
   for (const auto& entry : state_->rows)
-    if (auto r = entry.rows.lock()) {
-      std::lock_guard row_lock(r->mutex);
-      if (!r->Materialized() && !r->Retired())
+    if (auto r = entry.rows.lock())
+      if (!r->completion.load(std::memory_order_acquire))
         return false;
-    }
   return true;
 }
 SpillMetrics LeasedSlot::Metrics() const {
