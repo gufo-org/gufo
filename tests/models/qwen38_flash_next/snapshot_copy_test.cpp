@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iostream>
 #include <span>
+#include <thread>
 #include <vector>
 
 namespace qfn = gufo::models::qwen38_flash_next::rocm;
@@ -40,6 +41,46 @@ void Copies(std::span<std::byte> host, void* device, hipStream_t stream,
     }
   }
 }
+void PeerCapture(std::span<std::byte> host, void* device,
+                 hipStream_t copy_stream,
+                 const std::vector<std::byte>& expected) {
+  hipStream_t compute{};
+  Check(hipStreamCreateWithFlags(&compute, hipStreamNonBlocking));
+  void* scratch{};
+  Check(hipMalloc(&scratch, 4096));
+  Check(hipStreamBeginCapture(compute, hipStreamCaptureModeThreadLocal));
+  Check(hipMemsetAsync(scratch, 0x39, 4096, compute));
+  // A frozen slot can download while another worker records a decode graph.
+  // Its alias lookup and kernel belong only to the independent copy stream.
+  std::thread worker([&] {
+    Check(
+        qfn::CopySnapshotToHost(host.data(), device, host.size(), copy_stream));
+    Check(hipStreamSynchronize(copy_stream));
+  });
+  worker.join();
+  hipGraph_t graph{};
+  Check(hipStreamEndCapture(compute, &graph));
+  assert(std::ranges::equal(host, expected));
+  hipGraphExec_t replay{};
+  Check(hipGraphInstantiate(&replay, graph, nullptr, nullptr, 0));
+  std::ranges::fill(host, std::byte{0xcd});
+  for (int i = 0; i < 2; ++i) {
+    Check(hipMemsetAsync(scratch, 0, 4096, compute));
+    Check(hipGraphLaunch(replay, compute));
+    Check(hipStreamSynchronize(compute));
+    assert(
+        std::ranges::all_of(host, [](auto b) { return b == std::byte{0xcd}; }));
+    std::array<std::byte, 4096> actual;
+    Check(hipMemcpy(actual.data(), scratch, actual.size(),
+                    hipMemcpyDeviceToHost));
+    assert(std::ranges::all_of(actual,
+                               [](auto b) { return b == std::byte{0x39}; }));
+  }
+  Check(hipGraphExecDestroy(replay));
+  Check(hipGraphDestroy(graph));
+  Check(hipFree(scratch));
+  Check(hipStreamDestroy(compute));
+}
 }  // namespace
 
 int main() {
@@ -63,6 +104,8 @@ int main() {
   assert(madvise(mapping, bytes, MADV_POPULATE_WRITE) == 0);
   Check(hipHostRegister(mapping, bytes, hipHostRegisterDefault));
   Copies({static_cast<std::byte*>(mapping), bytes}, device, stream, expected);
+  PeerCapture({static_cast<std::byte*>(mapping), bytes}, device, stream,
+              expected);
   Check(hipHostUnregister(mapping));
   // The same address must fall back once its registration is removed.
   Copies({static_cast<std::byte*>(mapping), bytes}, device, stream, expected);
@@ -73,5 +116,6 @@ int main() {
   Check(hipStreamDestroy(stream));
   Check(hipFree(device));
   std::cout << "PASS: registered/pageable copies, exact bytes, all guards, "
-               "aligned/unaligned offsets and registration removal\n";
+               "aligned/unaligned offsets, registration removal and peer graph "
+               "capture/replay\n";
 }

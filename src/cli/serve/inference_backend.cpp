@@ -2499,12 +2499,11 @@ public:
         throw std::invalid_argument("insufficient component backing budget");
       const auto& allocation = plan.front();
       // Pages commit as captures need them. A payload cannot span segments,
-      // so the edge of each one strands space a ~140 MB private state cannot
-      // use; equal segments of about 1 GiB, and at least two private states,
-      // keep that small. Completed append rows prepare more backing; private
-      // and tail copies commit only when needed. Pinning ahead after a final
-      // private copy can delay decoder launches. Growth stops when the host
-      // keeps less than its reserve.
+      // so equal segments of about 1 GiB bound stranded edge space and fit at
+      // least two payloads of the largest component. Completed append rows
+      // prepare more backing; private and tail copies commit only when needed.
+      // Pinning ahead after a final private copy can delay decoder launches.
+      // Growth stops when the host keeps less than its reserve.
       std::size_t largest = 0;
       for (const auto& [id, bytes] : backing->component_classes)
         largest = std::max(largest, bytes);
