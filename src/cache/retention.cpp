@@ -352,11 +352,15 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
       Prefix(records_[source].checkpoint->Tokens(), r.tokens);
   const auto eligible = [&](std::size_t i) {
     // Byte admission for an edit boundary must not starve behind last copies
-    // of older families. Record-pressure guards and retry admission retain
-    // their existing rank limits. LRU still breaks ties within each rank.
+    // of older families. A resumed prompt may also replace covered history
+    // to retain its complete retry state; faster captures can otherwise fill
+    // the pool with older ancestors before this final boundary is reached.
+    // Retry admission still protects last copies, forks and current edit
+    // boundaries. Cold retries and record-pressure guards keep their limits.
     const auto maximum =
-        !record_pressure && r.purpose == RetentionPurpose::kHistory
-            ? 3
+        !record_pressure && r.purpose == RetentionPurpose::kHistory ? 3
+        : !record_pressure && r.purpose == RetentionPurpose::kRetry && r.reused
+            ? 2
             : MaxRank(r.purpose);
     return records_[i].checkpoint && !Persisting(i) && priority(i) <= maximum &&
            std::ranges::find(r.protected_checkpoints,

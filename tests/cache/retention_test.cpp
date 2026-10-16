@@ -420,6 +420,43 @@ void RetryCopyReplacesItsNearbySource() {
   distant.source = other;
   assert(!f.policy.Reclaim(distant));
 }
+void ResumedRetryReclaimsCoveredHistory() {
+  PressureFixture f;
+  const auto old = Conversation(1, 16);
+  const auto ancestor = f.Add({old.begin(), old.begin() + 8});
+  f.Add(old);
+  const auto unrelated = Conversation(2, 16);
+  f.Add(unrelated);
+  const auto fork = Conversation(3, 8);
+  f.Add(fork);
+  auto left = fork, right = fork;
+  left.push_back(10);
+  right.push_back(20);
+  f.Add(left);
+  f.Add(right);
+  const auto current = Conversation(4, 7);
+  const auto source = f.Add({current.begin(), current.begin() + 4});
+  const auto stable = f.Add(current);
+  const std::array protected_ids{source, stable};
+  auto prompt = current;
+  prompt.push_back(5);
+  RetentionRequest request{prompt, {1}, {}, RetentionPurpose::kRetry, 7};
+  request.protected_checkpoints = protected_ids;
+  // An optional cold retry cannot evict another conversation's history.
+  assert(!f.policy.Reclaim(request));
+  request.reused = true;
+  assert(f.policy.Reclaim(request) &&
+         "resumed retry starved behind covered history");
+  assert(f.log.events.back().checkpoint == ancestor);
+  assert(f.Cached(old) == old.size());
+  assert(f.Cached(unrelated) == unrelated.size());
+  assert(f.Cached(fork) == fork.size());
+  assert(f.Cached({current.begin(), current.begin() + 4}) == 4);
+  assert(f.Cached(current) == current.size());
+  // Last copies, branching prefixes and the current turn's edit boundaries
+  // remain protected even if a full-prompt retry would still need more space.
+  assert(!f.policy.Reclaim(request));
+}
 void SharedShortPrefixIsNotCheap() {
   // A new conversation sharing a short system/tools prefix must not evict
   // that prefix to admit itself (tool-agent peers).
@@ -1004,6 +1041,7 @@ int main() {
   ReusedCheapCheckpointKeepsRecency();
   PersistingCheckpointIsNotAVictim();
   RetryCopyReplacesItsNearbySource();
+  ResumedRetryReclaimsCoveredHistory();
   SharedShortPrefixIsNotCheap();
   UnreusedConversationKeepsItsStem();
   ForkedParentOutlivesItsChildren();
