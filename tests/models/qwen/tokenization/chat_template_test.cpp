@@ -982,7 +982,6 @@ void TestToolRendering() {
   };
 
   gufo::tokenization::ChatTemplateOptions options;
-  options.require_tool_call = true;
   const auto rendered = tpl->Render(messages, tools, options);
   Expect(rendered.has_value(), "Tool-aware render succeeds");
   Expect(rendered->find("# Tools") != std::string::npos,
@@ -994,9 +993,9 @@ void TestToolRendering() {
   Expect(rendered->find("<parameter=city>\nRome\n</parameter>") !=
              std::string::npos,
          "Tool arguments use native Qwen syntax");
-  Expect(rendered->find("You must call at least one available function") !=
+  Expect(rendered->find("You must call at least one available function") ==
              std::string::npos,
-         "Required tool choice is included in the model prompt");
+         "Tool requirements are enforced by the grammar, not the prompt");
 }
 
 void TestToolReplayPreservesGeneratedPrefix() {

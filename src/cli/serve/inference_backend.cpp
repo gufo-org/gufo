@@ -78,8 +78,6 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
                                                   std::uint32_t max_context) {
   auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
                                                       request.add_vision_id);
-  options.require_tool_call =
-      request.tool_choice == ChatRequest::ToolChoice::kRequired;
   // gufo #285: the rendered prompt may be as long as the context can hold.
   options.max_output_bytes =
       tokenization::RenderedPromptBoundBytes(max_context);
@@ -1855,8 +1853,6 @@ public:
     options.tools_present =
         !request.tools.empty() &&
         request.tool_choice != ChatRequest::ToolChoice::kNone;
-    options.require_tool_call =
-        request.tool_choice == ChatRequest::ToolChoice::kRequired;
     auto tokens =
         DeepSeekRunnerTokens(model_->EncodeChat(messages, tools, options));
     if (tokens.empty()) {

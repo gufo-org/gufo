@@ -232,6 +232,9 @@ void TestOfficialDsmlToolLoop() {
          "DeepSeek uses official typed DSML parameters");
   Expect(rendered.find("<｜DS｜") == std::string::npos,
          "Legacy nonstandard DS tool markers are absent");
+  Expect(rendered.find("You MUST invoke at least one available tool") ==
+             std::string::npos,
+         "Tool requirements are enforced by the grammar, not the prompt");
   Expect(Sha256(rendered) ==
              "cd89794650716ce13bac7ac2392db6a06231ce9927ceb1d712f7c399a0a2fde6",
          "DeepSeek tool loop matches the pinned official encoder golden");

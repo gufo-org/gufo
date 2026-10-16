@@ -162,7 +162,6 @@ struct ChatTemplateOptions {
   QwenReasoningEffort reasoning_effort{QwenReasoningEffort::kXHigh};
   bool preserve_thinking{true};
   bool add_vision_id{false};
-  bool require_tool_call{false};
   std::size_t max_output_bytes{1024ULL * 1024ULL};  ///< 1 MiB upper bound
 };
 

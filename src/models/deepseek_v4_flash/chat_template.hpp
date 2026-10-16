@@ -45,7 +45,6 @@ struct ChatTemplateOptions {
   ReasoningEffort reasoning_effort{ReasoningEffort::kLow};
   bool preserve_thinking{false};
   bool tools_present{false};
-  bool require_tool_call{false};
 };
 
 /// User-facing defaults follow DeepSeek's API: thinking enabled, high effort.

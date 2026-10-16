@@ -29,6 +29,7 @@ from tool_streaming import check_tool_streaming
 from discovery import check_discovery
 from image_inputs import check_image_count, check_image_inputs
 from tool_images import check_tool_images
+from tool_choice import check_tool_choice_cache
 from tool_native import check_finite_argument_types, check_native_tool_schemas
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
                         check_untyped_agent_tools, check_mixed_tool_schemas,
@@ -2650,7 +2651,7 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
 
 SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
               "tool-reasoning", "tool-streaming", "reasoning-separator",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
               "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection")
 
@@ -2777,6 +2778,8 @@ def main():
             "tool-native-types": lambda: check_finite_argument_types(
                 client, args.model, checks, chat_result,
                 image_content("red") if args.vision else None),
+            "tool-choice-cache": lambda: check_tool_choice_cache(
+                client, args.model, checks, chat_result),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content, args.server_log),
             "state-edges": lambda: check_state_edges(
