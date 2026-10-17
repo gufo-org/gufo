@@ -7328,6 +7328,16 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
   }
 }
 
+std::uint32_t WmmaCausalAttentionContextLimit(std::uint32_t heads,
+                                              std::uint32_t kv_heads,
+                                              std::uint32_t d,
+                                              std::uint32_t ratio) {
+  if (heads != kWmmaQueryHeads || kv_heads != kWmmaKvHeads ||
+      d != kWmmaHeadDim || ratio != kWmmaRatio)
+    return 0;
+  return kWmmaMaxMaskWords * kWmmaRatio * 32;
+}
+
 bool WmmaCausalAttention(const float* q, const float* gate,
                          const __half* k_cache, const __half* v_cache,
                          const std::uint32_t* mask, std::uint32_t mask_words,
@@ -7336,8 +7346,8 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t kv_heads, std::uint32_t d,
                          std::uint32_t ratio, hipStream_t stream,
                          bool last_only) {
-  if (heads != kWmmaQueryHeads || kv_heads != kWmmaKvHeads ||
-      d != kWmmaHeadDim || ratio != kWmmaRatio || n_tokens == 0) {
+  if (WmmaCausalAttentionContextLimit(heads, kv_heads, d, ratio) == 0 ||
+      n_tokens == 0) {
     return false;
   }
   if (mask != nullptr) {

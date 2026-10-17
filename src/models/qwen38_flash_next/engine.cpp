@@ -665,10 +665,14 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     // Extended-context attention can fall back from WMMA to the per-token
     // kernel. Its checkpoint must end a pass: the fused in-pass path requires
     // WMMA for both query groups. Preserve ordinary split-pass arithmetic on
-    // either side of the boundary, including chunks crossing native context.
+    // either side of the boundary. Use the actual launch capability rather
+    // than the model's independently configured native context length.
     if ((checkpoint || consume) && boundary > tokens_.size() &&
         boundary < tokens_.size() + n &&
-        tokens_.size() + n > model_->config().context_length) {
+        tokens_.size() + n >
+            rocm::WmmaCausalAttentionContextLimit(
+                model_->config().num_heads, model_->config().num_kv_heads,
+                model_->config().head_dim, model_->config().compress_ratio)) {
       n = boundary - tokens_.size();
     }
     const auto chunk = tokens.subspan(off, n);

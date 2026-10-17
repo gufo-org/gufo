@@ -487,6 +487,12 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                std::uint32_t* counts = nullptr,
                std::uint32_t list_capacity = 0);
 
+/// Maximum visible sparse context for this WMMA geometry, or zero when the
+/// geometry is unsupported. Checkpoint planning uses the same dispatch limit.
+[[nodiscard]] std::uint32_t WmmaCausalAttentionContextLimit(
+    std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
+    std::uint32_t ratio);
+
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows
 /// Attention's block-selection contract (null for the dense window). Returns
