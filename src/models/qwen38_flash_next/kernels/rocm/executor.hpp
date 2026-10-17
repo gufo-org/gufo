@@ -109,8 +109,9 @@ public:
   [[nodiscard]] std::uint32_t max_context() const noexcept {
     return max_context_;
   }
-  /// Drops every token; the next Forward starts at position 0.
-  void Reset();
+  /// Drops every token; the next Forward starts at position 0. Cache slot
+  /// reassignment may retain bounded MTP scratch and its recorded graphs.
+  void Reset(bool reuse_mtp = false);
   void SetCancellationCheck(std::function<bool()> check);
   [[nodiscard]] bool CheckCancellation(std::string* error) const;
   [[nodiscard]] bool Cancelled() const noexcept { return cancelled_; }

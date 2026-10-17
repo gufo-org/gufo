@@ -4179,6 +4179,12 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
         const v16h k_frag =
             LoadFrag(&k_lds[(((s_kb * 16) + sub) * kWmmaKStride) + d0]);
         s_acc = Wmma(q_frag[ks], k_frag, s_acc);
+        if constexpr (kPackHeads) {
+          // Bound temporary K fragments without changing the dot-product
+          // sequence. Hoisting all eight LDS fragments raises register use.
+          if ((ks + 1) % 2 == 0)
+            __builtin_amdgcn_sched_barrier(0);
+        }
       }
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {

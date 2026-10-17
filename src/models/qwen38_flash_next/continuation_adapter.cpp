@@ -847,7 +847,9 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
       ~ResetScope() { active = false; }
     } reset_scope{state.invalidating};
     state.invalidating = true;
-    state.session->Reset();
+    // Reassign a healthy resident slot without rebuilding its MTP graphs.
+    // Failed state and explicit Session::Reset still release all scratch.
+    state.session->ResetImpl(!state.failed && state.session->IsValid());
     state.failed = false;
     state.restoring = false;
     state.expected.clear();

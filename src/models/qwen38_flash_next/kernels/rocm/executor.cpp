@@ -872,10 +872,15 @@ void Session::TrimRollback(std::uint32_t depth) noexcept {
   ngram_snapshots_.resize(depth);
 }
 
-void Session::Reset() {
+void Session::Reset(bool reuse_mtp) {
   // Reset leaves append-only rows intact. Preserve them at the first write
   // that would overwrite them, allowing cancellation to resume by rewind.
-  TrimRollback(0);
+  // Scratch is overwritten by the next verification. Retaining its stable
+  // addresses also retains the graphs; freeing it at every cache reassignment
+  // makes later MTP requests allocate and record those shapes again. Its full
+  // bound is already included in speculative SessionBytes and AllocatedBytes.
+  if (!reuse_mtp || !mtp_enabled_)
+    TrimRollback(0);
   snapshot_lineage_.reset();
   position_ = 0;
   spec_tokens_ = 0;

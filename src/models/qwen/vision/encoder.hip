@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/hip/managed_alloc.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/vision/encoder.hpp"
 
@@ -45,6 +46,14 @@ struct Allocation {
   void* data{nullptr};
   Allocation() = default;
   explicit Allocation(std::size_t bytes) { Check(hipMalloc(&data, bytes)); }
+  static Allocation Weight(std::size_t bytes) {
+    // These copied, read-only weights share system DRAM on gfx1151. Coarse
+    // managed storage avoids the first-use text dispatch stalls observed
+    // after preparing the sidecar with hundreds of device-heap allocations.
+    Allocation allocation;
+    Check(gufo::hip::AllocateManaged(&allocation.data, bytes));
+    return allocation;
+  }
   ~Allocation() {
     if (data != nullptr)
       (void)hipFree(data);
@@ -463,7 +472,7 @@ struct Encoder::Impl {
         continue;
       const std::size_t bytes =
           tensor.ElementCount() * (tensor.type == core::GgmlType::kF32 ? 4 : 2);
-      Allocation buffer(bytes);
+      Allocation buffer = Allocation::Weight(bytes);
       bytes_uploaded += bytes;
       Check(hipMemcpyAsync(buffer.data, tensor.data, bytes,
                            hipMemcpyHostToDevice, stream));
@@ -484,7 +493,8 @@ struct Encoder::Impl {
         }
       }
     }
-    Allocation buffer(patch.size() * sizeof(std::uint16_t));
+    Allocation buffer =
+        Allocation::Weight(patch.size() * sizeof(std::uint16_t));
     Check(hipMemcpyAsync(buffer.data, patch.data(),
                          patch.size() * sizeof(std::uint16_t),
                          hipMemcpyHostToDevice, stream));

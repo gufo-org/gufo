@@ -322,10 +322,14 @@ std::uint32_t Session::ContextSize() const noexcept {
 }
 
 void Session::Reset() {
+  ResetImpl(false);
+}
+
+void Session::ResetImpl(bool reuse_mtp) {
   if (continuation_hooks_)
     continuation_hooks_->BeforeReset();
   valid_ = false;
-  session_->Reset();
+  session_->Reset(reuse_mtp);
   tokens_.clear();
   ForgetDraftVocab();
   hidden_base_ = 0;
