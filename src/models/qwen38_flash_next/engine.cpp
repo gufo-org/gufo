@@ -661,7 +661,16 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     const auto capacity = remaining <= exec.max_batch()
                               ? exec.max_batch()
                               : model_->PrefillCapacity();
-    const std::size_t n = std::min<std::size_t>(capacity, remaining);
+    std::size_t n = std::min<std::size_t>(capacity, remaining);
+    // Extended-context attention can fall back from WMMA to the per-token
+    // kernel. Its checkpoint must end a pass: the fused in-pass path requires
+    // WMMA for both query groups. Preserve ordinary split-pass arithmetic on
+    // either side of the boundary, including chunks crossing native context.
+    if ((checkpoint || consume) && boundary > tokens_.size() &&
+        boundary < tokens_.size() + n &&
+        tokens_.size() + n > model_->config().context_length) {
+      n = boundary - tokens_.size();
+    }
     const auto chunk = tokens.subspan(off, n);
     if (MtpEnabled() && !tokens_.empty() &&
         !DraftCatchUp(chunk[0], false, error_msg)) {
