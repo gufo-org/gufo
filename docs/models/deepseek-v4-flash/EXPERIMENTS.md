@@ -7,6 +7,7 @@
 | Batched speculative projections/attention | Retained; private session state and scalar-equivalent replay. |
 | Projection/mHC fusion | Retained only where independent HC/Sinkhorn and model guards pass. |
 | Compressed KV and use-sized scratch | Retained; capacity does not allocate a filled context. |
+| Rolled K steps in the 16- and 32-column MMQ tiles | Retained (2026-10-08): unrolled, these widths used 190–256 VGPRs and the 32-column tiles spilled with clang 22 and 23; rolled, they use 71–140 and do not spill. Wider tiles compile to the same code. The rounding of these two widths changes and is closer to the wider tiles. |
 | Extra F16 HC rounding | Rejected: fails official formula oracle and worsens probability comparisons. |
 | FP32 compressor/router | Rejected: local arithmetic improvements fail end-to-end continuation/trajectory controls. |
 | Paired IQ2 gate/up | Rejected (2026-09-19): exact forms slower; smaller tiles spill and fail exactness. |

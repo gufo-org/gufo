@@ -1097,6 +1097,12 @@ static __device__ __forceinline__ void vec_dot_q8_0_q8_1_mma(
 
     const int i0 = (wrow / ntx) * rows_per_warp;
 
+    /* ds4: keep this K loop rolled. At mmq_x 16 and 32 the loop body is small,
+     * so the compiler unrolls all four steps and loads every fragment first.
+     * mmq_x 32 then needs more than 256 VGPRs and spills, with clang 22 and
+     * clang 23. The compiler did not unroll the loop for the wider tiles, so
+     * their code does not change. */
+#pragma unroll 1
     for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += QI8_0) {
         const int k0 = k00 + k01;
 
