@@ -4065,6 +4065,27 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       float vals[kPerLane];
       float s0v[kPerLane];
       float s1v[kPerLane];
+      // A lane's four keys form one selection block, so the sparse window
+      // decides its mask bit once per lane instead of once per key.
+      static_assert(kPerLane == ratio, "one selection block per lane");
+      bool block_selected = true;
+      std::uint32_t blk = 0;
+      if constexpr (sparse) {
+        blk = n_blocks;
+#pragma unroll
+        for (std::uint32_t j = 0; j < kBlocksPerTile; ++j) {
+          if (seg == j) {
+            blk = tile.block[j];
+          }
+        }
+        if (words != nullptr && blk < n_blocks && blk * ratio < tail_start) {
+          const std::uint32_t member =
+              (seg * kMaskRows) + (local_query - query_start);
+          block_selected = compact
+                               ? ((tile.members >> member) & 1u) != 0u
+                               : ((words[blk / 32] >> (blk % 32)) & 1u) != 0u;
+        }
+      }
       if constexpr (kVectorSoftmax) {
         const float4 s0 = *reinterpret_cast<const float4*>(
             &s_lds[0][rb][row][seg * kPerLane]);
@@ -4072,31 +4093,29 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
             &s_lds[1][rb][row][seg * kPerLane]);
         s0v[0] = s0.x, s0v[1] = s0.y, s0v[2] = s0.z, s0v[3] = s0.w;
         s1v[0] = s1.x, s1v[1] = s1.y, s1v[2] = s1.z, s1v[3] = s1.w;
+      } else {
+        // Only lanes with a visible block read their scores, which saves
+        // LDS bandwidth, but under one condition so the reads share a wait.
+#pragma unroll
+        for (std::uint32_t m = 0; m < kPerLane; ++m)
+          s0v[m] = s1v[m] = 0.0F;
+        if (live_row && block_selected && blk < n_blocks) {
+#pragma unroll
+          for (std::uint32_t m = 0; m < kPerLane; ++m) {
+            const std::uint32_t col = (seg * kPerLane) + m;
+            const std::uint32_t s_index = ((col / 16) * kRowBlocks) + rb;
+            s0v[m] = s_lds[0][s_index][row][col % 16];
+            s1v[m] = s_lds[1][s_index][row][col % 16];
+          }
+        }
       }
 #pragma unroll
       for (std::uint32_t m = 0; m < kPerLane; ++m) {
         const std::uint32_t col = (seg * kPerLane) + m;
         const std::uint32_t key_position = tile_key(tile, col);
-        bool valid = live_row && key_position <= absolute_query &&
-                     key_position < context_end;
-        if (valid && words != nullptr && key_position < tail_start) {
-          if (compact) {
-            const std::uint32_t slot =
-                ((col / ratio) * kMaskRows) + (local_query - query_start);
-            valid = ((tile.members >> slot) & 1u) != 0u;
-          } else {
-            const std::uint32_t b = key_position / ratio;
-            valid = ((words[b / 32] >> (b % 32)) & 1u) != 0u;
-          }
-        }
-        if constexpr (kVectorSoftmax) {
-          vals[m] = valid ? (s0v[m] + s1v[m]) : -INFINITY;
-        } else {
-          const std::uint32_t s_index = ((col / 16) * kRowBlocks) + rb;
-          vals[m] = valid ? (s_lds[0][s_index][row][col % 16] +
-                             s_lds[1][s_index][row][col % 16])
-                          : -INFINITY;
-        }
+        const bool valid = live_row && key_position <= absolute_query &&
+                           key_position < context_end && block_selected;
+        vals[m] = valid ? (s0v[m] + s1v[m]) : -INFINITY;
         part_max = fmaxf(part_max, vals[m]);
       }
 #pragma unroll
@@ -4252,6 +4271,13 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
     if (next.count != 0)
       scores();
     accumulate(cur);
+    // Finish PV before the barrier. Left alone, the compiler sinks these
+    // WMMAs into phase B behind the softmax, which is the critical path.
+#pragma unroll
+    for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb)
+#pragma unroll
+      for (std::uint32_t t = 0; t < 2; ++t)
+        asm volatile("" : "+v"(o_acc[rb][t]));
     SyncLds();
     // Phase B.
     if (next.count != 0)
