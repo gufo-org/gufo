@@ -1,5 +1,8 @@
 static const void *g_model_host_base;
 static uint64_t g_model_registered_size;
+/* Set when the weights cannot fit the device pool; they then go wholly to
+ * managed memory so the pool is left intact for session state. */
+static int g_model_weights_managed;
 static int g_model_fd = -1;
 static const void *g_model_fd_host_base;
 static int g_model_cache_full;
@@ -656,6 +659,42 @@ static void hip_model_staging_release(void) {
     g_model_uploader.reset();
 }
 
+/* On a unified-memory machine the driver's device pool is a fraction of system
+ * RAM (about 61 of 122 GiB on gfx1151), so a checkpoint whose weights exceed
+ * it cannot be allocated device-only even though the system has the memory
+ * free. Managed memory is ordinary system memory the GPU can also access, and
+ * is not bounded by that pool -- the same escape hatch used for the KV cache
+ * below and for Qwen weights elsewhere.
+ *
+ * Decide once from the registered weight size against the pool, rather than
+ * discovering the limit one failed span at a time: a per-span fallback drains
+ * the pool to its last byte and leaves nothing for the session's
+ * device-only scratch tensors, which then fail with
+ * "tensor alloc failed: out of memory". Oversized weights therefore go wholly
+ * to managed memory, leaving the pool for session state, which is what the
+ * pool is for. */
+static void hip_model_choose_managed_weights(void) {
+  if (g_model_weights_managed)
+    return;
+  size_t free_b = 0;
+  size_t total_b = 0;
+  if (hipMemGetInfo(&free_b, &total_b) != hipSuccess) {
+    (void)hipGetLastError();
+    return;
+  }
+  /* Leave a quarter of the pool for session state and scratch. */
+  const uint64_t usable = (uint64_t)free_b - (uint64_t)total_b / 4u;
+  if (g_model_registered_size > usable) {
+    g_model_weights_managed = 1;
+    fprintf(stderr,
+            DS4_GPU_LOG_PREFIX
+            "weights (%.2f GiB) exceed the usable device pool (%.2f GiB); "
+            "placing them in managed memory\n",
+            (double)g_model_registered_size / 1073741824.0,
+            (double)usable / 1073741824.0);
+  }
+}
+
 static char* hip_model_range_alloc(uint64_t bytes, const char* what) {
   if (bytes == 0)
     return NULL;
@@ -664,8 +703,11 @@ static char* hip_model_range_alloc(uint64_t bytes, const char* what) {
   // The loader already merges adjacent tensors into large upload spans.
   // Allocate each span exactly: packing them into larger fixed blocks leaves
   // several GiB unused, reducing memory available to concurrent sessions.
+  hip_model_choose_managed_weights();
   void* dev = NULL;
-  hipError_t err = hipMalloc(&dev, (size_t)bytes);
+  hipError_t err = g_model_weights_managed
+                       ? hipMallocManaged(&dev, (size_t)bytes)
+                       : hipMalloc(&dev, (size_t)bytes);
   if (err != hipSuccess) {
     fprintf(stderr,
             DS4_GPU_LOG_PREFIX
@@ -852,9 +894,6 @@ extern "C" int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint
     const uint64_t huge_kv = 8ull * 1073741824ull;
     if (kv_cache_bytes >= huge_kv) return 1;
 
-    const uint64_t large_context = 8ull * 1073741824ull;
-    if (context_bytes < large_context) return 0;
-
     size_t free_b = 0;
     size_t total_b = 0;
     hipError_t err = hipMemGetInfo(&free_b, &total_b);
@@ -863,11 +902,17 @@ extern "C" int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint
         return 0;
     }
 
+    /* Ask the driver rather than guessing from the context size.  On unified
+     * memory the weights can consume the device pool before the session is
+     * built (their own spans fall back to managed one at a time), leaving
+     * nothing for these tensors -- so a small context still needs managed
+     * memory when the pool is already gone. */
     const uint64_t free_bytes = (uint64_t)free_b;
     const uint64_t total_bytes = (uint64_t)total_b;
     const uint64_t reserve_bytes = hip_managed_kv_reserve_bytes(total_bytes);
-    if (context_bytes > free_bytes) return 1;
-    return free_bytes - context_bytes < reserve_bytes;
+    if (kv_cache_bytes > free_bytes) return 1;
+    if (free_bytes - kv_cache_bytes < reserve_bytes) return 1;
+    return context_bytes > free_bytes;
 }
 
 extern "C" ds4_gpu_tensor *ds4_gpu_tensor_view(const ds4_gpu_tensor *base, uint64_t offset, uint64_t bytes) {
