@@ -1,4 +1,8 @@
+#include <limits.h>
+#include <unistd.h>
+
 #include <array>
+#include <cstdlib>
 #include <iostream>
 #include <span>
 #include <string_view>
@@ -173,6 +177,18 @@ int run(std::span<const char* const> args) {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  // Copies on the SDMA engine are not ordered against the compute queue on
+  // gfx1151: two interleaved sessions fault within about twenty prefills. Blit
+  // kernels keep every copy in queue order. The HIP runtime has already read
+  // its environment by the time main runs, so restart once with it set.
+  if (std::getenv("HSA_ENABLE_SDMA") == nullptr) {
+    setenv("HSA_ENABLE_SDMA", "0", 1);
+    // Exec the resolved path: /proc/self/exe itself would rename the process.
+    std::array<char, PATH_MAX> self{};
+    if (readlink("/proc/self/exe", self.data(), self.size() - 1) > 0) {
+      execv(self.data(), argv);
+    }
+  }
   const std::span<const char* const> args(argv, static_cast<std::size_t>(argc));
   return run(args);
 }
