@@ -996,6 +996,11 @@ struct DiskStore::Impl {
         st.st_ctim.tv_sec != after.st_ctim.tv_sec ||
         st.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
       DependencyFailure(directory == private_files.Get(), payload.file);
+    {
+      // Verified; drop the pages this re-read brought in.
+      CostTimer timer(publication_stats.filesystem_ns);
+      (void)posix_fadvise(fd.Get(), 0, 0, POSIX_FADV_DONTNEED);
+    }
   }
   void Publish(DiskFileId file, const DiskManifest& m,
                std::span<const DiskWriteBuffer> buffers,
@@ -1229,6 +1234,12 @@ struct DiskStore::Impl {
         }
         DISK_STEP(kPayloadWritten);
         Sync(fd.Get());
+        {
+          // The payload is durable; drop its clean pages so multi-GB snapshots
+          // don't accumulate in the page cache.
+          CostTimer timer(publication_stats.filesystem_ns);
+          (void)posix_fadvise(fd.Get(), 0, 0, POSIX_FADV_DONTNEED);
+        }
         DISK_STEP(kPayloadSynced);
         Rename(dir, payload_name);
         DISK_STEP(kPayloadRenamed);
@@ -1589,6 +1600,8 @@ DiskReadStats DiskStore::ReadPayload(
                                      payload.checksum} ||
       (!stats.verification_cached && checksum != payload.checksum))
     impl_->DependencyFailure(private_file, payload.file);
+  // The consumer holds the bytes now; drop the page-cache copy.
+  (void)posix_fadvise(file.Get(), 0, 0, POSIX_FADV_DONTNEED);
   stats.filesystem_ns += elapsed(begin);
   if (!stats.verification_cached) {
     std::lock_guard guard(impl_->verification_mutex);
