@@ -1475,6 +1475,9 @@ void TestCompatibilityRequests() {
          blocks[1].member_str("type") == "text" &&
          blocks[1].member_str("text") == "answer");
   assert(server.backend->LastCall().chat.reasoning.enabled == true);
+  // budget_tokens caps the reasoning that the sampler allows (#266).
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{1024});
   response_body(server.Post("/v1/messages", R"({"messages":[
       {"role":"user","content":"hi"},
       {"role":"assistant","content":[
@@ -1483,7 +1486,56 @@ void TestCompatibilityRequests() {
       {"role":"user","content":"next"}],
     "thinking":{"type":"disabled"}})"));
   const auto replayed = server.backend->LastCall().chat;
-  assert(replayed.reasoning.enabled == false);
+  assert(replayed.reasoning.enabled == false &&
+         !replayed.reasoning.budget_tokens);
+
+  // --reasoning-budget is a server default for Chat, Responses and Messages;
+  // Messages budget_tokens overrides it per request.
+  server.backend->reasoning.budget_tokens = 50;
+  response_body(server.Post("/v1/responses", R"({"input":"hi"})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  response_body(
+      server.Post("/v1/chat/completions", R"({"model":"test","messages":[
+      {"role":"user","content":"hi"}]})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  response_body(server.Post("/v1/messages", R"({"messages":[
+      {"role":"user","content":"hi"}],
+      "thinking":{"type":"enabled","budget_tokens":8}})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{8});
+  // As in llama.cpp, adaptive thinking takes no budget_tokens.
+  response_body(server.Post("/v1/messages", R"({"messages":[
+      {"role":"user","content":"hi"}],
+      "thinking":{"type":"adaptive","budget_tokens":8}})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  // llama.cpp's thinking_budget_tokens sets it on Chat and Responses; -1
+  // keeps the server default and 0 ends reasoning at once.
+  response_body(
+      server.Post("/v1/chat/completions", R"({"model":"test","messages":[
+      {"role":"user","content":"hi"}],"thinking_budget_tokens":0})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{0});
+  response_body(
+      server.Post("/v1/chat/completions", R"({"model":"test","messages":[
+      {"role":"user","content":"hi"}],"thinking_budget_tokens":-1})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  response_body(server.Post("/v1/responses",
+                            R"({"input":"hi","thinking_budget_tokens":12})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{12});
+  for (const auto* invalid : {"-2", "1.5", "\"8\""}) {
+    const auto rejected = server.Post(
+        "/v1/chat/completions", std::string(R"({"model":"test","messages":[
+        {"role":"user","content":"hi"}],"thinking_budget_tokens":)") +
+                                    invalid + "}");
+    ExpectStatus(rejected, 400);
+    assert(rejected.find("thinking_budget_tokens") != std::string::npos);
+  }
+  server.backend->reasoning.budget_tokens.reset();
   assert(replayed.messages.size() == 3 &&
          replayed.messages[1].thought == "plan" &&
          replayed.messages[1].content == "answer");

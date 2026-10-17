@@ -705,6 +705,55 @@ TextModelRunner::BindConstraint(
   return binding;
 }
 
+std::shared_ptr<const sampling::ReasoningBudget>
+TextModelRunner::BuildReasoningBudget(
+    std::size_t tokens, std::span<const TextRunnerToken> prompt) const {
+  const auto tags = ReasoningBudgetTags();
+  const auto start = TokenizeControl(tags.start);
+  auto forced = TokenizeControl(tags.forced_end);
+  if (start.size() != 1 || forced.empty())
+    return nullptr;
+  auto budget = std::make_shared<sampling::ReasoningBudget>();
+  budget->tokens = tokens;
+  budget->forced.assign(forced.begin(), forced.end());
+  for (const auto end : tags.ends) {
+    const auto token = TokenizeControl(end);
+    if (token.size() != 1)
+      return nullptr;
+    budget->ends.push_back(token.front());
+  }
+  // llama.cpp counts the generation prompt after the start tag, such as the
+  // newline after Qwen's <think>.
+  const auto opened =
+      std::ranges::find(prompt.rbegin(), prompt.rend(), start.front());
+  if (opened != prompt.rend())
+    budget->prompt.assign(opened.base(), prompt.end());
+  const std::lock_guard lock(constraint_mutex_);
+  if (!partial_utf8_ && VocabularySize() != 0) {
+    auto partial = std::make_shared<std::vector<bool>>(VocabularySize());
+    for (TextRunnerToken token = 0; token < partial->size(); ++token) {
+      // As llama.cpp common_utf8_is_complete: the last lead byte within the
+      // final four bytes must have all of its continuation bytes.
+      const auto text = Decode(std::span(&token, 1));
+      bool complete = text.empty();
+      for (std::size_t i = 1; i <= std::min<std::size_t>(4, text.size()); ++i) {
+        const auto byte = static_cast<unsigned char>(text[text.size() - i]);
+        if ((byte & 0xC0U) != 0x80U) {
+          complete = i >= (byte >= 0xF0U   ? 4U
+                           : byte >= 0xE0U ? 3U
+                           : byte >= 0xC0U ? 2U
+                                           : 1U);
+          break;
+        }
+      }
+      (*partial)[token] = !complete;
+    }
+    partial_utf8_ = std::move(partial);
+  }
+  budget->partial_utf8 = partial_utf8_;
+  return budget;
+}
+
 void TextModelRunner::StreamPersistentSnapshot(
     const TextRunnerSnapshot& snapshot, const SnapshotSink& sink) const {
   std::vector<std::uint8_t> payload(PersistentSnapshotPayloadBytes(snapshot));
