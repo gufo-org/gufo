@@ -924,7 +924,7 @@ def check_conversations(client, model, checks, vision=False):
         assert warm["usage"]["cached_tokens"] > 0, warm
 
 
-def check_long_context(client, model, checks, context, vision=False):
+def check_long_context(client, model, checks, context, vision=False, server_log=None):
     """A bounded, multi-turn agent history; actual depth is retained in usage."""
     if context < 8192:
         raise ValueError("long-context requires a server context of at least 8192")
@@ -958,13 +958,20 @@ def check_long_context(client, model, checks, context, vision=False):
     def signature(result):
         return result["text"], result["reasoning"].strip(), result["finish"], result["tools"]
 
+    replay_start = log_offset(server_log)
     first = chat("long_schema_cold", request)
     assert json.loads(first["text"]) == {"keyword": "LANTERN"}, first
     depth = first["usage"]["prompt_tokens"]
     assert context // 4 <= depth < context - 512, depth
+    replay_end = log_offset(server_log)
     replay = chat("long_schema_cached", request, True)
     assert signature(replay) == signature(first), replay
-    assert replay["usage"]["gufo"]["prefill_tokens"] == 0, replay
+    usage = replay["usage"]
+    prefilled = usage["gufo"]["prefill_tokens"]
+    assert usage["prompt_tokens"] == depth, replay
+    assert usage["cached_tokens"] + prefilled == depth, replay
+    check_unchanged_retry("long_schema_cached", replay, prefilled,
+                          server_log, replay_start, replay_end)
 
     # Reuse the same multimodal history through the Responses SDK, with sampled
     # output and a new turn. JSON validity alone would not catch lost memory.
@@ -2791,7 +2798,7 @@ def main():
             "batch": lambda: check_batches(
                 client, args.model, checks, args.concurrency, args.vision, args.speculative),
             "long-context": lambda: check_long_context(
-                client, args.model, checks, args.context, args.vision),
+                client, args.model, checks, args.context, args.vision, args.server_log),
             "progress": lambda: check_prompt_progress(
                 client, args.model, checks, args.concurrency, args.vision,
                 args.allow_missing_progress, args.server_log),
