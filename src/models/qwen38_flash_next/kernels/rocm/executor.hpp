@@ -753,6 +753,14 @@ private:
   // and the half type), so a projection over the same rows skips its
   // activation pass. Cleared whenever the source buffer is rewritten.
   mutable const float* q8t_src_{nullptr};
+  /// NPU staging buffers (activation tiles and six output slices), -1 / empty
+  /// when the NPU is not in use.
+  /// One A buffer and kNpuSlicesMax C buffers per 4096-token group of a chunk.
+  std::vector<int> npu_a_;
+  std::vector<int> npu_c_;
+  /// Device table of the C streams' GPU pointers, [group][kNpuSlicesMax]; the
+  /// GDN epilogue reads z from them directly. Null when unavailable.
+  const std::uint8_t** npu_c_dev_{nullptr};
   mutable std::uint32_t q8t_rows_{0};
   mutable std::size_t q8t_cols_{0};
   mutable const float* half_src_{nullptr};

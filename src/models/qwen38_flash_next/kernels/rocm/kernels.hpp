@@ -210,7 +210,8 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
                       float* gate, __half* keys, __half* values,
                       std::uint32_t n_tokens, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
-                      const qwen::vision::DeviceRope* rope = nullptr);
+                      const qwen::vision::DeviceRope* rope = nullptr,
+                      std::uint32_t skip_gate_heads = 0);
 
 /// Exact Q8_0 HC up projection and F16-input mixer for the Flash Next
 /// 2560-hidden, rank-320 geometry. Returns false below 96 tokens or for other
@@ -230,6 +231,31 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   std::size_t m, std::size_t k, hipStream_t stream,
                   std::size_t input_stride = 0);
+void SsmConvTail(const float* qkvz, const float* conv_w, const float* history,
+                 float* convolved, std::uint32_t n_tokens,
+                 std::uint32_t channels, std::uint32_t stride,
+                 std::uint32_t c_begin, hipStream_t stream);
+/// NPU staging for the block-float GEMM kernel (see kernels.hip.cpp). Buffers
+/// hold 9 bytes per 8 values. Activations: tokens (a multiple of 128) rows of
+/// F16 at pitch ldx, K columns [k_offset, k_offset + k_slice), zero past
+/// k_valid. Weights: Q8_0 rows [row0, row0 + cols) of a K = k_total matrix.
+/// Output: tokens x cols decoded into out (pitch out_pitch) from column col0;
+/// with valid_cols only the first valid_cols columns of the slice are written.
+void NpuEncodeActivations(const __half* x, std::size_t ldx,
+                          std::uint32_t tokens, std::uint32_t k_slice,
+                          std::uint32_t k_offset, std::uint32_t k_valid,
+                          void* dst, hipStream_t stream);
+void NpuEncodeWeights(const void* q8, std::uint32_t k_total, std::uint32_t row0,
+                      std::uint32_t cols, std::uint32_t k_slice,
+                      std::uint32_t k_offset, std::uint32_t k_valid, void* dst,
+                      hipStream_t stream);
+void NpuSwiglu(const void* gate, const void* up, __half* out,
+               std::uint32_t tokens, std::uint32_t cols,
+               std::uint32_t valid_cols, hipStream_t stream);
+void NpuDecodeOutput(const void* src, float* out, std::uint32_t tokens,
+                     std::uint32_t cols, std::size_t out_pitch,
+                     std::uint32_t col0, bool accumulate, hipStream_t stream,
+                     std::uint32_t valid_cols = 0);
 /// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
 /// F32 K16 chain per output. Token t's chain starts ((t / 32) % 4) * 128
 /// elements into K and wraps: hipBLASLt's MT32x32x64 order (BlasLt::Gemm).
@@ -244,11 +270,15 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
 /// history is read only; pass convolved=true to GatedDeltaNet to consume
 /// this result and update history. Speculative snapshots need all raw QKV
 /// rows and must use DenseF16Gemm instead. Unsupported shapes launch nothing.
+/// gpu_rows (a multiple of 256) computes only the first rows, leaving the rest
+/// of each pitch-m row to another device; when that cuts into the conv
+/// channels, SsmConvTail convolves the remaining channels from their raw rows.
 bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0);
+                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0,
+                     std::uint32_t gpu_rows = 0);
 
 /// Routed expert GEMMs. RoutedCompact sorts the (token, slot) assignments
 /// by expert into `rows_token`/`rows_slot` (RoutedCompactRows(slots,
@@ -363,7 +393,12 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t d, std::uint32_t kernel, bool row_split,
                    bool convolved, float eps, hipStream_t stream,
                    __half* out_half = nullptr, GdnCheckpoint checkpoint = {},
-                   std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr);
+                   std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr,
+                   void (*before_epilogue)(void*) = nullptr,
+                   void* before_epilogue_arg = nullptr,
+                   const std::uint8_t* const* z_streams = nullptr,
+                   std::uint32_t z_stream_stride = 0,
+                   std::uint32_t z_tokens = 0, std::uint32_t z_gpu_cols = 0);
 
 /// Private rows for one request in a decode batch. Scratch regions and all
 /// recurrent/history/rollback buffers must be disjoint between requests.
@@ -404,6 +439,24 @@ void UnpackQGate(const float* qg, std::uint32_t qg_stride, float* q,
 /// Unpacks a stacked Q/gate/K/V projection, normalizes and rotates Q/K,
 /// and writes the F16 caches. Returns false for heads wider than 256.
 /// With zero query heads, packed contains only K/V and q/gate may be null.
+/// PrepareAttention for the first q_heads query heads (and their gate rows)
+/// only; k and v are left to the projection.
+void PrepareQueryHeads(const float* packed, std::uint32_t stride,
+                       const float* q_gamma, float* q, float* gate,
+                       std::uint32_t n_tokens, std::uint32_t heads,
+                       std::uint32_t kv_heads, std::uint32_t d,
+                       std::uint32_t rotary_dim, const std::uint32_t* start_pos,
+                       float theta, float eps, hipStream_t stream,
+                       const qwen::vision::DeviceRope* rope,
+                       std::uint32_t q_heads);
+/// The same, reading the packed rows straight from the NPU's C streams.
+void PrepareQueryHeadsStreams(
+    const std::uint8_t* const* streams, std::uint32_t stream_stride,
+    std::uint32_t stream_tokens, const float* q_gamma, float* q, float* gate,
+    std::uint32_t n_tokens, std::uint32_t heads, std::uint32_t kv_heads,
+    std::uint32_t d, std::uint32_t rotary_dim, const std::uint32_t* start_pos,
+    float theta, float eps, hipStream_t stream,
+    const qwen::vision::DeviceRope* rope, std::uint32_t q_heads);
 bool PrepareAttention(const float* packed, std::uint32_t stride,
                       const float* q_gamma, const float* k_gamma, float* q,
                       float* gate, __half* k_cache, __half* v_cache,
