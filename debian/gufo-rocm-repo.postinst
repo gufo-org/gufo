@@ -1,0 +1,47 @@
+#!/bin/sh
+set -e
+
+# Register the AMD ROCm apt repository used by Gufo.
+#
+# The ROCm libraries required by Gufo (hipblaslt, rocwmma and the HIP
+# runtime) are not available in the Debian or Ubuntu repositories, so
+# this package configures the upstream AMD repository. AMD publishes
+# Ubuntu suites; Debian releases use the suite of the Ubuntu release
+# they are compatible with (bookworm -> jammy, trixie -> noble).
+
+. /etc/os-release
+
+case "$ID" in
+  debian)
+    case "$VERSION_CODENAME" in
+      bookworm) SUITE=jammy ;;
+      *) SUITE=noble ;;
+    esac
+    ;;
+  ubuntu)
+    case "$VERSION_CODENAME" in
+      jammy) SUITE=jammy ;;
+      *) SUITE=noble ;;
+    esac
+    ;;
+  *)
+    SUITE=noble
+    ;;
+esac
+
+mkdir -p /etc/apt/sources.list.d /etc/apt/preferences.d
+
+cat > /etc/apt/sources.list.d/gufo-rocm.list <<EOF
+deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2.4 ${SUITE} main
+EOF
+
+cat > /etc/apt/preferences.d/gufo-rocm-pin <<EOF
+Package: *
+Pin: release o=repo.radeon.com
+Pin-Priority: 600
+EOF
+
+echo "gufo-rocm-repo: AMD ROCm repository registered (suite ${SUITE})."
+echo "gufo-rocm-repo: run 'apt update' before installing gufo."
+
+exit 0

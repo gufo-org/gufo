@@ -81,6 +81,51 @@ run follows the same process and is available for recovery. Do not edit the
 version, changelog or release manifest in an ordinary feature or fix pull
 request.
 
+### Debian packaging
+
+The `debian/` tree builds Gufo's Debian packages. Their version comes from the
+top `debian/changelog` entry, while `version.txt` stays canonical, so the release
+workflow keeps the two aligned: after Release Please opens or updates the release
+pull request, it runs `debian/gen-changelog.sh` on that branch and commits the
+result before the pull request is merged. The script rewrites the top changelog
+entry from `version.txt` and the matching `CHANGELOG.md` section, preserving the
+existing maintainer and reusing the Debian revision when the upstream version is
+unchanged. Do not edit `debian/changelog` by hand: it is generated, and would
+otherwise drift from `version.txt`.
+
+The package build only checks it. `debian/rules` compares the upstream part of the
+changelog version with `version.txt` before `dh_gencontrol` reads it, and fails
+naming both values when they differ. It never writes to the source tree:
+regenerating there would leave a clean checkout modified and stamp
+`git describe --dirty` into `GUFO_REVISION`, so every binary would advertise a
+dirtiness its builder never caused. To build a tree that is deliberately ahead of
+its last generated entry, pass `DEB_BUILD_OPTIONS=gufo-changelog-regen`, which
+regenerates the top entry from `version.txt` first; that run does modify the
+working tree, so restore `debian/changelog` afterwards. Note that
+`dpkg-buildpackage` fixes the `.changes` and `.buildinfo` file names when it
+starts, so generate *before* the build when those names must carry the new
+version as well as the package itself.
+The hook sits after `dh_auto_configure`, which stamps the revision from
+`git describe --always --dirty`, so that the regenerated *changelog* cannot mark
+the build dirty. That guarantee covers `debian/changelog` and nothing else: the
+dirty check excludes only that path, so any other uncommitted change — maintainer
+scripts, `.install` files, sources — still stamps `-dirty`. `DEB_BUILD_OPTIONS=no-changelog-regen` builds against the checked-in
+entry. Because `dpkg-buildpackage` reads the version before it invokes
+`debian/rules`, the file names of the `.changes` and `.buildinfo` written by the
+first build of a new version still carry the previous entry; a release build from
+a `vX.Y.Z` tag, where the two already match, is unaffected.
+
+**Commit before you build, and never amend after.** The revision a binary carries is
+read from the working tree at build time; it is the last link between a deployed host
+and the source it came from. Building from an uncommitted tree ships `-dirty`, which
+names no commit; amending after the build makes the stamp name a commit that no longer
+exists on the remote. Verify the stamp from the artifact before deploying:
+
+```sh
+dpkg-deb --fsys-tarfile gufo_<version>_amd64.deb | tar -xO ./usr/bin/gufo > ./stamp-check
+chmod +x ./stamp-check && ./stamp-check --version    # must match git rev-parse --short HEAD
+```
+
 Nix keeps release identity and source identity separate. The default package is
 a development build and reports `gufo version development (<revision>)`.
 Official artifacts build the `release` package from a `vX.Y.Z` tag and report

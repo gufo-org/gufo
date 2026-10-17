@@ -1,0 +1,22 @@
+[Unit]
+Description=Gufo Strix Halo inference server
+Documentation=https://github.com/gufo-org/gufo
+After=network.target
+
+[Service]
+Type=simple
+User=gufo
+Group=llm-servers
+WorkingDirectory=/var/lib/gufo
+EnvironmentFile=-/etc/gufo/gufo.env
+# The launcher assembles the command line from /etc/gufo/gufo.env, so tuning
+# the model, the speculative backend, the draft length, the context, the
+# session count or the row cache never touches this file: edit the env file and
+# run `systemctl restart gufo`.
+ExecStart=/usr/lib/gufo/gufo-launch.sh
+LimitMEMLOCK=infinity
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

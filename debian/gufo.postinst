@@ -1,0 +1,83 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+  # Shared group for LLM server services. Every service user that must reach
+  # the model cache is a member of it.
+  if ! getent group llm-servers > /dev/null 2>&1; then
+    addgroup --system llm-servers
+  fi
+  # Dedicated system user for the Gufo server. Runtime state lives in
+  # the user's home directory (/var/lib/gufo).
+  if ! getent passwd gufo > /dev/null 2>&1; then
+    adduser --system --ingroup llm-servers --home /var/lib/gufo \
+      --shell /usr/sbin/nologin gufo
+  fi
+  # GPU device access: /dev/kfd and /dev/dri/renderD* require membership
+  # in the video and render groups. The render group is defined by the
+  # udev package's sysusers configuration; create it if missing (minimal
+  # systems and containers). Match the group of an existing device node
+  # so mounted devices stay accessible (rootful containers).
+  if ! getent group render > /dev/null 2>&1; then
+    render_gid=$(stat -c '%g' /dev/kfd 2>/dev/null || true)
+    case "$render_gid" in
+      ""|0|65534)
+        addgroup --system render
+        ;;
+      *)
+        addgroup --system --gid "$render_gid" render 2>/dev/null \
+          || addgroup --system render
+        ;;
+    esac
+  fi
+  usermod -a -G video,render gufo
+  # Shared Hugging Face cache for model weights. Group-owned with the
+  # setgid bit so new files inherit the llm-servers group; any member
+  # can read and download models. Survives purge
+  # (shared data). An existing directory may be a read-only mount
+  # (containers), so ownership and mode are best-effort there.
+  if [ -d /var/lib/huggingface/hub ]; then
+    chown gufo:llm-servers /var/lib/huggingface/hub 2>/dev/null || true
+    chmod 2775 /var/lib/huggingface/hub 2>/dev/null || true
+  else
+    install -d -o gufo -g llm-servers -m 2775 /var/lib/huggingface/hub
+  fi
+  # Per-instance configuration directory for gufo@<name>. Units stay untouched;
+  # a new server configuration is one file here plus a systemctl enable.
+  install -d -o root -g llm-servers -m 0755 /etc/gufo/instance.d
+  # Register the ROCm runtime libraries with the dynamic linker. The
+  # AMD ROCm runtime packages do not install an ld.so.conf.d entry, so
+  # without this the loader cannot find libhipblas/librocblas/libamdhip64
+  # and the server fails to start (exit 127).
+  if command -v ldconfig > /dev/null 2>&1; then
+    ldconfig
+  fi
+  # Bring back whatever this package owns that must be running. The decision and
+  # its evidence live in /usr/lib/gufo/gufo-upgrade-units.sh, shipped by this
+  # package, because the decision has to hold for EVERY upgrade path - including
+  # one from a version whose prerm stopped nothing and wrote no marker. dpkg runs
+  # the prerm of the package you upgrade FROM, so a prerm-only fix cannot help that
+  # upgrade; postinst is this package's own script, so the logic placed here lands
+  # immediately. $2 is dpkg's "configured from" version: empty on first install.
+  if [ -d /run/systemd/system ]; then
+    if [ -x /usr/lib/gufo/gufo-upgrade-units.sh ]; then
+      /usr/lib/gufo/gufo-upgrade-units.sh "${2:-}" \
+        || echo "gufo: warning: unit restore after upgrade reported a failure; check 'systemctl status gufo@<name>'" >&2
+    else
+      # Should not happen: the script is shipped by this package. Say so loudly
+      # rather than leaving the operator to infer it from a silent host.
+      echo "gufo: WARNING /usr/lib/gufo/gufo-upgrade-units.sh missing; a running instance may still be executing the replaced binary - run: sudo systemctl restart gufo@<name>" >&2
+    fi
+  fi
+  # Sync the systemd manager with the packaged unit file after installs
+  # and upgrades. dh_installsystemd --no-enable --no-start skips its own
+  # daemon-reload, so without this the manager keeps a stale cached unit
+  # and warns on the next restart.
+  if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+  fi
+fi
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,42 @@
+[Unit]
+# Instantiated gufo text server. One unit file, many configurations:
+# every tunable lives in an EnvironmentFile, so switching model, speculative
+# backend, draft length, context, sessions or cache never edits a unit file.
+#
+#   systemctl enable --now gufo@<name>          # /etc/gufo/instance.d/<name>.env
+#   systemctl enable --now gufo@<another-name>  # a second server, on another port
+#
+# Load ceiling: a large model stays resident for the life of the instance, so
+# capacity is a per-host budget, not a per-unit one - read the device usage the
+# service reports before starting a second one. Two large instances on one
+# machine starve each other, and an orphaned instance that crash-loops reloads a
+# model of its size on every retry until the box swaps, so run at most one large
+# instance per host and give every instance its own port and its own private
+# cache directory. The disk cache guard rejects a cache directory not owned by
+# the service user, hence instance dirs are created by the launcher, which runs
+# as that user.
+Description=Gufo Strix Halo inference server (instance %i)
+Documentation=https://github.com/gufo-org/gufo
+After=network-online.target
+Wants=network-online.target
+# A crash loop must not become an infinite reload of a ~100 GiB model. These
+# are [Unit] keys: in [Service] systemd ignores them (systemd-analyze verify).
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=gufo
+Group=llm-servers
+WorkingDirectory=/var/lib/gufo
+# Shared defaults first, then the instance file so the instance wins.
+Environment=GUFO_INSTANCE=%i
+EnvironmentFile=-/etc/gufo/gufo.env
+EnvironmentFile=-/etc/gufo/instance.d/%i.env
+ExecStart=/usr/lib/gufo/gufo-launch.sh
+LimitMEMLOCK=infinity
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

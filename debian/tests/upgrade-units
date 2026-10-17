@@ -1,0 +1,177 @@
+#!/bin/sh
+# Upgrade-path matrix for this package's systemd lifecycle handling.
+#
+#   debian/tests/upgrade-units                     # installed /usr/lib/gufo/... or the tree
+#   debian/tests/upgrade-units gufo.deb           # the script that ships inside a .deb
+#   debian/tests/upgrade-units path/to/script.sh  # an explicit target
+#
+# Also usable as an autopkgtest (see debian/tests/control), which runs it against the
+# freshly built and installed package.
+#
+# Nothing here contacts a real service manager, /run, /etc or any host. `systemctl` and
+# `deb-systemd-invoke` are stubs placed on PATH, and every directory the script enumerates
+# is redirected through its documented test overrides (GUFO_RUN_DIR, GUFO_WANTS_DIRS,
+# GUFO_SYSTEMCTL, GUFO_STATE_DIR, GUFO_BOOT_ID). It needs no root and no network.
+#
+# Why this file exists: a rule placed only in `prerm' takes effect one version late, because
+# dpkg runs the prerm of the package you upgrade FROM. Scenario 1 reproduces the upgrade that
+# left a host reporting a new version while its process still executed the replaced inode.
+# The `leave' scenarios exist for the opposite reason: enablement is a statement about boot,
+# not about now, and an upgrade that starts a unit an operator stopped takes a device and puts
+# a host back into a load balancer's path (observed in production on 2026-10-15).
+set -u
+cd "$(dirname "$0")"
+
+TARGET=""
+ARG="${1:-}"
+INSTALLED="/usr/lib/gufo/gufo-upgrade-units.sh"
+case "$ARG" in
+  "")
+    if [ -x "$INSTALLED" ]; then TARGET="$INSTALLED"; MODE="installed package"
+    else TARGET="../gufo-upgrade-units.sh"; MODE="source tree"; fi ;;
+  *.deb)
+    TMP="$(mktemp -d)"
+    dpkg-deb --fsys-tarfile "$ARG" | tar -xO ./usr/lib/gufo/gufo-upgrade-units.sh > "$TMP/u.sh" 2>/dev/null \
+      || { echo "cannot extract the shipped script from $ARG"; exit 2; }
+    chmod +x "$TMP/u.sh"; TARGET="$TMP/u.sh"; MODE="extracted from $ARG" ;;
+  *) TARGET="$ARG"; MODE="explicit target" ;;
+esac
+[ -f "$TARGET" ] || { echo "no such target: $TARGET"; exit 2; }
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/gufo-upgrade-matrix.XXXXXX")"
+trap 'rm -rf "$WORK" ${TMP:-}' EXIT INT TERM
+printf '### target: %s (%s)\n\n' "$TARGET" "$MODE"
+
+write_stubs() {
+  cat > "$WORK/bin/systemctl" <<'EOF'
+#!/bin/sh
+# state lines: "<unit>=active" | "<unit>=inactive"; enabled = wants file exists
+case "$1" in
+  is-active)  grep -qx "$3=active" "$STUB_STATE"; exit $? ;;
+  is-enabled) [ -e "$WANTS_DIR/$3" ]; exit $? ;;
+  list-units) cut -d= -f1 "$STUB_STATE" 2>/dev/null ;;
+  start|restart|stop)
+    echo "INVOKE $1 $3" >> "$STUB_LOG"
+    if [ -n "${STUB_FAIL:-}" ] && [ "$1" = "$STUB_FAIL" ]; then exit 1; fi
+    if [ "$1" = stop ]; then sed -i "\|^$3=|d" "$STUB_STATE"
+    else grep -q "^$3=" "$STUB_STATE" || echo "$3=active" >> "$STUB_STATE"; fi
+    exit 0 ;;
+esac
+exit 0
+EOF
+  cat > "$WORK/bin/deb-systemd-invoke" <<'EOF'
+#!/bin/sh
+echo "INVOKE $1 $2" >> "$STUB_LOG"
+[ -n "${STUB_FAIL:-}" ] && [ "$1" = "$STUB_FAIL" ] && exit 1
+exit 0
+EOF
+  chmod +x "$WORK/bin/systemctl" "$WORK/bin/deb-systemd-invoke"
+}
+
+setup() {
+  rm -rf "$WORK/bin" "$WORK/run" "$WORK/wants" "$WORK/statedir"
+  mkdir -p "$WORK/bin" "$WORK/run" "$WORK/wants" "$WORK/statedir"
+  : > "$WORK/state"; : > "$WORK/log"; write_stubs
+}
+
+pass=0; fail=0
+run() { # run <name> <want-line> <want-calls> <from> <state> <markers> <enabled> [boot]
+  local_name="$1"; want_line="$2"; want_call="$3"; from="$4"; state="$5"; markers="$6"; enabled="$7"; boot="${8:-}"
+  setup
+  bid="boot-id-current-aaaa"
+  [ -n "$state" ] && printf '%s\n' "$state" > "$WORK/state"
+  # a fresh marker carries the boot id that wrote it; that is what bounds it to its transaction
+  for m in $markers; do printf '%s\n' "$bid" > "$WORK/run/$m"; done
+  for u in $enabled; do : > "$WORK/wants/$u"; done
+  case "$boot" in
+    same) printf '%s\n' "$bid" > "$WORK/statedir/upgrade-boot.id" ;;
+    diff) printf '%s\n' "boot-id-previous-bbbb" > "$WORK/statedir/upgrade-boot.id" ;;
+  esac
+  out=$(STUB_STATE="$WORK/state" STUB_LOG="$WORK/log" WANTS_DIR="$WORK/wants" \
+        GUFO_RUN_DIR="$WORK/run" GUFO_WANTS_DIRS="$WORK/wants" GUFO_SYSTEMCTL="$WORK/bin/systemctl" \
+        GUFO_STATE_DIR="$WORK/statedir" GUFO_BOOT_ID="$bid" \
+        PATH="$WORK/bin:$PATH" sh "$TARGET" ${from:+"$from"} 2>&1); rc=$?
+  calls="-"; [ -s "$WORK/log" ] && calls=$(tr '\n' ';' < "$WORK/log")
+  if [ -z "$want_line" ]; then
+    [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ] && ok=yes || ok=no
+  else
+    printf '%s' "$out" | grep -qF "$want_line" && ok=yes || ok=no
+  fi
+  if [ "$ok" = yes ] && [ "$calls" = "$want_call" ]; then
+    printf '  ok   %-46s %s\n' "$local_name" "$calls"; pass=$((pass+1))
+  else
+    printf '  FAIL %-46s want[%s | %s]\n       got[%s | %s] rc=%s\n' "$local_name" "$want_line" "$want_call" \
+      "$(printf '%s' "$out" | tr '\n' '/' | cut -c1-64)" "$calls" "$rc"; fail=$((fail+1))
+  fi
+}
+
+#      name                                          decision  calls                                    from         state                                    markers                            enabled                     boot
+run "1 upgrade, active, pre-fix prerm"             "restart" "INVOKE restart gufo@flashnext.service;" "0.14.0-1" "gufo@flashnext.service=active" ""              "gufo@flashnext.service"
+run "2 upgrade, prerm stopped and marked"           "restart" "INVOKE restart gufo@flashnext.service;" "0.14.0-1" "gufo@flashnext.service=inactive" "gufo@flashnext.service.was-active" "gufo@flashnext.service"
+run "3 first install, nothing enabled"              ""        "-"                                      ""           ""                                      ""                                 ""
+run "4 first install, admin enabled"                "leave"   "-"                                      ""           ""                                      ""                                 "gufo@bench.service"
+run "5 inactive and disabled: untouched"            "none"    "-"                                      "0.14.0-1" "gufo.service=inactive"                  ""                                 ""
+run "6 active but not enabled"                      "restart" "INVOKE restart gufo@manual.service;"  "0.14.0-1" "gufo@manual.service=active"          ""                                 ""
+run "7 same-version reinstall"                      "restart" "INVOKE restart gufo@flashnext.service;" "0.15.0-1" "gufo@flashnext.service=active"     ""              "gufo@flashnext.service"
+run "8 rebooted, /run wiped, enabled"                "start"   "INVOKE start gufo@flashnext.service;" "0.15.0-1" "gufo@flashnext.service=inactive"     ""              "gufo@flashnext.service" diff
+run "9 operator stopped, enabled, no reboot"         "leave"   "-"                                      "0.15.1-1" "gufo@flashnext.service=inactive"         ""              "gufo@flashnext.service" same
+run "10 enabled, no boot record at all"             "leave"   "-"                                      "0.15.1-1" "gufo@flashnext.service=inactive"         ""              "gufo@flashnext.service"
+run "11 mixed host: one up, one stopped"            "restart" "INVOKE restart gufo@a.service;"       "0.15.1-1" "gufo@a.service=active
+gufo@b.service=inactive" "" "gufo@a.service gufo@b.service" same
+run "12 classic unit and instance together"         "restart" "INVOKE restart gufo.service;INVOKE restart gufo@flashnext.service;" "0.14.0-1" "gufo.service=active
+gufo@flashnext.service=active" "" "gufo.service gufo@flashnext.service"
+run "13 bare template is never acted on"            "note:"   "-"                                      "0.14.0-1" "gufo@.service=inactive"                ""                                 ""
+
+# a failing action must exit non-zero so postinst warns instead of failing silently
+setup; printf 'gufo@flashnext.service=active\n' > "$WORK/state"
+out=$(STUB_STATE="$WORK/state" STUB_LOG="$WORK/log" WANTS_DIR="$WORK/wants" STUB_FAIL=restart \
+      GUFO_RUN_DIR="$WORK/run" GUFO_WANTS_DIRS="$WORK/wants" GUFO_SYSTEMCTL="$WORK/bin/systemctl" \
+      GUFO_STATE_DIR="$WORK/statedir" PATH="$WORK/bin:$PATH" sh "$TARGET" "0.14.0-1" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "WARNING"; then
+  printf '  ok   %-46s rc=%s, loud\n' "14 failing restart exits non-zero" "$rc"; pass=$((pass+1))
+else printf '  FAIL %-46s rc=%s out=[%s]\n' "14 failing restart exits non-zero" "$rc" "$(printf '%s' "$out" | cut -c1-50)"; fail=$((fail+1)); fi
+
+# --dry-run must decide but mutate nothing
+setup
+# a VALID marker (stamped with this boot id), so the dry-run decision under test is the
+# real restart decision - not the stale-marker rejection
+printf 'boot-id-current-aaaa\n' > "$WORK/run/gufo@flashnext.service.was-active"
+out=$(STUB_STATE="$WORK/state" STUB_LOG="$WORK/log" WANTS_DIR="$WORK/wants" \
+      GUFO_RUN_DIR="$WORK/run" GUFO_WANTS_DIRS="$WORK/wants" GUFO_SYSTEMCTL="$WORK/bin/systemctl" \
+      GUFO_STATE_DIR="$WORK/statedir" GUFO_BOOT_ID="boot-id-current-aaaa" \
+      PATH="$WORK/bin:$PATH" sh "$TARGET" --dry-run "0.14.0-1" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && [ ! -s "$WORK/log" ] && ls "$WORK/run" | grep -q was-active && printf '%s' "$out" | grep -q "dry"; then
+  printf '  ok   %-46s marker kept, 0 calls\n' "15 dry-run mutates nothing"; pass=$((pass+1))
+else printf '  FAIL %-46s rc=%s log=[%s]\n' "15 dry-run mutates nothing" "$rc" "$(cat "$WORK/log" 2>/dev/null)"; fail=$((fail+1)); fi
+
+# the boot-id proof is single-use, and a marker must never outlive its own transaction
+setup; printf 'gufo@flashnext.service=inactive\n' > "$WORK/state"
+: > "$WORK/wants/gufo@flashnext.service"
+printf 'boot-id-previous-bbbb\n' > "$WORK/statedir/upgrade-boot.id"
+out=$(STUB_STATE="$WORK/state" STUB_LOG="$WORK/log" WANTS_DIR="$WORK/wants" \
+      GUFO_RUN_DIR="$WORK/run" GUFO_WANTS_DIRS="$WORK/wants" GUFO_SYSTEMCTL="$WORK/bin/systemctl" \
+      GUFO_STATE_DIR="$WORK/statedir" GUFO_BOOT_ID="boot-id-current-aaaa" \
+      PATH="$WORK/bin:$PATH" sh "$TARGET" "0.15.0-1" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && [ ! -e "$WORK/statedir/upgrade-boot.id" ]; then
+  printf '  ok   %-46s record consumed\n' "16 boot-id proof is single-use"; pass=$((pass+1))
+else printf '  FAIL %-46s rc=%s record still present\n' "16 boot-id proof is single-use" "$rc"; fail=$((fail+1)); fi
+
+# a marker stranded by an aborted transaction must not resurrect a unit later left stopped
+# prerm ran on THIS boot (record == current boot id); the marker on disk was written by a
+# transaction that died on an EARLIER boot. The operator has since left the unit stopped, so
+# honouring that marker would start something nobody asked to start.
+setup; printf 'gufo@x.service=inactive\n' > "$WORK/state"
+: > "$WORK/wants/gufo@x.service"
+printf 'boot-id-previous-bbbb\n' > "$WORK/run/gufo@x.service.was-active"
+printf 'boot-id-current-aaaa\n' > "$WORK/statedir/upgrade-boot.id"
+out=$(STUB_STATE="$WORK/state" STUB_LOG="$WORK/log" WANTS_DIR="$WORK/wants" \
+      GUFO_RUN_DIR="$WORK/run" GUFO_WANTS_DIRS="$WORK/wants" GUFO_SYSTEMCTL="$WORK/bin/systemctl" \
+      GUFO_STATE_DIR="$WORK/statedir" GUFO_BOOT_ID="boot-id-current-aaaa" \
+      PATH="$WORK/bin:$PATH" sh "$TARGET" "0.15.1-1" 2>&1); rc=$?
+calls="-"; [ -s "$WORK/log" ] && calls=$(tr '\n' ';' < "$WORK/log")
+if [ "$calls" = "-" ]; then
+  printf '  ok   %-46s stale marker ignored\n' "17 marker cannot survive its own boot"; pass=$((pass+1))
+else printf '  FAIL %-46s stale marker honoured: %s\n' "17 marker cannot survive its own boot" "$calls"; fail=$((fail+1)); fi
+
+printf '\n  %d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ] || exit 1

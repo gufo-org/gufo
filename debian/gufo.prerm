@@ -1,0 +1,103 @@
+#!/bin/sh
+set -e
+
+# dh_installsystemd is invoked with --no-start, which also suppresses the
+# stop-on-removal snippet. The service is started manually by the admin
+# after configuring /etc/gufo/gufo.env, so stop it here: a remove/purge
+# must not leave the process running with a deleted unit file.
+#
+# A same-version reinstall arrives here as "remove" as well, so the unit is
+# stopped before the new binary is unpacked and nothing would start it again:
+# the host would be left with no server at all. Record that it was running (in
+# /run, which is per-boot) so postinst can bring it back. A first install never
+# reaches prerm, so an unconfigured host still stays stopped by design.
+#
+# Stopping covers the upgrade path too, not just remove. dpkg overwrites
+# /usr/bin/gufo in place, so a unit that is not stopped keeps executing the
+# deleted inode: the running server, the package database and `gufo --version'
+# from a new shell then disagree, and nothing reports it. The symptom is a server
+# that keeps answering with the previous behaviour for as long as that process
+# lives. The stop below is what keeps the version claim honest.
+#
+# Which units? Instance names cannot be enumerated the obvious way:
+# deb-systemd-invoke passes unit names verbatim (it does not expand
+# gufo@.service), `systemctl is-enabled gufo@.service' answers "indirect", and
+# `systemctl list-unit-files gufo*' does not list an enabled instance at all -
+# enabling an instance is a wants symlink named after the instance. So the
+# wants symlinks plus the loaded units are enumerated, and the bare template is
+# dropped because systemctl refuses to act on it.
+gufo_owned_units() {
+  # An enabled unit IS a wants symlink named after the unit. Do not `ls' these
+  # paths: a glob that matches nothing is passed through literally, ls then
+  # exits non-zero, set -e aborts this function, and the enumeration yields
+  # nothing at all - so the upgrade silently stops no unit while the old process
+  # keeps running the deleted inode. Expand in the shell,
+  # existence-check each candidate, and take the basename: for a file argument
+  # ls prints the full path, which is not a unit name and would be rejected by
+  # the filter below.
+  for link in /etc/systemd/system/*.wants/gufo.service \
+              /etc/systemd/system/*.wants/gufo@*.service \
+              /run/systemd/system/*.wants/gufo.service \
+              /run/systemd/system/*.wants/gufo@*.service; do
+    [ -e "$link" ] || continue
+    basename "$link"
+  done
+  # Loaded units, including any started without being enabled. One 'gufo*'
+  # pattern covers the classic unit and the instances; cut the unit name from
+  # the first column and never let a systemd call abort the enumeration.
+  systemctl list-units --all --type=service --no-legend --plain 'gufo*' 2>/dev/null | awk '{print $1}' || true
+  printf '%s\n' gufo.service
+}
+
+# Filter to names this package can act on: drop the bare template gufo@.service
+# and anything that is not a gufo unit.
+gufo_actionable_units() {
+  gufo_owned_units | sort -u | while read -r unit; do
+    case "$unit" in
+      gufo.service) printf '%s\n' "$unit" ;;
+      gufo@.service) ;;
+      gufo@*.service) printf '%s\n' "$unit" ;;
+    esac
+  done
+}
+
+if { [ "$1" = "remove" ] || [ "$1" = "upgrade" ]; } && [ -d /run/systemd/system ]; then
+  mkdir -p /run/gufo
+  # Drop markers left behind by an aborted transaction before writing this one's, so a
+  # marker on disk always belongs to the transaction now in progress.
+  rm -f /run/gufo/*.was-active 2>/dev/null || true
+  # Record the boot id OUTSIDE /run: /run is wiped by a reboot, and without a record that
+  # survives it, configure cannot tell "reboot cleared the markers" (recover by starting
+  # what is enabled) from "an operator stopped a unit while the machine stayed up" (leave
+  # it alone). See debian/gufo-upgrade-units.sh.
+  mkdir -p /var/lib/gufo 2>/dev/null || true
+  cat /proc/sys/kernel/random/boot_id > /var/lib/gufo/upgrade-boot.id 2>/dev/null || true
+  marked=0
+  if command -v systemctl > /dev/null 2>&1; then
+    for unit in $(gufo_actionable_units); do
+      if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        cat /proc/sys/kernel/random/boot_id > "/run/gufo/${unit}.was-active" 2>/dev/null \
+          || : > "/run/gufo/${unit}.was-active"
+        marked=$((marked + 1))
+      fi
+    done
+  fi
+  # Loud, not silent: an upgrade that restarts nothing is how a host ends up
+  # serving the previous binary under a new package version. This lands in the
+  # dpkg/apt output the operator reads.
+  if [ "$marked" -eq 0 ]; then
+    echo "gufo: note: no running gufo unit found, nothing to restart after this upgrade" >&2
+  fi
+fi
+
+if { [ "$1" = "remove" ] || [ "$1" = "upgrade" ]; } && [ -d /run/systemd/system ]; then
+  if command -v deb-systemd-invoke > /dev/null 2>&1; then
+    for unit in $(gufo_actionable_units); do
+      deb-systemd-invoke stop "$unit" > /dev/null 2>&1 || true
+    done
+  fi
+fi
+
+#DEBHELPER#
+
+exit 0
