@@ -4,12 +4,14 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <vector>
 
 namespace q = gufo::models::qwen38_flash_next;
@@ -134,6 +136,7 @@ void TestTable() {
       OpenTable(path, offset, rows, dim, gufo::core::GgmlType::kBF16, &error);
   Check(table != nullptr, error.c_str());
   if (table) {
+    table->ReserveGather(32769);
     const std::vector<std::uint32_t> ids{7, rows - 1, 7, 0, 128, rows - 1};
     std::vector<float> out(ids.size() * dim);
     Check(table->Read(ids, out), "table read");
@@ -155,6 +158,13 @@ void TestTable() {
     std::fill(out.begin(), out.end(), -1.0F);
     Check(table->StartRead(ids, out), "asynchronous gather starts");
     Check(!table->StartRead(ids, out), "overlapping gather rejected");
+    bool reserve_rejected = false;
+    try {
+      table->ReserveGather(65536);
+    } catch (const std::logic_error&) {
+      reserve_rejected = true;
+    }
+    Check(reserve_rejected, "scratch reservation rejects an active gather");
     Check(table->WaitRead(), "asynchronous gather completes");
     Check(out == expected, "asynchronous rows and duplicates match");
     Check(!table->WaitRead(), "completed gather cannot be consumed twice");
@@ -187,6 +197,33 @@ void TestTable() {
     }
     for (std::size_t i = wide_size; i < wide.size(); ++i) {
       Check(wide[i] == -123.0F, "batched output guard");
+    }
+    // Reuse deduplication scratch across wide repetitive gathers, a tiny
+    // decode, and a larger gather. Old first-occurrence indices must never
+    // survive a change in input order or active table size.
+    for (const std::size_t count : {32768U, 3U, 32769U}) {
+      std::vector<std::uint32_t> repeated(count);
+      for (std::size_t i = 0; i < count; ++i)
+        repeated[i] = static_cast<std::uint32_t>((i * 197 + count) % 17);
+      std::vector<float> gathered(count * dim + guard, -123.0F);
+      Check(table->Read(repeated, std::span(gathered).first(count * dim)),
+            "reused gather scratch completes");
+      for (std::size_t j = 0; j < count; ++j) {
+        for (std::uint32_t i = 0; i < dim; i += 31) {
+          const float value =
+              static_cast<float>(repeated[j]) + static_cast<float>(i) / 1000.0F;
+          std::uint32_t bits = 0;
+          std::memcpy(&bits, &value, sizeof(bits));
+          bits &= 0xFFFF0000U;
+          float expected_value = 0;
+          std::memcpy(&expected_value, &bits, sizeof(expected_value));
+          Check(gathered[j * dim + i] == expected_value,
+                "reused scratch preserves duplicate output slots");
+        }
+      }
+      Check(std::all_of(gathered.end() - guard, gathered.end(),
+                        [](float value) { return value == -123.0F; }),
+            "reused scratch preserves output guard");
     }
     std::fill(out.begin(), out.end(), -1.0F);
     Check(table->StartRead(ids, out), "final gather starts");
