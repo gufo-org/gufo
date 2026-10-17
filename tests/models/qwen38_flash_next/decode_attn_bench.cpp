@@ -1,8 +1,9 @@
 // Times the narrow (decode / MTP verify) attention on synthetic caches and
 // selections: rows 1..8 at the given depths, 512 four-token blocks per row,
 // neighbouring rows mostly sharing them. Also times the block selection
-// (indexer scores and top-k marks) of the same rows. Prints FNV-1a hashes of
-// the attention output and of the selection masks.
+// (indexer scores and top-k marks) of the same rows and of a 512-row prefill
+// chunk. Prints FNV-1a hashes of the attention output, the selection masks
+// and the selection scores.
 //
 // decode_attn_bench [reps] [depths...]
 #include <hip/hip_fp16.h>
@@ -145,7 +146,8 @@ int main(int argc, char** argv) try {
     // one F16 key per four-token block.
     constexpr std::uint32_t kIndexHeads = 4;
     constexpr std::uint32_t kIndexDim = 128;
-    std::vector<float> iq(std::size_t{kMaxRows} * kIndexHeads * kIndexDim);
+    constexpr std::uint32_t kSelectRows = 512;  // the prefill score chunk
+    std::vector<float> iq(std::size_t{kSelectRows} * kIndexHeads * kIndexDim);
     for (auto& v : iq)
       v = static_cast<float>(Next(&s) % 2001) / 1000.0F - 1.0F;
     std::vector<__half> bk(std::size_t{blocks} * kIndexDim);
@@ -154,10 +156,10 @@ int main(int argc, char** argv) try {
     float* d_iq = Upload(iq);
     __half* d_bk = Upload(bk);
     float* d_scores =
-        Upload(std::vector<float>(std::size_t{kMaxRows} * blocks));
-    std::uint32_t* d_sel =
-        Upload(std::vector<std::uint32_t>(std::size_t{kMaxRows} * mask_words));
-    for (const std::uint32_t rows : {1u, 2u, 4u, 8u}) {
+        Upload(std::vector<float>(std::size_t{kSelectRows} * blocks));
+    std::uint32_t* d_sel = Upload(
+        std::vector<std::uint32_t>(std::size_t{kSelectRows} * mask_words));
+    for (const std::uint32_t rows : {1u, 2u, 4u, 8u, kSelectRows}) {
       const auto run = [&] {
         q::SelectBlocks(d_iq, d_bk, d_sel, d_scores, rows, d_pos, 0,
                         kIndexHeads, kIndexDim, kRatio, kSelected, mask_words,
@@ -166,6 +168,8 @@ int main(int argc, char** argv) try {
       run();
       CheckHip(hipDeviceSynchronize(), "hipDeviceSynchronize");
       const std::uint64_t hash = Hash(d_sel, std::size_t{rows} * mask_words);
+      const std::uint64_t score_hash =
+          Hash(d_scores, std::size_t{rows} * blocks);
       std::vector<float> us(reps);
       for (int i = 0; i < reps; ++i) {
         CheckHip(hipEventRecord(start, nullptr), "hipEventRecord");
@@ -177,8 +181,11 @@ int main(int argc, char** argv) try {
         us[i] *= 1000.0F;
       }
       std::sort(us.begin(), us.end());
-      std::printf("depth %6u rows %u  select %8.1f us  hash %016llx\n", depth,
-                  rows, us[reps / 2], static_cast<unsigned long long>(hash));
+      std::printf(
+          "depth %6u rows %3u  select %8.1f us  hash %016llx  scores "
+          "%016llx\n",
+          depth, rows, us[reps / 2], static_cast<unsigned long long>(hash),
+          static_cast<unsigned long long>(score_hash));
     }
     for (void* p : {static_cast<void*>(d_iq), static_cast<void*>(d_bk),
                     static_cast<void*>(d_scores), static_cast<void*>(d_sel)})

@@ -3,9 +3,12 @@
 // 512 four-token blocks per query that neighbouring queries mostly share.
 //
 // attn_bench [tokens] [reps] [start positions...]
+// attn_bench --masks reps FILE...
 //
-// A start position of 0 runs the dense causal window. Each line prints an
-// FNV-1a hash of the output after the first call, so kernel rewrites can be
+// A start position of 0 runs the dense causal window. A mask file replays a
+// selection dumped from the model (three words: start position, tokens and
+// mask words, then the rows' mask words) at its own geometry. Each line prints
+// an FNV-1a hash of the output after the first call, so kernel rewrites can be
 // checked for identical results.
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -72,19 +75,46 @@ std::uint64_t Hash(const float* device, std::size_t count) {
 
 }  // namespace
 
+std::vector<std::uint32_t> ReadWords(const char* path) {
+  std::FILE* file = std::fopen(path, "rb");
+  if (file == nullptr)
+    throw std::runtime_error(std::string("cannot open ") + path);
+  std::vector<std::uint32_t> words;
+  std::uint32_t word = 0;
+  while (std::fread(&word, sizeof(word), 1, file) == 1)
+    words.push_back(word);
+  std::fclose(file);
+  if (words.size() < 3 ||
+      words.size() != 3 + std::size_t{words[1]} * words[2] ||
+      words[2] < (words[0] + words[1] + kRatio * 32 - 1) / (kRatio * 32))
+    throw std::runtime_error(std::string("malformed mask file ") + path);
+  return words;
+}
+
 int main(int argc, char** argv) try {
-  const std::uint32_t tokens = argc > 1 ? std::atoi(argv[1]) : 4096;
+  const bool replay = argc > 1 && std::string(argv[1]) == "--masks";
+  std::uint32_t tokens = replay || argc <= 1 ? 4096 : std::atoi(argv[1]);
   const int reps = argc > 2 ? std::atoi(argv[2]) : 5;
   std::vector<std::uint32_t> starts;
-  for (int i = 3; i < argc; ++i)
-    starts.push_back(static_cast<std::uint32_t>(std::atoi(argv[i])));
+  std::vector<std::vector<std::uint32_t>> replays;
+  for (int i = 3; i < argc; ++i) {
+    if (replay) {
+      replays.push_back(ReadWords(argv[i]));
+      starts.push_back(replays.back()[0]);
+    } else {
+      starts.push_back(static_cast<std::uint32_t>(std::atoi(argv[i])));
+    }
+  }
   if (starts.empty())
     starts = {0, 8192, 32768, 65536, 118000};
   hipEvent_t start;
   hipEvent_t stop;
   CheckHip(hipEventCreate(&start), "hipEventCreate");
   CheckHip(hipEventCreate(&stop), "hipEventCreate");
-  for (const std::uint32_t start_pos : starts) {
+  for (std::size_t run_index = 0; run_index < starts.size(); ++run_index) {
+    const std::uint32_t start_pos = starts[run_index];
+    if (replay)
+      tokens = replays[run_index][1];
     const std::uint32_t n_kv = start_pos + tokens;
     const std::size_t q_count = std::size_t{tokens} * kHeads * kDim;
     const std::size_t kv_count = std::size_t{n_kv} * kKvHeads * kDim;
@@ -106,9 +136,13 @@ int main(int argc, char** argv) try {
     // Sixteen-query groups share a base selection; each query swaps a fifth
     // of it, so four packed queries select a union of roughly 1.6x 512.
     const std::uint32_t blocks = (n_kv + kRatio - 1) / kRatio;
-    const std::uint32_t mask_words = (blocks + 31) / 32;
+    const std::uint32_t mask_words =
+        replay ? replays[run_index][2] : (blocks + 31) / 32;
     std::uint32_t* d_mask = nullptr;
-    if (start_pos != 0) {
+    if (replay) {
+      d_mask = Upload(std::vector<std::uint32_t>(replays[run_index].begin() + 3,
+                                                 replays[run_index].end()));
+    } else if (start_pos != 0) {
       std::vector<std::uint32_t> mask(std::size_t{tokens} * mask_words);
       std::vector<std::uint32_t> base;
       std::uint32_t s = 0xDEADBEEFU;
