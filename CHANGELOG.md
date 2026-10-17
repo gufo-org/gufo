@@ -4,6 +4,26 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.17.0](https://github.com/gufo-org/gufo/compare/v0.16.0...v0.17.0) (2026-10-17)
+
+
+### Features
+
+* **serve:** prepare the Qwen vision sidecar before serving ([#616](https://github.com/gufo-org/gufo/issues/616)) ([0604e9e](https://github.com/gufo-org/gufo/commit/0604e9ebc41388ab610ed0bed198e49ef96a6a82))
+
+
+### Bug Fixes
+
+* **cache:** bound publication waits by observed prefill cost ([#621](https://github.com/gufo-org/gufo/issues/621)) ([e8e508f](https://github.com/gufo-org/gufo/commit/e8e508f51826c86d567ed3b7ea6bf2b1eaeb1ab5))
+* **cache:** let disk eviction wait for startup orphan reclamation ([#625](https://github.com/gufo-org/gufo/issues/625)) ([78248de](https://github.com/gufo-org/gufo/commit/78248de23cc279b1a5d4443cef816a6059bde189))
+* **serve:** keep the decimal spelling of integer JSON numbers ([#614](https://github.com/gufo-org/gufo/issues/614)) ([22e3676](https://github.com/gufo-org/gufo/commit/22e36769f9b25a57963a9215003eae0f5f9c15d6))
+* **serve:** preserve cache reuse when tool choice changes ([#623](https://github.com/gufo-org/gufo/issues/623)) ([23d970d](https://github.com/gufo-org/gufo/commit/23d970d0ca0ef694dafec64131269f9c24590940))
+
+
+### Performance
+
+* **qwen-flash:** compact sparse attention selections once per row ([#622](https://github.com/gufo-org/gufo/issues/622)) ([baf5a1b](https://github.com/gufo-org/gufo/commit/baf5a1bbab5b99a8278c4869122fd173b205671b))
+
 ## [0.16.0](https://github.com/gufo-org/gufo/compare/v0.15.1...v0.16.0) (2026-10-16)
 
 
