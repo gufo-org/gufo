@@ -4981,9 +4981,15 @@ __launch_bounds__(256) __global__
   // Both paths share the activation plane,
   // [kb][16-element quarter][token][16 B] so a fragment read is 256
   // contiguous bytes; the epilogue reuses it all.
-  constexpr int kCodeBytes = kPair ? 0 : BM * kChunks * 16;
-  constexpr int kHighBytes = !kPair && (kQ5 || kQ5K) ? BK * BM * 4 : 0;
-  constexpr int kScaleBytes = kPair ? 0 : BK * BM * 4;
+  // Q5_1 rows stage their blocks as stored: a row's BK blocks are 16-byte
+  // aligned, so whole 16-byte chunks load coalesced and each wave reads its
+  // rows' scale, high bits and codes from LDS.
+  constexpr int kQ5Bytes = BK * 24;  // one row's blocks per stage
+  constexpr int kCodeBytes = kPair ? 0
+                             : kQ5 ? BM * kQ5Bytes
+                                   : BM * kChunks * 16;
+  constexpr int kHighBytes = !kPair && kQ5K ? BK * BM * 4 : 0;
+  constexpr int kScaleBytes = kPair || kQ5 ? 0 : BK * BM * 4;
   // One slot of padding per activation quarter plane: the eight chunks of
   // a token then land on eight bank groups when they are written.
   constexpr int kActStride = BN + 1;
@@ -5057,10 +5063,30 @@ __launch_bounds__(256) __global__
   uint4 f_codes_hi[kWaveRowTiles];  ///< Q8_0: the block's second 16 codes
   uint4 f_qh[kWaveRowTiles][2];     ///< Q5_K: the superblock's high bits
   std::uint32_t f_high[kWaveRowTiles];
-  std::uint32_t f_dm[kWaveRowTiles];  ///< Q5_1: d | m; Q8_0: d
+  std::uint32_t f_dm[kWaveRowTiles];  ///< Q8_0: d
   int f_sb32[kWaveRowTiles];          ///< Q4_K: the K block in its superblock
   constexpr int kActFetch = BN <= 64 ? 2 : 4;
   uint4 a_data[kActFetch];
+  // Q5_1 chunk c is part c % kQ5Parts of row c / kQ5Parts.
+  constexpr int kQ5Parts = kQ5Bytes / 16;
+  constexpr int kQ5Chunks = BM * kQ5Parts;
+  constexpr int kQ5Fetch = kQ5 ? (kQ5Chunks + 255) / 256 : 1;
+  static_assert(!kQ5 || kQ5Bytes % 16 == 0);
+  const std::uint8_t* q5_src[kQ5Fetch];
+  uint4 f_q5[kQ5Fetch];
+  if constexpr (kQ5) {
+#pragma unroll
+    for (int i = 0; i < kQ5Fetch; ++i) {
+      const int chunk = tid + (i * 256);
+      const int r = r_block + (chunk / kQ5Parts);
+      q5_src[i] = chunk < kQ5Chunks
+                      ? w_expert +
+                            (static_cast<std::size_t>(r < m_i ? r : m_i - 1) *
+                             row_bytes) +
+                            ((chunk % kQ5Parts) * 16)
+                      : nullptr;
+    }
+  }
 
   // Activation fetch: BN tokens x (BK * 64) bytes per stage in 16-byte
   // chunks, eight per token; each thread fetches consecutive 256-chunk
@@ -5090,18 +5116,17 @@ __launch_bounds__(256) __global__
   };
 
   const auto fetch_stage = [&](int kb0, int code_group) {
+    if constexpr (kQ5) {
 #pragma unroll
-    for (int u = 0; u < kWaveRowTiles; ++u) {
-      if constexpr (kQ5) {
-        const int kb = kb0 + f_c;
-        const auto* words = reinterpret_cast<const uint2*>(f_ptr[u]) + (kb * 3);
-        const uint2 w0 = words[0];
-        const uint2 w1 = words[1];
-        const uint2 w2 = words[2];
-        f_codes[u] = make_uint4(w1.x, w1.y, w2.x, w2.y);
-        f_high[u] = w0.y;
-        f_dm[u] = w0.x;
-      } else if constexpr (kQ8) {
+      for (int i = 0; i < kQ5Fetch; ++i) {
+        f_q5[i] = q5_src[i] != nullptr
+                      ? *reinterpret_cast<const uint4*>(q5_src[i] + (kb0 * 24))
+                      : make_uint4(0u, 0u, 0u, 0u);
+      }
+    }
+#pragma unroll
+    for (int u = 0; u < (kQ5 ? 0 : kWaveRowTiles); ++u) {
+      if constexpr (kQ8) {
         // block_q8_0 is 34 bytes, so the code loads are 2-byte aligned.
         const auto* blk = f_ptr[u] + ((kb0 + f_c) * 34);
         f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
@@ -5163,8 +5188,15 @@ __launch_bounds__(256) __global__
   std::uint32_t own_scale[kWaveRowTiles];
   std::uint32_t own_high[kWaveRowTiles];
   const auto commit_stage = [&]() {
+    if constexpr (kQ5) {
 #pragma unroll
-    for (int u = 0; u < kWaveRowTiles; ++u) {
+      for (int i = 0; i < kQ5Fetch; ++i) {
+        if (q5_src[i] != nullptr)
+          s_codes[tid + (i * 256)] = f_q5[i];
+      }
+    }
+#pragma unroll
+    for (int u = 0; u < (kQ5 ? 0 : kWaveRowTiles); ++u) {
       const int row = (tid >> 1) + (u * 128);
       std::uint32_t scale_bias = 0;
       if constexpr (kPair) {
@@ -5182,13 +5214,6 @@ __launch_bounds__(256) __global__
         s_high[(f_c * BM) + row] = f_high[u];
       }
       if constexpr (kQ8) {
-      } else if constexpr (kQ5) {
-        s_high[(f_c * BM) + row] = f_high[u];
-        const __half2 dm = __builtin_bit_cast(__half2, f_dm[u]);
-        const float d = f_live[u] ? __low2float(dm) : 0.0F;
-        const float mn = f_live[u] ? __high2float(dm) : 0.0F;
-        scale_bias =
-            __builtin_bit_cast(std::uint32_t, __floats2half2_rn(d, mn));
       } else {
         const int sb32 = f_sb32[u];
         // The first four scale/min bytes live in y/z. Their remaining
@@ -5242,7 +5267,7 @@ __launch_bounds__(256) __global__
       __floats2half2_rn(kQ8 ? -1152.0F : -1024.0F, kQ8 ? -1152.0F : -1024.0F);
   const auto compute_stage = [&]() {
     uint4 raw[kWaveRowTiles][BK];
-    if constexpr (!kQ8 && !kPair) {
+    if constexpr (!kQ8 && !kQ5 && !kPair) {
 #pragma unroll
       for (int u = 0; u < kWaveRowTiles; ++u) {
         const int row = (wave_id * 16) + (u * 128) + sub_lane;
@@ -5304,8 +5329,21 @@ __launch_bounds__(256) __global__
 #pragma unroll
         for (int u = 0; u < kWaveRowTiles; ++u) {
           const int row = (wave_id * 16) + (u * 128) + sub_lane;
-          const __half2 sb =
-              __builtin_bit_cast(__half2, s_scale[(kb * BM) + row]);
+          // Q5_1 block kb of the row: d | m, the high-bit word, 16 codes.
+          uint2 q5_head{};
+          uint2 q5_lo{};
+          uint2 q5_hi{};
+          std::uint32_t scale_bias;
+          if constexpr (kQ5) {
+            const std::uint8_t* blk = lds + (row * kQ5Bytes) + (kb * 24);
+            q5_head = *reinterpret_cast<const uint2*>(blk);
+            q5_lo = *reinterpret_cast<const uint2*>(blk + 8);
+            q5_hi = *reinterpret_cast<const uint2*>(blk + 16);
+            scale_bias = r_block + row < m_i ? q5_head.x : 0U;
+          } else {
+            scale_bias = s_scale[(kb * BM) + row];
+          }
+          const __half2 sb = __builtin_bit_cast(__half2, scale_bias);
           const __half2 scale2 = __low2half2(sb);
           const __half2 bias2 = __high2half2(sb);
           std::uint32_t nib[8];
@@ -5322,12 +5360,10 @@ __launch_bounds__(256) __global__
               nib[i] = words[i] ^ 0x80808080U;
             }
           } else if constexpr (kQ5) {
-            // Q5_1: K block kb's 16 bytes are chunk kb; elements 0-15 take
-            // the low nibbles, 16-31 the high, plus bit j of the high-bit
-            // word.
-            const uint4 r = raw[u][kb];
-            const std::uint32_t high = s_high[(kb * BM) + row];
-            const std::uint32_t words[4] = {r.x, r.y, r.z, r.w};
+            // Q5_1: elements 0-15 take the low nibbles of the 16 code
+            // bytes, 16-31 the high, plus bit j of the high-bit word.
+            const std::uint32_t high = q5_head.y;
+            const std::uint32_t words[4] = {q5_lo.x, q5_lo.y, q5_hi.x, q5_hi.y};
 #pragma unroll
             for (int i = 0; i < 4; ++i) {
               nib[i] = (words[i] & 0x0F0F0F0FU) |
