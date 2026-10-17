@@ -980,6 +980,24 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   if (e->blaslt_ == nullptr) {
     return nullptr;
   }
+  if (MatrixRows(T)) {
+    // The first indexer heuristic query also loads the library's code object.
+    // Do that before readiness instead of leaving a ~100 ms GPU idle gap in
+    // the first prefill. Exact geometry still determines every plan; no trial
+    // GEMM runs and no model activations or session state are touched.
+    for (const auto& layer : model.layers()) {
+      for (const auto* tensor : {&layer.indexer_k, &layer.indexer_q}) {
+        if (!tensor->empty() &&
+            (tensor->type == GgmlType::kBF16 ||
+             tensor->type == GgmlType::kF16) &&
+            !e->blaslt_->Prepare(
+                tensor->type == GgmlType::kBF16 ? HIP_R_16BF : HIP_R_16F,
+                tensor->rows, T, tensor->cols, error_msg)) {
+          return nullptr;
+        }
+      }
+    }
+  }
   const std::size_t hc_dim = c.HcDim();
   const std::size_t hidden = c.hidden_size;
   const std::size_t slots = T * c.num_experts_used;

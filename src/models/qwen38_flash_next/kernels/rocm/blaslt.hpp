@@ -24,6 +24,10 @@ public:
   [[nodiscard]] static std::unique_ptr<BlasLt> Create(hipStream_t stream,
                                                       std::string* error_msg);
 
+  /// Prepare descriptors and load the solution library without launching a
+  /// GEMM or reading model data. Gemm uses the same exact-shape plan.
+  [[nodiscard]] bool Prepare(hipDataType type, int m, int n, int k,
+                             std::string* error_msg);
   /// Row-major out[n][m] = input[n][k] * weights[m][k]^T.
   [[nodiscard]] bool Gemm(const void* weights, const void* input, float* out,
                           hipDataType type, int m, int n, int k,

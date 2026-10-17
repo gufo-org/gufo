@@ -46,6 +46,7 @@ from cache_growth import check_cache_growth, check_unchanged_retry, log_offset
 from messages_tools import check_messages_tools
 from messages_count_tokens import check_messages_count_tokens, check_messages_image_counts
 from cache_depth import check_cache_depth
+from cache_stalls import check_cache_stalls
 from cache_rotation import check_cache_rotation
 from prefill_scheduling import check_prefill_scheduling
 
@@ -2660,7 +2661,7 @@ SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "re
               "tool-reasoning", "tool-streaming", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
-              "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection")
+              "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection")
 
 
 def main():
@@ -2814,6 +2815,9 @@ def main():
                 client, args.model, checks, chat_result, args.server_log),
             "cache-depth": lambda: check_cache_depth(
                 client, args.model, checks, chat_result, args.concurrency, args.server_log),
+            "cache-stalls": lambda: check_cache_stalls(
+                client, args.model, checks, chat_result, args.concurrency, args.context,
+                args.server_log),
             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
             "cache-concurrency": lambda: check_cache_concurrency(
                 client, args.model, checks, chat_result, args.concurrency),
@@ -2833,7 +2837,7 @@ def main():
             "system-injection": lambda: check_system_injection(
                 client, args.model, checks, chat_result),
         }
-        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "prefill-scheduling")
+        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
                      and (name not in ("image-inputs", "image-count", "tool-images") or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])

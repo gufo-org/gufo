@@ -106,6 +106,10 @@ public:
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;
   [[nodiscard]] std::size_t PageCommitAllocations() const noexcept;
+  // Linux long-term pins prevent page migration in addition to GPU
+  // registration. Zero when io_uring or the caller's memlock limit refuses
+  // them; the existing registered-page path remains usable in that case.
+  [[nodiscard]] std::size_t LongTermPinnedBytes() const noexcept;
 
 private:
   std::shared_ptr<detail::BackingState> state_;

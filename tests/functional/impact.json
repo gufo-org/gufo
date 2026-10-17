@@ -67,6 +67,7 @@
     "cache-edits": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
     "cache-growth": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
     "cache-depth": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "single-session", "vision_required": false},
+    "cache-stalls": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "scheduling", "generation"], "status": "active", "profiles": ["flash-next-q4/off", "flash-next-q4/mtp"], "configuration": "cache-stalls", "vision_required": false},
     "cache-rotation": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "single-session", "vision_required": false},
     "cache-concurrency": {"covers": ["continuation", "scheduling"], "uses": ["tokenization", "framing", "sampling", "limits", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
     "cache-shared-prefix": {"covers": ["continuation", "scheduling"], "uses": ["tokenization", "framing", "sampling", "limits", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
@@ -451,6 +452,7 @@
     ]
   },
   "configurations": {
+    "cache-stalls": {"context": 262144, "sessions": 2},
     "standard": {"context": 32768, "sessions": 2},
     "single-session": {"context": 32768, "sessions": 1},
     "cache-pressure": {"context": 32768, "sessions": 1, "cache_ram_bytes": 2147483648}

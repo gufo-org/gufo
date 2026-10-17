@@ -1,5 +1,40 @@
 # Qwen3.8 Flash-Next quality
 
+**Issue #632, October 17:** compared with merged main `8497711e`, indexer plan
+preparation moves the first hipBLASLt module load before readiness without
+running trial GEMMs. The independent F64 projection check and prepared/lazy
+F16/BF16 replay pass for 45 shapes, including ragged widths. Native AR/MTP
+snapshot, borrowed-state, sampled/serialized replay and device-exhaustion
+checks remain exact. Cache backing tests cover real long-term pins, allocations
+larger than 1 GiB, GPU/CPU bytes, failed registration, lifetime and low-memlock
+fallback; a separate process also passes with the io_uring syscalls denied.
+
+The new explicit `cache-stalls` suite uses a public equivalent of the report's
+24 ordered requests through 56K tokens. The supplied archive omits the inner
+prompt script, so this is not an exact reporter replay. Final candidate
+correctness and all 345 compared phase measurements pass. The standard d0
+pp2048/tg128 control retains all 12 outputs and token/cache/draft counts, with no
+timing flags. First-prompt PP drops from 257–260 to 145–146 ms; measured TG is
+28.27 → 28.29 tok/s AR, 35.79 → 35.76 mixed MTP, and 116.95 → 116.88 repetitive
+MTP. A real Pi conversation passes tools, editing and code generation with
+thinking, 10 HTTP requests, 9 successful tool calls and executed tests.
+
+Cache correctness also passes, including cancellation, image continuation and
+disk restart. Timing is **not globally qualified**: after two final/main pairs
+and an unchanged-main control, 843 of 860 measures pass and 17 remain
+inconclusive. The queue outlier overlaps main's 9.30–13.70 ms range. One image
+resume takes 181 versus 167 ms of decode in one pair and matches in the other;
+individual thinking/token-gap and disk-snapshot variation remains recorded.
+No timing margin was widened.
+
+An earlier main run had a 2.83-second token gap during page migration and
+reclaim. A matched control holding another 4 GiB retains all 24 outputs and
+phases within the timing gate, but neither arm repeats that large gap. Long-term
+pins prevent migration of the cache pages; these observations do not prove the
+entire original pause came from their migration. Container syscall restrictions
+can disable this extra protection; see [cache pinning](../../KV-CACHE.md).
+The cold-prompt setup fix also works when pinning is unavailable.
+
 **PR #613 review, October 17:** prompt lookup remains local to each Flash-Next
 MTP session and now works in batched decoding. Greedy requests can bypass the
 neural head; sampled requests retain a neural proposal first and require a

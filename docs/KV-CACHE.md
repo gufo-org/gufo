@@ -434,6 +434,25 @@ prepare the next segment before a prefill with at least 512 tokens remaining
 or when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative
 growth; a capture still commits any backing it needs.
 
+Backing excludes transparent huge pages before population and attempts a Linux
+long-term page pin before GPU registration. GPU registration alone leaves
+anonymous pages movable: ordinary memory compaction can invalidate their GPU
+mappings and pause the process's queues. Registered `io_uring` buffers supply
+the extra pin without submitting I/O or running polling threads. Their
+lifetime follows the backing, including blocks that outlive the pool facade;
+cleanup unregisters the GPU mapping and releases the pin before unmapping.
+If `io_uring` or the process's memory-lock limit refuses the pin, the existing
+registered base-page path remains available with the same cache capacity.
+`event=backing_prepared` and `event=backing_grown` report
+`long_term_pinned_bytes` alongside committed bytes, making that fallback visible.
+
+Container seccomp profiles may block `io_uring_setup` and `io_uring_register`.
+An unlimited `memlock` setting alone does not enable them. Check the pin-byte
+counter inside the running container: zero means the extra migration protection
+is unavailable. Enabling it requires allowing these two calls in the
+operator-managed syscall policy; `io_uring_enter` is not used. The registered
+base-page fallback remains compatible with restrictive container policies.
+
 A step of about 1 GiB took 56–58 ms on the capturing thread while the host had
 free pages **(measured)**. Captures run on the scheduler thread, so concurrent
 requests pause for that long too; an 8 GiB budget fills in eight steps. When the
