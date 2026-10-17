@@ -2,10 +2,9 @@
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target and
 shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.
-Gufo single-user tables measured October 17, 2026, with PR #626 and the
-validated sparse scheduling, MTP scratch reuse and vision allocation changes.
-Concurrency retains the October 16 PR #622 capture; loading and memory retain
-the October 16 `fdc21849` captures.
+Gufo single-user and concurrency tables measured October 17, 2026, with PR #613 and the
+validated prompt-lookup and PLE gather-scratch changes.
+Loading and memory retain the October 16 `fdc21849` captures.
 Reference results remain unchanged from September 22–23.
 llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
 
@@ -17,11 +16,12 @@ remain documented in [QUALITY.md](QUALITY.md). Historical llama.cpp MTP values a
 a separate check of that pin did not match its own AR output, so this review
 does not requalify those comparisons. [Review evidence](artifacts/decode-kernels-review.json).
 
-At 128K, Gufo reaches 1543.70 tok/s AR prefill and 1503.43 tok/s MTP prefill.
-All 24 single-user rows retain the previous completion hashes and token/cache/
-draft counts. Mixed MTP C2 in the retained concurrency capture alternates
-between two draft-controller trajectories (about 54 and 60 tok/s, identical
-text) on main and the PR alike.
+At 128K, Gufo reaches 1555.18 tok/s AR prefill and 1504.59 tok/s MTP prefill.
+All 24 single-user rows match main `3389a585` in completion hashes and
+prompt/cache counts; prompt lookup changes draft counts.
+All 63 concurrent tg128 completions match the corresponding C1 AR control.
+Prior mixed MTP C2 repeats show two draft-controller trajectories (about 54
+and 60 tok/s, identical text), so its gain is not entirely attributable to lookup.
 
 ## Single user, autoregressive
 
@@ -31,14 +31,14 @@ Context capacities differ between engines; see the measurement details.
 <!-- bench:single-ar -->
 | Flash-Next Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1764.48 | 489.59 | +260.4% | 28.20 | 22.20 | +27.0% |
-| 4,096 | 1694.37 | 455.24 | +272.2% | 28.21 | 21.21 | +33.0% |
-| 8,192 | 1693.71 | 428.85 | +294.9% | 28.20 | 20.40 | +38.2% |
-| 12,288 | 1692.24 | 400.21 | +322.8% | 28.23 | 19.64 | +43.7% |
-| 16,384 | 1645.61 | 375.89 | +337.8% | 28.17 | 18.95 | +48.7% |
-| 32,768 | 1661.24 | 301.31 | +451.3% | 28.13 | 16.54 | +70.1% |
-| 65,536 | 1597.39 | 221.94 | +619.7% | 28.03 | 11.62 | +141.2% |
-| 131,072 | 1543.70 | 144.78 | +966.2% | 27.78 | 7.98 | +248.1% |
+| 0 | 1787.54 | 489.59 | +265.1% | 28.26 | 22.20 | +27.3% |
+| 4,096 | 1708.08 | 455.24 | +275.2% | 28.26 | 21.21 | +33.2% |
+| 8,192 | 1716.12 | 428.85 | +300.2% | 28.23 | 20.40 | +38.4% |
+| 12,288 | 1705.14 | 400.21 | +326.1% | 28.23 | 19.64 | +43.7% |
+| 16,384 | 1694.13 | 375.89 | +350.7% | 28.19 | 18.95 | +48.8% |
+| 32,768 | 1667.83 | 301.31 | +453.5% | 28.14 | 16.54 | +70.1% |
+| 65,536 | 1606.04 | 221.94 | +623.6% | 28.07 | 11.62 | +141.6% |
+| 131,072 | 1555.18 | 144.78 | +974.2% | 27.84 | 7.98 | +248.9% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar.svg)
@@ -51,14 +51,14 @@ text, including Gufo predictor catch-up.
 <!-- bench:single-mtp -->
 | Flash-Next Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1723.45 | 468.76 | +267.7% | 35.58 | 31.73 | +12.1% | 73.80 | 48.12 | +53.4% |
-| 4,096 | 1660.85 | 423.79 | +291.9% | 37.57 | 34.48 | +9.0% | 70.68 | 45.71 | +54.6% |
-| 8,192 | 1659.31 | 394.98 | +320.1% | 36.85 | 32.20 | +14.4% | 58.11 | 44.31 | +31.1% |
-| 12,288 | 1640.48 | 365.91 | +348.3% | 39.15 | 32.32 | +21.1% | 48.61 | 43.53 | +11.7% |
-| 16,384 | 1632.92 | 341.98 | +377.5% | 40.59 | 32.07 | +26.6% | 59.99 | 43.66 | +37.4% |
-| 32,768 | 1618.21 | 277.61 | +482.9% | 39.93 | 25.41 | +57.1% | 52.73 | 39.28 | +34.2% |
-| 65,536 | 1562.75 | 208.04 | +651.2% | 39.18 | 19.65 | +99.4% | 53.08 | 27.75 | +91.3% |
-| 131,072 | 1503.43 | 135.42 | +1010.2% | 39.82 | 14.63 | +172.2% | 54.73 | 20.96 | +161.1% |
+| 0 | 1748.54 | 468.76 | +273.0% | 35.74 | 31.73 | +12.6% | 116.94 | 48.12 | +143.0% |
+| 4,096 | 1681.08 | 423.79 | +296.7% | 37.65 | 34.48 | +9.2% | 116.02 | 45.71 | +153.8% |
+| 8,192 | 1667.59 | 394.98 | +322.2% | 36.82 | 32.20 | +14.3% | 114.22 | 44.31 | +157.8% |
+| 12,288 | 1662.09 | 365.91 | +354.2% | 39.20 | 32.32 | +21.3% | 105.53 | 43.53 | +142.4% |
+| 16,384 | 1643.94 | 341.98 | +380.7% | 40.61 | 32.07 | +26.6% | 113.60 | 43.66 | +160.2% |
+| 32,768 | 1625.87 | 277.61 | +485.7% | 39.97 | 25.41 | +57.3% | 105.69 | 39.28 | +169.1% |
+| 65,536 | 1557.54 | 208.04 | +648.7% | 39.23 | 19.65 | +99.6% | 104.78 | 27.75 | +277.6% |
+| 131,072 | 1504.59 | 135.42 | +1011.1% | 39.89 | 14.63 | +172.7% | 108.40 | 20.96 | +417.2% |
 <!-- /bench -->
 
 ![Single user, MTP](artifacts/charts/single-mtp.svg)
@@ -72,11 +72,11 @@ llama.cpp re-evaluates its four-token checkpoint tail.
 <!-- bench:multi-ar -->
 | Flash-Next Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | 28.27 | 22.34 | +26.5% |
-| 2 | 50.68 | 37.08 | +36.7% |
-| 4 | 85.65 | 54.82 | +56.2% |
-| 6 | 107.53 | 65.34 | +64.6% |
-| 8 | 125.08 | 68.79 | +81.8% |
+| 1 | 28.21 | 22.34 | +26.3% |
+| 2 | 50.64 | 37.08 | +36.6% |
+| 4 | 85.89 | 54.82 | +56.7% |
+| 6 | 108.02 | 65.34 | +65.3% |
+| 8 | 124.72 | 68.79 | +81.3% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar.svg)
@@ -90,11 +90,11 @@ request decode rates. C1 cross-checks the single-user table.
 <!-- bench:multi-mtp -->
 | Flash-Next Q4 MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 35.66 | 31.77 | +12.2% | 73.17 | 46.93 | +55.9% |
-| 2 | 54.35 | 42.79 | +27.0% | 97.55 | 52.57 | +85.6% |
-| 4 | 86.42 | 48.78 | +77.2% | 157.76 | 48.23 | +227.1% |
-| 6 | 108.58 | 52.59 | +106.5% | 176.70 | 48.51 | +264.3% |
-| 8 | 125.47 | 61.92 | +102.6% | 194.29 | 58.13 | +234.2% |
+| 1 | 35.69 | 31.77 | +12.3% | 115.79 | 46.93 | +146.7% |
+| 2 | 60.93 | 42.79 | +42.4% | 165.09 | 52.57 | +214.0% |
+| 4 | 88.62 | 48.78 | +81.7% | 217.19 | 48.23 | +350.3% |
+| 6 | 109.72 | 52.59 | +108.6% | 231.03 | 48.51 | +376.3% |
+| 8 | 126.87 | 61.92 | +104.9% | 245.11 | 58.13 | +321.7% |
 <!-- /bench -->
 
 ![Multiple users, MTP](artifacts/charts/multi-mtp.svg)

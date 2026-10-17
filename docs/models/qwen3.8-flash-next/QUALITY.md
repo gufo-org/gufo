@@ -11,6 +11,42 @@ can also copy repetition within their current answer. This avoids displacing
 useful neural drafts with superficially similar parts of a new answer.
 Fully reused prompts reset this state even without `Sync`. Snapshots retain
 the request boundary and resume cursor; the payload compatibility version is 18.
+Version-17 disk entries are not reused after upgrading, so their first request
+needs a fresh prefill. New version-18 entries support normal restart reuse.
+
+The prefill follow-up replaces the per-gather allocating n-gram map with
+reusable scratch prepared before serving. It preserves token-to-row hashing, first
+occurrences, I/O order, dequantization and copied values. The independent
+n-gram tests pass, including 32,768-row, three-row and 32,769-row gathers
+through the same storage, with reference BF16 values and untouched guards.
+The repeated 8K MTP prefill flag is fixed: the same 2,042 input tokens after
+8,189 cached tokens take 1,220 ms rather than 1,330 ms, matching main's
+1,219 ms. The focused history retains every completion hash and cache/token
+count. This fixes prefill allocation stalls; speculative output still arrives
+in bursts, whose largest gaps are reported separately from total decode time.
+At 12K repetition, the largest gap is 73.86 ms versus main's 63.58 ms, while
+the same 128 output tokens take 1.218 seconds versus 2.634 seconds.
+The full-width copy path is retained for throughput; that accepted 10 ms
+burst-gap increase is not reported as a timing pass.
+The final AR, mixed MTP and repetitive MTP sweeps cover all eight depths
+from 0 to 128K. All 24 completion hashes and prompt/cache counts match main
+`3389a585`; prefill, total decode and first-token phases pass the same gate.
+The 12K burst-gap flag remains in the full sweep (64.02 → 70.19 ms).
+
+The final C1/C2/C4/C6/C8 sweep retains all 63 AR-equivalent completions and
+expected cache work. C8 ordinary/repetitive MTP reaches 126.87/245.11 versus
+main's 124.94/196.31 tok/s. Five preparation flags compare different admission
+positions: corresponding server admission, cache and batch roles agree across
+all 60 C>1 preparations, including conservative log-rounding bounds.
+The original request-index flags are retained.
+
+C8 AR has a separate maximum-gap limitation: the initial pair measures about
+72 → 103 ms, and a reverse-order repeat about 73 → 104 ms, with total
+throughput within 0.3%. A matched pair recording individual HTTP events gives
+72.74–72.87 ms on main and 72.36–72.52 ms on the candidate; its largest gap is
+on the first generated step. Output and cache work remain identical.
+This does not establish the cause of the earlier spikes: their attribution
+remains inconclusive, and they are not reported as a timing pass.
 
 Native tests with the same C8 model configuration compare isolated execution
 with C2/C4/C6/C8 cohorts: tokens, full logits, RNG, accepted/proposed counts and
@@ -28,33 +64,50 @@ full Q8 head, ragged catch-up and independent batches. Point-mass frequency and
 filter-boundary tests retain the target sampling distribution; target arithmetic
 and the neural sampler are unchanged throughout the follow-up. Native EOS and
 ignore-EOS checks pass. The final HTTP lookup test reaches every physical width
-C2/C4/C6/C8 and accepts 2,790 copied tokens, including an all-greedy C8 mix of
-copies and new text whose outputs match isolated execution. All eight focused
-cache cases pass,
-including text/thinking/tool cancellation and disk restart. The preceding
-sampling-defaults, stops, batch, tool-agent and long-context checks remain
-applicable; this was not an all-model or all-functional-suite run.
+C2/C4/C6/C8 and accepts 3,172 copied tokens, including an all-greedy C8 mix of
+copies and new text whose outputs match isolated execution. With the vision
+projector loaded, greedy and default-sampled image requests cancel after 40 and
+16 accepted copies respectively; both replay the exact uninterrupted response
+from RAM with zero prefill.
+
+A focused production run records 219 requests across sampling defaults, stops,
+image inputs and cache histories. Sampling overrides, thinking, concurrent
+seeded requests, Unicode stops, tools, PNG/JPEG/WebP and the Chat, Responses
+and Messages image paths pass. Text, thinking, tool and image cancellation
+histories also pass after a process restart with actual disk-cache hits and
+exact replay. These are correctness checks, not matched timing comparisons.
+The preceding batch, tool-agent and long-context checks remain applicable;
+this was not an all-model or all-functional-suite run.
 
 The expanded ordinary corpus uses real non-thinking defaults (temperature 0.7,
 top-p 0.8, top-k 20, presence penalty 1.5), seed 31 and main `3389a585`.
 All nine ordinary answers now match main exactly: aggregate decode is
-46.57 → 46.64 tok/s. Copying from the current sampled answer had changed two
+46.57 → 46.60 tok/s on the final scratch build. Copying from the current
+sampled answer had changed two
 answers, slowed C++ generation by about 4% and made a debugging answer 5.5%
 longer in wall time with an unsupported statistic. Restricting the sources
-removes both divergences. All 56 request phases across the 14 corpus/coding/tool
-cases pass the unchanged 5% and 3 ms gate. Generated C++ passes an independent
+removes both divergences. All 14 corpus/coding/tool outputs retain exact text,
+reasoning and tool arguments; prefill, total decode and first-token phases pass
+the unchanged 5% and 3 ms gate. One JSON response's largest gap increases
+130.96 → 150.03 ms. Replaying its complete preceding request history gives
+154.84 ms on unchanged main and 150.77 ms on the candidate, with identical work
+and no phase flags. The initial gap remains inconclusive.
+Generated C++ passes an independent
 deque oracle, wraparound and move-only checks; generated Python LRU code passes
 independent replacement, eviction and value-preservation checks.
 
 Three existing-file edits retain the exact intended content and improve
-85.44 → 105.86 tok/s in aggregate (9.06 → 7.56 seconds for the requests).
-Fresh Python LRU generation remains exact at 74.82 → 75.49 tok/s.
+85.44 → 105.93 tok/s in aggregate (9.06 → 7.54 seconds for the requests).
+Fresh Python LRU generation remains exact at 74.82 → 75.51 tok/s.
 A separate tool-write case omits the final newline on both main and candidate;
 its strict byte-preservation check fails equally and is not a qualified
 copy-speed result. The JSON schedule's original checker incorrectly required
 a particular goal field name absent from the prompt; saved outputs pass the
 corrected checker, with the original failure reports retained.
 
+The Pi and 115K measurements below precede the scratch-only follow-up; the
+final row-value, corpus, image/cancellation and benchmark checks above qualify
+that unchanged arithmetic and state handling.
 Real Pi 0.87.0 runs read/edit/write/test tools across five continued tasks.
 With thinking off, all 21 requests and 16 tool calls retain identical assistant
 content, tool arguments and tool results. Agent-process time is 26.12 → 25.92
@@ -84,12 +137,13 @@ literal thinking/tool tags. Default sampling is used with fixed seeds:
 
 | Request | Main tok/s | Candidate tok/s | Quality/work |
 | --- | ---: | ---: | --- |
-| Extraction, thinking | 84.49 | 84.63 | Exact answer and reasoning, 707 tokens |
+| Extraction, thinking | 84.49 | 84.59 | Exact answer and reasoning, 707 tokens |
 | URI test generation, no thinking | 82.99 | 83.47 | Exact tests, all three mutants detected, 435 tokens |
 | 115K agent edit, no thinking | 63.26 | 73.69 | Exact file/tool arguments, 187 tokens; cached continuation |
 | 115K agent edit, thinking | 67.50 | 75.18 | Exact file/tool arguments and reasoning, 219 tokens |
 
-All 32 captured extraction/URI phases pass the same timing gate.
+The final scratch build repeats extraction and URI generation with exact
+outputs; all eight captured phases pass the same timing gate.
 The first final 115K run flags one maximum token gap (120 → 137 ms);
 prefill, total decode time, output and expected cache work pass.
 A focused main/candidate repeat of the same warmup and cached edit passes all
@@ -103,8 +157,9 @@ its saved outputs and cache work were independently revalidated after fixing
 that assertion, without rerunning or replacing the measurements. A second seed
 also passes extraction and URI quality checks on the preceding candidate.
 
-Canonical prepared pp2048/tg128 repetition reaches 115.77 versus 73.18 tok/s at
-C1. At C6, aggregate ordinary/repetitive rates are 109.54/231.31 versus
+Before the scratch follow-up, canonical prepared pp2048/tg128 repetition
+reaches 115.77 versus 73.18 tok/s at C1.
+At C6, aggregate ordinary/repetitive rates are 109.54/231.31 versus
 108.74/177.98; all measured completion hashes and cache/prefill counts agree.
 Five C6 preparation flags remain in the raw request-index comparison: the
 identical requests were admitted in different orders. Server logs show the
@@ -402,34 +457,33 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-Single-user tables were refreshed on October 17, 2026, with production Nix
-build `c1088f89` plus the PR #626 follow-up (binary SHA-256 prefix
-`fc0a6628055f970e`); the exact source and binary identities are retained.
-Concurrency still uses October 16 build `32c4ece8`, PR #622 rebased on
-`22e36769` (binary prefix `2361bcffddf74773`). Loading and memory use the
+Single-user and concurrency tables were refreshed on October 17, 2026, with
+production Nix build `3b02d877` plus the reusable PLE gather scratch
+(binary SHA-256 prefix `93ec6640be94adb9`). The artifacts retain the dirty
+build identity, and the production file hashes identify the exact source.
+Loading and memory use the
 October 16 `fdc21849` capture (binary prefix `b1ab0e9795df6fba`).
-The pinned toolchain is unchanged. Every single-user row reproduces the
-previous completion hashes and draft counts. Four prior alternating mixed
+The pinned toolchain is unchanged. Every single-user row reproduces main's
+completion hashes and prompt/cache counts; prompt lookup changes draft counts.
+Four prior alternating mixed
 MTP C2 repeats gave 110 drafts (about 54 tok/s) on main twice and the PR once,
 and 144 drafts (about 60 tok/s) on the PR once, all with identical text.
 The checked platform profile is `performance`, with tuned
-`accelerator-performance`. Each independent AR,
-mixed MTP and repetitive MTP depth server starts after at least 90 seconds of
-idle recovery and the recorded temperature limits. Commands, binary/model identities, counts and
+`accelerator-performance`. Temperature telemetry is retained throughout.
+Model jobs run sequentially without overlapping builds or profiling.
+Commands, binary/model identities, counts and
 retained samples are in [artifacts](artifacts/bench.json) and
 [model identities](artifacts/model-identities.json). Full raw requests, phase
 timings, diagnostic profiles and repeated controls are retained outside Git.
 
 The driver is `tools/bench/model-bench.py run --target gufo --fresh`.
 One warmed sample per point, HTTP, greedy, thinking off, penalties disabled;
-automatic cache RAM budget except the retained mixed 64K follow-up, which pins
-the initial run's 17145280512-byte budget. Single-user uses ordered pp2048/tg128 histories at
+automatic cache RAM budget. Single-user uses ordered pp2048/tg128 histories at
 every depth from 0 to 131072, with capacity 133760. MTP pp is the maximum across
 the independently retained mixed/repetitive workloads. Diagnostic profiled
-runs and abandoned candidates do not supply published cells. Matched main
-AR controls for this refresh use main `78248de2`; the retained October 16
-cache review used post-#603 main `51a8b00d` (the same source tree as reviewed
-`c4177e37`). Controls preserve prompts, settings and ordered cache histories;
+runs and abandoned candidates do not supply published cells. Matched AR and
+MTP controls for this refresh use main `3389a585`.
+Controls preserve prompts, settings and ordered cache histories;
 per-request phase flags require both a 5% and a 3 ms increase.
 
 C1/2/4/6/8 use the same d0 prompts. Every session prefills before measured tg128,

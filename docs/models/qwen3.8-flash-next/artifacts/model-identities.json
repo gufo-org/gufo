@@ -258,5 +258,29 @@
     "quality": "All 24 retained rows match prior completion hashes and prompt/cache/draft counts. Seventeen million fixed-history logits and the independent attention error report are byte-identical to the PR-head control. Native AR/MTP slot reuse, sampled replay, cancellation and explicit reset pass. Focused HTTP cache and long-context checks use actual default-sampling drafts. Both Flash-Next and 27B retain all 29 encoder stages byte-for-byte with managed vision weights. This is numerical/storage regression evidence, not upstream accuracy qualification.",
     "timingScope": "All 12 AR requests match current-main inputs and pass the eight-phase gate. The final exact-budget mixed replay matches all 11 requests from the initial candidate history with no eight-phase flags. Four paired image/text requests also pass. These focused checks do not replace the older functional/concurrency timing limitations in QUALITY.md or establish the cause of an intermittent stall.",
     "retained": "Concurrency retains the October 16 PR #622 capture; loading and memory retain the October 16 fdc21849 capture. Every September 22-23 llama.cpp artifact is unchanged and was not rerun or requalified."
+  },
+  "benchmarks-2026-10-17-pr613": {
+    "scope": "Gufo HTTP C1 AR and mixed/repetitive MTP at all eight depths through 128K, plus C1/2/4/6/8 prepared decoding.",
+    "gufo": {
+      "revision": "3b02d877400d069c392a89adc5dbc37b5f6e2627",
+      "dirty": true,
+      "binarySha256": "93ec6640be94adb915cf36db5e9d00b8121146859024668efdc15837e70c1e32",
+      "build": "nix build, production gfx1151, unchanged pinned toolchain",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+      "productionSourceSha256": {
+        "src/models/qwen38_flash_next/ngram.cpp": "2c0d15ea9aeebcccd4072e68351f61e31772fc8235878e7813fbce714c22cb5b",
+        "src/models/qwen38_flash_next/ngram.hpp": "18440c41d666b98813a0c9ed9c20ae58ae85964007dc842d4b3f31a62741aa1e",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": "26ff58343b8d9e5c78f75b598362cfe1c74b704e8ee802c6373d0896ab21018a"
+      },
+      "sourceNote": "Base revision plus reusable PLE gather scratch; file hashes identify the production changes present in the measured binary."
+    },
+    "mainControl": {
+      "revision": "3389a585ef9eb59f8226e177455820c4d8390f46",
+      "binarySha256": "96dbdd563ab040fffee0244c4578408073656303acdbdb18fab229ec32c37a3a"
+    },
+    "measurement": "One warmed sample per point; complete ordered pp2048/tg128 depth histories and a fresh server per concurrency. Greedy, thinking off, automatic RAM cache. All model jobs serialized; no concurrent builds or profiling. Performance platform profile and temperature telemetry retained throughout. Raw requests, original flags, profiles and focused controls retained outside Git.",
+    "quality": "All 24 depth completions and prompt/cache counts match main. All 63 concurrent tg128 completions match isolated AR, with expected prefix reuse. Draft counts can differ. Independent row-value tests and existing model/sampler oracles qualify the unchanged arithmetic; HTTP text consistency is not original-model accuracy qualification.",
+    "timingScope": "The repeated 8K prefill allocation delay is fixed. The 12K repetitive maximum token gap increases by 6-10 ms while total generation more than doubles; this accepted throughput tradeoff is not a timing pass. Other request timing limitations and their controls remain documented in QUALITY.md.",
+    "retained": "Loading and memory retain October 16 fdc21849. All September 22-23 llama.cpp measurements remain unchanged and were not rerun or requalified."
   }
 }
