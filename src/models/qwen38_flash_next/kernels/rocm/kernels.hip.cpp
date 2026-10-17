@@ -2553,21 +2553,27 @@ __global__ void SelectScoreKernel(const float* q, const __half* blocks,
   scores[std::size_t{t0} * max_blocks + b] = total;
 }
 
-/// Locate a descending histogram rank cooperatively. Each thread owns
-/// consecutive bins; state receives the bin, its remaining rank and count.
-template<std::uint32_t kBinsPerThread>
+/// Locate a descending histogram rank cooperatively over kBins bins with a
+/// kBlock-thread block. Each thread owns consecutive bins (threads past the
+/// bins own none); state receives the bin, its remaining rank and count.
+template<std::uint32_t kBins, std::uint32_t kBlock>
 __device__ void FindHistogramThreshold(const std::uint32_t* histogram,
                                        std::uint32_t wanted,
                                        std::uint32_t* wave_sums,
                                        std::uint32_t* state) {
+  constexpr std::uint32_t kBinsPerThread = kBins >= kBlock ? kBins / kBlock : 1;
+  static_assert(kBins % kBinsPerThread == 0, "bins split evenly");
   const std::uint32_t lane = threadIdx.x & 31u;
   const std::uint32_t wave = threadIdx.x >> 5;
+  const bool owner = threadIdx.x < kBins / kBinsPerThread;
   const std::uint32_t first =
-      kThreads * kBinsPerThread - 1 - threadIdx.x * kBinsPerThread;
+      owner ? kBins - 1 - threadIdx.x * kBinsPerThread : 0;
   std::uint32_t count = 0;
+  if (owner) {
 #pragma unroll
-  for (std::uint32_t j = 0; j < kBinsPerThread; ++j)
-    count += histogram[first - j];
+    for (std::uint32_t j = 0; j < kBinsPerThread; ++j)
+      count += histogram[first - j];
+  }
   std::uint32_t inclusive = count;
 #pragma unroll
   for (std::uint32_t distance = 1; distance < 32; distance *= 2) {
@@ -2581,7 +2587,7 @@ __device__ void FindHistogramThreshold(const std::uint32_t* histogram,
   std::uint32_t before = inclusive - count;
   for (std::uint32_t w = 0; w < wave; ++w)
     before += wave_sums[w];
-  if (before < wanted && before + count >= wanted) {
+  if (owner && before < wanted && before + count >= wanted) {
     for (std::uint32_t j = 0; j < kBinsPerThread; ++j) {
       const std::uint32_t bin = first - j;
       const std::uint32_t bin_count = histogram[bin];
@@ -2601,15 +2607,19 @@ __device__ void FindHistogramThreshold(const std::uint32_t* histogram,
 /// window; a clipped threshold falls back to the full key range. At most
 /// 4096 candidates are refined in LDS; larger bins use the original scores.
 /// Every score participates, and the final mask keeps lowest-index ties.
-__global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
-                                 const std::uint32_t* start_pos,
-                                 std::uint32_t first_token, std::uint32_t ratio,
-                                 std::uint32_t budget, std::uint32_t mask_words,
-                                 std::uint32_t max_blocks) {
+/// Narrow batches use 1,024 threads per row: a single row's passes over its
+/// scores are bound by how much one block keeps in flight.
+template<std::uint32_t kBlock>
+__launch_bounds__(kBlock) __global__
+    void SelectMarkKernel(std::uint32_t* mask, const float* scores,
+                          const std::uint32_t* start_pos,
+                          std::uint32_t first_token, std::uint32_t ratio,
+                          std::uint32_t budget, std::uint32_t mask_words,
+                          std::uint32_t max_blocks) {
   __shared__ std::uint32_t candidates[4096];
   __shared__ std::uint32_t hist[256];
   __shared__ std::uint32_t candidate_count;
-  __shared__ std::uint32_t wave_ties[kThreads / 32];
+  __shared__ std::uint32_t wave_ties[kBlock / 32];
   __shared__ std::uint32_t state[3];  // threshold, remaining, bin count
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t pos = *start_pos + first_token + t;
@@ -2636,7 +2646,7 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
     if (lane == 0)
       wave_ties[wave] = maximum;
     __syncthreads();
-    for (unsigned w = 0; w < kThreads / 32; ++w)
+    for (unsigned w = 0; w < kBlock / 32; ++w)
       maximum = max(maximum, wave_ties[w]);
   }
   // Finer bins reduce contention among scores with similar exponents.
@@ -2646,6 +2656,31 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
       (maximum >> prefix_bits) > 2047 ? (maximum >> prefix_bits) - 2047 : 0;
   if (threadIdx.x == 0)
     candidate_count = 0;
+  // Visit every score of the row. Aligned rows give each thread four
+  // 16-byte loads per step, issued before any of them is used.
+  const auto for_each_score = [&](auto&& visit) {
+    constexpr std::uint32_t kLoads = 4;
+    constexpr std::uint32_t kStep = kLoads * 4;
+    for (std::uint32_t b = threadIdx.x * kStep; b < complete;
+         b += blockDim.x * kStep) {
+      if (b + kStep - 1 < complete && max_blocks % 4 == 0) {
+        uint4 v[kLoads];
+#pragma unroll
+        for (std::uint32_t j = 0; j < kLoads; ++j)
+          v[j] = *reinterpret_cast<const uint4*>(sc + b + (j * 4));
+#pragma unroll
+        for (std::uint32_t j = 0; j < kLoads; ++j) {
+          visit(v[j].x);
+          visit(v[j].y);
+          visit(v[j].z);
+          visit(v[j].w);
+        }
+      } else {
+        for (std::uint32_t j = 0; j < kStep && b + j < complete; ++j)
+          visit(sc[b + j]);
+      }
+    }
+  };
   for (unsigned attempt = 0; attempt < 2; ++attempt) {
     for (unsigned i = threadIdx.x; i < 4096; i += blockDim.x)
       candidates[i] = 0;
@@ -2654,21 +2689,10 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
       const auto key = value >> prefix_bits;
       return key > base ? min(key - base, 4095u) : 0u;
     };
-    // Aligned production rows use four adjacent scores per lane.
-    for (unsigned b = threadIdx.x * 4; b < complete; b += blockDim.x * 4) {
-      if (b + 3 < complete && max_blocks % 4 == 0) {
-        const uint4 v = *reinterpret_cast<const uint4*>(sc + b);
-        atomicAdd(&candidates[bin(v.x)], 1u);
-        atomicAdd(&candidates[bin(v.y)], 1u);
-        atomicAdd(&candidates[bin(v.z)], 1u);
-        atomicAdd(&candidates[bin(v.w)], 1u);
-      } else {
-        for (unsigned j = 0; j < 4 && b + j < complete; ++j)
-          atomicAdd(&candidates[bin(sc[b + j])], 1u);
-      }
-    }
+    for_each_score(
+        [&](std::uint32_t v) { atomicAdd(&candidates[bin(v)], 1u); });
     __syncthreads();
-    FindHistogramThreshold<16>(candidates, budget, wave_ties, state);
+    FindHistogramThreshold<4096, kBlock>(candidates, budget, wave_ties, state);
     if (!windowed || attempt != 0 ||
         (state[0] != 4095 && (state[0] != 0 || base == 0)))
       break;
@@ -2683,11 +2707,12 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
   const bool compact = state[2] <= 4096 && remaining != state[2];
   const std::uint32_t input_count = compact ? state[2] : complete;
   if (compact) {
-    for (std::uint32_t b = threadIdx.x; b < complete; b += blockDim.x) {
-      std::uint32_t v = sc[b];
+    // Candidate order is irrelevant: only their values are refined.
+    const auto keep = [&](std::uint32_t v) {
       if ((v & (~0u << prefix_bits)) == prefix)
         candidates[atomicAdd(&candidate_count, 1u)] = v;
-    }
+    };
+    for_each_score(keep);
     __syncthreads();
   }
   // A whole bin can be accepted as soon as its count fills the remaining
@@ -2697,15 +2722,21 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
     const std::uint32_t prefix_mask = ~0u << bits;
     bits -= digit_bits;
     const std::uint32_t radix_mask = (1u << digit_bits) - 1;
-    hist[threadIdx.x] = 0;
+    if (threadIdx.x < 256)
+      hist[threadIdx.x] = 0;
     __syncthreads();
-    for (std::uint32_t b = threadIdx.x; b < input_count; b += blockDim.x) {
-      const std::uint32_t v = compact ? candidates[b] : sc[b];
+    const auto count_digit = [&](std::uint32_t v) {
       if ((v & prefix_mask) == prefix)
         atomicAdd(&hist[(v >> bits) & radix_mask], 1u);
+    };
+    if (compact) {
+      for (std::uint32_t b = threadIdx.x; b < input_count; b += blockDim.x)
+        count_digit(candidates[b]);
+    } else {
+      for_each_score(count_digit);
     }
     __syncthreads();
-    FindHistogramThreshold<1>(hist, remaining, wave_ties, state);
+    FindHistogramThreshold<256, kBlock>(hist, remaining, wave_ties, state);
     prefix |= state[0] << bits;
     remaining = state[1];
     __syncthreads();
@@ -2716,14 +2747,24 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
   // a per-chunk scan over the eight waves.
   if (remaining == state[2]) {
     // Every threshold tie fits (in particular, a unique threshold). No
-    // prefix scan is needed: each wave writes one complete mask word.
-    for (std::uint32_t chunk = 0; chunk < complete; chunk += blockDim.x) {
-      const std::uint32_t b = chunk + threadIdx.x;
-      const bool selected = b < complete && sc[b] >= threshold;
-      const auto bits = static_cast<std::uint32_t>(__ballot(selected));
-      if (lane == 0 && b < complete) {
-        words[b / 32] = bits;
+    // prefix scan is needed: each thread writes complete mask words.
+    for (std::uint32_t w = threadIdx.x; w * 32 < complete; w += blockDim.x) {
+      const std::uint32_t b0 = w * 32;
+      std::uint32_t bits = 0;
+      if (b0 + 31 < complete && max_blocks % 4 == 0) {
+#pragma unroll
+        for (std::uint32_t j = 0; j < 32; j += 4) {
+          const uint4 v = *reinterpret_cast<const uint4*>(sc + b0 + j);
+          bits |= (v.x >= threshold ? 1u : 0u) << j;
+          bits |= (v.y >= threshold ? 1u : 0u) << (j + 1);
+          bits |= (v.z >= threshold ? 1u : 0u) << (j + 2);
+          bits |= (v.w >= threshold ? 1u : 0u) << (j + 3);
+        }
+      } else {
+        for (std::uint32_t j = 0; j < 32 && b0 + j < complete; ++j)
+          bits |= (sc[b0 + j] >= threshold ? 1u : 0u) << j;
       }
+      words[w] = bits;
     }
     return;
   }
@@ -2750,7 +2791,7 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
       atomicOr(&words[b / 32], 1u << (b % 32));
     }
     std::uint32_t chunk_ties = 0;
-    for (std::uint32_t w = 0; w < kThreads / 32; ++w) {
+    for (std::uint32_t w = 0; w < kBlock / 32; ++w) {
       chunk_ties += wave_ties[w];
     }
     ties_before += chunk_ties;
@@ -7390,7 +7431,11 @@ void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
   hipLaunchKernelGGL(SelectScoreKernel, grid, dim3(kThreads), 0, stream, q,
                      blocks, scores, n_tokens, start_pos, first_token, ratio,
                      budget, max_blocks);
-  hipLaunchKernelGGL(SelectMarkKernel, dim3(n_tokens), dim3(kThreads), 0,
+  constexpr std::uint32_t kNarrowMarkThreads = 1024;
+  const auto mark = n_tokens <= 4 ? SelectMarkKernel<kNarrowMarkThreads>
+                                  : SelectMarkKernel<kThreads>;
+  hipLaunchKernelGGL(mark, dim3(n_tokens),
+                     dim3(n_tokens <= 4 ? kNarrowMarkThreads : kThreads), 0,
                      stream, mask, scores, start_pos, first_token, ratio,
                      budget, mask_words, max_blocks);
 }
