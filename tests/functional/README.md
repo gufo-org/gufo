@@ -19,6 +19,10 @@ The runner owns eight sessions and the loopback listener. It retains individual
 request timings and server logs, and stays outside hosted CI and `--suite all`.
 The native Flash-Next session test additionally checks full logits, RNG and
 snapshot restoration into previously used sessions.
+Pass `--mmproj /path/to/mmproj.gguf` with the server command to add image-backed
+greedy and sampled copies. These cases require accepted lookup tokens before
+client cancellation, confirm the server observed cancellation, and replay the
+same output from the cached image prompt without prefill.
 
 `prompt_lookup_workflows.py` checks extraction, generated URI tests and edits
 after a long source archive against an already running Flash-Next MTP server:

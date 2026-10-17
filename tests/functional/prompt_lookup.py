@@ -13,13 +13,14 @@ from pathlib import Path
 import re
 import socket
 import threading
+import time
 import traceback
 
 import httpx
 from openai import OpenAI
 
 from metrics import Recorder, join_server_timings
-from openai_sdk import chat_result
+from openai_sdk import chat_result, image_content
 from run import execution_coverage, option, provenance, server, write_json
 
 
@@ -168,6 +169,55 @@ def main():
                     assert stopped["finish"] == "stop", stopped
                     replay = record(f"resume-{row}", chat_result(client, bodies[row], True))
                     same(controls[row], replay)
+
+                if option(command, "--mmproj") is not None:
+                    for row in (0, 1):
+                        body = {**bodies[row], "messages": [
+                            {"role": "user", "content": [
+                                image_content("red"),
+                                {"type": "text", "text":
+                                 bodies[row]["messages"][0]["content"]}]}]}
+                        record(f"image-warm-{row}", chat_result(
+                            client, {**body, "max_completion_tokens": 1}))
+                        start = copied()
+                        control = record(
+                            f"image-copy-{row}", chat_result(client, body, True))
+                        assert not control["reasoning"] and not control["tools"], control
+                        assert control["text"] and sources[row].startswith(control["text"]), control
+                        assert control["usage"]["prompt_tokens"] > controls[row]["usage"]["prompt_tokens"]
+                        assert copied() > start, "image request accepted no lookup copies"
+
+                        # Interrupt after a substantial copied prefix, not just
+                        # the first token before lookup has had a chance to run.
+                        start = copied()
+                        partial = ""
+                        with client.chat.completions.create(**body, stream=True) as stream:
+                            for chunk in stream:
+                                for choice in chunk.choices:
+                                    assert choice.finish_reason is None, "finished before cancellation"
+                                    partial += choice.delta.content or ""
+                                if len(partial) >= 200:
+                                    break
+                            else:
+                                raise AssertionError("image copy never reached cancellation point")
+                        request_id = trace.rows[-1]["request_id"]
+                        assert trace.rows[-1]["status"] == "disconnected"
+                        assert control["text"].startswith(partial)
+                        cancelled = re.compile(
+                            rf"\brequest={re.escape(request_id)}\b.*\bfinish=cancelled\b")
+                        deadline = time.monotonic() + 10
+                        while not cancelled.search((output / "server.log").read_text()):
+                            assert time.monotonic() < deadline, "server did not observe cancellation"
+                            time.sleep(.02)
+                        assert copied() > start, "cancelled image request exercised no accepted copies"
+                        record(f"image-cancel-{row}", {
+                            "partial": partial, "request_id": request_id,
+                            "accepted_copies": copied() - start})
+                        replay = record(
+                            f"image-resume-{row}", chat_result(client, body, True))
+                        same(control, replay)
+                        assert replay["usage"]["cached_tokens"] > 0, replay
+                        assert replay["usage"]["gufo"]["prefill_tokens"] == 0, replay
                 report["accepted_lookup_tokens"] = copied()
         join_server_timings(output)
         report["execution"] = execution_coverage(output, "mtp")
