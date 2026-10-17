@@ -53,6 +53,9 @@ chain and drafting stops. Greedy requests can
 bypass the neural head when a match supplies at least three copies. Sampled
 requests first make a neural proposal, then look for a copy extending it;
 a repeated prefix alone can poorly predict new code or field values.
+Their copy sources end at the request's starting context. Earlier parts of
+the same new answer are not indexed for sampled copying; they become eligible
+context on the next request. Greedy requests can also copy their current answer.
 The request's first speculative step skips lookup to avoid delaying its first
 token and records the start of generated text. Later matches cannot extend
 back into the prompt's chat wrapper; a common tool header alone must not

@@ -6,6 +6,9 @@ neural head; sampled requests retain a neural proposal first and require a
 24-token match. Fewer than half the copied proposals being accepted disables
 short resumption. Matches count only tokens generated since the request's first
 speculative step, so shared chat wrappers cannot qualify a new answer.
+Sampled copy sources stop at the request's starting context; greedy requests
+can also copy repetition within their current answer. This avoids displacing
+useful neural drafts with superficially similar parts of a new answer.
 Fully reused prompts reset this state even without `Sync`. Snapshots retain
 the request boundary and resume cursor; the payload compatibility version is 18.
 
@@ -17,28 +20,60 @@ vary budgets and peer order, and require accepted copies in both modes
 session and rewinding into a copy also replay exactly. Direct, RAM and serialized
 200-token continuations pass, including learned policies and both real sampling
 presets. Regressions cover the first step, rejected-copy resumption, a shared
-wrapper followed by a short answer, reindexing and boundary restoration.
+wrapper followed by a short answer, reindexing, boundary restoration, exclusion
+of a sampled answer's own repetitions and eligibility on the next request.
 
 The independent MTP oracle passes normalization, attention, recursive carry,
 full Q8 head, ragged catch-up and independent batches. Point-mass frequency and
 filter-boundary tests retain the target sampling distribution; target arithmetic
 and the neural sampler are unchanged throughout the follow-up. Native EOS and
 ignore-EOS checks pass. The final HTTP lookup test reaches every physical width
-C2/C4/C6/C8 and accepts 2,880 copied tokens, including an all-greedy C8 mix of
+C2/C4/C6/C8 and accepts 2,790 copied tokens, including an all-greedy C8 mix of
 copies and new text whose outputs match isolated execution. All eight focused
 cache cases pass,
 including text/thinking/tool cancellation and disk restart. The preceding
 sampling-defaults, stops, batch, tool-agent and long-context checks remain
 applicable; this was not an all-model or all-functional-suite run.
 
-Real Pi 0.87.0 edit and creation workflows pass on the final production build:
-eight requests, six tool calls, identical assistant content/tool arguments, and
-byte-identical generated files versus main `3389a585`. All 32 compared prefill,
-decode, first-token and maximum-gap phases pass the 5% and 3 ms gate. The
-216-token code write that regressed by 9% during development now measures
-67.72 versus main's 68.51 tok/s (1.2% lower). A separate 27-token test-running
-tool call, previously 61.37 versus 72.44 tok/s, now reaches 72.75. Earlier Pi
-checks also cover literal protocol text and a thinking-enabled edit over Responses.
+The expanded ordinary corpus uses real non-thinking defaults (temperature 0.7,
+top-p 0.8, top-k 20, presence penalty 1.5), seed 31 and main `3389a585`.
+All nine ordinary answers now match main exactly: aggregate decode is
+46.57 → 46.64 tok/s. Copying from the current sampled answer had changed two
+answers, slowed C++ generation by about 4% and made a debugging answer 5.5%
+longer in wall time with an unsupported statistic. Restricting the sources
+removes both divergences. All 56 request phases across the 14 corpus/coding/tool
+cases pass the unchanged 5% and 3 ms gate. Generated C++ passes an independent
+deque oracle, wraparound and move-only checks; generated Python LRU code passes
+independent replacement, eviction and value-preservation checks.
+
+Three existing-file edits retain the exact intended content and improve
+85.44 → 105.86 tok/s in aggregate (9.06 → 7.56 seconds for the requests).
+Fresh Python LRU generation remains exact at 74.82 → 75.49 tok/s.
+A separate tool-write case omits the final newline on both main and candidate;
+its strict byte-preservation check fails equally and is not a qualified
+copy-speed result. The JSON schedule's original checker incorrectly required
+a particular goal field name absent from the prompt; saved outputs pass the
+corrected checker, with the original failure reports retained.
+
+Real Pi 0.87.0 runs read/edit/write/test tools across five continued tasks.
+With thinking off, all 21 requests and 16 tool calls retain identical assistant
+content, tool arguments and tool results. Agent-process time is 26.12 → 25.92
+seconds; the original identical-code slowdown is gone. Precise child-exit
+timestamps exclude the functional harness's 500 ms polling granularity.
+A reverse-order repeat retains every observation: one prefill delay also
+appears on unchanged main, while maximum-gap flags move between requests and
+overlap passing observations. These phases remain inconclusive, not a global
+timing pass.
+
+With thinking enabled and about 25K source tokens, all five tasks pass
+(17 tool calls): 107.36 → 104.96 seconds. File timestamps are fixed before each
+task because an earlier `ls -la` result changed the prompts between arms;
+that earlier comparison is retained but cannot attribute latency to the PR.
+The corrected code-creation task is 33.45 → 33.37 seconds with identical work.
+The bug-fix task produces 35 extra sampled tokens and takes 21.35 → 22.22
+seconds; the following literal-protocol task needs one fewer request.
+The whole-agent result includes those different sampled choices and is not an
+isolated inference speedup. Every comparable request phase passes the gate.
 Sessions and actual tool results are retained outside Git.
 
 New public workflow fixtures substitute for the author's unavailable private
@@ -49,14 +84,18 @@ literal thinking/tool tags. Default sampling is used with fixed seeds:
 
 | Request | Main tok/s | Candidate tok/s | Quality/work |
 | --- | ---: | ---: | --- |
-| Extraction, thinking | 84.09 | 84.40 | Exact answer and reasoning, 707 tokens |
-| URI test generation, no thinking | 82.75 | 83.34 | Exact tests, all three mutants detected, 435 tokens |
-| 115K agent edit, no thinking | 63.26 | 74.77 | Exact file/tool arguments, 187 tokens; cached continuation |
-| 115K agent edit, thinking | 67.50 | 74.90 | Exact file/tool arguments and reasoning, 219 tokens |
+| Extraction, thinking | 84.49 | 84.63 | Exact answer and reasoning, 707 tokens |
+| URI test generation, no thinking | 82.99 | 83.47 | Exact tests, all three mutants detected, 435 tokens |
+| 115K agent edit, no thinking | 63.26 | 73.69 | Exact file/tool arguments, 187 tokens; cached continuation |
+| 115K agent edit, thinking | 67.50 | 75.18 | Exact file/tool arguments and reasoning, 219 tokens |
 
-All 25 captured phases, including the archive warmup, pass the same timing gate.
-These single-session measurements precede the final mixed-greedy batch
-adjustment, which leaves their execution path unchanged.
+All 32 captured extraction/URI phases pass the same timing gate.
+The first final 115K run flags one maximum token gap (120 → 137 ms);
+prefill, total decode time, output and expected cache work pass.
+A focused main/candidate repeat of the same warmup and cached edit passes all
+32 measured phases: the maximum gaps are 120.07/120.18 ms and decode rates
+63.37/75.14 tok/s. The original gap remains inconclusive; the table retains
+the first observation rather than substituting the faster repeat.
 Tool-call IDs are generated independently and excluded from content comparison.
 Changing thinking mode changes the rendered prefix, so its full prefill is
 expected. The original main run's erroneous cache-hit assertion is retained;

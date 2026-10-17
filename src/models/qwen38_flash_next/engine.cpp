@@ -867,8 +867,8 @@ bool Session::AppendLookup(PendingDecode& pending, bool stop_at_eos,
   if (match.length == 0) {
     return false;
   }
-  const std::size_t available =
-      std::min(cap - pending.chain.size(), tokens_.size() - match.start);
+  const std::size_t available = std::min(cap - pending.chain.size(),
+                                         lookup_.IndexedTokens() - match.start);
   if (available < minimum)
     return false;
   std::size_t count = 0;
@@ -984,7 +984,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   // A request's first speculative step copies nothing (see PromptLookup).
   pending->lookup_cap = lookup_.Step(base) ? cap : 0;
   if (pending->lookup_cap != 0) {
-    lookup_.Extend(tokens_);
+    lookup_.Extend(tokens_, sampled);
   }
   // Greedy copies can supply the whole chain without the neural head.
   // Sampled requests first extend with a neural proposal: a repeated prefix

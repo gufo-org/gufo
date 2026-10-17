@@ -271,6 +271,57 @@ void CheckNoMatch() {
   Require(Lookup{}.Find(committed, tail).length == 0, "an empty index matched");
 }
 
+void CheckSampledSources() {
+  auto committed = Range(1000, 40);
+  const auto boundary = committed.size();
+  Lookup sampled;
+  Lookup greedy;
+  Require(!sampled.Step(boundary) && !greedy.Step(boundary),
+          "first step copied");
+  // A new answer generates a passage twice. Only greedy lookup may copy it.
+  const auto passage = Range(5000, 40);
+  committed.insert(committed.end(), passage.begin(), passage.end());
+  committed.push_back(9000);
+  committed.insert(committed.end(), passage.begin(), passage.begin() + 23);
+  const std::vector<std::int32_t> tail{5023};
+  sampled.Extend(committed, true);
+  greedy.Extend(committed);
+  Require(
+      sampled.IndexedTokens() == boundary &&
+          sampled.Find(committed, tail, Lookup::kSampledMinMatch).length == 0,
+      "sampled lookup copied from its own new answer");
+  Require(greedy.Find(committed, tail).length == 24,
+          "greedy lookup lost repetition within an answer");
+  Lookup restored;
+  restored.Restore(sampled.Save());
+  restored.Extend(committed, true);
+  Require(
+      restored.IndexedTokens() == boundary &&
+          restored.Find(committed, tail, Lookup::kSampledMinMatch).length == 0,
+      "restoring a sampled request expanded its copy sources");
+
+  // Original context still supplies copies, bounded by its last token.
+  const auto original = Range(1015, 23);
+  committed.insert(committed.end(), original.begin(), original.end());
+  const std::vector<std::int32_t> original_tail{1038};
+  sampled.Extend(committed, true);
+  const auto match =
+      sampled.Find(committed, original_tail, Lookup::kSampledMinMatch);
+  Require(match.length == 24 && match.start == 39 &&
+              sampled.IndexedTokens() - match.start == 1,
+          "a sampled copy crossed its source boundary");
+  // In the next request, the previous answer becomes eligible context.
+  sampled.BeginRequest();
+  const auto next_boundary = committed.size();
+  Require(!sampled.Step(next_boundary), "new request first step copied");
+  committed.insert(committed.end(), passage.begin(), passage.begin() + 23);
+  sampled.Extend(committed, true);
+  Require(
+      sampled.IndexedTokens() == next_boundary &&
+          sampled.Find(committed, tail, Lookup::kSampledMinMatch).length == 24,
+      "a new request could not copy the preceding answer");
+}
+
 int main() {
   try {
     CheckCopy();
@@ -281,6 +332,7 @@ int main() {
     CheckResume();
     CheckFirstStep();
     CheckRequestBoundary();
+    CheckSampledSources();
     CheckNoMatch();
   } catch (const std::exception& e) {
     std::cerr << "prompt_lookup_test: " << e.what() << "\n";

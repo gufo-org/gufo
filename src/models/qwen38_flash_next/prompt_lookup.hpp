@@ -18,6 +18,9 @@ namespace gufo::models::qwen38_flash_next {
 /// requests require kMinMatch tokens; sampled requests require the longer
 /// kSampledMinMatch. Common code syntax and field names alone poorly predict
 /// their continuation at temperature and can displace useful neural drafts.
+/// Sampled requests index only their starting context: earlier parts of a
+/// freshly generated answer are especially poor sources for new prose/code.
+/// Greedy requests can also copy repetition within their current answer.
 ///
 /// Where the last verified copy left off, kResumeMinMatch tokens are
 /// enough: output that edits a line of the text it is copying rejoins it a
@@ -115,7 +118,11 @@ public:
   /// A shorter history, or one whose last indexed token changed, restarts
   /// the index; proposals are verified anyway, so this only keeps a missed
   /// Clear() from proposing stale copies.
-  void Extend(std::span<const std::int32_t> committed) {
+  void Extend(std::span<const std::int32_t> committed,
+              bool prompt_only = false) {
+    if (prompt_only && request_start_ != kNoResume) {
+      committed = committed.first(std::min(committed.size(), request_start_));
+    }
     if (committed.size() < prev_.size() ||
         (!prev_.empty() && committed[prev_.size() - 1] != last_)) {
       // BeginRequest/Step may already have established the new request's
@@ -139,9 +146,13 @@ public:
     // it is indexed once the next token commits.
   }
 
+  /// Copies must end inside the indexed source, even when the query's
+  /// committed history has grown beyond a sampled request's source boundary.
+  [[nodiscard]] std::size_t IndexedTokens() const { return prev_.size(); }
+
   /// Best match for the context `committed` + `tail` among the indexed
   /// committed tokens, or a zero-length match. `tail` holds the uncommitted
-  /// chain (anchor and drafts); `committed` must be what Extend() saw.
+  /// chain (anchor and drafts); `committed` must extend the indexed prefix.
   [[nodiscard]] Match Find(std::span<const std::int32_t> committed,
                            std::span<const std::int32_t> tail,
                            std::size_t minimum = kMinMatch) const {
@@ -174,7 +185,7 @@ public:
       const bool resumes = resume_ != kNoResume &&
                            end + kResumeBack >= resume_ &&
                            end <= resume_ + kResumeWindow;
-      if (end < committed.size() && length > best.length &&
+      if (end < prev_.size() && length > best.length &&
           (length >= minimum || (resumes && length >= kResumeMinMatch))) {
         best = {end, length};
       }
