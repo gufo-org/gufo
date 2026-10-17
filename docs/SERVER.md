@@ -171,6 +171,10 @@ configured ceiling. Sampled MTP proposals use p/q acceptance and residual
 correction; greedy verification follows target argmax. Draft and verification
 work can batch across ready requests. See the
 [Flash-Next benchmark and quality contract](models/qwen3.8-flash-next/BENCHMARKS.md).
+Requesting `--context` above Flash-Next's native 262144 automatically derives
+and enables static YaRN scaled to cover the request; see
+[Qwen3.8 Flash-Next](models/qwen3.8-flash-next/README.md) for the memory and
+short-text caveats.
 
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
