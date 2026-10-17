@@ -40,6 +40,13 @@ void CheckCopy() {
   const std::vector<std::int32_t> short_tail = {1015};
   Require(lookup.Find(committed, short_tail).length == 0,
           "an 11-token match passed the 12-token gate");
+  Require(lookup.Find(committed, tail, Lookup::kSampledMinMatch).length == 0,
+          "a short syntax match passed the sampled gate");
+  const auto long_tail = Range(1015, 14);
+  const auto sampled =
+      lookup.Find(committed, long_tail, Lookup::kSampledMinMatch);
+  Require(sampled.length == 24 && sampled.start == 29,
+          "a 24-token match did not pass the sampled gate");
 }
 
 // Several earlier occurrences of the key: the one matching furthest back
@@ -145,20 +152,27 @@ void CheckResume() {
   lookup.Extend(committed);
   Require(lookup.Find(committed, tail).length == 0,
           "a 5-token match passed without a copy to resume");
-  // The last copy proposed file[20...] and none of it was kept.
-  lookup.Observe(20, 8, 0, false);
+  // A long matching prefix did not predict the continuation: a fully
+  // rejected copy must not open the shorter gate.
+  lookup.Observe(20, 8, 0);
+  Require(lookup.Find(committed, tail).length == 0,
+          "a rejected full match enabled short copies");
+  lookup.Observe(20, 8, 3);
+  Require(lookup.Find(committed, tail).length == 0,
+          "a mostly rejected full match enabled short copies");
+  lookup.Observe(20, 8, 4);
   const auto match = lookup.Find(committed, tail);
-  Require(match.length == 5 && match.start == 27 && match.resumed,
+  Require(match.length == 5 && match.start == 27,
           "a resumed copy was not matched");
   // A resumed copy that keeps half its tokens still resumes; one that keeps
   // fewer has left the text, until a full match copies again.
-  lookup.Observe(match.start, 8, 4, true);
+  lookup.Observe(match.start, 8, 4);
   Require(lookup.Find(committed, tail).length == 5,
           "a resumed copy that kept half stopped resuming");
-  lookup.Observe(match.start, 8, 3, true);
+  lookup.Observe(match.start, 8, 3);
   Require(lookup.Find(committed, tail).length == 0,
           "a mostly rejected resumed copy kept resuming");
-  lookup.Observe(20, 8, 0, false);
+  lookup.Observe(20, 8, 4);
   Require(lookup.Find(committed, tail).length == 5,
           "a full copy did not restart resuming");
   const std::vector<std::int32_t> short_tail = {1025};
@@ -166,15 +180,15 @@ void CheckResume() {
           "a 4-token match resumed a copy");
   // A copy whose source continues far from this match does not lower the
   // gate, and Clear() forgets the copy.
-  lookup.Observe(600, 8, 0, false);
+  lookup.Observe(600, 8, 4);
   Require(lookup.Find(committed, tail).length == 0,
           "a distant copy lowered the gate");
   // A saved state resumes the same copy after a restore; a new request
   // starts with nothing to resume.
-  lookup.Observe(20, 8, 0, false);
+  lookup.Observe(20, 8, 4);
   const auto state = lookup.Save();
   Require(Lookup::Valid(state, committed.size()) && !Lookup::Valid(state, 19) &&
-              !Lookup::Valid({.resume = 20, .first_step = 2}, committed.size()),
+              !Lookup::Valid({.request_start = 1000}, committed.size()),
           "prompt-lookup state validation");
   Lookup restored;
   restored.Restore(state);
@@ -197,15 +211,54 @@ void CheckFirstStep() {
   Lookup lookup;
   lookup.BeginRequest();
   const auto before = lookup.Save();
-  Require(!lookup.Step() && lookup.Step() && lookup.Step(),
+  Require(!lookup.Step(10) && lookup.Step(11) && lookup.Step(12),
           "only a request's first step skips copying");
+  Require(lookup.Save().request_start == 10, "request boundary drifted");
   Lookup restored;
   restored.Restore(before);
-  Require(!restored.Step(), "a restored first step copied");
+  Require(!restored.Step(10), "a restored first step copied");
   restored.Restore(lookup.Save());
-  Require(restored.Step(), "a restored later step skipped copying");
+  Require(restored.Step(12), "a restored later step skipped copying");
   restored.BeginRequest();
-  Require(!restored.Step(), "a new request copied on its first step");
+  Require(!restored.Step(20), "a new request copied on its first step");
+}
+
+void CheckRequestBoundary() {
+  auto committed = Range(1000, 64);
+  const auto noise = Range(5000, 7);
+  committed.insert(committed.end(), noise.begin(), noise.end());
+  // Twenty tokens of shared framing precede the actual generated answer.
+  const auto wrapper = Range(1005, 20);
+  committed.insert(committed.end(), wrapper.begin(), wrapper.end());
+  Lookup lookup;
+  // Force reindexing a shorter history after Step has set the boundary.
+  const auto old_history = Range(7000, 160);
+  lookup.Extend(old_history);
+  lookup.BeginRequest();
+  const auto start = committed.size();
+  Require(!lookup.Step(start), "first step copied");
+  const auto prefix = Range(1025, 3);
+  committed.insert(committed.end(), prefix.begin(), prefix.end());
+  lookup.Extend(committed);
+  Require(lookup.Step(committed.size()), "second step skipped");
+  const std::vector<std::int32_t> tail{1028};
+  Require(lookup.Find(committed, tail, Lookup::kSampledMinMatch).length == 0,
+          "the shared wrapper inflated a four-token answer into a full match");
+  const auto rest = Range(1028, 20);
+  committed.insert(committed.end(), rest.begin(), rest.end());
+  lookup.Extend(committed);
+  const std::vector<std::int32_t> next{1048};
+  const auto match = lookup.Find(committed, next, Lookup::kSampledMinMatch);
+  Require(match.length == 24 && match.start == 49,
+          "a real matching answer did not copy");
+  Lookup restored;
+  restored.Restore(lookup.Save());
+  restored.Extend(committed);
+  Require(restored.Find(committed, next, Lookup::kSampledMinMatch).length == 24,
+          "restoring a snapshot lost the request boundary");
+  restored.Clear();
+  Require(Lookup::Valid(restored.Save(), 0),
+          "cleared request boundary is stale");
 }
 
 void CheckNoMatch() {
@@ -227,6 +280,7 @@ int main() {
     CheckProposalInsideCommitted();
     CheckResume();
     CheckFirstStep();
+    CheckRequestBoundary();
     CheckNoMatch();
   } catch (const std::exception& e) {
     std::cerr << "prompt_lookup_test: " << e.what() << "\n";

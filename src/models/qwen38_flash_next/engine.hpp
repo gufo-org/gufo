@@ -225,7 +225,7 @@ public:
   }
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 17;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
@@ -299,8 +299,9 @@ private:
                      std::string* error_msg, bool defer_head = false,
                      std::optional<std::uint32_t> batch_drafts = {});
   static void AppendDraft(PendingDecode& pending);
-  /// Prompt lookup: appends copied proposals up to `cap` chain tokens.
-  bool AppendLookup(PendingDecode& pending, std::size_t cap);
+  /// Appends copies within the prepared budget, stopping at EOG when enabled.
+  bool AppendLookup(PendingDecode& pending, bool stop_at_eos,
+                    std::size_t minimum = 1);
   bool FinishDecode(const DecodeRequest& request, const PendingDecode& pending,
                     std::string* error_msg);
 

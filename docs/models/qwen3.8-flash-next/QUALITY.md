@@ -1,5 +1,102 @@
 # Qwen3.8 Flash-Next quality
 
+**PR #613 review, October 17:** prompt lookup remains local to each Flash-Next
+MTP session and now works in batched decoding. Greedy requests can bypass the
+neural head; sampled requests retain a neural proposal first and require a
+24-token match. Fewer than half the copied proposals being accepted disables
+short resumption. Matches count only tokens generated since the request's first
+speculative step, so shared chat wrappers cannot qualify a new answer.
+Fully reused prompts reset this state even without `Sync`. Snapshots retain
+the request boundary and resume cursor; the payload compatibility version is 18.
+
+Native tests with the same C8 model configuration compare isolated execution
+with C2/C4/C6/C8 cohorts: tokens, full logits, RNG, accepted/proposed counts and
+snapshot bytes agree exactly. They mix greedy and sampled requests,
+vary budgets and peer order, and require accepted copies in both modes
+(118 greedy and 43 sampled copies in the final run). Restoring into a used
+session and rewinding into a copy also replay exactly. Direct, RAM and serialized
+200-token continuations pass, including learned policies and both real sampling
+presets. Regressions cover the first step, rejected-copy resumption, a shared
+wrapper followed by a short answer, reindexing and boundary restoration.
+
+The independent MTP oracle passes normalization, attention, recursive carry,
+full Q8 head, ragged catch-up and independent batches. Point-mass frequency and
+filter-boundary tests retain the target sampling distribution; target arithmetic
+and the neural sampler are unchanged throughout the follow-up. Native EOS and
+ignore-EOS checks pass. The final HTTP lookup test reaches every physical width
+C2/C4/C6/C8 and accepts 2,880 copied tokens, including an all-greedy C8 mix of
+copies and new text whose outputs match isolated execution. All eight focused
+cache cases pass,
+including text/thinking/tool cancellation and disk restart. The preceding
+sampling-defaults, stops, batch, tool-agent and long-context checks remain
+applicable; this was not an all-model or all-functional-suite run.
+
+Real Pi 0.87.0 edit and creation workflows pass on the final production build:
+eight requests, six tool calls, identical assistant content/tool arguments, and
+byte-identical generated files versus main `3389a585`. All 32 compared prefill,
+decode, first-token and maximum-gap phases pass the 5% and 3 ms gate. The
+216-token code write that regressed by 9% during development now measures
+67.72 versus main's 68.51 tok/s (1.2% lower). A separate 27-token test-running
+tool call, previously 61.37 versus 72.44 tok/s, now reaches 72.75. Earlier Pi
+checks also cover literal protocol text and a thinking-enabled edit over Responses.
+Sessions and actual tool results are retained outside Git.
+
+New public workflow fixtures substitute for the author's unavailable private
+prompts. Extraction checks exact records; generated URI tests must pass correct
+code and detect three deliberate defects. A frozen 115K-token source archive
+precedes a tool-driven edit that must preserve every unrelated byte, including
+literal thinking/tool tags. Default sampling is used with fixed seeds:
+
+| Request | Main tok/s | Candidate tok/s | Quality/work |
+| --- | ---: | ---: | --- |
+| Extraction, thinking | 84.09 | 84.40 | Exact answer and reasoning, 707 tokens |
+| URI test generation, no thinking | 82.75 | 83.34 | Exact tests, all three mutants detected, 435 tokens |
+| 115K agent edit, no thinking | 63.26 | 74.77 | Exact file/tool arguments, 187 tokens; cached continuation |
+| 115K agent edit, thinking | 67.50 | 74.90 | Exact file/tool arguments and reasoning, 219 tokens |
+
+All 25 captured phases, including the archive warmup, pass the same timing gate.
+These single-session measurements precede the final mixed-greedy batch
+adjustment, which leaves their execution path unchanged.
+Tool-call IDs are generated independently and excluded from content comparison.
+Changing thinking mode changes the rendered prefix, so its full prefill is
+expected. The original main run's erroneous cache-hit assertion is retained;
+its saved outputs and cache work were independently revalidated after fixing
+that assertion, without rerunning or replacing the measurements. A second seed
+also passes extraction and URI quality checks on the preceding candidate.
+
+Canonical prepared pp2048/tg128 repetition reaches 115.77 versus 73.18 tok/s at
+C1. At C6, aggregate ordinary/repetitive rates are 109.54/231.31 versus
+108.74/177.98; all measured completion hashes and cache/prefill counts agree.
+Five C6 preparation flags remain in the raw request-index comparison: the
+identical requests were admitted in different orders. Server logs show the
+same admission/cache roles and costs (the first cached seven-token prefill is
+102.23 versus 102.13 ms). Comparing each corresponding admission role passes
+without averaging or changing limits. Earlier first-token variability reversed
+in the unchanged-main control and remains inconclusive, not a global timing
+pass.
+
+A separate C8 history runs copies, then new text, then four of each. Its mixed
+copy step initially verified 44 rows and raised the longest pause from main's
+157–163 ms to 200 ms. Bounding greedy copied suffixes in mixed cohorts reduces
+that pause to 145 ms. Copying/new-text rates in the final mixed cohort are
+28.08/18.58 versus main's 21.63/17.95 tok/s; all-copy cohorts retain full width
+and reach 31.42 versus 25.29 tok/s. All 24 responses retain exact text and
+expected cache work. Ordinary generation immediately after copies remains
+18.00 → 17.56 tok/s per session, with its longest pause reduced from 215 to
+162 ms. Small first-token flags remain inconclusive: main's 23–31 ms variation
+changes which request indices flag across unchanged controls, while the
+candidate takes about 29–31 ms. No decode or maximum-gap phase flags remain
+against either final main control. This is not a global timing pass.
+These focused observations do not replace the complete benchmark table or
+establish statistical language quality.
+
+llama.cpp `10b8b755` also verifies context proposals against the target, but its
+ngram path samples the target directly and compares the token. Gufo retains
+point-mass rejection sampling for copies alongside its neural p/q proposals.
+Both preserve the target distribution; identical seeded streams or a speed
+advantage over llama.cpp are not claimed. Target arithmetic and weights are
+unchanged.
+
 **PR #626 follow-up, October 17:** sparse attention bounds temporary K-fragment
 scheduling while retaining every dot product and softmax operation. Healthy
 MTP cache-slot reassignment retains bounded rollback scratch and its graphs;

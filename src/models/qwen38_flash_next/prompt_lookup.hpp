@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <limits>
 #include <span>
-#include <utility>
 #include <vector>
 
 namespace gufo::models::qwen38_flash_next {
@@ -15,24 +14,22 @@ namespace gufo::models::qwen38_flash_next {
 /// The drafter's context (committed tokens plus the cycle's chain so far)
 /// ends in a key of kKeyTokens; among the most recent earlier occurrences
 /// of that key, the one whose preceding tokens match the context furthest
-/// back wins, and the tokens that followed it are the proposals. A match
-/// shorter than kMinMatch tokens proposes nothing: short matches ("of the")
-/// are poor predictions at sampling temperature and would displace MTP
-/// drafts (2026-09-25 study: an ungated 3-token rule cost 6-8% on every
-/// task; >= 12 matched tokens were accepted 82-94% of the time).
+/// back wins, and the tokens that followed it are the proposals. Greedy
+/// requests require kMinMatch tokens; sampled requests require the longer
+/// kSampledMinMatch. Common code syntax and field names alone poorly predict
+/// their continuation at temperature and can displace useful neural drafts.
 ///
 /// Where the last verified copy left off, kResumeMinMatch tokens are
 /// enough: output that edits a line of the text it is copying rejoins it a
 /// few tokens later, and waiting for 12 fresh matching tokens would draft
-/// that stretch with MTP alone. A resumed copy that keeps fewer than half
-/// of its tokens means the output has left that text, so the next copy
-/// needs kMinMatch again (2026-10-15: without this, extraction requests
-/// that quote scattered lines ran 6.5% slower). A new request starts with
-/// nothing to resume.
+/// that stretch with MTP alone. A copy that keeps fewer than half of its
+/// tokens cannot enable this shorter gate: even a long matching prefix can
+/// precede a different field value or a new function body. A new request
+/// starts with nothing to resume.
 ///
-/// A request's first decode step copies nothing: a copy widens the step that
-/// produces the first token, which delayed it by 8 ms at 65k context and
-/// 20 ms at 115k (2026-10-15).
+/// A request's first speculative step copies nothing. Its position also
+/// bounds later query matches: a shared chat wrapper or tool header must not
+/// count as a long matching answer before that answer has been generated.
 ///
 /// Proposals depend only on the prefix, so rejection sampling (with the
 /// proposal as a point mass) keeps the target distribution exact.
@@ -40,6 +37,9 @@ class PromptLookup {
 public:
   static constexpr std::size_t kKeyTokens = 3;
   static constexpr std::size_t kMinMatch = 12;
+  /// Sampled code and field extraction often share short syntax without
+  /// sharing the continuation. Establish a longer match before resuming.
+  static constexpr std::size_t kSampledMinMatch = 24;
   static constexpr std::size_t kMaxMatch = 64;
   static constexpr std::size_t kMaxCandidates = 16;
   static constexpr std::size_t kResumeMinMatch = 5;
@@ -51,58 +51,63 @@ public:
   struct Match {
     std::size_t start{0};   ///< committed index of the first proposal
     std::size_t length{0};  ///< matched context tokens (>= kKeyTokens)
-    bool resumed{false};    ///< shorter than kMinMatch: resumes the last copy
   };
 
   /// Copy state the index cannot rebuild from the tokens. Session snapshots
   /// carry it, so a restored session copies as the original would have and
   /// seeded sampled output replays.
   struct State {
-    std::uint32_t resume{kNoState};  ///< Observe()'s resume point
-    std::uint32_t first_step{0};     ///< 1 until the request's first Step()
+    std::uint32_t resume{kNoState};         ///< Observe()'s resume point
+    std::uint32_t request_start{kNoState};  ///< first speculative position
   };
   static constexpr std::uint32_t kNoState =
       std::numeric_limits<std::uint32_t>::max();
 
   void Clear() {
-    head_.Clear();
-    prev_.clear();
-    resume_ = kNoResume;
+    ClearIndex();
+    request_start_ = kNoResume;
   }
 
   /// Called when a request starts: nothing to resume yet.
   void BeginRequest() {
     resume_ = kNoResume;
-    first_step_ = true;
+    request_start_ = kNoResume;
   }
 
   /// Called once per decode step; false on a request's first step.
-  [[nodiscard]] bool Step() { return !std::exchange(first_step_, false); }
+  [[nodiscard]] bool Step(std::size_t position) {
+    if (request_start_ != kNoResume)
+      return true;
+    request_start_ = position;
+    return false;
+  }
 
   [[nodiscard]] State Save() const {
     return {.resume = resume_ == kNoResume
                           ? kNoState
                           : static_cast<std::uint32_t>(resume_),
-            .first_step = first_step_ ? 1U : 0U};
+            .request_start = request_start_ == kNoResume
+                                 ? kNoState
+                                 : static_cast<std::uint32_t>(request_start_)};
   }
   /// Whether `state` can belong to a history of `tokens` committed tokens.
   [[nodiscard]] static bool Valid(const State& state, std::size_t tokens) {
-    return state.first_step <= 1 &&
+    return (state.request_start == kNoState || state.request_start <= tokens) &&
            (state.resume == kNoState || state.resume <= tokens);
   }
   /// Clears the index and adopts `state` (checked with Valid()).
   void Restore(const State& state) {
     Clear();
     resume_ = state.resume == kNoState ? kNoResume : state.resume;
-    first_step_ = state.first_step != 0;
+    request_start_ =
+        state.request_start == kNoState ? kNoResume : state.request_start;
   }
 
   /// Records a verified copy of `proposed` tokens from committed index
   /// `start` of which `accepted` were kept; the copied text continues at
-  /// start + accepted. `resumed` is the copy's Match::resumed.
-  void Observe(std::size_t start, std::size_t proposed, std::size_t accepted,
-               bool resumed) {
-    resume_ = resumed && 2 * accepted < proposed ? kNoResume : start + accepted;
+  /// start + accepted. Only a mostly accepted copy enables short matches.
+  void Observe(std::size_t start, std::size_t proposed, std::size_t accepted) {
+    resume_ = 2 * accepted < proposed ? kNoResume : start + accepted;
   }
 
   /// Indexes committed tokens appended since the last call. `committed`
@@ -113,7 +118,9 @@ public:
   void Extend(std::span<const std::int32_t> committed) {
     if (committed.size() < prev_.size() ||
         (!prev_.empty() && committed[prev_.size() - 1] != last_)) {
-      Clear();
+      // BeginRequest/Step may already have established the new request's
+      // boundary before its shorter restored history is indexed.
+      ClearIndex();
     }
     for (std::size_t end = prev_.size(); end < committed.size(); ++end) {
       // prev_[end] chains occurrences of the key ending just before `end`.
@@ -136,9 +143,15 @@ public:
   /// committed tokens, or a zero-length match. `tail` holds the uncommitted
   /// chain (anchor and drafts); `committed` must be what Extend() saw.
   [[nodiscard]] Match Find(std::span<const std::int32_t> committed,
-                           std::span<const std::int32_t> tail) const {
+                           std::span<const std::int32_t> tail,
+                           std::size_t minimum = kMinMatch) const {
     const std::size_t context = committed.size() + tail.size();
-    if (context < kKeyTokens) {
+    const std::size_t available =
+        request_start_ == kNoResume
+            ? context
+            : context - std::min(context, request_start_);
+    const std::size_t max_match = std::min(kMaxMatch, available);
+    if (max_match < kKeyTokens) {
       return {};
     }
     const auto at = [&](std::size_t i) {
@@ -154,7 +167,7 @@ public:
       // An occurrence ending at `end` proposes committed[end...]. The key
       // itself matched; extend backwards against the context.
       std::size_t length = kKeyTokens;
-      while (length < kMaxMatch && end > length && context > length &&
+      while (length < max_match && end > length &&
              committed[end - length - 1] == at(context - length - 1)) {
         ++length;
       }
@@ -162,8 +175,8 @@ public:
                            end + kResumeBack >= resume_ &&
                            end <= resume_ + kResumeWindow;
       if (end < committed.size() && length > best.length &&
-          (length >= kMinMatch || (resumes && length >= kResumeMinMatch))) {
-        best = {end, length, length < kMinMatch};
+          (length >= minimum || (resumes && length >= kResumeMinMatch))) {
+        best = {end, length};
       }
       end = prev_[end];
     }
@@ -171,6 +184,12 @@ public:
   }
 
 private:
+  void ClearIndex() {
+    head_.Clear();
+    prev_.clear();
+    resume_ = kNoResume;
+  }
+
   static constexpr std::uint32_t kNone =
       std::numeric_limits<std::uint32_t>::max();
   static constexpr std::size_t kNoResume =
@@ -277,7 +296,7 @@ private:
   std::vector<std::uint32_t> prev_;
   std::int32_t last_{0};           ///< committed[prev_.size() - 1] when indexed
   std::size_t resume_{kNoResume};  ///< where the last copy's source continues
-  bool first_step_{true};          ///< no Step() since BeginRequest()
+  std::size_t request_start_{kNoResume};
 };
 
 }  // namespace gufo::models::qwen38_flash_next

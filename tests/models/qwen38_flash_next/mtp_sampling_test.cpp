@@ -250,6 +250,35 @@ void CheckBatchProfitability() {
   policy.Observe(2, 0, 3, 2000.0F);
   Require(policy.Choose(rows, 0) == 3,
           "a width transition charged the preceding chain to the new width");
+  policy.SkipCycle();  // A copy replaced the neural draft work.
+  policy.Observe(2, 0, 3, 100000.0F);
+  Require(policy.Choose(rows, 0) == 3,
+          "lookup catch-up contaminated the neural width estimate");
+  // Copies can leave the physical batch with an AR cost but no measured
+  // neural widths. Repeatedly widening probes never measures a steady cost:
+  // Observe correctly discards every transition's preceding catch-up work.
+  qfn::MtpBatchController after_copy;
+  for (unsigned i = 0; i < 3; ++i)
+    after_copy.Observe(2, 0, 0, 50.0F);
+  for (unsigned i = 0; i < 3; ++i) {
+    Require(after_copy.Choose(rows, 0) == 1,
+            "unmeasured batch widened before qualifying its cheapest draft");
+    after_copy.Observe(2, 0, 1, 1000.0F);
+  }
+  Require(after_copy.Choose(rows, 0) > 1,
+          "qualifying one draft permanently capped speculative width");
+  qfn::MtpLengthController rising_a(7), rising_b(7);
+  rising_a.Observe(4, 4);
+  rising_b.Observe(4, 4);
+  const std::array<qfn::MtpBatchController::Row, 2> rising{
+      {{&rising_a, 7}, {&rising_b, 7}}};
+  qfn::MtpBatchController measured;
+  for (unsigned i = 0; i < 3; ++i)
+    measured.Observe(2, 0, 0, 50.0F);
+  for (unsigned i = 0; i < 3; ++i)
+    measured.Observe(2, 0, 1, 10.0F);
+  Require(measured.Choose(rising, 0) == 1,
+          "acceptance probe ignored a cheaper measured batch width");
   rows[1].budget = 1;
   Require(policy.Choose(rows, 0) <= 1, "batch exceeded one member's budget");
   policy.Observe(2, 0, 0, std::numeric_limits<float>::quiet_NaN());

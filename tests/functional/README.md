@@ -3,6 +3,43 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+Flash-Next prompt lookup has a focused MTP runner. It requires actual accepted
+copies, compares isolated and C2/C4/C6/C8 requests under greedy and the model's
+default sampling, mixes greedy copies with new text at C8, and checks stops
+followed by full replay:
+
+```sh
+nix develop -c python3 tests/functional/prompt_lookup.py \
+  --output /tmp/prompt-lookup -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --speculative mtp --mtp-model /path/to/mtp.gguf
+```
+
+The runner owns eight sessions and the loopback listener. It retains individual
+request timings and server logs, and stays outside hosted CI and `--suite all`.
+The native Flash-Next session test additionally checks full logits, RNG and
+snapshot restoration into previously used sessions.
+
+`prompt_lookup_workflows.py` checks extraction, generated URI tests and edits
+after a long source archive against an already running Flash-Next MTP server:
+
+```sh
+nix develop -c python3 tests/functional/prompt_lookup_workflows.py \
+  --base-url http://127.0.0.1:8080 --model MODEL \
+  --output /tmp/lookup-workflows --depth 32768 --seed 31
+```
+
+Select `--case extract`, `--case uri-tests` or `--case agent-edit` for focused
+runs; set the server's context above the requested depth plus 2,048 tokens.
+Extraction must return the exact records. Generated Python tests run
+against correct code and must detect three deliberate defects. Edits must
+preserve every unrelated byte, including literal protocol tags. The edit checks
+cached continuation and switching thinking mode, which changes the prefix and
+requires prefill. Use `--archive /tmp/lookup-workflows/archive.txt` to retain
+the same source input when comparing revisions. These are public substitutes
+for PR #613's private cases; they do not reproduce the author's exact prompts.
+Run the existing Pi `edit` and `creation` cases for real tool execution, too.
+
 Flash-Next startup identity checks use a separate runner with an initially empty
 artifact-hash cache, as on a fresh container. RAM-only serving must skip full-file
 fingerprints and still reuse its prompt. Disk serving must fingerprint the model
