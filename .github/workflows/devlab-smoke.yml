@@ -1,7 +1,9 @@
 name: Devlab functional checks
 
 on:
-  pull_request_target:
+  # Same trigger and fork approval policy as CI. The check is advisory: it is
+  # not required for merging.
+  pull_request:
     types: [ opened, synchronize, reopened, ready_for_review ]
   workflow_dispatch:
     inputs:
@@ -38,63 +40,32 @@ jobs:
     outputs:
       head: ${{ steps.revision.outputs.head }}
       pr: ${{ steps.revision.outputs.pr }}
-      trusted: ${{ steps.trust.outputs.trusted }}
       has_work: ${{ steps.plan.outputs.has_work }}
       scope: ${{ steps.plan.outputs.scope }}
       base: ${{ steps.plan.outputs.base }}
     permissions:
-      actions: read # environment protection rules
       contents: read
-      statuses: write
+      statuses: write # fork PR tokens stay read-only
     steps:
-      # The cluster builds and runs the PR head. Branches in this repository and
-      # authors with write access run directly; other forks wait for a
-      # maintainer to approve the pinned revision in the fork-approval
-      # environment. Dispatches still require Maintain or Admin.
-      - name: Decide whether the revision needs maintainer approval
-        id: trust
+      # Pull requests follow the repository's fork approval policy, like CI.
+      # Dispatches require Maintain or Admin.
+      - name: Authorize dispatch
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
           DISPATCH_ACTOR: ${{ github.actor }}
           RERUN_ACTOR: ${{ github.triggering_actor }}
         shell: bash
         run: |
           set -euo pipefail
-          role() {
-            gh api "repos/$GITHUB_REPOSITORY/collaborators/$1/permission" --jq .role_name 2>/dev/null \
-              || echo none
-          }
-          if [[ "$EVENT" == workflow_dispatch ]]; then
-            for actor in "$DISPATCH_ACTOR" "$RERUN_ACTOR"; do
-              case "$(role "$actor")" in
-                admin|maintain) echo "Authorized $actor" ;;
-                *) echo "::error::Dispatching functional checks requires Maintain or Admin access."; exit 1 ;;
-              esac
-            done
-            trusted=true
-          elif [[ "$HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
-            trusted=true
-          else
-            case "$(role "$AUTHOR")" in
-              admin|maintain|write) trusted=true ;;
-              *) trusted=false ;;
+          for actor in "$DISPATCH_ACTOR" "$RERUN_ACTOR"; do
+            role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$actor/permission" \
+              --jq .role_name 2>/dev/null || true)
+            case "$role" in
+              admin|maintain) echo "Authorized $actor" ;;
+              *) echo "::error::Dispatching functional checks requires Maintain or Admin access."; exit 1 ;;
             esac
-          fi
-          if [[ "$trusted" != true ]]; then
-            # A missing environment is created unprotected on first use; fail closed.
-            reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/devlab-fork-approval" \
-              --jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length' \
-              2>/dev/null || echo 0)
-            (( reviewers > 0 )) || {
-              echo "::error::devlab-fork-approval needs required reviewers before fork revisions can run."
-              exit 1
-            }
-            echo "::notice::Fork revision waits for maintainer approval."
-          fi
-          echo "trusted=$trusted" >> "$GITHUB_OUTPUT"
+          done
 
       - name: Pin PR head
         id: revision
@@ -114,6 +85,7 @@ jobs:
       # Advisory only: devlab/functional is not a required check, so cluster
       # problems never block merging.
       - name: Mark advisory status pending
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.revision.outputs.head }}
@@ -124,7 +96,7 @@ jobs:
             -f context=devlab/functional -f description="Planning functional checks" \
             -f target_url="$RUN_URL" --silent
 
-      - name: Checkout trusted workflow and test harness
+      - name: Checkout workflow and test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -152,7 +124,7 @@ jobs:
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           git fetch https://github.com/gufo-org/gufo.git "refs/pull/$PR_NUMBER/head:refs/ci/pr" main:refs/ci/main
           [[ "$(git rev-parse refs/ci/pr)" == "$APPROVED_HEAD" ]] || {
-            echo "::error::PR changed after approval; start a new run."
+            echo "::error::PR changed after this run started; the new push starts its own run."
             exit 1
           }
           base=$(git merge-base refs/ci/main "$APPROVED_HEAD")
@@ -182,27 +154,10 @@ jobs:
           name: functional-plan-${{ github.run_attempt }}
           path: functional-plan.json
 
-  approve:
-    name: Maintainer approval for fork revision
-    needs: authorize
-    if: needs.authorize.outputs.has_work == 'true' && needs.authorize.outputs.trusted != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # Required reviewers on this environment approve one pinned revision.
-    environment: devlab-fork-approval
-    permissions: {}
-    steps:
-      - name: Record approved revision
-        env:
-          HEAD_SHA: ${{ needs.authorize.outputs.head }}
-        run: echo "Approved $HEAD_SHA for the Strix Halo runner."
-
   smoke:
     name: Flash-Next functional checks on Strix Halo
-    needs: [ authorize, approve ]
-    if: >-
-      !cancelled() && needs.authorize.outputs.has_work == 'true' &&
-      (needs.authorize.outputs.trusted == 'true' || needs.approve.result == 'success')
+    needs: authorize
+    if: needs.authorize.outputs.has_work == 'true'
     runs-on: [ linux, strix-halo, devlab-dispatch ]
     timeout-minutes: 360
     permissions:
@@ -223,7 +178,7 @@ jobs:
           printf '### Disk before run\n\n%stext\n%s\n%s\n\n' "$fence" \
             "$(df -h "$GITHUB_WORKSPACE" "$cache_root")" "$fence" >> "$GITHUB_STEP_SUMMARY"
 
-      # Run only the SHA pinned by the maintainer-authorized hosted job.
+      # Run only the SHA pinned by the hosted authorize job.
       - name: Verify platform and GPU device access
         shell: bash
         run: |
@@ -336,14 +291,14 @@ jobs:
           awk '/^MemTotal:/ { printf "Host-visible memory: %.1f GiB\n", $2 / 1048576 }' /proc/meminfo
           printf '\nThis probe verifies runner placement and GPU device access. It does not execute a model or qualify performance.\n' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Checkout trusted workflow and test harness
+      - name: Checkout workflow and test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
           path: controller
 
-      - name: Recreate approved selection plan and candidate checkout
+      - name: Recreate selection plan and candidate checkout
         env:
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
           APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
@@ -382,7 +337,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf 'Approved candidate: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf 'Candidate: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
           cmake --version
           c++ --version
           hipcc --version
@@ -555,7 +510,7 @@ jobs:
 
   report:
     name: Publish functional report
-    needs: [ authorize, approve, smoke ]
+    needs: [ authorize, smoke ]
     # Hosted job: the PR write token never reaches the GPU host.
     if: always() && needs.authorize.outputs.head != ''
     runs-on: ubuntu-latest
@@ -565,7 +520,7 @@ jobs:
       pull-requests: write
       statuses: write
     steps:
-      - name: Checkout trusted report renderer
+      - name: Checkout report renderer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -589,7 +544,6 @@ jobs:
       - name: Render comment and status
         env:
           AUTHORIZE_RESULT: ${{ needs.authorize.result }}
-          APPROVE_RESULT: ${{ needs.approve.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
           RUN_BENCHMARK: ${{ inputs.benchmark || false }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -601,11 +555,14 @@ jobs:
           [[ "$RUN_BENCHMARK" == true ]] && benchmark=(--benchmark)
           python3 tests/functional/report.py --plan report-input/functional-plan.json \
             --results report-input/results --authorize "$AUTHORIZE_RESULT" \
-            --approval "$APPROVE_RESULT" --smoke "$SMOKE_RESULT" --run-url "$RUN_URL" "${benchmark[@]}" \
+            --smoke "$SMOKE_RESULT" --run-url "$RUN_URL" "${benchmark[@]}" \
             --comment comment.md --status status.env
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
 
+      # A fork PR's token cannot comment or set statuses; its result stays in
+      # the job checks and this summary.
       - name: Publish PR comment and advisory status
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.authorize.outputs.pr }}
