@@ -33,6 +33,8 @@ SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "respon
           "tool-reasoning", "tool-streaming", "reasoning-separator",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection", "cache")
+# Suites that already run another suite's checks; selecting both repeats the work.
+INCLUDED_IN = {"auto-tools": "tools", "tool-native-types": "tool-native-schemas"}
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -277,10 +279,10 @@ def main():
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
+        selected = [suite for suite in SUITES if suite not in (*INCLUDED_IN, "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
                     and (suite not in ("image-inputs", "image-count", "tool-images")
                          or option(command, "--mmproj") is not None)]
-    selected = list(dict.fromkeys(selected))
+    selected = [suite for suite in dict.fromkeys(selected) if INCLUDED_IN.get(suite) not in selected]
     disk_enabled = bool(set(selected) & {"cache", "image-count"})
     try:
         overrides = sampling_overrides(command)

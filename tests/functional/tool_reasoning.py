@@ -838,32 +838,37 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
                          max_output_tokens=1024,
                          extra_body={"seed": 41, "cache_prompt": False})
         label = "strict" if strict else "non_strict"
-        for endpoint, request in (("chat", chat), ("responses", responses)):
-            reference = None
-            for streaming in (False, True):
-                mode = "stream" if streaming else "buffered"
-                result = (chat_result(client, request, streaming) if endpoint == "chat"
-                          else response_result(client, request, streaming))
-                record(f"tool_reasoning_{endpoint}_{mode}_{label}", result)
-                assert_edit(result)
-                signature = (result["reasoning"].strip(), result["text"],
-                             json.loads(result["tools"][0]["function"]["arguments"]))
-                if reference is not None:
-                    assert signature == reference, (signature, reference)
-                reference = signature
+        # Pairwise over strictness, endpoint and streaming: each strictness
+        # compares one buffered and one streamed endpoint, so every pair of
+        # values runs once and greedy output must match across the pair.
+        reference = None
+        for endpoint, streaming in ((("chat", False), ("responses", True)) if strict
+                                    else (("chat", True), ("responses", False))):
+            mode = "stream" if streaming else "buffered"
+            result = (chat_result(client, chat, streaming) if endpoint == "chat"
+                      else response_result(client, responses, streaming))
+            record(f"tool_reasoning_{endpoint}_{mode}_{label}", result)
+            assert_edit(result)
+            signature = (result["reasoning"].strip(), result["text"],
+                         json.loads(result["tools"][0]["function"]["arguments"]))
+            if reference is not None:
+                assert signature == reference, (signature, reference)
+            reference = signature
+            if endpoint == "chat":
+                thought, chat_streaming = result["reasoning"], streaming
 
         # Stop after the actual quoted opener, before reasoning ends. Deriving
         # the stop from greedy output avoids a model-specific token budget.
-        thought = checks[f"tool_reasoning_chat_buffered_{label}"]["reasoning"]
+        # The stopped request uses the other streaming mode than its source.
         cut = thought.index("<tool_call>") + len("<tool_call>")
         marker = thought[cut:cut + 16]
         assert len(marker) == 16 and thought.index(marker) == cut, thought
-        for streaming in (False, True):
-            mode = "stream" if streaming else "buffered"
-            result = chat_result(client, {**chat, "stop": marker}, streaming)
-            record(f"tool_reasoning_stopped_{mode}_{label}", result)
-            assert result["reasoning"].strip() == thought[:cut].strip(), result
-            assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
+        streaming = not chat_streaming
+        mode = "stream" if streaming else "buffered"
+        result = chat_result(client, {**chat, "stop": marker}, streaming)
+        record(f"tool_reasoning_stopped_{mode}_{label}", result)
+        assert result["reasoning"].strip() == thought[:cut].strip(), result
+        assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
     check_disabled_tool_markers(client, model, checks, chat_result)
     deepseek = sampling_preset == "deepseek4"
     check_envelope_closer_framing(client, model, checks, chat_result, deepseek)

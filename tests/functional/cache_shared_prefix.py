@@ -74,8 +74,10 @@ def check_cache_shared_prefix(client, model, checks, chat_result):
             assert cold["text"].strip() == warm["text"].strip(), (warm, cold)
 
     # Long distinct tasks spread the grid checkpoints past the shared prefix:
-    # only a learned boundary restores all of it.
-    group("long_tasks", 700, 0)
+    # only a learned boundary restores all of it. About 5,000 task tokens put
+    # the nearest grid point inside the prefix more than LEARN_MIN_TOKENS short
+    # of the boundary, like longer tasks do.
+    group("long_tasks", 200, 0)
     # Short tasks leave a grid checkpoint near the boundary; the server may
     # keep it when learning would gain less than LEARN_MIN_TOKENS.
     group("short_tasks", 4, LEARN_MIN_TOKENS)

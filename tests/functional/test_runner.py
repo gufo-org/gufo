@@ -534,10 +534,12 @@ class FunctionalRunnerTest(unittest.TestCase):
 
     def test_cache_depth_replays_branches_before_cold_controls(self):
         requests, checks = self.run_cache_depth()
-        self.assertEqual(len(checks), 17)
-        self.assertEqual(len(requests), 16)
+        self.assertEqual(len(checks), 16)
+        self.assertEqual(len(requests), 15)
         self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is False
-                            for body in requests[-7:]))
+                            for body in requests[-6:]))
+        # The first turn is uncached already; no control repeats it.
+        self.assertNotIn("depth_cold_turn_0", checks)
         for code in ("RED", "GREEN", "BLUE"):
             self.assertEqual(checks["depth_branch_" + code]["text"], code)
         self.assertEqual(requests[7]["messages"], requests[8]["messages"])
@@ -1679,6 +1681,33 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
             code, report = run("wrong", 150, "different", root / "main")
             self.assertEqual(code, 1)
             self.assertEqual(report["status"], "failed")
+
+    def test_runner_skips_suites_their_selected_parent_already_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "openai_sdk.py").write_text('''import json,sys
+from pathlib import Path
+p = Path(sys.argv[sys.argv.index("--output") + 1])
+p.write_text(json.dumps({"status": "passed"}))
+p.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests": [{
+    "index": 0, "case": "reply", "status": "complete", "endpoint": "/v1/chat/completions",
+    "wall_ms": 1, "request_sha256": "same", "output_sha256": "same"}]}))
+''')
+            args = ["run.py", "--output", str(root / "out"), "--sampling-preset", "qwen38",
+                    "--record-baseline"]
+            for suite in ("auto-tools", "tools", "tool-native-types", "tool-native-schemas",
+                          "tool-native-types"):
+                args += ["--suite", suite]
+            args += ["--", sys.executable, "serve", "llm", "--model", "fixture.gguf"]
+            with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
+                 patch.object(functional, "server", return_value=contextlib.nullcontext()), \
+                 patch.object(functional, "provenance", return_value={}), \
+                 patch.object(functional, "join_server_timings"), \
+                 patch.object(functional, "execution_coverage", return_value={}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(functional.main(), 0)
+            report = json.loads((root / "out" / "report.json").read_text())
+            self.assertEqual(list(report["suites"]), ["tools", "tool-native-schemas"])
 
     def test_failed_or_incomplete_child_is_not_reported_as_a_pass(self):
         for child, expected in (

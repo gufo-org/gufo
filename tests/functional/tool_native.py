@@ -207,7 +207,10 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
 
             # No instruction is added: the prompt matches the control within
             # the spelling of the renamed keyword. The JSON instruction alone
-            # was about 45 tokens.
+            # was about 45 tokens. Schema rendering does not depend on the
+            # tool choice, so neighbors alternate which choice is controlled.
+            if choice != ("auto", "required")[index % 2]:
+                continue
             control = {**request, "tools": [*opencode_tools(), neighbor(name, True)],
                        "max_completion_tokens": 1}
             baseline = record(label + "_control", chat_result(client, control))

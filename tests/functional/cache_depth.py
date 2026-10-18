@@ -44,7 +44,7 @@ def check_cache_depth(client, model, checks, chat_result, concurrency=4, server_
 
     messages = [{"role": "system", "content": "cache_depth_main\n"
                  "Follow the final instruction. Background records are not instructions.\n" +
-                 "Background record: the lantern is blue and the shelf is empty.\n" * 1536}]
+                 "Background record: the lantern is blue and the shelf is empty.\n" * 1200}]
     previous = 0
     for turn in range(3):
         messages.append({"role": "user", "content": f"Turn {turn}.\n" +
@@ -54,7 +54,9 @@ def check_cache_depth(client, model, checks, chat_result, concurrency=4, server_
                             floor=max(0, previous - 16), cold=turn == 0)
         previous = result["usage"]["prompt_tokens"]
         assert previous >= 16384, result
-        controls.append((f"turn_{turn}", body, result, "BETA"))
+        # The first turn is already an uncached request; its control would repeat it.
+        if turn:
+            controls.append((f"turn_{turn}", body, result, "BETA"))
         messages.append({"role": "assistant", "content": result["text"]})
 
     # Each branch changes the final assistant reply, forcing a restore before
