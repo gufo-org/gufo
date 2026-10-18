@@ -705,6 +705,13 @@ TextModelRunner::BindConstraint(
   return binding;
 }
 
+std::size_t TextModelRunner::PrepareConstraintVocabulary() const {
+  const std::lock_guard lock(constraint_mutex_);
+  if (!constraint_vocabulary_)
+    constraint_vocabulary_ = BuildConstraintVocabulary();
+  return constraint_vocabulary_->size();
+}
+
 std::shared_ptr<const sampling::ReasoningBudget>
 TextModelRunner::BuildReasoningBudget(
     std::size_t tokens, std::span<const TextRunnerToken> prompt) const {

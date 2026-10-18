@@ -613,6 +613,7 @@ void PrintServeHelp(std::string_view program_name,
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    bool prepare_structured_output = false;
     std::string trace_path;
 
     gufo::cli::ArgParser parser(
@@ -736,6 +737,12 @@ void PrintServeHelp(std::string_view program_name,
         "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
+    parser.AddFlag(
+        "", "--prepare-structured-output",
+        "Build the structured-output token vocabulary before serving, not in "
+        "the first constrained request; startup fails if the model has "
+        "none",
+        "Model", &prepare_structured_output);
     parser.AddFlag("", "--log-progress",
                    "Log live prefill and decode progress (needs "
                    "--log-level=info or debug)",
@@ -1166,6 +1173,7 @@ int RunServe(std::span<const char* const> args) {
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    bool prepare_structured_output = false;
     std::string trace_path;
 
     gufo::cli::ArgParser llm_parser(
@@ -1285,6 +1293,12 @@ int RunServe(std::span<const char* const> args) {
         "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
+    llm_parser.AddFlag(
+        "", "--prepare-structured-output",
+        "Build the structured-output token vocabulary before serving, not in "
+        "the first constrained request; startup fails if the model has "
+        "none",
+        "Model", &prepare_structured_output);
     llm_parser.AddFlag("", "--log-progress",
                        "Log live prefill and decode progress (needs "
                        "--log-level=info or debug)",
@@ -1442,6 +1456,7 @@ int RunServe(std::span<const char* const> args) {
                     static_cast<std::chrono::milliseconds::rep>(
                         stall_timeout_ms)},
             .log_progress = log_progress,
+            .prepare_structured_output = prepare_structured_output,
         },
         speculative_config,
         server::TextDiskCacheConfig{

@@ -883,6 +883,16 @@ Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, includi
 streaming, images and concurrent requests. Reasoning stays separate from JSON
 and counts toward the output budget. Changing the schema changes the cache prefix.
 
+Every schema and tool grammar uses one token vocabulary per loaded model. By
+default the first constrained request builds it inside its queue time
+(Flash-Next: 248,320 tokens, about 30 ms of CPU). `gufo serve llm
+--prepare-structured-output` builds the same vocabulary while the model loads,
+before readiness, and every constrained request reuses it. Startup takes that
+much longer, and the process keeps it resident even if no request is
+constrained. The startup line `event=structured_output_prepared` reports
+`vocabulary_tokens`, `prepare_ms` and `rss_delta_kib`. Startup fails if the
+model has no structured output. Grammars and their masks are unchanged.
+
 `</think>` ends reasoning before constrained JSON. Native tools also accept an
 unquoted function header as the boundary when the model omits `</think>`.
 Bare marker mentions and quoted examples remain reasoning; markers inside

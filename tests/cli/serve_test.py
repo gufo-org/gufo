@@ -103,6 +103,12 @@ def main():
     keyed = run(load + ["-v", "--api-key", "super-secret-value"])
     assert "api_key=set" in keyed.stderr
     assert "super-secret-value" not in keyed.stderr
+    # Preparing structured output before serving is an explicit flag; loading
+    # still fails first for a missing model.
+    assert "--prepare-structured-output" in check(["serve", "llm", "--help"], 0,
+                                                  "--cache-ram-bytes")
+    check(["serve", "llm", "--model", "missing.gguf",
+           "--prepare-structured-output"], 1, "Error loading model")
     for bad in ("trace", "Debug", "", "info,debug"):
         check(["serve", "llm", "--log-level", bad, "--model", "missing.gguf"],
               2, "--log-level must be error, warn, info or debug")
