@@ -322,6 +322,29 @@ replay different assistant text from main. Compare those timings using matched
 interrupted histories, not a direct baseline for the divergent session; this
 also applies to later disk-spacing and cancellation requests in that history.
 
+For repeated screenshot preprocessing (#627), `image_history.py` measures full
+RAM-cache retries with 1, 2 and 4 synthetic 1080p screenshots, similar-token text
+controls and 128px image controls. It uses only the Python standard library:
+
+```sh
+python3 tests/functional/image_history.py --output /tmp/image-history-main -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --mmproj /path/to/mmproj.gguf --sessions 1 --context 32768 \
+  --cache-ram-bytes 8589934592 --think off
+```
+
+Repeat with the candidate, identical model/mode/options and a fresh output path.
+The harness owns host, port and debug logging. It retains every request,
+response, per-request queue time, process RSS and preprocessing-cache byte count;
+retries require identical output, full prompt reuse and zero prefill. Add
+`--turns 1 --kind 1080p --repeats 7` for a focused control. Also add
+`--fresh-encoding` to change PNG metadata on each retry while preserving pixels,
+tokens and continuation identity: this measures preprocessing misses without
+GPU prefill. Add `--image /path/to/1920x1080.png` to check a supplied PNG,
+including the digest cost of a larger encoded payload. The native
+`qwen_vision_cache_test --capacity-probe` separately
+checks the default byte ceiling with 22 resized 1080p images.
+
 For real coding-agent regressions, run `pi_agent.py` against a local server with
 `--base-url`, `--model`, `--pi /path/to/pi-0.87.0`, `--server-log`, and a fresh
 `--output` directory. Repeat `--case` to select affected tasks;

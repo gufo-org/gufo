@@ -175,6 +175,21 @@ work can batch across ready requests. See the
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 
+Qwen image requests reuse decoded and resized RGB pixels using a fast lookup
+hash and exact encoded-byte comparison under the preprocessing version. Each
+loaded Qwen runner retains up to 128 MiB of encoded bytes and resized pixel
+vectors combined, evicting least-recently-used images; entry metadata is also
+bounded. `cache_prompt: false` bypasses this reuse as well as continuation reuse.
+Requests share immutable buffers, so eviction does not invalidate an in-flight
+request. This CPU cache is separate from the snapshot budget below and is not
+written to disk. A resized 1920×1080 screenshot takes about 6 MiB of RGB storage,
+plus its encoded bytes. The compressible test screenshots fit 21 entries in
+this budget; larger encoded files reduce that count. Warm history still pays
+for prompt rendering, tokenization and the existing pixel/position identity
+hash; a new screenshot still needs vision encoding and prefill. Debug logs
+expose `event=image_cache` with whether reuse is enabled, entries, retained
+pixel/encoded bytes, hits, misses and evictions.
+
 `--cache-ram-bytes 0` (the default) selects an automatic snapshot budget capped
 at 32 GiB and half the available host RAM after model/state allocation, respecting
 container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA

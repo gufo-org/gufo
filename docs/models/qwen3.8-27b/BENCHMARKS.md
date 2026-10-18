@@ -180,3 +180,13 @@ C1, context capacity 262144, AR. Peak memory reported by HIP.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q8.svg)
+
+## CPU image preprocessing reuse
+
+Qwen3.8-27B shares the bounded image-preprocessing cache described in the
+[screenshot measurements in PR #645](https://github.com/gufo-org/gufo/pull/645).
+It retains up to 128 MiB of combined encoded and resized RGB vectors per loaded runner and shares
+pixels with requests. The measured Flash-Next queue times are not 27B speed
+claims. Q4/Q8 AR and DFlash2 image API correctness passes; the matched Q4 AR
+functional timing comparison remains inconclusive under the existing per-request
+5% and 3 ms limits.

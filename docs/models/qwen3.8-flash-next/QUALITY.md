@@ -543,3 +543,36 @@ Loading measures cold target/sidecar files to HTTP readiness, verified with
 runtime libraries may remain warm. Memory uses C1/AR/capacity 133121 and peak
 global HIP allocation, including idle memory. See the
 [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
+
+## CPU image-history reuse, October 18 (#627)
+
+The preprocessing cache preserves the original v1 continuation identity.
+`qwen_vision_cache_test` checks an independent Python hashlib golden, identical
+resized pixels/tokens/grids and prefix identities on cold and warm paths,
+position/order/encoder changes, bounded eviction with live request ownership,
+oversized bypass, invalid input and eight concurrent callers. It passes along
+with `qwen27b_vision_test` and `qwen_chat_template_test`. All 24 independent
+Pillow/Torchvision preprocessing fixtures remain byte-exact.
+
+The native Flash-Next vision serving check passes AR/MTP, sampled replay,
+concurrency, image continuation and disk restoration; image-boundary append
+oracles have zero logit error. The affected HTTP image/token-count/tool-image
+suites pass in both AR and MTP. MTP also passes long-context, interrupted image
+continuation and disk-restart checks, with actual drafts observed. The matched
+36-request screenshot runs preserve every output, token count, restored byte
+count and snapshot size. Pi 0.87.0 performs two real `read` image tasks in one
+Chat Completions session, verifies the returned pixels and answers red twice;
+its four HTTP requests show one preprocessing miss followed by three hits.
+
+[PR #645](https://github.com/gufo-org/gufo/pull/645) summarizes the measurements
+and their timing limitations. Raw observations remain outside the repository.
+The screenshot queue gains are scoped to their measured histories; this review
+does not claim a global functional timing pass or a new text-generation speedup.
+The standard pp2048/tg128 AR and mixed/repetitive MTP controls are retained
+separately from the image-preparation measurements.
+
+Final-candidate API correctness passes in all six profiles and the Pi replay
+passes. Flash-Next MTP and Qwen27B Q4 AR timing comparisons remain inconclusive;
+a short forced-cold Flash-Next decode flag remains unresolved. The final standard
+speed benchmark was interrupted when work was paused; earlier controls are
+retained, with no new speed claim. This is draft evidence, pending timing review.

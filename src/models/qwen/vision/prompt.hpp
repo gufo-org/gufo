@@ -13,6 +13,8 @@
 
 namespace gufo::models::qwen::vision {
 
+class ImageCache;
+
 inline constexpr std::uint32_t kImageToken = 248056;
 inline constexpr std::uint32_t kPatchSize = 16;
 inline constexpr std::uint32_t kMergeSize = 2;
@@ -39,7 +41,9 @@ struct RopeLayout {
 };
 
 struct PreparedImage {
-  core::Image pixels;  ///< resized RGB8; temporal repetition happens on GPU
+  /// Immutable resized RGB8 shared with CPU preprocessing reuse. Temporal
+  /// repetition happens on GPU; continuation snapshots do not retain pixels.
+  std::shared_ptr<const core::Image> pixels;
   ImageGrid grid;
   std::array<std::uint8_t, 32> prefix_identity{};
 };
@@ -63,7 +67,8 @@ struct Prompt {
     std::span<const tokenization::ChatMessage> messages,
     std::span<const tokenization::ChatTool> tools,
     const tokenization::ChatTemplateOptions& options,
-    std::string_view encoder_identity, std::uint32_t max_context);
+    std::string_view encoder_identity, std::uint32_t max_context,
+    ImageCache* image_cache = nullptr);
 
 }  // namespace gufo::models::qwen::vision
 #endif
