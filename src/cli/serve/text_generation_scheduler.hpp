@@ -55,10 +55,6 @@ struct TextSchedulerPolicy {
   /// disables it.
   std::chrono::milliseconds stall_timeout{0};
   bool log_progress{false};
-  /// Build the structured-output vocabulary while the scheduler is created,
-  /// before it admits requests, instead of in the first constrained request.
-  /// Construction fails if the model has no structured output.
-  bool prepare_structured_output{false};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.

@@ -2067,7 +2067,7 @@ void TestSnapshotStartupReportsSelectedLimits() {
 }
 
 void TestPreparedConstraintVocabularyKeepsGrammarBehavior() {
-  // --prepare-structured-output changes when the vocabulary is built, not
+  // Startup preparation changes when the vocabulary is built, not
   // what it allows: one build, reused by every binding, with the same masks
   // and accepted states as a runner that builds it for its first request.
   class VocabularyRunner final : public FakeRunner {

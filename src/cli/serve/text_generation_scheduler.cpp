@@ -479,6 +479,8 @@ void PrepareStructuredOutput(const TextModelRunner& runner) {
   const auto resident = ResidentKiB();
   const auto started = std::chrono::steady_clock::now();
   const auto tokens = runner.PrepareConstraintVocabulary();
+  if (tokens == 0)
+    return;
   const std::chrono::duration<double, std::milli> elapsed =
       std::chrono::steady_clock::now() - started;
   std::ostringstream line;
@@ -551,8 +553,7 @@ struct TextGenerationScheduler::Impl {
             .Descriptor()
             .capabilities.batched_multi_token_decode_max_width;
     device_lost_requests.reserve(runner_pool->capacity());
-    if (scheduler_policy.prepare_structured_output)
-      PrepareStructuredOutput(runner_pool->runner());
+    PrepareStructuredOutput(runner_pool->runner());
     worker = std::jthread(
         [this](const std::stop_token& stop_token) { Run(stop_token); });
     if (scheduler_policy.stall_timeout.count() > 0) {

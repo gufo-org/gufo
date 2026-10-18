@@ -193,6 +193,7 @@ struct FakeControl {
   std::atomic<std::size_t> invalidations{0};
   std::atomic<std::size_t> states_created{0};
   bool structured_output{false};
+  bool vocabulary_failure{false};
   std::atomic<std::size_t> vocabulary_builds{0};
   std::atomic<std::size_t> decode_calls{0};
   std::atomic<std::size_t> batch_preparations{0};
@@ -318,6 +319,8 @@ public:
   BuildConstraintVocabulary() const override {
     if (!control_->structured_output)
       return TextModelRunner::BuildConstraintVocabulary();
+    if (control_->vocabulary_failure)
+      throw std::runtime_error("vocabulary build failed");
     control_->vocabulary_builds.fetch_add(1, std::memory_order_relaxed);
     return std::make_shared<gufo::sampling::ConstraintVocabulary>(
         256, [](std::uint32_t id) {
@@ -2629,20 +2632,13 @@ void TestShutdownCancelsRunnerAcquisition() {
 
 void TestStructuredOutputIsPreparedBeforeServing() {
   // The scheduler is created during model loading, before load_completed and
-  // before the server listens. With the option, the vocabulary is ready when
+  // before the server listens. The vocabulary is ready when
   // construction returns, and constrained requests reuse it.
-  const auto lazy = std::make_shared<FakeControl>();
-  lazy->structured_output = true;
-  (void)MakeScheduler(lazy, 1);
-  Expect(lazy->vocabulary_builds == 0,
-         "without the option the vocabulary waits for a constrained request");
-
   const auto control = std::make_shared<FakeControl>();
   control->structured_output = true;
   std::ostringstream output;
   auto* previous = std::clog.rdbuf(output.rdbuf());
-  auto scheduler = MakeScheduler(
-      control, 1, {}, TextSchedulerPolicy{.prepare_structured_output = true});
+  auto scheduler = MakeScheduler(control, 1);
   std::clog.rdbuf(previous);
   Expect(control->vocabulary_builds == 1,
          "the vocabulary is built before the scheduler admits a request");
@@ -2661,16 +2657,33 @@ void TestStructuredOutputIsPreparedBeforeServing() {
   Expect(scheduler->Submit({7, 70}, 2, 0.0F).Wait().tokens.size() == 2,
          "a prepared scheduler serves requests");
 
-  // A model without structured output fails loading instead of serving.
+  // Runners without structured output can still serve ordinary text, but
+  // reject an explicit constrained request as before.
+  const auto plain = MakeScheduler(std::make_shared<FakeControl>(), 1);
+  Expect(plain->runner().PrepareConstraintVocabulary() == 0 &&
+             plain->Submit({7, 70}, 2, 0.0F).Wait().tokens.size() == 2,
+         "unsupported runners retain ordinary text serving");
   std::string error;
   try {
-    (void)MakeScheduler(std::make_shared<FakeControl>(), 1, {},
-                        TextSchedulerPolicy{.prepare_structured_output = true});
+    (void)plain->runner().BindConstraint(grammar);
   } catch (const std::invalid_argument& exception) {
     error = exception.what();
   }
   Expect(error.find("does not support structured output") != std::string::npos,
-         "preparation failure stops startup");
+         "unsupported runners still reject structured output");
+
+  // A supported runner with a broken vocabulary must fail startup.
+  const auto broken = std::make_shared<FakeControl>();
+  broken->structured_output = true;
+  broken->vocabulary_failure = true;
+  error.clear();
+  try {
+    (void)MakeScheduler(broken, 1);
+  } catch (const std::runtime_error& exception) {
+    error = exception.what();
+  }
+  Expect(error == "vocabulary build failed",
+         "vocabulary build failures stop startup");
 }
 
 void TestProgressLoggingIsOptInAndBounded() {

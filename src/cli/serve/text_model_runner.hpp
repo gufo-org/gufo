@@ -265,11 +265,11 @@ public:
   [[nodiscard]] virtual std::vector<TextExecutionPlan> SupportedPlans()
       const = 0;
 
-  /// Built for the first constrained request, or before serving with
-  /// --prepare-structured-output; normal text loads pay nothing by default.
+  /// Prepared before serving and shared by all constrained requests.
+  /// A null vocabulary means the runner does not support structured output.
   [[nodiscard]] virtual std::shared_ptr<const sampling::ConstraintVocabulary>
   BuildConstraintVocabulary() const {
-    throw std::invalid_argument("model does not support structured output");
+    return nullptr;
   }
   [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
       const {
@@ -280,7 +280,8 @@ public:
       std::shared_ptr<const sampling::JsonConstraint> grammar) const;
   /// Builds the vocabulary BindConstraint uses now rather than in the first
   /// constrained request; later calls reuse it. Returns its token count.
-  /// Throws std::invalid_argument when the model has no structured output.
+  /// Returns zero when the runner has no structured output. Build failures
+  /// propagate to the caller.
   std::size_t PrepareConstraintVocabulary() const;
 
   /// Reasoning tags for a token budget, as llama.cpp's chat format for the
