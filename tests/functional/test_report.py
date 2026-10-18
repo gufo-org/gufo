@@ -24,7 +24,7 @@ BENCH = """| model | size | backend | test | t/s |
 
 class ReportTest(unittest.TestCase):
     def run_report(self, directory, plan, summary=None, authorize="success", smoke="success",
-                   benchmark=False, bench=None):
+                   benchmark=False, bench=None, approval="skipped"):
         root = Path(directory)
         (root / "plan.json").write_text(json.dumps(plan))
         results = root / "results"
@@ -34,7 +34,8 @@ class ReportTest(unittest.TestCase):
         for name, text in (bench or {}).items():
             (results / name).write_text(text)
         argv = ["report.py", "--plan", str(root / "plan.json"), "--results", str(results),
-                "--authorize", authorize, "--smoke", smoke, "--run-url", "https://run",
+                "--authorize", authorize, "--approval", approval, "--smoke", smoke,
+                "--run-url", "https://run",
                 "--comment", str(root / "comment.md"), "--status", str(root / "status.env")]
         if benchmark:
             argv.append("--benchmark")
@@ -77,6 +78,13 @@ class ReportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             status, _ = self.run_report(directory, self.plan, authorize="failure", smoke="skipped")
         self.assertEqual(status["state"], "error")
+
+    def test_declined_fork_approval_is_an_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status, comment = self.run_report(directory, self.plan, approval="failure",
+                                              smoke="skipped")
+        self.assertEqual(status["state"], "error")
+        self.assertIn("not approved", comment)
 
     def test_no_impact_skip_passes(self):
         plan = dict(self.plan, groups=[])

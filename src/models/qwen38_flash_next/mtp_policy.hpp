@@ -188,6 +188,11 @@ public:
                         stable_cycles_ >= 2;
     if (stable && (cell.samples[0] == 0 || cell.cycles % 32 < 2))
       return 0;
+    // Copies may leave all neural costs unmeasured. Qualify the cheapest
+    // width before widening: transitions include the previous catch-up,
+    // and the first usable sample can still contain lazy allocation work.
+    if (stable && cell.samples[0] != 0 && cell.samples[1] < 2)
+      return 1;
     auto costs = MtpCycleCosts(context, rows.size());
     const float scale = cell.samples[0] ? cell.ms[0] / costs[0] : 1.0F;
     for (unsigned width = 0; width <= cap; ++width)
@@ -205,18 +210,24 @@ public:
         best = width;
       }
     }
-    // Fully accepted cohorts can qualify deeper shapes promptly. Stop
-    // forcing exploration once that physical width has warmed measurements.
-    unsigned probe = cap;
-    for (const auto& row : rows)
-      probe = std::min(probe, row.acceptance->State().probe_depth);
-    if (probe > best && cell.samples[probe] < 2)
-      return probe;
     // Bounded exploration learns wider costs and conditional acceptance;
     // it also lets an AR-only batch detect a change in the workload.
     if (cell.cycles % 16 == 2)
       return std::min(cap, std::max(1U, best + 1));
+    // The transition's catch-up is excluded by Observe. Hold a new probe
+    // for two usable samples so its measured cost can inform the next choice.
+    const auto probe_phase = cell.cycles % 16;
+    if (stable && (probe_phase == 3 || probe_phase == 4) &&
+        cell.last_drafts != 0 && cell.samples[cell.last_drafts] < 2)
+      return std::min(cap, cell.last_drafts);
     return best;
+  }
+
+  /// Lookup can widen verification and shorten neural drafting. Neither
+  /// that cycle nor its following catch-up measures a neural width's cost.
+  void SkipCycle() noexcept {
+    last_concurrency_ = 0;
+    stable_cycles_ = 0;
   }
 
   void Observe(std::size_t concurrency, std::uint32_t context,

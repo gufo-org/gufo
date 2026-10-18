@@ -7,7 +7,8 @@
 #include <bit>
 #include <cerrno>
 #include <cstring>
-#include <unordered_map>
+#include <limits>
+#include <stdexcept>
 
 #include "src/core/quant/ggml_dequant.hpp"
 
@@ -237,27 +238,58 @@ bool NgramTable::Read(std::span<const std::uint32_t> rows,
   return StartRead(rows, out) && WaitRead();
 }
 
+void NgramTable::ReserveGather(std::size_t rows) {
+  const std::lock_guard lock(mutex_);
+  if (active_)
+    throw std::logic_error("cannot reserve an outstanding n-gram gather");
+  if (rows > std::numeric_limits<std::size_t>::max() / 4)
+    throw std::length_error("n-gram gather is too large");
+  const auto capacity = std::bit_ceil(std::max<std::size_t>(2, rows * 2));
+  if (first_rows_.size() < capacity)
+    first_rows_.resize(capacity);
+  // Touch the reserved pages too: later, larger prefills should not fault
+  // their scratch while cache backing is being populated.
+  jobs_.resize(rows);
+  jobs_.clear();
+  copies_.resize(rows);
+  copies_.clear();
+}
+
 bool NgramTable::StartRead(std::span<const std::uint32_t> rows,
                            std::span<float> out) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (active_ || rows.size() > out.size() / row_dim_ ||
+      rows.size() > std::numeric_limits<std::size_t>::max() / 4 ||
       std::any_of(rows.begin(), rows.end(),
                   [this](std::uint32_t row) { return row >= rows_; })) {
     return false;
   }
-  // Read each distinct row once, then copy it to its other slots.
-  std::unordered_map<std::uint32_t, std::size_t> first;
-  first.reserve(rows.size());
+  // A node-based map allocates on every gather. Those allocations can wait
+  // behind background cache page registration before any GPU work is queued.
+  // Keep a flat table at most half full and clear only this gather's size;
+  // decode after a large prefill must not scan the whole retained capacity.
+  constexpr auto empty = std::numeric_limits<std::size_t>::max();
+  const auto capacity =
+      std::bit_ceil(std::max<std::size_t>(2, rows.size() * 2));
+  if (first_rows_.size() < capacity)
+    first_rows_.resize(capacity);
+  auto first = std::span(first_rows_).first(capacity);
+  std::ranges::fill(first, empty);
   jobs_.clear();
   copies_.clear();
   jobs_.reserve(rows.size());
+  copies_.reserve(rows.size());
   for (std::size_t i = 0; i < rows.size(); ++i) {
-    const auto [it, inserted] = first.emplace(rows[i], i);
-    if (inserted) {
+    const auto hash = std::uint64_t{rows[i]} * 0x9e3779b97f4a7c15ULL;
+    auto slot = static_cast<std::size_t>(hash ^ (hash >> 32)) & (capacity - 1);
+    while (first[slot] != empty && rows[first[slot]] != rows[i])
+      slot = (slot + 1) & (capacity - 1);
+    if (first[slot] == empty) {
+      first[slot] = i;
       jobs_.push_back({rows[i], out.data() + i * row_dim_});
     } else {
       copies_.push_back(
-          {out.data() + it->second * row_dim_, out.data() + i * row_dim_});
+          {out.data() + first[slot] * row_dim_, out.data() + i * row_dim_});
     }
   }
   if (jobs_.size() >= kBatchJobs) {

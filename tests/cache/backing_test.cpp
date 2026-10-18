@@ -1,4 +1,9 @@
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 
 #include <algorithm>
 #include <array>
@@ -29,6 +34,7 @@ std::atomic<std::size_t> allocations{};
 std::atomic<std::size_t> host_allocations{};
 std::atomic<std::size_t> max_piece{};
 std::atomic<bool> fail_populate{};
+bool pins_denied{};
 bool fail_copy{}, fail_record{}, fail_query{}, fail_wait{}, fail_alloc{};
 int copies_before_failure{};
 thread_local bool fail_stream_new{}, observe_allocation_cleanup{};
@@ -835,6 +841,112 @@ void BasePageBacking() {
   }
   assert(ledger.Snapshot().total_bytes == 0);
 }
+std::size_t KernelPinnedBytes() {
+  auto* status = std::fopen("/proc/self/status", "r");
+  assert(status);
+  char line[256];
+  std::size_t kib = 0;
+  bool found = false;
+  while (std::fgets(line, sizeof(line), status))
+    if (std::sscanf(line, "VmPin: %zu kB", &kib) == 1) {
+      found = true;
+      break;
+    }
+  std::fclose(status);
+  assert(found);
+  return kib * 1024;
+}
+void LongTermPagePins() {
+  constexpr std::size_t bytes = 8ULL << 20;
+  const auto before = KernelPinnedBytes();
+  cache::ResourceLedger ledger(Limits(bytes + metadata));
+  std::optional<hip::BackingBlock> survivor;
+  bool pinned = false;
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+    pinned = pool.LongTermPinnedBytes() == bytes;
+    assert(!pins_denied || !pinned);
+    assert(pool.LongTermPinnedBytes() == (pinned ? bytes : 0));
+    survivor = pool.TryAcquire(Category::kPrivateState);
+    assert(survivor);
+    assert(KernelPinnedBytes() == before + (pinned ? bytes : 0));
+  }
+  // The allocation outlives its pool facade. Its kernel pins must do so too.
+  assert(KernelPinnedBytes() == before + (pinned ? bytes : 0));
+  void* device = nullptr;
+  auto memory = survivor->Bytes();
+  assert(hipHostGetDevicePointer(&device, memory.data(), 0) == hipSuccess);
+  assert(hipMemset(device, 0x67, memory.size()) == hipSuccess);
+  assert(hipDeviceSynchronize() == hipSuccess);
+  assert(std::all_of(memory.begin(), memory.end(),
+                     [](std::byte b) { return b == std::byte{0x67}; }));
+  survivor.reset();
+  assert(KernelPinnedBytes() == before);
+  assert(ledger.Snapshot().total_bytes == 0);
+  if (!pinned && !pins_denied)
+    std::puts("SKIP: long-term pin lifetime (io_uring or memlock restricted)");
+
+  // A failed GPU registration must release already-acquired Linux pins.
+  fail_alloc = true;
+  Throws<std::runtime_error>([&] {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+  });
+  fail_alloc = false;
+  assert(KernelPinnedBytes() == before);
+  assert(ledger.Snapshot().total_bytes == 0);
+
+  // A low soft memlock limit cannot remove the existing cache path. Restore
+  // it before returning, and ensure a refused pin does not poison later pools.
+  rlimit saved{};
+  assert(getrlimit(RLIMIT_MEMLOCK, &saved) == 0);
+  auto restricted = saved;
+  restricted.rlim_cur = 0;
+  assert(setrlimit(RLIMIT_MEMLOCK, &restricted) == 0);
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+    // CAP_IPC_LOCK can bypass the soft limit; either result remains usable.
+    auto block = pool.TryAcquire(Category::kPrivateState);
+    assert(block);
+    CheckBasePages(block->Bytes());
+    assert(hipHostGetDevicePointer(&device, block->Bytes().data(), 0) ==
+           hipSuccess);
+    assert(hipMemset(device, 0x38, bytes) == hipSuccess);
+    assert(hipDeviceSynchronize() == hipSuccess);
+    assert(std::all_of(block->Bytes().begin(), block->Bytes().end(),
+                       [](std::byte b) { return b == std::byte{0x38}; }));
+  }
+  assert(setrlimit(RLIMIT_MEMLOCK, &saved) == 0);
+  assert(KernelPinnedBytes() == before);
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+    assert(pool.LongTermPinnedBytes() == (pinned ? bytes : 0));
+  }
+  assert(KernelPinnedBytes() == before);
+  assert(ledger.Snapshot().total_bytes == 0);
+  // io_uring limits each iovec to 1 GiB, not the complete cache segment.
+  // Exercise a partial second range and release every pin together.
+  constexpr std::size_t large = (1ULL << 30) + 4096;
+  if (pinned && saved.rlim_cur >= large) {
+    cache::ResourceLedger large_ledger(Limits(large + metadata));
+    {
+      hip::CommittedBackingPool pool(large_ledger,
+                                     {large + metadata, large, metadata});
+      assert(pool.LongTermPinnedBytes() == large);
+      assert(KernelPinnedBytes() == before + large);
+      auto block = pool.TryAcquire(Category::kPrivateState);
+      assert(block);
+      assert(hipHostGetDevicePointer(&device, block->Bytes().data(), 0) ==
+             hipSuccess);
+      assert(hipMemset(static_cast<std::byte*>(device) + large - 4096, 0x19,
+                       4096) == hipSuccess);
+      assert(hipDeviceSynchronize() == hipSuccess);
+      assert(std::all_of(block->Bytes().end() - 4096, block->Bytes().end(),
+                         [](std::byte b) { return b == std::byte{0x19}; }));
+    }
+    assert(KernelPinnedBytes() == before);
+    assert(large_ledger.Snapshot().total_bytes == 0);
+  }
+}
 void PopulationFailure() {
   for (const std::size_t bytes : {8ULL << 20, 128ULL << 20}) {
     cache::ResourceLedger ledger(Limits(bytes + metadata));
@@ -878,7 +990,26 @@ void LargeBacking() {
   assert(ledger.Snapshot().total_bytes == 0);
 }
 }  // namespace
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--deny-long-term-pins") == 0) {
+    // Match restrictive container policies in this process only, before HIP
+    // creates threads. Cache registration, transfers and cleanup must still
+    // work; no host policy is changed or bypassed.
+    sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_setup, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_register, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_enter, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)};
+    sock_fprog program{static_cast<unsigned short>(std::size(filter)), filter};
+    assert(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0);
+    assert(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) == 0);
+    pins_denied = true;
+  } else
+    assert(argc == 1);
   hipDeviceProp_t properties{};
   assert(hipGetDeviceProperties(&properties, 0) == hipSuccess);
   assert(std::strncmp(properties.gcnArchName, "gfx1151", 7) == 0);
@@ -893,10 +1024,13 @@ int main() {
   AcquireAllocationFailure();
   BorrowedPoolLifetime();
   BasePageBacking();
+  LongTermPagePins();
   PopulationFailure();
   LargeBacking();
   std::puts(
       "PASS: precommitted and on-demand blocks, accounting, racing "
       "borrowers, pinned lifetime, bounded copies, leases and failure "
       "drains");
+  if (pins_denied)
+    std::puts("PASS: restricted io_uring retains registered cache backing");
 }

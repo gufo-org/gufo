@@ -1,7 +1,11 @@
 #include "src/core/hip/committed_backing.hpp"
 
 #include <hip/hip_runtime.h>
+#include <linux/io_uring.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -16,20 +20,66 @@
 namespace gufo::hip {
 namespace detail {
 namespace {
+struct CommittedPages {
+  void* data{};
+  int pin{-1};
+  explicit operator bool() const { return data != nullptr; }
+};
+
+// GPU registration uses movable userptr pages. A Linux long-term pin also
+// prevents ordinary compaction from moving them and evicting the process's
+// GPU queues. An io_uring registered buffer supplies that pin without I/O,
+// polling threads or a mapped submission/completion ring.
+int PinPages(void* data, std::size_t bytes) {
+  // Linux caps each registered buffer at 1 GiB. Keep one ring per segment,
+  // including models whose private state needs a larger contiguous segment.
+  constexpr std::size_t max_buffer = 1ULL << 30;
+  std::vector<iovec> ranges;
+  try {
+    for (std::size_t offset = 0; offset < bytes;) {
+      const auto length = std::min(max_buffer, bytes - offset);
+      ranges.push_back({static_cast<std::byte*>(data) + offset, length});
+      offset += length;
+    }
+  } catch (const std::bad_alloc&) {
+    return -1;
+  }
+  io_uring_params parameters{};
+  const int ring = syscall(SYS_io_uring_setup, 1, &parameters);
+  if (ring < 0)
+    return -1;
+  if (syscall(SYS_io_uring_register, ring, IORING_REGISTER_BUFFERS,
+              ranges.data(), ranges.size()) == 0)
+    return ring;
+  close(ring);
+  // Restricted io_uring or memlock limits retain the existing registration
+  // path and cache capacity; they must not turn cache admission into failure.
+  return -1;
+}
+
+void UnpinPages(int ring) {
+  if (ring >= 0) {
+    // Drop pins synchronously before unmapping and releasing ledger charges.
+    (void)syscall(SYS_io_uring_register, ring, IORING_UNREGISTER_BUFFERS,
+                  nullptr, 0);
+    close(ring);
+  }
+}
+
 // Ordinary anonymous pages, then registered with the GPU. Opt out of THP
 // before population: later huge-page promotion can invalidate GPU mappings.
-void* CommitPages(std::size_t bytes) {
+CommittedPages CommitPages(std::size_t bytes) {
   constexpr std::size_t page = 4096;
   const auto workers = std::min<std::size_t>(4, bytes / (32ULL << 20));
   void* data = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (data == MAP_FAILED)
-    return nullptr;
+    return {};
   // Kernels built without THP reject this advice with EINVAL; their pages
   // cannot be promoted. All other failures must release the mapping.
   if (madvise(data, bytes, MADV_NOHUGEPAGE) != 0 && errno != EINVAL) {
     munmap(data, bytes);
-    return nullptr;
+    return {};
   }
   std::atomic<bool> populated{true};
   const auto populate = [&](std::size_t begin, std::size_t end) {
@@ -59,26 +109,30 @@ void* CommitPages(std::size_t bytes) {
     populate(0, bytes);
   if (!populated.load(std::memory_order_relaxed)) {
     munmap(data, bytes);
-    return nullptr;
+    return {};
   }
+  const int pin = PinPages(data, bytes);
   if (hipHostRegister(data, bytes, hipHostRegisterDefault) != hipSuccess) {
+    UnpinPages(pin);
     munmap(data, bytes);
-    return nullptr;
+    return {};
   }
-  return data;
+  return {data, pin};
 }
-void ReleasePages(void* data, std::size_t bytes) {
-  (void)hipHostUnregister(data);
-  munmap(data, bytes);
+void ReleasePages(CommittedPages pages, std::size_t bytes) {
+  (void)hipHostUnregister(pages.data);
+  UnpinPages(pages.pin);
+  munmap(pages.data, bytes);
 }
 }  // namespace
 struct BackingState {
   cache::ResourceCharge metadata;
   // Fixed capacity; entries below `committed` are published and never move.
   std::unique_ptr<cache::ResourceCharge[]> blocks;
-  std::unique_ptr<void*[]> segments;
+  std::unique_ptr<CommittedPages[]> segments;
   std::size_t capacity{}, segment_blocks{}, block_bytes{};
   std::atomic<std::size_t> committed{}, next{};
+  std::atomic<std::size_t> pinned_bytes{};
   // Keep private states apart from longer-lived KV rows. Rows and tails grow
   // forward so restore can still join adjacent ranges into large transfers.
   // Both cursors can use the whole pool; there is no partition or extra budget.
@@ -89,7 +143,7 @@ struct BackingState {
   std::mutex growth;
   std::atomic<bool> growing_ahead{};
   std::byte* Address(std::size_t index) const {
-    return static_cast<std::byte*>(segments[index / segment_blocks]) +
+    return static_cast<std::byte*>(segments[index / segment_blocks].data) +
            index % segment_blocks * block_bytes;
   }
   std::size_t SegmentBytes(std::size_t segment) const {
@@ -131,11 +185,13 @@ struct BackingState {
     } catch (const std::bad_alloc&) {
       // Free before the converted charges unwind, as at initialization.
       ReleasePages(data, count * block_bytes);
-      data = nullptr;
+      data = {};
       for (std::size_t i = 0; i < count; ++i)
         blocks[first + i] = {};
       return false;
     }
+    if (data.pin >= 0)
+      pinned_bytes.fetch_add(count * block_bytes, std::memory_order_relaxed);
     committed.store(first + count, std::memory_order_release);
     return true;
   }
@@ -248,7 +304,7 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
                               ? config.segment_bytes / config.block_bytes
                               : std::max<std::size_t>(count, 1);
   state->blocks = std::make_unique<cache::ResourceCharge[]>(count);
-  state->segments = std::make_unique<void*[]>(
+  state->segments = std::make_unique<detail::CommittedPages[]>(
       (count + state->segment_blocks - 1) / state->segment_blocks + 1);
   state->ledger = &ledger;
   state->admit_segment = std::move(config.admit_segment);
@@ -270,12 +326,15 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
       // or converted charges unwind, preserving physical-byte accounting.
       if (data) {
         detail::ReleasePages(data, count * config.block_bytes);
-        data = nullptr;
+        data = {};
       }
       for (std::size_t i = 0; i < count; ++i)
         state->blocks[i] = {};
       throw;
     }
+    if (data.pin >= 0)
+      state->pinned_bytes.store(count * config.block_bytes,
+                                std::memory_order_relaxed);
     state->committed.store(count, std::memory_order_release);
   }
   state_ = std::move(state);
@@ -425,6 +484,9 @@ std::size_t CommittedBackingPool::CommittedBytes() const noexcept {
 }
 std::size_t CommittedBackingPool::PageCommitAllocations() const noexcept {
   return state_->SegmentCount();
+}
+std::size_t CommittedBackingPool::LongTermPinnedBytes() const noexcept {
+  return state_->pinned_bytes.load(std::memory_order_relaxed);
 }
 
 }  // namespace gufo::hip

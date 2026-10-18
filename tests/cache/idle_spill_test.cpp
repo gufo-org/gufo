@@ -261,8 +261,13 @@ void ForegroundStreamWait() {
   f.device_idle = false;
   f.streams_available = false;
   f.lease.Commit();
+  const int attempts = f.stream_attempts;
   auto request =
       std::async(std::launch::async, [&] { return f.slot.Acquire(); });
+  // The wait is timed from inside Acquire, so start the 20 ms only once the
+  // request is polling for a stream; a late thread start would shorten it.
+  while (f.stream_attempts == attempts)
+    std::this_thread::yield();
   assert(request.wait_for(20ms) == std::future_status::timeout);
   f.streams_available = true;
   f.adapter.gate.Allow(3);

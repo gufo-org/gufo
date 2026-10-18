@@ -697,6 +697,7 @@ int GenerateFlashNextResponse(const PromptOptions& opt,
   }
   sampling::SamplerState sampler(opt.sampling, prompt);
   std::vector<tokenization::TokenId> generated;
+  const auto stats_before = session.Statistics();
   const auto start = std::chrono::steady_clock::now();
   while (generated.size() < opt.max_tokens) {
     models::qwen38_flash_next::Session::DecodeResult decoded;
@@ -722,6 +723,16 @@ int GenerateFlashNextResponse(const PromptOptions& opt,
             .count();
     std::cerr << "Generated " << generated.size() << " tokens ("
               << generated.size() / seconds << " tok/s)\n";
+    const auto& stats = session.Statistics();
+    if (stats.cycles != stats_before.cycles) {
+      std::cerr << "[Speculative]: cycles="
+                << stats.cycles - stats_before.cycles
+                << " drafted=" << stats.drafted - stats_before.drafted
+                << " accepted=" << stats.accepted - stats_before.accepted
+                << " lookup_proposed=" << stats.lookup - stats_before.lookup
+                << " lookup_accepted="
+                << stats.lookup_accepted - stats_before.lookup_accepted << '\n';
+    }
     PrintTokenTrace(generated);
   }
   return 0;

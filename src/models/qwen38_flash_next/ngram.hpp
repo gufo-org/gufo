@@ -56,6 +56,10 @@ public:
   [[nodiscard]] bool Read(std::span<const std::uint32_t> rows,
                           std::span<float> out);
 
+  /// Prepare scratch before serving requests; does not read table rows.
+  /// Only valid while no gather is outstanding.
+  void ReserveGather(std::size_t rows);
+
   /// Starts a gather on the resident readers. The output must stay alive
   /// until WaitRead; only one gather may be outstanding on this table.
   [[nodiscard]] bool StartRead(std::span<const std::uint32_t> rows,
@@ -77,6 +81,9 @@ private:
     const float* src;
     float* dst;
   };
+  // Reuse deduplication storage across gathers. Entries index the first
+  // occurrence in the current input, so no row-cache state is retained here.
+  std::vector<std::size_t> first_rows_;
   void DecodeRow(const std::uint8_t* src, float* dst) const;
   bool ReadCached(std::uint32_t row, float* dst);
   bool ReadOne(std::uint32_t row, float* dst, std::vector<std::uint8_t>& buf);
