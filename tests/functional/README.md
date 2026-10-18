@@ -74,12 +74,13 @@ priority rules contribute a union. Unknown paths expand to all compatible
 coverage. Suite metadata must cover every name in `run.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
-`Devlab functional checks` starts when a maintainer applies `ci:functional` to a
-PR, or manually dispatches it with a PR number. The label event uses trusted base
-workflow code (`pull_request_target`); only Maintain/Admin senders and rerun
-actors authorize execution. The event's exact PR head must still be current.
-Later commits do not inherit approval: remove and reapply the label to approve
-another revision. It pins the PR head and merge base on `main`, plans on a hosted runner,
+`Devlab functional checks` runs on every push to a non-draft PR, using trusted
+base workflow code (`pull_request_target`); a newer push cancels the PR's earlier
+run. Branches in this repository and authors with write access run directly. A
+fork revision from anyone else waits until a required reviewer of the
+`devlab-fork-approval` environment approves that run; each push needs a new
+approval. Maintain/Admin users can also dispatch it with a PR number. It pins
+the event's PR head and merge base on `main`, plans on a hosted runner,
 and allocates the cluster only for affected Flash-Next MTP coverage (or an
 explicit benchmark request). AR suites run only when a dispatch sets `ar`, which
 plans with `--model flash-next-q4`; the default is `--model flash-next-q4/mtp`.
@@ -99,10 +100,10 @@ covering every third-party import here; the install step imports the harness
 to catch gaps.
 
 A hosted `report` job then updates a single PR comment with results, failure
-log tails and benchmark deltas, sets the `devlab/functional` commit status and
-removes `ci:functional`. The status is advisory: it is not a required check, so
+log tails and benchmark deltas, and sets the `devlab/functional` commit status. The status is advisory: it is not a required check, so
 a broken cluster never blocks merging. Suite failures report `failure`; cluster
-or harness problems (authorization, build, download, cancellation) report
+or harness problems (authorization, declined fork approval, build, download,
+cancellation) report
 `error`. The PR write token stays on the hosted runner.
 
 `cluster.py` executes each configuration group with a fresh server/cache history
