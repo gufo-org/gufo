@@ -232,8 +232,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                                       item.session->mtp_.position);
   if (!AllocateBatch(error) ||
       (batch_controls_ == nullptr &&
-       !Check(hipHostMalloc(&batch_controls_,
-                            kBatchSessions * sizeof(Session::Control)),
+       !Check(host_allocations_.Allocate(
+                  &batch_controls_, kBatchSessions * sizeof(Session::Control)),
               error))) {
     return false;
   }
@@ -453,8 +453,9 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
     return false;
   }
   if (batch_candidates_host_ == nullptr) {
-    if (!Check(hipHostMalloc(&batch_candidates_host_,
-                             kBatchSessions * sizeof(MtpCandidateLogits)),
+    if (!Check(host_allocations_.Allocate(
+                   &batch_candidates_host_,
+                   kBatchSessions * sizeof(MtpCandidateLogits)),
                error))
       return false;
     for (std::uint32_t i = 0; i < kBatchSessions; ++i)
@@ -813,8 +814,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     return false;
   }
   if (batch_controls_ == nullptr &&
-      !Check(hipHostMalloc(&batch_controls_,
-                           kBatchSessions * sizeof(Session::Control)),
+      !Check(host_allocations_.Allocate(
+                 &batch_controls_, kBatchSessions * sizeof(Session::Control)),
              error)) {
     return false;
   }
@@ -824,7 +825,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     const std::size_t bytes =
         std::size_t{c.num_layers} * kBatchSessions * sizeof(GdnBatchItem);
     if ((batch_gdn_host_ == nullptr &&
-         !Check(hipHostMalloc(&batch_gdn_host_, bytes, hipHostMallocMapped),
+         !Check(host_allocations_.Allocate(&batch_gdn_host_, bytes,
+                                           hipHostMallocMapped),
                 error)) ||
         (batch_gdn_ == nullptr &&
          !Check(hipHostGetDevicePointer(reinterpret_cast<void**>(&batch_gdn_),

@@ -919,22 +919,10 @@ Executor::~Executor() {
   }
   (void)hipFree(batch_logits_);
   (void)hipFree(verification_penalties_);
-  (void)hipHostFree(batch_gdn_host_);
-  (void)hipHostFree(batch_controls_);
-  (void)hipHostFree(batch_candidates_host_);
   for (void* p : allocations_) {
     (void)hipFree(p);
   }
-  for (void* p :
-       {static_cast<void*>(host_emb_), static_cast<void*>(control_host_),
-        static_cast<void*>(tokens_host_), static_cast<void*>(logits_host_),
-        static_cast<void*>(mtp_token_host_), static_cast<void*>(counts_host_),
-        static_cast<void*>(mtp_candidates_host_),
-        static_cast<void*>(tiles_host_)}) {
-    if (p != nullptr) {
-      (void)hipHostFree(p);
-    }
-  }
+  host_allocations_.Reset();
   if (blas_ != nullptr) {
     (void)hipblasDestroy(blas_);
   }
@@ -962,6 +950,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     AssignError(error_msg, "quantized GEMM tier initialization failed");
     return nullptr;
   }
+  if (!Check(PrepareW8A8GemmWave64(), "wide Q8 GEMM preparation", error_msg))
+    return nullptr;
+  // The first greedy verification otherwise resolves the shared argmax
+  // module on the decode path. Preparation launches no trial kernels.
+  if (e->has_mtp() && !Check(gufo::hip::PrepareBatchedGPUArgmax(),
+                             "MTP argmax preparation", error_msg))
+    return nullptr;
   if (!Check(hipStreamCreate(&e->stream_), "hipStreamCreate", error_msg)) {
     return nullptr;
   }
@@ -1118,8 +1113,9 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     // allocation or upload. Its address stays fixed for graph replay; the
     // next-chunk prefetch uses separate storage until this forward finishes.
     void* pinned = nullptr;
-    if (!Check(hipHostMalloc(&pinned, T * c.PleEmbeddingDim() * sizeof(float),
-                             hipHostMallocMapped | hipHostMallocCoherent),
+    if (!Check(e->host_allocations_.Allocate(
+                   &pinned, T * c.PleEmbeddingDim() * sizeof(float),
+                   hipHostMallocMapped | hipHostMallocCoherent),
                "pinned n-gram buffer", error_msg)) {
       return nullptr;
     }
@@ -1160,25 +1156,29 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     void* control = nullptr;
     void* tokens = nullptr;
     void* logits = nullptr;
-    if (!Check(hipHostMalloc(&control, sizeof(Session::Control)),
-               "pinned control buffer", error_msg) ||
-        !Check(hipHostMalloc(&tokens, T * sizeof(std::int32_t)),
+    if (!Check(
+            e->host_allocations_.Allocate(&control, sizeof(Session::Control)),
+            "pinned control buffer", error_msg) ||
+        !Check(e->host_allocations_.Allocate(&tokens, T * sizeof(std::int32_t)),
                "pinned token buffer", error_msg) ||
-        !Check(hipHostMalloc(&logits, static_cast<std::size_t>(
-                                          e->options_.max_logit_rows) *
-                                          c.vocab_size * sizeof(float)),
-               "pinned logits buffer", error_msg)) {
+        !Check(
+            e->host_allocations_.Allocate(
+                &logits, static_cast<std::size_t>(e->options_.max_logit_rows) *
+                             c.vocab_size * sizeof(float)),
+            "pinned logits buffer", error_msg)) {
       return nullptr;
     }
     void* counts = nullptr;
-    if (!Check(hipHostMalloc(&counts, c.num_experts * sizeof(std::uint32_t)),
+    if (!Check(e->host_allocations_.Allocate(
+                   &counts, c.num_experts * sizeof(std::uint32_t)),
                "pinned expert counts", error_msg)) {
       return nullptr;
     }
     e->counts_host_ = static_cast<std::uint32_t*>(counts);
     void* tiles = nullptr;
-    if (!Check(hipHostMalloc(&tiles, 3 * RoutedTileCapacity(slots, c) *
-                                         sizeof(std::int32_t)),
+    if (!Check(e->host_allocations_.Allocate(
+                   &tiles,
+                   3 * RoutedTileCapacity(slots, c) * sizeof(std::int32_t)),
                "pinned routed tile map", error_msg)) {
       return nullptr;
     }
@@ -1212,11 +1212,12 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     // Final selection consumes intermediate IDs before writing its scores.
     // Pack those scores behind the 64 returned IDs for one host transfer.
     s.mtp_scores = reinterpret_cast<float*>(s.mtp_ids + kMtpCandidates);
-    if (!Check(hipHostMalloc(&e->mtp_token_host_, sizeof(std::int32_t)),
+    if (!Check(e->host_allocations_.Allocate(&e->mtp_token_host_,
+                                             sizeof(std::int32_t)),
                "pinned draft token", error_msg) ||
-        !Check(
-            hipHostMalloc(&e->mtp_candidates_host_, sizeof(MtpCandidateLogits)),
-            "pinned draft candidates", error_msg)) {
+        !Check(e->host_allocations_.Allocate(&e->mtp_candidates_host_,
+                                             sizeof(MtpCandidateLogits)),
+               "pinned draft candidates", error_msg)) {
       return nullptr;
     }
     std::construct_at(e->mtp_candidates_host_);

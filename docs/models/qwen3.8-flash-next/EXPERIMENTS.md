@@ -1,5 +1,29 @@
 # Qwen3.8 Flash-Next experiments
 
+## Host compaction and cache transfers (October 18, 2026)
+
+KFD SMI events and HIP traces distinguish queue suspension from slower model
+kernels. Host page migration can suspend every GPU queue in the process,
+including text work unrelated to the allocation that moved. Controls against
+main `bff0eec6` also exposed smaller delays from preparing cache backing while
+capturing a checkpoint.
+
+| Experiment | Outcome |
+| --- | --- |
+| Nonpaged gfx1151 queue-save areas, launch/copy arenas and loader staging | Retained in the bundled ROCr patch. HIP can obtain kernel arguments from the coarse pool, bypassing ROCr's dedicated kernarg pool; traces also locate runtime-owned code-object upload buffers. Application SVM and ordinary fine-grained host allocations retain their policies. |
+| Long-term pins for owned HIP host buffers | Retained for uploads, Flash-Next execution and disk staging. Exact GPU/CPU visibility and restricted-policy fallback tests pass. |
+| Vision device weights and bounded pinned uploads | Retained with existing heap headroom and managed fallback. All 29 observed vision stages remain byte-identical. |
+| Bounded cache growth outside captures | Retained: approximately 128 MiB segments, bounded page population and pinning ranges, a 2 GiB reserve before readiness/substantial prefill chunks, and smaller reserves for short prefill chunks. Preparation follows any pending fallback capture. Existing budgets remain authoritative. |
+| Prepare cold HC, Q8 and argmax functions | Retained: resolve actual function variants before readiness, without trial launches or activation changes. |
+| Aligned snapshot upload kernel | Retained: use the existing exact byte-copy kernel for registered host-to-device restores, preserving unaligned, pageable and borrowed-device fallbacks. |
+| Default `HSA_USERPTR_FOR_PAGED_MEM=0` | Rejected: removed eviction events but slowed short prefill by 5–6%. The narrower runtime fix preserves normal prefill speed. |
+| Extra priority transfer queues | Rejected: two short C4 decodes rose from approximately 46/45 ms to 104/58 ms. Keeping the original shared queue pool removes this regression. |
+| Grow backing during each allocation or every prompt capture | Rejected: background population/registration delayed captures and the following decode. Request-release refill also delayed the next admission. Preparation now follows pending fallback captures, immediately before actual prefill work. Fully cached decode does not start it. |
+| Disable all ROCr SVM | Rejected: faults when a kernel writes application-managed storage. The independent memory test covers this failure. |
+
+See [quality and timing controls](QUALITY.md) for measured scope and remaining
+limitations. Raw requests, profiles and rejected controls remain outside Git.
+
 | Experiment | Decision / evidence |
 | --- | --- |
 | CPU image preprocessing reuse, October 18 (#627) | Retained: backend-owned 128 MiB combined encoded/RGB cache, fast lookup hash followed by exact byte equality, immutable request ownership and unchanged continuation hashing. Flash-Next queue medians: 45.01/82.40/161.49 → 9.65/13.25/20.63 ms for 1/2/4 screenshots. Miss median differences: −0.26 ms small PNG, +0.42 ms 6.2 MB PNG; individual stalls and broad timing flags remain inconclusive. Rejected: SHA-256 lookup added about 6.7 ms for large PNG misses; unconditional reuse changed forced-cold behavior, so `cache_prompt:false` bypasses reuse. [Evidence](https://github.com/gufo-org/gufo/pull/645). |

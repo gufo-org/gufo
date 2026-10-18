@@ -153,6 +153,12 @@ requirements. Optional benchmark baselines are selected separately with
 See [testing](docs/TESTING.md) for the small hosted CI suite and
 explicit local quality checks.
 
+The Nix package and development shell include a ROCr 7.2.3
+[queue-memory patch](.devops/nix/patches/rocr-fixed-cwsr.patch) for Strix Halo.
+It keeps queue save/restore buffers, launch/copy arenas and code-loading
+staging resident during host memory compaction, while retaining managed-memory
+support and the ordinary fine-grained host-allocation policy.
+
 ### Without Nix
 
 Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config and the
@@ -160,6 +166,10 @@ following development libraries. The currently qualified toolchain is GCC
 15.3 and ROCm 7.2.3. Attention and audio convolution kernels are compiled
 directly from HIP. Python, Triton/AOTriton, Composable Kernel and MIOpen are
 not production build or runtime requirements.
+For the same protection against queue evictions as the Nix build, apply the
+ROCr patch above when building your runtime. Flash-Next's host buffers also use
+Linux long-term pins, with ordinary HIP registration retained when system
+limits disallow those pins. Gufo leaves `HSA_USERPTR_FOR_PAGED_MEM` unchanged.
 
 | Dependency | Used for |
 | --- | --- |

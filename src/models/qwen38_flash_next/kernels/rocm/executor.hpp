@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "src/core/hip/host_allocations.hpp"
 #include "src/core/session_mode.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
@@ -704,6 +705,7 @@ private:
   std::vector<void*> allocations_;
   /// Coherent pinned storage, read directly by the GPU through s_.ple_emb.
   /// Reused only after the preceding forward has drained its stream.
+  mutable hip::HostAllocations host_allocations_;
   float* host_emb_{nullptr};
   mutable std::vector<std::uint32_t> host_rows_;
   mutable bool ple_pending_{false};

@@ -20,32 +20,44 @@ __global__ void CopyAlignedSnapshot(unsigned char* destination,
 bool Aligned(const void* pointer) {
   return (reinterpret_cast<std::uintptr_t>(pointer) & 15) == 0;
 }
-}  // namespace
-
-hipError_t CopySnapshotToHost(void* destination, const void* source,
-                              std::size_t bytes, hipStream_t stream) {
+hipError_t CopySnapshot(void* destination, const void* source,
+                        std::size_t bytes, hipStream_t stream, bool download) {
   if (bytes >= 4096 && destination && source && Aligned(destination) &&
       Aligned(source)) {
     void* mapped{};
-    const auto status = hipHostGetDevicePointer(&mapped, destination, 0);
+    const auto status = hipHostGetDevicePointer(
+        &mapped, download ? destination : const_cast<void*>(source), 0);
     if (status == hipSuccess && mapped && Aligned(mapped)) {
       const auto blocks = static_cast<unsigned>(
           std::min<std::size_t>(160, (bytes - 1) / 4096 + 1));
-      hipLaunchKernelGGL(CopyAlignedSnapshot, dim3(blocks), dim3(256), 0,
-                         stream, static_cast<unsigned char*>(mapped),
-                         static_cast<const unsigned char*>(source), bytes);
+      hipLaunchKernelGGL(
+          CopyAlignedSnapshot, dim3(blocks), dim3(256), 0, stream,
+          static_cast<unsigned char*>(download ? mapped : destination),
+          static_cast<const unsigned char*>(download ? source : mapped), bytes);
       return hipGetLastError();
     }
     if (status != hipSuccess) {
       if (status != hipErrorInvalidValue)
         return status;
       // Ordinary host vectors are not registered; preserve their established
-      // HIP download behavior without leaving the rejected alias query sticky.
+      // HIP behavior without leaving the rejected alias query sticky.
       (void)hipGetLastError();
     }
   }
-  return hipMemcpyAsync(destination, source, bytes, hipMemcpyDeviceToHost,
+  return hipMemcpyAsync(destination, source, bytes,
+                        download ? hipMemcpyDeviceToHost : hipMemcpyDefault,
                         stream);
+}
+}  // namespace
+
+hipError_t CopySnapshotToHost(void* destination, const void* source,
+                              std::size_t bytes, hipStream_t stream) {
+  return CopySnapshot(destination, source, bytes, stream, true);
+}
+
+hipError_t CopySnapshotToDevice(void* destination, const void* source,
+                                std::size_t bytes, hipStream_t stream) {
+  return CopySnapshot(destination, source, bytes, stream, false);
 }
 
 }  // namespace gufo::models::qwen38_flash_next::rocm

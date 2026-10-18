@@ -454,43 +454,62 @@ void CancelledPrefillKeepsCompletedSteps() {
     resend.Invalidate();
   }
 }
-void BackingPreparationAvoidsCachedDecodeAndShortTails() {
+void BackingPreparationFollowsCaptures() {
   class PrepareRunner final : public Runner {
   public:
-    mutable std::size_t preparations{};
+    mutable std::size_t unfinished{}, preparations{}, next_tokens{};
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
         cache::ResourceLedger& ledger, std::size_t ram) const override {
       auto resources = Runner::CreateComponentCacheResources(ledger, ram);
-      resources->prepare_prefill = [this] { ++preparations; };
+      const auto allocate = resources->allocate;
+      resources->allocate = [this, allocate](const auto& request) {
+        auto buffer = allocate(request);
+        ++unfinished;
+        buffer.finish = [this, finish = buffer.finish] {
+          auto payload = finish();
+          --unfinished;
+          return payload;
+        };
+        buffer.borrow = [this, borrow = buffer.borrow](auto& lease, auto rows) {
+          auto payload = borrow(lease, rows);
+          --unfinished;
+          return payload;
+        };
+        return buffer;
+      };
+      resources->prepare_prefill = [this](std::size_t tokens) {
+        assert(unfinished == 0 && tokens != 0);
+        next_tokens = tokens;
+        ++preparations;
+      };
       return resources;
     }
     TextPrefillStep Prefill(TextRunnerState& state,
                             std::span<const TextRunnerToken> prompt,
                             std::size_t offset,
                             std::size_t budget) const override {
-      if (prompt.size() == 600 && offset == 0)
-        assert(preparations == 1);
+      assert(next_tokens == std::min(prompt.size() - offset, budget));
+      next_tokens = 0;
       return Runner::Prefill(state, prompt, offset, budget);
     }
   };
   auto runner = std::make_shared<PrepareRunner>();
   TextRunnerPool pool(runner, 1);
-  auto short_request = pool.Acquire(std::vector<TextRunnerToken>(256, 7));
-  (void)short_request.Prefill(512);
-  (void)short_request.Commit();
-  assert(runner->preparations == 0);
-  const std::vector<TextRunnerToken> prompt(600, 8);
-  auto request = pool.Acquire(prompt);
-  assert(!request.Prefill(512).decode_ready);
-  assert(runner->preparations == 1);
-  assert(request.Prefill(512).decode_ready);
-  assert(runner->preparations == 1);
-  (void)request.Commit();
-  auto cached = pool.Acquire(prompt);
-  assert(cached.cached_prompt_tokens() == prompt.size());
-  assert(cached.Prefill(512).consumed_tokens == 0);
-  assert(runner->preparations == 1);
-  cached.Invalidate();
+  for (const std::size_t size : {256, 600, 601}) {
+    const std::vector<TextRunnerToken> prompt(size, 8);
+    auto request = pool.Acquire(prompt);
+    const auto before = runner->preparations;
+    while (!request.Prefill(512).decode_ready) {
+    }
+    assert(runner->preparations > before);
+    (void)request.Commit();
+    const auto prepared = runner->preparations;
+    auto cached = pool.Acquire(prompt);
+    assert(cached.cached_prompt_tokens() == prompt.size());
+    assert(cached.Prefill(512).consumed_tokens == 0);
+    assert(runner->preparations == prepared);
+    cached.Invalidate();
+  }
 }
 
 void CompletedCancelledPromptGetsARetrySnapshot() {
@@ -1406,7 +1425,7 @@ void UnbackedDeepRowsSurviveDiskRestart() {
 int main() {
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
-  BackingPreparationAvoidsCachedDecodeAndShortTails();
+  BackingPreparationFollowsCaptures();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();

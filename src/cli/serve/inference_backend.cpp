@@ -39,6 +39,7 @@
 #include "src/core/hip/committed_backing.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
+#include "src/core/hip/host_allocations.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
@@ -2542,17 +2543,16 @@ public:
         throw std::invalid_argument("insufficient component backing budget");
       const auto& allocation = plan.front();
       // Pages commit as captures need them. A payload cannot span segments,
-      // so equal segments of about 1 GiB bound stranded edge space and fit at
-      // least two payloads of the largest component. Completed append rows
-      // prepare more backing; private and tail copies commit only when needed.
-      // Pinning ahead after a final private copy can delay decoder launches.
+      // so segments of about 128 MiB bound registration pauses and stranded
+      // edge space, fitting at least two of the largest payloads. Prefill
+      // chunks prepare backing before GPU work, after any fallback capture.
       // Growth stops when the host keeps less than its reserve.
       std::size_t largest = 0;
       for (const auto& [id, bytes] : backing->component_classes)
         largest = std::max(largest, bytes);
       const auto block = allocation.block_bytes;
       const auto target =
-          std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
+          std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
       const auto parts =
           std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
       const auto segment = (allocation.blocks + parts - 1) / parts * block;
@@ -2603,9 +2603,9 @@ public:
                 return false;
               }});
       // Prepare a bounded reserve before readiness. The first shared-prefix
-      // capture needs more than one segment; preparing both avoids moving
+      // capture needs more than one segment; preparing 2 GiB avoids moving
       // registration onto that request's capture or decode path.
-      backing->pool->GrowAhead(2);
+      backing->pool->GrowAhead(2ULL << 30);
       backing->pool->WaitForGrowth();
       Logger::Info(
           "cache",
@@ -2614,7 +2614,11 @@ public:
               " long_term_pinned_bytes=" +
               std::to_string(backing->pool->LongTermPinnedBytes()));
     };
-    result->prepare_prefill = [backing] { backing->pool->GrowAhead(2); };
+    result->prepare_prefill = [backing](std::size_t tokens) {
+      // Prepare after any fallback capture, alongside actual prefill work.
+      // Short turns need a smaller reserve for private states and row tails.
+      backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
+    };
     result->can_capture = [backing](auto payloads) {
       return backing->pool->CanFit(payloads);
     };
@@ -2649,11 +2653,8 @@ public:
                                    .count()));
       if (!block)
         throw cache::ResourceExhausted();
-      // Completed append rows prepare backing for subsequent prefill/guard
-      // work. Final private-state and partial-tail copies must not start
-      // speculative pinning that delays the next decode step.
-      if (request.category == cache::ResourceCategory::kBackingAssigned)
-        backing->pool->GrowAhead();
+      // Do not start registration between a capture's allocations and copies.
+      // Each prefill chunk prepares its own reserve before GPU work.
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
       return ComponentCaptureBuffer{
           owner->Bytes(),
@@ -2669,12 +2670,13 @@ public:
           }};
     };
     result->staging = [](std::size_t bytes) {
+      auto allocation = std::make_shared<hip::HostAllocations>();
       void* data = nullptr;
-      const auto status = hipHostMalloc(&data, bytes, hipHostMallocCoherent);
+      const auto status =
+          allocation->Allocate(&data, bytes, hipHostMallocCoherent);
       if (status != hipSuccess)
         throw std::runtime_error(hipGetErrorString(status));
-      auto owner = std::shared_ptr<void>(
-          data, [](void* value) { (void)hipHostFree(value); });
+      auto owner = std::shared_ptr<void>(std::move(allocation), data);
       std::memset(data, 0, bytes);
       return cache::StagingAllocation{
           std::move(owner), {static_cast<std::uint8_t*>(data), bytes}};

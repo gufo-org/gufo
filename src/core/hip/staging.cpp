@@ -5,15 +5,14 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "src/core/hip/host_allocations.hpp"
+
 namespace gufo::hip {
 namespace {
 struct PinnedStorage {
   cache::ResourceCharge metadata;
+  HostAllocations allocations;
   void* data{};
-  ~PinnedStorage() {
-    if (data)
-      (void)hipHostFree(data);
-  }
 };
 }  // namespace
 cache::StagingAllocator PinnedStagingAllocator(cache::ResourceLedger& ledger) {
@@ -22,8 +21,8 @@ cache::StagingAllocator PinnedStagingAllocator(cache::ResourceLedger& ledger) {
                                     sizeof(PinnedStorage) + 64);
     auto storage = std::make_shared<PinnedStorage>();
     storage->metadata = admission.Convert();
-    const auto status =
-        hipHostMalloc(&storage->data, bytes, hipHostMallocCoherent);
+    const auto status = storage->allocations.Allocate(&storage->data, bytes,
+                                                      hipHostMallocCoherent);
     if (status != hipSuccess)
       throw std::runtime_error(hipGetErrorString(status));
     // Commit pages once; no first-touch allocation in the transfer worker.

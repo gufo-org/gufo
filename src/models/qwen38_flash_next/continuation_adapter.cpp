@@ -665,8 +665,8 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
             if (piece.host)
               std::memcpy(destination, source, end - first);
             else
-              Check(hipMemcpyAsync(destination, source, end - first,
-                                   hipMemcpyHostToDevice, transfer.Native()));
+              Check(rocm::CopySnapshotToDevice(destination, source, end - first,
+                                               transfer.Native()));
           }
         });
   } catch (...) {
@@ -753,8 +753,8 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
           if (component.part == ContinuationPart::kTokens && !bytes.empty())
             std::memcpy(destination, bytes.data(), bytes.size());
           else if (!bytes.empty())
-            Check(hipMemcpyAsync(destination, bytes.data(), bytes.size(),
-                                 hipMemcpyDefault, transfer.Native()));
+            Check(rocm::CopySnapshotToDevice(destination, bytes.data(),
+                                             bytes.size(), transfer.Native()));
         });
   } catch (...) {
     state.failed = true;

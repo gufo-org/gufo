@@ -59,7 +59,20 @@ class HipMemory:
     @classmethod
     def for_binary(cls, gufo_binary: Path) -> "HipMemory | None":
         """Resolve libamdhip64 the way the Gufo binary links it."""
-        completed = subprocess.run(["ldd", str(gufo_binary)], capture_output=True, text=True)
+        executable = gufo_binary.resolve()
+        # Nix's makeWrapper keeps the production ELF beside its launch script.
+        # ldd cannot inspect the script that selects Gufo's patched runtime.
+        for candidate in (executable, executable.with_name(f".{executable.name}-wrapped")):
+            try:
+                with candidate.open("rb") as binary:
+                    if binary.read(4) == b"\x7fELF":
+                        executable = candidate
+                        break
+            except OSError:
+                pass
+        else:
+            return None
+        completed = subprocess.run(["ldd", str(executable)], capture_output=True, text=True)
         for line in completed.stdout.splitlines():
             if "libamdhip64" in line and "=>" in line:
                 path = Path(line.split("=>", 1)[1].split()[0])

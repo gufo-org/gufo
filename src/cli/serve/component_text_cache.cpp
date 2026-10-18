@@ -1279,9 +1279,9 @@ void ComponentTextCache::Lease::SkipSnapshot(SnapshotEventReason reason,
   } catch (...) {
   }
 }
-void ComponentTextCache::Lease::PreparePrefill() {
+void ComponentTextCache::Lease::PreparePrefill(std::size_t tokens) {
   if (impl_->cache->resources->prepare_prefill)
-    impl_->cache->resources->prepare_prefill();
+    impl_->cache->resources->prepare_prefill(tokens);
 }
 
 std::size_t ComponentTextCache::Lease::CaptureBytes() const {
@@ -1644,9 +1644,9 @@ void ServingCacheLease::AdoptRestoredPrefix(std::size_t tokens,
     throw std::logic_error("component restore is owned by the component cache");
   legacy_.AdoptRestoredPrefix(tokens, bytes, ms);
 }
-void ServingCacheLease::PreparePrefill() {
+void ServingCacheLease::PreparePrefill(std::size_t tokens) {
   if (component_)
-    component_->PreparePrefill();
+    component_->PreparePrefill(tokens);
 }
 
 std::size_t ServingCacheLease::CaptureBytes() const {

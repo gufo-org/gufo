@@ -94,7 +94,9 @@ def provenance():
                                                 if kernel_command.is_file() else None), **{
             key: os.environ.get(key) for key in (
                 "GPU_MAX_HW_QUEUES", "HSA_ENABLE_SDMA", "HSA_ENABLE_INTERRUPT",
-                "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "LD_PRELOAD")}},
+                "HSA_USERPTR_FOR_PAGED_MEM", "HSA_USE_SVM",
+                "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+                "LD_LIBRARY_PATH", "LD_PRELOAD")}},
     }
 
 
