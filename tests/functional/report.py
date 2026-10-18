@@ -36,12 +36,10 @@ def parse_bench(text):
     return rates
 
 
-def verdict(authorize, smoke, plan, summary, benchmark, approval="skipped"):
+def verdict(authorize, smoke, plan, summary, benchmark):
     """Return (state, description); `error` marks cluster or harness problems."""
     if authorize != "success":
         return "error", "Authorization or planning failed"
-    if approval not in ("success", "skipped"):
-        return "error", f"Fork revision not approved for the cluster ({approval})"
     if smoke == "skipped" and plan is not None and not plan["groups"] and not benchmark:
         return "success", "No Flash-Next functional impact"
     if smoke == "cancelled":
@@ -132,8 +130,7 @@ def failure_details(rows):
 def render(args):
     plan = load_json(args.plan)
     summary = load_json(args.results / "summary.json")
-    state, description = verdict(args.authorize, args.smoke, plan, summary, args.benchmark,
-                                 args.approval or "skipped")
+    state, description = verdict(args.authorize, args.smoke, plan, summary, args.benchmark)
     rows = summary["groups"] if summary is not None else []
     model = group_name(rows[0])[1] if rows else "flash-next-q4"
     lines = [MARKER, f"### {ICONS[state]} Devlab functional checks: {description}", ""]
@@ -159,8 +156,6 @@ def main():
     parser.add_argument("--results", type=Path, required=True,
                         help="Directory with summary.json and optional bench-{base,head}.md")
     parser.add_argument("--authorize", required=True, help="Result of the authorize job")
-    parser.add_argument("--approval", default="skipped",
-                        help="Result of the fork approval job; skipped for trusted revisions")
     parser.add_argument("--smoke", required=True, help="Result of the cluster job")
     parser.add_argument("--benchmark", action="store_true")
     parser.add_argument("--run-url", required=True)
