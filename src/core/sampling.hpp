@@ -19,7 +19,8 @@ using TokenId = std::uint32_t;
 /// sampler (#266). Tokens are counted after the reasoning start, including
 /// reasoning text already in the prompt. Once the budget is spent, and the
 /// last token completed its UTF-8 character, `forced` is emitted token by
-/// token. Any token in `ends` closes reasoning early.
+/// token. Any token in `ends` closes reasoning early. Later tokens are answer
+/// content, including literal reasoning tags, as in Gufo's response framing.
 struct ReasoningBudget {
   std::size_t tokens{0};
   std::vector<TokenId> forced;

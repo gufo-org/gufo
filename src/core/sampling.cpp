@@ -414,7 +414,7 @@ SamplingDistribution BuildDistribution(
     std::span<const float> logits, const SamplingConfig& config,
     std::span<const TokenId> prompt_tokens,
     std::span<const TokenId> generated_tokens) {
-  if (config.constraint) {
+  if (config.constraint || config.reasoning_budget) {
     SamplerState sampler(config, prompt_tokens);
     sampler.Accept(generated_tokens);
     return sampler.Distribution(logits);

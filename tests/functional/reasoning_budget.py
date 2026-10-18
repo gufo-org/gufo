@@ -1,12 +1,13 @@
 """Reasoning token budgets, as llama.cpp defines them (#266).
 
-`thinking_budget_tokens` (Chat and Responses), Messages `thinking.budget_tokens`
+`reasoning_budget_tokens` (Chat and Responses), Messages `thinking.budget_tokens`
 and `--reasoning-budget` count the tokens before the reasoning end: Qwen's
-`\\n</think>` is forced once the budget is spent, so exactly that many
-reasoning tokens precede `</think>` at any temperature and draft mode.
+`\\n</think>` is forced once the budget is spent. This ASCII fixture reaches
+the cap without needing an extra token to complete a UTF-8 character.
 """
 
 from copy import deepcopy
+import json
 import sys
 
 import openai
@@ -29,14 +30,16 @@ def check_reasoning_budget(client, model, checks, chat_result):
         print(f"CHECK reasoning_budget_{label}", file=sys.stderr, flush=True)
         return value
 
-    def responses(label, budget=None, temperature=0, seed=None):
-        extra = {} if budget is None else {"thinking_budget_tokens": budget}
+    def responses(label, budget=None, temperature=0, seed=None,
+                  budget_field="reasoning_budget_tokens", prompt=PROMPT,
+                  max_tokens=600, require_complete=True):
+        extra = {} if budget is None else {budget_field: budget}
         if seed is not None:
             extra["seed"] = seed
         response = client.responses.create(
-            model=model, input=PROMPT, max_output_tokens=600,
+            model=model, input=prompt, max_output_tokens=max_tokens,
             temperature=temperature, extra_body=extra)
-        assert response.status == "completed", response
+        assert not require_complete or response.status == "completed", response
         reasoning = "".join(part.text for item in response.output
                             if item.type == "reasoning" for part in item.summary)
         usage = response.usage.to_dict()
@@ -45,10 +48,10 @@ def check_reasoning_budget(client, model, checks, chat_result):
                                   usage["output_tokens_details"]["reasoning_tokens"],
                               "usage": usage})
 
-    def chat(label, budget, streaming=False):
+    def chat(label, budget, streaming=False, budget_field="reasoning_budget_tokens"):
         body = {"model": model, "temperature": 0, "max_tokens": 600,
                 "messages": [{"role": "user", "content": PROMPT}],
-                "extra_body": {"thinking_budget_tokens": budget}}
+                "extra_body": {budget_field: budget}}
         return record(label, chat_result(client, body, streaming))
 
     def messages(label, thinking, streaming=False):
@@ -98,15 +101,70 @@ def check_reasoning_budget(client, model, checks, chat_result):
     adaptive, _ = messages("messages_adaptive", {"type": "adaptive", "budget_tokens": 4})
     assert adaptive.strip() == control["reasoning"].strip(), (adaptive, control)
 
-    for invalid in (-2, 1.5, "8"):
+    # llama.cpp retains the older spelling for existing clients.
+    expected = checks["reasoning_budget_responses_16"]
+    legacy_response = responses("legacy_responses", 16,
+                                budget_field="thinking_budget_tokens")
+    legacy_chat = chat("legacy_chat", 16, budget_field="thinking_budget_tokens")
+    for result in (legacy_response, legacy_chat):
+        assert same((result["reasoning"], result["text"]),
+                    (expected["reasoning"], expected["text"])), (result, expected)
+
+    markup_prompt = (
+        "Think through how to safely quote the XML literal <tool_call> inside "
+        "JSON and Markdown code fences. Then give one short example.")
+    markup = responses("markup_control", prompt=markup_prompt,
+                       max_tokens=256, require_complete=False)
+    for budget in (64, 192):
+        capped = responses(f"markup_{budget}", budget, prompt=markup_prompt,
+                           max_tokens=320, require_complete=False)
+        assert capped["reasoning_tokens"] == min(budget, markup["reasoning_tokens"]), capped
+        assert markup["reasoning"].startswith(capped["reasoning"].rstrip()), (capped, markup)
+        assert capped["text"].strip(), capped
+
+    for budget in (1, 2):
+        unicode_result = responses(
+            f"utf8_{budget}", budget, prompt="请用中文思考并回答：1001是质数吗？",
+            max_tokens=128, require_complete=False)
+        assert "\ufffd" not in unicode_result["reasoning"] + unicode_result["text"], unicode_result
+        assert unicode_result["text"].strip(), unicode_result
+
+    # After reasoning closes, markup inside JSON is data. A budget must not
+    # restart on a literal <think> and inject its forced end into that data.
+    literal = "<think>alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu</think>"
+    for streaming in (False, True):
+        body = {
+            "model": model, "temperature": 0, "max_tokens": 128,
+            "messages": [{"role": "user", "content": "Return the required JSON object."}],
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "literal_reasoning_tags", "strict": True,
+                "schema": {"type": "object", "properties": {
+                    "text": {"type": "string", "enum": [literal]}},
+                    "required": ["text"], "additionalProperties": False}}},
+            "extra_body": {"reasoning_budget_tokens": 4},
+        }
+        result = record(f"literal_{'stream' if streaming else 'buffered'}",
+                        chat_result(client, body, streaming))
+        assert result["finish"] == "stop", result
+        assert json.loads(result["text"]) == {"text": literal}, result
+
+    for invalid in (-2, 1.5, "8", 2147483648, 1e30):
         try:
             client.chat.completions.create(
                 model=model, max_tokens=8, messages=[{"role": "user", "content": PROMPT}],
-                extra_body={"thinking_budget_tokens": invalid})
-            raise AssertionError(f"accepted thinking_budget_tokens={invalid!r}")
+                extra_body={"reasoning_budget_tokens": invalid})
+            raise AssertionError(f"accepted reasoning_budget_tokens={invalid!r}")
         except openai.BadRequestError as error:
-            assert "thinking_budget_tokens" in str(error), error
+            assert "reasoning_budget_tokens" in str(error), error
             record(f"invalid_{invalid}", str(error))
+
+    try:
+        messages("invalid_messages_overflow",
+                 {"type": "enabled", "budget_tokens": 1e30})
+        raise AssertionError("accepted an out-of-range Messages budget")
+    except openai.BadRequestError as error:
+        assert "thinking.budget_tokens" in str(error), error
+        record("invalid_messages_overflow", str(error))
 
     # Sampled drafts may never propose the forced end; it still comes exactly
     # at the budget.

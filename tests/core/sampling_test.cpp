@@ -145,6 +145,33 @@ void TestReasoningBudgetMatchesLlamaCpp() {
          "the end is forced after the character completes");
 }
 
+void TestReasoningBudgetKeepsLiteralAnswer() {
+  SamplingConfig config;
+  config.reasoning_budget = Budget(2, {4, 3}, {4});
+  for (const bool natural_end : {false, true}) {
+    SamplerState sampler(config);
+    if (natural_end) {
+      sampler.Accept(3);
+    } else {
+      sampler.Accept(std::vector<TokenId>{1, 4, 3});
+    }
+    // Token 0 stands for a literal <think> inside answer/tool data. Gufo's
+    // framing recognizes reasoning markup only in the initial phase.
+    sampler.Accept(std::vector<TokenId>{6, 0, 1, 2, 1, 2, 1, 2});
+    Expect(!sampler.ForcedToken() && sampler.Sample(Logits(6)) == 6,
+           "literal answer tokens must not restart a completed budget");
+  }
+
+  const std::vector<TokenId> thinking{1};
+  Expect(gufo::sampling::BuildDistribution(Logits(1), config, {}, thinking)
+                 .best_token() == 4,
+         "distribution construction enforces an exhausted reasoning budget");
+  const std::vector<TokenId> answer{1, 4, 3, 6, 0, 1, 2};
+  Expect(gufo::sampling::BuildDistribution(Logits(1), config, {}, answer)
+                 .best_token() == 1,
+         "distribution construction preserves literal answer content");
+}
+
 // With a tool or format grammar, the forced end must be a legal grammar step
 // and the answer after it stays constrained.
 void TestReasoningBudgetWithGrammar() {
@@ -179,6 +206,7 @@ int main() {
   TestReasoningBudgetForcesTheEnd();
   TestEarlyEndAndNoBudget();
   TestReasoningBudgetMatchesLlamaCpp();
+  TestReasoningBudgetKeepsLiteralAnswer();
   TestReasoningBudgetWithGrammar();
   std::cout << "sampling_test passed\n";
   return 0;

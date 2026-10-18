@@ -356,13 +356,23 @@ must use the same reasoning mode and effort.
 `--reasoning-budget N` caps reasoning at N tokens on Chat, Responses and
 Messages requests, as in llama.cpp: `-1` (the default) is unlimited and `0`
 ends reasoning at once. Chat and Responses override it per request with
-`thinking_budget_tokens` (`-1` keeps the server default), and Messages with
+`reasoning_budget_tokens` (`-1` keeps the server default), and Messages with
 `thinking.budget_tokens` when `thinking.type` is `enabled`. Tokens are counted
 from the reasoning start, including the newline after Qwen's `<think>`. Once
 the budget is spent and the last token completes its UTF-8 character, the
 model's reasoning end is forced: `\n</think>` for Qwen, `</think>` for DeepSeek.
-Exactly N reasoning tokens precede `</think>`, so Responses reports N
-`reasoning_tokens`. A Qwen `<tool_call>` also ends reasoning.
+For an ASCII Qwen response that reaches the cap, N generated reasoning tokens
+precede `</think>`. A natural end can use fewer tokens, and completing a UTF-8
+character can require more. A Qwen `<tool_call>` also ends reasoning. The budget
+covers the initial reasoning phase. Later `<think>` spellings remain literal
+answer or tool-argument data, consistent with Gufo's response framing.
+
+Chat and Responses also accept llama.cpp's older `thinking_budget_tokens`
+spelling for existing clients; a non-null `reasoning_budget_tokens` takes
+precedence. Request budgets must fit a signed 32-bit integer; Messages budgets
+must also be positive. The server does not automatically reserve part of
+`max_tokens` for the answer: clients must set a smaller reasoning budget when
+they need that room.
 
 Keep `reasoning_effort` (Chat) or `output_config.effort` (Messages) consistent
 across turns while thinking is enabled: Qwen and DeepSeek render the effort

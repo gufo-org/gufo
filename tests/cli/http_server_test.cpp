@@ -1540,6 +1540,56 @@ void TestCompatibilityRequests() {
     ExpectStatus(rejected, 400);
     assert(rejected.find("thinking_budget_tokens") != std::string::npos);
   }
+  for (const auto* path : {"/v1/chat/completions", "/v1/responses"}) {
+    const auto input = gufo::json::parse(
+        std::string_view(path) == "/v1/responses"
+            ? R"({"input":"hi"})"
+            : R"({"model":"test","messages":[{"role":"user","content":"hi"}]})");
+    for (const auto* field :
+         {"reasoning_budget_tokens", "thinking_budget_tokens"}) {
+      for (const auto* value : {"-1", "0", "16", "2147483647"}) {
+        auto body = input;
+        body[field] = gufo::json::parse(value);
+        response_body(server.Post(path, body.dump()));
+        const auto expected =
+            std::string_view(value) == "-1"
+                ? std::size_t{50}
+                : static_cast<std::size_t>(body[field].as_double());
+        assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+               expected);
+      }
+      for (const auto* invalid : {"-2", "1.5", "\"8\"", "2147483648", "1e30"}) {
+        auto body = input;
+        body[field] = gufo::json::parse(invalid);
+        const auto rejected = server.Post(path, body.dump());
+        ExpectStatus(rejected, 400);
+        assert(rejected.find(field) != std::string::npos);
+      }
+    }
+    auto body = input;
+    body["reasoning_budget_tokens"] = 4;
+    body["thinking_budget_tokens"] = 16;
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+           std::size_t{4});
+    body["reasoning_budget_tokens"] = -1;
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+           std::size_t{50});
+    body["reasoning_budget_tokens"] = gufo::json::Value{};
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+           std::size_t{16});
+  }
+  for (const auto* invalid : {"2147483648", "18446744073709551616", "1e30"}) {
+    const auto rejected =
+        server.Post("/v1/messages",
+                    std::string(R"({"messages":[{"role":"user","content":"hi"}],
+        "thinking":{"type":"enabled","budget_tokens":)") +
+                        invalid + "}}");
+    ExpectStatus(rejected, 400);
+    assert(rejected.find("thinking.budget_tokens") != std::string::npos);
+  }
   server.backend->reasoning.budget_tokens.reset();
   assert(replayed.messages.size() == 3 &&
          replayed.messages[1].thought == "plan" &&

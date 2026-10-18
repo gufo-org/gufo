@@ -739,17 +739,25 @@ bool ParseReasoningOptions(const json::Value& body, ReasoningOptions* options,
   return true;
 }
 
-// llama.cpp's per-request reasoning budget; -1 keeps the server default.
-std::optional<HttpResponse> ParseThinkingBudget(const json::Value& body,
-                                                ReasoningOptions* options) {
-  const auto* budget = body.find("thinking_budget_tokens");
+// Match llama.cpp's canonical field and its older compatibility spelling.
+// An explicit canonical value takes precedence; -1 keeps the server default.
+std::optional<HttpResponse> ParseReasoningBudget(const json::Value& body,
+                                                 ReasoningOptions* options) {
+  const char* field = "reasoning_budget_tokens";
+  const auto* budget = body.find(field);
+  if (budget == nullptr || budget->is_null()) {
+    field = "thinking_budget_tokens";
+    budget = body.find(field);
+  }
   if (budget == nullptr || budget->is_null())
     return {};
   const double value = budget->is_number() ? budget->as_double() : -2.0;
-  if (value < -1.0 || value > std::numeric_limits<std::int32_t>::max() ||
+  if (!std::isfinite(value) || value < -1.0 ||
+      value > std::numeric_limits<std::int32_t>::max() ||
       std::floor(value) != value)
     return Error(400, "Bad Request",
-                 "'thinking_budget_tokens' must be an integer of at least -1",
+                 "'" + std::string(field) +
+                     "' must be an integer between -1 and 2147483647",
                  "invalid_reasoning");
   if (value >= 0.0)
     options->budget_tokens = static_cast<std::size_t>(value);
@@ -872,7 +880,7 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     return Error(400, "Bad Request", std::move(parse_error),
                  "invalid_reasoning");
   }
-  if (auto error = ParseThinkingBudget(body, &output->chat.reasoning))
+  if (auto error = ParseReasoningBudget(body, &output->chat.reasoning))
     return error;
   if (const auto* kwargs = body.find("chat_template_kwargs")) {
     if (const auto* vision_id = kwargs->find("add_vision_id")) {
@@ -3244,7 +3252,7 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
         chat->reasoning.effort = options.effort;
     }
   }
-  if (auto error = ParseThinkingBudget(body, &chat->reasoning))
+  if (auto error = ParseReasoningBudget(body, &chat->reasoning))
     return error;
   if (const auto* text = body.find("text"); text && !text->is_null()) {
     if (!text->is_object())

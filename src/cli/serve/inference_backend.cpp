@@ -3985,12 +3985,18 @@ InferenceBackend::Result InferenceBackend::chat(
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return {};
   }
+  const auto initial =
+      state->scheduler->runner().InitialOutputState(effective_request);
+  if (request.reasoning.budget_tokens &&
+      initial == TextGenerationBackend::InitialOutputState::kReasoning)
+    effective_sampling.reasoning_budget =
+        state->scheduler->runner().BuildReasoningBudget(
+            *request.reasoning.budget_tokens, prompt->tokens);
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
       effective_sampling, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
-      prompt->cache_prefix_tokens, request.stop_sequences,
-      state->scheduler->runner().InitialOutputState(effective_request));
+      prompt->cache_prefix_tokens, request.stop_sequences, initial);
 #else
   (void)request;
   (void)max_tokens;
