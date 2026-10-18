@@ -90,19 +90,3 @@ DFlash2 uses mixed/repetitive cases. Rates sum individual decode rates.
 Loading uses cold files, C1/DFlash2/capacity 262144; memory uses C1/AR peak HIP
 allocation. Commands, hashes and counts remain in [artifacts](artifacts/bench.json)
 and the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
-
-## CPU image-history reuse, October 18 (#627)
-
-Q4/Q8 AR and DFlash2 pass the image-input, Messages image-token-count and
-image-tool-result functional suites. Every speculative profile executes drafts;
-AR executes none. The final matched Q4 AR timing comparison remains inconclusive under the
-existing per-request 5% and 3 ms limits. The shared cache's independent identity golden,
-eviction/lifetime/concurrency checks and all 24 Pillow/Torchvision pixel
-fixtures pass. The native image-boundary append oracle has zero logit error.
-
-The broader native C4 check flags its greedy proposal/acceptance-accounting
-expectation; it is retained as a failed observation rather than a quality pass.
-The current DFlash2 policy chooses greedy widths using cohort size, while
-sampled choices remain private. The same assertion fails on unchanged main. The check and its main control are summarized in
-[PR #645](https://github.com/gufo-org/gufo/pull/645).
-No draft policy, numerical tolerance or expected output was changed for this fix.
