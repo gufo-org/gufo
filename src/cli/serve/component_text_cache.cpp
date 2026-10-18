@@ -791,8 +791,7 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
             : private_file ? cache::ResourceCategory::kPrivateTail
                            : cache::ResourceCategory::kBackingAssigned,
             first, end, bytes};
-        copies.push_back(
-            {request, cache->resources->allocate(request), file, private_file});
+        copies.push_back({request, {}, file, private_file});
       }
       return cache::DiskPayload{file, bytes, 0};
     };
@@ -807,6 +806,42 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
         component.tail = capture(completed, p->valid_rows, true);
     }
     manifest.components.push_back(std::move(component));
+  }
+  // Private states, tails, and rows the slot cannot lend are staged in RAM
+  // backing. Allocate them largest first, as Capture does. Reclaim for the
+  // staged bytes only, because Reclaim refuses a request larger than RAM. The
+  // disk checkpoint does not replace a retained one, so keep the source.
+  std::vector<cache::PayloadRequest> requests;
+  requests.reserve(copies.size());
+  std::size_t staged = 0;
+  for (const auto& copy : copies) {
+    requests.push_back(copy.request);
+    staged += copy.request.bytes;
+  }
+  std::vector<std::size_t> allocation_order(copies.size());
+  std::iota(allocation_order.begin(), allocation_order.end(), 0);
+  std::ranges::sort(allocation_order, [&](auto a, auto b) {
+    return requests[a].bytes != requests[b].bytes
+               ? requests[a].bytes > requests[b].bytes
+               : a < b;
+  });
+  auto retain = Retain(capture_tokens, staged);
+  retain.preserve_source = true;
+  while (!copies.empty()) {
+    try {
+      if (cache->resources->can_capture &&
+          !cache->resources->can_capture(requests))
+        throw cache::ResourceExhausted();
+      for (const auto i : allocation_order)
+        copies[i].buffer = cache->resources->allocate(requests[i]);
+      break;
+    } catch (const cache::ResourceExhausted&) {
+      for (auto& copy : copies)
+        copy.buffer = {};
+      const std::lock_guard lock(cache->mutex);
+      if (!cache->retention.Reclaim(retain))
+        throw;
+    }
   }
   TransferBatch transfers(cache->resources->transfer_batch_size);
   for (auto& copy : copies) {
@@ -1386,8 +1421,29 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
       cache.resources->adapter->Positions(request.slot.Execution());
   const auto bytes = request.entry->history->NewPayloadBytes(positions);
   const auto retain = request.Retain(request.capture_tokens, bytes);
-  if (bytes > cache.ledger.Limits().ram_bytes)
-    return request.CaptureDurable();
+  const auto refused = [&] {
+    Logger::Info("cache",
+                 "schema=component-cache-v1 event=capture_refused "
+                 "reason=byte_capacity tokens=" +
+                     std::to_string(request.capture_tokens.size()));
+  };
+  const auto failed = [](const std::exception& error) {
+    Logger::Info(
+        "cache",
+        std::string("schema=component-cache-v1 event=capture_failed reason=") +
+            error.what());
+  };
+  if (bytes > cache.ledger.Limits().ram_bytes) {
+    try {
+      return request.CaptureDurable();
+    } catch (const cache::ResourceExhausted&) {
+      refused();
+      throw;
+    } catch (const std::exception& error) {
+      failed(error);
+      throw;
+    }
+  }
   const auto reclaim = [&] {
     const std::lock_guard lock(cache.mutex);
     return cache.retention.Reclaim(retain);
@@ -1518,23 +1574,24 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
       break;
     } catch (const cache::ResourceExhausted&) {
       if (!reclaim()) {
-        if (cache.queue && request.purpose != SnapshotPurpose::kHistory)
-          if (auto durable = request.CaptureDurable())
-            return durable;
+        if (cache.queue && request.purpose != SnapshotPurpose::kHistory) {
+          try {
+            if (auto durable = request.CaptureDurable())
+              return durable;
+          } catch (const cache::ResourceExhausted&) {
+            // Staging for disk did not fit either. Refuse below.
+          } catch (const std::exception& error) {
+            failed(error);
+            throw;
+          }
+        }
         // RAM refused the copy; the disk fallback, when there is one, already
         // holds a checkpoint within its step of this boundary.
-        Logger::Info("cache",
-                     "schema=component-cache-v1 event=capture_refused "
-                     "reason=byte_capacity tokens=" +
-                         std::to_string(request.capture_tokens.size()));
+        refused();
         throw;
       }
     } catch (const std::exception& error) {
-      Logger::Info(
-          "cache",
-          std::string(
-              "schema=component-cache-v1 event=capture_failed reason=") +
-              error.what());
+      failed(error);
       throw;
     }
   }

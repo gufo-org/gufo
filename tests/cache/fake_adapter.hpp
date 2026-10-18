@@ -1,6 +1,7 @@
 #ifndef GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 #define GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -43,6 +44,8 @@ private:
 
 class FakeAdapter final : public Adapter {
 public:
+  // Wider chunks need less capture metadata for the same row bytes.
+  explicit FakeAdapter(Rows rows_per_chunk = 4);
   [[nodiscard]] Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const ComponentDescriptor> Components()
       const override;
@@ -101,6 +104,7 @@ private:
                                       std::function<TransferResult()>);
   [[nodiscard]] Completion SubmitLoad(Slot&, Stream&,
                                       std::function<TransferResult()>);
+  std::array<ComponentDescriptor, 3> components_;
   bool fail_allocation_{false};
   bool fail_transfer_{false};
   std::atomic<std::size_t> invalidations_{};

@@ -8,10 +8,14 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <numeric>
 #include <semaphore>
+#include <sstream>
 #include <thread>
 
+#include "src/cache/retention.hpp"
+#include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
 #include "tests/cache/fake_adapter.hpp"
 
@@ -34,6 +38,7 @@ public:
   bool in_pass{};
   bool partial{};
   std::size_t private_blocks{128};
+  cache::Rows rows_per_chunk{4};
   mutable std::size_t through_calls{};
   bool UsesComponentCache() const override { return true; }
   TextRunnerDescriptor Descriptor() const override {
@@ -96,7 +101,7 @@ public:
                          std::shared_ptr<const void>(data, bytes.data())});
     }
     auto resources = std::make_unique<ComponentCacheResources>();
-    resources->adapter = std::make_unique<FakeAdapter>();
+    resources->adapter = std::make_unique<FakeAdapter>(rows_per_chunk);
     adapter = dynamic_cast<FakeAdapter*>(resources->adapter.get());
     resources->owner = blocks;
     resources->stream = [this, foreground = std::this_thread::get_id()]()
@@ -1669,6 +1674,97 @@ void UnbackedDeepRowsSurviveDiskRestart() {
   }
   std::filesystem::remove_all(directory);
 }
+void OverRamCaptureStagesPrivateStateUnderPressure(bool protect) {
+  // An over-RAM checkpoint is captured for disk only. Its rows are borrowed
+  // from the live slot, but its private state is staged in RAM backing, and
+  // two retained checkpoints fill that backing. Wide chunks keep the capture
+  // metadata within RAM.
+  char pattern[] = "/tmp/gufo-component-over-ram-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .min_checkpoint_step_tokens = 1};
+  auto runner = std::make_shared<Runner>();
+  runner->private_blocks = 2;
+  runner->rows_per_chunk = 4096;
+  constexpr std::size_t kRam = 448 << 10;
+  const auto previous_level = Logger::Level();
+  Logger::SetLevel(LogLevel::kInfo);
+  std::ostringstream output;
+  auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+  {
+    ComponentTextCache cache(runner, 1, kRam, disk);
+    const auto history = [](auto& lease, const auto& tokens,
+                            std::size_t boundary) {
+      assert(lease->TryReserveSnapshot(lease->CaptureBytes(), boundary, false,
+                                       SnapshotPurpose::kHistory, {}));
+      assert(lease->PublishSnapshot({tokens.begin(), tokens.begin() + boundary},
+                                    lease->Capture(), false));
+    };
+    const auto append = [&](auto& lease, std::span<const TextRunnerToken> t) {
+      auto& state = dynamic_cast<State&>(lease->state());
+      runner->adapter->Append(state.slot, t, t);
+    };
+    std::vector<TextRunnerToken> prompt(65536);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    if (!protect) {
+      // The cache may reclaim another conversation's history checkpoints.
+      const std::vector<TextRunnerToken> other(4, 7);
+      auto lease = cache.Acquire(other, {}, {}, true, 0, true);
+      append(lease, std::span(other).first(2));
+      history(lease, other, 2);
+      append(lease, std::span(other).subspan(2));
+      history(lease, other, 4);
+      (void)lease->Commit({}, {}, other);
+    }
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    if (protect) {
+      // The cache keeps this turn's own edit boundaries until it commits.
+      append(lease, std::span(prompt).first(2));
+      history(lease, prompt, 2);
+      append(lease, std::span(prompt).subspan(2, 2));
+      history(lease, prompt, 4);
+      append(lease, std::span(prompt).subspan(4));
+    } else {
+      append(lease, prompt);
+    }
+    const auto bytes = lease->CaptureBytes();
+    assert(bytes > kRam);
+    assert(lease->TryReserveSnapshot(bytes, prompt.size(), false,
+                                     SnapshotPurpose::kContinuation, prompt));
+    if (protect) {
+      bool refused = false;
+      try {
+        (void)lease->Capture();
+      } catch (const cache::ResourceExhausted&) {
+        refused = true;
+      }
+      assert(refused);
+    } else {
+      // Persisting would charge the manifest's tokens again, and in this fake
+      // they cost as many bytes as the rows. This test covers the capture.
+      auto snapshot = lease->Capture();
+      assert(snapshot && snapshot->PayloadBytes() == bytes);
+    }
+    lease->Invalidate();
+  }
+  std::clog.rdbuf(previous_sink);
+  Logger::SetLevel(previous_level);
+  const auto log = output.str();
+  const auto refused =
+      log.find("event=capture_refused reason=byte_capacity tokens=65536");
+  assert(protect == (refused != std::string::npos));
+  // Only the other conversation's history is reclaimed. Edit boundaries stay.
+  const auto reclaimed =
+      "event=retention action=" +
+      std::to_string(static_cast<unsigned>(cache::RetentionAction::kRemoved)) +
+      " reason=" +
+      std::to_string(
+          static_cast<unsigned>(cache::RetentionReason::kByteCapacity));
+  assert(protect == (log.find(reclaimed) == std::string::npos));
+  assert(log.find("event=capture_failed") == std::string::npos);
+  std::filesystem::remove_all(directory);
+}
 }  // namespace
 int main() {
   PublishedResidentCheckpointKeepsDiskStep();
@@ -1707,4 +1803,6 @@ int main() {
   GridDoesNotSuppressFirstDiskPrompt();
   NearTailDiskBranchSurvivesRestart();
   UnbackedDeepRowsSurviveDiskRestart();
+  OverRamCaptureStagesPrivateStateUnderPressure(false);
+  OverRamCaptureStagesPrivateStateUnderPressure(true);
 }
