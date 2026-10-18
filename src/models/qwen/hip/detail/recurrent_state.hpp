@@ -10,19 +10,17 @@
 namespace gufo::hip::detail {
 
 // Call only after the convolution launch has finished reading the old history.
-// Each thread owns one channel; load the short-batch tail before overwriting
-// it.
-__device__ __forceinline__ void StoreSSMConvHistory(const float* input,
-                                                    float* state,
-                                                    std::size_t channel,
-                                                    std::size_t batch_size,
-                                                    std::size_t qkv_size) {
+// Each thread owns one channel; load the short-batch tail from `state_in`,
+// which is `state` itself on an in-place pass, before overwriting it.
+__device__ __forceinline__ void StoreSSMConvHistory(
+    const float* input, const float* state_in, float* state,
+    std::size_t channel, std::size_t batch_size, std::size_t qkv_size) {
   float tail[4];
 #pragma unroll
   for (std::size_t j = 0; j < 4; ++j) {
     tail[j] = (batch_size + j >= 4)
                   ? input[((batch_size + j - 4) * qkv_size) + channel]
-                  : state[(channel * 4) + batch_size + j];
+                  : state_in[(channel * 4) + batch_size + j];
   }
 #pragma unroll
   for (std::size_t j = 0; j < 4; ++j) {

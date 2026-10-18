@@ -218,8 +218,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
     auto& state_arena = items[row].executor->arena_;
     auto replay = state_arena.GetSsmReplayCapture();
     replay.position = scratch.decode.prompt_tokens.data() + row;
-    ssm_sequences[row] = {state_arena.d_ssm_conv_state,
-                          state_arena.d_ssm_deltanet_state, replay,
+    ssm_sequences[row] = {state_arena.BeginRecurrentWrite(), replay,
                           static_cast<std::uint32_t>(row), 1};
   }
   HIP_CHECK(hipMemcpyAsync(
@@ -528,8 +527,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
     auto& state_arena = item.executor->arena_;
     auto replay = state_arena.GetSsmReplayCapture();
     replay.position = scratch.decode.prompt_tokens.data() + offsets[index];
-    ssm_sequences[index] = {state_arena.d_ssm_conv_state,
-                            state_arena.d_ssm_deltanet_state, replay,
+    ssm_sequences[index] = {state_arena.BeginRecurrentWrite(), replay,
                             static_cast<std::uint32_t>(offsets[index]),
                             static_cast<std::uint32_t>(item.tokens.size())};
     for (std::size_t row = 0; row < item.tokens.size(); ++row) {

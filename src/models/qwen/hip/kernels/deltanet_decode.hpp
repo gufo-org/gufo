@@ -13,8 +13,16 @@
 
 namespace gufo::hip {
 
+// The state tile is loaded once before the row loop and stored once after it.
+// A `Diverge` pass loads from `deltanet_in` (the buffer pinned for rollback)
+// and stores to `deltanet_state`; in place, `deltanet_in` is unused and the
+// single restrict pointer keeps today's aliasing contract and code. The generic
+// path keeps per-row storage transitions, so only its first row reads the
+// pinned tile. Per-sequence launches take both pointers from the sequence and
+// may alias per block.
 template<detail::QwenRecurrentStateElement StateT, bool Resident = false,
-         bool WriteOutput = true, typename Sequences = std::nullptr_t>
+         bool WriteOutput = true, bool Diverge = false,
+         typename Sequences = std::nullptr_t>
 __launch_bounds__(Resident ? 128 : 1024, 1) __global__
     void DeltaNetRecurrenceKernel(
         const float* __restrict__ conv_out, StateT* __restrict__ deltanet_state,
@@ -26,10 +34,16 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
         std::uint32_t key_dimension, std::uint32_t value_dimension,
         SsmReplayCapture replay_capture, std::uint32_t rows,
         std::size_t conv_row_stride, std::size_t projection_row_stride,
-        std::size_t inner_row_stride, Sequences sequences = {}) {
+        std::size_t inner_row_stride,
+        const StateT* __restrict__ deltanet_in = nullptr,
+        Sequences sequences = {}) {
+  const StateT* state_in = Diverge ? deltanet_in : deltanet_state;
+  StateT* state_out = deltanet_state;
   if constexpr (!std::is_same_v<Sequences, std::nullptr_t>) {
+    static_assert(Diverge, "per-sequence launches decide aliasing per block");
     const auto& sequence = sequences.sequences[blockIdx.y];
-    deltanet_state = static_cast<StateT*>(sequence.recurrent);
+    state_in = static_cast<const StateT*>(sequence.state.recurrent_in);
+    state_out = static_cast<StateT*>(sequence.state.recurrent_out);
     replay_capture = sequence.replay;
     rows = sequence.rows;
     const std::size_t offset = sequence.row_offset;
@@ -62,9 +76,10 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
   __shared__ float s_warp_q[8];
   __shared__ float s_val_warp[8];
 
-  StateT* s_matrix =
-      deltanet_state + ((static_cast<std::size_t>(layer_idx) * num_heads + h) *
-                        key_dim * val_dim);
+  const std::size_t head_offset =
+      (static_cast<std::size_t>(layer_idx) * num_heads + h) * key_dim * val_dim;
+  const StateT* s_matrix_in = state_in + head_offset;
+  StateT* s_matrix = state_out + head_offset;
 
   // Keep each FP32 state row across the verification/replay block. Generic
   // shapes and BF16 storage retain their per-token storage transitions.
@@ -72,7 +87,7 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
   if constexpr (Resident) {
 #pragma unroll
     for (std::size_t vi = 0; vi < 32; ++vi)
-      resident[vi] = detail::LoadRecurrentState4(s_matrix + tid * 128, vi);
+      resident[vi] = detail::LoadRecurrentState4(s_matrix_in + tid * 128, vi);
   }
 
   for (std::uint32_t row = 0; row < rows; ++row) {
@@ -200,6 +215,10 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
     if (tid < val_dim) {
       const std::size_t j = tid;
       StateT* s_row = s_matrix + (j * key_dim);
+      // Only the first row of a diverging pass reads the pinned tile; later
+      // rows read what this launch stored.
+      const StateT* s_row_in =
+          (Diverge && row == 0) ? s_matrix_in + (j * key_dim) : s_row;
       const float4* k4 = reinterpret_cast<const float4*>(s_k);
       const float4* q4 = reinterpret_cast<const float4*>(s_q);
 
@@ -212,7 +231,7 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
         if constexpr (Resident)
           st = resident[vi];
         else
-          st = detail::LoadRecurrentState4(s_row, vi);
+          st = detail::LoadRecurrentState4(s_row_in, vi);
         const float4 kv = k4[vi];
         u_j += (st.x * alpha_h) * kv.x + (st.y * alpha_h) * kv.y +
                (st.z * alpha_h) * kv.z + (st.w * alpha_h) * kv.w;
@@ -232,7 +251,7 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
         if constexpr (Resident)
           st = resident[vi];
         else
-          st = detail::LoadRecurrentState4(s_row, vi);
+          st = detail::LoadRecurrentState4(s_row_in, vi);
         const float4 kv = k4[vi];
         const float4 qv = WriteOutput ? q4[vi] : float4{};
         if constexpr (Resident) {
