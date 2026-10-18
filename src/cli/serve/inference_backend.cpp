@@ -2518,8 +2518,9 @@ public:
     // The remainder belongs to index, histories, disk catalog and queue
     // metadata. The pools charge their own per-block allocator headroom.
     result->commit_backing = [backing, &ledger,
-                              adapter =
-                                  result->adapter.get()](std::size_t budget) {
+                              adapter = result->adapter.get()](
+                                 std::size_t budget,
+                                 TextRunnerRamCommit commit) {
       const auto plan =
           static_cast<models::qwen38_flash_next::ContinuationAdapter*>(adapter)
               ->BackingPlan(budget);
@@ -2546,13 +2547,14 @@ public:
         std::chrono::steady_clock::time_point refused;
         bool active{};
       };
+      const auto limited = std::make_shared<Limited>();
       backing->pool = std::make_unique<hip::CommittedBackingPool>(
           ledger,
           hip::BackingPoolConfig{
               allocation.blocks * allocation.block_bytes +
                   allocation.metadata_bytes,
               allocation.block_bytes, allocation.metadata_bytes, segment,
-              [limited = std::make_shared<Limited>()](std::size_t bytes) {
+              [limited](std::size_t bytes) {
                 const std::lock_guard lock(limited->mutex);
                 const auto now = std::chrono::steady_clock::now();
                 // Pressure retries ask once per capture; recheck at most
@@ -2587,17 +2589,52 @@ public:
                 limited->refused = now;
                 return false;
               }});
-      // Prepare a bounded reserve before readiness. The first shared-prefix
-      // capture needs more than one segment; preparing both avoids moving
-      // registration onto that request's capture or decode path.
-      backing->pool->GrowAhead(2);
-      backing->pool->WaitForGrowth();
+      const auto started = std::chrono::steady_clock::now();
+      if (commit == TextRunnerRamCommit::kEager) {
+        // Every segment, in the on-demand layout and with the same host and
+        // device-heap admission, so no request overlaps page commitment or
+        // registration: either competes with request CPU and GPU work.
+        if (!backing->pool->CommitAll())
+          throw std::runtime_error(
+              "--cache-ram-commit eager could not commit the Flash-Next RAM "
+              "cache before serving: " +
+              std::to_string(backing->pool->CommittedBytes()) + " of " +
+              std::to_string(allocation.blocks * block) + " bytes (" +
+              std::to_string(backing->pool->PageCommitAllocations()) + " of " +
+              std::to_string(parts) + " segments) committed, then " +
+              (limited->active
+                   ? "a segment would cut into the host or device-heap "
+                     "reserve (see the backing_limited warning)"
+                   : "committing or registering a segment failed") +
+              ". Lower --cache-ram-bytes or use --cache-ram-commit lazy");
+      } else {
+        // Prepare a bounded reserve before readiness. The first shared-prefix
+        // capture needs more than one segment; preparing both avoids moving
+        // registration onto that request's capture or decode path.
+        backing->pool->GrowAhead(2);
+        backing->pool->WaitForGrowth();
+      }
+      std::size_t heap_free = 0, heap_total = 0;
+      (void)hipMemGetInfo(&heap_free, &heap_total);
       Logger::Info(
           "cache",
-          "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
+          "schema=component-cache-v1 event=backing_prepared commit=" +
+              std::string(commit == TextRunnerRamCommit::kEager ? "eager"
+                                                                : "lazy") +
+              " budget_bytes=" + std::to_string(budget) + " backing_bytes=" +
+              std::to_string(allocation.blocks * block) + " committed_bytes=" +
               std::to_string(backing->pool->CommittedBytes()) +
               " long_term_pinned_bytes=" +
-              std::to_string(backing->pool->LongTermPinnedBytes()));
+              std::to_string(backing->pool->LongTermPinnedBytes()) +
+              " segments=" +
+              std::to_string(backing->pool->PageCommitAllocations()) + "/" +
+              std::to_string(parts) +
+              " segment_bytes=" + std::to_string(segment) + " prepare_ms=" +
+              std::to_string(std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - started)
+                                 .count()) +
+              " device_heap_free_bytes=" + std::to_string(heap_free) + " " +
+              Logger::MemoryStatus());
     };
     result->prepare_prefill = [backing] { backing->pool->GrowAhead(2); };
     result->can_capture = [backing](auto payloads) {

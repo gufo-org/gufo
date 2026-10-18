@@ -40,6 +40,7 @@ using gufo::server::TextRunnerDescriptor;
 using gufo::server::TextRunnerDiskCacheOptions;
 using gufo::server::TextRunnerMeasuredResources;
 using gufo::server::TextRunnerPool;
+using gufo::server::TextRunnerRamCommit;
 using gufo::server::TextRunnerResourceClaim;
 using gufo::server::TextRunnerSnapshot;
 using gufo::server::TextRunnerState;
@@ -460,6 +461,22 @@ void TestResourceClaimsAreValidatedBeforeAllocation() {
   Expect(rejected, "aggregate request-state claim must fit capacity");
   Expect(stats->states_created == 0,
          "invalid resource claim is rejected before state allocation");
+}
+
+void TestEagerRamCommitNeedsPinnedBacking() {
+  // Only a cache with pinned backing can commit its budget before serving;
+  // other models refuse the request instead of quietly staying lazy.
+  auto stats = std::make_shared<FakeStats>();
+  std::string error;
+  try {
+    TextRunnerPool pool(std::make_shared<FakeRunner>(stats), 1, std::nullopt,
+                        {.commit = TextRunnerRamCommit::kEager});
+  } catch (const std::invalid_argument& e) {
+    error = e.what();
+  }
+  Expect(error.find("--cache-ram-commit eager") != std::string::npos,
+         "eager RAM commit is refused without pinned backing");
+  Expect(stats->states_created == 0, "refused before state allocation");
 }
 
 class FakeSnapshot final : public TextRunnerSnapshot {
@@ -2334,6 +2351,7 @@ int main() {
   TestRequestBindsAndClearsCancellation();
   TestBatchedAdvancePreservesIndependentRequests();
   TestResourceClaimsAreValidatedBeforeAllocation();
+  TestEagerRamCommitNeedsPinnedBacking();
   TestSnapshotForkAndUnsupportedCapabilities();
   TestSnapshotCacheBranchesOnePrefixIntoIndependentStates();
   std::ostringstream normal_log;

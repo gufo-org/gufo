@@ -102,6 +102,11 @@ public:
   // The count is the desired free-segment reserve, bounded by capacity.
   void GrowAhead(std::size_t segments = 1);
   void WaitForGrowth();
+  // Commits every remaining on-demand segment on the calling thread, in the
+  // same layout and admission order as growth, after any growth GrowAhead
+  // started. False when a segment is declined or cannot be committed; the
+  // segments committed so far stay. Once full, the pool never grows again.
+  [[nodiscard]] bool CommitAll();
   // Committed blocks and bytes; both grow with on-demand segments.
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;

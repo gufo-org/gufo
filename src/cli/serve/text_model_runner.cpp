@@ -618,7 +618,8 @@ struct TextRunnerPool::Impl {
       // state claim includes lazy image/rollback storage, not startup usage.
       component_cache = std::make_unique<ComponentTextCache>(
           validated.runner, state_count, std::min(requested, ceiling),
-          disk_cache_options, !ram_cache_options.capacity_bytes);
+          disk_cache_options, !ram_cache_options.capacity_bytes,
+          ram_cache_options.commit);
       if (disk_cache_options) {
         shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
         shared_prefix_max_boundaries =
@@ -626,6 +627,10 @@ struct TextRunnerPool::Impl {
       }
       return;
     }
+    if (ram_cache_options.commit == TextRunnerRamCommit::kEager)
+      throw std::invalid_argument(
+          "--cache-ram-commit eager applies only to models with pinned cache "
+          "backing (Qwen3.8-Flash-Next); omit the option");
     cache = std::make_unique<ContinuationCache>(
         state_count,
         [this] {

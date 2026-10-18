@@ -210,7 +210,7 @@ struct ComponentTextCache::Impl {
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
        std::size_t ram,
        const std::optional<TextRunnerDiskCacheOptions>& options,
-       bool automatic_ram)
+       bool automatic_ram, TextRunnerRamCommit commit)
       : runner(std::move(runner)),
         // Disk transfers lease one fixed pinned staging buffer. Its size does
         // not change restore or write speed (#562), and a larger one only
@@ -279,7 +279,11 @@ struct ComponentTextCache::Impl {
       if (automatic_ram)
         ram = std::min(ram, automatic);
       ledger.ConstrainLimits({ram + staging, ram, staging, ram});
-      resources->commit_backing(ram);
+      resources->commit_backing(ram, commit);
+    } else if (commit == TextRunnerRamCommit::kEager) {
+      throw std::invalid_argument(
+          "--cache-ram-commit eager needs pinned cache backing, which this "
+          "model does not use; omit the option");
     }
     if (options) {
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index);
@@ -852,9 +856,10 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
 
 ComponentTextCache::ComponentTextCache(
     std::shared_ptr<TextModelRunner> runner, std::size_t count, std::size_t ram,
-    const std::optional<TextRunnerDiskCacheOptions>& disk, bool automatic_ram)
+    const std::optional<TextRunnerDiskCacheOptions>& disk, bool automatic_ram,
+    TextRunnerRamCommit commit)
     : impl_(std::make_unique<Impl>(std::move(runner), count, ram, disk,
-                                   automatic_ram)) {}
+                                   automatic_ram, commit)) {}
 ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();

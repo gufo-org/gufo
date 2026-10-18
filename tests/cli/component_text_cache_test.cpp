@@ -229,7 +229,8 @@ void BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim() {
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
         cache::ResourceLedger& ledger, std::size_t ram) const override {
       auto resources = Runner::CreateComponentCacheResources(ledger, ram);
-      resources->commit_backing = [this, &ledger](std::size_t budget) {
+      resources->commit_backing = [this, &ledger](std::size_t budget,
+                                                  TextRunnerRamCommit) {
         assert(ledger.Limits().ram_bytes == budget);
         committed = budget;
       };
@@ -1080,7 +1081,8 @@ void StagingCountsAgainstRamCeiling() {
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
         cache::ResourceLedger& ledger, std::size_t ram) const override {
       auto resources = Runner::CreateComponentCacheResources(ledger, ram);
-      resources->commit_backing = [this](std::size_t budget) {
+      resources->commit_backing = [this](std::size_t budget,
+                                         TextRunnerRamCommit) {
         committed = budget;
       };
       return resources;
@@ -1108,7 +1110,9 @@ void DiskDirectoryHasOneOwner() {
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
         cache::ResourceLedger& ledger, std::size_t ram) const override {
       auto resources = Runner::CreateComponentCacheResources(ledger, ram);
-      resources->commit_backing = [this](std::size_t) { committed = true; };
+      resources->commit_backing = [this](std::size_t, TextRunnerRamCommit) {
+        committed = true;
+      };
       // Every execution slot takes a preservation stream when it allocates.
       resources->stream = [this, stream = std::move(resources->stream)] {
         ++streams;
@@ -1143,6 +1147,63 @@ void DiskDirectoryHasOneOwner() {
     assert(runner->committed);
   }
   std::filesystem::remove_all(directory);
+}
+void EagerCommitPrecedesServing() {
+  // The serving pool asks the provider to commit as configured while it
+  // starts, before any request can be admitted. A failed eager commit fails
+  // startup and releases the provider's backing; it never falls back to lazy.
+  class CommitRunner final : public Runner {
+  public:
+    mutable std::vector<TextRunnerRamCommit> commits;
+    mutable std::weak_ptr<void> owner;
+    bool decline{};
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      owner = resources->owner;
+      resources->commit_backing = [this](std::size_t,
+                                         TextRunnerRamCommit commit) {
+        commits.push_back(commit);
+        if (decline && commit == TextRunnerRamCommit::kEager)
+          throw std::runtime_error("segment declined");
+      };
+      return resources;
+    }
+  };
+  using enum TextRunnerRamCommit;
+  auto runner = std::make_shared<CommitRunner>();
+  {
+    TextRunnerPool pool(runner, 1, {}, {});
+    assert(runner->commits == std::vector{kLazy});
+  }
+  {
+    TextRunnerPool pool(runner, 1, {},
+                        {.capacity_bytes = 1 << 22, .commit = kEager});
+    assert((runner->commits == std::vector{kLazy, kEager}));
+    std::vector<TextRunnerToken> prompt{10, 11, 12, 13};
+    auto request = pool.Acquire(prompt);
+    while (!request.prefill_complete())
+      (void)request.Prefill(8);
+    assert(request.SelectNext().token != 0);
+    assert(runner->commits.size() == 2);
+  }
+  runner->decline = true;
+  std::string error;
+  try {
+    TextRunnerPool pool(runner, 1, {}, {.commit = kEager});
+  } catch (const std::runtime_error& e) {
+    error = e.what();
+  }
+  assert(error == "segment declined" && runner->commits.size() == 3 &&
+         runner->owner.expired());
+  // A model without pinned backing cannot honour eager, so it refuses it.
+  error.clear();
+  try {
+    TextRunnerPool pool(std::make_shared<Runner>(), 1, {}, {.commit = kEager});
+  } catch (const std::invalid_argument& e) {
+    error = e.what();
+  }
+  assert(error.find("--cache-ram-commit eager") != std::string::npos);
 }
 void GridDoesNotSuppressFirstDiskPrompt() {
   char pattern[] = "/tmp/gufo-component-spacing-test-XXXXXX";
@@ -1429,6 +1490,7 @@ int main() {
   StagingIsInternal();
   StagingCountsAgainstRamCeiling();
   DiskDirectoryHasOneOwner();
+  EagerCommitPrecedesServing();
   GridDoesNotSuppressFirstDiskPrompt();
   NearTailDiskBranchSurvivesRestart();
   UnbackedDeepRowsSurviveDiskRestart();

@@ -184,8 +184,15 @@ positive value sets a byte cap that may exceed the automatic budget, up to the
 available host RAM minus 4 GiB; the startup line reports both as
 `automatic_bytes` and `max_bytes`.
 On Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
-`max_bytes` excludes it. Other models' disk staging and temporary disk-save
-buffers are separate from this RAM budget.
+`max_bytes` excludes it. Flash-Next pins the budget about 1 GiB at a time as
+captures need it; `--cache-ram-commit eager` pins all of its backing pages
+before serving, so no request shares the host with that work. Startup then
+takes longer by the time to commit them, they are resident immediately, and
+startup fails rather than growing later if the host or device heap cannot hold
+them. The `event=backing_prepared` line reports the committed and long-term
+pinned bytes and the time taken. Pair it with an explicit `--cache-ram-bytes`
+([details](KV-CACHE.md#limits)). Other models' disk staging and temporary
+disk-save buffers are separate from this RAM budget.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
 Qwen3.8-Flash-Next pins pages for up to about 89% of its budget as captures

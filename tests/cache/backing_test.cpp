@@ -549,6 +549,69 @@ void OnDemandBacking() {
   assert(startup_first && startup_second &&
          allocations.load() == committed_allocations);
 }
+void EagerCommit() {
+  // Serving may commit the whole pool before it starts. Segments, admission
+  // and accounting stay those of on-demand growth, and nothing grows later.
+  constexpr std::size_t pages = 5, headroom = 16 << 10;
+  constexpr std::size_t capacity = pages * block_bytes + headroom;
+  cache::ResourceLedger ledger(Limits(capacity));
+  std::size_t asked{};
+  {
+    const auto physical = allocations.load();
+    hip::CommittedBackingPool pool(
+        ledger, {capacity, block_bytes, headroom, 2 * block_bytes,
+                 [&](std::size_t bytes) {
+                   asked += bytes;
+                   return true;
+                 }});
+    assert(pool.CommitAll());
+    assert(pool.BlockCount() == pages && pool.PageCommitAllocations() == 3);
+    assert(allocations == physical + 3 && asked == pages * block_bytes);
+    assert(ledger.Snapshot().total_bytes == headroom + pages * block_bytes);
+    assert(pool.CommitAll());
+    // Neither capture-time growth nor the reserve before a long prefill can
+    // grow a full pool.
+    pool.GrowAhead();
+    pool.GrowAhead(2);
+    pool.WaitForGrowth();
+    // Runs still end with their segment: after one block, a single pair fits
+    // (one coalesced region would take two), then the singles left. Private
+    // states fill from the end, so the first block is a forward-filled tail.
+    auto first = pool.TryAcquire(Category::kPrivateTail);
+    auto pair = pool.TryAcquire(Category::kBackingAssigned, 2 * block_bytes);
+    assert(first && pair);
+    assert(!pool.TryAcquire(Category::kBackingAssigned, 2 * block_bytes));
+    auto second = pool.TryAcquire(Category::kPrivateTail);
+    auto third = pool.TryAcquire(Category::kPrivateTail);
+    assert(second && third && !pool.TryAcquire(Category::kPrivateTail));
+    assert(pool.PageCommitAllocations() == 3 && allocations == physical + 3 &&
+           asked == pages * block_bytes);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+  // A declined segment stops it; what committed stays accounted until the
+  // pool, and with it the failed server, releases it.
+  std::size_t admitted{};
+  {
+    hip::CommittedBackingPool pool(
+        ledger, {capacity, block_bytes, headroom, 2 * block_bytes,
+                 [&](std::size_t) { return admitted++ == 0; }});
+    assert(!pool.CommitAll());
+    assert(pool.BlockCount() == 2 && pool.PageCommitAllocations() == 1);
+    assert(ledger.Snapshot().total_bytes == headroom + 2 * block_bytes);
+  }
+  assert(admitted == 2 && ledger.Snapshot().total_bytes == 0);
+  // So does a segment whose pages cannot be pinned.
+  {
+    hip::CommittedBackingPool pool(
+        ledger, {capacity, block_bytes, headroom, 2 * block_bytes, {}});
+    fail_alloc = true;
+    assert(!pool.CommitAll());
+    fail_alloc = false;
+    assert(pool.BlockCount() == 0 && pool.PageCommitAllocations() == 0 &&
+           ledger.Snapshot().total_bytes == headroom);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
 void CaptureCapacity() {
   constexpr std::size_t pages = 6, headroom = 16 << 10;
   constexpr std::size_t capacity = pages * block_bytes + headroom;
@@ -1017,6 +1080,7 @@ int main(int argc, char** argv) {
   GroupedBacking();
   CheckpointLifetimes();
   OnDemandBacking();
+  EagerCommit();
   CaptureCapacity();
   Transfers();
   LifetimeAndFailures();

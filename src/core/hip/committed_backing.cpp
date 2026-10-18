@@ -476,6 +476,16 @@ void CommittedBackingPool::WaitForGrowth() {
   if (ahead_.joinable())
     ahead_.join();
 }
+bool CommittedBackingPool::CommitAll() {
+  WaitForGrowth();
+  for (;;) {
+    const auto committed = state_->committed.load(std::memory_order_acquire);
+    if (committed == state_->capacity)
+      return true;
+    if (!state_->Grow(committed))
+      return false;
+  }
+}
 std::size_t CommittedBackingPool::BlockCount() const noexcept {
   return state_->committed.load(std::memory_order_acquire);
 }
