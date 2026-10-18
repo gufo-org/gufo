@@ -1710,10 +1710,11 @@ p.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests":
             self.assertEqual(list(report["suites"]), ["tools", "tool-native-schemas"])
 
     def test_failed_or_incomplete_child_is_not_reported_as_a_pass(self):
+        hung = 'import time; time.sleep(10)'
         for child, expected in (
             ('import sys; sys.exit(7)', "failed"),
             ('pass', "failed"),
-            ('import time; time.sleep(10)', "failed"),
+            (hung, "failed"),
             ('import json,sys; from pathlib import Path; '
              'Path(sys.argv[sys.argv.index("--output")+1]).write_text('
              'json.dumps({"status":"failed"}))', "failed"),
@@ -1734,7 +1735,9 @@ p.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests":
                 (root / "openai_sdk.py").write_text(child)
                 args = ["run.py", "--record-baseline", "--output", str(root / "report"),
                         "--sampling-preset", "qwen38", "--suite", "responses",
-                        "--suite-timeout", ".2", "--",
+                        # Only the hung child relies on the timeout; the others need time
+                        # to start Python on a loaded host.
+                        "--suite-timeout", ".2" if child == hung else "60", "--",
                         sys.executable, "serve", "llm", "--model", "fixture.gguf"]
                 with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
                      patch.object(functional, "server", return_value=contextlib.nullcontext()), \
