@@ -1,5 +1,52 @@
 # Qwen3.8 Flash-Next quality
 
+**Host-memory stalls, October 18:** `fec4759d` protects runtime-owned queue-save,
+launch/copy and code-loading buffers from host compaction while preserving
+application managed memory and ordinary fine-grained host allocations. Owned
+HIP host buffers retain their coherence policy and gain best-effort long-term
+pins. Cache backing grows in bounded pieces before actual prefill work, after
+pending captures. Cold HC, Q8 and argmax functions resolve before readiness
+without trial launches. Model arithmetic, sampling and checkpoint contents are
+unchanged. The Nix package selects the patched ROCr runtime automatically.
+
+Independent memory checks cover GPU/CPU visibility, managed fallback and
+restricted pinning. Weight-upload bytes, bounds and failed-read cleanup pass.
+All 903,984,064 vision-upload bytes are checked, and 29 vision stages containing
+8,421,376 finite floats remain byte-identical to main. Independent projection,
+MTP and bidirectional snapshot-copy checks pass, including pageable/unaligned
+fallbacks, borrowed device sources, guards and graph replay.
+
+Controls on main `bff0eec6` pass all 1,918 sampling/stop measurements, 345
+measurements across the 24-request history through 56K, and 302 concurrent
+measurements against the control with matching admission order. Original
+request-index flags remain recorded. After rebasing onto `f948ddd3` and its
+image-preprocessing cache, the production package passes cache correctness and
+every compared prefill, decode and disk-restore phase. Eight image-history
+requests with one/four 1080p screenshots and text controls retain exact outputs
+and cache work; all 56 phase checks pass. Pi passes tools, editing and code
+creation with thinking enabled, ten HTTP requests, nine successful tool calls
+and executed tests.
+
+The complete HTTP benchmark refresh retains all 24 depth completion hashes
+and prompt/cache counts, and all 63 concurrent completions match fresh AR
+controls. Initial repetitive-MTP PP samples at 16K/32K/64K were
+1573/1541/1469 tok/s. A matched ordered repeat measures 1647/1624/1567,
+versus current main's 1654/1634/1570. All nine observed requests pass 63
+phase comparisons; server logs also confirm matching work and passing phases
+for all sixteen requests including prefix preparation. Both candidate samples
+contribute to the published mean and standard deviation. The initial dips'
+cause remains unproven. Cold-file loading takes 16.42 seconds versus main's
+15.95 seconds, within the timing gate.
+
+One fully cached thinking replay retains a queue/TTFT flag of about 3.22 ms:
+queue time is 7.70 → 10.93 ms, while an earlier unchanged-main control reaches
+11.47 ms. This remains **inconclusive**, not a timing pass. The post-build probe
+retains all twelve outputs/tool arguments and observes 98.5–101.4 ms maximum
+token gaps, versus 208–283 ms in the incomplete fix. Its small 4 ms total KFD
+eviction counter is retained; this is not a guarantee that every possible
+operating-system or concurrency stall is eliminated.
+[Detailed controls and failed observations](artifacts/host-memory-stalls-review.json).
+
 **Issue #632, October 17:** compared with merged main `8497711e`, indexer plan
 preparation moves the first hipBLASLt module load before readiness without
 running trial GEMMs. The independent F64 projection check and prepared/lazy
@@ -492,14 +539,11 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-Single-user and concurrency tables were refreshed on October 17, 2026, with
-production Nix build `3b02d877` plus the reusable PLE gather scratch
-(binary SHA-256 prefix `93ec6640be94adb9`). The artifacts retain the dirty
-build identity, and the production file hashes identify the exact source.
-Loading and memory use the
-October 16 `fdc21849` capture (binary prefix `b1ab0e9795df6fba`).
-The pinned toolchain is unchanged. Every single-user row reproduces main's
-completion hashes and prompt/cache counts; prompt lookup changes draft counts.
+All Gufo tables were refreshed on October 18, 2026, with the clean production
+Nix build `fec4759d` (ELF SHA-256 prefix `1d822fb97b4639c61`).
+The pinned compiler and dependencies are unchanged; the package includes the
+qualified ROCr host-memory patch. Every single-user row reproduces the
+previous qualified completion hashes and prompt/cache counts.
 Four prior alternating mixed
 MTP C2 repeats gave 110 drafts (about 54 tok/s) on main twice and the PR once,
 and 144 drafts (about 60 tok/s) on the PR once, all with identical text.
@@ -513,11 +557,16 @@ timings, diagnostic profiles and repeated controls are retained outside Git.
 
 The driver is `tools/bench/model-bench.py run --target gufo --fresh`.
 One warmed sample per point, HTTP, greedy, thinking off, penalties disabled;
-automatic cache RAM budget. Single-user uses ordered pp2048/tg128 histories at
+automatic cache RAM budget. Repetitive MTP through 64K also includes one
+focused repeat, preserving the ordered history and the initial sweep's realized
+17,213,143,040-byte RAM cache budget. Those rows report mean ± sample standard
+deviation, retaining the initial slower samples. Both repeat arms start after
+GPU temperature recovery; telemetry and the initial flags remain recorded.
+Single-user uses ordered pp2048/tg128 histories at
 every depth from 0 to 131072, with capacity 133760. MTP pp is the maximum across
 the independently retained mixed/repetitive workloads. Diagnostic profiled
-runs and abandoned candidates do not supply published cells. Matched AR and
-MTP controls for this refresh use main `3389a585`.
+runs and abandoned candidates do not supply published cells. Focused repetitive
+MTP, loading, cache and screenshot controls use current main `f948ddd3`.
 Controls preserve prompts, settings and ordered cache histories;
 per-request phase flags require both a 5% and a 3 ms increase.
 

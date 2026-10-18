@@ -22,7 +22,7 @@
     "fingerprintId": "fe5929d418cfe1f7e3aa4a09199012c1fa064859f1fc762a8cbcda970358f158",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-16",
+  "measuredOn": "2026-10-18",
   "mode": "mtp",
   "model": {
     "id": "Qwen3.8-Flash-Next",
@@ -35,8 +35,8 @@
   "referenceName": "llama.cpp",
   "rows": {
     "default": {
-      "command": "gufo serve --port 41287 --sessions 1 --host 127.0.0.1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
-      "ready_s": 15.274,
+      "command": "gufo serve --port 41383 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "ready_s": 16.417,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -47,11 +47,9 @@
       "gufo",
       "serve",
       "--port",
-      "41287",
+      "41383",
       "--sessions",
       "1",
-      "--host",
-      "127.0.0.1",
       "llm",
       "--model",
       "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
@@ -72,7 +70,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": false,
-    "revision": "fdc2184941a19867fb2d643030717fec344b7280"
+    "revision": "fec4759d064585d72f87c6e11af5cfa0e1fa95c7"
   },
   "table": "loading",
   "target": "gufo"
