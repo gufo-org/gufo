@@ -1035,6 +1035,8 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
   // are not drafts of the head, so they are left out.
   Require((ts.accepted - ts.lookup_accepted) * 2 >= ts.drafted - ts.lookup,
           "small-head drafts of tabled tokens were rejected");
+  // Later restores into this session replace its statistics.
+  const auto tabled_copies = ts.lookup;
 
   // A second request with its own table, then a restore of each into the
   // other's populated session against a restore into a fresh one.
@@ -1179,7 +1181,7 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
   }
   std::cout << "draft table: small head returns after the window ("
             << tabled.small_head << "/" << tabled.drafting
-            << " drafting cycles, " << ts.lookup
+            << " drafting cycles, " << tabled_copies
             << " lookup copies), tabled rare drafts map back, restores into "
                "used tables and mixed batches are exact\n";
 }
