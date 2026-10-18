@@ -68,6 +68,10 @@ for t in "${targets[@]}"; do
   if [[ "$src" -ef tools/qwen27b/prefill_gemm_bench.hip ]]; then
     native_sources+=(src/models/qwen/hip/kernels/prefill_quant_wave64.hip)
   fi
+  if [[ "$src" -ef tools/qwen27b/attention_bench.hip ]]; then
+    native_sources+=(
+      src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip)
+  fi
   if ((${#native_sources[@]})); then
     # HIP helpers and their callers must share the native wave size.
     objects="$(mktemp -d "/tmp/${t}.XXXXXX")"

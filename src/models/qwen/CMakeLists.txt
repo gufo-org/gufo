@@ -60,6 +60,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/swiglu.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_batched.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_graph.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_tile.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_wmma.hip
@@ -88,6 +89,7 @@ if (ENGINE_ENABLE_HIP)
   set_source_files_properties(
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip
     TARGET_DIRECTORY gufo_core
     PROPERTIES COMPILE_OPTIONS -mwavefrontsize64)
   # Iterative ILP improves Q4/Q5 groups of sixteen without changing arithmetic.
