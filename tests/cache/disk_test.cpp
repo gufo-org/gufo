@@ -645,6 +645,61 @@ void CapacityBeforePayloadReads() {
     assert(rejected && !store.Open({7}) && !store.Open({8}));
   }
 }
+void VerifiedDependencies() {
+  Directory directory;
+  DiskStore store(ledger, directory.path, 1ULL << 30);
+  std::vector<std::uint8_t> chunk(8, 42);
+  std::array<std::uint8_t, 16> state{};
+  unsigned shared = 1;
+  auto publish = [&](unsigned checkpoint) {
+    auto m = Manifest();
+    m.checkpoint = {checkpoint};
+    m.tokens.resize(2);
+    m.components[0].chunks[0] = {Id(shared), chunk.size(), DiskChecksum(chunk)};
+    m.components[0].tail.reset();
+    m.components[0].position.valid_rows = 2;
+    m.components[1].position.valid_rows = 2;
+    state[0] = checkpoint;
+    m.components[1].private_state =
+        DiskPayload{Id(checkpoint + 100), state.size(), DiskChecksum(state)};
+    const std::array<DiskWriteBuffer, 2> buffers{
+        {{false, Id(shared), chunk}, {true, Id(checkpoint + 100), state}}};
+    actual_payload_bytes = 0;
+    store.Publish(Id(checkpoint), m,
+                  std::span(buffers).subspan(store.Entries().empty() ? 0 : 1));
+    return actual_payload_bytes.load();
+  };
+  auto retire = [&] {
+    for (unsigned id : {7, 8, 9})
+      (void)store.Retire({id});
+    store.ReclaimOrphans();
+    store.WaitForReclamation();
+    assert(store.Entries().empty());
+    return ledger.Snapshot().total_bytes;
+  };
+  // Inherited chunks are read once after they were written, then their
+  // unchanged identity is trusted by later publications.
+  assert(publish(7) == 0);
+  assert(publish(8) == chunk.size());
+  assert(publish(9) == 0);
+  const auto settled = retire();
+  // Removing a file releases its verification record.
+  shared = 2;
+  assert(publish(7) == 0);
+  assert(publish(8) == chunk.size());
+  // A rewritten file changes identity and is verified again.
+  chunk[0] ^= 1;
+  Write(directory.path / "v2/chunks" / DiskFileName(Id(shared)), chunk);
+  chunk[0] ^= 1;
+  bool rejected = false;
+  try {
+    (void)publish(9);
+  } catch (const DiskDependencyError&) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(retire() == settled);
+}
 }  // namespace
 int main() {
   Format();
@@ -656,6 +711,7 @@ int main() {
   Cleanup();
   BudgetAndDirectories();
   CapacityBeforePayloadReads();
+  VerifiedDependencies();
   InterruptedCleanup();
   RootSymlinks();
   ParentPathResolution();
