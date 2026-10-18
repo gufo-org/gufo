@@ -33,6 +33,7 @@
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/generator.hpp"
+#include "src/models/qwen/vision/image_cache.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/core/hip/committed_backing.hpp"
@@ -87,7 +88,7 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
 std::optional<std::size_t> CountQwenPromptTokens(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
   const auto options = QwenChatOptions(request, max_context);
   const auto tools =
       request.tool_choice == ChatRequest::ToolChoice::kNone
@@ -108,14 +109,15 @@ std::optional<std::size_t> CountQwenPromptTokens(
   return models::qwen::vision::Prepare(
              tokenizer, request.messages, tools, options,
              encoder ? encoder->identity() : std::string_view{},
-             std::numeric_limits<std::int32_t>::max())
+             std::numeric_limits<std::int32_t>::max(),
+             request.cache_prompt ? &image_cache : nullptr)
       .tokens.size();
 }
 
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
   const auto options = QwenChatOptions(request, max_context);
@@ -127,7 +129,17 @@ TextPreparedPrompt PrepareQwenPrompt(
               : std::span<const tokenization::ChatTool>{request.tools},
           options,
           encoder && has_images ? encoder->identity() : std::string_view{},
-          max_context));
+          max_context, request.cache_prompt ? &image_cache : nullptr));
+  if (has_images && Logger::Enabled(LogLevel::kDebug)) {
+    const auto stats = image_cache.GetStats();
+    Logger::LogFormatted(LogLevel::kDebug, "vision",
+                         "event=image_cache enabled=%d entries=%zu "
+                         "pixel_bytes=%zu encoded_bytes=%zu "
+                         "hits=%zu misses=%zu evictions=%zu",
+                         static_cast<int>(request.cache_prompt), stats.entries,
+                         stats.pixel_bytes, stats.encoded_bytes, stats.hits,
+                         stats.misses, stats.evictions);
+  }
   const auto cache_prefix = prompt->stable_prefix_tokens;
   if (prompt->images.empty())
     return {std::move(prompt->tokens), {}, cache_prefix};
@@ -1073,13 +1085,15 @@ public:
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->GetTokenizer(),
-                             model_->VisionEncoder(), max_context_);
+                             model_->VisionEncoder(), max_context_,
+                             image_cache_);
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
       const ChatRequest& request) const override {
     return CountQwenPromptTokens(request, model_->GetTokenizer(),
-                                 model_->VisionEncoder(), max_context_);
+                                 model_->VisionEncoder(), max_context_,
+                                 image_cache_);
   }
 
   void SetPromptContext(
@@ -1563,6 +1577,7 @@ private:
     return std::clamp<std::size_t>(max_context_ / rows_per_session, 1, 8);
   }
 
+  mutable models::qwen::vision::ImageCache image_cache_;
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model_;
   std::uint32_t max_context_;
@@ -2771,13 +2786,15 @@ public:
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->tokenizer(),
-                             model_->VisionEncoder(), max_context_);
+                             model_->VisionEncoder(), max_context_,
+                             image_cache_);
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
       const ChatRequest& request) const override {
     return CountQwenPromptTokens(request, model_->tokenizer(),
-                                 model_->VisionEncoder(), max_context_);
+                                 model_->VisionEncoder(), max_context_,
+                                 image_cache_);
   }
 
   void SetPromptContext(
@@ -3109,6 +3126,7 @@ public:
   }
 
 private:
+  mutable models::qwen::vision::ImageCache image_cache_;
   std::shared_ptr<QwenFlashNextModel> model_;
   std::uint32_t max_context_;
   bool use_mtp_;

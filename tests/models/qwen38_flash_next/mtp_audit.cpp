@@ -147,7 +147,9 @@ void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
       gufo::core::Image pixels;
       pixels.width = pixels.height = 64;
       pixels.pixels.assign(64 * 64 * 3, 127);
-      prompt->images.push_back({std::move(pixels), rope.images.front()});
+      prompt->images.push_back(
+          {std::make_shared<const gufo::core::Image>(std::move(pixels)),
+           rope.images.front()});
       sessions[sequence]->ConfigureVision(prompt, vision, stream);
       serial[sequence]->ConfigureVision(prompt, vision, stream);
     }

@@ -244,7 +244,8 @@ void CheckImageSnapshotAttachment(const std::shared_ptr<qfn::Model>& model) {
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = blue ? 2 : 0; i < pixels.pixels.size(); i += 3)
       pixels.pixels[i] = 255;
-    prompt->images.push_back({std::move(pixels), grid});
+    prompt->images.push_back(
+        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
     prompt->images.back().prefix_identity.fill(blue ? 2 : 1);
     prompt->cache_identity.assign(32, blue ? 2 : 1);
     return prompt;
@@ -1224,7 +1225,8 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = 0; i < pixels.pixels.size(); ++i)
       pixels.pixels[i] = static_cast<std::uint8_t>((i * 37 + i / 64) % 256);
-    image->images.push_back({std::move(pixels), grid});
+    image->images.push_back(
+        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
     image->images.back().prefix_identity.fill(3);
     image->cache_identity.assign(32, 3);
     ar->ConfigureVision(image);

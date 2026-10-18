@@ -7,6 +7,9 @@ endfunction()
 
 # Qwen tests mirror src/models/qwen so focused module, policy, and runtime
 # changes have an obvious validation target while preserving CTest names.
+add_qwen_cpu_test(qwen_vision_cache_test
+  tests/models/qwen/vision_cache_test.cpp
+  "cpu;vision;qwen;correctness")
 add_qwen_cpu_test(qwen_tokenizer_test
   tests/models/qwen/tokenization/tokenizer_test.cpp
   "cpu;tokenization;qwen")

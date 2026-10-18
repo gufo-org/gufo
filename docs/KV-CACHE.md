@@ -368,9 +368,11 @@ Memory that another process claims after startup is not subtracted. When
 other GPU servers share the machine, such as an image or speech server, set an
 explicit `--cache-ram-bytes` that leaves room for their peak use; starting
 them first only accounts for what they hold at that moment.
-The RAM payload budget excludes weights, execution states, token metadata
-and disk staging. It also excludes temporary host buffers used to save
-checkpoints to disk; this is not a limit on total server memory.
+The RAM payload budget excludes weights, execution states, token metadata,
+disk staging and Qwen's separate CPU image-preprocessing cache (up to 128 MiB
+of retained encoded/RGB vectors plus bounded metadata). It also excludes temporary
+host buffers used to save checkpoints to disk; this is not a limit on total
+server memory.
 
 The 32 GiB automatic cap limits default growth on a lightly loaded machine.
 It leaves room for several 27B histories: two 3.7 GB checkpoints per history

@@ -74,17 +74,16 @@ priority rules contribute a union. Unknown paths expand to all compatible
 coverage. Suite metadata must cover every name in `run.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
-`Devlab functional checks` starts when a maintainer applies `ci:functional` to a
-PR, or manually dispatches it with a PR number. The label event uses trusted base
-workflow code (`pull_request_target`); only Maintain/Admin senders and rerun
-actors authorize execution. The event's exact PR head must still be current.
-Later commits do not inherit approval: remove and reapply the label to approve
-another revision. It pins the PR head and merge base on `main`, plans on a hosted runner,
+`Devlab functional checks` runs on every push to a non-draft PR, like `CI`
+(`pull_request`), and fork PRs follow the same repository approval policy; a
+newer push cancels the PR's earlier run. Maintain/Admin users can also dispatch
+it with a PR number. It pins
+the event's PR head and merge base on `main`, plans on a hosted runner,
 and allocates the cluster only for affected Flash-Next MTP coverage (or an
 explicit benchmark request). AR suites run only when a dispatch sets `ar`, which
 plans with `--model flash-next-q4`; the default is `--model flash-next-q4/mtp`.
-`--model` accepts a model or a single `model/mode` profile. The workflow and harness come from the trusted
-workflow revision; only the production binary is built from the approved PR.
+`--model` accepts a model or a single `model/mode` profile. The workflow, harness
+and production binary all come from the PR, as in `CI`.
 It fetches the pinned Q4 shards, MTP sidecar and vision projector into a persistent
 cache under `$GUFO_CI_CACHE` (default `$RUNNER_TOOL_CACHE/gufo`; the weights need
 about 110 GiB free), and retains reports and selection reasons as artifacts.
@@ -98,12 +97,14 @@ versions, because newer unpinned SDKs break every suite inside the client. Keep 
 covering every third-party import here; the install step imports the harness
 to catch gaps.
 
-A hosted `report` job then updates a single PR comment with results, failure
-log tails and benchmark deltas, sets the `devlab/functional` commit status and
-removes `ci:functional`. The status is advisory: it is not a required check, so
-a broken cluster never blocks merging. Suite failures report `failure`; cluster
-or harness problems (authorization, build, download, cancellation) report
-`error`. The PR write token stays on the hosted runner.
+A hosted `report` job then renders results, failure log tails and benchmark
+deltas into the run summary. For branches in this repository and dispatches it
+also updates a single PR comment and sets the `devlab/functional` commit status;
+a fork PR's token is read-only, so its result stays in the job checks. The check
+is advisory: it is not required, so a broken cluster never blocks merging. Suite
+failures report `failure`; cluster or harness problems (authorization, build,
+download, cancellation) report `error`. The PR write token stays on the hosted
+runner.
 
 `cluster.py` executes each configuration group with a fresh server/cache history
 and continues to other groups after a failure, removing each group's disk cache
@@ -322,6 +323,29 @@ Cancellation fixtures that stop after a fixed number of deltas can therefore
 replay different assistant text from main. Compare those timings using matched
 interrupted histories, not a direct baseline for the divergent session; this
 also applies to later disk-spacing and cancellation requests in that history.
+
+For repeated screenshot preprocessing (#627), `image_history.py` measures full
+RAM-cache retries with 1, 2 and 4 synthetic 1080p screenshots, similar-token text
+controls and 128px image controls. It uses only the Python standard library:
+
+```sh
+python3 tests/functional/image_history.py --output /tmp/image-history-main -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --mmproj /path/to/mmproj.gguf --sessions 1 --context 32768 \
+  --cache-ram-bytes 8589934592 --think off
+```
+
+Repeat with the candidate, identical model/mode/options and a fresh output path.
+The harness owns host, port and debug logging. It retains every request,
+response, per-request queue time, process RSS and preprocessing-cache byte count;
+retries require identical output, full prompt reuse and zero prefill. Add
+`--turns 1 --kind 1080p --repeats 7` for a focused control. Also add
+`--fresh-encoding` to change PNG metadata on each retry while preserving pixels,
+tokens and continuation identity: this measures preprocessing misses without
+GPU prefill. Add `--image /path/to/1920x1080.png` to check a supplied PNG,
+including the digest cost of a larger encoded payload. The native
+`qwen_vision_cache_test --capacity-probe` separately
+checks the default byte ceiling with 22 resized 1080p images.
 
 For real coding-agent regressions, run `pi_agent.py` against a local server with
 `--base-url`, `--model`, `--pi /path/to/pi-0.87.0`, `--server-log`, and a fresh
