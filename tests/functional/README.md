@@ -239,6 +239,7 @@ RAM, disk and restart settings once their contracts pass.
 | `tool-mixed` | JSON-only neighbors, annotated refs, extra keys, URI and nullable arguments across Chat/Responses; images, stops/retry and sampled peers; a union neighbor keeps native calls, so a replayed reasoning/call turn is reused in full |
 | `tool-native-schemas` | opencode's tool set beside each schema family that used to force a JSON envelope (pattern, oneOf, allOf, not, open objects), auto and required, strict: native calls, no prompt instruction, typed arguments and full reuse of the generated call; Chat/Responses |
 | `tool-choice-cache` | Required/auto/omitted transitions preserve the complete generated call, unchanged-choice controls, prompt-token equality and zero-prefill retries |
+| `tool-parameter-order` | Wide native schemas retain intended arguments across declaration orders, all three APIs, streaming, sampling and thinking; includes the 10/11/12-field controls from #641 |
 | `tool-native-types` | Focused subset: enum/const/inferred string types, literal delimiters and exact continuation reuse after new literal tool markers; Chat/Responses, text/images |
 | `tool-schema-edges` | Wildcard JSON types, conditional fields, impossible schemas, nested metadata and required-call timing; both APIs, cache, stops and sampled peers |
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops (including inside quoted calls), image retry and failed-request recovery |
@@ -327,6 +328,10 @@ For real coding-agent regressions, run `pi_agent.py` against a local server with
 `--output` directory. Repeat `--case` to select affected tasks;
 `--case literal-protocol --passes 1` exercises a real write/read/verify loop
 containing literal ChatML vocabulary spellings.
+`--case wide-tool --passes 1` loads a fixture extension with a 12-field `todo`
+schema and verifies two actual updates and their tool results, covering #641.
+Both Chat and Responses require exactly the requested fields, including when
+Pi omits `strict`; unrequested default values also fail the test.
 It replays #368's five tasks, verifies the generated code independently, and
 retains Pi sessions, HTTP/SSE and per-request timings. It executes generated
 commands in disposable fixtures using isolated Pi configuration. Use `--passes 1`

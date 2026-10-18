@@ -875,9 +875,11 @@ semantics; lookbehind, backreferences, inline flags and unbounded repetition
 of assertions are unsupported.
 
 Function `strict:true` constrains tool arguments independently of the response
-schema. Chat Completions defaults to non-strict tools. Responses attempts strict
-schema normalization when `strict` is omitted, falling back to `strict:false`
-when unsupported; explicit `strict:false` keeps best-effort arguments.
+schema. Chat Completions and Responses preserve the supplied parameter schema
+when `strict` is omitted, `null` or `false`, matching llama.cpp's schema
+handling. Optional fields stay optional; Gufo does not add them to `required`
+or force the model to invent default values. To require every field, list them
+in `required` and use `strict:true` with a closed object schema.
 With `tool_choice: "auto"`, the model may call a tool or give a final answer;
 the response schema constrains the latter. Use `"none"` for JSON answers only,
 `"required"` to force a call, or select a named function.

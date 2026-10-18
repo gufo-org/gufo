@@ -732,6 +732,58 @@ void TestInvalidToolsFailBeforeGeneration() {
   }
 }
 
+void TestResponsesToolStrictness() {
+  // llama.cpp retains the parameter schema for omitted/null strictness. Pi
+  // omits strict, so optional arguments must remain optional on that path too.
+  for (const bool namespaced : {false, true}) {
+    for (const std::string strict : {"omitted", "null", "false", "true"}) {
+      auto tool = gufo::json::parse(R"({
+        "type":"function","name":"todo","parameters":{"type":"object",
+          "properties":{"action":{"type":"string"},"status":{"type":"string"},
+            "id":{"type":"integer"}},"required":["action"],
+          "additionalProperties":false}})");
+      if (strict != "omitted")
+        tool["strict"] = gufo::json::parse(strict);
+      if (strict == "true")
+        tool["parameters"]["required"] =
+            gufo::json::parse(R"(["action","status","id"])");
+      auto body = gufo::json::parse(R"({"tools":[]})");
+      if (namespaced) {
+        auto group = gufo::json::parse(
+            R"({"type":"namespace","name":"tasks","tools":[]})");
+        group["tools"].push_back(tool);
+        body["tools"].push_back(std::move(group));
+      } else {
+        body["tools"].push_back(tool);
+      }
+      gufo::server::ChatRequest chat;
+      Expect(
+          !gufo::server::ParseOpenAiResponseControls(body, &chat) &&
+              chat.tools.size() == 1 && chat.constrained_tools,
+          "Responses accepts each tool strictness without disabling grammar");
+      auto expected = gufo::json::Value::object();
+      for (const auto& [key, value] : tool.members())
+        if (key != "type")
+          expected.append_member(key, value);
+      const auto definition =
+          gufo::json::parse(chat.tools.front().definition_json);
+      Expect(definition.find("function")->dump() == expected.dump() &&
+                 chat.tools.front().parameters_json ==
+                     expected.find("parameters")->dump(),
+             "Responses preserves the supplied schema for every strictness");
+    }
+  }
+  gufo::server::ChatRequest invalid;
+  Expect(gufo::server::ParseOpenAiResponseControls(
+             gufo::json::parse(R"({"tools":[{"type":"function","name":"todo",
+               "strict":true,"parameters":{"type":"object","properties":{
+                 "id":{"type":"integer"}},"required":[],
+               "additionalProperties":false}}]})"),
+             &invalid)
+             .has_value(),
+         "Explicit strict true still rejects optional fields");
+}
+
 void TestResponsesClientCompatTolerances() {
   // Hosted tool types (Responses-only) are skipped, not rejected. Namespaces
   // group client-executed functions and flatten to the function list, while a
@@ -6192,6 +6244,7 @@ int main() {
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
   TestInvalidToolsFailBeforeGeneration();
+  TestResponsesToolStrictness();
   TestResponsesClientCompatTolerances();
   TestMidConversationSystemMessagesKeepOrder();
   TestToolNameCharacters();

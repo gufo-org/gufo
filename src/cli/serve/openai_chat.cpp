@@ -773,47 +773,6 @@ std::optional<HttpResponse> ParseToolControls(const json::Value& body,
   return {};
 }
 
-json::Value NormalizeToolSchema(const json::Value& schema,
-                                std::size_t depth = 0) {
-  if (!schema.is_object() || depth > 16 || (depth && schema.empty()))
-    throw std::invalid_argument("tool schema cannot be made strict");
-  auto out = schema;
-  for (const auto* key : {"properties", "$defs", "definitions"}) {
-    if (const auto* fields = schema.find(key); fields && fields->is_object()) {
-      auto normalized = json::Value::object();
-      for (const auto& [name, field] : fields->members())
-        normalized.append_member(name, NormalizeToolSchema(field, depth + 1));
-      out[key] = std::move(normalized);
-    }
-  }
-  if (const auto* items = schema.find("items"))
-    out["items"] = NormalizeToolSchema(*items, depth + 1);
-  for (const auto* key : {"anyOf", "allOf", "oneOf"}) {
-    if (const auto* choices = schema.find(key);
-        choices && choices->is_array()) {
-      auto normalized = json::Value::array();
-      for (const auto& choice : choices->items())
-        normalized.push_back(NormalizeToolSchema(choice, depth + 1));
-      out[key] = std::move(normalized);
-    }
-  }
-  if (schema.empty() || schema.member_str("type") == "object" ||
-      schema.contains("properties")) {
-    if (!out.contains("type"))
-      out["type"] = "object";
-    if (!out.contains("properties"))
-      out["properties"] = json::Value::object();
-    if (!out.contains("additionalProperties"))
-      out["additionalProperties"] = false;
-    out["required"] = json::Value::array();
-    for (const auto& [name, value] : out.find("properties")->members()) {
-      (void)value;
-      out["required"].push_back(name);
-    }
-  }
-  return out;
-}
-
 std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                                          TextGenerationBackend& backend,
                                          ParsedChatRequest* output) {
@@ -3216,27 +3175,10 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
           parsed.chat.tool_namespaces[tool.member_str("name")] = name;
     }
   }
-  // Responses attempts strict normalization when strict is omitted; Chat
-  // Completions keeps its best-effort default. Explicit true/false wins.
-  for (auto& tool : parsed.chat.tools) {
-    auto definition = json::parse(tool.definition_json);
-    auto& function = definition["function"];
-    const auto* strict = function.find("strict");
-    if (strict && !strict->is_null())
-      continue;
-    try {
-      auto schema = NormalizeToolSchema(json::parse(tool.parameters_json));
-      sampling::JsonConstraint::Compile(schema, true);
-      function["parameters"] = std::move(schema);
-      function["strict"] = true;
-      tool.parameters_json = function.find("parameters")->dump();
-      parsed.chat.constrained_tools |=
-          parsed.chat.tool_choice != ChatRequest::ToolChoice::kNone;
-    } catch (const std::invalid_argument&) {
-      function["strict"] = false;
-    }
-    tool.definition_json = definition.dump();
-  }
+  // Like llama.cpp, retain the supplied parameter schema when strict is
+  // omitted or null. Promoting optional fields to required ones forces agents
+  // to invent values. ParseToolControls still validates explicit strict:true
+  // and enables tool constraints regardless of strictness.
   *chat = std::move(parsed.chat);
 
   if (const auto* progress = body.find("return_progress");

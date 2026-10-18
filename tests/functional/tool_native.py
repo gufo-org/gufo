@@ -388,8 +388,8 @@ def check_read_arguments(client, model, checks, chat_result):
                     "path": {"type": "string"},
                     "offset": {"type": "number"},
                     "limit": {"type": "number"}}, "required": ["path"]}}
-    # Omitted strict is normalized by Responses. Exercise that real client
-    # contract, not a hand-normalized schema or a one-parameter string tool.
+    # Pi omits strict. All three arguments are requested here, even though
+    # offset and limit remain optional in the supplied schema.
     prompt = "Read archive-00.txt with offset 1 and limit 2000. Use the read tool."
     for responses in (False, True):
         for stream in (False, True):
