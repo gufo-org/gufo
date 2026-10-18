@@ -1065,6 +1065,34 @@ struct DiskStore::Impl {
             sources[j].private_file == source.private_file)
           Invalid();
     }
+    // Most writes fit even if every payload were new. Only inspect stored
+    // ownership when that upper bound exceeds the remaining capacity.
+    auto remaining = stats.managed_bytes > budget_bytes
+                         ? 0
+                         : budget_bytes - stats.managed_bytes;
+    bool check_capacity = bytes.size() > remaining;
+    if (!check_capacity) {
+      remaining -= bytes.size();
+      for (const auto& [key, payload] : dependencies) {
+        if (payload.bytes > remaining) {
+          check_capacity = true;
+          break;
+        }
+        remaining -= payload.bytes;
+      }
+    }
+    if (check_capacity) {
+      std::uint64_t required = bytes.size();
+      for (const auto& [key, payload] : dependencies)
+        if (!Referenced(key.first ? private_files.Get() : chunks.Get(),
+                        payload.file))
+          required = Add(required, payload.bytes);
+      // Eviction can retry this publication many times. Refuse it before
+      // reading and checksumming the shared prefix on every failed attempt.
+      if (stats.managed_bytes > budget_bytes ||
+          required > budget_bytes - stats.managed_bytes)
+        throw DiskCapacityExhausted();
+    }
     std::uint64_t additional = bytes.size();
     for (auto& [key, p] : dependencies) {
       int dir = key.first ? private_files.Get() : chunks.Get();
