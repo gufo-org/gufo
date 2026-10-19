@@ -11,6 +11,11 @@ on:
         description: PR to test (head pinned at authorization)
         required: true
         type: string
+      tier:
+        description: pr trims suites and transports; full runs the complete set (release PRs)
+        type: choice
+        options: [ full, pr ]
+        default: full
       ar:
         description: Also run the functional suites in AR (speculative off); MTP always runs
         default: false
@@ -32,9 +37,7 @@ jobs:
     name: Authorize functional checks
     if: >-
       github.repository == 'gufo-org/gufo' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (!github.event.pull_request.draft &&
-        !startsWith(github.event.pull_request.head.ref, 'release-please--')))
+      (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -43,6 +46,7 @@ jobs:
       has_work: ${{ steps.plan.outputs.has_work }}
       scope: ${{ steps.plan.outputs.scope }}
       base: ${{ steps.plan.outputs.base }}
+      tier: ${{ steps.plan.outputs.tier }}
     permissions:
       contents: read
       statuses: write # fork PR tokens stay read-only
@@ -115,9 +119,16 @@ jobs:
           APPROVED_HEAD: ${{ steps.revision.outputs.head }}
           RUN_BENCHMARK: ${{ inputs.benchmark || false }}
           RUN_AR: ${{ inputs.ar || false }}
+          DISPATCH_TIER: ${{ inputs.tier }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         shell: bash
         run: |
           set -euo pipefail
+          # Release PRs run the complete set; other PRs the pr tier.
+          tier="pr"
+          [[ "$HEAD_REF" == release-please--* ]] && tier=full
+          [[ -n "$DISPATCH_TIER" ]] && tier="$DISPATCH_TIER"
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
           # MTP exercises the AR verification path too; AR-only coverage is opt-in.
           scope=flash-next-q4/mtp
           [[ "$RUN_AR" == true ]] && scope=flash-next-q4
@@ -130,7 +141,7 @@ jobs:
           base=$(git merge-base refs/ci/main "$APPROVED_HEAD")
           echo "base=$base" >> "$GITHUB_OUTPUT"
           python3 tests/functional/impact.py --repo . --base "$base" --head "$APPROVED_HEAD" \
-            --model "$scope" --output functional-plan.json
+            --model "$scope" --tier "$tier" --output functional-plan.json
           python3 - <<'PYPLAN'
           import json, os
           plan = json.load(open('functional-plan.json'))
@@ -139,12 +150,12 @@ jobs:
               print('has_work=' + str(work).lower(), file=output)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('## Changed-file functional plan\n\n')
-              summary.write(f"Revisions: `{plan['base']}` → `{plan['head']}`.\n\n")
+              summary.write(f"Revisions: `{plan['base']}` → `{plan['head']}`; tier `{plan['tier']}`.\n\n")
               for path in plan['paths']:
                   summary.write(f"- `{path['path']}` → {', '.join(path['rules'])}\n")
               for group in plan['groups']:
                   summary.write(f"\n**{group['profile']} / {group['configuration']}**: " + ', '.join(group['suites']) + '\n')
-              summary.write(f"\nDeferred: {len(plan['deferred'])}; outside scope {', '.join(plan['scope'])}: {len(plan['out_of_scope'])}.\n")
+              summary.write(f"\nDeferred: {len(plan['deferred'])}; release run only: {len(plan['release_only'])}; outside scope {', '.join(plan['scope'])}: {len(plan['out_of_scope'])}.\n")
               summary.write('Candidate correctness only. Other-model, numerical, agent replay and timing qualification remain separate obligations.\n')
           PYPLAN
 
@@ -303,6 +314,7 @@ jobs:
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
           APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
           APPROVED_SCOPE: ${{ needs.authorize.outputs.scope }}
+          APPROVED_TIER: ${{ needs.authorize.outputs.tier }}
         shell: bash
         run: |
           set -euo pipefail
@@ -311,7 +323,7 @@ jobs:
           git -C candidate checkout --detach "$APPROVED_HEAD"
           base="$APPROVED_BASE"
           python3 controller/tests/functional/impact.py --repo candidate --base "$base" --head "$APPROVED_HEAD" \
-            --model "$APPROVED_SCOPE" --output functional-plan.json
+            --model "$APPROVED_SCOPE" --tier "$APPROVED_TIER" --output functional-plan.json
 
       - name: Prepare persistent model cache
         shell: bash

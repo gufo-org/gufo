@@ -99,8 +99,8 @@ jobs:
           [[ "$HEAD_REPO" == "$GITHUB_REPOSITORY" ]] || fork=true
 
           if [[ "$ACTION" == in_progress ]]; then
-            # Mirror the authorize job: drafts and release PRs do not run.
-            [[ "$draft" == false && "$HEAD_BRANCH" != release-please--* ]] || exit 0
+            # Mirror the authorize job: drafts do not run.
+            [[ "$draft" == false ]] || exit 0
             # in_progress fires as each job starts, the report job included: only
             # the first event of a run may replace the comment, never its report.
             [[ "${comment_this_run:-}" != true ]] || exit 0
@@ -115,7 +115,7 @@ jobs:
 
           [![Cancel run](https://img.shields.io/badge/%E2%8F%B9%20Cancel%20run-cf222e?style=for-the-badge)]($RUN_URL)
 
-          <sub>The button opens the [workflow run]($RUN_URL); choose **Cancel workflow** there (requires write access). Advisory: \`devlab/functional\` is not a required check and never blocks merging.</sub>
+          <sub>The button opens the [workflow run]($RUN_URL); choose **Cancel workflow** there (requires write access). \`devlab/functional\` is advisory on PRs; only the automatic release merge waits for it.</sub>
           EOF
             publish placeholder.md
             # Same-repository runs set their own pending status.

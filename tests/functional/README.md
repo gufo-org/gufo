@@ -74,9 +74,20 @@ priority rules contribute a union. Unknown paths expand to all compatible
 coverage. Suite metadata must cover every name in `run.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
+`--tier pr` plans the per-PR set. Suites marked `"tier": "release"` (the deep
+cache histories, `cache-stalls`, `long-context` and `reasoning-budget`) then move
+to `release_only` unless a changed path matches their `escalate` patterns: cache
+code, the suite's own module, or Flash-Next model code for depth checks. `run.py
+--tier pr` also trims transport matrices that a case does not depend on:
+`tool-reasoning` keeps the streamed mode, whose partial parses end in the same
+final parse a buffered reply uses, and `tool-native-schemas` rotates endpoint,
+stream and tool choice across cases. `--tier full` (the default for manual runs)
+keeps every suite and combination.
+
 `Devlab functional checks` runs on every push to a non-draft PR, like `CI`
 (`pull_request`), and fork PRs follow the same repository approval policy; a
-newer push cancels the PR's earlier run. Maintain/Admin users can also dispatch
+newer push cancels the PR's earlier run. PRs run the `pr` tier; release-please
+PRs and dispatches (unless they choose `tier: pr`) run `full`. Maintain/Admin users can also dispatch
 it with a PR number. It pins
 the event's PR head and merge base on `main`, plans on a hosted runner,
 and allocates the cluster only for affected Flash-Next MTP coverage (or an
@@ -110,7 +121,8 @@ A fork PR's token is read-only, so the job uploads the rendered report and
 without checking out PR code. While any PR run is in progress, the same
 workflow keeps a placeholder in that comment with a link to cancel the run.
 It only runs from `main`. The check
-is advisory: it is not required, so a broken cluster never blocks merging. Suite
+is advisory on PRs, so a broken cluster never blocks an ordinary merge; the
+automatic release merge requires it (see [releasing](../../docs/RELEASING.md)). Suite
 failures report `failure`; cluster or harness problems (authorization, build,
 download, cancellation) report `error`. The PR write token stays on the hosted
 runner.

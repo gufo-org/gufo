@@ -202,7 +202,9 @@ def render(args):
     state, description = verdict(args.authorize, args.smoke, plan, summary, args.benchmark)
     rows = summary["groups"] if summary is not None else []
     model = group_name(rows[0])[1] if rows else "flash-next-q4"
-    lines = [MARKER, f"### {ICONS[state]} Devlab functional checks: {description}", ""]
+    tier = plan.get("tier", "full") if plan is not None else "full"
+    title = "Devlab functional checks" + (" · PR tier" if tier == "pr" else "")
+    lines = [MARKER, f"### {ICONS[state]} {title}: {description}", ""]
     if rows:
         lines += group_table(rows) + failure_details(rows)
     if args.benchmark:
@@ -214,9 +216,12 @@ def render(args):
     footer = [f"[Workflow run]({args.run_url})", f"model `{model}`"]
     if plan is not None:
         footer.insert(1, f"PR `{plan['head'][:7]}` vs merge base `{plan['base'][:7]}`")
-        footer.append(f"{len(plan['deferred'])} deferred, {len(plan['out_of_scope'])} out of scope")
+        release_only = len(plan.get("release_only", []))
+        footer.append(f"{len(plan['deferred'])} deferred, "
+                      + (f"{release_only} for the release run, " if release_only else "")
+                      + f"{len(plan['out_of_scope'])} out of scope")
     lines += ["", "<sub>" + " · ".join(footer) + "<br>"
-              f"Advisory: `{STATUS_CONTEXT}` is not a required check and never blocks merging. "
+              f"`{STATUS_CONTEXT}` is advisory on PRs; only the automatic release merge waits for it. "
               "Candidate correctness only; other-model, numerical, agent replay and timing "
               "qualification remain separate.</sub>"]
     return state, description, "\n".join(lines) + "\n"

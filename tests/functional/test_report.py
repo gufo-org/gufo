@@ -70,7 +70,20 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(report.suite_list(["a", "b", "c", "d"], 3), "`a`, `b`, `c` +1 more")
         self.assertIn("Failed to open GGUF", comment)
         self.assertNotIn("noise", comment)
-        self.assertIn("never blocks merging", comment)
+        self.assertIn("only the automatic release merge waits for it", comment)
+
+    def test_pr_tier_is_named_with_its_release_suites(self):
+        summary = {"groups": [{"profile": "flash-next-q4/mtp", "configuration": "standard",
+                               "suites": ["stops"], "status": "passed"}]}
+        plan = {**self.plan, "tier": "pr", "release_only": [{"suite": "cache-stalls"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            _, comment = self.run_report(directory, plan, summary)
+        self.assertIn("### ✅ Devlab functional checks · PR tier: 1 configuration groups passed",
+                      comment)
+        self.assertIn("0 deferred, 1 for the release run, 0 out of scope", comment)
+        with tempfile.TemporaryDirectory() as directory:
+            _, comment = self.run_report(directory, self.plan, summary)
+        self.assertIn("### ✅ Devlab functional checks: 1 configuration", comment)
 
     def test_cluster_problems_are_errors_not_failures(self):
         with tempfile.TemporaryDirectory() as directory:
