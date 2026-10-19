@@ -1,9 +1,14 @@
 # Qwen27B benchmarks
 
-AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo `628ed18e`
-versus llama.cpp `b11069`, using the same Q4_K_XL / Q8_K_XL targets.
-Both use the Q4_K_M DFlash2 draft; Gufo uses its adaptive controller.
-HTTP, greedy, thinking off. Measured September 23, 2026.
+AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo versus llama.cpp
+`b11069`, using the same Q4_K_XL / Q8_K_XL targets and Q4_K_M DFlash2 draft.
+Gufo uses its adaptive controller. HTTP, greedy, thinking off.
+
+Gufo DFlash2 rows were refreshed October 19, 2026 on `d5e90965` with the
+local snapshot serialization cleanup. AR, loading and memory retain the
+September 23 `628ed18e` measurements. All llama.cpp measurements are unchanged.
+[Recurrent-state review](artifacts/recurrent-fork-review.json) records matched
+main/PR checks and the remaining variable latency observations.
 
 Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md) · [Model identities](artifacts/model-identities.json)
@@ -47,20 +52,20 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 ## Single user, DFlash2
 
 pp is the highest measured rate per engine and depth across mixed/repetitive
-text. Gufo retains AR output; llama.cpp differs in some controls
-([quality details](QUALITY.md#meaning-of-exact)).
+text. Output-consistency controls and their dated scope are recorded in
+the [quality details](QUALITY.md#meaning-of-exact).
 
 <!-- bench:single-dflash2-q4 -->
 | Qwen27B Q4 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 607.27 | 347.51 | +74.7% | 26.13 | 23.40 | +11.7% | 63.12 | 35.86 | +76.0% |
-| 4,096 | 559.04 | 316.58 | +76.6% | 27.06 | 23.03 | +17.5% | 52.24 | 34.47 | +51.6% |
-| 8,192 | 537.00 | 302.47 | +77.5% | 26.77 | 21.73 | +23.2% | 61.55 | 34.73 | +77.2% |
-| 12,288 | 520.81 | 289.98 | +79.6% | 23.92 | 23.05 | +3.8% | 53.18 | 34.19 | +55.5% |
-| 16,384 | 504.59 | 278.53 | +81.2% | 23.78 | 21.84 | +8.9% | 49.67 | 33.75 | +47.2% |
-| 32,768 | 448.96 | 239.21 | +87.7% | 19.25 | 18.88 | +2.0% | 47.76 | 31.75 | +50.4% |
-| 65,536 | 347.29 | 190.92 | +81.9% | 17.70 | 18.53 | -4.5% | 29.44 | 26.33 | +11.8% |
-| 131,072 | 274.07 | 133.37 | +105.5% | 14.70 | 14.58 | +0.8% | 26.83 | 22.93 | +17.0% |
+| 0 | 575.84 | 347.51 | +65.7% | 26.87 | 23.40 | +14.8% | 64.38 | 35.86 | +79.5% |
+| 4,096 | 540.33 | 316.58 | +70.7% | 27.93 | 23.03 | +21.3% | 53.30 | 34.47 | +54.6% |
+| 8,192 | 516.06 | 302.47 | +70.6% | 26.26 | 21.73 | +20.8% | 62.44 | 34.73 | +79.8% |
+| 12,288 | 489.05 | 289.98 | +68.6% | 24.48 | 23.05 | +6.2% | 54.12 | 34.19 | +58.3% |
+| 16,384 | 470.65 | 278.53 | +69.0% | 24.28 | 21.84 | +11.2% | 50.28 | 33.75 | +49.0% |
+| 32,768 | 410.71 | 239.21 | +71.7% | 19.08 | 18.88 | +1.1% | 48.24 | 31.75 | +51.9% |
+| 65,536 | 338.78 | 190.92 | +77.4% | 17.70 | 18.53 | -4.5% | 29.84 | 26.33 | +13.3% |
+| 131,072 | 246.36 | 133.37 | +84.7% | 14.14 | 14.58 | -3.0% | 27.09 | 22.93 | +18.1% |
 <!-- /bench -->
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q4.svg)
@@ -70,14 +75,14 @@ text. Gufo retains AR output; llama.cpp differs in some controls
 <!-- bench:single-dflash2-q8 -->
 | Qwen27B Q8 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 457.05 | 333.85 | +36.9% | 16.08 | 15.00 | +7.2% | 46.84 | 23.83 | +96.6% |
-| 4,096 | 423.09 | 310.23 | +36.4% | 16.36 | 16.12 | +1.5% | 40.51 | 23.59 | +71.7% |
-| 8,192 | 408.06 | 292.86 | +39.3% | 15.57 | 15.27 | +2.0% | 41.53 | 23.21 | +78.9% |
-| 12,288 | 401.07 | 280.40 | +43.0% | 14.99 | 13.21 | +13.5% | 40.45 | 22.10 | +83.0% |
-| 16,384 | 390.69 | 269.03 | +45.2% | 14.28 | 13.83 | +3.3% | 39.39 | 22.56 | +74.6% |
-| 32,768 | 355.59 | 231.89 | +53.3% | 14.41 | 14.44 | -0.2% | 35.87 | 21.16 | +69.5% |
-| 65,536 | 293.81 | 185.73 | +58.2% | 10.87 | 12.62 | -13.9% | 25.45 | 19.03 | +33.7% |
-| 131,072 | 237.24 | 131.80 | +80.0% | 8.87 | 11.62 | -23.7% | 23.41 | 17.23 | +35.9% |
+| 0 | 443.39 | 333.85 | +32.8% | 16.40 | 15.00 | +9.3% | 47.47 | 23.83 | +99.2% |
+| 4,096 | 416.97 | 310.23 | +34.4% | 16.71 | 16.12 | +3.7% | 41.06 | 23.59 | +74.1% |
+| 8,192 | 407.51 | 292.86 | +39.1% | 15.82 | 15.27 | +3.6% | 42.07 | 23.21 | +81.3% |
+| 12,288 | 394.04 | 280.40 | +40.5% | 15.31 | 13.21 | +15.9% | 40.75 | 22.10 | +84.4% |
+| 16,384 | 384.66 | 269.03 | +43.0% | 14.62 | 13.83 | +5.7% | 39.87 | 22.56 | +76.7% |
+| 32,768 | 332.78 | 231.89 | +43.5% | 14.60 | 14.44 | +1.1% | 36.22 | 21.16 | +71.2% |
+| 65,536 | 284.37 | 185.73 | +53.1% | 11.59 | 12.62 | -8.2% | 25.58 | 19.03 | +34.4% |
+| 131,072 | 216.29 | 131.80 | +64.1% | 9.22 | 11.62 | -20.7% | 24.09 | 17.23 | +39.8% |
 <!-- /bench -->
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q8.svg)
@@ -121,11 +126,11 @@ tokens. Rates sum individual request decode rates. No prompt-cache hits.
 <!-- bench:multi-dflash2-q4 -->
 | Qwen27B Q4 DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 36.30 | 27.15 | +33.7% | 70.56 | 37.56 | +87.9% |
-| 2 | 56.34 | 40.04 | +40.7% | 105.51 | 51.65 | +104.3% |
-| 4 | 70.87 | 74.43 | -4.8% | 110.49 | 93.38 | +18.3% |
-| 6 | 79.83 | 77.19 | +3.4% | 113.52 | 97.52 | +16.4% |
-| 8 | 85.39 | 71.71 | +19.1% | 123.00 | 113.56 | +8.3% |
+| 1 | 37.22 | 27.15 | +37.1% | 71.31 | 37.56 | +89.9% |
+| 2 | 57.17 | 40.04 | +42.8% | 108.59 | 51.65 | +110.2% |
+| 4 | 73.85 | 74.43 | -0.8% | 113.69 | 93.38 | +21.7% |
+| 6 | 86.72 | 77.19 | +12.3% | 117.12 | 97.52 | +20.1% |
+| 8 | 90.48 | 71.71 | +26.2% | 128.41 | 113.56 | +13.1% |
 <!-- /bench -->
 
 ![Multiple users, DFlash2](artifacts/charts/multi-dflash2-q4.svg)
@@ -135,11 +140,11 @@ tokens. Rates sum individual request decode rates. No prompt-cache hits.
 <!-- bench:multi-dflash2-q8 -->
 | Qwen27B Q8 DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 24.65 | 17.54 | +40.5% | 51.23 | 24.09 | +112.7% |
-| 2 | 42.87 | 31.64 | +35.5% | 86.58 | 41.60 | +108.1% |
-| 4 | 48.44 | 43.88 | +10.4% | 102.98 | 58.92 | +74.8% |
-| 6 | 54.77 | 53.14 | +3.1% | 109.42 | 72.40 | +51.1% |
-| 8 | 65.52 | 60.64 | +8.0% | 118.07 | 86.25 | +36.9% |
+| 1 | 25.05 | 17.54 | +42.8% | 51.66 | 24.09 | +114.4% |
+| 2 | 44.61 | 31.64 | +41.0% | 87.27 | 41.60 | +109.8% |
+| 4 | 52.91 | 43.88 | +20.6% | 106.56 | 58.92 | +80.9% |
+| 6 | 58.75 | 53.14 | +10.6% | 115.34 | 72.40 | +59.3% |
+| 8 | 67.51 | 60.64 | +11.3% | 123.57 | 86.25 | +43.3% |
 <!-- /bench -->
 
 ![Multiple users, DFlash2](artifacts/charts/multi-dflash2-q8.svg)
