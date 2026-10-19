@@ -171,6 +171,8 @@ and the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
 ## Component serving migration
 
 October 19 refresh: main `270b5333` is merged into the component-cache PR.
+Qualification was paused at the user’s request after the four 27B HTTP profiles
+passed. Flash and timing/recovery checks below remain incomplete.
 Q4/Q8 native adapter, DFlash2 state, serving-cache and target numerical checks
 pass on the candidate. Restored component bytes and full logits match; checks
 include FP16/FP32 KV, edits, rollback, images, sampled frontiers, cancellation,

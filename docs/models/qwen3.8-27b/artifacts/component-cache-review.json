@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "date": "2026-10-19",
-  "status": "qualification_in_progress",
+  "status": "qualification_paused_by_user",
   "main": "270b53338829d25ea05dab633fb924621d9168f9",
   "merge": "79c62c9e390456b7ebe783217e86fcbf80c8d2bd",
   "fixture_fix": "6f62a09d1d27cc9e4775e0bbe9e6f236e7cd9ab2",
@@ -835,9 +835,11 @@
     }
   },
   "remaining": [
-    "Matched affected-history timing controls and focused investigation of flags",
-    "Flash AR/MTP shared-path controls",
-    "Standard speed benchmark and focused deep/recovery/agent resource workflows"
+    "Finish Flash AR shared-prefix, state-edge, cancellation and disk-replay checks; run Flash MTP shared-path controls",
+    "Matched current-main affected-history timings, including cold snapshots, concurrent TTFT, configured high-context probes and focused first-request AR followup; investigate retained flags and fix confirmed regressions",
+    "Standard pp2048/tg128 production main/candidate speed checks",
+    "Real Pi tool/edit/bugfix workflows with actual tool-result inspection",
+    "Over-RAM completed-prefill cancellation/publication waits and deep peer crash/restart/resource workflows"
   ],
   "limitations": [
     "No new upstream-model or weight-conversion parity claim",
@@ -1038,6 +1040,26 @@
         }
       ],
       "interpretation": "At readiness the component cache prepares bounded backing before serving. This is a real resident-memory cost versus main 27B legacy cache; prepared bytes account for most observed anonymous RSS difference. Startup time is not qualified because file-cache history was not matched."
+    }
+  },
+  "pause_reason": "User requested push and stop with 5% of allowance remaining. Owned validation jobs stopped; incomplete checks remain unqualified.",
+  "flash_http_checks": {
+    "off": {
+      "status": "interrupted_by_user",
+      "passed_stages": [
+        "long-context",
+        "conversation",
+        "image-count",
+        "cache-edits",
+        "cache-growth",
+        "cache-depth",
+        "cache-concurrency"
+      ],
+      "interrupted_stage": "cache-shared-prefix",
+      "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/flash-off-http"
+    },
+    "mtp": {
+      "status": "not_run"
     }
   }
 }
