@@ -79,6 +79,13 @@
         653
       ],
       "application": "MTP prompt lookup and Flash-specific inline boundary/predictor/attention kernels remain model-local. Qwen AR/DFlash2 retain their own exact planned checkpoint boundaries."
+    },
+    {
+      "prs": [
+        637
+      ],
+      "application": "Shared cgroup memory-budget discovery retains reclaimable inactive file pages, dirty/writeback exclusions and parent limits. The runner implementation, header and hosted runner tests are byte-identical to current main.",
+      "evidence": "/home/mixer/gufo-qualification/pr540-2026-10-19/cgroup-budget-review.json"
     }
   ],
   "native_checks": [
@@ -954,6 +961,22 @@
       },
       "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
       "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q8-off-http"
+    },
+    "q8/dflash2": {
+      "status": "running",
+      "stages": {
+        "long-context": "passed",
+        "conversation": "passed",
+        "image-count": "passed",
+        "cache-edits": "passed",
+        "cache-growth": "passed",
+        "cache-depth": "passed",
+        "cache-concurrency": "passed",
+        "cache-shared-prefix": "running"
+      },
+      "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
+      "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q8-dflash2-http",
+      "note": "Partial evidence only. Shared-prefix is running; cancellation and durable replay remain. No full-profile pass is claimed."
     }
   },
   "readiness_resources": {
