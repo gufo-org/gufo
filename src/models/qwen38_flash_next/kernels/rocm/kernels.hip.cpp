@@ -83,21 +83,22 @@ __device__ __forceinline__ void QuantizeQ8_1Lane(float v, void* y,
                                                  std::size_t i) {
   const float xi = Materialize(v);
   float amax = fabsf(xi);
-  float sum = xi;
 #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1) {
     amax = fmaxf(amax, XorLane(amax, offset));
   }
-#pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    sum += XorLane(sum, offset);
-  }
   const float d = amax / 127.0f;
   const std::int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+  // The block sum is d*sum(q), as in quantize_q8_1.
+  int sumq = q;
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    sumq += XorLane(sumq, offset);
+  }
   Q8_1Block* blocks = static_cast<Q8_1Block*>(y);
   blocks[i / 32].qs[i % 32] = q;
   if (i % 32 == 0) {
-    blocks[i / 32].ds = make_half2(d, sum);
+    blocks[i / 32].ds = make_half2(d, d * sumq);
   }
 }
 
