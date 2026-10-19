@@ -735,7 +735,7 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
     checks[f"batch_c{width}_rejected_peer_isolation"] = rejected
 
 
-def check_conversations(client, model, checks, vision=False):
+def check_conversations(client, model, checks, vision=False, server_log=None):
     """Exercise thinking controls and cache reuse after a client disconnect."""
 
     def signature(result):
@@ -881,17 +881,24 @@ def check_conversations(client, model, checks, vision=False):
             cold = chat("vision_" + color + "_cold", request)
             assert color in cold["text"].lower() and not cold["reasoning"], cold
             request["extra_body"]["cache_prompt"] = True
+            replay_start = log_offset(server_log)
             warm = chat("vision_" + color + "_warm", request)
+            replay_end = log_offset(server_log)
             repeated = chat("vision_" + color + "_replay", request, True)
             assert signature(cold) == signature(warm) == signature(repeated), (
                 cold,
                 warm,
                 repeated,
             )
-            assert (
-                repeated["usage"]["cached_tokens"] > 0
-                and repeated["usage"]["gufo"]["prefill_tokens"] == 0
-            ), repeated
+            usage = repeated["usage"]
+            prefilled = usage["gufo"]["prefill_tokens"]
+            assert usage["prompt_tokens"] == cold["usage"]["prompt_tokens"], repeated
+            assert usage["cached_tokens"] > 0, repeated
+            assert usage["cached_tokens"] + prefilled == usage["prompt_tokens"], repeated
+            # A refused full-prompt copy may leave only the stable image prefix.
+            # Require the preceding request's capacity refusal and a short tail.
+            check_unchanged_retry("vision_" + color + "_replay", repeated, prefilled,
+                                  server_log, replay_start, replay_end)
             candidates.append((request, cold))
         with ThreadPoolExecutor(2) as pool:
             results = list(
@@ -2750,7 +2757,8 @@ def main():
             "responses": lambda: check_responses(client, args.model, checks, options,
                                                    async_local_only, args.expect_reasoning),
             "stops": lambda: check_stops(client, args.model, checks),
-            "conversation": lambda: check_conversations(client, args.model, checks, args.vision),
+            "conversation": lambda: check_conversations(
+                client, args.model, checks, args.vision, args.server_log),
             "image-inputs": lambda: check_image_inputs(
                 client, args.model, checks, image_content, chat_result, response_result),
             "image-count": lambda: check_image_count(

@@ -1,8 +1,8 @@
 // Token-serial DeltaNet recurrence with independent state-row groups.
-// Prologues compute per-head K/Q norms, the raw K.Q dot product, alpha and beta.
-// Convolution history advances after all readers of the old history finish.
-// The recurrence applies the shared scales to its dot products and rank-one
-// update, then the epilogue normalizes and gates output.
+// Prologues compute per-head K/Q norms, the raw K.Q dot product, alpha and
+// beta. Convolution history advances after all readers of the old history
+// finish. The recurrence applies the shared scales to its dot products and
+// rank-one update, then the epilogue normalizes and gates output.
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -83,17 +83,19 @@ __launch_bounds__(32) __global__
 
 // Softplus gate and beta sigmoid, per (token, value head). Uniform across the
 // state rows, so hoisting it out of the recurrence removes it from every one of
-// the 16 waves that now share a head.
+// the 16 waves that now share a head. `conv_in` is the same buffer as
+// `conv_state` on an in-place pass, so neither is restrict.
 __launch_bounds__(256) __global__ void BatchedDeltaNetPrepAlphaBetaKernel(
     const float* __restrict__ alpha_buf, const float* __restrict__ beta_buf,
     const float* __restrict__ ssm_a, const float* __restrict__ ssm_dt,
     float* __restrict__ ab, std::size_t count, std::uint32_t num_heads,
-    const float* __restrict__ qkv_in, float* __restrict__ conv_state,
+    const float* __restrict__ qkv_in, const float* conv_in, float* conv_state,
     std::size_t batch_size, std::size_t qkv_size) {
   const std::size_t i =
       (static_cast<std::size_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
   if (i < qkv_size) {
-    detail::StoreSSMConvHistory(qkv_in, conv_state, i, batch_size, qkv_size);
+    detail::StoreSSMConvHistory(qkv_in, conv_in, conv_state, i, batch_size,
+                                qkv_size);
   }
   if (i >= count) {
     return;
@@ -151,13 +153,18 @@ __device__ __forceinline__ void RowReduce2(float& u, float& p) {
 // block-uniform and advances by one scalar add per token, and every
 // lane-dependent index is loop-invariant, which keeps the token loop free of
 // 64-bit address arithmetic.
+//
+// A `kDiverge` pass loads the state from `deltanet_in` (the buffer pinned for
+// rollback) and stores to `deltanet_state`; in place, `deltanet_in` is unused
+// and the single restrict pointer keeps today's aliasing contract and code.
 template<detail::QwenRecurrentStateElement StateT, int kKeysPerLane,
-         int kRowsPerLane, bool kPrefetch>
+         int kRowsPerLane, bool kPrefetch, bool kDiverge>
 __launch_bounds__(256) __global__ void BatchedDeltaNetRowSplitKernel(
     const float* __restrict__ conv_out, const float* __restrict__ kq_scales,
     const float* __restrict__ ab, StateT* __restrict__ deltanet_state,
     float* __restrict__ raw_out, std::uint32_t layer_idx, int batch_size,
-    int qkv_size, int inner_size, int num_key_heads, int num_heads) {
+    int qkv_size, int inner_size, int num_key_heads, int num_heads,
+    const StateT* __restrict__ deltanet_in) {
   constexpr int kLanesPerRow = kRowSplitDim / kKeysPerLane;
   constexpr int kRowGroups = 32 / kLanesPerRow;
   constexpr int kRowsPerWave = kRowGroups * kRowsPerLane;
@@ -177,15 +184,18 @@ __launch_bounds__(256) __global__ void BatchedDeltaNetRowSplitKernel(
   const int kh = h % num_key_heads;
   const int kq_idx = seg * kVec;
 
-  StateT* s_head = deltanet_state +
-                   ((((static_cast<std::size_t>(layer_idx) * num_heads) + h)) *
-                    kRowSplitDim * kRowSplitDim);
+  const std::size_t head_offset =
+      (((static_cast<std::size_t>(layer_idx) * num_heads) + h)) * kRowSplitDim *
+      kRowSplitDim;
+  const StateT* state_in = kDiverge ? deltanet_in : deltanet_state;
+  const StateT* s_head_in = state_in + head_offset;
+  StateT* s_head = deltanet_state + head_offset;
 
   float4 s_reg[kRowsPerLane][kVec];
 #pragma unroll
   for (int r = 0; r < kRowsPerLane; ++r) {
     const StateT* src =
-        s_head +
+        s_head_in +
         (static_cast<std::size_t>(row0 + (r * kRowGroups)) * kRowSplitDim);
 #pragma unroll
     for (int vi = 0; vi < kVec; ++vi) {
@@ -365,15 +375,14 @@ __global__ void BatchedSSMPostNormGateFp16Kernel(const float* raw,
 }  // namespace
 
 void LaunchBatchedSSMConvRecurrenceRowSplit(
-    const float* qkv_in, const float* conv_weights, float* conv_state,
-    float* conv_out, void* deltanet_state, const float* alpha_buf,
-    const float* beta_buf, const float* ssm_a, const float* ssm_dt,
-    const float* ssm_norm, const float* gate, float* out_buf, void* q8_out,
-    float* kq_scales, float* alpha_beta, std::uint32_t layer_idx,
-    std::size_t batch_size, std::size_t qkv_size, std::uint32_t num_key_heads,
-    std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim,
-    hipStream_t stream, QwenRecurrentStateStorage state_storage,
-    void* fp16_out) {
+    const float* qkv_in, const float* conv_weights, QwenRecurrentStateIo state,
+    float* conv_out, const float* alpha_buf, const float* beta_buf,
+    const float* ssm_a, const float* ssm_dt, const float* ssm_norm,
+    const float* gate, float* out_buf, void* q8_out, float* kq_scales,
+    float* alpha_beta, std::uint32_t layer_idx, std::size_t batch_size,
+    std::size_t qkv_size, std::uint32_t num_key_heads, std::uint32_t num_heads,
+    std::uint32_t key_dim, std::uint32_t val_dim, hipStream_t stream,
+    QwenRecurrentStateStorage state_storage, void* fp16_out) {
   if (!IsDeltaNetRowSplitSupported(key_dim, val_dim)) {
     throw std::invalid_argument(
         "row-split Qwen recurrent state requires 128x128 matrices");
@@ -382,11 +391,13 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
   const std::size_t grid_x = (qkv_size + block_size - 1) / block_size;
   const dim3 conv_grid(static_cast<unsigned int>(grid_x),
                        static_cast<unsigned int>(batch_size));
-  float* conv_layer_state =
-      conv_state + (static_cast<std::size_t>(layer_idx) * qkv_size * 4);
+  const std::size_t conv_layer_offset =
+      static_cast<std::size_t>(layer_idx) * qkv_size * 4;
+  const float* conv_layer_in = state.conv_in + conv_layer_offset;
+  float* conv_layer_state = state.conv_out + conv_layer_offset;
 
   BatchedSSMConvKernel<<<conv_grid, static_cast<unsigned int>(block_size), 0,
-                         stream>>>(qkv_in, conv_weights, conv_layer_state,
+                         stream>>>(qkv_in, conv_weights, conv_layer_in,
                                    conv_out, batch_size, qkv_size);
 
   const dim3 kq_grid(num_key_heads, static_cast<unsigned int>(batch_size));
@@ -398,7 +409,7 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
   BatchedDeltaNetPrepAlphaBetaKernel<<<
       static_cast<unsigned int>((prep_count + 255) / 256), 256, 0, stream>>>(
       alpha_buf, beta_buf, ssm_a, ssm_dt, alpha_beta, ab_count, num_heads,
-      qkv_in, conv_layer_state, batch_size, qkv_size);
+      qkv_in, conv_layer_in, conv_layer_state, batch_size, qkv_size);
 
   const std::size_t inner_size = static_cast<std::size_t>(num_heads) * val_dim;
   const auto batch_i = static_cast<int>(batch_size);
@@ -407,41 +418,41 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
   const auto kh_i = static_cast<int>(num_key_heads);
   const auto h_i = static_cast<int>(num_heads);
 
+  const auto launch = [&]<typename StateT, int kRowsPerLane, bool kPrefetch,
+                          bool kDiverge>() {
+    const dim3 grid(val_dim / RowSplitRowsPerBlock<32, kRowsPerLane>(),
+                    num_heads);
+    BatchedDeltaNetRowSplitKernel<StateT, 32, kRowsPerLane, kPrefetch, kDiverge>
+        <<<grid, 256, 0, stream>>>(
+            conv_out, kq_scales, alpha_beta,
+            static_cast<StateT*>(state.recurrent_out), out_buf, layer_idx,
+            batch_i, qkv_i, inner_i, kh_i, h_i,
+            static_cast<const StateT*>(state.recurrent_in));
+  };
+  const auto launch_diverge =
+      [&]<typename StateT, int kRowsPerLane, bool kPrefetch>() {
+        if (state.Diverges())
+          launch.template operator()<StateT, kRowsPerLane, kPrefetch, true>();
+        else
+          launch.template operator()<StateT, kRowsPerLane, kPrefetch, false>();
+      };
+  const auto launch_tile = [&]<int kRowsPerLane, bool kPrefetch>() {
+    if (state_storage == QwenRecurrentStateStorage::kBf16)
+      launch_diverge
+          .template operator()<hip_bfloat16, kRowsPerLane, kPrefetch>();
+    else
+      launch_diverge.template operator()<float, kRowsPerLane, kPrefetch>();
+  };
+
   // Two register tiles cover the useful range. The 32-key / one-row tile keeps
   // the shortest reduction and wins while the live k/q working set still fits
   // the vector caches; past a few thousand tokens the blocks drift far enough
   // apart in the token index that halving the k/q traffic with a second row
   // matters more than the extra registers.
   if (batch_size <= kRowSplitSmallBatch) {
-    const dim3 grid(val_dim / RowSplitRowsPerBlock<32, 1>(), num_heads);
-    if (state_storage == QwenRecurrentStateStorage::kBf16) {
-      BatchedDeltaNetRowSplitKernel<hip_bfloat16, 32, 1, false>
-          <<<grid, 256, 0, stream>>>(conv_out, kq_scales, alpha_beta,
-                                     static_cast<hip_bfloat16*>(deltanet_state),
-                                     out_buf, layer_idx, batch_i, qkv_i,
-                                     inner_i, kh_i, h_i);
-    } else {
-      BatchedDeltaNetRowSplitKernel<float, 32, 1, false>
-          <<<grid, 256, 0, stream>>>(conv_out, kq_scales, alpha_beta,
-                                     static_cast<float*>(deltanet_state),
-                                     out_buf, layer_idx, batch_i, qkv_i,
-                                     inner_i, kh_i, h_i);
-    }
+    launch_tile.template operator()<1, false>();
   } else {
-    const dim3 grid(val_dim / RowSplitRowsPerBlock<32, 2>(), num_heads);
-    if (state_storage == QwenRecurrentStateStorage::kBf16) {
-      BatchedDeltaNetRowSplitKernel<hip_bfloat16, 32, 2, true>
-          <<<grid, 256, 0, stream>>>(conv_out, kq_scales, alpha_beta,
-                                     static_cast<hip_bfloat16*>(deltanet_state),
-                                     out_buf, layer_idx, batch_i, qkv_i,
-                                     inner_i, kh_i, h_i);
-    } else {
-      BatchedDeltaNetRowSplitKernel<float, 32, 2, true>
-          <<<grid, 256, 0, stream>>>(conv_out, kq_scales, alpha_beta,
-                                     static_cast<float*>(deltanet_state),
-                                     out_buf, layer_idx, batch_i, qkv_i,
-                                     inner_i, kh_i, h_i);
-    }
+    launch_tile.template operator()<2, true>();
   }
 
   // Emit the activation consumed by ssm_out directly. Other callers retain the

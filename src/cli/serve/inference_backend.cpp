@@ -1431,7 +1431,10 @@ public:
         qwen_snapshot->verifier_snapshot != nullptr
             ? qwen_snapshot->verifier_snapshot->PersistentPayloadBytes()
             : 0;
-    std::fill(destination.begin(), destination.end(), std::uint8_t{0});
+    // Preserve zeroed reserved fields and unused pending-token slots without
+    // clearing the large payload that the serializers below overwrite.
+    std::fill_n(destination.begin(), kQwenPersistentSnapshotHeaderBytes,
+                std::uint8_t{0});
     std::copy(kQwenPersistentSnapshotMagic.begin(),
               kQwenPersistentSnapshotMagic.end(), destination.begin());
     PutLittleEndian<std::uint32_t>(destination, 8,

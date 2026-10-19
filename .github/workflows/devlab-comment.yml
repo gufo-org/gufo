@@ -1,0 +1,147 @@
+name: Devlab functional comment
+
+# Keeps the single Devlab functional PR comment in step with its run: a
+# placeholder with a cancel link while the run is in progress, and the
+# rendered report of a fork PR once it completes (a fork run only has a
+# read-only token). Same-repository runs post their own report.
+#
+# This workflow runs from the base repository with a write token. It never
+# checks out or executes PR code: the fork artifact is treated as text and the
+# PR is resolved from the triggering run, not from the artifact.
+on:
+  workflow_run:
+    workflows: [ Devlab functional checks ]
+    types: [ in_progress, completed ]
+
+permissions: {}
+
+# Serialize updates per PR branch so a placeholder never lands after a report.
+concurrency:
+  group: devlab-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Update functional PR comment
+    if: >-
+      github.repository == 'gufo-org/gufo' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
+      statuses: write
+    steps:
+      # Runs without a report (unauthorized, superseded) have nothing to post.
+      - name: Download fork report
+        if: >-
+          github.event.action == 'completed' &&
+          github.event.workflow_run.head_repository.full_name != github.repository
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: functional-comment
+          path: report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Publish PR comment and advisory status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ github.event.action }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker='<!-- devlab-functional -->'
+          running='<!-- devlab-functional:running -->'
+
+          # Fork runs carry no pull_requests; match the open PR by head. A run
+          # for an older head is superseded and must not touch the comment.
+          pr=$(gh api -X GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open \
+            -f head="$HEAD_OWNER:$HEAD_BRANCH" -f per_page=100 |
+            jq -r --arg sha "$HEAD_SHA" '[.[] | select(.head.sha == $sha)] |
+              if length == 1 then .[0] | "\(.number) \(.draft)" else "" end')
+          if [[ -z "$pr" ]]; then
+            echo "::notice::No single open PR has head $HEAD_SHA; a newer run reports instead."
+            exit 0
+          fi
+          read -r pr_number draft <<<"$pr"
+
+          # Update one comment per PR instead of adding one per run.
+          # Both the placeholder and the report link their run.
+          read -r comment_id comment_running comment_this_run < <(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/issues/$pr_number/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and
+                               (.body | startswith("<!-- devlab-functional -->"))) |
+                  [.id, (.body | contains("<!-- devlab-functional:running -->")),
+                   (.body | contains("/actions/runs/" + env.RUN_ID + ")"))] | join(" ")' |
+            head -1) || true
+          publish() {
+            if [[ -n "${comment_id:-}" ]]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" -F body=@"$1" --silent
+            else
+              gh api "repos/$GITHUB_REPOSITORY/issues/$pr_number/comments" -F body=@"$1" --silent
+            fi
+          }
+          set_status() {
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" -f state="$1" \
+              -f context=devlab/functional -f description="${2:0:140}" \
+              -f target_url="$RUN_URL" --silent
+          }
+          fork=false
+          [[ "$HEAD_REPO" == "$GITHUB_REPOSITORY" ]] || fork=true
+
+          if [[ "$ACTION" == in_progress ]]; then
+            # Mirror the authorize job: drafts do not run.
+            [[ "$draft" == false ]] || exit 0
+            # in_progress fires as each job starts, the report job included: only
+            # the first event of a run may replace the comment, never its report.
+            [[ "${comment_this_run:-}" != true ]] || exit 0
+            status=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq .status)
+            [[ "$status" != completed ]] || exit 0
+            cat > placeholder.md <<EOF
+          $marker
+          $running
+          ### ⏳ Devlab functional checks running
+
+          Building \`${HEAD_SHA:0:7}\` and running the affected functional suites on Strix Halo. This comment updates with the results when the run finishes.
+
+          [![Cancel run](https://img.shields.io/badge/%E2%8F%B9%20Cancel%20run-cf222e?style=for-the-badge)]($RUN_URL)
+
+          <sub>The button opens the [workflow run]($RUN_URL); choose **Cancel workflow** there (requires write access). \`devlab/functional\` is advisory on PRs; only the automatic release merge waits for it.</sub>
+          EOF
+            publish placeholder.md
+            # Same-repository runs set their own pending status.
+            [[ "$fork" == false ]] || set_status pending "Functional checks running"
+            exit 0
+          fi
+
+          if [[ -f report/comment.md ]]; then
+            state=$(sed -n 's/^state=//p' report/status.env)
+            description=$(sed -n 's/^description=//p' report/status.env)
+            case "$state" in
+              pending|success|failure|error) ;;
+              *) echo "::error::Unexpected status state"; exit 1 ;;
+            esac
+            [[ "$(head -c ${#marker} report/comment.md)" == "$marker" ]] || {
+              echo "::error::Report lacks the devlab-functional marker"; exit 1
+            }
+            set_status "$state" "$description"
+            publish report/comment.md
+          elif [[ "${comment_running:-}" == true ]]; then
+            # No report replaced the placeholder; do not leave it claiming a run.
+            cat > ended.md <<EOF
+          $marker
+          ### ⚠️ Devlab functional checks ended without a report
+
+          The run stopped before rendering results. See the [workflow run]($RUN_URL).
+          EOF
+            publish ended.md
+          fi

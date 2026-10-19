@@ -11,6 +11,11 @@ on:
         description: PR to test (head pinned at authorization)
         required: true
         type: string
+      tier:
+        description: pr trims suites and transports; full runs the complete set (release PRs)
+        type: choice
+        options: [ full, pr ]
+        default: full
       ar:
         description: Also run the functional suites in AR (speculative off); MTP always runs
         default: false
@@ -32,9 +37,7 @@ jobs:
     name: Authorize functional checks
     if: >-
       github.repository == 'gufo-org/gufo' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (!github.event.pull_request.draft &&
-        !startsWith(github.event.pull_request.head.ref, 'release-please--')))
+      (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -43,6 +46,7 @@ jobs:
       has_work: ${{ steps.plan.outputs.has_work }}
       scope: ${{ steps.plan.outputs.scope }}
       base: ${{ steps.plan.outputs.base }}
+      tier: ${{ steps.plan.outputs.tier }}
     permissions:
       contents: read
       statuses: write # fork PR tokens stay read-only
@@ -115,9 +119,16 @@ jobs:
           APPROVED_HEAD: ${{ steps.revision.outputs.head }}
           RUN_BENCHMARK: ${{ inputs.benchmark || false }}
           RUN_AR: ${{ inputs.ar || false }}
+          DISPATCH_TIER: ${{ inputs.tier }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         shell: bash
         run: |
           set -euo pipefail
+          # Release PRs run the complete set; other PRs the pr tier.
+          tier="pr"
+          [[ "$HEAD_REF" == release-please--* ]] && tier=full
+          [[ -n "$DISPATCH_TIER" ]] && tier="$DISPATCH_TIER"
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
           # MTP exercises the AR verification path too; AR-only coverage is opt-in.
           scope=flash-next-q4/mtp
           [[ "$RUN_AR" == true ]] && scope=flash-next-q4
@@ -130,7 +141,7 @@ jobs:
           base=$(git merge-base refs/ci/main "$APPROVED_HEAD")
           echo "base=$base" >> "$GITHUB_OUTPUT"
           python3 tests/functional/impact.py --repo . --base "$base" --head "$APPROVED_HEAD" \
-            --model "$scope" --output functional-plan.json
+            --model "$scope" --tier "$tier" --output functional-plan.json
           python3 - <<'PYPLAN'
           import json, os
           plan = json.load(open('functional-plan.json'))
@@ -139,12 +150,12 @@ jobs:
               print('has_work=' + str(work).lower(), file=output)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('## Changed-file functional plan\n\n')
-              summary.write(f"Revisions: `{plan['base']}` → `{plan['head']}`.\n\n")
+              summary.write(f"Revisions: `{plan['base']}` → `{plan['head']}`; tier `{plan['tier']}`.\n\n")
               for path in plan['paths']:
                   summary.write(f"- `{path['path']}` → {', '.join(path['rules'])}\n")
               for group in plan['groups']:
                   summary.write(f"\n**{group['profile']} / {group['configuration']}**: " + ', '.join(group['suites']) + '\n')
-              summary.write(f"\nDeferred: {len(plan['deferred'])}; outside scope {', '.join(plan['scope'])}: {len(plan['out_of_scope'])}.\n")
+              summary.write(f"\nDeferred: {len(plan['deferred'])}; release run only: {len(plan['release_only'])}; outside scope {', '.join(plan['scope'])}: {len(plan['out_of_scope'])}.\n")
               summary.write('Candidate correctness only. Other-model, numerical, agent replay and timing qualification remain separate obligations.\n')
           PYPLAN
 
@@ -168,7 +179,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf -- candidate baseline functional-results functional-report functional-plan.json
+          rm -rf -- candidate baseline functional-results functional-report functional-plan.json phase-logs
           # The 63 GB home overlay cannot hold the 104 GiB weights.
           cache_root="${GUFO_CI_CACHE:-$RUNNER_TOOL_CACHE/gufo}"
           mkdir -p "$cache_root"
@@ -303,6 +314,7 @@ jobs:
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
           APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
           APPROVED_SCOPE: ${{ needs.authorize.outputs.scope }}
+          APPROVED_TIER: ${{ needs.authorize.outputs.tier }}
         shell: bash
         run: |
           set -euo pipefail
@@ -311,53 +323,7 @@ jobs:
           git -C candidate checkout --detach "$APPROVED_HEAD"
           base="$APPROVED_BASE"
           python3 controller/tests/functional/impact.py --repo candidate --base "$base" --head "$APPROVED_HEAD" \
-            --model "$APPROVED_SCOPE" --output functional-plan.json
-
-      - name: Configure compiler cache
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "::notice::ccache is not installed; builds start from scratch."
-            exit 0
-          fi
-          {
-            printf 'CCACHE_DIR=%s\n' "$GUFO_CACHE_ROOT/ccache"
-            printf 'CCACHE_BASEDIR=%s\n' "$GITHUB_WORKSPACE"
-            printf 'CCACHE_MAXSIZE=20G\n'
-            for language in C CXX HIP; do
-              printf 'CMAKE_%s_COMPILER_LAUNCHER=ccache\n' "$language"
-            done
-          } >> "$GITHUB_ENV"
-          CCACHE_DIR="$GUFO_CACHE_ROOT/ccache" ccache --zero-stats
-
-      - name: Build Gufo from source
-        id: build
-        working-directory: candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf 'Candidate: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
-          cmake --version
-          c++ --version
-          hipcc --version
-          cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-          cmake --build --preset release --parallel 4
-          ./build/release/gufo diagnose
-
-      - name: Build merge base for the benchmark baseline
-        id: build_base
-        if: inputs.benchmark
-        env:
-          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git -C candidate worktree add --detach ../baseline "$APPROVED_BASE"
-          cd baseline
-          printf 'Benchmark baseline: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
-          cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-          cmake --build --preset release --parallel 4
+            --model "$APPROVED_SCOPE" --tier "$APPROVED_TIER" --output functional-plan.json
 
       - name: Prepare persistent model cache
         shell: bash
@@ -374,10 +340,13 @@ jobs:
             exit 1
           fi
 
-      - name: Download pinned Flash-Next Q4 weights
-        id: weights
+      # Weights are network bound and the builds CPU bound: download in the
+      # background and wait for it before the suites need the files.
+      - name: Start pinned Flash-Next Q4 weight download
         shell: bash
         run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/gufo-weights.sh" <<'SCRIPT'
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/gufo-hf-cli"
           "$RUNNER_TEMP/gufo-hf-cli/bin/python" -m pip install 'huggingface_hub[hf_xet]'
@@ -418,6 +387,72 @@ jobs:
             }
           done
           du -sh "$GUFO_MODEL_DIR"
+          SCRIPT
+          rm -f "$RUNNER_TEMP/gufo-weights.status"
+          # The job outlives this step; the runner reaps the process at job end.
+          (
+            status=0
+            bash "$RUNNER_TEMP/gufo-weights.sh" || status=$?
+            echo "$status" > "$RUNNER_TEMP/gufo-weights.status"
+          ) > "$RUNNER_TEMP/gufo-weights.log" 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/gufo-weights.pid"
+
+      - name: Configure compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "::notice::ccache is not installed; builds start from scratch."
+            exit 0
+          fi
+          {
+            printf 'CCACHE_DIR=%s\n' "$GUFO_CACHE_ROOT/ccache"
+            printf 'CCACHE_BASEDIR=%s\n' "$GITHUB_WORKSPACE"
+            printf 'CCACHE_MAXSIZE=20G\n'
+            for language in C CXX HIP; do
+              printf 'CMAKE_%s_COMPILER_LAUNCHER=ccache\n' "$language"
+            done
+          } >> "$GITHUB_ENV"
+          CCACHE_DIR="$GUFO_CACHE_ROOT/ccache" ccache --zero-stats
+
+      - name: Build Gufo from source
+        id: build
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Candidate: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          cmake --version
+          c++ --version
+          hipcc --version
+          cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+          cmake --build --preset release --parallel 4
+          ./build/release/gufo diagnose
+
+      - name: Build merge base for the phase and benchmark baselines
+        id: build_base
+        env:
+          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C candidate worktree add --detach ../baseline "$APPROVED_BASE"
+          cd baseline
+          printf 'Benchmark baseline: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+          cmake --build --preset release --parallel 4
+
+      - name: Wait for pinned Flash-Next Q4 weights
+        id: weights
+        shell: bash
+        run: |
+          set -euo pipefail
+          pid=$(cat "$RUNNER_TEMP/gufo-weights.pid")
+          while kill -0 "$pid" 2>/dev/null; do sleep 5; done
+          # Progress bars redraw with carriage returns; keep their final states.
+          tr '\r' '\n' < "$RUNNER_TEMP/gufo-weights.log" | grep -v '^\s*$' | tail -n 60
+          status=$(cat "$RUNNER_TEMP/gufo-weights.status" 2>/dev/null || echo 1)
+          exit "$status"
 
       - name: Install functional client dependencies
         shell: bash
@@ -437,6 +472,24 @@ jobs:
           "$RUNNER_TEMP/gufo-functional-client/bin/python" controller/tests/functional/cluster.py \
             --plan functional-plan.json --binary candidate/build/release/gufo \
             --weights "$GUFO_MODEL_DIR" --output functional-results
+
+      # Timing observations only: they never change the advisory verdict, and
+      # suite failures must not hide them.
+      - name: Time inference phases on base and PR
+        if: >-
+          !cancelled() && steps.build.outcome == 'success' &&
+          steps.build_base.outcome == 'success' && steps.weights.outcome == 'success'
+        env:
+          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
+          APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p functional-report
+          python3 controller/tests/functional/phases.py \
+            --base-binary baseline/build/release/gufo --head-binary candidate/build/release/gufo \
+            --base-revision "$APPROVED_BASE" --head-revision "$APPROVED_HEAD" \
+            --weights "$GUFO_MODEL_DIR" --output functional-report/phases.json --logs phase-logs
 
       # Suite failures must not hide benchmark observations.
       - name: Benchmark Flash-Next AR through 128K depth on base and PR
@@ -489,6 +542,7 @@ jobs:
             functional-plan.json
             functional-results/
             functional-report/
+            phase-logs/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -559,8 +613,17 @@ jobs:
             --comment comment.md --status status.env
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
 
-      # A fork PR's token cannot comment or set statuses; its result stays in
-      # the job checks and this summary.
+      # A fork PR's token cannot comment or set statuses; devlab-comment.yml
+      # publishes this report from the base repository instead.
+      - name: Retain report for fork publishing
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: functional-comment
+          path: |
+            comment.md
+            status.env
+
       - name: Publish PR comment and advisory status
         if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
         env:

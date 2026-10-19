@@ -224,6 +224,9 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
                                      std::uint32_t count) {
   const auto& config = weights_.config;
   auto scratch = arena_.GetScratchView();
+  // The replay is one pass: it reads the restored (pinned) state and leaves it
+  // intact for a second RestoreState.
+  const auto recurrent_state = arena_.BeginRecurrentWrite();
   for (std::uint32_t layer_idx = 0; layer_idx < config.num_layers;
        ++layer_idx) {
     const auto& layer = weights_.layers[layer_idx];
@@ -232,7 +235,9 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
     }
 
     // Layers have independent recorded inputs and recurrent state. Replay each
-    // layer's committed rows together, splitting only at ring/scratch bounds.
+    // layer's committed rows together, splitting only at ring/scratch bounds;
+    // a layer's later splits continue from what its first launch wrote.
+    auto layer_state = recurrent_state;
     for (std::uint32_t offset = 0; offset < count;) {
       const auto start = position + offset;
       const auto until_wrap = static_cast<std::uint32_t>(
@@ -241,9 +246,8 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
           std::min({count - offset, until_wrap, arena_.GetMaxBatch()});
       LaunchSSMConvRecurrenceRows(
           arena_.GetReplayQkv(layer_idx, start),
-          static_cast<const float*>(layer.ssm_conv1d.data),
-          arena_.d_ssm_conv_state, scratch.ssm.conv_out.data(),
-          arena_.d_ssm_deltanet_state, arena_.GetReplayAlpha(layer_idx, start),
+          static_cast<const float*>(layer.ssm_conv1d.data), layer_state,
+          scratch.ssm.conv_out.data(), arena_.GetReplayAlpha(layer_idx, start),
           arena_.GetReplayBeta(layer_idx, start),
           static_cast<const float*>(layer.ssm_a.data),
           static_cast<const float*>(layer.ssm_dt.data), nullptr, nullptr,
@@ -252,6 +256,7 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
           config.ssm_state_size, config.SsmValueSize(), rows,
           config.ssm_time_step_rank, config.ssm_inner_size, arena_.stream, {},
           arena_.GetRecurrentStateStorage());
+      layer_state = layer_state.Continued();
       offset += rows;
     }
   }

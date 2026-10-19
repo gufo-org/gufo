@@ -797,9 +797,13 @@ int main(int argc, const char* const* argv) {
 
     auto snapshot = backend->Snapshot();
     const std::size_t persistent_bytes = snapshot->PersistentPayloadBytes();
-    std::vector<std::uint8_t> payload(persistent_bytes);
+    std::vector<std::uint8_t> payload(persistent_bytes, 0xA5);
     Expect(snapshot->SerializePersistent(payload) == persistent_bytes,
            "DFlash persistent serializer byte count");
+    std::vector<std::uint8_t> overwritten(persistent_bytes, 0x5A);
+    Expect(snapshot->SerializePersistent(overwritten) == persistent_bytes &&
+               overwritten == payload,
+           "DFlash persistent snapshot depends on previous destination bytes");
 
     auto corrupt_backend = gufo::hip::QwenDFlashGpuDraftBackend::Create(
         dflash_model, config, &error);

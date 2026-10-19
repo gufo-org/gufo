@@ -827,10 +827,12 @@ gufo::bench::KernelBenchResult BenchmarkDeltaNet(
                              "/val_dim=" + std::to_string(val_dim);
   auto samples_us = MeasureKernel(options, marker, stream, [&] {
     gufo::hip::LaunchBatchedSSMConvRecurrence(
-        qkv.Get(), conv_weights.Get(), conv_state.Get(), conv_output.Get(),
-        deltanet_state.Get(), alpha.Get(), beta.Get(), ssm_a.Get(),
-        ssm_dt.Get(), ssm_norm.Get(), gate.Get(), output.Get(), 0, batch_size,
-        qkv_size, num_key_heads, num_heads, key_dim, val_dim, stream);
+        qkv.Get(), conv_weights.Get(),
+        gufo::hip::QwenRecurrentStateIo::InPlace(conv_state.Get(),
+                                                 deltanet_state.Get()),
+        conv_output.Get(), alpha.Get(), beta.Get(), ssm_a.Get(), ssm_dt.Get(),
+        ssm_norm.Get(), gate.Get(), output.Get(), 0, batch_size, qkv_size,
+        num_key_heads, num_heads, key_dim, val_dim, stream);
   });
   VerifyFiniteNonzero(output);
 

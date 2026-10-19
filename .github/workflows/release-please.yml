@@ -17,7 +17,8 @@ jobs:
   release:
     name: Create daily release
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # The release PR waits for the full Devlab functional run (about an hour).
+    timeout-minutes: 180
     steps:
       - name: Create release app token
         id: app-token
@@ -73,10 +74,22 @@ jobs:
           required_checks=(
             "Conventional Commit title"
             "CPU contracts & repository checks"
+            # The full functional suite on Strix Halo; only releases require it.
+            "devlab/functional"
           )
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          block() {
+            # Leave the release PR open and tell the maintainers why.
+            gh pr comment "$1" --repo "$GITHUB_REPOSITORY" --body "@fedeizzo @francescobozzo \
+          The automatic release merge stopped: $2. Check the PR's checks and the \
+          [release workflow run]($run_url), then merge by hand or close the PR."
+            echo "$2" >&2
+            exit 1
+          }
 
           for pr_number in "${pr_numbers[@]}"; do
-            for attempt in {1..180}; do
+            # Ten-second polls for up to 160 minutes.
+            for attempt in {1..960}; do
               checks_rc=0
               checks=$(gh pr checks "$pr_number" \
                 --repo "$GITHUB_REPOSITORY" \
@@ -97,8 +110,7 @@ jobs:
                 ' <<<"$checks")
 
                 if [[ "$bucket" == "fail" ]]; then
-                  echo "Required check failed for PR #${pr_number}: ${check_name}" >&2
-                  exit 1
+                  block "$pr_number" "required check \`${check_name}\` did not pass"
                 fi
                 if [[ "$bucket" != "pass" ]]; then
                   all_passed=false
@@ -108,9 +120,8 @@ jobs:
               if [[ "$all_passed" == true ]]; then
                 break
               fi
-              if (( attempt == 180 )); then
-                echo "Timed out waiting for required checks on PR #${pr_number}." >&2
-                exit 1
+              if (( attempt == 960 )); then
+                block "$pr_number" "required checks were still pending after 160 minutes"
               fi
               sleep 10
             done

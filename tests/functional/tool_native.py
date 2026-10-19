@@ -13,6 +13,7 @@ from copy import deepcopy
 import json
 import sys
 
+from tier import rotate
 from tool_reasoning import response_result
 
 SCHEMA = "https://json-schema.org/draft/2020-12/schema"
@@ -178,7 +179,8 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
         assert_native(result, label)
 
     for index, name in enumerate(NEIGHBORS):
-        for choice in ("auto", "required"):
+        # The pr tier keeps the choice each neighbor's control runs with.
+        for choice in rotate(("auto", "required"), index):
             label = f"native_{name}_{choice}"
             stream = bool(index % 2)
             request = {**common, "tool_choice": choice,
@@ -231,7 +233,7 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
          "Call mcp_lookup once with date set to 2026-10-05."),
     )
     for index, (name, expected, instruction) in enumerate(typed):
-        for stream in (False, True):
+        for stream in rotate((False, True), index):
             label = f"native_typed_{name}_{index}_{'stream' if stream else 'buffered'}"
             request = {**common, "tool_choice": "required",
                        "tools": [*opencode_tools(), neighbor(name)],
@@ -302,6 +304,10 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
     print(f"CHECK native_schemas_complete deepseek={deepseek}", file=sys.stderr, flush=True)
 
 
+# (responses, stream) pairs; the pr tier rotates one per finite type.
+TRANSPORTS = ((False, False), (False, True), (True, False), (True, True))
+
+
 def check_finite_argument_types(client, model, checks, chat_result, image=None):
     """const/enum without type still have a type, including through unions."""
     check_read_arguments(client, model, checks, chat_result)
@@ -323,26 +329,25 @@ def check_finite_argument_types(client, model, checks, chat_result, image=None):
                     "parameters": {"type": "object", "properties": {"v": schema},
                                    "required": ["v"], "additionalProperties": False}}
         prompt = f"Call record once with v set to {json.dumps(value)}. No other arguments."
-        for responses in (False, True):
-            for stream in (False, True):
-                label = f"finite_type_{index}_{'responses' if responses else 'chat'}_{stream}"
-                if responses:
-                    result = response_result(client, dict(
-                        model=model, input=prompt, tools=[{"type": "function", **function}],
-                        tool_choice="required", temperature=0, reasoning={"effort": "none"},
-                        max_output_tokens=128, store=False), stream)
-                else:
-                    result = chat_result(client, dict(
-                        model=model, messages=[{"role": "user", "content": prompt}],
-                        tools=[{"type": "function", "function": function}],
-                        tool_choice="required", temperature=0, reasoning_effort="none",
-                        max_completion_tokens=128), stream)
-                checks[label] = result
-                assert len(result["tools"]) == 1, (label, result)
-                actual = json.loads(result["tools"][0]["function"]["arguments"])
-                assert actual == {"v": value} and type(actual["v"]) is type(value), (label, actual)
-                assert_native(result, label)
-                print(f"CHECK {label}", file=sys.stderr, flush=True)
+        for responses, stream in rotate(TRANSPORTS, index):
+            label = f"finite_type_{index}_{'responses' if responses else 'chat'}_{stream}"
+            if responses:
+                result = response_result(client, dict(
+                    model=model, input=prompt, tools=[{"type": "function", **function}],
+                    tool_choice="required", temperature=0, reasoning={"effort": "none"},
+                    max_output_tokens=128, store=False), stream)
+            else:
+                result = chat_result(client, dict(
+                    model=model, messages=[{"role": "user", "content": prompt}],
+                    tools=[{"type": "function", "function": function}],
+                    tool_choice="required", temperature=0, reasoning_effort="none",
+                    max_completion_tokens=128), stream)
+            checks[label] = result
+            assert len(result["tools"]) == 1, (label, result)
+            actual = json.loads(result["tools"][0]["function"]["arguments"])
+            assert actual == {"v": value} and type(actual["v"]) is type(value), (label, actual)
+            assert_native(result, label)
+            print(f"CHECK {label}", file=sys.stderr, flush=True)
     check_literal_history(client, model, checks, chat_result, image)
     check_integer_history(client, model, checks, chat_result)
 
@@ -354,8 +359,8 @@ def check_integer_history(client, model, checks, chat_result):
                     "path": {"type": "string"}, "limit": {"type": "integer"}},
                     "required": ["path", "limit"], "additionalProperties": False}}
     # Both have a shorter exponent spelling (1e+05, 1e+06) than their decimal.
-    for limit in (100000, 1000000):
-        for stream in (False, True):
+    for index, limit in enumerate((100000, 1000000)):
+        for stream in rotate((False, True), index):
             label = f"integer_history_{limit}_{stream}"
             messages = [{"role": "user", "content":
                          f"Call read once with path archive-01.txt and limit {limit}."}]

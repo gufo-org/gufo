@@ -117,7 +117,9 @@ public:
         gpu_snapshot->PersistentPayloadBytes();
     const std::size_t pending_bytes =
         pending_target_features.size() * sizeof(std::uint32_t);
-    std::fill(destination.begin(), destination.end(), std::uint8_t{0});
+    // The nested serializer and pending features overwrite the entire payload.
+    std::fill_n(destination.begin(), kDFlashDraftPersistentHeaderBytes,
+                std::uint8_t{0});
     std::copy(kDFlashDraftPersistentMagic.begin(),
               kDFlashDraftPersistentMagic.end(), destination.begin());
     PutLittleEndian<std::uint32_t>(destination, 8,
