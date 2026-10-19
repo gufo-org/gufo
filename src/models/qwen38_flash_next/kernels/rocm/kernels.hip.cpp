@@ -89,12 +89,15 @@ __device__ __forceinline__ void QuantizeQ8_1Lane(float v, void* y,
   }
   const float d = amax / 127.0f;
   const std::int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
-  // The block sum is d*sum(q), as in quantize_q8_1.
+  // The block sum is d*sum(q), as in quantize_q8_1. The steps are spelled
+  // out: after the divergent `q`, a `#pragma unroll` loop stays rolled and
+  // dispatches XorLane's switch at run time, doubling HcCombineKernel.
   int sumq = q;
-#pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    sumq += XorLane(sumq, offset);
-  }
+  sumq += XorLane(sumq, 16);
+  sumq += XorLane(sumq, 8);
+  sumq += XorLane(sumq, 4);
+  sumq += XorLane(sumq, 2);
+  sumq += XorLane(sumq, 1);
   Q8_1Block* blocks = static_cast<Q8_1Block*>(y);
   blocks[i / 32].qs[i % 32] = q;
   if (i % 32 == 0) {
