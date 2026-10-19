@@ -821,7 +821,7 @@
     "recovery_evidence": "6 passed"
   },
   "remaining": [
-    "Q4 DFlash2 and Q8 AR/DFlash2 HTTP cache/long-context/conversation/image/concurrency histories",
+    "Q8 AR/DFlash2 HTTP cache/long-context/conversation/image/concurrency histories",
     "Matched affected-history timing controls and focused investigation of flags",
     "Flash AR/MTP shared-path controls",
     "Standard speed benchmark and focused deep/recovery/agent resource workflows"
@@ -871,6 +871,84 @@
       },
       "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
       "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q4-off-http"
+    },
+    "q4/dflash2": {
+      "status": "passed",
+      "requests": 290,
+      "invalid_requests": 0,
+      "execution": {
+        "loaded_mode": "dflash2",
+        "draft_tokens": 3419,
+        "draft_tokens_accepted": 2016,
+        "draft_execution_observed": true
+      },
+      "stages": {
+        "long-context": "passed",
+        "conversation": "passed",
+        "image-count": "passed",
+        "cache-edits": "passed",
+        "cache-growth": "passed",
+        "cache-depth": "passed",
+        "cache-concurrency": "passed",
+        "cache-shared-prefix": "passed",
+        "state-edges": "passed",
+        "image-count-cancel": "passed",
+        "text-cancel": "passed",
+        "thinking-tool-cancel": "passed",
+        "legacy-tool-cancel": "passed",
+        "image-cancel": "passed",
+        "image-thinking-cancel": "passed",
+        "disk-spacing": "passed",
+        "image-count-cancel-disk": "passed",
+        "text-cancel-disk": "passed",
+        "thinking-tool-cancel-disk": "passed",
+        "legacy-tool-cancel-disk": "passed",
+        "image-cancel-disk": "passed",
+        "image-thinking-cancel-disk": "passed",
+        "disk-spacing-disk": "passed"
+      },
+      "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
+      "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q4-dflash2-http"
+    }
+  },
+  "readiness_resources": {
+    "off": {
+      "main_candidate_pairs": [
+        {
+          "main": "0-main",
+          "candidate": "2-candidate",
+          "anonymous_rss_increase_bytes": 2277134336,
+          "prepared_backing_bytes": 2270560256,
+          "remaining_difference_bytes": 6574080
+        },
+        {
+          "main": "5-main",
+          "candidate": "3-candidate",
+          "anonymous_rss_increase_bytes": 2282164224,
+          "prepared_backing_bytes": 2270560256,
+          "remaining_difference_bytes": 11603968
+        }
+      ],
+      "interpretation": "At readiness the component cache prepares bounded backing before serving. This is a real resident-memory cost versus main 27B legacy cache; prepared bytes account for most observed anonymous RSS difference. Startup time is not qualified because file-cache history was not matched."
+    },
+    "dflash2": {
+      "main_candidate_pairs": [
+        {
+          "main": "0-main",
+          "candidate": "2-candidate",
+          "anonymous_rss_increase_bytes": 2281283584,
+          "prepared_backing_bytes": 2270560256,
+          "remaining_difference_bytes": 10723328
+        },
+        {
+          "main": "5-main",
+          "candidate": "3-candidate",
+          "anonymous_rss_increase_bytes": 2281283584,
+          "prepared_backing_bytes": 2270560256,
+          "remaining_difference_bytes": 10723328
+        }
+      ],
+      "interpretation": "At readiness the component cache prepares bounded backing before serving. This is a real resident-memory cost versus main 27B legacy cache; prepared bytes account for most observed anonymous RSS difference. Startup time is not qualified because file-cache history was not matched."
     }
   }
 }

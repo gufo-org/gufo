@@ -184,14 +184,24 @@ backing, admission, retention and publication fixes are preserved, and 27B
 uses the shared mapped snapshot copy kernels for private state and FP16 rows.
 FP32's canonical head-major transfers retain their strided representation.
 
+At readiness with four 32K sessions and a 16 GiB cache budget, the component
+cache commits 2,270,560,256 bytes of backing before serving, as Flash's shared
+policy does. Anonymous RSS is about 2.1 GiB above main's legacy 27B cache in
+both modes; that reserve accounts for all but 6.6–11.6 MB of the observed
+difference. This is a resident-memory cost of preparing captures in advance.
+The startup timing observations do not establish readiness latency parity
+because filesystem-cache histories were not matched.
+
 Short-request main/PR/PR/main controls preserve every output and draft count.
 DFlash2 passes the per-request timing limits against main. AR has an
 inconclusive first-request queue flag. Against the merged branch without the
 copy change, one initial AR snapshot outlier and token-gap flags in both modes
-remain inconclusive. The selected Q4 AR HTTP run passes all 23 stages and 290 recorded requests,
+remain inconclusive. The selected Q4 AR and DFlash2 HTTP runs each pass all
+23 stages and 290 recorded requests,
 including long-context, conversation, image-count, edits, growth, depth,
 concurrency, learned shared prefixes, state edges, cancellation and durable
-restart/replay. Other current-head profiles, Flash shared-path controls,
+restart/replay. The DFlash2 run observes 3,419 proposed and 2,016 accepted draft
+tokens. Q8 profiles, Flash shared-path controls,
 deep/recovery workflows and complete latency qualification remain open.
 See the [dated review record](artifacts/component-cache-review.json) for
 commands, binary identities, every short-request observation and outstanding
