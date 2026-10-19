@@ -4,6 +4,30 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.18.0](https://github.com/gufo-org/gufo/compare/v0.17.1...v0.18.0) (2026-10-19)
+
+
+### Features
+
+* **serve:** honor the Messages thinking budget ([#524](https://github.com/gufo-org/gufo/issues/524)) ([295f26c](https://github.com/gufo-org/gufo/commit/295f26ce63e93b288a47b1bb54d8d823a93e8c0d))
+* **serve:** prepare the structured-output vocabulary before serving ([#638](https://github.com/gufo-org/gufo/issues/638)) ([e773094](https://github.com/gufo-org/gufo/commit/e77309421b0013d44d62ec0824be63c057a970e5))
+
+
+### Bug Fixes
+
+* **cache:** keep disk-cache snapshots out of the page cache ([#477](https://github.com/gufo-org/gufo/issues/477)) ([bff0eec](https://github.com/gufo-org/gufo/commit/bff0eec6f1eaaa5847d00712787153a3de78a4a0))
+* **ci:** keep the devlab report when later jobs start ([#659](https://github.com/gufo-org/gufo/issues/659)) ([fbfc712](https://github.com/gufo-org/gufo/commit/fbfc712586c8972b2209bd6c13c69c8146311b81))
+* **qwen-flash:** pin square-accumulation order in all HcCombineMoeF16Kernel instantiations ([#624](https://github.com/gufo-org/gufo/issues/624)) ([43b829d](https://github.com/gufo-org/gufo/commit/43b829d4dee5574d66fbd499640e56f40cbf4baa))
+* **qwen:** reuse historical image preprocessing ([#645](https://github.com/gufo-org/gufo/issues/645)) ([f948ddd](https://github.com/gufo-org/gufo/commit/f948ddd371bf2a3f7360b7069fc703badbbc07ed))
+* **serve:** reclaimable page cache is available in cgroup space ([#637](https://github.com/gufo-org/gufo/issues/637)) ([9e1afaa](https://github.com/gufo-org/gufo/commit/9e1afaaa4da0f36e3638ac88bf12b054d2a1114a))
+* **tools:** preserve optional arguments in native calls ([#643](https://github.com/gufo-org/gufo/issues/643)) ([a802cc7](https://github.com/gufo-org/gufo/commit/a802cc77c795e26388e45cacec94aafcd69d12b4))
+
+
+### Performance
+
+* **flash-next:** reduce prompt and decode stalls ([#653](https://github.com/gufo-org/gufo/issues/653)) ([3462aa9](https://github.com/gufo-org/gufo/commit/3462aa96d0c02da3a6a511e0be197e186bd9f36a))
+* **qwen:** fork the recurrent state across two buffers instead of copying it ([#650](https://github.com/gufo-org/gufo/issues/650)) ([95ba1ea](https://github.com/gufo-org/gufo/commit/95ba1eae63f62fd8a4576f6313ffa6be05f1e83b))
+
 ## [0.17.1](https://github.com/gufo-org/gufo/compare/v0.17.0...v0.17.1) (2026-10-18)
 
 
