@@ -257,6 +257,16 @@ python3 tools/ci/check-kernel-resources.py new/bin/gufo --compare old/bin/gufo
 Change the baseline only after you decide that a new allowance is correct.
 Use `--write-baseline` and record the reason with `--note`.
 
+The allowances are measured per target, so the committed baseline is only
+meaningful for the toolchain and architecture that produced it: the release
+build from the Nix package (ROCm 7.2.3, AMD clang 22) on `gfx1151`. A local
+build against a different ROCm, or a build for `gfx1150`, reports higher
+scratch for many kernels and fails the check. That is a property of the
+comparison, not a regression: register allocation differs between compiler
+versions and between the two parts. Compare such a build with `--compare`
+against a binary built the same way, or write a separate baseline for that
+target.
+
 ### HIP allocation diagnostic
 
 Compare allocation, mapped-registration, first-touch, warm-access, copy,
