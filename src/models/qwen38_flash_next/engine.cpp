@@ -920,17 +920,16 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   const std::size_t cap =
       std::min<std::size_t>({max_tokens, room, exec.max_speculative()});
   const auto concurrency = model_->DecodeConcurrency();
-  // C1 sampled requests use the subset, including penalties and constraints;
-  // verification corrects their proposals against the full target distribution.
-  // Greedy penalties/constraints retain the full head. Unplanned multi-session
-  // requests also retain it so changed proposal chains cannot delay peers.
-  // Every request keeps the established length controller and AR backoff.
+  // Head eligibility is MtpDraftSubsetAllowed. Sampled cohorts are never
+  // jointly planned (DecodeBatchImpl), so a sampled request decides the same
+  // way alone and in any batch. Every request keeps the established length
+  // controller and AR backoff.
   const bool unmodified = !sampler.config().uses_random_sampling() &&
                           !sampler.config().penalties_enabled() &&
                           !sampler.config().constraint;
   const bool allow_subset =
-      (unmodified && (concurrency == 1 || batch_drafts.has_value())) ||
-      (concurrency == 1 && sampler.config().uses_random_sampling());
+      MtpDraftSubsetAllowed(sampler.config().uses_random_sampling(), unmodified,
+                            concurrency, batch_drafts.has_value());
   const std::size_t width =
       MtpEnabled() && cap > 1
           ? 1 + (batch_drafts ? std::min<std::uint32_t>(*batch_drafts, cap - 1)

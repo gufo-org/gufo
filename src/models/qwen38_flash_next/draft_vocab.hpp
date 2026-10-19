@@ -31,6 +31,20 @@ inline constexpr std::uint32_t kMtpDraftExtraRows = 1024;
 /// Committed tokens the head choice looks back over.
 inline constexpr std::size_t kMtpDraftVocabWindow = 32;
 
+/// Whether a request's cycle may draft through the small head; the table then
+/// decides per cycle (MtpDraftVocab::Fits). Sampled requests may at any
+/// session count, with penalties and constraints: verification corrects
+/// their proposals against the full target distribution, and the choice
+/// reads only the request's own tokens, so seeded output does not depend on
+/// overlapping requests. Greedy penalties/constraints keep the full head.
+/// Other greedy requests use the small head on one session or in a jointly
+/// planned batch; unplanned multi-session greedy requests keep the full head.
+[[nodiscard]] constexpr bool MtpDraftSubsetAllowed(
+    bool sampled, bool plain_greedy, std::uint32_t sessions,
+    bool planned_batch) noexcept {
+  return sampled || (plain_greedy && (sessions == 1 || planned_batch));
+}
+
 /// The request's draft vocabulary and when to use it. A token is a miss when
 /// it is outside the prefix, not special and not yet in the request's table
 /// (or the table is full). A draft cycle uses the small head when its anchor

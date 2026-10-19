@@ -85,12 +85,31 @@ void CheckReset() {
   Require(!vocab.Fits(500, Common), "reset kept a tabled token");
 }
 
+// Sampled requests may use the small head at any session count, in or out of
+// a batch, so a seeded request drafts the same way whatever overlaps it.
+// Greedy eligibility is unchanged: plain greedy needs one session or a
+// jointly planned batch, and greedy penalties/constraints never qualify.
+void CheckEligibility() {
+  for (const std::uint32_t sessions : {1U, 2U, 8U}) {
+    for (const bool planned : {false, true}) {
+      Require(qfn::MtpDraftSubsetAllowed(true, false, sessions, planned),
+              "a sampled request lost the small head");
+      Require(!qfn::MtpDraftSubsetAllowed(false, false, sessions, planned),
+              "greedy penalties or constraints reached the small head");
+      Require(qfn::MtpDraftSubsetAllowed(false, true, sessions, planned) ==
+                  (sessions == 1 || planned),
+              "plain greedy eligibility changed");
+    }
+  }
+}
+
 int main() {
   try {
     CheckCommonText();
     CheckMissWindow();
     CheckCapacity();
     CheckReset();
+    CheckEligibility();
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';
     return 1;
