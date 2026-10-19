@@ -89,9 +89,13 @@ in the background into a persistent
 cache under `$GUFO_CI_CACHE` (default `$RUNNER_TOOL_CACHE/gufo`; the weights need
 about 110 GiB free), and retains reports and selection reasons as artifacts.
 Weight and `ccache` reuse depend on the cluster preserving that directory on the
-allocated machine. A benchmark request also builds the merge base and runs the
-same AR sweep on it first, so the report shows per-depth deltas; one sweep per
-revision is an observation, not a qualified timing regression.
+allocated machine. The job also builds the merge base. After the suites,
+`phases.py` alternates base and PR servers (two arms each, after GPU cool-down)
+through startup and a cold, long and follow-up MTP request, and the comment draws
+each phase as a Mermaid pipeline colored by its paired verdict: a phase is slower
+or faster only when every repeat moves by more than 5% and 3 ms. A benchmark
+request also runs the same AR sweep on the merge base first, so the report shows
+per-depth deltas. Both are observations, not qualified timing regressions.
 
 The cluster installs the client from `requirements.txt`, pinned to the flake's
 versions, because newer unpinned SDKs break every suite inside the client. Keep it

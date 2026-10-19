@@ -12,6 +12,7 @@ from unittest.mock import patch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import phases
 import report
 
 
@@ -95,6 +96,61 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(status["state"], "success")
         self.assertIn("| `pp2048 @ d0` | 1300.00 | 1430.00 | +10.0% |", comment)
         self.assertIn("| `tg128 @ d0` | 20.00 | 20.00 | +0.0% |", comment)
+
+    def test_phase_verdicts_need_every_repeat(self):
+        self.assertEqual(phases.verdict([(100, 110), (100, 120)]), "slower")
+        self.assertEqual(phases.verdict([(100, 110), (100, 101)]), "noisy")
+        self.assertEqual(phases.verdict([(100, 90), (100, 80)]), "faster")
+        # Above 5% but within 3 ms is noise, not a regression.
+        self.assertEqual(phases.verdict([(20, 22), (20, 22.5)]), "same")
+        self.assertEqual(phases.verdict([]), "missing")
+
+    def test_phase_pipeline_is_drawn_with_verdict_colors(self):
+        def arm(revision, prefill, text="same"):
+            request = {"cache_restore_ms": 0, "prompt_ms": prefill, "ttft_ms": prefill + 20,
+                       "predicted_ms": 2000, "cache_snapshot_ms": 50, "prompt_tokens": 2048,
+                       "text_sha256": text}
+            return {"revision": revision, "startup": {
+                        "init": 900, "weights": 14000, "vision": 540, "structured": None,
+                        "listen": 12},
+                    "requests": {key: dict(request) for key in ("short", "long", "resume")}}
+        arms = [arm("base", 1500), arm("head", 1700, "other"),
+                arm("base", 1500), arm("head", 1680, "other")]
+        arms[1]["requests"]["resume"]["cache_restore_ms"] = 40
+        found, diverged = phases.summarize(arms)
+        verdicts = {phase["key"]: phase["verdict"] for phase in found}
+        self.assertEqual(verdicts["short.prompt_ms"], "slower")
+        self.assertEqual(verdicts["startup.weights"], "same")
+        self.assertEqual(verdicts["startup.structured"], "missing")
+        self.assertEqual(diverged, ["long", "resume", "short"])
+        data = {"settings": {"repeats": 2, "slowdown": .05, "noise_ms": 3,
+                             "requests": {"short": "Short prompt", "long": "Long prompt",
+                                          "resume": "Follow-up"}},
+                "wall_s": 600, "arms": arms, "phases": found, "diverged": diverged}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            results = root / "results"
+            results.mkdir()
+            (results / "phases.json").write_text(json.dumps(data))
+            (root / "plan.json").write_text(json.dumps(self.plan))
+            argv = ["report.py", "--plan", str(root / "plan.json"), "--results", str(results),
+                    "--authorize", "success", "--smoke", "success", "--run-url", "https://run",
+                    "--comment", str(root / "comment.md"), "--status", str(root / "status.env")]
+            with patch.object(sys, "argv", argv):
+                self.assertEqual(report.main(), 0)
+            comment = (root / "comment.md").read_text()
+        self.assertIn("```mermaid\nflowchart LR", comment)
+        self.assertIn('subgraph g1["Short prompt · 2,048 tok"]', comment)
+        self.assertIn('["Prefill<br/>1.50 s → 1.69 s<br/>+12.7%"]:::slower', comment)
+        self.assertIn('["Weights and model<br/>14.00 s → 14.00 s<br/>+0.0%"]:::same', comment)
+        # Unexercised phases stay out; a one-sided restore is inconclusive.
+        self.assertNotIn("Structured output", comment)
+        self.assertNotIn("Short prompt · 2,048 tok · Cache restore", comment)
+        self.assertIn("| Follow-up · 2,048 tok · Cache restore | 0.0 ms, 0.0 ms "
+                      "| 40 ms, 0.0 ms | noisy |", comment)
+        self.assertIn("g0 --> g1 --> g2 --> g3", comment)
+        self.assertIn("Measured in 10.0 min", comment)
+        self.assertIn("⚠️ Generated text differs", comment)
 
 
 if __name__ == "__main__":

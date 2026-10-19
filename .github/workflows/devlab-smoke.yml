@@ -168,7 +168,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf -- candidate baseline functional-results functional-report functional-plan.json
+          rm -rf -- candidate baseline functional-results functional-report functional-plan.json phase-logs
           # The 63 GB home overlay cannot hold the 104 GiB weights.
           cache_root="${GUFO_CI_CACHE:-$RUNNER_TOOL_CACHE/gufo}"
           mkdir -p "$cache_root"
@@ -417,9 +417,8 @@ jobs:
           cmake --build --preset release --parallel 4
           ./build/release/gufo diagnose
 
-      - name: Build merge base for the benchmark baseline
+      - name: Build merge base for the phase and benchmark baselines
         id: build_base
-        if: inputs.benchmark
         env:
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
         shell: bash
@@ -461,6 +460,24 @@ jobs:
           "$RUNNER_TEMP/gufo-functional-client/bin/python" controller/tests/functional/cluster.py \
             --plan functional-plan.json --binary candidate/build/release/gufo \
             --weights "$GUFO_MODEL_DIR" --output functional-results
+
+      # Timing observations only: they never change the advisory verdict, and
+      # suite failures must not hide them.
+      - name: Time inference phases on base and PR
+        if: >-
+          !cancelled() && steps.build.outcome == 'success' &&
+          steps.build_base.outcome == 'success' && steps.weights.outcome == 'success'
+        env:
+          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
+          APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p functional-report
+          python3 controller/tests/functional/phases.py \
+            --base-binary baseline/build/release/gufo --head-binary candidate/build/release/gufo \
+            --base-revision "$APPROVED_BASE" --head-revision "$APPROVED_HEAD" \
+            --weights "$GUFO_MODEL_DIR" --output functional-report/phases.json --logs phase-logs
 
       # Suite failures must not hide benchmark observations.
       - name: Benchmark Flash-Next AR through 128K depth on base and PR
@@ -513,6 +530,7 @@ jobs:
             functional-plan.json
             functional-results/
             functional-report/
+            phase-logs/
           if-no-files-found: ignore
           retention-days: 14
 
