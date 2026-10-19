@@ -734,6 +734,35 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
     assert rejected[1:] == expected[1:], (rejected, expected)
     checks[f"batch_c{width}_rejected_peer_isolation"] = rejected
 
+    # Short greedy answers end at EOS inside a speculative block. A batched
+    # row must stop there exactly as its serial run does (#612).
+    words = ("BRAVO KILO", "CHARLIE ROMEO", "GOLF FOXTROT", "KILO NOVEMBER",
+             "SIERRA JULIET", "ALPHA DELTA", "JULIET GOLF", "TANGO QUEBEC")
+    short = [dict(model=model, temperature=0, seed=42, max_completion_tokens=32,
+                  messages=[{"role": "user", "content":
+                             f"Reply with exactly the words: {pair}"}],
+                  extra_body={"cache_prompt": False,
+                              "chat_template_kwargs": {"enable_thinking": False}})
+             for pair in words]
+    serial = [chat_result(client, body) for body in short]
+    batched, references = [], []
+    for offset in (0, 1):
+        indices = [(index + offset) % len(short) for index in range(len(short))]
+        for group in range(0, len(indices) - width + 1, width):
+            members = indices[group:group + width]
+            barrier = threading.Barrier(width)
+            def together(index):
+                barrier.wait(timeout=30)
+                return chat_result(client, short[index], True)
+            with ThreadPoolExecutor(width) as pool:
+                batched += list(pool.map(together, members))
+            references += [serial[index] for index in members]
+    assert max(row["usage"]["gufo"]["physical_execution_width"] for row in batched) > 1, batched
+    for row, reference in zip(batched, references, strict=True):
+        assert (row["text"], row["finish"]) == (reference["text"], reference["finish"]), (
+            row, reference)
+    checks[f"batch_c{width}_greedy_short_replies_match_serial"] = batched
+
 
 def check_conversations(client, model, checks, vision=False, server_log=None):
     """Exercise thinking controls and cache reuse after a client disconnect."""

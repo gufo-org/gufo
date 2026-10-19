@@ -268,7 +268,7 @@ RAM, disk and restart settings once their contracts pass.
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops (including inside quoted calls), image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |
-| `batch` | Independent requests across Chat, Responses and Completions; sessions 1–8 |
+| `batch` | Independent requests across Chat, Responses and Completions; batched short greedy replies match serial ones; sessions 1–8 |
 | `progress` | Opt-in progress on all text endpoints; output/sampling equality, limits, stops, images, batching and cancel/resume |
 | `stream-start` | Plain streams on all text endpoints send headers before a cold prefill completes; a stream queued behind every session sends them after the five-second bound |
 | `prefill-scheduling` | Short arrival during a cold prefill: work-aligned arrival, independent per-request timings, unchanged output and no repeated prefill. Requires sessions ≥2 and context ≥16384; not in `all` |
