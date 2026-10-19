@@ -431,18 +431,27 @@ def verify_execution_log(out, log_name, mode):
 
 def assert_publication_wait(out, label, segment, result):
     """Require a real pending job, successful publication and deeper reuse."""
-    begins = list(re.finditer(r'event=publication_wait_begin id=(\d+) pending_tokens=(\d+) cached_tokens=(\d+)\b', segment))
+    begins = list(re.finditer(
+        r'event=publication_wait request=(\d+) stage=start checkpoint_id=(\d+) '
+        r'pending_tokens=(\d+) available_tokens=(\d+) limit_ms=([\d.e+-]+)', segment))
     record = {'qualified': False, 'raw_log': segment, 'waits': []}
     for begin in begins:
-        request, pending, previous = map(int, begin.groups())
-        end = re.search(r'event=publication_wait_end id=' + str(request) +
-                        r' reason=(\w+) cached_tokens=(\d+) wait_ms=([\d.]+)', segment[begin.end():])
-        row = {'request': request, 'pending_tokens': pending, 'previous_tokens': previous}
+        request, checkpoint, pending, previous = map(int, begin.groups()[:4])
+        end = re.search(
+            r'event=publication_wait request=' + str(request) +
+            r' stage=release checkpoint_id=' + str(checkpoint) +
+            r' pending_tokens=(\d+) available_tokens=(\d+) limit_ms=([\d.e+-]+)'
+            r' wait_ms=([\d.e+-]+) release=(\w+)', segment[begin.end():])
+        row = {'request': request, 'checkpoint_id': checkpoint,
+               'pending_tokens': pending, 'previous_tokens': previous,
+               'limit_ms': float(begin[5])}
         if end:
-            row.update(reason=end[1], cached_tokens=int(end[2]), wait_ms=float(end[3]))
+            row.update(reason=end[5], available_tokens=int(end[2]),
+                       wait_ms=float(end[4]), release_limit_ms=float(end[3]))
             between = segment[begin.end():begin.end() + end.start()]
             row['published_tokens'] = [int(value) for value in re.findall(
-                r'event=published\s+tokens=(\d+)\b', between)]
+                r'event=published\s+tokens=(\d+) checkpoint_id=' +
+                str(checkpoint) + r'\b', between)]
         record['waits'].append(row)
     cached = result['usage'].get('prompt_tokens_details', {}).get('cached_tokens')
     metrics = result['usage'].get('gufo', {}).get('component_cache', {})
@@ -452,9 +461,9 @@ def assert_publication_wait(out, label, segment, result):
     if valid:
         row = record['waits'][0]
         valid = (row['pending_tokens'] > row['previous_tokens'] + 4096 and
-                 row.get('reason') == 'pending_settled' and
+                 row.get('reason') in ('not_pending', 'available') and
                  0 <= row.get('wait_ms', -1) <= 120000 and
-                 row.get('cached_tokens', 0) >= row['pending_tokens'] and
+                 0 < row.get('release_limit_ms', 0) <= row['limit_ms'] and
                  any(value >= row['pending_tokens'] for value in row.get('published_tokens', [])) and
                  type(cached) is int and cached >= row['pending_tokens'] and
                  metrics.get('selected_tokens') == cached)

@@ -21,9 +21,11 @@ def response(cached=0):
 
 
 WAIT = (
-    "event=publication_wait_begin id=7 pending_tokens=17000 cached_tokens=10000\n"
-    "event=published tokens=17000 payload_bytes=100\n"
-    "event=publication_wait_end id=7 reason=pending_settled cached_tokens=17000 wait_ms=80\n"
+    "event=publication_wait request=7 stage=start checkpoint_id=42 "
+    "pending_tokens=17000 available_tokens=10000 limit_ms=100\n"
+    "event=published tokens=17000 checkpoint_id=42 payload_bytes=100\n"
+    "event=publication_wait request=7 stage=release checkpoint_id=42 "
+    "pending_tokens=17000 available_tokens=10000 limit_ms=100 wait_ms=80 release=not_pending\n"
 )
 
 
@@ -72,10 +74,12 @@ class QwenRecoveryEvidenceTest(unittest.TestCase):
             self.assertTrue(json.loads(Path(directory, "rewrite.publication-wait.json").read_text())["qualified"])
 
     def test_wait_without_successful_publication_is_rejected(self):
-        for segment in ("", WAIT.replace("pending_settled", "timeout"),
+        for segment in ("", WAIT.replace("not_pending", "cost_bound"),
                         WAIT.replace("event=published", "event=queued"),
-                        WAIT.replace("cached_tokens=10000", "cached_tokens=15000"),
-                        WAIT.replace("wait_end id=7", "wait_end id=8")):
+                        WAIT.replace("available_tokens=10000", "available_tokens=15000"),
+                        WAIT.replace("request=7 stage=release", "request=8 stage=release"),
+                        WAIT.replace("event=published tokens=17000 checkpoint_id=42",
+                                     "event=published tokens=17000 checkpoint_id=43")):
             with self.subTest(segment=segment), tempfile.TemporaryDirectory() as directory:
                 with self.assertRaises(RuntimeError):
                     assert_publication_wait(directory, "rewrite", segment, response(17000))
