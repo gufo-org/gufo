@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/arch.hpp"
 #include "src/core/platform/mapped_file.hpp"
 #include "src/core/platform/os_info.hpp"
 #include "src/models/minimax_h3/denoiser.hpp"
@@ -81,7 +82,7 @@ bool ValidateTarget(int* device, std::string* error) {
     SetError(error, HipError("hipGetDeviceProperties", status));
     return false;
   }
-  if (!std::string_view(properties.gcnArchName).starts_with("gfx1151") ||
+  if (!gufo::hip::IsRdna35(properties.gcnArchName) ||
       properties.integrated == 0) {
     SetError(error,
              "MiniMax H3 denoising supports only integrated gfx1151 Gufo "

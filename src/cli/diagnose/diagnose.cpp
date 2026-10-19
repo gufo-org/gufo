@@ -17,6 +17,7 @@
 #include "src/core/diagnostics/fingerprint.h"
 #include "src/core/diagnostics/linux_sysfs.h"
 #include "src/core/diagnostics/system_inventory.h"
+#include "src/core/hip/arch.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
@@ -166,13 +167,15 @@ diagnostics::DiagnosticReport CollectDiagnostics(
     check.details["pciId"] = inventory.gpu.pci_id;
     check.details["powerMode"] = inventory.gpu.power_mode;
 
-    if (inventory.gpu.architecture == "gfx1151") {
+    if (gufo::hip::IsRdna35(inventory.gpu.architecture)) {
       check.status = diagnostics::DiagnosticStatus::kPass;
-      check.message = "Detected AMD Strix Halo GPU (gfx1151)";
+      check.message = std::string(gufo::hip::Rdna35MarketingName(
+          inventory.gpu.architecture));
     } else {
       check.status = diagnostics::DiagnosticStatus::kFail;
       check.message =
-          "Unsupported GPU architecture: expected gfx1151, detected " +
+          "Unsupported GPU architecture: expected gfx1151 (Strix Halo) or "
+          "gfx1150 (Strix Point), detected " +
           inventory.gpu.architecture;
       report.AddError("Unsupported GPU architecture: " +
                       inventory.gpu.architecture);

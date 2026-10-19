@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <sstream>
 
+#include "src/core/hip/arch.hpp"
 #include "src/core/platform/os_info.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -111,10 +112,9 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
     inv.gpu.temperatures = primary_gpu.hwmon_sensors;
 
     const std::string_view pci_view = primary_gpu.pci_id;
-    if (pci_view.find("1002:1586") != std::string_view::npos ||
-        pci_view.find("1002:1587") != std::string_view::npos ||
-        pci_view.find("1002:1588") != std::string_view::npos) {
-      inv.gpu.architecture = "gfx1151";
+    if (const std::string_view pci_arch = gufo::hip::Rdna35PciArch(pci_view);
+        !pci_arch.empty()) {
+      inv.gpu.architecture = std::string(pci_arch);
       inv.gpu.availability = "available";
     } else {
       inv.gpu.architecture = primary_gpu.pci_id;
@@ -134,11 +134,17 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
       inv.gpu.compute_units =
           static_cast<std::uint32_t>(prop.multiProcessorCount);
 
-      // Normalize architecture to gfx1151
+      // Keep the driver's architecture string. gfx1150 and gfx1151 are
+      // distinct machines and must not share a fingerprint or a disk-cache
+      // identity.
       const std::string_view raw_view(prop.gcnArchName);
-      if (raw_view.find("gfx1151") != std::string_view::npos) {
-        inv.gpu.architecture = "gfx1151";
+      if (gufo::hip::IsRdna35(raw_view)) {
+        inv.gpu.architecture = std::string(gufo::hip::IsStrixPoint(raw_view)
+                                               ? gufo::hip::kGfx1150
+                                               : gufo::hip::kGfx1151);
         inv.gpu.availability = "available";
+        inv.memory.memory_type =
+            std::string(gufo::hip::Rdna35MemoryType(inv.gpu.architecture));
       } else {
         inv.gpu.architecture = prop.gcnArchName;
         inv.gpu.availability = "unsupported architecture";

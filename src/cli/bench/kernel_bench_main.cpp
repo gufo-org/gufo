@@ -23,6 +23,7 @@
 #include "src/cli/bench/kernel_bench.hpp"
 #include "src/core/diagnostics/fingerprint.h"
 #include "src/core/diagnostics/system_inventory.h"
+#include "src/core/hip/arch.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/model_config.hpp"
 #include "src/models/qwen/gemm_route.hpp"
@@ -1029,9 +1030,9 @@ int Run(std::span<const char* const> args) {
   HIP_CHECK(hipGetDevice(&device));
   hipDeviceProp_t properties{};
   HIP_CHECK(hipGetDeviceProperties(&properties, device));
-  if (std::string_view(properties.gcnArchName).find("gfx1151") ==
-      std::string_view::npos) {
-    throw std::runtime_error("gufo-kernel-bench requires gfx1151");
+  if (!gufo::hip::IsRdna35(properties.gcnArchName)) {
+    throw std::runtime_error(
+        "gufo-kernel-bench requires an RDNA 3.5 GPU (gfx1151 or gfx1150)");
   }
 
   const auto inventory = gufo::diagnostics::CollectSystemInventory();
