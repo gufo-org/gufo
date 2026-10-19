@@ -5190,12 +5190,9 @@ static bool rocm_graph_distribute_verify_results(
     for (size_t index = 0; ok && index < item_count; ++index) {
       const ds4_rocm_verify_item& item = items[index];
       if (item.row_logits != nullptr) continue;
-      uint32_t accepted = 1u;
-      while (accepted < item.logical_n_tokens &&
-             item.row_tops[accepted - 1u] ==
-                 item.tokens->v[item.start + accepted]) {
-        ++accepted;
-      }
+      const uint32_t accepted = ds4_dspark_greedy_accept(
+          item.row_tops, item.tokens->v + item.start, item.logical_n_tokens,
+          item.stop_token);
       const uint32_t source_row =
           row_offsets[index] + accepted - 1u;
       ok = ds4_gpu_tensor_copy(

@@ -706,13 +706,9 @@ static uint32_t session_dspark_accept_prefix(
   uint32_t accepted = 1;
   *frontier_read = false;
   if (sampler == nullptr) {
-    while (accepted < drafted && row_tops[accepted - 1] == drafts[accepted]) {
-      if (stop_at_eos && ds4_token_is_stop(session->engine, drafts[accepted])) {
-        return accepted;
-      }
-      accepted++;
-    }
-    return accepted;
+    return ds4_dspark_greedy_accept(
+        row_tops, drafts, drafted,
+        stop_at_eos ? ds4_token_eos(session->engine) : -1);
   }
   while (accepted < drafted) {
     int drawn = row_tops[accepted - 1u];
@@ -1328,6 +1324,8 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
         .row_tops = row_tops[index].data(),
         .frontier_logits = session->logits.get(),
         .row_logits = row_logits[index],
+        .stop_token =
+            items[index].stop_at_eos ? ds4_token_eos(session->engine) : -1,
     };
   }
 

@@ -143,6 +143,23 @@ void CheckConditionalProposals() {
              "joint p");
     }
 }
+
+void CheckGreedyAcceptance() {
+  // The #612 cycle: anchor 721, drafts 72048 and EOS, each reproduced by the
+  // target argmax of the preceding row.
+  constexpr int eos = 1;
+  const int32_t tokens[]{721, 72048, eos};
+  const int32_t tops[]{72048, eos, 48};
+  Expect(ds4_dspark_greedy_accept(tops, tokens, 3, -1) == 3,
+         "greedy acceptance takes every reproduced draft");
+  const uint32_t accepted = ds4_dspark_greedy_accept(tops, tokens, 3, eos);
+  Expect(accepted == 2 && tops[accepted - 1] == eos,
+         "an accepted stop token stays the frontier row's next anchor");
+  const int32_t rejected[]{5, eos, 48};
+  Expect(ds4_dspark_greedy_accept(rejected, tokens, 3, eos) == 1 &&
+             ds4_dspark_greedy_accept(tops, tokens, 1, eos) == 1,
+         "greedy acceptance always keeps the anchor");
+}
 }  // namespace
 
 int main() {
@@ -150,6 +167,7 @@ int main() {
   const float inf = std::numeric_limits<float>::infinity();
   const float extreme[]{-3e35F, -2e35F, -1e35F};
   const float mixed[]{nan, inf, -inf, -3e35F, -3e35F};
+  CheckGreedyAcceptance();
   Expect(ds4_sample_argmax(extreme, 3) == 2,
          "argmax covers finite float range");
   Expect(ds4_sample_argmax(mixed, 5) == 3,
