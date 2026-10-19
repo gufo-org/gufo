@@ -129,6 +129,9 @@ Reasoning tokens count toward that response limit.
   system turn, so Gufo moves them there. The request that introduces one is
   prefilled again; later requests reuse the cache. See the
   [API contract](docs/SERVER.md).
+- **Qwen with Claude Code:** not supported. Claude Code adds a system message
+  to `messages` on every turn, so Gufo moves a new one to the leading system
+  turn each time and every request prefills the whole history again (#522).
 
 ## Build from source
 
