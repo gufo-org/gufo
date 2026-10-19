@@ -1,8 +1,8 @@
 // Token-serial DeltaNet recurrence with independent state-row groups.
-// Prologues compute per-head K/Q norms, the raw K.Q dot product, alpha and beta.
-// Convolution history advances after all readers of the old history finish.
-// The recurrence applies the shared scales to its dot products and rank-one
-// update, then the epilogue normalizes and gates output.
+// Prologues compute per-head K/Q norms, the raw K.Q dot product, alpha and
+// beta. Convolution history advances after all readers of the old history
+// finish. The recurrence applies the shared scales to its dot products and
+// rank-one update, then the epilogue normalizes and gates output.
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>

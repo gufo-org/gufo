@@ -260,7 +260,10 @@ std::size_t QwenGpuSnapshot::SerializeCompact(
     throw std::invalid_argument(
         "Qwen compact snapshot destination size is invalid");
   }
-  std::fill(destination.begin(), destination.end(), std::uint8_t{0});
+  // Only the header has reserved bytes. Every payload byte is overwritten
+  // below; clearing it first needlessly competes with inference for bandwidth.
+  std::fill_n(destination.begin(), kCompactSnapshotHeaderBytes,
+              std::uint8_t{0});
   std::copy(kCompactSnapshotMagic.begin(), kCompactSnapshotMagic.end(),
             destination.begin());
   PutLittleEndian<std::uint32_t>(destination, 8,

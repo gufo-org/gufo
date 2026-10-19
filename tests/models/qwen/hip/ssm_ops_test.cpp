@@ -427,6 +427,23 @@ void TestRecurrentForkPingPong() {
       run(candidate, pass.Continued(), split_rows, total_rows - split_rows);
       expect(state_bytes(candidate) == after_all,
              "diverging pass changed the recurrence");
+      // A persistent snapshot must read the live buffer, whichever parity
+      // holds it, and survive resetting/reusing a different arena.
+      auto snapshot = candidate.SaveSnapshot(0);
+      reference.RestoreSnapshot(*snapshot);
+      expect(state_bytes(reference) == after_all,
+             "snapshot of a forked state changed the recurrence");
+      std::vector<std::uint8_t> payload(snapshot->CompactPayloadBytes(), 0xA5);
+      expect(snapshot->SerializeCompact(payload) == payload.size(),
+             "forked snapshot serialization returned the wrong size");
+      std::vector<std::uint8_t> overwritten(payload.size(), 0x5A);
+      expect(snapshot->SerializeCompact(overwritten) == overwritten.size() &&
+                 overwritten == payload,
+             "forked snapshot depends on previous destination bytes");
+      reference.Reset();
+      reference.RestoreCompactSnapshot(payload, 0);
+      expect(state_bytes(reference) == after_all,
+             "serialized forked snapshot changed the recurrence");
       const auto in_place = candidate.BeginRecurrentWrite();
       expect(!in_place.Diverges() && in_place.conv_out == pass.conv_out,
              "second pass after a pin must update in place");
@@ -1387,6 +1404,7 @@ int main() {
   for (const std::size_t batch : {1U, 2U, 3U, 7U, 96U}) {
     TestBatchedRecurrenceDivergingState(batch);
   }
+  TestBatchedRecurrenceDivergingState(2080);
   std::cout << "Qwen ssm ops test passed on gfx1151.\n";
   return 0;
 #else
