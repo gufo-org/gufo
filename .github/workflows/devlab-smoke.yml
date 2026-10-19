@@ -313,6 +313,78 @@ jobs:
           python3 controller/tests/functional/impact.py --repo candidate --base "$base" --head "$APPROVED_HEAD" \
             --model "$APPROVED_SCOPE" --output functional-plan.json
 
+      - name: Prepare persistent model cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          model_dir="$GUFO_CACHE_ROOT/models/flash-next/38bb39ee97821de2c9009abb7e93950eec396e66"
+          mkdir -p "$model_dir"
+          printf 'GUFO_MODEL_DIR=%s\n' "$model_dir" >> "$GITHUB_ENV"
+          # Weights total about 104 GiB; require the remainder plus headroom.
+          required_kib=$((110 * 1024 * 1024 - $(du -sk "$model_dir" | cut -f1)))
+          available_kib=$(df --output=avail -k "$model_dir" | tail -1)
+          if (( available_kib < required_kib )); then
+            echo "::error::Model cache needs $((required_kib / 1048576)) GiB more; $((available_kib / 1048576)) GiB free at $model_dir."
+            exit 1
+          fi
+
+      # Weights are network bound and the builds CPU bound: download in the
+      # background and wait for it before the suites need the files.
+      - name: Start pinned Flash-Next Q4 weight download
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/gufo-weights.sh" <<'SCRIPT'
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/gufo-hf-cli"
+          "$RUNNER_TEMP/gufo-hf-cli/bin/python" -m pip install 'huggingface_hub[hf_xet]'
+          # The cluster mirror times out on HEAD requests for the large shards.
+          export HF_ENDPOINT=https://huggingface.co
+          export HF_HUB_DISABLE_XET=0
+          export HF_XET_HIGH_PERFORMANCE=1
+          export HF_HUB_DOWNLOAD_TIMEOUT=120
+          export HF_HUB_ETAG_TIMEOUT=60
+          printf 'Hugging Face endpoint: %s\n' "${HF_ENDPOINT:-https://huggingface.co}"
+          printf 'Xet disabled by runner: %s\n' "${HF_HUB_DISABLE_XET:-0}"
+          export HF_HOME="$GUFO_CACHE_ROOT/huggingface"
+          df -h "$GUFO_MODEL_DIR"
+          downloaded=false
+          for attempt in 1 2 3; do
+            # Repeat --include: extra values after one flag become explicit
+            # filenames, which makes the CLI ignore the shard pattern.
+            if "$RUNNER_TEMP/gufo-hf-cli/bin/hf" download unsloth/Qwen3.8-Flash-Next-GGUF \
+              --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
+              --include 'UD-Q4_K_XL/*.gguf' \
+              --include 'MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf' \
+              --include 'mmproj-BF16.gguf' \
+              --local-dir "$GUFO_MODEL_DIR"; then
+              downloaded=true
+              break
+            fi
+            echo "::warning::Download attempt $attempt failed; retaining partial files for resume."
+          done
+          [[ "$downloaded" == true ]] || {
+            echo "::error::Flash-Next download failed after three attempts."
+            exit 1
+          }
+          for file in UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-0000{1,2,3,4}-of-00004.gguf \
+                      MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf mmproj-BF16.gguf; do
+            [[ -s "$GUFO_MODEL_DIR/$file" ]] || {
+              echo "::error::Missing weight file after download: $file"
+              exit 1
+            }
+          done
+          du -sh "$GUFO_MODEL_DIR"
+          SCRIPT
+          rm -f "$RUNNER_TEMP/gufo-weights.status"
+          # The job outlives this step; the runner reaps the process at job end.
+          (
+            status=0
+            bash "$RUNNER_TEMP/gufo-weights.sh" || status=$?
+            echo "$status" > "$RUNNER_TEMP/gufo-weights.status"
+          ) > "$RUNNER_TEMP/gufo-weights.log" 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/gufo-weights.pid"
+
       - name: Configure compiler cache
         shell: bash
         run: |
@@ -359,65 +431,17 @@ jobs:
           cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
           cmake --build --preset release --parallel 4
 
-      - name: Prepare persistent model cache
-        shell: bash
-        run: |
-          set -euo pipefail
-          model_dir="$GUFO_CACHE_ROOT/models/flash-next/38bb39ee97821de2c9009abb7e93950eec396e66"
-          mkdir -p "$model_dir"
-          printf 'GUFO_MODEL_DIR=%s\n' "$model_dir" >> "$GITHUB_ENV"
-          # Weights total about 104 GiB; require the remainder plus headroom.
-          required_kib=$((110 * 1024 * 1024 - $(du -sk "$model_dir" | cut -f1)))
-          available_kib=$(df --output=avail -k "$model_dir" | tail -1)
-          if (( available_kib < required_kib )); then
-            echo "::error::Model cache needs $((required_kib / 1048576)) GiB more; $((available_kib / 1048576)) GiB free at $model_dir."
-            exit 1
-          fi
-
-      - name: Download pinned Flash-Next Q4 weights
+      - name: Wait for pinned Flash-Next Q4 weights
         id: weights
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/gufo-hf-cli"
-          "$RUNNER_TEMP/gufo-hf-cli/bin/python" -m pip install 'huggingface_hub[hf_xet]'
-          # The cluster mirror times out on HEAD requests for the large shards.
-          export HF_ENDPOINT=https://huggingface.co
-          export HF_HUB_DISABLE_XET=0
-          export HF_XET_HIGH_PERFORMANCE=1
-          export HF_HUB_DOWNLOAD_TIMEOUT=120
-          export HF_HUB_ETAG_TIMEOUT=60
-          printf 'Hugging Face endpoint: %s\n' "${HF_ENDPOINT:-https://huggingface.co}"
-          printf 'Xet disabled by runner: %s\n' "${HF_HUB_DISABLE_XET:-0}"
-          export HF_HOME="$GUFO_CACHE_ROOT/huggingface"
-          df -h "$GUFO_MODEL_DIR"
-          downloaded=false
-          for attempt in 1 2 3; do
-            # Repeat --include: extra values after one flag become explicit
-            # filenames, which makes the CLI ignore the shard pattern.
-            if "$RUNNER_TEMP/gufo-hf-cli/bin/hf" download unsloth/Qwen3.8-Flash-Next-GGUF \
-              --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
-              --include 'UD-Q4_K_XL/*.gguf' \
-              --include 'MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf' \
-              --include 'mmproj-BF16.gguf' \
-              --local-dir "$GUFO_MODEL_DIR"; then
-              downloaded=true
-              break
-            fi
-            echo "::warning::Download attempt $attempt failed; retaining partial files for resume."
-          done
-          [[ "$downloaded" == true ]] || {
-            echo "::error::Flash-Next download failed after three attempts."
-            exit 1
-          }
-          for file in UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-0000{1,2,3,4}-of-00004.gguf \
-                      MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf mmproj-BF16.gguf; do
-            [[ -s "$GUFO_MODEL_DIR/$file" ]] || {
-              echo "::error::Missing weight file after download: $file"
-              exit 1
-            }
-          done
-          du -sh "$GUFO_MODEL_DIR"
+          pid=$(cat "$RUNNER_TEMP/gufo-weights.pid")
+          while kill -0 "$pid" 2>/dev/null; do sleep 5; done
+          # Progress bars redraw with carriage returns; keep their final states.
+          tr '\r' '\n' < "$RUNNER_TEMP/gufo-weights.log" | grep -v '^\s*$' | tail -n 60
+          status=$(cat "$RUNNER_TEMP/gufo-weights.status" 2>/dev/null || echo 1)
+          exit "$status"
 
       - name: Install functional client dependencies
         shell: bash

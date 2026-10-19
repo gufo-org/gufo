@@ -84,7 +84,8 @@ explicit benchmark request). AR suites run only when a dispatch sets `ar`, which
 plans with `--model flash-next-q4`; the default is `--model flash-next-q4/mtp`.
 `--model` accepts a model or a single `model/mode` profile. The workflow, harness
 and production binary all come from the PR, as in `CI`.
-It fetches the pinned Q4 shards, MTP sidecar and vision projector into a persistent
+While it builds, it fetches the pinned Q4 shards, MTP sidecar and vision projector
+in the background into a persistent
 cache under `$GUFO_CI_CACHE` (default `$RUNNER_TOOL_CACHE/gufo`; the weights need
 about 110 GiB free), and retains reports and selection reasons as artifacts.
 Weight and `ccache` reuse depend on the cluster preserving that directory on the
