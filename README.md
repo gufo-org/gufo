@@ -1,4 +1,4 @@
-# Gufo: The ***Open Source*** RDNA 3.5 AI engine 
+# Gufo: The ***Open Source*** RDNA 3.5 AI engine
 
 <p align="center">
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
@@ -7,8 +7,8 @@
 Gufo is a vertical local inference engine specifically built and optimized for AMD RDNA 3.5
 integrated GPUs: Strix Halo (`gfx1151`, Ryzen AI MAX+ 395 / Radeon 8060S, up to 128 GiB of
 unified memory) and Strix Point (`gfx1150`, Ryzen AI 300 / Radeon 890M, DDR5). Both parts share
-Wave32 and the same instruction set, so one build serves either; only the CU count and memory
-bandwidth differ.
+Wave32 and the same instruction set, so one source tree serves either; the part is selected at
+configure time, and only the CU count and memory bandwidth differ.
 
 **Contributions are welcome!**
 
@@ -38,11 +38,16 @@ individual request decode rates. Qwen27B's single-user peak uses the short-promp
 C1 workload. Audio excludes loading.
 Each model guide lists the required files and complete benchmark settings.
 
+All peaks above are Strix Halo (`gfx1151`) numbers. Strix Point (`gfx1150`) is
+memory-bound at a fraction of that bandwidth, so expect lower throughput there;
+the [Qwen27B benchmark page](docs/models/qwen3.8-27b/BENCHMARKS.md#strix-point-gfx1150-reference)
+records one measured Strix Point run for scale.
+
 ## Philosophy
 
-- Contributions are welcome! We need the help of Strix Halo community to keep improving gufo!
-- We would like this to be the one-stop shop for Strix Halo Local AI enthusiasts: batteries included for text, audio, image, and video models.
-- Build and optimize specifically for the Strix Halo 128 GiB hardware. Smaller memory configurations should still work and preserve the speed benefits for models that can fit on memory.
+- Contributions are welcome! We need the help of the RDNA 3.5 community to keep improving gufo!
+- We would like this to be the one-stop shop for RDNA 3.5 Local AI enthusiasts: batteries included for text, audio, image, and video models.
+- Build and optimize specifically for the Strix Halo 128 GiB hardware, the primary target. Smaller memory configurations, including Strix Point APUs, should still work and preserve the speed benefits for models that can fit on memory.
 - Support only the best available models for their size that can run on this hardware: less code to maintain, more focused optimization and testing work.
 - Preserve quality when optimizing. Each model's quality report records independent numerical checks, execution consistency and unresolved gaps. Don't reuse kernels across different models to limit blast radius of a code change.
 - Treat concurrent requests, cancellation and conversation caching as first-class workloads.
@@ -138,11 +143,14 @@ Reasoning tokens count toward that response limit.
 
 ## Build from source
 
-Linux x86-64 on an AMD RDNA 3.5 integrated GPU (`gfx1151` Strix Halo or `gfx1150` Strix Point)
-is the supported target. CMake owns
-one production configuration for both Nix and ordinary Linux builds. Tests,
-profilers, tuning executables and Python reference runners are not installed
-with the production package. No `build.sh` wrapper is needed.
+Linux x86-64 on an AMD RDNA 3.5 integrated GPU (`gfx1151` Strix Halo or
+`gfx1150` Strix Point) is the supported target. CMake owns one production
+configuration for both Nix and ordinary Linux builds. Tests, profilers, tuning
+executables and Python reference runners are not installed with the production
+package. No `build.sh` wrapper is needed.
+
+Select the part at configure time with `-DCMAKE_HIP_ARCHITECTURES=gfx1150` when
+building for Strix Point; the default is `gfx1151`.
 
 ### With Nix
 
@@ -161,10 +169,12 @@ See [testing](docs/TESTING.md) for the small hosted CI suite and
 explicit local quality checks.
 
 The Nix package and development shell include a ROCr 7.2.3
-[queue-memory patch](.devops/nix/patches/rocr-fixed-cwsr.patch) for Strix Halo.
-It keeps queue save/restore buffers, launch/copy arenas and code-loading
-staging resident during host memory compaction, while retaining managed-memory
-support and the ordinary fine-grained host-allocation policy.
+[queue-memory patch](.devops/nix/patches/rocr-fixed-cwsr.patch) for Strix Halo
+(`gfx1151`). It keeps queue save/restore buffers, launch/copy arenas and
+code-loading staging resident during host memory compaction, while retaining
+managed-memory support and the ordinary fine-grained host-allocation policy.
+The queue fix is keyed to `gfx1151`; the arena and code-loading parts apply to
+any part. Strix Point (`gfx1150`) runs without it.
 
 ### Without Nix
 
@@ -211,6 +221,8 @@ For nonstandard installations, pass ordinary CMake paths, for example
 `cmake --preset release -DCMAKE_PREFIX_PATH="/opt/rocm"`.
 If compiler discovery picks a system Clang, also pass
 `-DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++`.
+On Strix Point, add `-DCMAKE_HIP_ARCHITECTURES=gfx1150`; the default targets
+Strix Halo.
 Use `cmake --install build/release` to install Gufo,
 its runtime data and license notices. The GPU driver must allow your user to
 access `/dev/kfd` and `/dev/dri`; model weights are acquired separately.
