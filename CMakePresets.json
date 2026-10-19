@@ -59,7 +59,7 @@
     {
       "name": "release",
       "displayName": "Release",
-      "description": "Production gfx1151 build; same optimization as the Nix package",
+      "description": "Production RDNA 3.5 build; same optimization as the Nix package",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -92,7 +92,7 @@
     },
     {
       "name": "gpu-test",
-      "displayName": "gfx1151 GPU Tests",
+      "displayName": "RDNA 3.5 GPU Tests",
       "description": "Optimized correctness build with debug symbols and active test assertions",
       "inherits": "base",
       "cacheVariables": {
@@ -131,7 +131,7 @@
     },
     {
       "name": "gpu-test",
-      "displayName": "gfx1151 GPU Tests",
+      "displayName": "RDNA 3.5 GPU Tests",
       "configurePreset": "gpu-test"
     },
     {
@@ -166,7 +166,7 @@
     },
     {
       "name": "gpu-full",
-      "displayName": "All gfx1151 GPU Tests",
+      "displayName": "All RDNA 3.5 GPU Tests",
       "configurePreset": "gpu-test",
       "output": {
         "outputOnFailure": true
@@ -174,7 +174,7 @@
     },
     {
       "name": "gpu-fast",
-      "displayName": "Fast gfx1151 GPU Tests",
+      "displayName": "Fast RDNA 3.5 GPU Tests",
       "configurePreset": "gpu-test",
       "output": {
         "outputOnFailure": true

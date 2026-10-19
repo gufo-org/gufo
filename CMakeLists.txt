@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 project(gufo LANGUAGES C CXX)
-# Production remains Linux x86-64 on gfx1151; Windows x86-64 is a supported
-# native build target sharing the same source tree.
+# Production remains Linux x86-64 on an AMD RDNA 3.5 GPU (gfx1151 Strix Halo
+# or gfx1150 Strix Point); Windows x86-64 is a supported native build target
+# sharing the same source tree.
 if (NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
     OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
-  message(FATAL_ERROR "Gufo requires Linux or Windows on x86-64 with an AMD gfx1151 GPU")
+  message(FATAL_ERROR "Gufo requires Linux or Windows on x86-64 with an AMD RDNA 3.5 GPU (gfx1151 Strix Halo or gfx1150 Strix Point)")
 endif()
 if (WIN32)
   # Declared before any subdirectory: windows.h must never define the
@@ -96,11 +97,17 @@ set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
   "FFprobe executable used to validate generated media")
 
-# CPU-only builds exist for host checks; production targets gfx1151 only.
-option(ENGINE_ENABLE_HIP "Build the gfx1151 HIP backend" ON)
-set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING "HIP architecture")
-if (ENGINE_ENABLE_HIP AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1151")
-  message(FATAL_ERROR "Gufo kernels require CMAKE_HIP_ARCHITECTURES=gfx1151")
+# CPU-only builds exist for host checks; production targets RDNA 3.5 APUs.
+# gfx1151 is Strix Halo (Radeon 8060S/8050S), gfx1150 is Strix Point
+# (Radeon 890M). Both are Wave32 and share the instruction set, so the same
+# kernels serve either part; only the CU count and memory bandwidth differ.
+option(ENGINE_ENABLE_HIP "Build the RDNA 3.5 HIP backend" ON)
+set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING
+  "HIP architecture: gfx1151 (Strix Halo) or gfx1150 (Strix Point)")
+if (ENGINE_ENABLE_HIP AND NOT CMAKE_HIP_ARCHITECTURES MATCHES "^gfx115[01]$")
+  message(FATAL_ERROR
+    "Gufo kernels require CMAKE_HIP_ARCHITECTURES=gfx1151 (Strix Halo) or "
+    "gfx1150 (Strix Point); got '${CMAKE_HIP_ARCHITECTURES}'")
 endif()
 # Standard ROCm installations; custom prefixes use CMAKE_PREFIX_PATH. As a
 # system prefix /opt/rocm is searched after CMAKE_PREFIX_PATH in the
@@ -934,7 +941,7 @@ if (BUILD_TESTING)
   target_link_libraries(allocation_benchmark_test PRIVATE gufo_diagnostics)
   add_test(NAME allocation_benchmark_test COMMAND allocation_benchmark_test)
   set_tests_properties(allocation_benchmark_test PROPERTIES
-    LABELS "gpu;hip;gfx1151;diagnostics;allocation;opt-c091")
+    LABELS "gpu;hip;rdna35;diagnostics;allocation;opt-c091")
 
   # the prefetch fixture uses mkstemp and mmap
   if (NOT WIN32)
@@ -1163,7 +1170,7 @@ if (BUILD_TESTING)
     add_test(NAME qwen3_tts_speech_decoder_hip_test
       COMMAND qwen3_tts_speech_decoder_hip_test)
     set_tests_properties(qwen3_tts_speech_decoder_hip_test PROPERTIES
-      LABELS "hip;gpu;gfx1151;models;qwen3-tts;speech-decoder;audio;quality;external-model;slow;opt-qwen3-tts-device-copy"
+      LABELS "hip;gpu;rdna35;models;qwen3-tts;speech-decoder;audio;quality;external-model;slow;opt-qwen3-tts-device-copy"
       SKIP_RETURN_CODE 77)
     add_executable(qwen3_tts_talker_hip_prefill_test
       tests/models/qwen3_tts/talker_hip_prefill_test.cpp)
@@ -1172,7 +1179,7 @@ if (BUILD_TESTING)
     add_test(NAME qwen3_tts_talker_hip_prefill_test
       COMMAND qwen3_tts_talker_hip_prefill_test)
     set_tests_properties(qwen3_tts_talker_hip_prefill_test PROPERTIES
-      LABELS "hip;gpu;gfx1151;models;qwen3-tts;talker;prefill;quality;external-model;slow"
+      LABELS "hip;gpu;rdna35;models;qwen3-tts;talker;prefill;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(qwen3_tts_variant_talker_hip_test
@@ -1182,7 +1189,7 @@ if (BUILD_TESTING)
     add_test(NAME qwen3_tts_variant_talker_hip_test
       COMMAND qwen3_tts_variant_talker_hip_test)
     set_tests_properties(qwen3_tts_variant_talker_hip_test PROPERTIES
-      LABELS "hip;gpu;gfx1151;models;qwen3-tts;talker;voice-design;base;quality;external-model;slow"
+      LABELS "hip;gpu;rdna35;models;qwen3-tts;talker;voice-design;base;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(qwen3_tts_base_encoders_hip_test
@@ -1192,7 +1199,7 @@ if (BUILD_TESTING)
     add_test(NAME qwen3_tts_base_encoders_hip_test
       COMMAND qwen3_tts_base_encoders_hip_test)
     set_tests_properties(qwen3_tts_base_encoders_hip_test PROPERTIES
-      LABELS "hip;gpu;gfx1151;models;qwen3-tts;base;speech-encoder;speaker-encoder;quality;external-model;slow"
+      LABELS "hip;gpu;rdna35;models;qwen3-tts;base;speech-encoder;speaker-encoder;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(minimax_h3_runtime_hip_test
@@ -1202,7 +1209,7 @@ if (BUILD_TESTING)
     add_test(NAME minimax_h3_runtime_hip_test
       COMMAND minimax_h3_runtime_hip_test)
     set_tests_properties(minimax_h3_runtime_hip_test PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;external-model;slow"
+      LABELS "gpu;hip;rdna35;minimax-h3;external-model;slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(minimax_h3_prompt_encoder_hip_test
@@ -1214,11 +1221,11 @@ if (BUILD_TESTING)
     add_test(NAME minimax_h3_prompt_encoder_analytic
       COMMAND minimax_h3_prompt_encoder_hip_test --analytic)
     set_tests_properties(minimax_h3_prompt_encoder_analytic PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;prompt-encoder;analytic")
+      LABELS "gpu;hip;rdna35;minimax-h3;prompt-encoder;analytic")
     add_test(NAME minimax_h3_prompt_encoder_real
       COMMAND minimax_h3_prompt_encoder_hip_test --real)
     set_tests_properties(minimax_h3_prompt_encoder_real PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;prompt-encoder;external-model;slow"
+      LABELS "gpu;hip;rdna35;minimax-h3;prompt-encoder;external-model;slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(minimax_h3_sampling_hip_test
@@ -1228,7 +1235,7 @@ if (BUILD_TESTING)
     add_test(NAME minimax_h3_sampling_hip_test
       COMMAND minimax_h3_sampling_hip_test)
     set_tests_properties(minimax_h3_sampling_hip_test PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;sampling;euler;analytic"
+      LABELS "gpu;hip;rdna35;minimax-h3;sampling;euler;analytic"
       SKIP_RETURN_CODE 77)
 
     add_executable(minimax_h3_dit_hip_test
@@ -1240,11 +1247,11 @@ if (BUILD_TESTING)
     add_test(NAME minimax_h3_dit_analytic
       COMMAND minimax_h3_dit_hip_test --analytic)
     set_tests_properties(minimax_h3_dit_analytic PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;dit;analytic")
+      LABELS "gpu;hip;rdna35;minimax-h3;dit;analytic")
     add_test(NAME minimax_h3_dit_block0_real
       COMMAND minimax_h3_dit_hip_test --real)
     set_tests_properties(minimax_h3_dit_block0_real PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;dit;external-model;slow"
+      LABELS "gpu;hip;rdna35;minimax-h3;dit;external-model;slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(minimax_h3_denoiser_hip_test
@@ -1256,22 +1263,22 @@ if (BUILD_TESTING)
     add_test(NAME minimax_h3_denoiser_smoke
       COMMAND minimax_h3_denoiser_hip_test --smoke)
     set_tests_properties(minimax_h3_denoiser_smoke PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;dit;denoiser;external-model;slow"
+      LABELS "gpu;hip;rdna35;minimax-h3;dit;denoiser;external-model;slow"
       SKIP_RETURN_CODE 77)
     add_test(NAME minimax_h3_denoiser_oracle
       COMMAND minimax_h3_denoiser_hip_test --oracle-forward)
     set_tests_properties(minimax_h3_denoiser_oracle PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;dit;denoiser;quality;external-model;slow"
+      LABELS "gpu;hip;rdna35;minimax-h3;dit;denoiser;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
     add_test(NAME minimax_h3_denoiser_production_shape_oracle
       COMMAND minimax_h3_denoiser_hip_test --oracle-512-forward)
     set_tests_properties(minimax_h3_denoiser_production_shape_oracle PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;dit;denoiser;quality;external-model;slow"
+      LABELS "gpu;hip;rdna35;minimax-h3;dit;denoiser;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
     add_test(NAME minimax_h3_denoiser_reuse_smoke
       COMMAND minimax_h3_denoiser_hip_test --reuse-smoke)
     set_tests_properties(minimax_h3_denoiser_reuse_smoke PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;dit;denoiser;reuse;quality;external-model;slow"
+      LABELS "gpu;hip;rdna35;minimax-h3;dit;denoiser;reuse;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(minimax_h3_video_vae_hip_test
@@ -1284,7 +1291,7 @@ if (BUILD_TESTING)
     add_test(NAME minimax_h3_video_vae_real
       COMMAND minimax_h3_video_vae_hip_test)
     set_tests_properties(minimax_h3_video_vae_real PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;video;vae;quality;external-model;very-slow"
+      LABELS "gpu;hip;rdna35;minimax-h3;video;vae;quality;external-model;very-slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(minimax_h3_audio_vae_hip_test
@@ -1297,11 +1304,11 @@ if (BUILD_TESTING)
     add_test(NAME minimax_h3_audio_vae_primitives
       COMMAND minimax_h3_audio_vae_hip_test --primitives)
     set_tests_properties(minimax_h3_audio_vae_primitives PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;audio;vae;analytic")
+      LABELS "gpu;hip;rdna35;minimax-h3;audio;vae;analytic")
     add_test(NAME minimax_h3_audio_vae_real
       COMMAND minimax_h3_audio_vae_hip_test --real)
     set_tests_properties(minimax_h3_audio_vae_real PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;audio;vae;quality;external-model;very-slow"
+      LABELS "gpu;hip;rdna35;minimax-h3;audio;vae;quality;external-model;very-slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(hip_memory_visibility_test
@@ -1312,16 +1319,16 @@ if (BUILD_TESTING)
       COMMAND hip_memory_visibility_test --deny-long-term-pins)
     add_test(NAME hip_memory_visibility_driver_test COMMAND hip_memory_visibility_test)
     set_tests_properties(hip_memory_visibility_test hip_memory_visibility_restricted_test PROPERTIES
-      LABELS "gpu;hip;gfx1151"
+      LABELS "gpu;hip;rdna35"
       ENVIRONMENT "HSA_USERPTR_FOR_PAGED_MEM=1")
     set_tests_properties(hip_memory_visibility_driver_test PROPERTIES
-      LABELS "gpu;hip;gfx1151"
+      LABELS "gpu;hip;rdna35"
       ENVIRONMENT "HSA_USERPTR_FOR_PAGED_MEM=0")
 
     add_executable(hip_weight_upload_test tests/core/hip_weight_upload_test.cpp)
     target_link_libraries(hip_weight_upload_test PRIVATE gufo_core)
     add_test(NAME hip_weight_upload_test COMMAND hip_weight_upload_test)
-    set_tests_properties(hip_weight_upload_test PROPERTIES LABELS "hip;gpu;gfx1151")
+    set_tests_properties(hip_weight_upload_test PROPERTIES LABELS "hip;gpu;rdna35")
 
     add_executable(hipblaslt_runtime_cache_test
       tests/kernels/hipblaslt_runtime_cache_test.cpp)
@@ -1339,10 +1346,10 @@ if (BUILD_TESTING)
     set_tests_properties(persistent_deltanet_test PROPERTIES
       LABELS "hip;gpu;kernels;deltanet;speculative")
 
-    add_executable(gfx1151_acceptance_test tests/benchmarks/gfx1151_acceptance_test.cpp)
-    target_link_libraries(gfx1151_acceptance_test PRIVATE gufo_core hip::host roc::hipblas roc::rocblas)
-    add_test(NAME gfx1151_acceptance_test COMMAND gfx1151_acceptance_test)
-    set_tests_properties(gfx1151_acceptance_test PROPERTIES LABELS "hip;gpu;benchmarks")
+    add_executable(rdna35_acceptance_test tests/benchmarks/rdna35_acceptance_test.cpp)
+    target_link_libraries(rdna35_acceptance_test PRIVATE gufo_core hip::host roc::hipblas roc::rocblas)
+    add_test(NAME rdna35_acceptance_test COMMAND rdna35_acceptance_test)
+    set_tests_properties(rdna35_acceptance_test PROPERTIES LABELS "hip;gpu;benchmarks")
 
     add_executable(speculative_verification_test tests/core/test_speculative_verification.cpp)
     target_link_libraries(speculative_verification_test PRIVATE gufo_core hip::host roc::hipblas roc::rocblas)
