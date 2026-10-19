@@ -1396,6 +1396,7 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
   const std::string requested = req.query_param("model");
   json::Value resp = json::Value::object();
   resp["model"] = requested.empty() ? b.model_id() : requested;
+  resp["model_alias"] = b.model_id();
   resp["template"] = "";
   resp["model_info"] = json::Value::object();
   if (auto path = b.model_path(); !path.empty()) {
@@ -1421,9 +1422,12 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
   params["repeat_last_n"] = sampling.repeat_last_n;
   params["frequency_penalty"] = static_cast<double>(sampling.frequency_penalty);
   params["presence_penalty"] = static_cast<double>(sampling.presence_penalty);
-  if (defaults.max_tokens > 0) {
-    params["n_predict"] = defaults.max_tokens;
-  }
+  // -1 means no default limit, as in llama-server, which reports both keys.
+  const auto n_predict = defaults.max_tokens > 0
+                             ? static_cast<std::int64_t>(defaults.max_tokens)
+                             : std::int64_t{-1};
+  params["max_tokens"] = n_predict;
+  params["n_predict"] = n_predict;
   json::Value generation = json::Value::object();
   if (const std::size_t context = b.max_context(); context > 0) {
     generation["n_ctx"] = context;
@@ -1433,6 +1437,7 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
 
   json::Value modalities = json::Value::object();
   modalities["vision"] = b.supports_images();
+  modalities["video"] = false;
   modalities["audio"] = false;
   resp["modalities"] = std::move(modalities);
   return Ok(resp);

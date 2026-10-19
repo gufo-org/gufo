@@ -1167,11 +1167,13 @@ Slots and metrics are separate snapshots; requests can advance between polls.
 
 `GET /props` reports what a text server runs, in llama-server's shape, so
 llama-server tooling can record which model, build and settings answered it.
-`?model=` is accepted and not required. `model_path` is `--model`, `build_info`
+`?model=` is accepted and not required. `model_alias` is the served model
+name, `model_path` is `--model`, `build_info`
 the version and revision `gufo --version` prints, `total_slots` the
 `--sessions` count, `default_generation_settings.n_ctx` the per-session context
 and `default_generation_settings.params` the sampling a request without
-sampling fields gets. `modalities.vision` is true only when a vision encoder
+sampling fields gets, with `n_predict` and `max_tokens` -1 when no default
+limit is set. `modalities.vision` is true only when a vision encoder
 loaded. Fields the server cannot report are omitted rather than sent as zero.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even

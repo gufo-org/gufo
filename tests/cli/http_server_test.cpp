@@ -861,12 +861,16 @@ void TestLlamaProps() {
   // Nothing is invented for what the backend does not report.
   const auto bare = props("/props");
   assert(bare.member_str("model") == "test");
+  assert(bare.member_str("model_alias") == "test");
   assert(!bare.contains("model_path"));
   assert(!bare.contains("build_info"));
   assert(!bare.contains("total_slots"));
   const auto* generation = bare.find("default_generation_settings");
   assert(generation != nullptr && generation->member_size("n_ctx") == 65536);
-  assert(generation->find("params")->contains("temperature"));
+  const auto* params = generation->find("params");
+  assert(params->contains("temperature"));
+  assert(params->find("n_predict")->as_double() == -1.0);
+  assert(params->find("max_tokens")->as_double() == -1.0);
   assert(!bare.find("modalities")->find("vision")->as_bool(true));
 
   server.backend->served_path = "/models/model-00001-of-00002.gguf";
@@ -886,6 +890,7 @@ void TestLlamaProps() {
   // ?model= is accepted and not required, as outside llama-server router mode.
   const auto named = props("/props?model=alias");
   assert(named.member_str("model") == "alias");
+  assert(named.member_str("model_alias") == "test");
   assert(named.member_str("build_info") == "0.2.0 (abc1234)");
 }
 
