@@ -235,8 +235,16 @@ __global__ static void indexer_scores_wmma128_kernel(
       wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
     }
 
-    if (token_own < n_tokens) {
-      const float w = weights[(uint64_t)token_own * n_head + h];
+    // The accumulation must stay warp-uniform: mma_sync above is a
+    // warp-collective operation, and guarding this block with
+    // `token_own < n_tokens` lets the compiler sink the WMMA loop into a
+    // divergent branch. Lanes of a partial tile then execute the collective
+    // with a subset of the wave and produce garbage for every component
+    // beyond the first. Fold the bound into the weight instead.
+    {
+      const float w = (token_own < n_tokens)
+                          ? weights[(uint64_t)token_own * n_head + h]
+                          : 0.0f;
 #pragma unroll
       for (uint32_t e = 0; e < 8u; e++) {
         acc[e] += fmaxf(c_frag.x[e], 0.0f) * w;
