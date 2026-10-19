@@ -99,8 +99,12 @@ to catch gaps.
 
 A hosted `report` job then renders results, failure log tails and benchmark
 deltas into the run summary. For branches in this repository and dispatches it
-also updates a single PR comment and sets the `devlab/functional` commit status;
-a fork PR's token is read-only, so its result stays in the job checks. The check
+also updates a single PR comment and sets the `devlab/functional` commit status.
+A fork PR's token is read-only, so the job uploads the rendered report and
+`devlab-comment.yml` publishes it from a `workflow_run` in the base repository,
+without checking out PR code. While any PR run is in progress, the same
+workflow keeps a placeholder in that comment with a link to cancel the run.
+It only runs from `main`. The check
 is advisory: it is not required, so a broken cluster never blocks merging. Suite
 failures report `failure`; cluster or harness problems (authorization, build,
 download, cancellation) report `error`. The PR write token stays on the hosted
