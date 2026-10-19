@@ -1388,17 +1388,53 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
              "invalid_prompt");
 }
 
-HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend&) {
-  const std::string model = req.query_param("model");
-  if (model.empty()) {
-    return Err(400, "Bad Request", "'model' query parameter is required",
-               "invalid_request_error", "missing_model");
-  }
+/// llama-server props for a single-model server: what it runs, so a client
+/// can record which model, build and settings answered it. `?model=` is
+/// accepted and not required, as in llama-server outside router mode. Fields
+/// the backend does not report are omitted rather than sent as zero.
+HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
+  const std::string requested = req.query_param("model");
   json::Value resp = json::Value::object();
-  resp["model"] = model;
+  resp["model"] = requested.empty() ? b.model_id() : requested;
   resp["template"] = "";
-  json::Value model_info = json::Value::object();
-  resp["model_info"] = std::move(model_info);
+  resp["model_info"] = json::Value::object();
+  if (auto path = b.model_path(); !path.empty()) {
+    resp["model_path"] = std::move(path);
+  }
+  if (auto build = b.build_info(); !build.empty()) {
+    resp["build_info"] = std::move(build);
+  }
+  if (const auto sessions = b.session_states().size(); sessions > 0) {
+    resp["total_slots"] = sessions;
+  }
+
+  // What a request without sampling fields gets.
+  const auto defaults = b.sampling_defaults();
+  const auto sampling = defaults.Resolve(b.reasoning_defaults().enabled);
+  json::Value params = json::Value::object();
+  params["temperature"] = static_cast<double>(sampling.temperature);
+  params["top_k"] = static_cast<int>(sampling.top_k);
+  params["top_p"] = static_cast<double>(sampling.top_p);
+  params["min_p"] = static_cast<double>(sampling.min_p);
+  params["seed"] = static_cast<long long>(sampling.seed);
+  params["repeat_penalty"] = static_cast<double>(sampling.repeat_penalty);
+  params["repeat_last_n"] = sampling.repeat_last_n;
+  params["frequency_penalty"] = static_cast<double>(sampling.frequency_penalty);
+  params["presence_penalty"] = static_cast<double>(sampling.presence_penalty);
+  if (defaults.max_tokens > 0) {
+    params["n_predict"] = defaults.max_tokens;
+  }
+  json::Value generation = json::Value::object();
+  if (const std::size_t context = b.max_context(); context > 0) {
+    generation["n_ctx"] = context;
+  }
+  generation["params"] = std::move(params);
+  resp["default_generation_settings"] = std::move(generation);
+
+  json::Value modalities = json::Value::object();
+  modalities["vision"] = b.supports_images();
+  modalities["audio"] = false;
+  resp["modalities"] = std::move(modalities);
   return Ok(resp);
 }
 

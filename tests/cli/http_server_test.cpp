@@ -98,6 +98,10 @@ public:
   std::uint32_t max_context() const override { return 65536; }
   std::vector<SessionState> session_states() const override { return sessions; }
   std::vector<SessionState> sessions;
+  std::string model_path() const override { return served_path; }
+  std::string build_info() const override { return served_build; }
+  std::string served_path;
+  std::string served_build;
   std::shared_ptr<GenerationRequest> start_complete(
       std::string_view prompt, std::size_t max_tokens,
       const gufo::sampling::SamplingConfig& sampling,
@@ -842,6 +846,47 @@ void TestFallbackBackendMetrics() {
            prompt_before + test.expected_prompt);
     assert(metrics::TotalGenTokens().load() == generated_before + 2);
   }
+}
+
+// /props reports what the server runs, as llama-server's does, so a client
+// can record which model, build and settings answered it.
+void TestLlamaProps() {
+  RunningServer server;
+  const auto props = [&](const std::string& path) {
+    const auto response = server.Send("GET " + path + " HTTP/1.1\r\n\r\n");
+    ExpectStatus(response, 200);
+    return gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+  };
+
+  // Nothing is invented for what the backend does not report.
+  const auto bare = props("/props");
+  assert(bare.member_str("model") == "test");
+  assert(!bare.contains("model_path"));
+  assert(!bare.contains("build_info"));
+  assert(!bare.contains("total_slots"));
+  const auto* generation = bare.find("default_generation_settings");
+  assert(generation != nullptr && generation->member_size("n_ctx") == 65536);
+  assert(generation->find("params")->contains("temperature"));
+  assert(!bare.find("modalities")->find("vision")->as_bool(true));
+
+  server.backend->served_path = "/models/model-00001-of-00002.gguf";
+  server.backend->served_build = "0.2.0 (abc1234)";
+  server.backend->sessions.resize(2);
+  server.backend->image_support = true;
+  server.backend->defaults.max_tokens = 512;
+  const auto full = props("/props");
+  assert(full.member_str("model_path") == "/models/model-00001-of-00002.gguf");
+  assert(full.member_str("build_info") == "0.2.0 (abc1234)");
+  assert(full.member_size("total_slots") == 2);
+  assert(full.find("default_generation_settings")
+             ->find("params")
+             ->member_size("n_predict") == 512);
+  assert(full.find("modalities")->find("vision")->as_bool());
+
+  // ?model= is accepted and not required, as outside llama-server router mode.
+  const auto named = props("/props?model=alias");
+  assert(named.member_str("model") == "alias");
+  assert(named.member_str("build_info") == "0.2.0 (abc1234)");
 }
 
 void TestLlamaSlotsAndMetrics() {
@@ -3004,6 +3049,7 @@ int main() {
   TestAuthorization();
   TestFramingAndMetrics();
   TestFallbackBackendMetrics();
+  TestLlamaProps();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
   TestTextOnlyBackendRefusesImagesBeforeReading();

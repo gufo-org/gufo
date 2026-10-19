@@ -3177,6 +3177,8 @@ struct InferenceBackend::Impl {
     std::uint32_t max_context{0};
     bool supports_images{false};
     ReasoningOptions reasoning_defaults;
+    std::string model_path;
+    std::string build_info;
   };
 
   class ScheduledGenerationRequest final : public GenerationRequest {
@@ -3884,6 +3886,41 @@ InferenceBackend::InitialOutputState InferenceBackend::initial_output_state(
 #else
   (void)request;
   return InitialOutputState::kAuto;
+#endif
+}
+
+std::string InferenceBackend::model_path() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr ? state->model_path : std::string{};
+#else
+  return {};
+#endif
+}
+
+std::string InferenceBackend::build_info() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr ? state->build_info : std::string{};
+#else
+  return {};
+#endif
+}
+
+void InferenceBackend::set_served_artifact(const std::string& model_path,
+                                           const std::string& build_info) {
+#if defined(ENGINE_ENABLE_HIP)
+  const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+  if (impl_->state == nullptr) {
+    return;
+  }
+  auto updated = std::make_shared<Impl::State>(*impl_->state);
+  updated->model_path = model_path;
+  updated->build_info = build_info;
+  impl_->state = std::move(updated);
+#else
+  (void)model_path;
+  (void)build_info;
 #endif
 }
 

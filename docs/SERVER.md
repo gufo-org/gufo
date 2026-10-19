@@ -1162,8 +1162,17 @@ prompt, `n_prompt_tokens_cache` the tokens restored from cache, and
 `timings.prompt_n`. `next_token[0].n_decoded` counts generated tokens and
 `n_remain` the remaining token budget. Idle slots report zero counts and
 `n_remain` -1. `task_id` and `state` (0 idle, 1 processing) remain for older
-clients; `prompt` is always empty. `/props` metadata is a placeholder.
+clients; `prompt` is always empty.
 Slots and metrics are separate snapshots; requests can advance between polls.
+
+`GET /props` reports what a text server runs, in llama-server's shape, so
+llama-server tooling can record which model, build and settings answered it.
+`?model=` is accepted and not required. `model_path` is `--model`, `build_info`
+the version and revision `gufo --version` prints, `total_slots` the
+`--sessions` count, `default_generation_settings.n_ctx` the per-session context
+and `default_generation_settings.params` the sampling a request without
+sampling fields gets. `modalities.vision` is true only when a vision encoder
+loaded. Fields the server cannot report are omitted rather than sent as zero.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed
