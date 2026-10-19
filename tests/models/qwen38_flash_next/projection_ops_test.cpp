@@ -929,6 +929,9 @@ void CheckMtpOutputHead(float input_scale) {
 
 int main() {
   try {
+    CheckHip(q::PrepareW8A8GemmWave64(), "prepare wide Q8 projection");
+    if (qfn_mmq_init(0) != 0)
+      throw std::runtime_error("prepare quantized decode projections");
     CheckRoutedQ8Placement();
     CheckSmallProjection(q::WeightType::kF32, 513, 2560);
     CheckSmallProjection(q::WeightType::kF32, 96, 2560);

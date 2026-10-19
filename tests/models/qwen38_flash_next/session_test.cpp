@@ -244,7 +244,8 @@ void CheckImageSnapshotAttachment(const std::shared_ptr<qfn::Model>& model) {
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = blue ? 2 : 0; i < pixels.pixels.size(); i += 3)
       pixels.pixels[i] = 255;
-    prompt->images.push_back({std::move(pixels), grid});
+    prompt->images.push_back(
+        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
     prompt->images.back().prefix_identity.fill(blue ? 2 : 1);
     prompt->cache_identity.assign(32, blue ? 2 : 1);
     return prompt;
@@ -943,9 +944,16 @@ std::size_t RareTokens(std::span<const std::int32_t> tokens) {
       }));
 }
 
+// The reduced draft head serves one-session requests (and planned batches);
+// on a multi-session model an unplanned request keeps the full head, so this
+// check needs a one-session model. Greedy prompt lookup can supply a whole
+// chain without any draft head, so head use is judged per cycle, for the
+// cycles that draft through the MTP head.
 void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
   if (!model->HasMtp())
     return;
+  Require(model->DecodeConcurrency() == 1,
+          "the draft-vocabulary lifecycle needs a one-session model");
   std::string error;
   const auto create = [&] {
     auto session = model->CreateSession(gufo::core::SessionMode::kSpeculative,
@@ -983,24 +991,53 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
     }
     return out;
   };
+  // Cycles whose chain starts with an MTP draft, and how many of those used
+  // the small head. A cycle of prompt-lookup copies alone drafts nothing.
+  struct HeadUse {
+    std::uint64_t drafting{0};
+    std::uint64_t small_head{0};
+  };
+  const auto decode_counted = [&](qfn::Session& session,
+                                  sampling::SamplerState& sampler,
+                                  unsigned cycles, HeadUse* use) {
+    std::vector<std::int32_t> out;
+    for (unsigned c = 0; c < cycles; ++c) {
+      const auto before = session.Statistics();
+      qfn::Session::DecodeResult step;
+      Require(session.DecodeStep(8, sampler, &step, &error, false), error);
+      out.insert(out.end(), step.tokens.begin(), step.tokens.end());
+      const auto& after = session.Statistics();
+      if (after.drafted - before.drafted > after.lookup - before.lookup) {
+        ++use->drafting;
+        use->small_head += after.small_head_cycles - before.small_head_cycles;
+      }
+    }
+    return out;
+  };
   const auto history = [](std::span<const std::int32_t> tokens) {
     return std::vector<sampling::TokenId>(tokens.begin(), tokens.end());
   };
 
   // Rare tokens in the prompt were misses, but the window has passed, so the
-  // greedy continuation drafts its rare tokens through the table.
+  // greedy continuation drafts its rare tokens through the table. It also
+  // repeats the prompt, so lookup copies supply some of its chains.
   auto t = create();
   Require(t->Sync(thai, &error), error);
   sampling::SamplerState greedy({}, history(thai));
-  const auto thai_out = decode(*t, greedy, 8);
+  HeadUse tabled;
+  const auto thai_out = decode_counted(*t, greedy, 8, &tabled);
   const auto& ts = t->Statistics();
-  Require(ts.small_head_cycles == ts.cycles,
+  Require(tabled.drafting > 0, "no tabled cycle drafted through the MTP head");
+  Require(tabled.small_head == tabled.drafting,
           "tabled text did not return to the small head");
   Require(RareTokens(thai_out) * 3 >= thai_out.size(),
           "the repeated Thai continuation has too few rare tokens");
-  // Wrong table IDs would reject every drafted rare token.
-  Require(ts.accepted * 2 >= ts.drafted,
+  // Wrong table IDs would reject every drafted rare token. Accepted copies
+  // are not drafts of the head, so they are left out.
+  Require((ts.accepted - ts.lookup_accepted) * 2 >= ts.drafted - ts.lookup,
           "small-head drafts of tabled tokens were rejected");
+  // Later restores into this session replace its statistics.
+  const auto tabled_copies = ts.lookup;
 
   // A second request with its own table, then a restore of each into the
   // other's populated session against a restore into a fresh one.
@@ -1023,17 +1060,21 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
           .temperature = sampled ? 0.8F : 0.0F, .seed = 91};
       sampling::SamplerState a(config, history(restored));
       sampling::SamplerState b(config, history(restored));
-      const auto expected = decode(*fresh, a, 4);
+      HeadUse use;
+      const auto expected = decode_counted(*fresh, a, 4, &use);
       const auto actual = decode(*used, b, 4);
       const auto& fs = fresh->Statistics();
       const auto& us = used->Statistics();
-      Require(
-          expected == actual && a.rng_state() == b.rng_state() &&
-              fs.drafted == us.drafted && fs.accepted == us.accepted &&
-              fs.small_head_cycles == us.small_head_cycles &&
-              (sampled || pair != &thai_snapshot || fs.small_head_cycles > 0),
-          "restore into a populated draft table differs from a fresh "
-          "session");
+      Require(expected == actual && a.rng_state() == b.rng_state() &&
+                  fs.drafted == us.drafted && fs.accepted == us.accepted &&
+                  fs.small_head_cycles == us.small_head_cycles,
+              "restore into a populated draft table differs from a fresh "
+              "session");
+      // The restored Thai table keeps drafting through the small head.
+      // Greedy lookup may copy every chain; sampled cycles always draft.
+      Require(pair != &thai_snapshot || (use.small_head == use.drafting &&
+                                         (!sampled || use.drafting > 0)),
+              "a restored draft table left the small head");
       RequireExact(fresh->Logits(), used->Logits(),
                    "restore into a populated draft table changed logits");
     }
@@ -1100,6 +1141,7 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
     batch_samplers.emplace_back(config, history(batched[i]->Tokens()));
   }
   for (unsigned cycle = 0; cycle < 3; ++cycle) {
+    const auto tabled_before = batched[0]->Statistics();
     std::vector<qfn::Session::DecodeResult> expected(3), actual(3);
     std::vector<qfn::Session::DecodeRequest> requests;
     for (std::size_t i = 0; i < 3; ++i) {
@@ -1124,16 +1166,25 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
           serial[i]->Logits(), batched[i]->Logits(),
           "mixed-head batch changed logits of member " + std::to_string(i));
     }
+    // The tabled member repeats its prompt, so lookup may copy its whole
+    // chain; a chain it drafts must use the small head.
+    const auto& tabled_after = batched[0]->Statistics();
+    Require(tabled_after.drafted - tabled_before.drafted ==
+                    tabled_after.lookup - tabled_before.lookup ||
+                tabled_after.small_head_cycles ==
+                    tabled_before.small_head_cycles + 1,
+            "the tabled batch member drafted over the full head");
     if (cycle == 0) {
-      Require(batched[0]->Statistics().small_head_cycles == 1 &&
-                  batched[1]->Statistics().small_head_cycles == 1 &&
+      Require(batched[1]->Statistics().small_head_cycles == 1 &&
                   batched[2]->Statistics().small_head_cycles == 0,
               "the batch did not mix small-head and full-head members");
     }
   }
-  std::cout << "draft table: small head returns after the window, tabled "
-               "rare drafts map back, restores into used tables and mixed "
-               "batches are exact\n";
+  std::cout << "draft table: small head returns after the window ("
+            << tabled.small_head << "/" << tabled.drafting
+            << " drafting cycles, " << tabled_copies
+            << " lookup copies), tabled rare drafts map back, restores into "
+               "used tables and mixed batches are exact\n";
 }
 
 void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
@@ -1174,7 +1225,8 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = 0; i < pixels.pixels.size(); ++i)
       pixels.pixels[i] = static_cast<std::uint8_t>((i * 37 + i / 64) % 256);
-    image->images.push_back({std::move(pixels), grid});
+    image->images.push_back(
+        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
     image->images.back().prefix_identity.fill(3);
     image->cache_identity.assign(32, 3);
     ar->ConfigureVision(image);
@@ -1550,9 +1602,23 @@ int main(int argc, char** argv) {
     CheckBatchFailureIsolation(model);
     CheckBatchedSessions(model);
     CheckLookupBatch(model);
+    // The checks above batch up to eight sessions; the draft-vocabulary
+    // lifecycle needs one (see CheckDraftVocabLifecycle).
+    const auto load = [&](std::uint32_t decode_concurrency) {
+      model.reset();
+      model = qfn::Model::Load(argv[2],
+                               {.max_context = 6145,
+                                .mtp_model_path = argv[4],
+                                .max_draft_tokens = 7,
+                                .decode_concurrency = decode_concurrency},
+                               &error);
+      Require(model != nullptr, error);
+    };
+    load(1);
     CheckDraftVocabLifecycle(model);
     if (batch_only)
       return 0;
+    load(8);
     CheckServingEos(model);
     const auto pattern = model->Tokenize(
         "The quick brown fox jumps over the lazy dog. "

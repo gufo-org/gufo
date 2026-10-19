@@ -1,4 +1,5 @@
 target_sources(gufo_core PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/image_cache.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/prompt.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/tokenizer.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/chat_template.cpp

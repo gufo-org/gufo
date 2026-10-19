@@ -4,6 +4,7 @@
   cmake,
   ninja,
   pkg-config,
+  makeWrapper,
   icu,
   curl,
   libpng,
@@ -17,6 +18,12 @@
 }:
 
 let
+  # Keep SVM available for managed model/state allocations, but prevent
+  # compaction of ROCr's queue save areas and HIP's runtime-owned buffers from
+  # suspending inference.
+  rocmRuntime = rocmPackages.rocm-runtime.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ./patches/rocr-fixed-cwsr.patch ];
+  });
   versionLabel = if releaseVersion == null then "development" else releaseVersion;
   packageVersion =
     if releaseVersion == null then "0-unstable-${revision}" else releaseVersion;
@@ -54,6 +61,7 @@ stdenv.mkDerivation {
     cmake
     ninja
     pkg-config
+    makeWrapper
     rocmPackages.clr
   ];
 
@@ -85,6 +93,12 @@ stdenv.mkDerivation {
   ];
 
   doInstallCheck = true;
+  postFixup = ''
+    # HIP loads ROCr transitively. Select the patched ABI-compatible runtime
+    # without rebuilding the unchanged HIP/BLAS compiler and kernel libraries.
+    wrapProgram "$out/bin/gufo" \
+      --prefix LD_LIBRARY_PATH : "${rocmRuntime}/lib"
+  '';
   installCheckPhase = ''
     runHook preInstallCheck
 
@@ -100,7 +114,7 @@ stdenv.mkDerivation {
   '';
 
   passthru = {
-    inherit releaseVersion revision rocmPackages;
+    inherit releaseVersion revision rocmPackages rocmRuntime;
     toolchain = {
       targetPlatform = "x86_64-linux";
       targetGpu = "gfx1151";

@@ -1,0 +1,658 @@
+{
+  "date": "2026-10-18",
+  "source_revision": "fec4759d064585d72f87c6e11af5cfa0e1fa95c7",
+  "base_revision": "f948ddd371bf2a3f7360b7069fc703badbbc07ed",
+  "earlier_control_revision": "bff0eec6f1eaaa5847d00712787153a3de78a4a0",
+  "scope": "Flash-Next UD-Q4_K_XL with shared-Q8_0 MTP on gfx1151. Same pinned toolchain. The late rebase adds main's image preprocessing cache; text inference arithmetic is unchanged.",
+  "timing_gate": {
+    "relative": 0.05,
+    "absolute_ms": 3,
+    "aggregation": "Every request and phase, no averaging of flags."
+  },
+  "native_checks": {
+    "memory": "Exact CPU/GPU integer oracle for managed, HIP host, registered, device and owned coherent allocations; default USERPTR, restricted memlock and driver-owned host policy.",
+    "upload": "Exact bytes, bounds, guards, EOF and failed-read drain; all 903984064 vision-upload bytes checked.",
+    "vision": "29 intermediate stages, 8421376 finite floats, byte-identical to main.",
+    "operators": "Independent projection and MTP oracles after function preparation; no trial launches or model arithmetic changes.",
+    "snapshots": "Exact copies in both directions; registered, unaligned, pageable and borrowed-device sources, guards and graph replay.",
+    "backing": "Partial/parallel page-population failure unwinds mappings and charges; byte reserves, no-op and capacity clamp; preparation follows captures and excludes zero-prefill decode."
+  },
+  "functional_checks": {
+    "api-bff-coarse:comparison.json": {
+      "status": "passed",
+      "compared_metrics": 1918,
+      "quality_or_work_changes": [],
+      "flags": []
+    },
+    "long-bff-coarse:comparison.json": {
+      "status": "passed",
+      "compared_metrics": 345,
+      "quality_or_work_changes": [],
+      "flags": []
+    },
+    "concurrent-bff-coarse:comparison.json": {
+      "status": "inconclusive",
+      "compared_metrics": 302,
+      "quality_or_work_changes": [],
+      "flags": [
+        {
+          "case": "cache-concurrency.requests.json:identical:2",
+          "metric": "cache_snapshot_ms",
+          "baseline": 47.090333,
+          "candidate": 167.490606,
+          "change_percent": 255.6793832823395
+        },
+        {
+          "case": "cache-concurrency.requests.json:identical:2",
+          "metric": "max_inter_token_ms",
+          "baseline": 92.25276,
+          "candidate": 213.334857,
+          "change_percent": 131.2503788504539
+        },
+        {
+          "case": "cache-concurrency.requests.json:identical:2",
+          "metric": "mean_inter_token_ms",
+          "baseline": 92.25276,
+          "candidate": 213.334857,
+          "change_percent": 131.2503788504539
+        },
+        {
+          "case": "cache-concurrency.requests.json:identical:3",
+          "metric": "ttft_ms",
+          "baseline": 3308.628342,
+          "candidate": 3504.738717,
+          "change_percent": 5.927240981120763
+        }
+      ]
+    },
+    "concurrent-bff-coarse:comparison-main-control.json": {
+      "status": "passed",
+      "compared_metrics": 302,
+      "quality_or_work_changes": [],
+      "flags": []
+    },
+    "cache-bff-coarse:comparison.json": {
+      "status": "inconclusive",
+      "compared_metrics": 737,
+      "quality_or_work_changes": [],
+      "flags": [
+        {
+          "case": "image-cancel-disk.requests.json:0:0",
+          "metric": "cache_restore_ms",
+          "baseline": 34.986687,
+          "candidate": 38.462944,
+          "change_percent": 9.93594220567382
+        },
+        {
+          "case": "image-cancel-disk.requests.json:0:0",
+          "metric": "queue_ms",
+          "baseline": 42.210364,
+          "candidate": 46.542114,
+          "change_percent": 10.262290085913506
+        },
+        {
+          "case": "image-cancel.requests.json:7:0",
+          "metric": "decode_ms",
+          "baseline": 118.08515,
+          "candidate": 132.50274000000002,
+          "change_percent": 12.209486120820468
+        },
+        {
+          "case": "image-cancel.requests.json:7:0",
+          "metric": "decode_ms_per_token",
+          "baseline": 14.76064375,
+          "candidate": 16.562842500000002,
+          "change_percent": 12.209486120820468
+        },
+        {
+          "case": "image-cancel.requests.json:7:0",
+          "metric": "max_inter_token_ms",
+          "baseline": 65.720206,
+          "candidate": 69.014043,
+          "change_percent": 5.011909122743763
+        },
+        {
+          "case": "image-thinking-cancel-disk.requests.json:0:0",
+          "metric": "cache_restore_ms",
+          "baseline": 36.356935,
+          "candidate": 39.529431,
+          "change_percent": 8.725972087581102
+        },
+        {
+          "case": "image-thinking-cancel-disk.requests.json:0:0",
+          "metric": "queue_ms",
+          "baseline": 40.144008,
+          "candidate": 43.395324,
+          "change_percent": 8.099131506749412
+        },
+        {
+          "case": "text-cancel-disk.requests.json:0:0",
+          "metric": "cache_restore_ms",
+          "baseline": 33.295196,
+          "candidate": 37.390126,
+          "change_percent": 12.298861373274406
+        },
+        {
+          "case": "text-cancel-disk.requests.json:0:0",
+          "metric": "queue_ms",
+          "baseline": 35.739433,
+          "candidate": 39.822503,
+          "change_percent": 11.42455169895953
+        },
+        {
+          "case": "thinking-tool-cancel-disk.requests.json:0:0",
+          "metric": "queue_ms",
+          "baseline": 73.835419,
+          "candidate": 78.001221,
+          "change_percent": 5.642010374451867
+        },
+        {
+          "case": "thinking-tool-cancel.requests.json:4:2",
+          "metric": "queue_ms",
+          "baseline": 7.843142,
+          "candidate": 11.275544,
+          "change_percent": 43.76309902332509
+        },
+        {
+          "case": "thinking-tool-cancel.requests.json:4:2",
+          "metric": "ttft_ms",
+          "baseline": 7.935145,
+          "candidate": 11.368248,
+          "change_percent": 43.26452761732771
+        }
+      ]
+    },
+    "cache-bff-coarse-confirm:comparison-matched-main.json": {
+      "status": "inconclusive",
+      "compared_metrics": 737,
+      "quality_or_work_changes": [],
+      "flags": [
+        {
+          "case": "disk-spacing-disk.requests.json:1:0",
+          "metric": "cache_restore_ms",
+          "baseline": 52.046927,
+          "candidate": 56.555077,
+          "change_percent": 8.661702543936943
+        },
+        {
+          "case": "disk-spacing-disk.requests.json:1:0",
+          "metric": "queue_ms",
+          "baseline": 53.398118,
+          "candidate": 57.861807,
+          "change_percent": 8.359262774017617
+        },
+        {
+          "case": "disk-spacing-disk.requests.json:0:0",
+          "metric": "cache_restore_ms",
+          "baseline": 78.108678,
+          "candidate": 84.172061,
+          "change_percent": 7.76275204657797
+        },
+        {
+          "case": "disk-spacing-disk.requests.json:0:0",
+          "metric": "queue_ms",
+          "baseline": 81.308553,
+          "candidate": 87.202873,
+          "change_percent": 7.249323450633782
+        }
+      ]
+    },
+    "cache-645-final:comparison.json": {
+      "status": "inconclusive",
+      "compared_metrics": 737,
+      "quality_or_work_changes": [],
+      "flags": [
+        {
+          "case": "thinking-tool-cancel.requests.json:4:2",
+          "metric": "queue_ms",
+          "baseline": 7.704319,
+          "candidate": 10.926433,
+          "change_percent": 41.822177923837266
+        },
+        {
+          "case": "thinking-tool-cancel.requests.json:4:2",
+          "metric": "ttft_ms",
+          "baseline": 7.79541,
+          "candidate": 11.019277,
+          "change_percent": 41.355964599681094
+        }
+      ]
+    }
+  },
+  "post_build_probes": {
+    "postbuild-bff-main-bff": [
+      {
+        "case": "short_10_0",
+        "prefill_ms": 580.737359,
+        "decode_ms": 629.812895,
+        "max_inter_token_ms": 98.70403,
+        "cache_snapshot_ms": 6.16533,
+        "cache_restore_ms": 0,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_12_0",
+        "prefill_ms": 543.283601,
+        "decode_ms": 618.614935,
+        "max_inter_token_ms": 98.710432,
+        "cache_snapshot_ms": 5.1210450000000005,
+        "cache_restore_ms": 0,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_10_1",
+        "prefill_ms": 0,
+        "decode_ms": 612.0970409999999,
+        "max_inter_token_ms": 98.579416,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 2.555438,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_12_1",
+        "prefill_ms": 0,
+        "decode_ms": 611.343674,
+        "max_inter_token_ms": 98.73019,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 2.52979,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      }
+    ],
+    "postbuild-bff-pin-idle": [
+      {
+        "case": "short_10_0",
+        "prefill_ms": 544.180348,
+        "decode_ms": 1419.659974,
+        "max_inter_token_ms": 282.703007,
+        "cache_snapshot_ms": 6.593135,
+        "cache_restore_ms": 0,
+        "kfd_evicted_ms_delta": 907,
+        "migrated_pages_delta": 739562
+      },
+      {
+        "case": "short_12_0",
+        "prefill_ms": 557.034513,
+        "decode_ms": 854.619468,
+        "max_inter_token_ms": 207.691495,
+        "cache_snapshot_ms": 8.352014,
+        "cache_restore_ms": 0,
+        "kfd_evicted_ms_delta": 265,
+        "migrated_pages_delta": 193615
+      },
+      {
+        "case": "short_10_1",
+        "prefill_ms": 0,
+        "decode_ms": 870.3202180000001,
+        "max_inter_token_ms": 249.440484,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.941793,
+        "kfd_evicted_ms_delta": 266,
+        "migrated_pages_delta": 171809
+      },
+      {
+        "case": "short_12_1",
+        "prefill_ms": 0,
+        "decode_ms": 611.446788,
+        "max_inter_token_ms": 98.695913,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.965257,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      }
+    ],
+    "postbuild-bff-coarse-hook": [
+      {
+        "case": "short_10_0",
+        "prefill_ms": 541.399848,
+        "decode_ms": 629.354247,
+        "max_inter_token_ms": 98.818357,
+        "cache_snapshot_ms": 4.899077,
+        "cache_restore_ms": 0,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_12_0",
+        "prefill_ms": 556.369242,
+        "decode_ms": 618.9737949999999,
+        "max_inter_token_ms": 98.68733,
+        "cache_snapshot_ms": 5.298518,
+        "cache_restore_ms": 0,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 252012
+      },
+      {
+        "case": "short_10_1",
+        "prefill_ms": 0,
+        "decode_ms": 633.454009,
+        "max_inter_token_ms": 101.447743,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.861553,
+        "kfd_evicted_ms_delta": 4,
+        "migrated_pages_delta": 166674
+      },
+      {
+        "case": "short_12_1",
+        "prefill_ms": 0,
+        "decode_ms": 619.946936,
+        "max_inter_token_ms": 99.848666,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.885567,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 108644
+      },
+      {
+        "case": "short_10_2",
+        "prefill_ms": 0,
+        "decode_ms": 610.8536270000001,
+        "max_inter_token_ms": 98.575419,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.930061,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_12_2",
+        "prefill_ms": 0,
+        "decode_ms": 609.7019819999999,
+        "max_inter_token_ms": 98.640953,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.818462,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_10_3",
+        "prefill_ms": 0,
+        "decode_ms": 610.8557420000001,
+        "max_inter_token_ms": 98.580849,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.91316,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_12_3",
+        "prefill_ms": 0,
+        "decode_ms": 609.844128,
+        "max_inter_token_ms": 98.676159,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.895506,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_10_4",
+        "prefill_ms": 0,
+        "decode_ms": 610.794979,
+        "max_inter_token_ms": 98.563748,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.875097,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_12_4",
+        "prefill_ms": 0,
+        "decode_ms": 609.31277,
+        "max_inter_token_ms": 98.560662,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.811338,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_10_5",
+        "prefill_ms": 0,
+        "decode_ms": 610.710319,
+        "max_inter_token_ms": 98.545313,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.890848,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      },
+      {
+        "case": "short_12_5",
+        "prefill_ms": 0,
+        "decode_ms": 609.494082,
+        "max_inter_token_ms": 98.581741,
+        "cache_snapshot_ms": 0,
+        "cache_restore_ms": 1.954778,
+        "kfd_evicted_ms_delta": 0,
+        "migrated_pages_delta": 0
+      }
+    ]
+  },
+  "interpretation": [
+    "The partial fix still reproduced large decode gaps with KFD evictions during host page migration. These failed controls are retained.",
+    "The final runtime protects HIP coarse-pool launch/copy arenas and loader staging as well as queue-save areas. The instrumented post-build follow-up has no new active USERPTR allocations and no comparable large gap. Its small 4ms eviction total is not a claim of zero evictions or a universal latency guarantee.",
+    "Four original concurrent request-index flags disappear against the unchanged-main control with matching admission order; retain both comparisons.",
+    "The final current-main comparison passes every prefill, decode and disk-restore phase. One fully cached thinking replay retains a 3.22ms queue/TTFT flag; an earlier unchanged-main control reached 11.47ms versus the final 10.93ms. This flag remains inconclusive, not a timing pass. No timing tolerance was widened.",
+    "All raw requests, profiles, failed variants and runtime maps are retained outside Git. No llama.cpp result is changed or requalified."
+  ],
+  "production_binary_sha256": "1d822fb97b4639c61df61e9f5fcc874d9b639a69c82c484bfa4dafbbcb44a692",
+  "main_binary_sha256": "a11cfb07072426feb01517aa8ab900ee8d8932e60c85b68c6729fb0a5f04b0cd",
+  "build_checks": {
+    "nix_production": "passed",
+    "nix_pr_checks": "passed",
+    "format_cpp_files": 589,
+    "explicit_hip_format": "passed",
+    "diagnose": "passed"
+  },
+  "image_history": {
+    "requests": 8,
+    "measurements": 56,
+    "flags": 0,
+    "outputs_and_cache_work": "exact",
+    "scope": "One/four 1080p screenshots and text controls, cold then full RAM reuse, production candidate versus main f948ddd3."
+  },
+  "pi_agent": {
+    "version": "0.87.0",
+    "node": "v22.23.2",
+    "thinking": "low",
+    "sampling": {
+      "temperature": 0,
+      "seed": 31
+    },
+    "http_requests": 10,
+    "tool_calls": 9,
+    "tool_errors": 0,
+    "cases": [
+      "tools",
+      "edit",
+      "creation"
+    ],
+    "generated_tests": "passed"
+  },
+  "benchmark_refresh": {
+    "scope": "Complete Gufo HTTP sweep: all eight AR/mixed-MTP/repetitive-MTP depths through 128K, C1/2/4/6/8, cold-file loading and memory. Reference artifacts unchanged.",
+    "single_user_qualified_rows": 24,
+    "single_user_quality": "All completion hashes and prompt/cache counts match the prior qualified capture.",
+    "concurrent_qualified_completions": 63,
+    "concurrent_quality": "Every tg128 completion matches its fresh C1 AR control, with expected prefix reuse.",
+    "initial_repetition_pp_flags": [
+      [
+        "single-mtp-repetition",
+        "16384",
+        "pp",
+        1643.94,
+        1572.59,
+        -4.340182731729881
+      ],
+      [
+        "single-mtp-repetition",
+        "32768",
+        "pp",
+        1625.87,
+        1540.9,
+        -5.226125089951827
+      ],
+      [
+        "single-mtp-repetition",
+        "65536",
+        "pp",
+        1514.83,
+        1469.32,
+        -3.0042975119320303
+      ]
+    ],
+    "repetition_repeat": {
+      "base_revision": "f948ddd371bf2a3f7360b7069fc703badbbc07ed",
+      "candidate_revision": "fec4759d064585d72f87c6e11af5cfa0e1fa95c7",
+      "ram_cache_bytes": 17213143040,
+      "matching_observed_requests": 9,
+      "matching_requests_including_prefix_setup": 16,
+      "request_phase_checks": 63,
+      "request_phase_flags": [],
+      "server_phase_flags_including_prefix_setup": [],
+      "quality": "Exact prompts, replies, completion hashes, prompt/cache/draft counts and captured bytes.",
+      "pp_tok_s": {
+        "0": {
+          "main": 1736.58,
+          "candidate": 1734.36,
+          "initial_candidate": 1735.57
+        },
+        "12288": {
+          "main": 1668.51,
+          "candidate": 1661.41,
+          "initial_candidate": 1659.68
+        },
+        "16384": {
+          "main": 1653.58,
+          "candidate": 1647.22,
+          "initial_candidate": 1572.59
+        },
+        "32768": {
+          "main": 1633.7,
+          "candidate": 1623.55,
+          "initial_candidate": 1540.9
+        },
+        "4096": {
+          "main": 1606.93,
+          "candidate": 1675.61,
+          "initial_candidate": 1678.05
+        },
+        "65536": {
+          "main": 1570.43,
+          "candidate": 1566.99,
+          "initial_candidate": 1469.32
+        },
+        "8192": {
+          "main": 1664.91,
+          "candidate": 1659.69,
+          "initial_candidate": 1663.47
+        }
+      },
+      "reporting": "Both candidate samples contribute to mean and sample standard deviation; no discarded low sample.",
+      "interpretation": "No request-phase regression repeats against current main. Initial dips remain unexplained timing variation, not a proven thermal or cache attribution."
+    },
+    "loading": {
+      "main_seconds": 15.953,
+      "candidate_seconds": 16.417,
+      "method": "POSIX_FADV_DONTNEED on every target/sidecar file; mincore verifies zero resident model pages. Runtime libraries may be warm."
+    },
+    "memory": {
+      "16K prefix, pp4096 + tg128": {
+        "command": "gufo serve --port 60073 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+        "gib": 90.53,
+        "idle_gib": 2.38
+      },
+      "pp2048 + tg128": {
+        "command": "gufo serve --port 60073 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+        "gib": 88.78,
+        "idle_gib": 2.38
+      }
+    },
+    "concurrent_tok_s": {
+      "multi-ar-gufo-ar": {
+        "c1": {
+          "tg": 28.243876206340342,
+          "completions": 1
+        },
+        "c2": {
+          "tg": 50.6645016879073,
+          "completions": 2
+        },
+        "c4": {
+          "tg": 86.01474248701282,
+          "completions": 4
+        },
+        "c6": {
+          "tg": 108.34294810408127,
+          "completions": 6
+        },
+        "c8": {
+          "tg": 125.48289619871719,
+          "completions": 8
+        }
+      },
+      "multi-mixed-gufo-mtp": {
+        "c1": {
+          "tg": 35.743061162327486,
+          "completions": 1
+        },
+        "c2": {
+          "tg": 61.304149101952575,
+          "completions": 2
+        },
+        "c4": {
+          "tg": 88.77473100425226,
+          "completions": 4
+        },
+        "c6": {
+          "tg": 109.73906986647732,
+          "completions": 6
+        },
+        "c8": {
+          "tg": 127.0162918869017,
+          "completions": 8
+        }
+      },
+      "multi-repetition-gufo-mtp": {
+        "c1": {
+          "tg": 116.50112898377078,
+          "completions": 1
+        },
+        "c2": {
+          "tg": 165.49781101580365,
+          "completions": 2
+        },
+        "c4": {
+          "tg": 218.12270577764625,
+          "completions": 4
+        },
+        "c6": {
+          "tg": 231.84564496814062,
+          "completions": 6
+        },
+        "c8": {
+          "tg": 245.81223209660368,
+          "completions": 8
+        }
+      }
+    },
+    "conditions": {
+      "platform_profile": "performance",
+      "tuned_profile": "accelerator-performance",
+      "profile_verified_throughout": true,
+      "monitor_samples": 1095,
+      "overlapping_builds_or_model_jobs": false,
+      "temperatures_c": {
+        "k10temp:temp1_input": {
+          "start": 60.625,
+          "minimum": 50.25,
+          "maximum": 93.625
+        },
+        "amdgpu:temp1_input": {
+          "start": 45.0,
+          "minimum": 40.0,
+          "maximum": 79.0
+        }
+      }
+    }
+  }
+}

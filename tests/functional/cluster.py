@@ -58,14 +58,14 @@ def remove_disk_caches(group_output):
             shutil.rmtree(path, ignore_errors=True)
 
 
-def command(group, binary, weights, output):
+def command(group, binary, weights, output, tier="full"):
     profile = group["profile"]
     if profile not in ("flash-next-q4/off", "flash-next-q4/mtp"):
         raise ValueError("Cluster executor only supports Flash-Next: " + profile)
     settings = group["settings"]
     args = [sys.executable, str(HERE / "run.py"), "--output", str(output),
             "--sampling-preset", "qwen38", "--expected-input-modalities", "text,image",
-            "--startup-timeout", "600", "--record-baseline"]
+            "--startup-timeout", "600", "--record-baseline", "--tier", tier]
     for suite in group["suites"]:
         args += ["--suite", suite]
     args += ["--", str(binary), "serve", "llm", "--model",
@@ -84,7 +84,7 @@ def execute(plan, binary, weights, output):
     rows = []
     for group in plan["groups"]:
         name = group["profile"].replace("/", "-") + "-" + group["configuration"]
-        args = command(group, binary, weights, output / name)
+        args = command(group, binary, weights, output / name, plan.get("tier", "full"))
         print("Running", name, ":", ", ".join(group["suites"]), flush=True)
         log_path = output / (name + ".log")
         with log_path.open("w") as log:
@@ -101,6 +101,7 @@ def execute(plan, binary, weights, output):
               ("passed" if rows else "no-functional-impact"),
               "scope": "Flash-Next AR/MTP candidate correctness",
               "timing_qualification": "not performed; --record-baseline captures observations",
+              "tier": plan.get("tier", "full"), "release_only": plan.get("release_only", []),
               "groups": rows, "deferred": plan["deferred"],
               "out_of_scope": plan["out_of_scope"], "obligations": plan["obligations"]}
     (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")

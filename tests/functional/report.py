@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import statistics
 import sys
 
 
@@ -86,6 +87,74 @@ def bench_section(base_text, head_text):
     return lines
 
 
+def duration(ms):
+    if ms is None:
+        return "—"
+    if ms >= 1000:
+        return f"{ms / 1000:.2f} s"
+    return f"{ms:.0f} ms" if ms >= 10 else f"{ms:.1f} ms"
+
+
+def middle(values):
+    values = [value for value in values if value is not None]
+    return statistics.median(values) if values else None
+
+
+def phases_section(data):
+    """Draw the phase pipeline; colors carry the paired verdicts from phases.py."""
+    requests = data["settings"]["requests"]
+    head_arm = next((arm for arm in data["arms"] if arm["revision"] == "head"), None)
+    titles = {"startup": "Startup"}
+    for key, label in requests.items():
+        tokens = head_arm["requests"][key]["prompt_tokens"] if head_arm else None
+        titles[key] = label + (f" · {tokens:,} tok" if tokens else "")
+    # Phases a request never exercises (no cache restore on a cold prompt) stay out.
+    phases = [phase for phase in data["phases"]
+              if any(value for value in phase["base"] + phase["head"])]
+    lines = ["", "#### Inference phases · merge base → PR", "", "```mermaid", "flowchart LR"]
+    groups = [group for group in titles if any(p["group"] == group for p in phases)]
+    for index, group in enumerate(groups):
+        lines += [f'  subgraph g{index}["{titles[group]}"]', "    direction TB"]
+        members = [phase for phase in phases if phase["group"] == group]
+        for position, phase in enumerate(members):
+            base, head = middle(phase["base"]), middle(phase["head"])
+            delta = f"{(head / base - 1) * 100:+.1f}%" if base and head is not None else ""
+            label = f"{phase['label']}<br/>{duration(base)} → {duration(head)}"
+            if delta:
+                label += f"<br/>{delta}"
+            node = f"g{index}n{position}"
+            lines.append(f'    {node}["{label}"]:::{phase["verdict"]}')
+            if position:
+                lines.append(f"    g{index}n{position - 1} --> {node}")
+        lines.append("  end")
+    if len(groups) > 1:
+        lines.append("  " + " --> ".join(f"g{index}" for index in range(len(groups))))
+    lines += ["  classDef slower fill:#cf222e,stroke:#82071e,color:#fff",
+              "  classDef faster fill:#1a7f37,stroke:#044f1e,color:#fff",
+              "  classDef noisy fill:#bf8700,stroke:#7d4e00,color:#fff",
+              "  classDef same fill:#6e7781,stroke:#424a53,color:#fff",
+              "  classDef missing fill:#d0d7de,stroke:#8c959f,color:#24292f",
+              "```", ""]
+    settings = data["settings"]
+    lines.append(f"<sub>Medians of {settings['repeats']} alternating base/PR arms after GPU "
+                 f"cool-down. 🟥 slower and 🟩 faster in every repeat (>"
+                 f"{settings['slowdown'] * 100:.0f}% and >{settings['noise_ms']} ms); 🟨 mixed "
+                 "repeats, inconclusive; ⬜ unchanged. Observations, not qualified timing "
+                 f"regressions. Measured in {data['wall_s'] / 60:.1f} min.</sub>")
+    if data.get("diverged"):
+        lines += ["", "⚠️ Generated text differs between arms for "
+                  + ", ".join(f"`{key}`" for key in data["diverged"])
+                  + "; MTP decode times there follow different drafts."]
+    lines += ["", "<details><summary>Every repeat</summary>", "",
+              "| Phase | Base | PR | Verdict |", "| --- | ---: | ---: | --- |"]
+    for phase in phases:
+        cells = [", ".join(duration(value) for value in phase[side]) for side in ("base", "head")]
+        lines.append(f"| {titles[phase['group']]} · {phase['label']} | {cells[0]} | {cells[1]} "
+                     f"| {phase['verdict']} |")
+    lines += ["", "</details>"]
+    return lines
+
+
 def group_table(rows):
     lines = ["| | Mode · configuration | Passed | Failing suites |", "| :-: | --- | ---: | --- |"]
     for row in rows:
@@ -133,18 +202,26 @@ def render(args):
     state, description = verdict(args.authorize, args.smoke, plan, summary, args.benchmark)
     rows = summary["groups"] if summary is not None else []
     model = group_name(rows[0])[1] if rows else "flash-next-q4"
-    lines = [MARKER, f"### {ICONS[state]} Devlab functional checks: {description}", ""]
+    tier = plan.get("tier", "full") if plan is not None else "full"
+    title = "Devlab functional checks" + (" · PR tier" if tier == "pr" else "")
+    lines = [MARKER, f"### {ICONS[state]} {title}: {description}", ""]
     if rows:
         lines += group_table(rows) + failure_details(rows)
     if args.benchmark:
         read = lambda name: (args.results / name).read_text() if (args.results / name).exists() else ""
         lines += bench_section(read("bench-base.md"), read("bench-head.md"))
+    phases = load_json(args.results / "phases.json")
+    if phases is not None:
+        lines += phases_section(phases)
     footer = [f"[Workflow run]({args.run_url})", f"model `{model}`"]
     if plan is not None:
         footer.insert(1, f"PR `{plan['head'][:7]}` vs merge base `{plan['base'][:7]}`")
-        footer.append(f"{len(plan['deferred'])} deferred, {len(plan['out_of_scope'])} out of scope")
+        release_only = len(plan.get("release_only", []))
+        footer.append(f"{len(plan['deferred'])} deferred, "
+                      + (f"{release_only} for the release run, " if release_only else "")
+                      + f"{len(plan['out_of_scope'])} out of scope")
     lines += ["", "<sub>" + " · ".join(footer) + "<br>"
-              f"Advisory: `{STATUS_CONTEXT}` is not a required check and never blocks merging. "
+              f"`{STATUS_CONTEXT}` is advisory on PRs; only the automatic release merge waits for it. "
               "Candidate correctness only; other-model, numerical, agent replay and timing "
               "qualification remain separate.</sub>"]
     return state, description, "\n".join(lines) + "\n"
@@ -154,7 +231,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--results", type=Path, required=True,
-                        help="Directory with summary.json and optional bench-{base,head}.md")
+                        help="Directory with summary.json, optional bench-{base,head}.md and phases.json")
     parser.add_argument("--authorize", required=True, help="Result of the authorize job")
     parser.add_argument("--smoke", required=True, help="Result of the cluster job")
     parser.add_argument("--benchmark", action="store_true")

@@ -30,9 +30,11 @@ from metrics import compare, comparison_status, join_server_timings, timing_meas
 
 TESTS = Path(__file__).resolve().parent
 SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
-          "tool-reasoning", "tool-streaming", "reasoning-separator",
-          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
+          "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
+          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
           "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection", "cache")
+# Suites that already run another suite's checks; selecting both repeats the work.
+INCLUDED_IN = {"auto-tools": "tools", "tool-native-types": "tool-native-schemas"}
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -42,7 +44,7 @@ SAMPLING = {
     "--repeat-penalty": ("repeat_penalty", float),
     "--repeat-last-n": ("repeat_last_n", int),
 }
-COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides",
+COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "tier",
                      "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256",
                      "expected_input_modalities")
 
@@ -50,7 +52,7 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
 HARNESS_ROOTS = ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
                  "tool_reasoning.py", "tool_streaming.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
                  "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py", "cache_stalls.py",
-                 "cache_disk_spacing.py", "tool_images.py")
+                 "cache_disk_spacing.py", "tool_images.py", "reasoning_budget.py")
 
 
 def harness_files():
@@ -92,7 +94,9 @@ def provenance():
                                                 if kernel_command.is_file() else None), **{
             key: os.environ.get(key) for key in (
                 "GPU_MAX_HW_QUEUES", "HSA_ENABLE_SDMA", "HSA_ENABLE_INTERRUPT",
-                "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "LD_PRELOAD")}},
+                "HSA_USERPTR_FOR_PAGED_MEM", "HSA_USE_SVM",
+                "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+                "LD_LIBRARY_PATH", "LD_PRELOAD")}},
     }
 
 
@@ -172,7 +176,9 @@ def compare_runs(baseline_dir, candidate_dir):
         if report.get("functional_status", report["status"]) != "passed":
             raise ValueError("functional checks did not pass")
     for key in (*COMPARISON_FIELDS, "through_case"):
-        if baseline.get(key) != candidate.get(key):
+        # Reports from before tiers always ran the full matrix.
+        default = "full" if key == "tier" else None
+        if baseline.get(key, default) != candidate.get(key, default):
             raise ValueError(f"unmatched baseline {key}")
     if list(baseline["suites"]) != list(candidate["suites"]):
         raise ValueError("unmatched baseline suites")
@@ -244,6 +250,8 @@ def main():
                         help="Repeat to select affected suites; use all for an explicit full run")
     parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
                         help="Expected loaded inputs for the discovery suite")
+    parser.add_argument("--tier", choices=("pr", "full"), default="full",
+                        help="pr trims each suite's transport matrix; full runs every combination")
     parser.add_argument("--startup-timeout", type=float, default=240)
     parser.add_argument("--suite-timeout", type=float, default=900)
     qualification = parser.add_mutually_exclusive_group(required=True)
@@ -277,10 +285,10 @@ def main():
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
+        selected = [suite for suite in SUITES if suite not in (*INCLUDED_IN, "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
                     and (suite not in ("image-inputs", "image-count", "tool-images")
                          or option(command, "--mmproj") is not None)]
-    selected = list(dict.fromkeys(selected))
+    selected = [suite for suite in dict.fromkeys(selected) if INCLUDED_IN.get(suite) not in selected]
     disk_enabled = bool(set(selected) & {"cache", "image-count"})
     try:
         overrides = sampling_overrides(command)
@@ -302,6 +310,8 @@ def main():
     except (ValueError, OSError) as error:
         parser.error(str(error))
     output = args.output.resolve()
+    # Every suite process inherits the tier; see tier.py.
+    os.environ["GUFO_FUNCTIONAL_TIER"] = args.tier
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
         port = reserve.getsockname()[1]
@@ -329,6 +339,7 @@ def main():
               "binary": str(Path(command[0]).resolve()),
               "mode": "baseline" if args.record_baseline else "qualification",
               "sampling_preset": args.sampling_preset, "sampling_overrides": overrides,
+              "tier": args.tier,
               "vision": vision, "speculative": speculative,
               "suites": {}, "through_case": args.through_case,
               "allow_missing_progress": args.allow_missing_progress,

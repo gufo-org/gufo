@@ -175,6 +175,21 @@ work can batch across ready requests. See the
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 
+Qwen image requests reuse decoded and resized RGB pixels using a fast lookup
+hash and exact encoded-byte comparison under the preprocessing version. Each
+loaded Qwen runner retains up to 128 MiB of encoded bytes and resized pixel
+vectors combined, evicting least-recently-used images; entry metadata is also
+bounded. `cache_prompt: false` bypasses this reuse as well as continuation reuse.
+Requests share immutable buffers, so eviction does not invalidate an in-flight
+request. This CPU cache is separate from the snapshot budget below and is not
+written to disk. A resized 1920×1080 screenshot takes about 6 MiB of RGB storage,
+plus its encoded bytes. The compressible test screenshots fit 21 entries in
+this budget; larger encoded files reduce that count. Warm history still pays
+for prompt rendering, tokenization and the existing pixel/position identity
+hash; a new screenshot still needs vision encoding and prefill. Debug logs
+expose `event=image_cache` with whether reuse is enabled, entries, retained
+pixel/encoded bytes, hits, misses and evictions.
+
 `--cache-ram-bytes 0` (the default) selects an automatic snapshot budget capped
 at 32 GiB and half the available host RAM after model/state allocation, respecting
 container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
@@ -337,6 +352,27 @@ official Jinja: thinking enabled, `xhigh` effort, prior reasoning preserved.
 Use `--think off` or `chat_template_kwargs.enable_thinking=false` for direct
 answers. DeepSeek defaults to thinking with `high` effort. Quality comparisons
 must use the same reasoning mode and effort.
+
+`--reasoning-budget N` caps reasoning at N tokens on Chat, Responses and
+Messages requests, as in llama.cpp: `-1` (the default) is unlimited and `0`
+ends reasoning at once. Chat and Responses override it per request with
+`reasoning_budget_tokens` (`-1` keeps the server default), and Messages with
+`thinking.budget_tokens` when `thinking.type` is `enabled`. Tokens are counted
+from the reasoning start, including the newline after Qwen's `<think>`. Once
+the budget is spent and the last token completes its UTF-8 character, the
+model's reasoning end is forced: `\n</think>` for Qwen, `</think>` for DeepSeek.
+For an ASCII Qwen response that reaches the cap, N generated reasoning tokens
+precede `</think>`. A natural end can use fewer tokens, and completing a UTF-8
+character can require more. A Qwen `<tool_call>` also ends reasoning. The budget
+covers the initial reasoning phase. Later `<think>` spellings remain literal
+answer or tool-argument data, consistent with Gufo's response framing.
+
+Chat and Responses also accept llama.cpp's older `thinking_budget_tokens`
+spelling for existing clients; a non-null `reasoning_budget_tokens` takes
+precedence. Request budgets must fit a signed 32-bit integer; Messages budgets
+must also be positive. The server does not automatically reserve part of
+`max_tokens` for the answer: clients must set a smaller reasoning budget when
+they need that room.
 
 Keep `reasoning_effort` (Chat) or `output_config.effort` (Messages) consistent
 across turns while thinking is enabled: Qwen and DeepSeek render the effort
@@ -658,9 +694,10 @@ complete usage, and `message_stop`. `message_start` reports zero usage because
 prompt accounting is final only at the end. A failure after the headers sends
 an `error` event. Responses and Messages honor the server's thinking defaults.
 Messages accepts `thinking.type` (`enabled`, `adaptive` or `disabled`);
-`adaptive` keeps the server's thinking default, and `budget_tokens` has no
-native equivalent, so the effort stays the server's unless
-`output_config.effort` sets it. Reasoning is returned as a `thinking` block
+`adaptive` keeps the server's thinking default. With `enabled`,
+`budget_tokens` caps the reasoning (see Reasoning controls), and the answer
+follows. The effort stays the server's unless `output_config.effort`
+sets it. Reasoning is returned as a `thinking` block
 before the `text` block, with an empty `signature`, for every accepted
 `thinking.display` (`summarized`, `omitted` or `updates`). Replay assistant
 `thinking` blocks unchanged so later turns reuse the cached prompt.
@@ -846,6 +883,16 @@ Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, includi
 streaming, images and concurrent requests. Reasoning stays separate from JSON
 and counts toward the output budget. Changing the schema changes the cache prefix.
 
+Every schema and tool grammar uses one token vocabulary per loaded model.
+Gufo prepares it automatically while the model loads, before readiness, and
+every constrained request reuses it. This moves a one-time CPU cost from the
+first constrained request to startup (Flash-Next: 248,320 tokens, about 30 ms).
+The vocabulary stays resident even if no request is constrained. The startup
+line `event=structured_output_prepared` reports `vocabulary_tokens`, `prepare_ms`
+and `rss_delta_kib`. Runners without structured output skip preparation and
+retain ordinary text serving; vocabulary build errors still fail startup.
+Grammars and their masks are unchanged.
+
 `</think>` ends reasoning before constrained JSON. Native tools also accept an
 unquoted function header as the boundary when the model omits `</think>`.
 Bare marker mentions and quoted examples remain reasoning; markers inside
@@ -875,9 +922,11 @@ semantics; lookbehind, backreferences, inline flags and unbounded repetition
 of assertions are unsupported.
 
 Function `strict:true` constrains tool arguments independently of the response
-schema. Chat Completions defaults to non-strict tools. Responses attempts strict
-schema normalization when `strict` is omitted, falling back to `strict:false`
-when unsupported; explicit `strict:false` keeps best-effort arguments.
+schema. Chat Completions and Responses preserve the supplied parameter schema
+when `strict` is omitted, `null` or `false`, matching llama.cpp's schema
+handling. Optional fields stay optional; Gufo does not add them to `required`
+or force the model to invent default values. To require every field, list them
+in `required` and use `strict:true` with a closed object schema.
 With `tool_choice: "auto"`, the model may call a tool or give a final answer;
 the response schema constrains the latter. Use `"none"` for JSON answers only,
 `"required"` to force a call, or select a named function.

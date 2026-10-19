@@ -1,7 +1,32 @@
 # Qwen3.8 Flash-Next experiments
 
+## Host compaction and cache transfers (October 18, 2026)
+
+KFD SMI events and HIP traces distinguish queue suspension from slower model
+kernels. Host page migration can suspend every GPU queue in the process,
+including text work unrelated to the allocation that moved. Controls against
+main `bff0eec6` also exposed smaller delays from preparing cache backing while
+capturing a checkpoint.
+
+| Experiment | Outcome |
+| --- | --- |
+| Nonpaged gfx1151 queue-save areas, launch/copy arenas and loader staging | Retained in the bundled ROCr patch. HIP can obtain kernel arguments from the coarse pool, bypassing ROCr's dedicated kernarg pool; traces also locate runtime-owned code-object upload buffers. Application SVM and ordinary fine-grained host allocations retain their policies. |
+| Long-term pins for owned HIP host buffers | Retained for uploads, Flash-Next execution and disk staging. Exact GPU/CPU visibility and restricted-policy fallback tests pass. |
+| Vision device weights and bounded pinned uploads | Retained with existing heap headroom and managed fallback. All 29 observed vision stages remain byte-identical. |
+| Bounded cache growth outside captures | Retained: approximately 128 MiB segments, bounded page population and pinning ranges, a 2 GiB reserve before readiness/substantial prefill chunks, and smaller reserves for short prefill chunks. Preparation follows any pending fallback capture. Existing budgets remain authoritative. |
+| Prepare cold HC, Q8 and argmax functions | Retained: resolve actual function variants before readiness, without trial launches or activation changes. |
+| Aligned snapshot upload kernel | Retained: use the existing exact byte-copy kernel for registered host-to-device restores, preserving unaligned, pageable and borrowed-device fallbacks. |
+| Default `HSA_USERPTR_FOR_PAGED_MEM=0` | Rejected: removed eviction events but slowed short prefill by 5–6%. The narrower runtime fix preserves normal prefill speed. |
+| Extra priority transfer queues | Rejected: two short C4 decodes rose from approximately 46/45 ms to 104/58 ms. Keeping the original shared queue pool removes this regression. |
+| Grow backing during each allocation or every prompt capture | Rejected: background population/registration delayed captures and the following decode. Request-release refill also delayed the next admission. Preparation now follows pending fallback captures, immediately before actual prefill work. Fully cached decode does not start it. |
+| Disable all ROCr SVM | Rejected: faults when a kernel writes application-managed storage. The independent memory test covers this failure. |
+
+See [quality and timing controls](QUALITY.md) for measured scope and remaining
+limitations. Raw requests, profiles and rejected controls remain outside Git.
+
 | Experiment | Decision / evidence |
 | --- | --- |
+| CPU image preprocessing reuse, October 18 (#627) | Retained: backend-owned 128 MiB combined encoded/RGB cache, fast lookup hash followed by exact byte equality, immutable request ownership and unchanged continuation hashing. Flash-Next queue medians: 45.01/82.40/161.49 → 9.65/13.25/20.63 ms for 1/2/4 screenshots. Miss median differences: −0.26 ms small PNG, +0.42 ms 6.2 MB PNG; individual stalls and broad timing flags remain inconclusive. Rejected: SHA-256 lookup added about 6.7 ms for large PNG misses; unconditional reuse changed forced-cold behavior, so `cache_prompt:false` bypasses reuse. [Evidence](https://github.com/gufo-org/gufo/pull/645). |
 | Prepare indexer plans before readiness, October 17 (#632) | Retained: the first heuristic query loads a hipBLASLt code object for 104–115 ms, overlapping a 115 ms GPU idle gap. Preparing actual indexer geometry during model startup runs no trial GEMMs and preserves exact-shape selection. Cold 13-token PP falls from 257–260 to 145–146 ms; all 12 d0 control outputs/work match, with no timing flags. Independent F64 and prepared/lazy F16/BF16 checks, native snapshot replay and Pi tools/edit/code pass. |
 | Long-term pins for committed cache backing, October 17 (#632) | Retained as migration protection when process policy permits: registered base pages can still move under ordinary compaction. io_uring buffer registration supplies long-term pins without I/O; ranges split at Linux's 1 GiB per-buffer limit. Lifetime, failure, large-buffer and restricted-policy fallback tests pass. A 4 GiB held-memory control preserves all 24 outputs and timings, but neither arm repeats main's earlier 2.83-second gap. Podman syscall policy can disable the pins despite unlimited memlock. Cache timing outliers remain inconclusive as detailed in [quality](QUALITY.md); this is not a blanket stall or timing pass. |
 | Reuse PLE gather scratch, October 17 | Retained: an 8K MTP prefill twice lost about 100 ms while constructing the per-gather n-gram deduplication map. Lightweight timestamps locate 87.35 ms in that construction overlapping background cache page population/registration; GPU arithmetic is unchanged. A reusable flat index preserves the first occurrence and read/copy order, and the executor prepares its maximum scratch before readiness. The original short history now measures 1673.55 tok/s versus 1535.61 before and 1675.25 on main, with identical output and cache work. Independent BF16/IQ4 row tests pass, including wide/tiny/wide gathers, duplicate output slots and buffer guards. |

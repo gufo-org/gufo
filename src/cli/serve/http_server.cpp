@@ -1146,8 +1146,9 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
 }
 
 // Messages selects reasoning with thinking.type; adaptive leaves the choice to
-// the server's default. budget_tokens has no native equivalent, so enabled
-// thinking keeps the server's effort unless output_config.effort sets it.
+// the server's default. With enabled thinking, budget_tokens caps the
+// reasoning tokens, as llama.cpp does; enabled thinking keeps the server's
+// effort unless output_config.effort sets it.
 // Reasoning is returned for every display, because replayed thinking blocks
 // restore the cached thought.
 std::optional<HttpResponse> ReadThinking(const json::Value& body,
@@ -1163,10 +1164,15 @@ std::optional<HttpResponse> ReadThinking(const json::Value& body,
         "'thinking.type' must be enabled, adaptive, or disabled");
   if (const auto* budget = thinking->find("budget_tokens");
       budget != nullptr &&
-      (!budget->is_number() || budget->as_double() < 1 ||
+      (!budget->is_number() || !std::isfinite(budget->as_double()) ||
+       budget->as_double() < 1 ||
+       budget->as_double() > std::numeric_limits<std::int32_t>::max() ||
        std::floor(budget->as_double()) != budget->as_double()))
     return InvalidCompatibilityRequest(
-        "'thinking.budget_tokens' must be a positive integer");
+        "'thinking.budget_tokens' must be a positive integer at most "
+        "2147483647");
+  else if (budget != nullptr && type->str() == "enabled")
+    reasoning->budget_tokens = static_cast<std::size_t>(budget->as_double());
   if (const auto* display = thinking->find("display");
       display != nullptr &&
       (!display->is_string() ||

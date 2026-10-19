@@ -93,7 +93,7 @@ void DeviceInput::Inject(float* hidden, std::uint32_t position,
     if (begin >= end)
       continue;
     if (!embeddings_[index])
-      embeddings_[index] = encoder_->Encode(image.pixels, {}, is_cancelled_);
+      embeddings_[index] = encoder_->Encode(*image.pixels, {}, is_cancelled_);
     const auto& embedding = *embeddings_[index];
     if (embedding.width() != width ||
         embedding.rows() != image.grid.height * image.grid.width) {

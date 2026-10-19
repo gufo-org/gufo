@@ -164,6 +164,7 @@
             env = {
               TORCH_HOME = "${alexnetTorchHome system}";
               LD_LIBRARY_PATH = pkgs.${system}.lib.makeLibraryPath [
+                self.packages.${system}.default.rocmRuntime
                 pkgs.${system}.stdenv.cc.cc.lib
                 pkgs.${system}.zlib
               ];

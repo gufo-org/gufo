@@ -105,9 +105,9 @@ void TestConcurrentSsmRecurrence() {
     DeviceBuffer<std::uint8_t> recurrent(state_bytes);
     for (std::size_t i = 0; i < count; ++i) {
       auto& sequence = sequences[i];
-      sequence.conv = conv_state.data() + i * conv_per_sequence;
-      sequence.recurrent =
-          recurrent.data() + i * state_per_sequence * element_bytes;
+      sequence.state = gufo::hip::QwenRecurrentStateIo::InPlace(
+          conv_state.data() + i * conv_per_sequence,
+          recurrent.data() + i * state_per_sequence * element_bytes);
       sequence.replay = {captured_qkv.data() + i * replay_qkv,
                          captured_alpha.data() + i * replay_control,
                          captured_beta.data() + i * replay_control,
@@ -127,9 +127,8 @@ void TestConcurrentSsmRecurrence() {
         for (const auto& sequence : std::span(sequences).first(width)) {
           const std::size_t row = sequence.row_offset;
           gufo::hip::LaunchSSMConvRecurrenceRows(
-              input.data() + row * qkv, weights.data(), sequence.conv,
-              conv_output.data() + row * qkv, sequence.recurrent,
-              controls.data() + row * heads * 2,
+              input.data() + row * qkv, weights.data(), sequence.state,
+              conv_output.data() + row * qkv, controls.data() + row * heads * 2,
               controls.data() + row * heads * 2 + heads, decay.data(),
               dt.data(), norm.data(), gate.data() + row * inner,
               write_output ? output.data() + row * inner : nullptr, layer, qkv,
@@ -198,7 +197,27 @@ void TestRecurrentRollbackRows(bool large_state) {
       }
       if (packed != config.SsmLayerCount())
         throw std::runtime_error("incorrect recurrent layer count");
-      // A second save must replace the first snapshot, including a tail group.
+      // Without recurrent layers the state buffers are empty (null), so there
+      // is nothing to pin or divert.
+      if (config.SsmLayerCount() == 0)
+        continue;
+      const auto expect = [](bool condition, const char* message) {
+        if (!condition)
+          throw std::runtime_error(message);
+      };
+      const auto check = [&](const void* device,
+                             const std::vector<std::uint8_t>& expected) {
+        std::vector<std::uint8_t> actual(expected.size());
+        if (!actual.empty())
+          HIP_CHECK(hipMemcpy(actual.data(), device, actual.size(),
+                              hipMemcpyDeviceToHost));
+        if (actual != expected)
+          throw std::runtime_error("rollback changed recurrent state");
+      };
+      // A save pins the live buffer in place; the pass after it, and the pass
+      // after a restore, write the other buffer. A second save must pin that
+      // other buffer, so both parities are covered, including a tail group.
+      const float* previous_pin = nullptr;
       for (unsigned generation = 0; generation < 2; ++generation) {
         for (auto* values : {&conv, &delta}) {
           for (std::size_t i = 0; i < values->size(); ++i) {
@@ -211,26 +230,298 @@ void TestRecurrentRollbackRows(bool large_state) {
         HIP_CHECK(hipMemcpyAsync(arena.d_ssm_deltanet_state, delta.data(),
                                  delta.size(), hipMemcpyHostToDevice,
                                  arena.stream));
+        const float* pinned = arena.d_ssm_conv_state;
+        expect(pinned != previous_pin, "second save pinned the same buffer");
+        previous_pin = pinned;
         arena.SaveState(7);
-        HIP_CHECK(hipMemsetAsync(arena.d_ssm_conv_state, 0x5A, conv.size(),
+        const auto pass = arena.BeginRecurrentWrite();
+        expect(pass.Diverges() && pass.conv_in == pinned &&
+                   pass.conv_out == arena.d_ssm_conv_state &&
+                   pass.recurrent_out == arena.d_ssm_deltanet_state,
+               "save did not divert the next pass or move the live mirrors");
+        HIP_CHECK(
+            hipMemsetAsync(pass.conv_out, 0x5A, conv.size(), arena.stream));
+        HIP_CHECK(hipMemsetAsync(pass.recurrent_out, 0x5A, delta.size(),
                                  arena.stream));
-        HIP_CHECK(hipMemsetAsync(arena.d_ssm_deltanet_state, 0x5A, delta.size(),
-                                 arena.stream));
+        // Later passes in the same window update in place.
+        const auto in_place = arena.BeginRecurrentWrite();
+        expect(!in_place.Diverges() && in_place.conv_out == pass.conv_out,
+               "in-place pass moved the live state");
         arena.RestoreState();
-        const auto check = [&](const void* device,
-                               const std::vector<std::uint8_t>& expected) {
-          std::vector<std::uint8_t> actual(expected.size());
-          if (!actual.empty())
-            HIP_CHECK(hipMemcpy(actual.data(), device, actual.size(),
-                                hipMemcpyDeviceToHost));
-          if (actual != expected)
-            throw std::runtime_error("rollback changed recurrent state");
-        };
+        HIP_CHECK(hipStreamSynchronize(arena.stream));
+        expect(arena.d_ssm_conv_state == pinned, "restore missed the pin");
         check(arena.d_ssm_conv_state, conv);
         check(arena.d_ssm_deltanet_state, delta);
+        // The replay after a restore reads the pin and writes elsewhere, so a
+        // cancellation can restore a second time.
+        const auto replay = arena.BeginRecurrentWrite();
+        expect(replay.Diverges() && replay.conv_in == pinned &&
+                   replay.conv_out == pass.conv_out,
+               "replay pass did not read the pin");
+        HIP_CHECK(
+            hipMemsetAsync(replay.conv_out, 0x5A, conv.size(), arena.stream));
+        HIP_CHECK(hipMemsetAsync(replay.recurrent_out, 0x5A, delta.size(),
+                                 arena.stream));
+        arena.RestoreState();
+        HIP_CHECK(hipStreamSynchronize(arena.stream));
+        check(arena.d_ssm_conv_state, conv);
+        check(arena.d_ssm_deltanet_state, delta);
+        // Leave the live state on the other buffer for the next generation.
+        (void)arena.BeginRecurrentWrite();
       }
     }
   }
+}
+
+// A rollback pin moves the recurrent state between two buffers instead of
+// copying it: the pass after SaveState or RestoreState reads the pinned buffer
+// and writes the other one, later passes update in place. Every variant must
+// produce the same bytes as an unpinned in-place run of the same rows, over
+// both buffer parities, a replay followed by a second (cancellation) restore,
+// FP32 resident and generic shapes, BF16 storage, launches split within one
+// pass, and pinned/unpinned sequences sharing one batched launch.
+void TestRecurrentForkPingPong() {
+  using gufo::hip::QwenGpuArena;
+  using gufo::hip::QwenRecurrentStateIo;
+  using gufo::test::DeviceBuffer;
+  using Storage = gufo::hip::QwenRecurrentStateStorage;
+  struct Shape {
+    std::uint32_t state_size;
+    std::uint32_t inner_size;
+    std::uint32_t time_step_rank;
+    Storage storage;
+  };
+  const auto expect = [](bool condition, const char* message) {
+    if (!condition)
+      throw std::runtime_error(message);
+  };
+  const auto values = [](std::size_t size, float scale, float phase) {
+    std::vector<float> result(size);
+    for (std::size_t i = 0; i < size; ++i)
+      result[i] = scale * std::sin(phase + static_cast<float>(i) * 0.013F);
+    return result;
+  };
+  constexpr std::uint32_t total_rows = 16, replayed_rows = 7, split_rows = 5;
+  for (const auto& shape :
+       {Shape{128, 256, 2, Storage::kFp32}, Shape{128, 256, 2, Storage::kBf16},
+        Shape{32, 128, 4, Storage::kFp32}}) {
+    auto config = gufo::models::qwen::make_small_qwen_config();
+    config.ssm_state_size = shape.state_size;
+    config.ssm_inner_size = shape.inner_size;
+    config.ssm_time_step_rank = shape.time_step_rank;
+    auto policy = gufo::hip::QwenExecutionPolicy::Production();
+    policy.recurrent_state_storage = shape.storage;
+    const std::uint32_t heads = config.ssm_time_step_rank;
+    const std::uint32_t key_heads = config.ssm_group_count;
+    const std::uint32_t key_dim = config.ssm_state_size;
+    const std::uint32_t val_dim = config.SsmValueSize();
+    const std::size_t qkv = config.SsmQkvSize();
+    const std::size_t inner = config.ssm_inner_size;
+    const std::size_t layers = config.SsmLayerCount();
+    const std::size_t conv_bytes = layers * qkv * 4 * sizeof(float);
+    const std::size_t element_bytes =
+        gufo::hip::QwenRecurrentStateElementBytes(shape.storage);
+    const std::size_t delta_elements = layers * heads * key_dim * val_dim;
+    const std::size_t delta_bytes = delta_elements * element_bytes;
+    std::cout << "Recurrent fork ping-pong: key_dim=" << key_dim
+              << " val_dim=" << val_dim
+              << (shape.storage == Storage::kBf16 ? " bf16\n" : " fp32\n");
+
+    DeviceBuffer<float> input(values(total_rows * qkv, 1.0F, 1)),
+        weights(values(qkv * 4, 0.3F, 2)),
+        alpha(values(total_rows * heads, 1.0F, 3)),
+        beta(values(total_rows * heads, 1.0F, 4)),
+        decay(std::vector<float>(heads, -0.15F)), dt(values(heads, 0.1F, 5)),
+        norm(std::vector<float>(val_dim, 1.0F)),
+        gate(values(total_rows * inner, 0.5F, 6)),
+        conv_output(total_rows * qkv), output(total_rows * inner);
+    std::vector<std::uint8_t> seed_bytes(conv_bytes + delta_bytes);
+    {
+      const auto conv = values(layers * qkv * 4, 0.3F, 7);
+      const auto delta = values(delta_elements, 0.02F, 8);
+      std::memcpy(seed_bytes.data(), conv.data(), conv_bytes);
+      for (std::size_t i = 0; i < delta_elements; ++i) {
+        if (shape.storage == Storage::kFp32) {
+          std::memcpy(seed_bytes.data() + conv_bytes + i * element_bytes,
+                      &delta[i], element_bytes);
+        } else {
+          const auto bits = gufo::test::FloatToBf16Bits(delta[i]);
+          std::memcpy(seed_bytes.data() + conv_bytes + i * element_bytes, &bits,
+                      element_bytes);
+        }
+      }
+    }
+    const auto seed = [&](QwenGpuArena& arena) {
+      HIP_CHECK(hipMemcpyAsync(arena.d_ssm_conv_state, seed_bytes.data(),
+                               conv_bytes, hipMemcpyHostToDevice,
+                               arena.stream));
+      HIP_CHECK(hipMemcpyAsync(arena.d_ssm_deltanet_state,
+                               seed_bytes.data() + conv_bytes, delta_bytes,
+                               hipMemcpyHostToDevice, arena.stream));
+      HIP_CHECK(hipStreamSynchronize(arena.stream));
+    };
+    // The live mirrors always name the buffer holding the current state.
+    const auto state_bytes = [&](const QwenGpuArena& arena) {
+      HIP_CHECK(hipStreamSynchronize(arena.stream));
+      std::vector<std::uint8_t> bytes(conv_bytes + delta_bytes);
+      HIP_CHECK(hipMemcpy(bytes.data(), arena.d_ssm_conv_state, conv_bytes,
+                          hipMemcpyDeviceToHost));
+      HIP_CHECK(hipMemcpy(bytes.data() + conv_bytes, arena.d_ssm_deltanet_state,
+                          delta_bytes, hipMemcpyDeviceToHost));
+      return bytes;
+    };
+    // One pass over every recurrent layer for `rows` rows starting at
+    // `first_row`, through the given buffer pair.
+    const auto run = [&](QwenGpuArena& arena, QwenRecurrentStateIo state,
+                         std::size_t first_row, std::uint32_t rows) {
+      for (std::uint32_t layer = 0; layer < layers; ++layer) {
+        gufo::hip::LaunchSSMConvRecurrenceRows(
+            input.data() + first_row * qkv, weights.data(), state,
+            conv_output.data() + first_row * qkv,
+            alpha.data() + first_row * heads, beta.data() + first_row * heads,
+            decay.data(), dt.data(), norm.data(),
+            gate.data() + first_row * inner, output.data() + first_row * inner,
+            layer, qkv, key_heads, heads, key_dim, val_dim, rows, heads, inner,
+            arena.stream, {}, shape.storage);
+      }
+      HIP_CHECK(hipStreamSynchronize(arena.stream));
+    };
+    // The destination of a diverging pass may already hold the pinned bytes
+    // (second parity, recycled allocations); poison it so a kernel reading
+    // its destination instead of the pin cannot pass.
+    const auto poison = [&](QwenRecurrentStateIo state, hipStream_t stream) {
+      HIP_CHECK(hipMemsetAsync(state.conv_out, 0x5A, conv_bytes, stream));
+      HIP_CHECK(hipMemsetAsync(state.recurrent_out, 0x5A, delta_bytes, stream));
+    };
+
+    QwenGpuArena reference(config, 16, policy);
+    QwenGpuArena candidate(config, 16, policy);
+    seed(reference);
+    const auto unpinned = reference.BeginRecurrentWrite();
+    expect(!unpinned.Diverges() &&
+               unpinned.conv_out == reference.d_ssm_conv_state &&
+               unpinned.recurrent_out == reference.d_ssm_deltanet_state,
+           "an unpinned arena must update in place");
+    run(reference, unpinned, 0, total_rows);
+    const auto after_all = state_bytes(reference);
+    seed(reference);
+    run(reference, reference.BeginRecurrentWrite(), 0, replayed_rows);
+    const auto after_replay = state_bytes(reference);
+
+    seed(candidate);
+    const float* previous_pin = nullptr;
+    for (unsigned parity = 0; parity < 2; ++parity) {
+      const float* pinned = candidate.d_ssm_conv_state;
+      expect(pinned != previous_pin, "second save pinned the same buffer");
+      previous_pin = pinned;
+      candidate.SaveState(7);
+      // The first pass after the pin diverges; a second launch of the same
+      // pass continues in place, as a replay split at the ring bound does.
+      const auto pass = candidate.BeginRecurrentWrite();
+      expect(pass.Diverges() && pass.conv_in == pinned &&
+                 pass.conv_out == candidate.d_ssm_conv_state &&
+                 pass.recurrent_out == candidate.d_ssm_deltanet_state,
+             "save did not divert the next pass");
+      poison(pass, candidate.stream);
+      run(candidate, pass, 0, split_rows);
+      run(candidate, pass.Continued(), split_rows, total_rows - split_rows);
+      expect(state_bytes(candidate) == after_all,
+             "diverging pass changed the recurrence");
+      // A persistent snapshot must read the live buffer, whichever parity
+      // holds it, and survive resetting/reusing a different arena.
+      auto snapshot = candidate.SaveSnapshot(0);
+      reference.RestoreSnapshot(*snapshot);
+      expect(state_bytes(reference) == after_all,
+             "snapshot of a forked state changed the recurrence");
+      std::vector<std::uint8_t> payload(snapshot->CompactPayloadBytes(), 0xA5);
+      expect(snapshot->SerializeCompact(payload) == payload.size(),
+             "forked snapshot serialization returned the wrong size");
+      std::vector<std::uint8_t> overwritten(payload.size(), 0x5A);
+      expect(snapshot->SerializeCompact(overwritten) == overwritten.size() &&
+                 overwritten == payload,
+             "forked snapshot depends on previous destination bytes");
+      reference.Reset();
+      reference.RestoreCompactSnapshot(payload, 0);
+      expect(state_bytes(reference) == after_all,
+             "serialized forked snapshot changed the recurrence");
+      const auto in_place = candidate.BeginRecurrentWrite();
+      expect(!in_place.Diverges() && in_place.conv_out == pass.conv_out,
+             "second pass after a pin must update in place");
+      // Rejection: restore, then replay fewer rows from the pin.
+      candidate.RestoreState();
+      expect(candidate.d_ssm_conv_state == pinned &&
+                 state_bytes(candidate) == seed_bytes,
+             "restore did not return the pinned bytes");
+      const auto replay = candidate.BeginRecurrentWrite();
+      expect(replay.Diverges() && replay.conv_in == pinned,
+             "replay must read the pin and write elsewhere");
+      poison(replay, candidate.stream);
+      run(candidate, replay, 0, replayed_rows);
+      expect(state_bytes(candidate) == after_replay,
+             "replay after restore changed the recurrence");
+      // Cancellation restores a second time; the pin survived the replay.
+      candidate.RestoreState();
+      expect(state_bytes(candidate) == seed_bytes,
+             "second restore did not return the pinned bytes");
+      // Move the live state to the other buffer and reseed it so the next
+      // save pins the other parity.
+      run(candidate, candidate.BeginRecurrentWrite(), 0, total_rows);
+      expect(candidate.d_ssm_conv_state != pinned,
+             "pass after the second restore stayed on the pin");
+      seed(candidate);
+    }
+
+    // Three sessions in one batched launch: pinned and diverging (3 rows),
+    // unpinned and in place (5 rows), and pinned but already diverged by an
+    // earlier 4-row pass so this launch is in place on its other buffer
+    // (2 rows). Each must match its own serial reference.
+    QwenGpuArena pinned_arena(config, 16, policy);
+    QwenGpuArena plain_arena(config, 16, policy);
+    QwenGpuArena diverged_arena(config, 16, policy);
+    seed(pinned_arena);
+    seed(plain_arena);
+    seed(diverged_arena);
+    pinned_arena.SaveState(7);
+    diverged_arena.SaveState(7);
+    run(diverged_arena, diverged_arena.BeginRecurrentWrite(), 0, 4);
+    const std::array<gufo::hip::SsmSequenceState, 3> sequences{{
+        {pinned_arena.BeginRecurrentWrite(), {}, 0, 3},
+        {plain_arena.BeginRecurrentWrite(), {}, 3, 5},
+        {diverged_arena.BeginRecurrentWrite(), {}, 8, 2},
+    }};
+    expect(sequences[0].state.Diverges() && !sequences[1].state.Diverges() &&
+               !sequences[2].state.Diverges(),
+           "batched sequences did not get the expected buffer pairs");
+    poison(sequences[0].state, pinned_arena.stream);
+    for (std::uint32_t layer = 0; layer < layers; ++layer) {
+      gufo::hip::LaunchSSMConvRecurrenceBatch(
+          input.data(), weights.data(), conv_output.data(), alpha.data(),
+          beta.data(), decay.data(), dt.data(), norm.data(), gate.data(),
+          output.data(), sequences, layer, qkv, key_heads, heads, key_dim,
+          val_dim, heads, inner, pinned_arena.stream, shape.storage);
+    }
+    HIP_CHECK(hipStreamSynchronize(pinned_arena.stream));
+    seed(reference);
+    run(reference, reference.BeginRecurrentWrite(), 0, 3);
+    expect(state_bytes(pinned_arena) == state_bytes(reference),
+           "pinned sequence in a batched launch changed the recurrence");
+    seed(reference);
+    run(reference, reference.BeginRecurrentWrite(), 3, 5);
+    expect(state_bytes(plain_arena) == state_bytes(reference),
+           "unpinned sequence in a batched launch changed the recurrence");
+    seed(reference);
+    run(reference, reference.BeginRecurrentWrite(), 0, 4);
+    run(reference, reference.BeginRecurrentWrite(), 8, 2);
+    expect(state_bytes(diverged_arena) == state_bytes(reference),
+           "in-place pinned sequence in a batched launch changed the "
+           "recurrence");
+    pinned_arena.RestoreState();
+    diverged_arena.RestoreState();
+    expect(state_bytes(pinned_arena) == seed_bytes &&
+               state_bytes(diverged_arena) == seed_bytes,
+           "batched launch wrote into a pinned buffer");
+  }
+  std::cout << "Recurrent fork ping-pong: pinned passes bit-exact\n";
 }
 
 void TestBf16RecurrentMemoryAndSnapshot() {
@@ -444,27 +735,31 @@ void TestBatchedSSMConvEquivalence() {
                       hipMemcpyHostToDevice));
 
   // Sequential
+  using gufo::hip::QwenRecurrentStateIo;
   for (std::size_t t = 0; t < batch; ++t) {
     gufo::hip::LaunchSSMConvRecurrence(
-        d_qkv + t * qkv_dim, d_w, d_state_seq, d_conv_out_seq + t * qkv_dim,
-        d_delta_seq, d_alpha + t * num_heads, d_beta + t * num_heads, d_ssm_a,
-        d_ssm_dt, d_ssm_norm, d_gate + t * inner_size,
-        d_out_seq + t * inner_size, 0, qkv_dim, num_key_heads, num_heads,
-        key_dim, val_dim);
+        d_qkv + t * qkv_dim, d_w,
+        QwenRecurrentStateIo::InPlace(d_state_seq, d_delta_seq),
+        d_conv_out_seq + t * qkv_dim, d_alpha + t * num_heads,
+        d_beta + t * num_heads, d_ssm_a, d_ssm_dt, d_ssm_norm,
+        d_gate + t * inner_size, d_out_seq + t * inner_size, 0, qkv_dim,
+        num_key_heads, num_heads, key_dim, val_dim);
     gufo::hip::LaunchSSMConvRecurrence(
-        d_qkv + t * qkv_dim, d_w, d_state_bf16, d_conv_out_bf16 + t * qkv_dim,
-        d_delta_bf16, d_alpha + t * num_heads, d_beta + t * num_heads, d_ssm_a,
-        d_ssm_dt, d_ssm_norm, d_gate + t * inner_size,
-        d_out_bf16 + t * inner_size, 0, qkv_dim, num_key_heads, num_heads,
-        key_dim, val_dim, nullptr, {},
+        d_qkv + t * qkv_dim, d_w,
+        QwenRecurrentStateIo::InPlace(d_state_bf16, d_delta_bf16),
+        d_conv_out_bf16 + t * qkv_dim, d_alpha + t * num_heads,
+        d_beta + t * num_heads, d_ssm_a, d_ssm_dt, d_ssm_norm,
+        d_gate + t * inner_size, d_out_bf16 + t * inner_size, 0, qkv_dim,
+        num_key_heads, num_heads, key_dim, val_dim, nullptr, {},
         gufo::hip::QwenRecurrentStateStorage::kBf16);
   }
 
   // Batched
   gufo::hip::LaunchBatchedSSMConvRecurrence(
-      d_qkv, d_w, d_state_batch, d_conv_out_batch, d_delta_batch, d_alpha,
-      d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate, d_out_batch, 0, batch,
-      qkv_dim, num_key_heads, num_heads, key_dim, val_dim);
+      d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_batch, d_delta_batch),
+      d_conv_out_batch, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
+      d_out_batch, 0, batch, qkv_dim, num_key_heads, num_heads, key_dim,
+      val_dim);
 
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -557,8 +852,9 @@ void TestBatchedSSMConvEquivalence() {
         for (std::size_t offset = 0; offset < batch;
              offset += rows_per_launch) {
           gufo::hip::LaunchSSMConvRecurrenceRows(
-              d_qkv + offset * qkv_dim, d_w, d_state_batch, d_conv_out_batch,
-              d_delta_batch, d_alpha + offset * num_heads,
+              d_qkv + offset * qkv_dim, d_w,
+              QwenRecurrentStateIo::InPlace(d_state_batch, d_delta_batch),
+              d_conv_out_batch, d_alpha + offset * num_heads,
               d_beta + offset * num_heads, d_ssm_a, d_ssm_dt, d_ssm_norm,
               d_gate + offset * inner_size,
               write_output ? d_out_batch + offset * inner_size : nullptr, 0,
@@ -724,25 +1020,26 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
   upload(d_state_new, h_history);
   upload(d_state_bf16, h_history);
 
+  using gufo::hip::QwenRecurrentStateIo;
   gufo::hip::LaunchBatchedSSMConvRecurrence(
-      d_qkv, d_w, d_state_ref, d_conv_ref, d_delta_ref, d_alpha, d_beta,
-      d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate, d_out_ref, 0, batch, qkv_dim,
-      num_key_heads, num_heads, key_dim, val_dim);
+      d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_ref, d_delta_ref),
+      d_conv_ref, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
+      d_out_ref, 0, batch, qkv_dim, num_key_heads, num_heads, key_dim, val_dim);
 
   if (!gufo::hip::IsDeltaNetRowSplitSupported(key_dim, val_dim)) {
     std::cerr << "row-split recurrence rejected the production state shape\n";
     std::abort();
   }
   gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
-      d_qkv, d_w, d_state_new, d_conv_new, d_delta_new, d_alpha, d_beta,
-      d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate, d_out_new, /*q8_out=*/nullptr,
-      d_kq, d_ab, 0, batch, qkv_dim, num_key_heads, num_heads, key_dim,
-      val_dim);
+      d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_new, d_delta_new),
+      d_conv_new, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
+      d_out_new, /*q8_out=*/nullptr, d_kq, d_ab, 0, batch, qkv_dim,
+      num_key_heads, num_heads, key_dim, val_dim);
   gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
-      d_qkv, d_w, d_state_bf16, d_conv_bf16, d_delta_bf16, d_alpha, d_beta,
-      d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate, d_out_bf16,
-      /*q8_out=*/nullptr, d_kq, d_ab, 0, batch, qkv_dim, num_key_heads,
-      num_heads, key_dim, val_dim, nullptr,
+      d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_bf16, d_delta_bf16),
+      d_conv_bf16, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
+      d_out_bf16, /*q8_out=*/nullptr, d_kq, d_ab, 0, batch, qkv_dim,
+      num_key_heads, num_heads, key_dim, val_dim, nullptr,
       gufo::hip::QwenRecurrentStateStorage::kBf16);
 
   HIP_CHECK(hipDeviceSynchronize());
@@ -857,10 +1154,10 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
       upload(static_cast<float*>(state), h_delta0);
     }
     gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
-        d_qkv, d_w, conv_state, conv_output, state, d_alpha, d_beta, d_ssm_a,
-        d_ssm_dt, d_ssm_norm, d_gate, output, nullptr, d_kq, d_ab, 0, batch,
-        qkv_dim, num_key_heads, num_heads, key_dim, val_dim, nullptr, storage,
-        actual.data());
+        d_qkv, d_w, QwenRecurrentStateIo::InPlace(conv_state, state),
+        conv_output, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
+        output, nullptr, d_kq, d_ab, 0, batch, qkv_dim, num_key_heads,
+        num_heads, key_dim, val_dim, nullptr, storage, actual.data());
     if (actual.CopyToHost() != expected.CopyToHost()) {
       throw std::runtime_error("fused SSM FP16 epilogue changed output bits");
     }
@@ -911,9 +1208,10 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
     upload(d_state_q8, h_history);
     upload(d_delta_q8, h_delta0);
     gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
-        d_qkv, d_w, d_state_q8, d_conv_q8, d_delta_q8, d_alpha, d_beta, d_ssm_a,
-        d_ssm_dt, d_ssm_norm, d_gate, d_out_q8, d_q8_got, d_kq, d_ab, 0, batch,
-        qkv_dim, num_key_heads, num_heads, key_dim, val_dim);
+        d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_q8, d_delta_q8),
+        d_conv_q8, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
+        d_out_q8, d_q8_got, d_kq, d_ab, 0, batch, qkv_dim, num_key_heads,
+        num_heads, key_dim, val_dim);
     HIP_CHECK(hipDeviceSynchronize());
 
     std::vector<std::uint8_t> q8_ref(q8_bytes);
@@ -955,6 +1253,132 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
   }
 }
 
+// A prefill chunk that follows a rollback pin (prefill right after a cancelled
+// request's restore) reads the pinned conv history and state and writes the
+// other buffer pair. Both prefill recurrences must then produce the same bytes
+// as the in-place form and leave the pinned buffers untouched. Short batches
+// matter: the new conv history takes its tail from the old one when fewer than
+// four tokens arrive.
+void TestBatchedRecurrenceDivergingState(std::size_t batch) {
+  using gufo::hip::QwenRecurrentStateIo;
+  using gufo::test::DeviceBuffer;
+  using Storage = gufo::hip::QwenRecurrentStateStorage;
+  constexpr std::uint32_t num_key_heads = 16;
+  constexpr std::uint32_t num_heads = 48;
+  constexpr std::uint32_t key_dim = 128;
+  constexpr std::uint32_t val_dim = 128;
+  constexpr std::size_t qkv_dim =
+      (2 * num_key_heads * key_dim) + (num_heads * val_dim);
+  constexpr std::size_t inner_size = num_heads * val_dim;
+  constexpr std::size_t delta_size =
+      static_cast<std::size_t>(num_heads) * key_dim * val_dim;
+  std::cout << "Batched recurrence from a pinned state: batch=" << batch
+            << "\n";
+
+  const auto values = [](std::size_t size, float scale, float phase) {
+    std::vector<float> result(size);
+    for (std::size_t i = 0; i < size; ++i)
+      result[i] = scale * std::sin(phase + static_cast<float>(i) * 0.013F);
+    return result;
+  };
+  const auto expect = [](bool condition, const char* message) {
+    if (!condition)
+      throw std::runtime_error(message);
+  };
+  const auto same_bytes = [](const auto& expected, const auto& actual) {
+    return expected.size() == actual.size() &&
+           std::memcmp(expected.data(), actual.data(),
+                       expected.size() * sizeof(expected[0])) == 0;
+  };
+  DeviceBuffer<float> qkv(values(batch * qkv_dim, 0.6F, 1)),
+      weights(values(qkv_dim * 4, 0.25F, 2)),
+      alpha(values(batch * num_heads, 1.5F, 3)),
+      beta(values(batch * num_heads, 0.3F, 4)),
+      decay(std::vector<float>(num_heads, -0.05F)),
+      dt(values(num_heads, 0.1F, 5)), norm(values(val_dim, 0.9F, 6)),
+      gate(values(batch * inner_size, 0.5F, 7)), conv_output(batch * qkv_dim),
+      output(batch * inner_size), kq_scales(batch * num_key_heads * 3),
+      alpha_beta(batch * num_heads * 2);
+  const auto history = values(qkv_dim * 4, 0.4F, 8);
+  const auto delta = values(delta_size, 0.01F, 9);
+  const std::size_t conv_bytes = history.size() * sizeof(float);
+
+  for (const auto storage : {Storage::kFp32, Storage::kBf16}) {
+    const std::size_t element_bytes =
+        gufo::hip::QwenRecurrentStateElementBytes(storage);
+    std::vector<std::uint8_t> delta_seed(delta_size * element_bytes);
+    for (std::size_t i = 0; i < delta_size; ++i) {
+      if (storage == Storage::kFp32) {
+        std::memcpy(delta_seed.data() + i * element_bytes, &delta[i],
+                    element_bytes);
+      } else {
+        const auto bits = gufo::test::FloatToBf16Bits(delta[i]);
+        std::memcpy(delta_seed.data() + i * element_bytes, &bits,
+                    element_bytes);
+      }
+    }
+    DeviceBuffer<float> conv_in_place(history), conv_in(history),
+        conv_out(history.size());
+    DeviceBuffer<std::uint8_t> delta_in_place(delta_seed), delta_in(delta_seed),
+        delta_out(delta_seed.size());
+    const auto in_place = QwenRecurrentStateIo::InPlace(conv_in_place.data(),
+                                                        delta_in_place.data());
+    const QwenRecurrentStateIo diverging{conv_in.data(), conv_out.data(),
+                                         delta_in.data(), delta_out.data()};
+    const auto reseed = [&] {
+      conv_in_place.CopyFrom(history);
+      delta_in_place.CopyFrom(delta_seed);
+      HIP_CHECK(hipMemset(conv_out.data(), 0x5A, conv_bytes));
+      HIP_CHECK(hipMemset(delta_out.data(), 0x5A, delta_seed.size()));
+      HIP_CHECK(
+          hipMemset(output.data(), 0, batch * inner_size * sizeof(float)));
+    };
+    const auto compare = [&](const char* route) {
+      HIP_CHECK(hipDeviceSynchronize());
+      expect(
+          same_bytes(conv_in_place.CopyToHost(), conv_out.CopyToHost()) &&
+              same_bytes(delta_in_place.CopyToHost(), delta_out.CopyToHost()),
+          route);
+      expect(same_bytes(history, conv_in.CopyToHost()) &&
+                 same_bytes(delta_seed, delta_in.CopyToHost()),
+             "diverging prefill wrote into the pinned buffers");
+    };
+    const auto run_plain = [&](QwenRecurrentStateIo state) {
+      gufo::hip::LaunchBatchedSSMConvRecurrence(
+          qkv.data(), weights.data(), state, conv_output.data(), alpha.data(),
+          beta.data(), decay.data(), dt.data(), norm.data(), gate.data(),
+          output.data(), 0, batch, qkv_dim, num_key_heads, num_heads, key_dim,
+          val_dim, nullptr, storage);
+    };
+    const auto run_row_split = [&](QwenRecurrentStateIo state) {
+      gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
+          qkv.data(), weights.data(), state, conv_output.data(), alpha.data(),
+          beta.data(), decay.data(), dt.data(), norm.data(), gate.data(),
+          output.data(), nullptr, kq_scales.data(), alpha_beta.data(), 0, batch,
+          qkv_dim, num_key_heads, num_heads, key_dim, val_dim, nullptr,
+          storage);
+    };
+
+    reseed();
+    run_plain(in_place);
+    HIP_CHECK(hipDeviceSynchronize());
+    const auto plain_output = output.CopyToHost();
+    run_plain(diverging);
+    compare("diverging batched recurrence changed the state");
+    expect(same_bytes(plain_output, output.CopyToHost()),
+           "diverging batched recurrence changed the output");
+
+    reseed();
+    run_row_split(in_place);
+    HIP_CHECK(hipDeviceSynchronize());
+    const auto row_split_output = output.CopyToHost();
+    run_row_split(diverging);
+    compare("diverging row-split recurrence changed the state");
+    expect(same_bytes(row_split_output, output.CopyToHost()),
+           "diverging row-split recurrence changed the output");
+  }
+}
+
 #endif  // defined(ENGINE_ENABLE_HIP)
 
 int main() {
@@ -969,6 +1393,7 @@ int main() {
   TestConcurrentSsmRecurrence();
   TestRecurrentRollbackRows(false);
   TestRecurrentRollbackRows(true);
+  TestRecurrentForkPingPong();
   TestBf16RecurrentMemoryAndSnapshot();
   for (const std::size_t batch : {1U, 2U, 3U, 7U, 96U}) {
     TestBatchedSSMRowSplitRecurrenceEquivalence(batch);
@@ -976,6 +1401,10 @@ int main() {
   // Above the launcher's 2048-token crossover, so the two-row prefetching tile
   // runs too.
   TestBatchedSSMRowSplitRecurrenceEquivalence(2080);
+  for (const std::size_t batch : {1U, 2U, 3U, 7U, 96U}) {
+    TestBatchedRecurrenceDivergingState(batch);
+  }
+  TestBatchedRecurrenceDivergingState(2080);
   std::cout << "Qwen ssm ops test passed on gfx1151.\n";
   return 0;
 #else

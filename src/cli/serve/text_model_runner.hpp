@@ -272,10 +272,11 @@ public:
   [[nodiscard]] virtual std::vector<TextExecutionPlan> SupportedPlans()
       const = 0;
 
-  /// Lazily built only for constrained requests; normal text loads pay nothing.
+  /// Prepared before serving and shared by all constrained requests.
+  /// A null vocabulary means the runner does not support structured output.
   [[nodiscard]] virtual std::shared_ptr<const sampling::ConstraintVocabulary>
   BuildConstraintVocabulary() const {
-    throw std::invalid_argument("model does not support structured output");
+    return nullptr;
   }
   [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
       const {
@@ -284,9 +285,38 @@ public:
   /// Reuse a compiled grammar bound to this runner's vocabulary.
   [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
       std::shared_ptr<const sampling::JsonConstraint> grammar) const;
+  /// Builds the vocabulary BindConstraint uses now rather than in the first
+  /// constrained request; later calls reuse it. Returns its token count.
+  /// Returns zero when the runner has no structured output. Build failures
+  /// propagate to the caller.
+  std::size_t PrepareConstraintVocabulary() const;
+
+  /// Reasoning tags for a token budget, as llama.cpp's chat format for the
+  /// model defines them: `forced_end` is emitted once the budget is spent and
+  /// any of `ends` closes reasoning early.
+  struct ReasoningTags {
+    std::string_view start;
+    std::string_view forced_end;
+    std::vector<std::string_view> ends;
+  };
+  [[nodiscard]] virtual ReasoningTags ReasoningBudgetTags() const {
+    return {"<think>", "</think>", {"</think>"}};
+  }
+  /// Zero when the vocabulary cannot be enumerated.
+  [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
+  /// A budget for a prompt that opens reasoning, or null when the tags are not
+  /// single tokens in this vocabulary.
+  [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
+  BuildReasoningBudget(std::size_t tokens,
+                       std::span<const TextRunnerToken> prompt) const;
 
   [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const = 0;
+  /// Tokenizes control text such as `</think>` as the template renders it.
+  [[nodiscard]] virtual std::vector<TextRunnerToken> TokenizeControl(
+      std::string_view text) const {
+    return Tokenize(text);
+  }
   [[nodiscard]] virtual std::optional<std::vector<TextRunnerToken>>
   RenderAndTokenize(const ChatRequest& request) const = 0;
   [[nodiscard]] virtual std::optional<TextPreparedPrompt> PreparePrompt(
@@ -456,6 +486,7 @@ private:
       constraint_vocabulary_;
   mutable std::vector<std::shared_ptr<const sampling::TokenConstraint>>
       constraints_;
+  mutable std::shared_ptr<const std::vector<bool>> partial_utf8_;
 };
 
 /// Bounded pool of opaque runner states with exact-prefix continuation reuse.

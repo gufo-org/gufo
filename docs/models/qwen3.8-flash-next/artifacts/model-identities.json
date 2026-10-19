@@ -282,5 +282,45 @@
     "quality": "All 24 depth completions and prompt/cache counts match main. All 63 concurrent tg128 completions match isolated AR, with expected prefix reuse. Draft counts can differ. Independent row-value tests and existing model/sampler oracles qualify the unchanged arithmetic; HTTP text consistency is not original-model accuracy qualification.",
     "timingScope": "The repeated 8K prefill allocation delay is fixed. The 12K repetitive maximum token gap increases by 6-10 ms while total generation more than doubles; this accepted throughput tradeoff is not a timing pass. Other request timing limitations and their controls remain documented in QUALITY.md.",
     "retained": "Loading and memory retain October 16 fdc21849. All September 22-23 llama.cpp measurements remain unchanged and were not rerun or requalified."
+  },
+  "benchmarks-2026-10-18-host-memory": {
+    "scope": "Complete Gufo single-user, concurrency, cold-file loading and memory refresh.",
+    "gufo": {
+      "revision": "fec4759d064585d72f87c6e11af5cfa0e1fa95c7",
+      "dirty": false,
+      "binarySha256": "1d822fb97b4639c61df61e9f5fcc874d9b639a69c82c484bfa4dafbbcb44a692",
+      "launcherSha256": "04b95b3769f0ab2d61fa2de798257ee70056583dd53bda1dfa272cd6e1956dac",
+      "build": "nix build; same pinned compiler/dependencies, with the retained ROCr host-memory patch",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6"
+    },
+    "mainControl": {
+      "revision": "f948ddd371bf2a3f7360b7069fc703badbbc07ed",
+      "binarySha256": "a11cfb07072426feb01517aa8ab900ee8d8932e60c85b68c6729fb0a5f04b0cd",
+      "scope": "Focused repetitive-MTP history through 64K, cold loading, cache and screenshot histories."
+    },
+    "measurement": "One warmed sample per point, with one focused ordered repetition repeat through 64K to investigate three PP dips. Repeated rows report mean +/- sample standard deviation and retain both observations. Same prompts and realized 17213143040-byte RAM cache budget; all other rows use the complete sweep. Greedy, thinking off, pp2048/tg128, C1 capacity 133760. Concurrent sessions prepare their prefix before measured tg128.",
+    "quality": "All 24 depth completions and prompt/cache counts agree with the prior qualified sweep. All 63 concurrent completions match fresh AR controls. The focused repeat preserves all work and outputs and passes all compared phases, including prefix preparation. Independent memory, byte-copy, projection, MTP and vision checks qualify unchanged arithmetic; this is not a new original-model accuracy evaluation.",
+    "timingScope": "Initial repetitive PP dips did not repeat against current main; original observations remain in the mean and spread. One cache-history queue/TTFT flag remains inconclusive. See host-memory-stalls-review.json and QUALITY.md.",
+    "conditions": {
+      "platform_profile": "performance",
+      "tuned_profile": "accelerator-performance",
+      "profile_verified_throughout": true,
+      "monitor_samples": 1095,
+      "overlapping_builds_or_model_jobs": false,
+      "temperatures_c": {
+        "k10temp:temp1_input": {
+          "start": 60.625,
+          "minimum": 50.25,
+          "maximum": 93.625
+        },
+        "amdgpu:temp1_input": {
+          "start": 45.0,
+          "minimum": 40.0,
+          "maximum": 79.0
+        }
+      }
+    },
+    "loadingMethod": "Cold target/sidecar files verified with POSIX_FADV_DONTNEED and mincore; C1 MTP capacity 262144. Runtime libraries may be warm.",
+    "reference": "All September 22-23 llama.cpp artifacts, values and provenance unchanged; no new reference run or equivalence qualification."
   }
 }

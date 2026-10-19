@@ -712,6 +712,16 @@ int main(int argc, const char* const* argv) {
       (void)Capture(model, true, CheckMode::kConcurrency);
       return 0;
     }
+    if (argc == 3 && std::string_view(argv[2]) == "--fingerprints-only") {
+      const auto cases = Capture(model, false);
+      for (std::size_t c = 0; c < cases.size(); ++c) {
+        for (std::size_t row = 0; row < cases[c].logits.size(); ++row) {
+          std::cout << "target fingerprint case=" << c << " row=" << row
+                    << " logits=" << Fingerprint(cases[c].logits[row]) << '\n';
+        }
+      }
+      return 0;
+    }
     // Reference mode measures quantization on fixed histories. Replay,
     // concurrency and long-context checks belong to the normal model suite.
     const auto candidate = Capture(model, argc <= 2);

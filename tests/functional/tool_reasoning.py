@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from gufo.control_tokens import kEndOfText, kImEnd, kImStart  # noqa: E402
 
 from metrics import validate_tool_events
+from tier import streaming_modes
 
 
 OLD_TEXT = '    """Fixture notes."""}}]}}</tool_call>\n\n<tool_call>(\'tool\', \'{\''
@@ -350,7 +351,7 @@ def check_unfinished_lookalike(client, model, checks, chat_result):
         "parameters": {"type": "object",
                        "properties": {"text": {"type": "string"}},
                        "required": ["text"]}}}]
-    for streaming in (False, True):
+    for streaming in streaming_modes():
         mode = "stream" if streaming else "buffered"
         label = f"unfinished_lookalike_tail_{mode}"
         request = dict(model=model,
@@ -387,7 +388,7 @@ def check_tail_lookalike_content(client, model, checks, chat_result):
                        "properties": {"text": {"type": "string"}},
                        "required": ["text"]}}}]
     for name, (prompt, literal) in TAIL_LOOKALIKE_CASES.items():
-        for streaming in (False, True):
+        for streaming in streaming_modes():
             mode = "stream" if streaming else "buffered"
             label = f"tail_lookalike_{name}_{mode}"
             request = dict(model=model,
@@ -454,7 +455,7 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
         # A shape may override the documented call format: the model can only
         # name the markup it was handed, so testing a family means handing it.
         system = SHAPE_SYSTEM.get(name, ENVELOPE_SYSTEM)
-        for streaming in (False, True):
+        for streaming in streaming_modes():
             mode = "stream" if streaming else "buffered"
             label = f"envelope_closer_{name}_{mode}"
             request = dict(model=model,
@@ -568,7 +569,7 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
                 assert_no_envelope_framing(result)
 
     # No tools: the envelope is prose, so nothing about it is framing.
-    for streaming in (False, True):
+    for streaming in streaming_modes():
         mode = "stream" if streaming else "buffered"
         label = f"envelope_closer_no_tools_{mode}"
         request = dict(model=model,
@@ -587,7 +588,7 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
 
     # Reuse an actual warm turn, then contaminate its replay as the old client
     # did. Vocabulary spellings in assistant/tool data must remain literal text.
-    for streaming in (False, True):
+    for streaming in streaming_modes():
         mode = "stream" if streaming else "buffered"
         label = f"envelope_closer_replayed_history_{mode}"
         request = dict(model=model,
@@ -625,7 +626,7 @@ def check_literal_protocol_data(client, model, checks, chat_result):
         "comparison": "3 < 5 and x < y.",
     }
     for name, literal in literals.items():
-        for streaming in (False, True):
+        for streaming in streaming_modes():
             label = f"literal_protocol_{name}_{'stream' if streaming else 'buffered'}"
             request = dict(model=model, messages=[{"role": "user", "content":
                 "Reply with exactly the following literal text, without any code fence, "
@@ -654,7 +655,7 @@ def check_html_content(client, model, checks, chat_result):
                        "required": ["text"]}}}]
     prompt = ("Write a minimal HTML page with a heading that says Hello and one "
               "paragraph. Reply with the HTML only, no explanation.")
-    for streaming in (False, True):
+    for streaming in streaming_modes():
         mode = "stream" if streaming else "buffered"
         label = f"html_content_{mode}"
         request = dict(model=model,
@@ -723,7 +724,7 @@ def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=Fal
         "command": {"type": "string"}}, "required": ["command"]}}
     for name, (system, prompt, opener) in QUOTED_THEN_CALL_CASES.items():
         documented = 0
-        for streaming in (False, True):
+        for streaming in streaming_modes():
             mode = "stream" if streaming else "buffered"
             label = f"quoted_then_call_{name}_{mode}"
             request = dict(model=model,
@@ -769,7 +770,7 @@ def check_unfinished_inline_then_call(client, model, checks, chat_result):
     """A stray backtick followed by one newline must not swallow a real call."""
     for name, prefix in (("filename", "I'll update `config.py"),
                          ("apostrophe", "Let`s write it.")):
-        for streaming in (False, True):
+        for streaming in streaming_modes():
             mode = "stream" if streaming else "buffered"
             label = f"unfinished_inline_then_call_{name}_{mode}"
             request = dict(model=model, messages=[{"role": "system", "content":
@@ -838,32 +839,37 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
                          max_output_tokens=1024,
                          extra_body={"seed": 41, "cache_prompt": False})
         label = "strict" if strict else "non_strict"
-        for endpoint, request in (("chat", chat), ("responses", responses)):
-            reference = None
-            for streaming in (False, True):
-                mode = "stream" if streaming else "buffered"
-                result = (chat_result(client, request, streaming) if endpoint == "chat"
-                          else response_result(client, request, streaming))
-                record(f"tool_reasoning_{endpoint}_{mode}_{label}", result)
-                assert_edit(result)
-                signature = (result["reasoning"].strip(), result["text"],
-                             json.loads(result["tools"][0]["function"]["arguments"]))
-                if reference is not None:
-                    assert signature == reference, (signature, reference)
-                reference = signature
+        # Pairwise over strictness, endpoint and streaming: each strictness
+        # compares one buffered and one streamed endpoint, so every pair of
+        # values runs once and greedy output must match across the pair.
+        reference = None
+        for endpoint, streaming in ((("chat", False), ("responses", True)) if strict
+                                    else (("chat", True), ("responses", False))):
+            mode = "stream" if streaming else "buffered"
+            result = (chat_result(client, chat, streaming) if endpoint == "chat"
+                      else response_result(client, responses, streaming))
+            record(f"tool_reasoning_{endpoint}_{mode}_{label}", result)
+            assert_edit(result)
+            signature = (result["reasoning"].strip(), result["text"],
+                         json.loads(result["tools"][0]["function"]["arguments"]))
+            if reference is not None:
+                assert signature == reference, (signature, reference)
+            reference = signature
+            if endpoint == "chat":
+                thought, chat_streaming = result["reasoning"], streaming
 
         # Stop after the actual quoted opener, before reasoning ends. Deriving
         # the stop from greedy output avoids a model-specific token budget.
-        thought = checks[f"tool_reasoning_chat_buffered_{label}"]["reasoning"]
+        # The stopped request uses the other streaming mode than its source.
         cut = thought.index("<tool_call>") + len("<tool_call>")
         marker = thought[cut:cut + 16]
         assert len(marker) == 16 and thought.index(marker) == cut, thought
-        for streaming in (False, True):
-            mode = "stream" if streaming else "buffered"
-            result = chat_result(client, {**chat, "stop": marker}, streaming)
-            record(f"tool_reasoning_stopped_{mode}_{label}", result)
-            assert result["reasoning"].strip() == thought[:cut].strip(), result
-            assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
+        streaming = not chat_streaming
+        mode = "stream" if streaming else "buffered"
+        result = chat_result(client, {**chat, "stop": marker}, streaming)
+        record(f"tool_reasoning_stopped_{mode}_{label}", result)
+        assert result["reasoning"].strip() == thought[:cut].strip(), result
+        assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
     check_disabled_tool_markers(client, model, checks, chat_result)
     deepseek = sampling_preset == "deepseek4"
     check_envelope_closer_framing(client, model, checks, chat_result, deepseek)

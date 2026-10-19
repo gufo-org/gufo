@@ -15,5 +15,12 @@ namespace gufo::models::qwen38_flash_next::rocm {
                                             std::size_t bytes,
                                             hipStream_t stream);
 
+// Registered host snapshots use the same byte-exact kernel for restore.
+// Other sources retain HIP's inferred direction, including borrowed GPU rows.
+[[nodiscard]] hipError_t CopySnapshotToDevice(void* destination,
+                                              const void* source,
+                                              std::size_t bytes,
+                                              hipStream_t stream);
+
 }  // namespace gufo::models::qwen38_flash_next::rocm
 #endif

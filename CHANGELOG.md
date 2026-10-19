@@ -4,6 +4,20 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.17.1](https://github.com/gufo-org/gufo/compare/v0.17.0...v0.17.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **cache:** reject capacity retries before reading payloads ([#636](https://github.com/gufo-org/gufo/issues/636)) ([778061d](https://github.com/gufo-org/gufo/commit/778061d453ff4cf863c47059f8ea63142c7f5ca1))
+* **inference:** reduce Flash-Next cache and cold-prompt stalls ([#633](https://github.com/gufo-org/gufo/issues/633)) ([1f97092](https://github.com/gufo-org/gufo/commit/1f97092333af10f29887b098d9cb8a041610004a))
+
+
+### Performance
+
+* **qwen-flash:** copy repeated context into MTP drafts ([#613](https://github.com/gufo-org/gufo/issues/613)) ([8497711](https://github.com/gufo-org/gufo/commit/8497711eb154ecff55ef4119a01ace214149e276))
+* **qwen-flash:** cut prefill and decode attention cost at depth ([#626](https://github.com/gufo-org/gufo/issues/626)) ([5a1669a](https://github.com/gufo-org/gufo/commit/5a1669a6c15129917a4e91b77bd36ddaa3e7b0d8))
+
 ## [0.17.0](https://github.com/gufo-org/gufo/compare/v0.16.0...v0.17.0) (2026-10-17)
 
 

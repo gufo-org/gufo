@@ -165,7 +165,9 @@ std::size_t QwenDFlashGpuSnapshot::SerializePersistent(
     throw std::invalid_argument("DFlash GPU snapshot payload is malformed");
   }
 
-  std::fill(destination.begin(), destination.end(), std::uint8_t{0});
+  // K/V copies overwrite the payload; do not clear those pages on the CPU.
+  std::fill_n(destination.begin(), kDFlashGpuPersistentHeaderBytes,
+              std::uint8_t{0});
   std::copy(kDFlashGpuPersistentMagic.begin(), kDFlashGpuPersistentMagic.end(),
             destination.begin());
   PutLittleEndian<std::uint32_t>(destination, 8, kDFlashGpuPersistentVersion);

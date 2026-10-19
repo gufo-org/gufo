@@ -113,13 +113,20 @@ void TestArenaRestoresOnlyMutableRecurrentState() {
                       hipMemcpyHostToDevice));
   arena.SaveState(4);
 
-  HIP_CHECK(hipMemset(arena.d_ssm_conv_state, 0,
-                      conv_initial.size() * sizeof(float)));
-  HIP_CHECK(hipMemset(arena.d_ssm_deltanet_state, 0,
+  // The save pins the live buffers in place. A pass that follows it must write
+  // the other pair, named by BeginRecurrentWrite, which the live mirrors then
+  // follow; writing through the pinned pointers would destroy the rollback.
+  const auto pass = arena.BeginRecurrentWrite();
+  Expect(pass.Diverges() && pass.conv_out == arena.d_ssm_conv_state &&
+             pass.recurrent_out == arena.d_ssm_deltanet_state,
+         "pass after a save must write the other buffer pair");
+  HIP_CHECK(hipMemset(pass.conv_out, 0, conv_initial.size() * sizeof(float)));
+  HIP_CHECK(hipMemset(pass.recurrent_out, 0,
                       deltanet_initial.size() * sizeof(float)));
   HIP_CHECK(hipMemset(arena.d_kv_cache, 0, kv_initial.size() * sizeof(float)));
   HIP_CHECK(hipDeviceSynchronize());
   arena.RestoreState();
+  HIP_CHECK(hipStreamSynchronize(arena.stream));
 
   const auto conv_restored =
       CopyToHost(arena.d_ssm_conv_state, conv_initial.size());
@@ -214,13 +221,18 @@ void TestCapturedInputsReplayBitExactly() {
   HIP_CHECK(hipMemcpy(d_enabled.Get(), &enabled, sizeof(enabled),
                       hipMemcpyHostToDevice));
 
+  using gufo::hip::QwenRecurrentStateIo;
+  const auto golden_state =
+      QwenRecurrentStateIo::InPlace(d_conv_golden.Get(), d_delta_golden.Get());
+  const auto capture_state = QwenRecurrentStateIo::InPlace(
+      d_conv_capture.Get(), d_delta_capture.Get());
   for (std::size_t token = 0; token < token_count; ++token) {
     gufo::hip::LaunchSSMConvRecurrence(
-        d_qkv.Get() + token * qkv_size, d_weights.Get(), d_conv_golden.Get(),
-        d_conv_out.Get(), d_delta_golden.Get(),
-        d_alpha.Get() + token * num_heads, d_beta.Get() + token * num_heads,
-        d_ssm_a.Get(), d_ssm_dt.Get(), nullptr, nullptr, d_output.Get(), layer,
-        qkv_size, num_key_heads, num_heads, key_dim, val_dim);
+        d_qkv.Get() + token * qkv_size, d_weights.Get(), golden_state,
+        d_conv_out.Get(), d_alpha.Get() + token * num_heads,
+        d_beta.Get() + token * num_heads, d_ssm_a.Get(), d_ssm_dt.Get(),
+        nullptr, nullptr, d_output.Get(), layer, qkv_size, num_key_heads,
+        num_heads, key_dim, val_dim);
   }
 
   const gufo::hip::SsmReplayCapture capture{
@@ -235,11 +247,11 @@ void TestCapturedInputsReplayBitExactly() {
     HIP_CHECK(hipMemcpy(d_position.Get(), &position, sizeof(position),
                         hipMemcpyHostToDevice));
     gufo::hip::LaunchSSMConvRecurrence(
-        d_qkv.Get() + token * qkv_size, d_weights.Get(), d_conv_capture.Get(),
-        d_conv_out.Get(), d_delta_capture.Get(),
-        d_alpha.Get() + token * num_heads, d_beta.Get() + token * num_heads,
-        d_ssm_a.Get(), d_ssm_dt.Get(), nullptr, nullptr, d_output.Get(), layer,
-        qkv_size, num_key_heads, num_heads, key_dim, val_dim, nullptr, capture);
+        d_qkv.Get() + token * qkv_size, d_weights.Get(), capture_state,
+        d_conv_out.Get(), d_alpha.Get() + token * num_heads,
+        d_beta.Get() + token * num_heads, d_ssm_a.Get(), d_ssm_dt.Get(),
+        nullptr, nullptr, d_output.Get(), layer, qkv_size, num_key_heads,
+        num_heads, key_dim, val_dim, nullptr, capture);
   }
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -274,10 +286,10 @@ void TestCapturedInputsReplayBitExactly() {
                                   beta.begin() + (token + 1) * num_heads),
            "captured beta input");
     gufo::hip::LaunchSSMConvRecurrence(
-        replay_qkv, d_weights.Get(), d_conv_capture.Get(), d_conv_out.Get(),
-        d_delta_capture.Get(), replay_alpha, replay_beta, d_ssm_a.Get(),
-        d_ssm_dt.Get(), nullptr, nullptr, d_output.Get(), layer, qkv_size,
-        num_key_heads, num_heads, key_dim, val_dim);
+        replay_qkv, d_weights.Get(), capture_state, d_conv_out.Get(),
+        replay_alpha, replay_beta, d_ssm_a.Get(), d_ssm_dt.Get(), nullptr,
+        nullptr, d_output.Get(), layer, qkv_size, num_key_heads, num_heads,
+        key_dim, val_dim);
   }
   HIP_CHECK(hipDeviceSynchronize());
 

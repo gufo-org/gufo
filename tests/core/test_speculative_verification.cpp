@@ -860,6 +860,51 @@ void TestGreedyPenaltiesRetainSpeculationAndHistory() {
   }
 }
 
+void TestGreedyReasoningBudgetForcesEndThroughVerification() {
+  // Token 2 stands for </think>. The target never predicts it and the draft
+  // never proposes it, so only the sampler's forced end can emit it.
+  for (const std::size_t reasoning_budget : {0U, 1U, 2U, 5U}) {
+    const std::vector<float> logits = {-INFINITY, 2.0F, 1.8F};
+    SampledTargetExecutor target(logits, true);
+    gufo::speculative::DraftProposal proposal{
+        .tokens = {1, 1},
+        .candidate_ids = {},
+        .candidate_probabilities = {},
+        .start_pos = 1,
+    };
+    gufo::speculative::SpeculativeOptions options;
+    options.max_draft_tokens = 2;
+    options.initial_draft_tokens = 2;
+    options.enable_adaptive_draft_length = false;
+    gufo::speculative::SpeculativeVerifier verifier(
+        target, std::make_unique<FixedSampledDraftBackend>(proposal), options);
+    const std::vector<TokenId> prompt{0};
+    const TokenId current = verifier.Prime(prompt);
+    std::vector<TokenId> sequence{0, current};
+    gufo::sampling::SamplingConfig config;
+    auto budget = std::make_shared<gufo::sampling::ReasoningBudget>();
+    budget->tokens = reasoning_budget;
+    budget->forced = {2};
+    budget->ends = {2};
+    config.reasoning_budget = budget;
+    gufo::sampling::SamplerState sampler(config);
+    auto reference = sampler;
+    const auto result =
+        verifier.VerifyStep(sequence, 1, current, 99, 3, sampler);
+    Expect(result.draft_count == 2, "a greedy reasoning budget keeps drafting");
+    Expect(!result.emitted_tokens.empty(),
+           "budgeted verification emits at least one token");
+    for (const auto token : result.emitted_tokens) {
+      Expect(token == reference.Sample(logits),
+             "every budgeted speculative token equals sequential AR");
+      reference.Accept(token);
+    }
+    const bool forced = reasoning_budget < 3;
+    Expect(forced == (result.emitted_tokens.back() == 2),
+           "the reasoning end is emitted exactly when the budget is reached");
+  }
+}
+
 void TestMalformedProposalDoesNotAdvanceTarget() {
   for (int kind = 0; kind < 7; ++kind) {
     SampledTargetExecutor target({-INFINITY, std::log(0.25F), std::log(0.75F)});
@@ -1441,6 +1486,7 @@ int main() {
   TestFilteredSampledSpeculationMatchesTargetDistribution();
   TestFilteredSampledSpeculationMatchesTargetDistribution(true);
   TestGreedyPenaltiesRetainSpeculationAndHistory();
+  TestGreedyReasoningBudgetForcesEndThroughVerification();
   TestMalformedProposalDoesNotAdvanceTarget();
   TestStopAndBudgetKeepExactFrontier();
   TestConcurrentTargetOnlySteps();

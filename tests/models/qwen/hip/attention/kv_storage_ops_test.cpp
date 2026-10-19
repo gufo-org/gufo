@@ -194,8 +194,12 @@ void TestCanonicalMemoryAccountingAndSnapshot() {
   HIP_CHECK(hipMemcpy(fp32_arena.d_kv_cache, source.data(),
                       source.size() * sizeof(float), hipMemcpyHostToDevice));
   auto saved = fp32_arena.SaveSnapshot(7);
-  std::vector<std::uint8_t> serialized(saved->CompactPayloadBytes());
+  std::vector<std::uint8_t> serialized(saved->CompactPayloadBytes(), 0xA5);
   saved->SerializeCompact(serialized);
+  std::vector<std::uint8_t> overwritten(serialized.size(), 0x5A);
+  saved->SerializeCompact(overwritten);
+  Expect(overwritten == serialized,
+         "FP32 snapshot must overwrite every destination byte");
   for (const bool disk : {false, true}) {
     HIP_CHECK(
         hipMemset(fp32_arena.d_kv_cache, 0, source.size() * sizeof(float)));
@@ -279,9 +283,13 @@ void TestCompactPersistentSnapshotRoundTrip() {
              snapshot->PayloadBytes() + header_bytes,
          "GPU and disk snapshots must retain the same compact state");
 
-  std::vector<std::uint8_t> payload(snapshot->CompactPayloadBytes());
+  std::vector<std::uint8_t> payload(snapshot->CompactPayloadBytes(), 0xA5);
   Expect(snapshot->SerializeCompact(payload) == payload.size(),
          "compact snapshot serializer byte count");
+  std::vector<std::uint8_t> overwritten(payload.size(), 0x5A);
+  Expect(snapshot->SerializeCompact(overwritten) == overwritten.size() &&
+             overwritten == payload,
+         "compact snapshot must overwrite every destination byte");
 
   QwenGpuArena restored(config, context, policy);
   HIP_CHECK(hipMemset(restored.d_attention_kv_f16, 0xA5,

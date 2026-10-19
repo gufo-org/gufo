@@ -30,6 +30,7 @@ from discovery import check_discovery
 from image_inputs import check_image_count, check_image_inputs
 from tool_images import check_tool_images
 from tool_choice import check_tool_choice_cache
+from tool_parameter_order import check_tool_parameter_order
 from tool_native import check_finite_argument_types, check_native_tool_schemas
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
                         check_untyped_agent_tools, check_mixed_tool_schemas,
@@ -44,6 +45,7 @@ from cache_messages_loop import check_cache_messages_loop
 from system_injection import check_system_injection
 from cache_growth import check_cache_growth, check_unchanged_retry, log_offset
 from messages_tools import check_messages_tools
+from reasoning_budget import check_reasoning_budget
 from messages_count_tokens import check_messages_count_tokens, check_messages_image_counts
 from cache_depth import check_cache_depth
 from cache_stalls import check_cache_stalls
@@ -733,7 +735,7 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
     checks[f"batch_c{width}_rejected_peer_isolation"] = rejected
 
 
-def check_conversations(client, model, checks, vision=False):
+def check_conversations(client, model, checks, vision=False, server_log=None):
     """Exercise thinking controls and cache reuse after a client disconnect."""
 
     def signature(result):
@@ -879,17 +881,24 @@ def check_conversations(client, model, checks, vision=False):
             cold = chat("vision_" + color + "_cold", request)
             assert color in cold["text"].lower() and not cold["reasoning"], cold
             request["extra_body"]["cache_prompt"] = True
+            replay_start = log_offset(server_log)
             warm = chat("vision_" + color + "_warm", request)
+            replay_end = log_offset(server_log)
             repeated = chat("vision_" + color + "_replay", request, True)
             assert signature(cold) == signature(warm) == signature(repeated), (
                 cold,
                 warm,
                 repeated,
             )
-            assert (
-                repeated["usage"]["cached_tokens"] > 0
-                and repeated["usage"]["gufo"]["prefill_tokens"] == 0
-            ), repeated
+            usage = repeated["usage"]
+            prefilled = usage["gufo"]["prefill_tokens"]
+            assert usage["prompt_tokens"] == cold["usage"]["prompt_tokens"], repeated
+            assert usage["cached_tokens"] > 0, repeated
+            assert usage["cached_tokens"] + prefilled == usage["prompt_tokens"], repeated
+            # A refused full-prompt copy may leave only the stable image prefix.
+            # Require the preceding request's capacity refusal and a short tail.
+            check_unchanged_retry("vision_" + color + "_replay", repeated, prefilled,
+                                  server_log, replay_start, replay_end)
             candidates.append((request, cold))
         with ThreadPoolExecutor(2) as pool:
             results = list(
@@ -2658,8 +2667,8 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
 
 
 SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
-              "tool-reasoning", "tool-streaming", "reasoning-separator",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
+              "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
               "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection")
 
@@ -2748,7 +2757,8 @@ def main():
             "responses": lambda: check_responses(client, args.model, checks, options,
                                                    async_local_only, args.expect_reasoning),
             "stops": lambda: check_stops(client, args.model, checks),
-            "conversation": lambda: check_conversations(client, args.model, checks, args.vision),
+            "conversation": lambda: check_conversations(
+                client, args.model, checks, args.vision, args.server_log),
             "image-inputs": lambda: check_image_inputs(
                 client, args.model, checks, image_content, chat_result, response_result),
             "image-count": lambda: check_image_count(
@@ -2768,6 +2778,8 @@ def main():
             "reasoning-separator": lambda: check_reasoning_separator(
                 client, args.model, checks, chat_result, args.server_log),
             "tool-streaming": lambda: check_tool_streaming(client, args.model, checks, chat_result),
+            "reasoning-budget": lambda: check_reasoning_budget(
+                client, args.model, checks, chat_result),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
@@ -2787,6 +2799,8 @@ def main():
                 client, args.model, checks, chat_result,
                 image_content("red") if args.vision else None),
             "tool-choice-cache": lambda: check_tool_choice_cache(
+                client, args.model, checks, chat_result, args.server_log),
+            "tool-parameter-order": lambda: check_tool_parameter_order(
                 client, args.model, checks, chat_result),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content, args.server_log),

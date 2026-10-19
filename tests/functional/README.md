@@ -74,36 +74,58 @@ priority rules contribute a union. Unknown paths expand to all compatible
 coverage. Suite metadata must cover every name in `run.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
-`Devlab functional checks` starts when a maintainer applies `ci:functional` to a
-PR, or manually dispatches it with a PR number. The label event uses trusted base
-workflow code (`pull_request_target`); only Maintain/Admin senders and rerun
-actors authorize execution. The event's exact PR head must still be current.
-Later commits do not inherit approval: remove and reapply the label to approve
-another revision. It pins the PR head and merge base on `main`, plans on a hosted runner,
+`--tier pr` plans the per-PR set. Suites marked `"tier": "release"` (the deep
+cache histories, `cache-stalls`, `long-context` and `reasoning-budget`) then move
+to `release_only` unless a changed path matches their `escalate` patterns: cache
+code, the suite's own module, or Flash-Next model code for depth checks. `run.py
+--tier pr` also trims transport matrices that a case does not depend on:
+`tool-reasoning` keeps the streamed mode, whose partial parses end in the same
+final parse a buffered reply uses, and `tool-native-schemas` rotates endpoint,
+stream and tool choice across cases. `--tier full` (the default for manual runs)
+keeps every suite and combination.
+
+`Devlab functional checks` runs on every push to a non-draft PR, like `CI`
+(`pull_request`), and fork PRs follow the same repository approval policy; a
+newer push cancels the PR's earlier run. PRs run the `pr` tier; release-please
+PRs and dispatches (unless they choose `tier: pr`) run `full`. Maintain/Admin users can also dispatch
+it with a PR number. It pins
+the event's PR head and merge base on `main`, plans on a hosted runner,
 and allocates the cluster only for affected Flash-Next MTP coverage (or an
 explicit benchmark request). AR suites run only when a dispatch sets `ar`, which
 plans with `--model flash-next-q4`; the default is `--model flash-next-q4/mtp`.
-`--model` accepts a model or a single `model/mode` profile. The workflow and harness come from the trusted
-workflow revision; only the production binary is built from the approved PR.
-It fetches the pinned Q4 shards, MTP sidecar and vision projector into a persistent
+`--model` accepts a model or a single `model/mode` profile. The workflow, harness
+and production binary all come from the PR, as in `CI`.
+While it builds, it fetches the pinned Q4 shards, MTP sidecar and vision projector
+in the background into a persistent
 cache under `$GUFO_CI_CACHE` (default `$RUNNER_TOOL_CACHE/gufo`; the weights need
 about 110 GiB free), and retains reports and selection reasons as artifacts.
 Weight and `ccache` reuse depend on the cluster preserving that directory on the
-allocated machine. A benchmark request also builds the merge base and runs the
-same AR sweep on it first, so the report shows per-depth deltas; one sweep per
-revision is an observation, not a qualified timing regression.
+allocated machine. The job also builds the merge base. After the suites,
+`phases.py` alternates base and PR servers (two arms each, after GPU cool-down)
+through startup and a cold, long and follow-up MTP request, and the comment draws
+each phase as a Mermaid pipeline colored by its paired verdict: a phase is slower
+or faster only when every repeat moves by more than 5% and 3 ms. A benchmark
+request also runs the same AR sweep on the merge base first, so the report shows
+per-depth deltas. Both are observations, not qualified timing regressions.
 
 The cluster installs the client from `requirements.txt`, pinned to the flake's
 versions, because newer unpinned SDKs break every suite inside the client. Keep it
 covering every third-party import here; the install step imports the harness
 to catch gaps.
 
-A hosted `report` job then updates a single PR comment with results, failure
-log tails and benchmark deltas, sets the `devlab/functional` commit status and
-removes `ci:functional`. The status is advisory: it is not a required check, so
-a broken cluster never blocks merging. Suite failures report `failure`; cluster
-or harness problems (authorization, build, download, cancellation) report
-`error`. The PR write token stays on the hosted runner.
+A hosted `report` job then renders results, failure log tails and benchmark
+deltas into the run summary. For branches in this repository and dispatches it
+also updates a single PR comment and sets the `devlab/functional` commit status.
+A fork PR's token is read-only, so the job uploads the rendered report and
+`devlab-comment.yml` publishes it from a `workflow_run` in the base repository,
+without checking out PR code. While any PR run is in progress, the same
+workflow keeps a placeholder in that comment with a link to cancel the run.
+It only runs from `main`. The check
+is advisory on PRs, so a broken cluster never blocks an ordinary merge; the
+automatic release merge requires it (see [releasing](../../docs/RELEASING.md)). Suite
+failures report `failure`; cluster or harness problems (authorization, build,
+download, cancellation) report `error`. The PR write token stays on the hosted
+runner.
 
 `cluster.py` executes each configuration group with a fresh server/cache history
 and continues to other groups after a failure, removing each group's disk cache
@@ -229,6 +251,7 @@ RAM, disk and restart settings once their contracts pass.
 | `tool-reasoning` | Quoted tags, exact literal arguments, early stops, disabled tools, envelope framing, completed tool-result continuations and warm replay of contaminated history; Chat/Responses |
 | `tool-streaming` | Incremental argument arrival and exact assembly in Chat/Responses/Messages; stable IDs, literal framing, thinking, stopped/limited calls and successful retries |
 | `reasoning-separator` | No leading separator newlines after reasoning in Chat/Responses, plain/tools/JSON; exact streamed/buffered text, warm retry, continuation and thinking-off paragraph breaks |
+| `reasoning-budget` | llama.cpp-compatible budgets: Responses/Chat `reasoning_budget_tokens` (buffered and streamed), the older `thinking_budget_tokens` spelling, and Messages `budget_tokens` cap the ASCII fixture at N tokens while preserving its greedy reasoning prefix; adaptive and `-1` retain the server default, invalid/oversized values fail, sampled requests obey the cap, and replayed capped thinking preserves cache reuse |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
@@ -239,6 +262,7 @@ RAM, disk and restart settings once their contracts pass.
 | `tool-mixed` | JSON-only neighbors, annotated refs, extra keys, URI and nullable arguments across Chat/Responses; images, stops/retry and sampled peers; a union neighbor keeps native calls, so a replayed reasoning/call turn is reused in full |
 | `tool-native-schemas` | opencode's tool set beside each schema family that used to force a JSON envelope (pattern, oneOf, allOf, not, open objects), auto and required, strict: native calls, no prompt instruction, typed arguments and full reuse of the generated call; Chat/Responses |
 | `tool-choice-cache` | Required/auto/omitted transitions preserve the complete generated call, unchanged-choice controls, prompt-token equality and zero-prefill retries |
+| `tool-parameter-order` | Wide native schemas retain intended arguments across declaration orders, all three APIs, streaming, sampling and thinking; includes the 10/11/12-field controls from #641 |
 | `tool-native-types` | Focused subset: enum/const/inferred string types, literal delimiters and exact continuation reuse after new literal tool markers; Chat/Responses, text/images |
 | `tool-schema-edges` | Wildcard JSON types, conditional fields, impossible schemas, nested metadata and required-call timing; both APIs, cache, stops and sampled peers |
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops (including inside quoted calls), image retry and failed-request recovery |
@@ -322,11 +346,38 @@ replay different assistant text from main. Compare those timings using matched
 interrupted histories, not a direct baseline for the divergent session; this
 also applies to later disk-spacing and cancellation requests in that history.
 
+For repeated screenshot preprocessing (#627), `image_history.py` measures full
+RAM-cache retries with 1, 2 and 4 synthetic 1080p screenshots, similar-token text
+controls and 128px image controls. It uses only the Python standard library:
+
+```sh
+python3 tests/functional/image_history.py --output /tmp/image-history-main -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --mmproj /path/to/mmproj.gguf --sessions 1 --context 32768 \
+  --cache-ram-bytes 8589934592 --think off
+```
+
+Repeat with the candidate, identical model/mode/options and a fresh output path.
+The harness owns host, port and debug logging. It retains every request,
+response, per-request queue time, process RSS and preprocessing-cache byte count;
+retries require identical output, full prompt reuse and zero prefill. Add
+`--turns 1 --kind 1080p --repeats 7` for a focused control. Also add
+`--fresh-encoding` to change PNG metadata on each retry while preserving pixels,
+tokens and continuation identity: this measures preprocessing misses without
+GPU prefill. Add `--image /path/to/1920x1080.png` to check a supplied PNG,
+including the digest cost of a larger encoded payload. The native
+`qwen_vision_cache_test --capacity-probe` separately
+checks the default byte ceiling with 22 resized 1080p images.
+
 For real coding-agent regressions, run `pi_agent.py` against a local server with
 `--base-url`, `--model`, `--pi /path/to/pi-0.87.0`, `--server-log`, and a fresh
 `--output` directory. Repeat `--case` to select affected tasks;
 `--case literal-protocol --passes 1` exercises a real write/read/verify loop
 containing literal ChatML vocabulary spellings.
+`--case wide-tool --passes 1` loads a fixture extension with a 12-field `todo`
+schema and verifies two actual updates and their tool results, covering #641.
+Both Chat and Responses require exactly the requested fields, including when
+Pi omits `strict`; unrequested default values also fail the test.
 It replays #368's five tasks, verifies the generated code independently, and
 retains Pi sessions, HTTP/SSE and per-request timings. It executes generated
 commands in disposable fixtures using isolated Pi configuration. Use `--passes 1`
@@ -394,15 +445,19 @@ history, so the controls cannot hide a missed checkpoint. `cache-edits` checks
 latest-message edits, shortened tool results and rewinds. `cache-growth` checks
 omitted, preserved and explicitly discarded reasoning, plus thinking off.
 Unchanged retries in `cache-growth`, `cache-depth`, `long-context`, reasoning-separator,
-tool-history, schema edges, state edges, progress and metrics must prefill nothing,
-unless the runner's server log shows that memory pressure refused the retry
-copy; the retry may then prefill only the assistant opening after the stable
-boundary. In agent histories the mutable suffix includes the final user turn;
-`tool-history` bounds it with an independent count-tokens request rather than
-extra slack. Generic capture failures do not qualify for this exception.
+tool-history, `tool-choice-cache`, schema edges, state edges, progress and metrics
+must prefill nothing, unless the runner's server log shows that memory pressure
+refused the retry copy; the retry may then prefill only the assistant opening
+after the stable boundary. In agent histories the mutable suffix includes the
+final user turn; `tool-history` bounds it with an independent count-tokens
+request rather than extra slack, and `tool-choice-cache` does the same per case.
+Generic capture failures do not qualify for this exception.
 Run `nix develop -c python3 tests/functional/test_long_context.py` to check
 that only a capacity refusal in the preceding request's log window permits
 the framing suffix; lost context, changed output and unrelated refusals fail.
+Run `nix develop -c python3 tests/functional/test_tool_choice.py` to check that
+the tool-choice retry may prefill its final user turn only when the server
+logged a capacity refusal during the continued request.
 Component disk-spacing checks correlate drained publication logs with the
 checkpoint IDs captured by their own requests, excluding delayed writes from
 earlier suites even when their token counts match.
