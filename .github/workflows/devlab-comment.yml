@@ -75,11 +75,13 @@ jobs:
           read -r pr_number draft <<<"$pr"
 
           # Update one comment per PR instead of adding one per run.
-          read -r comment_id comment_running < <(gh api --paginate \
+          # Both the placeholder and the report link their run.
+          read -r comment_id comment_running comment_this_run < <(gh api --paginate \
             "repos/$GITHUB_REPOSITORY/issues/$pr_number/comments" \
             --jq '.[] | select(.user.login == "github-actions[bot]" and
                                (.body | startswith("<!-- devlab-functional -->"))) |
-                  "\(.id) \(.body | contains("<!-- devlab-functional:running -->"))"' |
+                  [.id, (.body | contains("<!-- devlab-functional:running -->")),
+                   (.body | contains("/actions/runs/" + env.RUN_ID + ")"))] | join(" ")' |
             head -1) || true
           publish() {
             if [[ -n "${comment_id:-}" ]]; then
@@ -99,7 +101,9 @@ jobs:
           if [[ "$ACTION" == in_progress ]]; then
             # Mirror the authorize job: drafts and release PRs do not run.
             [[ "$draft" == false && "$HEAD_BRANCH" != release-please--* ]] || exit 0
-            # A fast run may already have finished and posted its report.
+            # in_progress fires as each job starts, the report job included: only
+            # the first event of a run may replace the comment, never its report.
+            [[ "${comment_this_run:-}" != true ]] || exit 0
             status=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq .status)
             [[ "$status" != completed ]] || exit 0
             cat > placeholder.md <<EOF
