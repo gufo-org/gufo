@@ -2,6 +2,8 @@
 
 #include <sstream>
 
+#include "src/core/hip/arch.hpp"
+
 namespace gufo::diagnostics {
 
 namespace {
@@ -59,21 +61,22 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
     report.items.push_back(std::move(platform_item));
   }
 
-  // 2. GPU Architecture Check (gfx1151)
+  // 2. GPU Architecture Check (RDNA 3.5)
   if (section == "all" || section == "gpu" || section == "inventory") {
     CompatibilityItem gpu_item;
     gpu_item.component = "gpu";
     gpu_item.detected_value = inventory.gpu.architecture;
-    gpu_item.required_value = "gfx1151";
+    gpu_item.required_value = "gfx1151 or gfx1150";
     gpu_item.evidence = inventory.gpu.source;
-    if (inventory.gpu.architecture == "gfx1151") {
+    if (gufo::hip::IsRdna35(inventory.gpu.architecture)) {
       gpu_item.verdict = CompatibilityVerdict::kSupported;
       gpu_item.remediation_hint = "None";
     } else {
       gpu_item.verdict = CompatibilityVerdict::kUnsupported;
       gpu_item.remediation_hint =
-          "gufo requires AMD Strix Halo gfx1151 GPU (Radeon 8060S / "
-          "8050S). Detected: " +
+          "gufo requires an AMD RDNA 3.5 integrated GPU: gfx1151 (Strix "
+          "Halo, Radeon 8060S/8050S) or gfx1150 (Strix Point, Radeon 890M). "
+          "Detected: " +
           inventory.gpu.architecture;
       overall = CompatibilityVerdict::kUnsupported;
     }

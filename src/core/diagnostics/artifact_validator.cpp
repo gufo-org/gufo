@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "src/core/diagnostics/fingerprint.h"
+#include "src/core/hip/arch.hpp"
 #include "src/core/json.hpp"
 
 namespace gufo::diagnostics {
@@ -89,7 +90,7 @@ ValidationResult ValidateArtifactContent(std::string_view content) {
     const auto check_architecture = [&](const json::Value& object) {
       if (object.contains("gpuArchitecture")) {
         const auto arch = String(object, "gpuArchitecture");
-        if (!arch.empty() && arch != "gfx1151")
+        if (!arch.empty() && !gufo::hip::IsRdna35(arch))
           fail("Incompatible GPU architecture: " + arch);
       }
     };
