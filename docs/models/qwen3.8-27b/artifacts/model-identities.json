@@ -146,5 +146,38 @@
     },
     "review": "recurrent-fork-review.json",
     "reference": "llama.cpp b11069; existing measurements unchanged"
+  },
+  "benchmarks-2026-10-19-verify-wave64": {
+    "gufo": {
+      "revision": "11813e51150b1b6f990f57a9fc1b62b8bce494d2",
+      "dirty": false,
+      "build": "nix release",
+      "store": "8fqffr5qr6xpx5fyh5ad273xhz1fmi6n-gufo-0-unstable-11813e5",
+      "wrapperSha256": "70ad9a53b84ea85403025ca5ddcc709c765b838bfb22e0c44285168ca4c8ed6a",
+      "binarySha256": "5463d9d78a461aa73021a082dfbf3a2d08d1282494b3050a825720c3349be275",
+      "change": "PR #660 wave64 verification attention, rebased on main 23fd87dc"
+    },
+    "mainControl": {
+      "revision": "23fd87dc992d958e0c9c1ef5aeb81158463f9e6c",
+      "store": "9ywdh0zvby3y1i6kkj17qbq8kyb06qm0-gufo-0-unstable-23fd87d",
+      "wrapperSha256": "84cdc1631b4b663695dd4a732303c16e94c93d457efcbbdfb383c6884d669ddb",
+      "binarySha256": "07c7511dc892bfa0dd989bbf96a96da506db885a55ce89ec0314a5729f18fc95",
+      "scope": "memory-q4, single-ar-q4 d8K/d32K, single-dflash2-q8 d8K/d16K and multi-dflash2-q4 controls; same hashes and counts as the candidate"
+    },
+    "targets": [
+      "Target UD-Q4_K_XL",
+      "Target UD-Q8_K_XL"
+    ],
+    "draft": "Draft Q4_K_M",
+    "scope": "Every Gufo table: AR and DFlash2 single-user depths, short-corpus C1/2/4/6/8, loading and memory. All llama.cpp rows retain earlier measurements.",
+    "sampling": {
+      "temperature": 0,
+      "seed": 1,
+      "thinking": false
+    },
+    "timedRunsPerPoint": 1,
+    "powerProfile": "performance",
+    "coldFiles": "POSIX_FADV_DONTNEED on target and draft files, zero resident pages verified with mincore before each loading launch",
+    "reference": "llama.cpp b11069; existing measurements unchanged"
   }
 }

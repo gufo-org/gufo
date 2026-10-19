@@ -15,6 +15,18 @@ parity remain unqualified.
 | Target verification, widths 2–8 and ragged cohorts | Full logits/features match scalar | Full logits/features match scalar |
 | Serving and state | Cancellation, continuation, RAM/disk restore and seeded replay pass | Same; also eight 32K continuation forks |
 
+## October 19 wave64 verification review
+
+The wave64 verification attention (#660) reproduces the scalar decode bits.
+Single-row outputs from main `23fd87dc` and the candidate are byte-identical
+in the production 24/4-head shape (fp32 and fp16 caches, gated and plain,
+starts 0–65,536), and verification rows 2–8 match those single rows. Every
+Q4/Q8 DFlash2 single-user completion from 0 to 128K matches the earlier
+October 19 rows; all concurrency completions match Gufo AR. The Q4 DFlash2
+functional `batch`, `long-context`, `conversation`, `state-edges`,
+`cache-concurrency` and `cache` suites pass against main with no output
+change; 2,239 of 2,246 timings pass and 7 are inconclusive.
+
 ## October 19 recurrent-state review
 
 The refreshed DFlash2 concurrency corpus matches fresh, isolated AR on all
@@ -104,13 +116,15 @@ fixed before interpreting any numerical difference.
 
 ## Benchmark method
 
-DFlash2 refreshed October 19, 2026; AR, loading, memory and llama.cpp retain
-September 23 measurements. One warmed sample per point, greedy, thinking off.
+All Gufo rows refreshed October 19, 2026 on `11813e51` (#660, rebased on
+`23fd87dc`); llama.cpp retains September 23 measurements. One warmed sample per
+point, greedy, thinking off, `performance` platform profile.
 Single-user rows use pp2048/tg128 and cached depths 0–128K. Each mode creates
 its own eight-token prefix reply; histories can differ across engines.
 Concurrency uses the older short-prompt corpus, not matching pp2048 prompts;
 its C1 is not directly comparable to single-user d0. AR uses repetitive text;
 DFlash2 uses mixed/repetitive cases. Rates sum individual decode rates.
-Loading uses cold files, C1/DFlash2/capacity 262144; memory uses C1/AR peak HIP
+Loading uses cold files (`POSIX_FADV_DONTNEED`, zero resident pages checked
+with `mincore`), C1/DFlash2/capacity 262144; memory uses C1/AR peak HIP
 allocation. Commands, hashes and counts remain in [artifacts](artifacts/bench.json)
 and the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).

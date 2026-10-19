@@ -39,7 +39,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.56,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 46211 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "command": "gufo serve --port 53091 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "counts": [
         {
           "cache_n": 0,
@@ -50,10 +50,10 @@
           "prompt_n": 2040
         }
       ],
-      "pp": 443.39,
+      "pp": 442.27,
       "pp_sd": null,
       "samples": 1,
-      "tg": 16.4,
+      "tg": 16.44,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -62,7 +62,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.56,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 46211 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "command": "gufo serve --port 53091 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "counts": [
         {
           "cache_n": 12249,
@@ -73,10 +73,10 @@
           "prompt_n": 2047
         }
       ],
-      "pp": 394.04,
+      "pp": 380.4,
       "pp_sd": null,
       "samples": 1,
-      "tg": 15.31,
+      "tg": 15.5,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -85,7 +85,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.67,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 46211 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "command": "gufo serve --port 53091 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "counts": [
         {
           "cache_n": 130932,
@@ -96,10 +96,10 @@
           "prompt_n": 2047
         }
       ],
-      "pp": 216.29,
+      "pp": 216.84,
       "pp_sd": null,
       "samples": 1,
-      "tg": 9.22,
+      "tg": 10.06,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -108,7 +108,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.51,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 46211 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "command": "gufo serve --port 53091 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "counts": [
         {
           "cache_n": 16324,
@@ -119,10 +119,10 @@
           "prompt_n": 2047
         }
       ],
-      "pp": 384.66,
+      "pp": 370.43,
       "pp_sd": null,
       "samples": 1,
-      "tg": 14.62,
+      "tg": 14.87,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -131,7 +131,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.72,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 46211 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "command": "gufo serve --port 53091 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "counts": [
         {
           "cache_n": 32718,
@@ -142,10 +142,10 @@
           "prompt_n": 2029
         }
       ],
-      "pp": 330.75,
+      "pp": 332.88,
       "pp_sd": null,
       "samples": 1,
-      "tg": 14.6,
+      "tg": 15.17,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -154,7 +154,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.67,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 46211 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "command": "gufo serve --port 53091 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "counts": [
         {
           "cache_n": 4095,
@@ -165,7 +165,7 @@
           "prompt_n": 2043
         }
       ],
-      "pp": 416.97,
+      "pp": 405.45,
       "pp_sd": null,
       "samples": 1,
       "tg": 16.71,
@@ -177,7 +177,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.56,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 46211 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "command": "gufo serve --port 53091 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "counts": [
         {
           "cache_n": 65447,
@@ -188,10 +188,10 @@
           "prompt_n": 2058
         }
       ],
-      "pp": 272.97,
+      "pp": 273.7,
       "pp_sd": null,
       "samples": 1,
-      "tg": 11.59,
+      "tg": 12.38,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -200,7 +200,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.61,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 46211 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "command": "gufo serve --port 53091 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "counts": [
         {
           "cache_n": 8184,
@@ -211,10 +211,10 @@
           "prompt_n": 2048
         }
       ],
-      "pp": 407.51,
+      "pp": 389.48,
       "pp_sd": null,
       "samples": 1,
-      "tg": 15.82,
+      "tg": 16.04,
       "tg_sd": null,
       "workload": "prose"
     }
@@ -225,7 +225,7 @@
       "gufo",
       "serve",
       "--port",
-      "46211",
+      "53091",
       "--sessions",
       "1",
       "llm",
@@ -248,7 +248,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "d5e90965b3b5ef22d3eeb187faecf9fb60e1bcb9"
+    "revision": "11813e51150b1b6f990f57a9fc1b62b8bce494d2"
   },
   "table": "single-dflash2-q8",
   "target": "gufo"

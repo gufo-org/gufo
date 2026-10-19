@@ -4,11 +4,11 @@ AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo versus llama.cpp
 `b11069`, using the same Q4_K_XL / Q8_K_XL targets and Q4_K_M DFlash2 draft.
 Gufo uses its adaptive controller. HTTP, greedy, thinking off.
 
-Gufo DFlash2 rows were refreshed October 19, 2026 on `d5e90965` with the
-local snapshot serialization cleanup. AR, loading and memory retain the
-September 23 `628ed18e` measurements. All llama.cpp measurements are unchanged.
-[Recurrent-state review](artifacts/recurrent-fork-review.json) records matched
-main/PR checks and the remaining variable latency observations.
+All Gufo rows were refreshed October 19, 2026 on `11813e51` (wave64
+verification attention, rebased on main `23fd87dc`). DFlash2 completions match
+the earlier October 19 rows at every depth; decode gains grow with depth.
+AR pp, multi-user rates and memory match matched main controls; their changes
+from September predate this revision. All llama.cpp measurements are unchanged.
 
 Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md) · [Model identities](artifacts/model-identities.json)
@@ -20,14 +20,14 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar-q4 -->
 | Qwen27B Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 656.33 | 357.54 | +83.6% | 12.37 | 12.06 | +2.6% |
-| 4,096 | 633.16 | 330.42 | +91.6% | 12.21 | 11.88 | +2.8% |
-| 8,192 | 615.06 | 316.09 | +94.6% | 12.03 | 11.73 | +2.6% |
-| 12,288 | 594.61 | 302.54 | +96.5% | 11.88 | 11.59 | +2.5% |
-| 16,384 | 575.50 | 290.23 | +98.3% | 11.72 | 11.44 | +2.4% |
-| 32,768 | 505.07 | 246.97 | +104.5% | 11.13 | 10.89 | +2.2% |
-| 65,536 | 386.92 | 193.61 | +99.8% | 10.13 | 9.93 | +2.0% |
-| 131,072 | 287.12 | 135.95 | +111.2% | 8.52 | 8.46 | +0.7% |
+| 0 | 648.89 | 357.54 | +81.5% | 12.37 | 12.06 | +2.6% |
+| 4,096 | 608.70 | 330.42 | +84.2% | 12.20 | 11.88 | +2.7% |
+| 8,192 | 586.09 | 316.09 | +85.4% | 12.03 | 11.73 | +2.6% |
+| 12,288 | 565.92 | 302.54 | +87.1% | 11.87 | 11.59 | +2.4% |
+| 16,384 | 546.20 | 290.23 | +88.2% | 11.71 | 11.44 | +2.4% |
+| 32,768 | 469.28 | 246.97 | +90.0% | 11.13 | 10.89 | +2.2% |
+| 65,536 | 342.31 | 193.61 | +76.8% | 10.07 | 9.93 | +1.4% |
+| 131,072 | 259.73 | 135.95 | +91.0% | 8.51 | 8.46 | +0.6% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q4.svg)
@@ -37,14 +37,14 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar-q8 -->
 | Qwen27B Q8 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 485.26 | 337.08 | +44.0% | 7.20 | 7.20 | +0.0% |
-| 4,096 | 470.80 | 317.96 | +48.1% | 7.14 | 7.14 | +0.0% |
-| 8,192 | 450.84 | 306.22 | +47.2% | 7.08 | 7.08 | +0.0% |
-| 12,288 | 436.37 | 289.19 | +50.9% | 7.03 | 7.02 | +0.1% |
-| 16,384 | 423.19 | 276.91 | +52.8% | 6.97 | 6.97 | +0.0% |
-| 32,768 | 381.43 | 236.32 | +61.4% | 6.76 | 6.76 | +0.0% |
-| 65,536 | 311.47 | 186.67 | +66.9% | 6.38 | 6.38 | +0.0% |
-| 131,072 | 248.60 | 133.34 | +86.4% | 5.71 | 5.74 | -0.5% |
+| 0 | 479.25 | 337.08 | +42.2% | 7.19 | 7.20 | -0.1% |
+| 4,096 | 463.03 | 317.96 | +45.6% | 7.14 | 7.14 | +0.0% |
+| 8,192 | 451.42 | 306.22 | +47.4% | 7.08 | 7.08 | +0.0% |
+| 12,288 | 426.61 | 289.19 | +47.5% | 7.01 | 7.02 | -0.1% |
+| 16,384 | 407.95 | 276.91 | +47.3% | 6.95 | 6.97 | -0.3% |
+| 32,768 | 363.22 | 236.32 | +53.7% | 6.76 | 6.76 | +0.0% |
+| 65,536 | 293.26 | 186.67 | +57.1% | 6.37 | 6.38 | -0.2% |
+| 131,072 | 228.10 | 133.34 | +71.1% | 5.72 | 5.74 | -0.3% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q8.svg)
@@ -58,14 +58,14 @@ the [quality details](QUALITY.md#meaning-of-exact).
 <!-- bench:single-dflash2-q4 -->
 | Qwen27B Q4 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 575.84 | 347.51 | +65.7% | 26.87 | 23.40 | +14.8% | 64.38 | 35.86 | +79.5% |
-| 4,096 | 540.33 | 316.58 | +70.7% | 27.93 | 23.03 | +21.3% | 53.30 | 34.47 | +54.6% |
-| 8,192 | 516.06 | 302.47 | +70.6% | 26.26 | 21.73 | +20.8% | 62.44 | 34.73 | +79.8% |
-| 12,288 | 489.05 | 289.98 | +68.6% | 24.48 | 23.05 | +6.2% | 54.12 | 34.19 | +58.3% |
-| 16,384 | 470.65 | 278.53 | +69.0% | 24.28 | 21.84 | +11.2% | 50.28 | 33.75 | +49.0% |
-| 32,768 | 410.71 | 239.21 | +71.7% | 19.08 | 18.88 | +1.1% | 48.24 | 31.75 | +51.9% |
-| 65,536 | 338.78 | 190.92 | +77.4% | 17.70 | 18.53 | -4.5% | 29.84 | 26.33 | +13.3% |
-| 131,072 | 246.36 | 133.37 | +84.7% | 14.14 | 14.58 | -3.0% | 27.09 | 22.93 | +18.1% |
+| 0 | 579.58 | 347.51 | +66.8% | 26.91 | 23.40 | +15.0% | 64.74 | 35.86 | +80.5% |
+| 4,096 | 527.39 | 316.58 | +66.6% | 27.99 | 23.03 | +21.5% | 54.04 | 34.47 | +56.8% |
+| 8,192 | 502.57 | 302.47 | +66.2% | 26.44 | 21.73 | +21.7% | 63.83 | 34.73 | +83.8% |
+| 12,288 | 487.00 | 289.98 | +67.9% | 24.88 | 23.05 | +7.9% | 55.72 | 34.19 | +63.0% |
+| 16,384 | 471.44 | 278.53 | +69.3% | 24.80 | 21.84 | +13.6% | 52.23 | 33.75 | +54.8% |
+| 32,768 | 413.41 | 239.21 | +72.8% | 19.77 | 18.88 | +4.7% | 51.20 | 31.75 | +61.3% |
+| 65,536 | 339.15 | 190.92 | +77.6% | 18.61 | 18.53 | +0.4% | 31.85 | 26.33 | +21.0% |
+| 131,072 | 246.56 | 133.37 | +84.9% | 15.30 | 14.58 | +4.9% | 29.93 | 22.93 | +30.5% |
 <!-- /bench -->
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q4.svg)
@@ -75,14 +75,14 @@ the [quality details](QUALITY.md#meaning-of-exact).
 <!-- bench:single-dflash2-q8 -->
 | Qwen27B Q8 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 443.39 | 333.85 | +32.8% | 16.40 | 15.00 | +9.3% | 47.47 | 23.83 | +99.2% |
-| 4,096 | 416.97 | 310.23 | +34.4% | 16.71 | 16.12 | +3.7% | 41.06 | 23.59 | +74.1% |
-| 8,192 | 407.51 | 292.86 | +39.1% | 15.82 | 15.27 | +3.6% | 42.07 | 23.21 | +81.3% |
-| 12,288 | 394.04 | 280.40 | +40.5% | 15.31 | 13.21 | +15.9% | 40.75 | 22.10 | +84.4% |
-| 16,384 | 384.66 | 269.03 | +43.0% | 14.62 | 13.83 | +5.7% | 39.87 | 22.56 | +76.7% |
-| 32,768 | 332.78 | 231.89 | +43.5% | 14.60 | 14.44 | +1.1% | 36.22 | 21.16 | +71.2% |
-| 65,536 | 284.37 | 185.73 | +53.1% | 11.59 | 12.62 | -8.2% | 25.58 | 19.03 | +34.4% |
-| 131,072 | 216.29 | 131.80 | +64.1% | 9.22 | 11.62 | -20.7% | 24.09 | 17.23 | +39.8% |
+| 0 | 445.02 | 333.85 | +33.3% | 16.44 | 15.00 | +9.6% | 47.69 | 23.83 | +100.1% |
+| 4,096 | 407.55 | 310.23 | +31.4% | 16.71 | 16.12 | +3.7% | 41.47 | 23.59 | +75.8% |
+| 8,192 | 389.48 | 292.86 | +33.0% | 16.04 | 15.27 | +5.0% | 42.61 | 23.21 | +83.6% |
+| 12,288 | 380.40 | 280.40 | +35.7% | 15.50 | 13.21 | +17.3% | 41.75 | 22.10 | +88.9% |
+| 16,384 | 370.43 | 269.03 | +37.7% | 14.87 | 13.83 | +7.5% | 40.92 | 22.56 | +81.4% |
+| 32,768 | 332.88 | 231.89 | +43.6% | 15.17 | 14.44 | +5.1% | 37.88 | 21.16 | +79.0% |
+| 65,536 | 283.99 | 185.73 | +52.9% | 12.38 | 12.62 | -1.9% | 27.70 | 19.03 | +45.6% |
+| 131,072 | 216.84 | 131.80 | +64.5% | 10.06 | 11.62 | -13.4% | 26.80 | 17.23 | +55.5% |
 <!-- /bench -->
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q8.svg)
@@ -96,10 +96,10 @@ excluding prefill and scheduling. One AR workload per concurrency.
 | Qwen27B Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
 | 1 | 12.42 | 12.20 | +1.8% |
-| 2 | 23.84 | 22.58 | +5.6% |
-| 4 | 44.23 | 38.94 | +13.6% |
-| 6 | 60.99 | 47.45 | +28.5% |
-| 8 | 74.46 | 50.14 | +48.5% |
+| 2 | 23.83 | 22.58 | +5.5% |
+| 4 | 44.27 | 38.94 | +13.7% |
+| 6 | 61.02 | 47.45 | +28.6% |
+| 8 | 74.95 | 50.14 | +49.5% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar-q4.svg)
@@ -109,11 +109,11 @@ excluding prefill and scheduling. One AR workload per concurrency.
 <!-- bench:multi-ar-q8 -->
 | Qwen27B Q8 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | 7.22 | 7.24 | -0.3% |
+| 1 | 7.21 | 7.24 | -0.4% |
 | 2 | 14.45 | 13.71 | +5.4% |
-| 4 | 27.81 | 25.32 | +9.8% |
-| 6 | 39.96 | 34.64 | +15.4% |
-| 8 | 51.62 | 41.57 | +24.2% |
+| 4 | 27.79 | 25.32 | +9.8% |
+| 6 | 39.89 | 34.64 | +15.2% |
+| 8 | 51.63 | 41.57 | +24.2% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar-q8.svg)
@@ -126,11 +126,11 @@ tokens. Rates sum individual request decode rates. No prompt-cache hits.
 <!-- bench:multi-dflash2-q4 -->
 | Qwen27B Q4 DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 37.22 | 27.15 | +37.1% | 71.31 | 37.56 | +89.9% |
-| 2 | 57.17 | 40.04 | +42.8% | 108.59 | 51.65 | +110.2% |
-| 4 | 73.85 | 74.43 | -0.8% | 113.69 | 93.38 | +21.7% |
-| 6 | 86.72 | 77.19 | +12.3% | 117.12 | 97.52 | +20.1% |
-| 8 | 90.48 | 71.71 | +26.2% | 128.41 | 113.56 | +13.1% |
+| 1 | 37.19 | 27.15 | +37.0% | 71.55 | 37.56 | +90.5% |
+| 2 | 57.20 | 40.04 | +42.9% | 105.08 | 51.65 | +103.4% |
+| 4 | 74.29 | 74.43 | -0.2% | 113.45 | 93.38 | +21.5% |
+| 6 | 83.30 | 77.19 | +7.9% | 117.03 | 97.52 | +20.0% |
+| 8 | 91.27 | 71.71 | +27.3% | 128.42 | 113.56 | +13.1% |
 <!-- /bench -->
 
 ![Multiple users, DFlash2](artifacts/charts/multi-dflash2-q4.svg)
@@ -140,11 +140,11 @@ tokens. Rates sum individual request decode rates. No prompt-cache hits.
 <!-- bench:multi-dflash2-q8 -->
 | Qwen27B Q8 DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 25.05 | 17.54 | +42.8% | 51.66 | 24.09 | +114.4% |
-| 2 | 44.61 | 31.64 | +41.0% | 87.27 | 41.60 | +109.8% |
-| 4 | 52.91 | 43.88 | +20.6% | 106.56 | 58.92 | +80.9% |
-| 6 | 58.75 | 53.14 | +10.6% | 115.34 | 72.40 | +59.3% |
-| 8 | 67.51 | 60.64 | +11.3% | 123.57 | 86.25 | +43.3% |
+| 1 | 25.04 | 17.54 | +42.8% | 51.69 | 24.09 | +114.6% |
+| 2 | 44.50 | 31.64 | +40.6% | 87.02 | 41.60 | +109.2% |
+| 4 | 53.02 | 43.88 | +20.8% | 107.08 | 58.92 | +81.7% |
+| 6 | 58.97 | 53.14 | +11.0% | 115.36 | 72.40 | +59.3% |
+| 8 | 66.63 | 60.64 | +9.9% | 123.47 | 86.25 | +43.2% |
 <!-- /bench -->
 
 ![Multiple users, DFlash2](artifacts/charts/multi-dflash2-q8.svg)
@@ -156,21 +156,24 @@ C1, context capacity 262144, DFlash2. Cold target/draft files to HTTP readiness.
 <!-- bench:loading -->
 | Qwen27B<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
-| Q4 | 5.87 | 23.33 | +297.4% |
-| Q8 | 8.17 | 36.47 | +346.4% |
+| Q4 | 6.27 | 23.33 | +272.1% |
+| Q8 | 8.59 | 36.47 | +324.6% |
 <!-- /bench -->
 
 ![Loading time](artifacts/charts/loading.svg)
 
 ## Memory occupation
 
-C1, context capacity 262144, AR. Peak memory reported by HIP.
+C1, context capacity 262144, AR. Peak memory reported by HIP. Main `23fd87dc`
+gives the same peaks. Gufo now loads the vision projector by default, and HIP
+counts retained RAM prompt snapshots: with `--cache-ram-bytes 1073741824`, Q4
+peaks at 39.14 GiB in both rows.
 
 <!-- bench:memory-q4 -->
 | Qwen27B Q4 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 37.63 | 36.19 | -3.8% |
-| 16K prefix, pp4096 + tg128 | 39.88 | 36.62 | -8.2% |
+| pp2048 + tg128 | 40.20 | 36.19 | -10.0% |
+| 16K prefix, pp4096 + tg128 | 50.27 | 36.62 | -27.2% |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q4.svg)
@@ -180,8 +183,8 @@ C1, context capacity 262144, AR. Peak memory reported by HIP.
 <!-- bench:memory-q8 -->
 | Qwen27B Q8 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 50.58 | 48.60 | -3.9% |
-| 16K prefix, pp4096 + tg128 | 52.83 | 49.02 | -7.2% |
+| pp2048 + tg128 | 53.15 | 48.60 | -8.6% |
+| 16K prefix, pp4096 + tg128 | 63.22 | 49.02 | -22.5% |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q8.svg)

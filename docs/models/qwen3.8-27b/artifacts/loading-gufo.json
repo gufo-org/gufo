@@ -14,75 +14,35 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "memoryTotalBytes": 134309875712,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "fe5929d418cfe1f7e3aa4a09199012c1fa064859f1fc762a8cbcda970358f158",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-23",
-  "mode": null,
+  "measuredOn": "2026-10-19",
+  "mode": "dflash2",
   "model": {
     "id": "Qwen3.8-27B",
     "variant": null
   },
   "notes": [
-    "Cold target/draft file pages: POSIX_FADV_DONTNEED followed by mincore confirming zero resident pages before each launch. Runtime libraries may remain cached.",
+    "file cache reset before each launch with the supplied --drop-caches command",
     "readiness = HTTP 200 on /ready"
   ],
   "referenceName": "llama.cpp",
   "rows": {
     "q4": {
-      "command": "gufo serve --port 34815 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
-      "fileCacheAudit": [
-        {
-          "afterBytes": 0,
-          "at": "2026-09-23T19:41:37.730075+02:00",
-          "beforeBytes": 17559179264,
-          "file": "Qwen3.8-27B-UD-Q4_K_XL.gguf"
-        },
-        {
-          "afterBytes": 0,
-          "at": "2026-09-23T19:41:40.879292+02:00",
-          "beforeBytes": 31183048704,
-          "file": "Qwen3.8-27B-UD-Q8_K_XL.gguf"
-        },
-        {
-          "afterBytes": 0,
-          "at": "2026-09-23T19:41:41.041152+02:00",
-          "beforeBytes": 915787776,
-          "file": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
-        }
-      ],
-      "ready_s": 5.87,
+      "command": "gufo serve --port 46261 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "ready_s": 6.273,
       "ready_s_sd": null,
       "samples": 1
     },
     "q8": {
-      "command": "gufo serve --port 54847 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
-      "fileCacheAudit": [
-        {
-          "afterBytes": 0,
-          "at": "2026-09-23T19:41:50.760626+02:00",
-          "beforeBytes": 17559179264,
-          "file": "Qwen3.8-27B-UD-Q4_K_XL.gguf"
-        },
-        {
-          "afterBytes": 0,
-          "at": "2026-09-23T19:41:51.925900+02:00",
-          "beforeBytes": 0,
-          "file": "Qwen3.8-27B-UD-Q8_K_XL.gguf"
-        },
-        {
-          "afterBytes": 0,
-          "at": "2026-09-23T19:41:52.027932+02:00",
-          "beforeBytes": 1143009280,
-          "file": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
-        }
-      ],
-      "ready_s": 8.17,
+      "command": "gufo serve --port 33687 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "ready_s": 8.589,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -93,7 +53,7 @@
       "gufo",
       "serve",
       "--port",
-      "54847",
+      "33687",
       "--sessions",
       "1",
       "llm",
@@ -116,7 +76,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "628ed18ee92a973d5026b33644d9cb906116ff9d"
+    "revision": "11813e51150b1b6f990f57a9fc1b62b8bce494d2"
   },
   "table": "loading",
   "target": "gufo"
