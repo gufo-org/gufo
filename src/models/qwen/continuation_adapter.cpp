@@ -9,6 +9,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "src/core/hip/snapshot_copy.hpp"
+
 namespace gufo::models::qwen {
 namespace {
 using cache::Rows;
@@ -576,10 +578,9 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     return Transfer(state, false, stream, [&](hip::TransferStream& transfer) {
       std::ranges::fill(bytes, std::byte{});
       if (offset < valid)
-        Check(hipMemcpyAsync(bytes.data(),
-                             static_cast<std::byte*>(source) + offset,
-                             std::min(bytes.size(), valid - offset),
-                             hipMemcpyDeviceToHost, transfer.Native()));
+        Check(hip::CopySnapshotToHost(
+            bytes.data(), static_cast<std::byte*>(source) + offset,
+            std::min(bytes.size(), valid - offset), transfer.Native()));
     });
   }
   return Transfer(state, false, stream, [&](hip::TransferStream& transfer) {
@@ -591,9 +592,9 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
       std::memcpy(bytes.data(), static_cast<std::byte*>(source) + offset,
                   bytes.size());
     else
-      Check(hipMemcpyAsync(
-          bytes.data(), static_cast<std::byte*>(source) + offset, bytes.size(),
-          hipMemcpyDeviceToHost, transfer.Native()));
+      Check(hip::CopySnapshotToHost(bytes.data(),
+                                    static_cast<std::byte*>(source) + offset,
+                                    bytes.size(), transfer.Native()));
   });
 }
 cache::Completion ContinuationAdapter::LoadPrivate(
@@ -666,9 +667,9 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
         std::memcpy(static_cast<std::byte*>(target) + offset, bytes.data(),
                     bytes.size());
       else
-        Check(hipMemcpyAsync(static_cast<std::byte*>(target) + offset,
-                             bytes.data(), bytes.size(), hipMemcpyHostToDevice,
-                             transfer.Native()));
+        Check(hip::CopySnapshotToDevice(
+            static_cast<std::byte*>(target) + offset, bytes.data(),
+            bytes.size(), transfer.Native()));
     });
   } catch (...) {
     state.failed = true;
@@ -763,8 +764,10 @@ cache::Completion ContinuationAdapter::TransferRows(
     const auto direction = load ? hipMemcpyDefault : hipMemcpyDeviceToHost;
     if (policy_.UsesFp16AttentionKv()) {
       auto* device = native + first * row;
-      Check(hipMemcpyAsync(load ? device : bytes, load ? bytes : device,
-                           (end - first) * row, direction, transfer.Native()));
+      Check(load ? hip::CopySnapshotToDevice(device, bytes, (end - first) * row,
+                                             transfer.Native())
+                 : hip::CopySnapshotToHost(bytes, device, (end - first) * row,
+                                           transfer.Native()));
     } else {
       const auto head_bytes = std::size_t{c.head_dim} * sizeof(float);
       for (std::uint32_t head = 0; head < c.num_key_value_heads; ++head) {

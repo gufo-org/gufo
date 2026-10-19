@@ -1,4 +1,4 @@
-#include "src/models/qwen38_flash_next/kernels/rocm/snapshot_copy.hpp"
+#include "src/core/hip/snapshot_copy.hpp"
 
 #include <sys/mman.h>
 
@@ -12,7 +12,7 @@
 #include <thread>
 #include <vector>
 
-namespace qfn = gufo::models::qwen38_flash_next::rocm;
+namespace gpu = gufo::hip;
 namespace {
 void Check(hipError_t result) {
   assert(result == hipSuccess);
@@ -26,7 +26,7 @@ void Copies(std::span<std::byte> host, void* device, hipStream_t stream,
       const auto destination = host.size() - size - offset;
       const auto source = expected.size() - size - offset;
       std::ranges::fill(host, std::byte{0xcd});
-      Check(qfn::CopySnapshotToHost(host.data() + destination,
+      Check(gpu::CopySnapshotToHost(host.data() + destination,
                                     static_cast<std::byte*>(device) + source,
                                     size, stream));
       Check(hipStreamSynchronize(stream));
@@ -54,10 +54,10 @@ void PeerCapture(std::span<std::byte> host, void* device,
   // Its alias lookup and kernel belong only to the independent copy stream.
   std::thread worker([&] {
     if (upload)
-      Check(qfn::CopySnapshotToDevice(device, host.data(), host.size(),
+      Check(gpu::CopySnapshotToDevice(device, host.data(), host.size(),
                                       copy_stream));
     else
-      Check(qfn::CopySnapshotToHost(host.data(), device, host.size(),
+      Check(gpu::CopySnapshotToHost(host.data(), device, host.size(),
                                     copy_stream));
     Check(hipStreamSynchronize(copy_stream));
   });
@@ -106,7 +106,7 @@ void Uploads(std::span<std::byte> host, void* device, hipStream_t stream,
     for (const auto offset : {0U, 1U, 3U, 15U, 16U}) {
       const auto first = host.size() - size - offset;
       Check(hipMemsetAsync(device, 0xcd, host.size(), stream));
-      Check(qfn::CopySnapshotToDevice(static_cast<std::byte*>(device) + first,
+      Check(gpu::CopySnapshotToDevice(static_cast<std::byte*>(device) + first,
                                       host.data() + first, size, stream));
       Check(hipStreamSynchronize(stream));
       Check(hipMemcpy(actual.data(), device, actual.size(),
@@ -165,7 +165,7 @@ int main() {
   Uploads(pageable, device, stream, expected);
   void* borrowed{};
   Check(hipMalloc(&borrowed, bytes));
-  Check(qfn::CopySnapshotToDevice(borrowed, device, bytes, stream));
+  Check(gpu::CopySnapshotToDevice(borrowed, device, bytes, stream));
   Check(hipStreamSynchronize(stream));
   Check(hipMemcpy(pageable.data(), borrowed, bytes, hipMemcpyDeviceToHost));
   assert(pageable == expected);

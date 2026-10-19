@@ -1,0 +1,825 @@
+{
+  "schema": 1,
+  "date": "2026-10-19",
+  "status": "qualification_in_progress",
+  "main": "270b53338829d25ea05dab633fb924621d9168f9",
+  "merge": "79c62c9e390456b7ebe783217e86fcbf80c8d2bd",
+  "fixture_fix": "6f62a09d1d27cc9e4775e0bbe9e6f236e7cd9ab2",
+  "candidate": {
+    "binary": {
+      "path": "/nix/store/8bjsvxwkp9bp7dgkidxrgfgc4rffwkdj-gufo-0-unstable-79c62c9-dirty/bin/gufo",
+      "sha256": "813bb894b5cbe6620720374f0d3b5bbc780800c8e1ed0ca64f3ba8c61141dde0",
+      "wrapped_path": "/nix/store/8bjsvxwkp9bp7dgkidxrgfgc4rffwkdj-gufo-0-unstable-79c62c9-dirty/bin/.gufo-wrapped",
+      "wrapped_sha256": "a577f887ebee700d66bea845922dc023a73558ac6d8900aad6380138daa7d72f"
+    },
+    "toolchain": "Pinned Nix production package; ROCm 7.2.3; gfx1151",
+    "flake_lock_sha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+    "build_source_tree": "9bc9b170113c9f45e2b42ee89d408084b33c3ef6"
+  },
+  "weights": {
+    "Qwen3.8-27B-UD-Q4_K_XL.gguf": {
+      "path": "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "resolved_path": "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+      "bytes": 17559178144
+    },
+    "Qwen3.8-27B-UD-Q8_K_XL.gguf": {
+      "path": "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf",
+      "resolved_path": "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+      "bytes": 31457991680
+    },
+    "mmproj-BF16.gguf": {
+      "path": "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/mmproj-BF16.gguf",
+      "resolved_path": "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/blobs/83ee4f4f205fa514161778c41df1ea14144faa0f713510893b63c2395f5c2d53",
+      "bytes": 931146432
+    },
+    "Qwen3.8-27B-DFlash2-Q4_K_M.gguf": {
+      "path": "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "resolved_path": "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "bytes": 1143006816
+    }
+  },
+  "changes": [
+    {
+      "prs": [
+        589,
+        596,
+        615,
+        633,
+        636,
+        653
+      ],
+      "application": "Shared committed backing factory retains current main capacity admission, bounded segments, readiness/prefill preparation, pin telemetry and host allocation ownership; shared copy kernel is used by 27B private/FP16-row and draft capture/restore."
+    },
+    {
+      "prs": [
+        602
+      ],
+      "application": "27B target/draft fingerprints are required only for disk serving; the startup runner covers AR/DFlash2 RAM and durable restart."
+    },
+    {
+      "prs": [
+        621,
+        625,
+        623,
+        477,
+        645,
+        650
+      ],
+      "application": "Current main publication waits, orphan reclamation, tool-choice reuse, disk page-cache handling, image preprocessing and native recurrent forks are inherited."
+    },
+    {
+      "prs": [
+        613,
+        653
+      ],
+      "application": "MTP prompt lookup and Flash-specific inline boundary/predictor/attention kernels remain model-local. Qwen AR/DFlash2 retain their own exact planned checkpoint boundaries."
+    }
+  ],
+  "native_checks": [
+    {
+      "case": "snapshot-copy",
+      "status": "passed",
+      "command": [
+        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen38_flash_next/qwen38_flash_next_snapshot_copy_test"
+      ]
+    },
+    {
+      "case": "q4-adapter",
+      "status": "passed",
+      "command": [
+        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
+        "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+      ]
+    },
+    {
+      "case": "q4-draft-adapter",
+      "status": "passed",
+      "command": [
+        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
+        "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        "--draft",
+        "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+      ]
+    },
+    {
+      "case": "q4-serving-cache",
+      "status": "passed",
+      "command": [
+        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+        "--cache-only"
+      ]
+    },
+    {
+      "case": "q4-target",
+      "status": "passed",
+      "command": [
+        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_target_test",
+        "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+      ]
+    },
+    {
+      "case": "q8-adapter",
+      "status": "passed",
+      "command": [
+        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
+        "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf"
+      ]
+    },
+    {
+      "case": "q8-draft-adapter",
+      "status": "passed",
+      "command": [
+        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
+        "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf",
+        "--draft",
+        "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+      ]
+    },
+    {
+      "case": "q8-serving-cache",
+      "status": "passed",
+      "command": [
+        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf",
+        "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+        "--cache-only"
+      ]
+    },
+    {
+      "case": "q8-target",
+      "status": "passed",
+      "command": [
+        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_target_test",
+        "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf"
+      ]
+    }
+  ],
+  "startup_checks": {
+    "startup-q4-dflash2": {
+      "status": "passed",
+      "stages": {
+        "ram": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "dflash2",
+            "draft_tokens": 36,
+            "draft_tokens_accepted": 34,
+            "draft_execution_observed": true
+          }
+        },
+        "disk": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "dflash2",
+            "draft_tokens": 36,
+            "draft_tokens_accepted": 34,
+            "draft_execution_observed": true
+          }
+        },
+        "restart": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "dflash2",
+            "draft_tokens": 18,
+            "draft_tokens_accepted": 17,
+            "draft_execution_observed": true
+          }
+        }
+      }
+    },
+    "startup-q4-off": {
+      "status": "passed",
+      "stages": {
+        "ram": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "off",
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0,
+            "draft_execution_observed": false
+          }
+        },
+        "disk": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "off",
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0,
+            "draft_execution_observed": false
+          }
+        },
+        "restart": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "off",
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0,
+            "draft_execution_observed": false
+          }
+        }
+      }
+    },
+    "startup-q8-dflash2": {
+      "status": "passed",
+      "stages": {
+        "ram": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "dflash2",
+            "draft_tokens": 42,
+            "draft_tokens_accepted": 34,
+            "draft_execution_observed": true
+          }
+        },
+        "disk": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "dflash2",
+            "draft_tokens": 42,
+            "draft_tokens_accepted": 34,
+            "draft_execution_observed": true
+          }
+        },
+        "restart": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "dflash2",
+            "draft_tokens": 21,
+            "draft_tokens_accepted": 17,
+            "draft_execution_observed": true
+          }
+        }
+      }
+    },
+    "startup-q8-off": {
+      "status": "passed",
+      "stages": {
+        "ram": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "off",
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0,
+            "draft_execution_observed": false
+          }
+        },
+        "disk": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "off",
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0,
+            "draft_execution_observed": false
+          }
+        },
+        "restart": {
+          "status": "passed",
+          "execution": {
+            "loaded_mode": "off",
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0,
+            "draft_execution_observed": false
+          }
+        }
+      }
+    }
+  },
+  "short_request_controls": {
+    "off": {
+      "work_equal": true,
+      "comparisons": {
+        "main-vs-candidate": {
+          "status": "inconclusive",
+          "quality_or_coverage_changes": [],
+          "unqualified_measurements": [
+            {
+              "case": "probe.requests.json:cold-0:0",
+              "metric": "queue_ms",
+              "status": "inconclusive",
+              "baseline_range": [
+                0.314866,
+                0.318061
+              ],
+              "candidate_range": [
+                3.269514,
+                4.346982
+              ],
+              "reason": "variable or overlapping observations; inspect stalls"
+            }
+          ]
+        },
+        "merge-vs-candidate": {
+          "status": "inconclusive",
+          "quality_or_coverage_changes": [],
+          "unqualified_measurements": [
+            {
+              "case": "probe.requests.json:cold-0:0",
+              "metric": "cache_snapshot_ms",
+              "status": "inconclusive",
+              "baseline_range": [
+                8.604553,
+                8.614425
+              ],
+              "candidate_range": [
+                8.670258,
+                18.250650999999998
+              ],
+              "reason": "variable or overlapping observations; inspect stalls"
+            },
+            {
+              "case": "probe.requests.json:cold-0:0",
+              "metric": "max_inter_token_ms",
+              "status": "inconclusive",
+              "baseline_range": [
+                89.774212,
+                102.696453
+              ],
+              "candidate_range": [
+                91.302798,
+                102.195664
+              ],
+              "reason": "variable or overlapping observations; inspect stalls"
+            }
+          ]
+        }
+      },
+      "requests": {
+        "0-main": [
+          {
+            "request": 0,
+            "ttft_ms": 963.708478,
+            "cache_snapshot_ms": 22.325296,
+            "queue_ms": 0.314866,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 1,
+            "ttft_ms": 979.49761,
+            "cache_snapshot_ms": 34.845771,
+            "queue_ms": 0.300198,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 2,
+            "ttft_ms": 958.544131,
+            "cache_snapshot_ms": 44.384525000000004,
+            "queue_ms": 0.274809,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 3,
+            "ttft_ms": 1019.5817,
+            "cache_snapshot_ms": 17.106291,
+            "queue_ms": 0.286472,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          }
+        ],
+        "1-merge": [
+          {
+            "request": 0,
+            "ttft_ms": 953.209624,
+            "cache_snapshot_ms": 8.614425,
+            "queue_ms": 2.945382,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 1,
+            "ttft_ms": 955.195613,
+            "cache_snapshot_ms": 8.573568,
+            "queue_ms": 1.965879,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 2,
+            "ttft_ms": 958.307594,
+            "cache_snapshot_ms": 8.459651000000001,
+            "queue_ms": 2.109511,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 3,
+            "ttft_ms": 960.29659,
+            "cache_snapshot_ms": 8.667134,
+            "queue_ms": 2.971621,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          }
+        ],
+        "2-candidate": [
+          {
+            "request": 0,
+            "ttft_ms": 959.91234,
+            "cache_snapshot_ms": 18.250650999999998,
+            "queue_ms": 4.346982,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 1,
+            "ttft_ms": 955.316091,
+            "cache_snapshot_ms": 6.4764800000000005,
+            "queue_ms": 2.144085,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 2,
+            "ttft_ms": 954.516644,
+            "cache_snapshot_ms": 6.615192,
+            "queue_ms": 2.156399,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 3,
+            "ttft_ms": 955.763839,
+            "cache_snapshot_ms": 6.521676,
+            "queue_ms": 3.19838,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          }
+        ],
+        "3-candidate": [
+          {
+            "request": 0,
+            "ttft_ms": 946.73155,
+            "cache_snapshot_ms": 8.670258,
+            "queue_ms": 3.269514,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 1,
+            "ttft_ms": 949.614368,
+            "cache_snapshot_ms": 6.458926,
+            "queue_ms": 2.475412,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 2,
+            "ttft_ms": 949.875207,
+            "cache_snapshot_ms": 6.4752659999999995,
+            "queue_ms": 2.404868,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 3,
+            "ttft_ms": 952.266987,
+            "cache_snapshot_ms": 6.568301999999999,
+            "queue_ms": 2.895236,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          }
+        ],
+        "4-merge": [
+          {
+            "request": 0,
+            "ttft_ms": 943.691654,
+            "cache_snapshot_ms": 8.604553,
+            "queue_ms": 3.168111,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 1,
+            "ttft_ms": 951.3426,
+            "cache_snapshot_ms": 8.573944999999998,
+            "queue_ms": 2.556465,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 2,
+            "ttft_ms": 952.963523,
+            "cache_snapshot_ms": 8.607296,
+            "queue_ms": 2.383768,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 3,
+            "ttft_ms": 952.841559,
+            "cache_snapshot_ms": 8.628968,
+            "queue_ms": 3.042694,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          }
+        ],
+        "5-main": [
+          {
+            "request": 0,
+            "ttft_ms": 953.651601,
+            "cache_snapshot_ms": 37.283273,
+            "queue_ms": 0.318061,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 1,
+            "ttft_ms": 964.464866,
+            "cache_snapshot_ms": 81.779562,
+            "queue_ms": 0.423111,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 2,
+            "ttft_ms": 953.547559,
+            "cache_snapshot_ms": 15.941664,
+            "queue_ms": 0.374979,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          },
+          {
+            "request": 3,
+            "ttft_ms": 955.996819,
+            "cache_snapshot_ms": 18.305743999999997,
+            "queue_ms": 0.400537,
+            "draft_tokens": 0,
+            "draft_tokens_accepted": 0
+          }
+        ]
+      }
+    },
+    "dflash2": {
+      "work_equal": true,
+      "comparisons": {
+        "main-vs-candidate": {
+          "status": "passed",
+          "quality_or_coverage_changes": [],
+          "unqualified_measurements": []
+        },
+        "merge-vs-candidate": {
+          "status": "inconclusive",
+          "quality_or_coverage_changes": [],
+          "unqualified_measurements": [
+            {
+              "case": "probe.requests.json:cold-0:0",
+              "metric": "max_inter_token_ms",
+              "status": "inconclusive",
+              "baseline_range": [
+                144.532159,
+                148.450489
+              ],
+              "candidate_range": [
+                143.105269,
+                153.076377
+              ],
+              "reason": "variable or overlapping observations; inspect stalls"
+            },
+            {
+              "case": "probe.requests.json:cold-2:0",
+              "metric": "max_inter_token_ms",
+              "status": "inconclusive",
+              "baseline_range": [
+                115.064879,
+                125.799789
+              ],
+              "candidate_range": [
+                117.850648,
+                126.63265
+              ],
+              "reason": "variable or overlapping observations; inspect stalls"
+            }
+          ]
+        }
+      },
+      "requests": {
+        "0-main": [
+          {
+            "request": 0,
+            "ttft_ms": 1034.242708,
+            "cache_snapshot_ms": 28.867184,
+            "queue_ms": 0.284658,
+            "draft_tokens": 42,
+            "draft_tokens_accepted": 23
+          },
+          {
+            "request": 1,
+            "ttft_ms": 1042.422295,
+            "cache_snapshot_ms": 17.025703999999998,
+            "queue_ms": 0.367004,
+            "draft_tokens": 37,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 2,
+            "ttft_ms": 1015.377893,
+            "cache_snapshot_ms": 14.913408,
+            "queue_ms": 0.341726,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 3,
+            "ttft_ms": 1015.674387,
+            "cache_snapshot_ms": 19.225431,
+            "queue_ms": 0.348419,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          }
+        ],
+        "1-merge": [
+          {
+            "request": 0,
+            "ttft_ms": 1008.653996,
+            "cache_snapshot_ms": 14.802195999999999,
+            "queue_ms": 2.96174,
+            "draft_tokens": 42,
+            "draft_tokens_accepted": 23
+          },
+          {
+            "request": 1,
+            "ttft_ms": 1005.135235,
+            "cache_snapshot_ms": 13.733466,
+            "queue_ms": 1.950158,
+            "draft_tokens": 37,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 2,
+            "ttft_ms": 1008.761706,
+            "cache_snapshot_ms": 13.782568,
+            "queue_ms": 1.887949,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 3,
+            "ttft_ms": 1023.961438,
+            "cache_snapshot_ms": 13.850537,
+            "queue_ms": 2.185122,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          }
+        ],
+        "2-candidate": [
+          {
+            "request": 0,
+            "ttft_ms": 1002.422597,
+            "cache_snapshot_ms": 12.726921,
+            "queue_ms": 3.218495,
+            "draft_tokens": 42,
+            "draft_tokens_accepted": 23
+          },
+          {
+            "request": 1,
+            "ttft_ms": 1007.1512,
+            "cache_snapshot_ms": 10.61051,
+            "queue_ms": 1.979392,
+            "draft_tokens": 37,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 2,
+            "ttft_ms": 1010.817857,
+            "cache_snapshot_ms": 11.708426,
+            "queue_ms": 2.018276,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 3,
+            "ttft_ms": 1013.071913,
+            "cache_snapshot_ms": 10.784828999999998,
+            "queue_ms": 2.246187,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          }
+        ],
+        "3-candidate": [
+          {
+            "request": 0,
+            "ttft_ms": 1009.675554,
+            "cache_snapshot_ms": 12.834866,
+            "queue_ms": 2.99404,
+            "draft_tokens": 42,
+            "draft_tokens_accepted": 23
+          },
+          {
+            "request": 1,
+            "ttft_ms": 1013.565672,
+            "cache_snapshot_ms": 12.704308000000001,
+            "queue_ms": 1.850047,
+            "draft_tokens": 37,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 2,
+            "ttft_ms": 1018.75675,
+            "cache_snapshot_ms": 12.698366,
+            "queue_ms": 1.867861,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 3,
+            "ttft_ms": 1049.746441,
+            "cache_snapshot_ms": 11.645135,
+            "queue_ms": 2.006904,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          }
+        ],
+        "4-merge": [
+          {
+            "request": 0,
+            "ttft_ms": 1001.298527,
+            "cache_snapshot_ms": 12.788886999999999,
+            "queue_ms": 3.362206,
+            "draft_tokens": 42,
+            "draft_tokens_accepted": 23
+          },
+          {
+            "request": 1,
+            "ttft_ms": 1029.029024,
+            "cache_snapshot_ms": 13.762037,
+            "queue_ms": 1.910412,
+            "draft_tokens": 37,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 2,
+            "ttft_ms": 1016.833313,
+            "cache_snapshot_ms": 13.852657,
+            "queue_ms": 1.820341,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 3,
+            "ttft_ms": 1025.173404,
+            "cache_snapshot_ms": 13.937117,
+            "queue_ms": 1.970405,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          }
+        ],
+        "5-main": [
+          {
+            "request": 0,
+            "ttft_ms": 1005.302242,
+            "cache_snapshot_ms": 14.937477000000001,
+            "queue_ms": 0.336707,
+            "draft_tokens": 42,
+            "draft_tokens_accepted": 23
+          },
+          {
+            "request": 1,
+            "ttft_ms": 1005.6058,
+            "cache_snapshot_ms": 14.926436,
+            "queue_ms": 0.23277,
+            "draft_tokens": 37,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 2,
+            "ttft_ms": 1023.428255,
+            "cache_snapshot_ms": 54.99112,
+            "queue_ms": 0.305888,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          },
+          {
+            "request": 3,
+            "ttft_ms": 1028.611427,
+            "cache_snapshot_ms": 98.993487,
+            "queue_ms": 0.251385,
+            "draft_tokens": 39,
+            "draft_tokens_accepted": 24
+          }
+        ]
+      }
+    }
+  },
+  "other_checks": {
+    "hosted": "60/60 passed before fixture updates",
+    "format": "599 files passed",
+    "functional_harness": "80 passed",
+    "recovery_evidence": "6 passed"
+  },
+  "remaining": [
+    "Current-head HTTP cache/long-context/conversation/image/concurrency histories across affected profiles",
+    "Matched affected-history timing controls and focused investigation of flags",
+    "Flash AR/MTP shared-path controls",
+    "Standard speed benchmark and focused deep/recovery/agent resource workflows"
+  ],
+  "limitations": [
+    "No new upstream-model or weight-conversion parity claim",
+    "Earlier cold-prefill versus decoded-history vision differences remain historical, unqualified model behavior; scalar-equivalent prefill remains rejected for its sevenfold prefill regression",
+    "Short request probes do not qualify long-context or concurrent serving",
+    "Startup wall times were not a matched filesystem-cache experiment"
+  ],
+  "raw_evidence_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19"
+}

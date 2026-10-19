@@ -1,9 +1,9 @@
 #include <algorithm>
 #include <cstdint>
 
-#include "src/models/qwen38_flash_next/kernels/rocm/snapshot_copy.hpp"
+#include "src/core/hip/snapshot_copy.hpp"
 
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace gufo::hip {
 namespace {
 __global__ void CopyAlignedSnapshot(unsigned char* destination,
                                     const unsigned char* source,
@@ -60,4 +60,4 @@ hipError_t CopySnapshotToDevice(void* destination, const void* source,
   return CopySnapshot(destination, source, bytes, stream, false);
 }
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace gufo::hip

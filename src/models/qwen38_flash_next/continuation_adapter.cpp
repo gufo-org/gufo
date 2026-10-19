@@ -10,9 +10,9 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/snapshot_copy.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
-#include "src/models/qwen38_flash_next/kernels/rocm/snapshot_copy.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
@@ -614,8 +614,8 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
           if (piece.host)
             std::memcpy(destination, source, end - first);
           else
-            Check(rocm::CopySnapshotToHost(destination, source, end - first,
-                                           transfer.Native()));
+            Check(hip::CopySnapshotToHost(destination, source, end - first,
+                                          transfer.Native()));
         }
       });
 }
@@ -665,8 +665,8 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
             if (piece.host)
               std::memcpy(destination, source, end - first);
             else
-              Check(rocm::CopySnapshotToDevice(destination, source, end - first,
-                                               transfer.Native()));
+              Check(hip::CopySnapshotToDevice(destination, source, end - first,
+                                              transfer.Native()));
           }
         });
   } catch (...) {
@@ -701,8 +701,8 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
         if (component.part == ContinuationPart::kTokens && !bytes.empty())
           std::memcpy(bytes.data(), source, bytes.size());
         else if (!bytes.empty())
-          Check(rocm::CopySnapshotToHost(bytes.data(), source, bytes.size(),
-                                         transfer.Native()));
+          Check(hip::CopySnapshotToHost(bytes.data(), source, bytes.size(),
+                                        transfer.Native()));
       });
 }
 std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
@@ -753,8 +753,8 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
           if (component.part == ContinuationPart::kTokens && !bytes.empty())
             std::memcpy(destination, bytes.data(), bytes.size());
           else if (!bytes.empty())
-            Check(rocm::CopySnapshotToDevice(destination, bytes.data(),
-                                             bytes.size(), transfer.Native()));
+            Check(hip::CopySnapshotToDevice(destination, bytes.data(),
+                                            bytes.size(), transfer.Native()));
         });
   } catch (...) {
     state.failed = true;

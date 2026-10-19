@@ -10,6 +10,10 @@ the earlier October 19 rows at every depth; decode gains grow with depth.
 AR pp, multi-user rates and memory match matched main controls; their changes
 from September predate this revision. All llama.cpp measurements are unchanged.
 
+The [component-cache refresh](artifacts/component-cache-review.json) has separate
+per-request short-history controls and remains under qualification. These
+throughput tables retain their dates and do not qualify the new cache wiring.
+
 Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md) · [Model identities](artifacts/model-identities.json)
 

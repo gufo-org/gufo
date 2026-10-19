@@ -57,7 +57,10 @@ nix develop -c python3 tests/functional/cache_startup.py \
 ```
 
 Run again with `--speculative off` for AR. `--case ram` or `--case disk` selects
-only that lifecycle. Commands, startup times, request timings, responses and logs
+only that lifecycle. For Qwen 27B, add `--model-kind qwen27b` before `--`,
+use its target weights, and select `--speculative off` or
+`--speculative dflash2 --dflash-model /path/to/draft.gguf` in the server command.
+Commands, startup times, request timings, responses and logs
 remain in the output directory. This check stays outside hosted model CI.
 Qwen 27B deep-history recovery uses separate, explicitly selected workloads:
 

@@ -170,13 +170,28 @@ and the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
 
 ## Component serving migration
 
-The new component format adds sampled frontier state and DFlash2 ring KV,
-pending target features and controller metadata. AR and DFlash2 serving use
-adapter-owned slots and committed host backing. At `c7053529`, Q4/Q8 full cache-serving checks pass in both modes, including
-exact greedy/seeded forks, generated-frontier cancellation, disk restarts and
-artifact compatibility misses. Current DFlash component restore checks also pass.
-The vision suite restores image identity, sampling and cancellation exactly,
-but cold prefill differs from decoded-history continuation on a Q4 fixture;
-that strict failure remains open. Deep workloads and resource checks remain
-unqualified. Earlier capacity probes cover the earlier AR adapter format.
-Performance measurements are deferred until functional work ends.
+October 19 refresh: main `270b5333` is merged into the component-cache PR.
+Q4/Q8 native adapter, DFlash2 state, serving-cache and target numerical checks
+pass on the candidate. Restored component bytes and full logits match; checks
+include FP16/FP32 KV, edits, rollback, images, sampled frontiers, cancellation,
+disk compatibility, concurrent forks and cleanup. The shared byte-copy control
+also covers registered/pageable memory, unaligned tails and peer graph capture.
+
+Q4/Q8 AR/DFlash2 startup checks pass for RAM, disk and restart. RAM-only
+serving does not fingerprint the artifacts; durable restart restores the same
+reply. Loaded modes and actual draft counts are verified. Main's shared
+backing, admission, retention and publication fixes are preserved, and 27B
+uses the shared mapped snapshot copy kernels for private state and FP16 rows.
+FP32's canonical head-major transfers retain their strided representation.
+
+Short-request main/PR/PR/main controls preserve every output and draft count.
+DFlash2 passes the per-request timing limits against main. AR has an
+inconclusive first-request queue flag. Against the merged branch without the
+copy change, one initial AR snapshot outlier and token-gap flags in both modes
+remain inconclusive. Current-head HTTP histories, Flash shared-path controls,
+deep/recovery workflows and complete latency qualification remain open.
+See the [dated review record](artifacts/component-cache-review.json) for
+commands, binary identities, every short-request observation and outstanding
+checks. Earlier capacity and vision evidence does not qualify this revision.
+The earlier cold-prefill versus decoded-history vision difference remains
+unqualified; the wide prefill route restored by `dabc85cf` is retained.
