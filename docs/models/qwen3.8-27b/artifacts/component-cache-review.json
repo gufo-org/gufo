@@ -818,10 +818,17 @@
     },
     "format": "599 files passed",
     "functional_harness": "80 passed",
-    "recovery_evidence": "6 passed"
+    "recovery_evidence": "6 passed",
+    "latest_documentation_head": {
+      "head": "8b3bbed4",
+      "cpu_contracts": "passed",
+      "title": "passed",
+      "cpu_run": "https://github.com/gufo-org/gufo/actions/runs/39278124881",
+      "note": "Job status verified; full log download failed with a gateway timeout. Implementation-head CI log remains retained separately."
+    }
   },
   "remaining": [
-    "Q8 AR/DFlash2 HTTP cache/long-context/conversation/image/concurrency histories",
+    "Q8 DFlash2 HTTP cache/long-context/conversation/image/concurrency histories",
     "Matched affected-history timing controls and focused investigation of flags",
     "Flash AR/MTP shared-path controls",
     "Standard speed benchmark and focused deep/recovery/agent resource workflows"
@@ -909,6 +916,44 @@
       },
       "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
       "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q4-dflash2-http"
+    },
+    "q8/off": {
+      "status": "passed",
+      "requests": 290,
+      "invalid_requests": 0,
+      "execution": {
+        "loaded_mode": "off",
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "draft_execution_observed": false
+      },
+      "stages": {
+        "long-context": "passed",
+        "conversation": "passed",
+        "image-count": "passed",
+        "cache-edits": "passed",
+        "cache-growth": "passed",
+        "cache-depth": "passed",
+        "cache-concurrency": "passed",
+        "cache-shared-prefix": "passed",
+        "state-edges": "passed",
+        "image-count-cancel": "passed",
+        "text-cancel": "passed",
+        "thinking-tool-cancel": "passed",
+        "legacy-tool-cancel": "passed",
+        "image-cancel": "passed",
+        "image-thinking-cancel": "passed",
+        "disk-spacing": "passed",
+        "image-count-cancel-disk": "passed",
+        "text-cancel-disk": "passed",
+        "thinking-tool-cancel-disk": "passed",
+        "legacy-tool-cancel-disk": "passed",
+        "image-cancel-disk": "passed",
+        "image-thinking-cancel-disk": "passed",
+        "disk-spacing-disk": "passed"
+      },
+      "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
+      "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q8-off-http"
     }
   },
   "readiness_resources": {

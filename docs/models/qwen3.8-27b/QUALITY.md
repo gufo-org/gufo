@@ -196,12 +196,12 @@ Short-request main/PR/PR/main controls preserve every output and draft count.
 DFlash2 passes the per-request timing limits against main. AR has an
 inconclusive first-request queue flag. Against the merged branch without the
 copy change, one initial AR snapshot outlier and token-gap flags in both modes
-remain inconclusive. The selected Q4 AR and DFlash2 HTTP runs each pass all
-23 stages and 290 recorded requests,
+remain inconclusive. The selected HTTP runs for Q4 AR, Q4 DFlash2 and Q8 AR
+each pass all 23 stages and 290 recorded requests,
 including long-context, conversation, image-count, edits, growth, depth,
 concurrency, learned shared prefixes, state edges, cancellation and durable
 restart/replay. The DFlash2 run observes 3,419 proposed and 2,016 accepted draft
-tokens. Q8 profiles, Flash shared-path controls,
+tokens. The Q8 DFlash2 profile, Flash shared-path controls,
 deep/recovery workflows and complete latency qualification remain open.
 See the [dated review record](artifacts/component-cache-review.json) for
 commands, binary identities, every short-request observation and outstanding
