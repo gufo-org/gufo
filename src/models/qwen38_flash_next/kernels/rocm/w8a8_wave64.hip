@@ -3,6 +3,14 @@
 
 namespace gufo::models::qwen38_flash_next::rocm {
 
+hipError_t PrepareW8A8GemmWave64() {
+  hipFuncAttributes attributes{};
+  return hipFuncGetAttributes(
+      &attributes, reinterpret_cast<const void*>(
+                       gufo::hip::WKQuantA8BlockedWmmaGEMMKernel<
+                           128, 128, 2, 4, 1, core::GgmlType::kQ8_0, 64>));
+}
+
 void W8A8GemmWave64(const void* w, const void* x_tiled, float* out,
                     std::size_t batch, std::size_t m, std::size_t k,
                     hipStream_t stream) {

@@ -534,10 +534,12 @@ class FunctionalRunnerTest(unittest.TestCase):
 
     def test_cache_depth_replays_branches_before_cold_controls(self):
         requests, checks = self.run_cache_depth()
-        self.assertEqual(len(checks), 17)
-        self.assertEqual(len(requests), 16)
+        self.assertEqual(len(checks), 16)
+        self.assertEqual(len(requests), 15)
         self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is False
-                            for body in requests[-7:]))
+                            for body in requests[-6:]))
+        # The first turn is uncached already; no control repeats it.
+        self.assertNotIn("depth_cold_turn_0", checks)
         for code in ("RED", "GREEN", "BLUE"):
             self.assertEqual(checks["depth_branch_" + code]["text"], code)
         self.assertEqual(requests[7]["messages"], requests[8]["messages"])
@@ -1680,11 +1682,39 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
             self.assertEqual(code, 1)
             self.assertEqual(report["status"], "failed")
 
+    def test_runner_skips_suites_their_selected_parent_already_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "openai_sdk.py").write_text('''import json,sys
+from pathlib import Path
+p = Path(sys.argv[sys.argv.index("--output") + 1])
+p.write_text(json.dumps({"status": "passed"}))
+p.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests": [{
+    "index": 0, "case": "reply", "status": "complete", "endpoint": "/v1/chat/completions",
+    "wall_ms": 1, "request_sha256": "same", "output_sha256": "same"}]}))
+''')
+            args = ["run.py", "--output", str(root / "out"), "--sampling-preset", "qwen38",
+                    "--record-baseline"]
+            for suite in ("auto-tools", "tools", "tool-native-types", "tool-native-schemas",
+                          "tool-native-types"):
+                args += ["--suite", suite]
+            args += ["--", sys.executable, "serve", "llm", "--model", "fixture.gguf"]
+            with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
+                 patch.object(functional, "server", return_value=contextlib.nullcontext()), \
+                 patch.object(functional, "provenance", return_value={}), \
+                 patch.object(functional, "join_server_timings"), \
+                 patch.object(functional, "execution_coverage", return_value={}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(functional.main(), 0)
+            report = json.loads((root / "out" / "report.json").read_text())
+            self.assertEqual(list(report["suites"]), ["tools", "tool-native-schemas"])
+
     def test_failed_or_incomplete_child_is_not_reported_as_a_pass(self):
+        hung = 'import time; time.sleep(10)'
         for child, expected in (
             ('import sys; sys.exit(7)', "failed"),
             ('pass', "failed"),
-            ('import time; time.sleep(10)', "failed"),
+            (hung, "failed"),
             ('import json,sys; from pathlib import Path; '
              'Path(sys.argv[sys.argv.index("--output")+1]).write_text('
              'json.dumps({"status":"failed"}))', "failed"),
@@ -1705,7 +1735,9 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
                 (root / "openai_sdk.py").write_text(child)
                 args = ["run.py", "--record-baseline", "--output", str(root / "report"),
                         "--sampling-preset", "qwen38", "--suite", "responses",
-                        "--suite-timeout", ".2", "--",
+                        # Only the hung child relies on the timeout; the others need time
+                        # to start Python on a loaded host.
+                        "--suite-timeout", ".2" if child == hung else "60", "--",
                         sys.executable, "serve", "llm", "--model", "fixture.gguf"]
                 with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
                      patch.object(functional, "server", return_value=contextlib.nullcontext()), \
@@ -1799,6 +1831,47 @@ sys.exit({exit_code})
 
 
 class PiWatchdogTest(unittest.TestCase):
+    def test_wide_tool_checks_intent_and_actual_execution(self):
+        from pi_agent import validate_task
+
+        wanted = [{"action": "update", "id": 1, "status": "completed"},
+                  {"action": "update", "id": 2, "status": "in_progress"}]
+
+        def check(arguments, *, executed=None):
+            history = []
+            for i, item in enumerate(arguments):
+                history.extend([
+                    {"role": "assistant", "content": [{
+                        "type": "toolCall", "id": str(i), "name": "todo",
+                        "arguments": item}]},
+                    {"role": "toolResult", "isError": False, "content": [{
+                        "type": "text", "text": f"Task {i + 1}: {wanted[i]['status']}"}]},
+                ])
+            history.append({"role": "assistant", "stopReason": "stop",
+                            "content": [{"type": "text", "text": "DONE"}]})
+            with tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                (work / "todo-calls.jsonl").write_text(
+                    "\n".join(json.dumps(row) for row in (
+                        arguments if executed is None else executed)) + "\n")
+                validate_task("wide-tool", work, history)
+
+        check(wanted)
+        for change in ("missing_status", "owner", "extra_default", "execution"):
+            bad = deepcopy(wanted)
+            executed = None
+            if change == "missing_status":
+                del bad[0]["status"]
+            elif change == "owner":
+                bad[0]["owner"] = "unrequested-owner"
+            elif change == "extra_default":
+                bad[0]["includeDeleted"] = False
+            else:
+                executed = deepcopy(bad)
+                executed[0]["status"] = "pending"
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                check(bad, executed=executed)
+
     def test_repeated_command_can_make_progress(self):
         from pi_agent import repeated_actions
 

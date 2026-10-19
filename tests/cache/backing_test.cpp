@@ -33,7 +33,8 @@ namespace {
 std::atomic<std::size_t> allocations{};
 std::atomic<std::size_t> host_allocations{};
 std::atomic<std::size_t> max_piece{};
-std::atomic<bool> fail_populate{};
+std::atomic<int> fail_populate_after{-1};
+std::atomic<void*> failed_page{};
 bool pins_denied{};
 bool fail_copy{}, fail_record{}, fail_query{}, fail_wait{}, fail_alloc{};
 int copies_before_failure{};
@@ -61,7 +62,9 @@ void operator delete(void* memory, std::size_t) noexcept {
 extern "C" {
 int __real_madvise(void*, std::size_t, int);
 int __wrap_madvise(void* data, std::size_t bytes, int advice) {
-  if (advice == MADV_POPULATE_WRITE && fail_populate.exchange(false)) {
+  if (advice == MADV_POPULATE_WRITE && fail_populate_after.load() >= 0 &&
+      fail_populate_after.fetch_sub(1) == 0) {
+    failed_page.store(data);
     errno = ENOMEM;
     return -1;
   }
@@ -521,13 +524,13 @@ void OnDemandBacking() {
       {ahead_capacity, block_bytes, headroom, 2 * block_bytes, {}});
   auto held = ahead.TryAcquire(Category::kPrivateTail);
   assert(held && ahead.BlockCount() == 2);
-  ahead.GrowAhead();
+  ahead.GrowAhead(2 * block_bytes);
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (ahead.BlockCount() != 4 && std::chrono::steady_clock::now() < deadline)
     std::this_thread::yield();
   assert(ahead.BlockCount() == 4 && ahead.PageCommitAllocations() == 2);
-  ahead.GrowAhead();
+  ahead.GrowAhead(2 * block_bytes);
   assert(ahead.BlockCount() == 4);
   // A bounded startup reserve finishes before requests acquire its pages.
   // Observe real HIP allocations: neither request below may commit a segment.
@@ -535,10 +538,10 @@ void OnDemandBacking() {
   hip::CommittedBackingPool startup(
       startup_ledger,
       {ahead_capacity, block_bytes, headroom, 2 * block_bytes, {}});
-  startup.GrowAhead();
+  startup.GrowAhead(2 * block_bytes);
   startup.WaitForGrowth();
   assert(startup.BlockCount() == 2);
-  startup.GrowAhead(2);
+  startup.GrowAhead(4 * block_bytes);
   startup.WaitForGrowth();
   assert(startup.BlockCount() == 4 && startup.PageCommitAllocations() == 2);
   const auto committed_allocations = allocations.load();
@@ -548,6 +551,26 @@ void OnDemandBacking() {
       startup.TryAcquire(Category::kPrivateTail, 2 * block_bytes);
   assert(startup_first && startup_second &&
          allocations.load() == committed_allocations);
+  // A byte reserve need not be a segment multiple. It must not grow another
+  // segment just because the free backing is below a rounded-up threshold.
+  cache::ResourceLedger exact_ledger(Limits(many_capacity));
+  hip::CommittedBackingPool exact(
+      exact_ledger,
+      {many_capacity, block_bytes, many_headroom, 3 * block_bytes, {}});
+  exact.GrowAhead(0);
+  exact.WaitForGrowth();
+  assert(exact.BlockCount() == 0);
+  exact.GrowAhead(4 * block_bytes);
+  exact.WaitForGrowth();
+  assert(exact.BlockCount() == 6);
+  auto used = exact.TryAcquire(Category::kPrivateTail);
+  assert(used);
+  exact.GrowAhead(4 * block_bytes);
+  exact.WaitForGrowth();
+  assert(exact.BlockCount() == 6);
+  exact.GrowAhead(std::numeric_limits<std::size_t>::max());
+  exact.WaitForGrowth();
+  assert(exact.BlockCount() == many);
 }
 void EagerCommit() {
   // Serving may commit the whole pool before it starts. Segments, admission
@@ -569,10 +592,9 @@ void EagerCommit() {
     assert(allocations == physical + 3 && asked == pages * block_bytes);
     assert(ledger.Snapshot().total_bytes == headroom + pages * block_bytes);
     assert(pool.CommitAll());
-    // Neither capture-time growth nor the reserve before a long prefill can
-    // grow a full pool.
-    pool.GrowAhead();
-    pool.GrowAhead(2);
+    // No reserve before a prefill chunk can grow a full pool.
+    pool.GrowAhead(block_bytes);
+    pool.GrowAhead(std::numeric_limits<std::size_t>::max());
     pool.WaitForGrowth();
     // Runs still end with their segment: after one block, a single pair fits
     // (one coalesced region would take two), then the singles left. Private
@@ -1011,19 +1033,25 @@ void LongTermPagePins() {
   }
 }
 void PopulationFailure() {
-  for (const std::size_t bytes : {8ULL << 20, 128ULL << 20}) {
-    cache::ResourceLedger ledger(Limits(bytes + metadata));
-    const auto before = allocations.load();
-    // One worker fails while its peers may still populate other ranges.
-    // No mapping may be registered or escape, and all charges must unwind.
-    fail_populate = true;
-    Throws<std::runtime_error>([&] {
-      hip::CommittedBackingPool pool(ledger,
-                                     {bytes + metadata, bytes, metadata});
-    });
-    assert(!fail_populate && allocations == before);
-    assert(ledger.Snapshot().total_bytes == 0);
-  }
+  for (const std::size_t bytes : {8ULL << 20, 256ULL << 20})
+    for (int after : {0, 3}) {
+      cache::ResourceLedger ledger(Limits(bytes + metadata));
+      const auto before = allocations.load();
+      // Fail before or after partial population, including parallel workers.
+      // No mapping may be registered or escape; every charge and page unwinds.
+      failed_page = nullptr;
+      fail_populate_after = after;
+      Throws<std::runtime_error>([&] {
+        hip::CommittedBackingPool pool(ledger,
+                                       {bytes + metadata, bytes, metadata});
+      });
+      assert(fail_populate_after < 0 && failed_page != nullptr &&
+             allocations == before);
+      unsigned char resident{};
+      assert(mincore(failed_page.load(), 4096, &resident) == -1 &&
+             errno == ENOMEM);
+      assert(ledger.Snapshot().total_bytes == 0);
+    }
 }
 void LargeBacking() {
   constexpr std::size_t block = 64ULL << 20;

@@ -1047,9 +1047,14 @@ __global__ void HcCombineMoeF16Kernel(
         v[s][c] = float4{r.x + b.x * w[s], r.y + b.y * w[s], r.z + b.z * w[s],
                          r.w + b.w * w[s]};
         *reinterpret_cast<float4*>(dst + e) = v[s][c];
-        if constexpr (kPrior) {
-          // Keep the existing compiled square-accumulation order when the
-          // preceding residual FMA stays in registers instead of memory.
+        {
+          // One square-accumulation order for every instantiation. The
+          // deferred path must stay bit-identical to the separate-store
+          // path, and fast-math reorders a plain `ss += x*x + ...`
+          // differently per template instantiation (gfx1151 stream 3), so
+          // the two would start from sums differing in the last F32 bits
+          // and disagree in the Q8 block scales. The pinned order is the
+          // compiled order of the separate-store build this defers.
           const float4 n = v[s][c];
           if (s == 3) {
             ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
@@ -1067,9 +1072,6 @@ __global__ void HcCombineMoeF16Kernel(
             ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
             ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
           }
-        } else {
-          ss[s] += v[s][c].x * v[s][c].x + v[s][c].y * v[s][c].y +
-                   v[s][c].z * v[s][c].z + v[s][c].w * v[s][c].w;
         }
       }
     }
@@ -1112,16 +1114,11 @@ __global__ void HcCombineMoeF16Kernel(
       float4 n{0.0F, 0.0F, 0.0F, 0.0F};
       if (i < hidden) {
         const float4 gm = *reinterpret_cast<const float4*>(gamma + e);
-        if constexpr (kPrior) {
-          const float4 g =
-              float4{__fmul_rn(gm.x, scale[s]), __fmul_rn(gm.y, scale[s]),
-                     __fmul_rn(gm.z, scale[s]), __fmul_rn(gm.w, scale[s])};
-          n = float4{v[s][c].x * g.x, v[s][c].y * g.y, v[s][c].z * g.z,
-                     v[s][c].w * g.w};
-        } else {
-          n = float4{v[s][c].x * scale[s] * gm.x, v[s][c].y * scale[s] * gm.y,
-                     v[s][c].z * scale[s] * gm.z, v[s][c].w * scale[s] * gm.w};
-        }
+        const float4 g =
+            float4{__fmul_rn(gm.x, scale[s]), __fmul_rn(gm.y, scale[s]),
+                   __fmul_rn(gm.z, scale[s]), __fmul_rn(gm.w, scale[s])};
+        n = float4{__fmul_rn(v[s][c].x, g.x), __fmul_rn(v[s][c].y, g.y),
+                   __fmul_rn(v[s][c].z, g.z), __fmul_rn(v[s][c].w, g.w)};
         __half* out = xn + (static_cast<std::size_t>(t) * hc_dim) + e;
         const __half2 lo = __floats2half2_rn(n.x, n.y);
         const __half2 hi = __floats2half2_rn(n.z, n.w);

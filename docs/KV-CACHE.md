@@ -368,9 +368,11 @@ Memory that another process claims after startup is not subtracted. When
 other GPU servers share the machine, such as an image or speech server, set an
 explicit `--cache-ram-bytes` that leaves room for their peak use; starting
 them first only accounts for what they hold at that moment.
-The RAM payload budget excludes weights, execution states, token metadata
-and disk staging. It also excludes temporary host buffers used to save
-checkpoints to disk; this is not a limit on total server memory.
+The RAM payload budget excludes weights, execution states, token metadata,
+disk staging and Qwen's separate CPU image-preprocessing cache (up to 128 MiB
+of retained encoded/RGB vectors plus bounded metadata). It also excludes temporary
+host buffers used to save checkpoints to disk; this is not a limit on total
+server memory.
 
 The 32 GiB automatic cap limits default growth on a lightly loaded machine.
 It leaves room for several 27B histories: two 3.7 GB checkpoints per history
@@ -417,8 +419,8 @@ Flash-Next keeps the same options with these meanings:
 
 | Option | Meaning |
 | --- | --- |
-| `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
-| `--cache-ram-commit` | `lazy` (default): two steps commit before serving and later steps on a background thread ahead of long prefills and completed append rows, or on a capture that needs them (below). `eager`: every step commits before serving, in the same layout, with the same host and device-heap reserves and the same long-term page-pin attempt and fallback, so no request overlaps a backing commit. Startup takes longer by the time to commit all of the backing pages, including any page-cache reclaim that needs (below), and those pages are resident from the start. The rest of the budget, for cache metadata, still grows with use, as do rollback and image storage. If a step is declined or fails, startup stops with an error naming what was committed; it never falls back to lazy growth. Use it with an explicit `--cache-ram-bytes` sized for the deployment. Other models reject `eager`. |
+| `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in segments of about 128 MiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
+| `--cache-ram-commit` | `lazy` (default): a 2 GiB reserve commits before serving and later segments on a background thread before each prefill chunk (a 2 GiB reserve, 1 GiB for chunks under 512 tokens), or on a capture that needs them (below). `eager`: every segment commits before serving, in the same layout, with the same host and device-heap reserves and the same long-term page-pin attempt and fallback, so no request overlaps a backing commit. Startup takes longer by the time to commit all of the backing pages, including any page-cache reclaim that needs (below), and those pages are resident from the start. The rest of the budget, for cache metadata, still grows with use, as do rollback and image storage. If a segment is declined or fails, startup stops with an error naming what was committed; it never falls back to lazy growth. Use it with an explicit `--cache-ram-bytes` sized for the deployment. Other models reject `eager`. |
 | `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the oldest checkpoints by creation order: use history does not survive a restart. |
 | `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 1 MiB pinned buffer; checkpoints of any size stream through it. Its size did not change restore or write speed (#562), and a larger value only took pinned RAM and device heap. Earlier advice to raise staging no longer applies. |
 | `--cache-disk DIR` | Owned by one Flash-Next server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory. Other models do not take this lock. Startup removes earlier-release `*.kvc` and `.tmp-*` files from the directory, including those of another model's server sharing it. |
@@ -430,10 +432,11 @@ count under 128; only larger explicit budgets can reach the record limit. The st
 `automatic_bytes`, `max_bytes`, `staging_capacity_bytes` and
 `disk_capacity_bytes`.
 
-Flash-Next prepares a bounded two-segment reserve before readiness and can
-prepare the next segment before a prefill with at least 512 tokens remaining
-or when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative
-growth; a capture still commits any backing it needs.
+Flash-Next prepares a 2 GiB reserve before readiness. Before each prefill
+chunk, after any pending fallback capture, it grows backing on a background
+thread toward a 2 GiB reserve (1 GiB for chunks under 512 tokens); fully cached
+decode does not start it. Captures do not request speculative growth; a capture
+still commits any backing it needs.
 
 Backing excludes transparent huge pages before population and attempts a Linux
 long-term page pin before GPU registration. GPU registration alone leaves
@@ -548,7 +551,7 @@ result can still populate the cache. `null` keeps the default, `true`.
 | `event=snapshot_cache_configured` | retained capacity at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
 | `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
 | `schema=component-cache-v1 event=backing_prepared` | Flash-Next: backing committed before serving under `commit=lazy` or `commit=eager`: `budget_bytes`, the pool's `backing_bytes`, `committed_bytes`, `long_term_pinned_bytes` (zero when the pin falls back, above), `segments` committed of the total, `segment_bytes`, `prepare_ms`, and the device heap and host memory left afterwards |
-| `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 1 GiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
+| `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 128 MiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
 | `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
 | `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because its pinned pages would leave the device heap less than its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory (#460) |
 | `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |

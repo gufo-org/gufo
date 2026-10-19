@@ -29,6 +29,143 @@ bool Accepts(const JsonConstraint& grammar, std::string_view text) {
   return grammar.Complete(state);
 }
 
+void TestWideNativeArgumentOrder() {
+  using Format = JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto parameter = [&](unsigned i, std::string_view value = "1") {
+      const auto name = "p" + std::to_string(i);
+      return format == Format::kQwen
+                 ? "<parameter=" + name + ">\n" + std::string(value) +
+                       "\n</parameter>\n"
+                 : "<｜DSML｜parameter name=\"" + name +
+                       "\" string=\"false\">" + std::string(value) +
+                       "</｜DSML｜parameter>\n";
+    };
+    // Cross the old ten-property cutoff and the per-request bitset word
+    // boundary. Declaration order must never make a later argument unreachable.
+    for (const unsigned count : {10, 11, 12, 16, 24, 65}) {
+      auto schema = parse(R"({"type":"object","properties":{},
+        "required":["p0"],"additionalProperties":false})");
+      for (unsigned i = 0; i < count; ++i)
+        schema["properties"]["p" + std::to_string(i)] =
+            parse(R"({"type":"integer","minimum":1,"maximum":9})");
+      {
+        const auto grammar =
+            JsonConstraint::ToolParameters(schema, false, format);
+        assert(Accepts(*grammar,
+                       parameter(0) + parameter(count - 1) + parameter(4)));
+        assert(Accepts(*grammar, parameter(count - 1) + parameter(0)));
+        assert(!Accepts(*grammar, parameter(count - 1)));
+        assert(!Accepts(*grammar, parameter(0) + parameter(0)));
+        assert(!Accepts(*grammar, parameter(0) + parameter(count)));
+        assert(!Accepts(*grammar, parameter(0) + parameter(4, "10")));
+        assert(!Accepts(*grammar, parameter(0) + parameter(4, "\"1\"")));
+      }
+      auto optional_schema = schema;
+      optional_schema["required"] = gufo::json::Value::array();
+      const auto optional =
+          JsonConstraint::ToolParameters(optional_schema, false, format);
+      assert(Accepts(*optional, ""));
+      assert(Accepts(*optional, parameter(count - 1) + parameter(4)));
+      assert(!Accepts(*optional, parameter(4) + parameter(4)));
+      // Many required fields also remain unordered, without enumerating 2^N
+      // grammar rules. Reject a call missing even the final required member.
+      schema["required"] = gufo::json::Value::array();
+      std::string reverse;
+      for (unsigned i = count; i-- > 0;) {
+        schema["required"].push_back("p" + std::to_string(i));
+        reverse += parameter(i);
+      }
+      const auto required =
+          JsonConstraint::ToolParameters(schema, true, format);
+      assert(Accepts(*required, reverse));
+      assert(!Accepts(*required,
+                      reverse.substr(0, reverse.size() - parameter(0).size())));
+      if (count != 12)
+        continue;
+      // A pattern selects the loose native route. Its other typed fields and
+      // required names must keep the same unordered contract.
+      schema["required"] = parse(R"(["p0"])");
+      schema["properties"]["p1"] =
+          parse(R"({"type":"string","pattern":"^[a-z]+$"})");
+      const auto loose = JsonConstraint::ToolParameters(schema, false, format);
+      const auto body = parameter(0) + parameter(11) + parameter(4);
+      assert(Accepts(*loose, body));
+      assert(!Accepts(*loose, parameter(11) + parameter(4)));
+      assert(!Accepts(*loose, parameter(0) + parameter(4, "10")));
+
+      schema["properties"]["p0"]["minimum"] = 2;
+      for (unsigned i = count; i < 65; ++i)
+        schema["properties"]["p" + std::to_string(i)] =
+            parse(R"({"type":"integer"})");
+      const auto other = JsonConstraint::ToolParameters(schema, false, format);
+      const auto opening = [&](std::string_view name) {
+        return format == Format::kQwen
+                   ? "<tool_call>\n<function=" + std::string(name) + ">\n"
+                   : "<｜DSML｜invoke name=\"" + std::string(name) + "\">\n";
+      };
+      const std::string closing = format == Format::kQwen
+                                      ? "</function>\n</tool_call>"
+                                      : "</｜DSML｜invoke>\n";
+      const auto wrap = [&](std::string text) {
+        return format == Format::kQwen
+                   ? text
+                   : "<｜DSML｜tool_calls>\n" + text + "</｜DSML｜tool_calls>";
+      };
+      const auto combined = JsonConstraint::WithTools(
+          nullptr, {{"a", loose}, {"b", other}, {"alias", loose}}, true, true,
+          format);
+      // Import distinct argument sets and reuse one imported set. Each call
+      // starts fresh; required/used bits cannot leak between calls or tools.
+      const auto calls = wrap(opening("a") + body + closing + opening("b") +
+                              parameter(64) + parameter(0, "2") + parameter(4) +
+                              closing + opening("alias") + body + closing);
+      assert(Accepts(*combined, calls));
+      assert(Accepts(*JsonConstraint::WithReasoning(combined),
+                     "Choose the fields.</think>" + calls));
+      assert(!Accepts(*combined, wrap(opening("b") + body + closing)));
+      assert(!Accepts(*combined, wrap(opening("a") + body + closing +
+                                      opening("b") + parameter(4) + closing)));
+
+      // Vocabulary masks and speculative sampler copies must include the
+      // chosen subset, including tokens crossing complete parameter blocks.
+      auto binding = std::make_shared<TokenConstraint>();
+      binding->grammar = combined;
+      const std::vector<std::string> pieces{
+          (format == Format::kQwen ? "" : "<｜DSML｜tool_calls>\n") +
+              opening("a"),
+          parameter(0),
+          parameter(11),
+          parameter(4),
+          parameter(4) + parameter(11),
+          ""};
+      binding->vocabulary = std::make_shared<ConstraintVocabulary>(
+          pieces.size(), [&](std::uint32_t id) {
+            return ConstraintVocabulary::Piece{pieces[id], id == 5};
+          });
+      SamplerState sampler({.constraint = binding});
+      sampler.Accept(0);
+      sampler.Accept(1);
+      auto saved = sampler;
+      sampler.Accept(2);
+      std::vector<float> logits(pieces.size(), -INFINITY);
+      logits[2] = 100;  // a repeated name is unavailable in this copy
+      logits[3] = 10;
+      assert(sampler.Sample(logits) == 3);
+      assert(saved.Sample(logits) == 2);
+      sampler = saved;
+      sampler.Accept(4);  // both complete parameter blocks fit one token
+      bool duplicate_rejected = false;
+      try {
+        sampler.Accept(2);
+      } catch (const std::runtime_error&) {
+        duplicate_rejected = true;
+      }
+      assert(duplicate_rejected);
+    }
+  }
+}
+
 void TestJsonLanguage() {
   const auto grammar = JsonConstraint::Object();
   for (const char* valid :
@@ -2153,6 +2290,7 @@ int main(int argc, char** argv) {
   TestNativeRequestMaskReuse();
   TestReasoningConstraint();
   TestAutomaticTools();
+  TestWideNativeArgumentOrder();
   TestNativeTools();
   TestOpenNativeTools();
   TestNonStrictAgentTools();

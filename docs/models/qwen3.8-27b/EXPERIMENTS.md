@@ -2,6 +2,7 @@
 
 | Experiment | Decision / qualification |
 | --- | --- |
+| CPU image preprocessing reuse, October 18 (#627) | Retained: backend-owned 128 MiB combined encoded/RGB cache, fast lookup hash followed by exact byte equality, immutable request ownership and unchanged continuation hashing. Flash-Next queue medians: 45.01/82.40/161.49 → 9.65/13.25/20.63 ms for 1/2/4 screenshots. Miss median differences: −0.26 ms small PNG, +0.42 ms 6.2 MB PNG; individual stalls and broad timing flags remain inconclusive. Rejected: SHA-256 lookup added about 6.7 ms for large PNG misses; unconditional reuse changed forced-cold behavior, so `cache_prompt:false` bypasses reuse. [Evidence](https://github.com/gufo-org/gufo/pull/645). |
 | Conversation checkpoints | Retained: bounded edit checkpoints and advancing conversation boundaries. Q4/Q8 AR and DFlash2 cancellation, image replay and disk restart pass; Q4 edits and growing histories match cold answer controls. [Functional checks](../../../tests/functional/README.md). |
 | Bounded prefill submission for cancellation | Retained: Q4/Q8 AR resume in 302/412 ms after a prefill disconnect; DFlash2 in 214/281 ms. Exact image/snapshot logits and seeded replay; matched 2,504-token C1 prefill times remain within 1.7% across all four modes. Two reusable events, no tensor allocation or arithmetic change. |
 | Quantized verification row groups | Retained per shape; scalar FP32 bits, full target logits and private acceptance/RNG must match. |

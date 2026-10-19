@@ -587,6 +587,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
+    std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
@@ -653,6 +654,11 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--preserve-thinking", "MODE",
                      "Replay prior reasoning: on, off, or auto",
                      "Reasoning Defaults", &preserve_thinking);
+    parser.AddOption(
+        "", "--reasoning-budget", "N",
+        "Reasoning tokens before </think> is forced: -1 unlimited, 0 none "
+        "(default: -1)",
+        "Reasoning Defaults", &reasoning_budget);
 
     // Speculative & Hardware
     parser.AddOption("", "--speculative", "MODE",
@@ -714,14 +720,15 @@ void PrintServeHelp(std::string_view program_name,
         "", "--cache-ram-bytes", "N",
         "Retained RAM-cache byte budget (default: 0 = auto: half of free "
         "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
-        "Flash-Next pins its backing about 1 GiB at a time as captures need "
-        "it, or all before serving with --cache-ram-commit eager",
+        "Flash-Next pins it about 1 GiB at a time as captures need it, or "
+        "all before serving with --cache-ram-commit eager",
         "Cache", &cache_ram_bytes);
     parser.AddOption(
         "", "--cache-ram-commit", "MODE",
-        "Flash-Next: when to pin the RAM cache backing: lazy (default) as "
-        "captures need it, or eager: all of it before serving, so no request "
-        "shares the host with a commit; startup fails if it cannot",
+        "Flash-Next: when to pin the RAM cache backing: lazy (default) ahead "
+        "of prefill as captures need it, or eager: all of it before serving, "
+        "so no request shares the host with a commit; startup fails if it "
+        "cannot",
         "Cache", &cache_ram_commit);
     parser.AddOption("", "--cache-disk", "DIR",
                      "Opt-in restart-safe continuation cache directory "
@@ -1141,6 +1148,7 @@ int RunServe(std::span<const char* const> args) {
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
+    std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
@@ -1203,6 +1211,11 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--preserve-thinking", "MODE",
                          "Replay prior reasoning: on, off, or auto",
                          "Reasoning Defaults", &preserve_thinking);
+    llm_parser.AddOption(
+        "", "--reasoning-budget", "N",
+        "Reasoning tokens before </think> is forced: -1 unlimited, 0 none "
+        "(default: -1)",
+        "Reasoning Defaults", &reasoning_budget);
     llm_parser.AddOption("", "--speculative", "MODE",
                          "HTTP draft backend: dspark, dflash2, mtp, or off",
                          "Speculative", &speculative_backend);
@@ -1265,14 +1278,15 @@ int RunServe(std::span<const char* const> args) {
         "", "--cache-ram-bytes", "N",
         "Retained RAM-cache byte budget (default: 0 = auto: half of free "
         "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
-        "Flash-Next pins its backing about 1 GiB at a time as captures need "
-        "it, or all before serving with --cache-ram-commit eager",
+        "Flash-Next pins it about 1 GiB at a time as captures need it, or "
+        "all before serving with --cache-ram-commit eager",
         "Cache", &cache_ram_bytes);
     llm_parser.AddOption(
         "", "--cache-ram-commit", "MODE",
-        "Flash-Next: when to pin the RAM cache backing: lazy (default) as "
-        "captures need it, or eager: all of it before serving, so no request "
-        "shares the host with a commit; startup fails if it cannot",
+        "Flash-Next: when to pin the RAM cache backing: lazy (default) ahead "
+        "of prefill as captures need it, or eager: all of it before serving, "
+        "so no request shares the host with a commit; startup fails if it "
+        "cannot",
         "Cache", &cache_ram_commit);
     llm_parser.AddOption("", "--cache-disk", "DIR",
                          "Opt-in restart-safe continuation cache directory "
@@ -1358,12 +1372,19 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: speculative draft limits are invalid\n";
       return 2;
     }
-    const auto reasoning_defaults = ResolveReasoningDefaults(
+    auto reasoning_defaults = ResolveReasoningDefaults(
         reasoning_mode, reasoning_effort, preserve_thinking, &parse_err);
     if (!reasoning_defaults.has_value()) {
       std::cerr << "Error: " << parse_err << "\n";
       return 2;
     }
+    if (reasoning_budget < -1) {
+      std::cerr << "Error: --reasoning-budget must be -1 or nonnegative\n";
+      return 2;
+    }
+    if (reasoning_budget >= 0)
+      reasoning_defaults->budget_tokens =
+          static_cast<std::size_t>(reasoning_budget);
 
     if (cache_ram_commit != "lazy" && cache_ram_commit != "eager") {
       std::cerr << "Error: --cache-ram-commit must be lazy or eager\n";

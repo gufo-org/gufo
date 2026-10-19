@@ -281,13 +281,20 @@ void RoundTripAndFailures() {
   assert(disk.Retire({3}));
   {
     auto snapshot = disk.Open({1});
-    const auto payload = snapshot->Manifest().components[0].chunks[0];
+    // Publishing {3} verified the shared chunks. Private state has not been
+    // read since it was written.
+    const auto& components = snapshot->Manifest().components;
+    const auto component =
+        std::find_if(components.begin(), components.end(),
+                     [](const auto& c) { return c.private_state.has_value(); });
+    assert(component != components.end());
+    const auto payload = *component->private_state;
     const auto baseline = ledger.Snapshot().total_bytes;
     std::array<std::uint8_t, 5> piece{};
     for (auto fault : {LedgerStep::kReserve, LedgerStep::kConvert}) {
       ledger.FailAfter(fault, 0);
       auto read =
-          disk.ReadPayload(*snapshot, false, payload, piece, [](auto, auto) {});
+          disk.ReadPayload(*snapshot, true, payload, piece, [](auto, auto) {});
       assert(!read.verification_cached && read.bytes == payload.bytes);
       ledger.ClearFaults();
       assert(ledger.Snapshot().total_bytes == baseline);

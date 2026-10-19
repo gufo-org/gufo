@@ -103,10 +103,13 @@ def main():
     keyed = run(load + ["-v", "--api-key", "super-secret-value"])
     assert "api_key=set" in keyed.stderr
     assert "super-secret-value" not in keyed.stderr
+    # Structured output is prepared automatically, without a separate option.
+    assert "--prepare-structured-output" not in help_text
+    check(["serve", "llm", "--model", "missing.gguf",
+           "--prepare-structured-output"], 2, "Unknown option")
     # Pinning the whole RAM cache before serving is an explicit mode, not a
     # spelling the parser should guess at.
-    assert "--cache-ram-commit" in check(["serve", "llm", "--help"], 0,
-                                         "--cache-ram-bytes")
+    assert "--cache-ram-commit" in help_text
     for bad in ("Eager", "", "startup"):
         check(["serve", "llm", "--model", "missing.gguf", "--cache-ram-commit",
                bad], 2, "--cache-ram-commit must be lazy or eager")

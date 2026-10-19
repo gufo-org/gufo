@@ -739,6 +739,31 @@ bool ParseReasoningOptions(const json::Value& body, ReasoningOptions* options,
   return true;
 }
 
+// Match llama.cpp's canonical field and its older compatibility spelling.
+// An explicit canonical value takes precedence; -1 keeps the server default.
+std::optional<HttpResponse> ParseReasoningBudget(const json::Value& body,
+                                                 ReasoningOptions* options) {
+  const char* field = "reasoning_budget_tokens";
+  const auto* budget = body.find(field);
+  if (budget == nullptr || budget->is_null()) {
+    field = "thinking_budget_tokens";
+    budget = body.find(field);
+  }
+  if (budget == nullptr || budget->is_null())
+    return {};
+  const double value = budget->is_number() ? budget->as_double() : -2.0;
+  if (!std::isfinite(value) || value < -1.0 ||
+      value > std::numeric_limits<std::int32_t>::max() ||
+      std::floor(value) != value)
+    return Error(400, "Bad Request",
+                 "'" + std::string(field) +
+                     "' must be an integer between -1 and 2147483647",
+                 "invalid_reasoning");
+  if (value >= 0.0)
+    options->budget_tokens = static_cast<std::size_t>(value);
+  return {};
+}
+
 std::optional<HttpResponse> ParseToolControls(const json::Value& body,
                                               ParsedChatRequest* output,
                                               bool nullable_parallel = false,
@@ -771,47 +796,6 @@ std::optional<HttpResponse> ParseToolControls(const json::Value& body,
       output->chat.tool_choice != ChatRequest::ToolChoice::kNone;
 
   return {};
-}
-
-json::Value NormalizeToolSchema(const json::Value& schema,
-                                std::size_t depth = 0) {
-  if (!schema.is_object() || depth > 16 || (depth && schema.empty()))
-    throw std::invalid_argument("tool schema cannot be made strict");
-  auto out = schema;
-  for (const auto* key : {"properties", "$defs", "definitions"}) {
-    if (const auto* fields = schema.find(key); fields && fields->is_object()) {
-      auto normalized = json::Value::object();
-      for (const auto& [name, field] : fields->members())
-        normalized.append_member(name, NormalizeToolSchema(field, depth + 1));
-      out[key] = std::move(normalized);
-    }
-  }
-  if (const auto* items = schema.find("items"))
-    out["items"] = NormalizeToolSchema(*items, depth + 1);
-  for (const auto* key : {"anyOf", "allOf", "oneOf"}) {
-    if (const auto* choices = schema.find(key);
-        choices && choices->is_array()) {
-      auto normalized = json::Value::array();
-      for (const auto& choice : choices->items())
-        normalized.push_back(NormalizeToolSchema(choice, depth + 1));
-      out[key] = std::move(normalized);
-    }
-  }
-  if (schema.empty() || schema.member_str("type") == "object" ||
-      schema.contains("properties")) {
-    if (!out.contains("type"))
-      out["type"] = "object";
-    if (!out.contains("properties"))
-      out["properties"] = json::Value::object();
-    if (!out.contains("additionalProperties"))
-      out["additionalProperties"] = false;
-    out["required"] = json::Value::array();
-    for (const auto& [name, value] : out.find("properties")->members()) {
-      (void)value;
-      out["required"].push_back(name);
-    }
-  }
-  return out;
 }
 
 std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
@@ -896,6 +880,8 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     return Error(400, "Bad Request", std::move(parse_error),
                  "invalid_reasoning");
   }
+  if (auto error = ParseReasoningBudget(body, &output->chat.reasoning))
+    return error;
   if (const auto* kwargs = body.find("chat_template_kwargs")) {
     if (const auto* vision_id = kwargs->find("add_vision_id")) {
       if (!vision_id->is_bool())
@@ -914,6 +900,9 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   }
   if (!output->chat.reasoning.preserve_thinking.has_value()) {
     output->chat.reasoning.preserve_thinking = defaults.preserve_thinking;
+  }
+  if (!output->chat.reasoning.budget_tokens.has_value()) {
+    output->chat.reasoning.budget_tokens = defaults.budget_tokens;
   }
 
   if (const json::Value* stream = body.find("stream");
@@ -3216,27 +3205,10 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
           parsed.chat.tool_namespaces[tool.member_str("name")] = name;
     }
   }
-  // Responses attempts strict normalization when strict is omitted; Chat
-  // Completions keeps its best-effort default. Explicit true/false wins.
-  for (auto& tool : parsed.chat.tools) {
-    auto definition = json::parse(tool.definition_json);
-    auto& function = definition["function"];
-    const auto* strict = function.find("strict");
-    if (strict && !strict->is_null())
-      continue;
-    try {
-      auto schema = NormalizeToolSchema(json::parse(tool.parameters_json));
-      sampling::JsonConstraint::Compile(schema, true);
-      function["parameters"] = std::move(schema);
-      function["strict"] = true;
-      tool.parameters_json = function.find("parameters")->dump();
-      parsed.chat.constrained_tools |=
-          parsed.chat.tool_choice != ChatRequest::ToolChoice::kNone;
-    } catch (const std::invalid_argument&) {
-      function["strict"] = false;
-    }
-    tool.definition_json = definition.dump();
-  }
+  // Like llama.cpp, retain the supplied parameter schema when strict is
+  // omitted or null. Promoting optional fields to required ones forces agents
+  // to invent values. ParseToolControls still validates explicit strict:true
+  // and enables tool constraints regardless of strictness.
   *chat = std::move(parsed.chat);
 
   if (const auto* progress = body.find("return_progress");
@@ -3280,6 +3252,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
         chat->reasoning.effort = options.effort;
     }
   }
+  if (auto error = ParseReasoningBudget(body, &chat->reasoning))
+    return error;
   if (const auto* text = body.find("text"); text && !text->is_null()) {
     if (!text->is_object())
       return Error(400, "Bad Request", "'text' must be an object",

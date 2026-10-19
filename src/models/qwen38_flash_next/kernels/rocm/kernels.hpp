@@ -191,6 +191,8 @@ void QuantizeQ8Tiled(const float* x, void* out, std::size_t batch,
 bool W8A8Gemm(const void* w, const void* x_tiled, float* out, std::size_t batch,
               std::size_t m, std::size_t k, hipStream_t stream);
 /// Native wave64 launch, selected by W8A8Gemm for wide output projections.
+/// Resolve the kernel before serving, without executing a projection.
+hipError_t PrepareW8A8GemmWave64();
 void W8A8GemmWave64(const void* w, const void* x_tiled, float* out,
                     std::size_t batch, std::size_t m, std::size_t k,
                     hipStream_t stream);

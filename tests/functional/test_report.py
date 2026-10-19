@@ -34,7 +34,8 @@ class ReportTest(unittest.TestCase):
         for name, text in (bench or {}).items():
             (results / name).write_text(text)
         argv = ["report.py", "--plan", str(root / "plan.json"), "--results", str(results),
-                "--authorize", authorize, "--smoke", smoke, "--run-url", "https://run",
+                "--authorize", authorize, "--smoke", smoke,
+                "--run-url", "https://run",
                 "--comment", str(root / "comment.md"), "--status", str(root / "status.env")]
         if benchmark:
             argv.append("--benchmark")

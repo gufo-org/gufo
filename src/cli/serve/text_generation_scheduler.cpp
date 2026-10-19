@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <deque>
 #include <exception>
+#include <fstream>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -459,6 +460,39 @@ void WriteGenerationTrace(GenerationTrace trace,
   Trace::Write(record);
 }
 
+std::size_t ResidentKiB() {
+  std::ifstream status("/proc/self/status");
+  for (std::string line; std::getline(status, line);) {
+    if (line.starts_with("VmRSS:")) {
+      std::istringstream value(line.substr(6));
+      std::size_t kib = 0;
+      if (value >> kib)
+        return kib;
+    }
+  }
+  return 0;
+}
+
+// The first constrained request would otherwise build the vocabulary inside
+// its queue time (about 30 ms for Flash-Next's 248,320 tokens).
+void PrepareStructuredOutput(const TextModelRunner& runner) {
+  const auto resident = ResidentKiB();
+  const auto started = std::chrono::steady_clock::now();
+  const auto tokens = runner.PrepareConstraintVocabulary();
+  if (tokens == 0)
+    return;
+  const std::chrono::duration<double, std::milli> elapsed =
+      std::chrono::steady_clock::now() - started;
+  std::ostringstream line;
+  line << "event=structured_output_prepared vocabulary_tokens=" << tokens
+       << " prepare_ms=" << std::fixed << std::setprecision(1)
+       << elapsed.count() << " rss_delta_kib="
+       << static_cast<long long>(ResidentKiB()) -
+              static_cast<long long>(resident)
+       << ' ' << Logger::MemoryStatus();
+  Logger::Info("loader", line.str());
+}
+
 }  // namespace
 
 struct TextGenerationScheduler::Request::Impl {
@@ -519,6 +553,7 @@ struct TextGenerationScheduler::Impl {
             .Descriptor()
             .capabilities.batched_multi_token_decode_max_width;
     device_lost_requests.reserve(runner_pool->capacity());
+    PrepareStructuredOutput(runner_pool->runner());
     worker = std::jthread(
         [this](const std::stop_token& stop_token) { Run(stop_token); });
     if (scheduler_policy.stall_timeout.count() > 0) {

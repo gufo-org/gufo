@@ -207,7 +207,10 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
 
             # No instruction is added: the prompt matches the control within
             # the spelling of the renamed keyword. The JSON instruction alone
-            # was about 45 tokens.
+            # was about 45 tokens. Schema rendering does not depend on the
+            # tool choice, so neighbors alternate which choice is controlled.
+            if choice != ("auto", "required")[index % 2]:
+                continue
             control = {**request, "tools": [*opencode_tools(), neighbor(name, True)],
                        "max_completion_tokens": 1}
             baseline = record(label + "_control", chat_result(client, control))
@@ -388,8 +391,8 @@ def check_read_arguments(client, model, checks, chat_result):
                     "path": {"type": "string"},
                     "offset": {"type": "number"},
                     "limit": {"type": "number"}}, "required": ["path"]}}
-    # Omitted strict is normalized by Responses. Exercise that real client
-    # contract, not a hand-normalized schema or a one-parameter string tool.
+    # Pi omits strict. All three arguments are requested here, even though
+    # offset and limit remain optional in the supplied schema.
     prompt = "Read archive-00.txt with offset 1 and limit 2000. Use the read tool."
     for responses in (False, True):
         for stream in (False, True):

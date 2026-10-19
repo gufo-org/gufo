@@ -382,6 +382,8 @@ int main() {
     CheckArgmax(1);
     CheckArgmax(257);
     CheckArgmax(248320);
+    CheckHip(gufo::hip::PrepareBatchedGPUArgmax(), "prepare MTP argmax");
+    CheckArgmax(248320);
     for (const unsigned vocab :
          {1, 63, 64, 65, 255, 256, 257, 1024, 1025, 16385, 248320}) {
       CheckCandidates(vocab);

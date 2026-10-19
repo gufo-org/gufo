@@ -50,6 +50,12 @@ PROMPTS = {
         "tool, then reply with only its dominant color in lowercase. "
         "Do not use bash or infer the color from a filename."
     ),
+    "wide-tool": (
+        "Use the todo tool to mark existing task 1 as completed, then mark "
+        "existing task 2 as in_progress. Make exactly two calls, both updates. "
+        "Do not change any other fields or make verification calls. "
+        "After the two successful results, reply DONE."
+    ),
 }
 SLUG_TEST = """const assert = require("node:assert");
 const slugify = require("./slugify");
@@ -228,7 +234,8 @@ def validate_requests(rows, server_log=None):
 def validate_task(name, cwd, history):
     calls = calls_from(history)
     for call in calls:
-        assert call["name"] in {"read", "write", "edit", "bash"}, call
+        allowed = {"todo"} if name == "wide-tool" else {"read", "write", "edit", "bash"}
+        assert call["name"] in allowed, call
         assert isinstance(call["arguments"], dict), call
         path = call["arguments"].get("path", "")
         assert not any(tag in path for tag in ("<tool_call", "</tool_call", "</think")), call
@@ -248,6 +255,18 @@ def validate_task(name, cwd, history):
     # so a sampled run may create or read a file through bash instead.
     if name == "simple":
         assert not calls and text.strip().rstrip(".") == "Paris", text
+    elif name == "wide-tool":
+        expected = [{"action": "update", "id": 1, "status": "completed"},
+                    {"action": "update", "id": 2, "status": "in_progress"}]
+        actual = [call["arguments"] for call in calls]
+        assert actual == expected, calls
+        assert all(type(update["id"]) is int for update in actual), calls
+        executed = [json.loads(line) for line in (cwd / "todo-calls.jsonl").read_text().splitlines()]
+        assert executed == actual, executed
+        results = [m for m in history if m.get("role") == "toolResult"]
+        assert len(results) == 2 and all(not m.get("isError") for m in results), results
+        for result, wanted in zip(results, ("Task 1: completed", "Task 2: in_progress")):
+            assert any(p.get("text") == wanted for p in result.get("content", [])), result
     elif name == "tools":
         assert (cwd / "hello.txt").read_bytes() == b"bonjour"
         assert {"bash", "read"} <= names, names
@@ -325,6 +344,9 @@ def run_case(args, recorder, env, index, name):
     ]
     if args.context_file:
         command += ["--append-system-prompt", str(args.context_file)]
+    if name == "wide-tool":
+        command += ["--extension", str(Path(__file__).resolve().parent / "fixtures/pi_wide_tool.ts"),
+                    "--tools", "todo"]
     save(case / "command.json", command)
     recorder.case = case.name
     row = {"case": case.name, "start_request": len(recorder.requests)}

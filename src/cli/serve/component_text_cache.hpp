@@ -38,8 +38,8 @@ struct ComponentCacheResources {
   cache::StreamLease stream;
   std::function<ComponentCaptureBuffer(const cache::PayloadRequest&)> allocate;
   cache::StagingAllocator staging;
-  // Prepare on-demand backing while a substantial prefill can hide pinning.
-  std::function<void()> prepare_prefill;
+  // Prepare on-demand backing immediately before the next prefill chunk.
+  std::function<void(std::size_t)> prepare_prefill;
   // Optional capacity bound before assigning a complete capture. False takes
   // the ordinary reclamation path; true still requires every allocation.
   std::function<bool(std::span<const cache::PayloadRequest>)> can_capture;
@@ -86,7 +86,7 @@ public:
     [[nodiscard]] std::size_t CaptureBytes() const;
     [[nodiscard]] std::size_t CaptureBytes(std::size_t boundary) const;
     [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Capture();
-    void PreparePrefill();
+    void PreparePrefill(std::size_t tokens);
     [[nodiscard]] ComponentCacheMetrics Metrics() const;
     [[nodiscard]] std::vector<std::size_t> PlannedCaptures(
         std::size_t stable) const;
@@ -158,7 +158,7 @@ public:
   [[nodiscard]] std::size_t CaptureBytes() const;
   [[nodiscard]] std::size_t CaptureBytes(std::size_t boundary) const;
   [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Capture();
-  void PreparePrefill();
+  void PreparePrefill(std::size_t tokens);
   [[nodiscard]] std::optional<ComponentCacheMetrics> Metrics() const;
   [[nodiscard]] std::vector<std::size_t> PlannedCaptures(
       std::size_t stable) const;

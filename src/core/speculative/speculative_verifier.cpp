@@ -438,9 +438,12 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
   prepared.position = request.position;
   prepared.eos_id = request.eos_id;
   prepared.random_sampling = request.sampler.config().uses_random_sampling();
+  // A reasoning budget can force a token the target never predicts, so its
+  // greedy rows go through the sampler like penalties and constraints.
   prepared.sampled = prepared.random_sampling ||
                      request.sampler.config().penalties_enabled() ||
-                     request.sampler.config().constraint != nullptr;
+                     request.sampler.config().constraint != nullptr ||
+                     request.sampler.config().reasoning_budget != nullptr;
   if (prepared.sampled)
     prepared.working_sampler.emplace(request.sampler);
   prepared.max_draft_tokens =
