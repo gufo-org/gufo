@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/hip/arch.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
@@ -215,9 +216,9 @@ int Run(std::span<const char* const> arguments) {
   HIP_CHECK(hipGetDevice(&device));
   hipDeviceProp_t properties{};
   HIP_CHECK(hipGetDeviceProperties(&properties, device));
-  if (std::string_view(properties.gcnArchName).find("gfx1151") ==
-      std::string_view::npos) {
-    throw std::runtime_error("tune_hipblaslt requires gfx1151");
+  if (!gufo::hip::IsRdna35(properties.gcnArchName)) {
+    throw std::runtime_error(
+        "tune_hipblaslt requires an RDNA 3.5 GPU (gfx1151 or gfx1150)");
   }
 
   HipStream stream;

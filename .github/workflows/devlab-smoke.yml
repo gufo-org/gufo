@@ -255,7 +255,7 @@ jobs:
           done
           printf '```\n\nUnavailable interfaces are omitted. These readings do not establish the firmware APU TDP when it is not exposed to the runner.\n' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify gfx1151 and inventory available tools
+      - name: Verify RDNA 3.5 GPU and inventory available tools
         shell: bash
         run: |
           set -euo pipefail
@@ -266,30 +266,33 @@ jobs:
           if [[ -n "$rocminfo_bin" ]]; then
             "$rocminfo_bin" > "$RUNNER_TEMP/devlab-rocminfo.txt"
             cat "$RUNNER_TEMP/devlab-rocminfo.txt"
-            grep -Eq 'Name:[[:space:]]+gfx1151([[:space:]]|$)' "$RUNNER_TEMP/devlab-rocminfo.txt" || {
-              echo "::error::ROCm did not enumerate a gfx1151 agent."
+            arch=$(grep -Eo 'Name:[[:space:]]+gfx115[01]([[:space:]]|$)' "$RUNNER_TEMP/devlab-rocminfo.txt" | head -1 | awk '{print $2}')
+            if [[ -z "$arch" ]]; then
+              echo "::error::ROCm did not enumerate an RDNA 3.5 agent (gfx1151 or gfx1150)."
               exit 1
-            }
+            fi
             verification='ROCm agent enumeration'
           else
-            # KFD encodes gfx1151 as major 11, minor 5, stepping 1.
-            verified=false
+            # KFD encodes gfx1151 as 110501 and gfx1150 as 110500.
+            arch=''
             for properties in /sys/class/kfd/kfd/topology/nodes/*/properties; do
               if [[ -r "$properties" ]]; then
                 target=$(awk '$1 == "gfx_target_version" { print $2 }' "$properties")
                 echo "KFD graphics target: $target"
-                if [[ "$target" == 110501 ]]; then
-                  verified=true
-                fi
+                case "$target" in
+                  110501) arch=gfx1151 ;;
+                  110500) arch=gfx1150 ;;
+                esac
+                [[ -n "$arch" ]] && break
               fi
             done
-            [[ "$verified" == true ]] || {
-              echo "::error::Cannot verify gfx1151: install rocminfo or expose KFD topology."
+            [[ -n "$arch" ]] || {
+              echo "::error::Cannot verify an RDNA 3.5 GPU: install rocminfo or expose KFD topology."
               exit 1
             }
             verification='KFD topology; ROCm tools are not installed'
           fi
-          printf -- '- gfx1151: verified (%s)\n' "$verification" >> "$GITHUB_STEP_SUMMARY"
+          printf -- '- %s: verified (%s)\n' "$arch" "$verification" >> "$GITHUB_STEP_SUMMARY"
           for tool in nix hipcc rocminfo rocm-smi amd-smi python3 git ccache; do
             if command -v "$tool" >/dev/null 2>&1; then
               echo "$tool: available"
