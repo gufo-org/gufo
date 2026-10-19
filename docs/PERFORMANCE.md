@@ -8,10 +8,14 @@ comments and local artifacts hold detailed experiment history.
 
 ## Target
 
-The only production target is Linux x86-64 on AMD Strix Halo:
+The production targets are Linux x86-64 on AMD RDNA 3.5 integrated GPUs:
 
-- `gfx1151` GPU using Wave32 HIP kernels.
-- Unified LPDDR5X shared by CPU and GPU.
+- `gfx1151` (Strix Halo, Radeon 8060S/8050S, 40 CU, LPDDR5X 256-bit) or
+  `gfx1150` (Strix Point, Radeon 890M, 16 CU, DDR5 128-bit), using Wave32 HIP
+  kernels. Both share the instruction set; they differ in CU count and memory
+  bandwidth, which is what separates their measured numbers.
+- Unified memory shared by CPU and GPU (LPDDR5X on Strix Halo, DDR5 on
+  Strix Point).
 - Nix-provided compilers, libraries, profilers, and test tools.
 
 Runtime probes, not assumed peak specifications, determine the available CUs,
@@ -85,7 +89,8 @@ cost in the result.
 
 ### HIP
 
-- Compile production kernels for `gfx1151` and treat Wave32 as explicit.
+- Compile production kernels for the RDNA 3.5 target (`gfx1151` or `gfx1150`)
+  and treat Wave32 as explicit.
 - Prove alignment before vector loads and provide bounded tail paths.
 - Track VGPR, LDS, occupancy, and scratch for retained kernels.
   `kernel_resources_test` fails if a kernel uses more scratch than
@@ -94,7 +99,8 @@ cost in the result.
 - Read only live KV spans and reuse GQA/MQA K/V across query heads.
 - Retain hipBLASLt or rocBLAS as the baseline for supported matrix shapes.
 - Do not inherit launch geometry from CUDA or another RDNA target without a
-  new measurement on `gfx1151`.
+  new measurement on the target part. Launch geometry tuned for 40 CU does not
+  transfer to 16 CU; measure on the part you ship.
 
 ### Quantization
 

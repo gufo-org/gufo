@@ -2,7 +2,7 @@
 
 Run the smallest check that covers the change. Correctness and model-owned
 quality limits pass before performance results count. Production targets
-Linux gfx1151. CMake/CTest work with either system dependencies or `nix develop`.
+Linux on an RDNA 3.5 GPU (`gfx1151` or `gfx1150`). CMake/CTest work with either system dependencies or `nix develop`.
 
 ## Commands
 
