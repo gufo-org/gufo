@@ -1,11 +1,14 @@
-# Gufo: The ***Open Source*** Strix Halo AI engine 
+# Gufo: The ***Open Source*** RDNA 3.5 AI engine 
 
 <p align="center">
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
 
-Gufo is a vertical local inference engine for Linux and Windows, specifically built and optimized for AMD Strix Halo hardware:
-Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
+Gufo is a vertical local inference engine for Linux and Windows, specifically built and
+optimized for AMD RDNA 3.5 integrated GPUs: Strix Halo (`gfx1151`, Ryzen AI MAX+ 395 /
+Radeon 8060S, up to 128 GiB of unified memory) and Strix Point (`gfx1150`, Ryzen AI 300 /
+Radeon 890M, DDR5). Both parts share Wave32 and the same instruction set, so one build
+serves either; only the CU count and memory bandwidth differ.
 
 **Contributions are welcome!**
 
@@ -136,8 +139,8 @@ Reasoning tokens count toward that response limit.
 
 ## Build from source
 
-Production packages target Linux x86-64 on AMD Strix Halo (`gfx1151`).
-Windows x86-64 is a supported native build target for development; see
+Production packages target Linux x86-64 on an AMD RDNA 3.5 integrated GPU (`gfx1151` Strix Halo
+or `gfx1150` Strix Point). Windows x86-64 is a supported native build target for development; see
 [BUILD-WINDOWS.md](BUILD-WINDOWS.md). CMake owns
 one production configuration for both Nix and ordinary Linux builds. Tests,
 profilers, tuning executables and Python reference runners are not installed
