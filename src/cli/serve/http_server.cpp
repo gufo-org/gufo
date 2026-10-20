@@ -863,6 +863,142 @@ HttpResponse ListModels(TextGenerationBackend* backend,
   return Ok(resp);
 }
 
+/// A non-negative integer field no larger than `max`; nullopt when valid.
+std::optional<HttpResponse> ReadIndexField(const json::Value& body,
+                                           const std::string& field,
+                                           std::size_t max, std::size_t* out) {
+  const auto* value = body.find(field);
+  if (value == nullptr || value->is_null())
+    return std::nullopt;
+  const double number = value->as_double(-1.0);
+  if (!value->is_number() || !std::isfinite(number) || number < 0.0 ||
+      number != std::floor(number) || number > static_cast<double>(max))
+    return InvalidCompatibilityRequest(
+        "'" + field + "' must be an integer from 0 to " + std::to_string(max));
+  *out = static_cast<std::size_t>(number);
+  return std::nullopt;
+}
+
+/// Teacher-forced scoring on /v1/completions: `prompt` is a token-ID array
+/// and `prompt_logprobs` asks for each position's next-token distribution, as
+/// in vLLM. Nothing is generated, and no cached prefix is reused.
+HttpResponse ScorePromptTokens(const HttpRequest& req, const json::Value& body,
+                               TextGenerationBackend& b) {
+  if (!body.is_object())
+    return InvalidCompatibilityRequest("request body must be an object");
+  for (const auto& [key, value] : body.members()) {
+    if (key != "model" && key != "prompt" && key != "prompt_logprobs" &&
+        key != "prompt_logprobs_start" && key != "max_tokens" &&
+        key != "temperature" && key != "stream" && key != "echo" &&
+        key != "n" && key != "cache_prompt")
+      return InvalidCompatibilityRequest("request field '" + key +
+                                         "' is not supported with "
+                                         "'prompt_logprobs'");
+  }
+  if (const auto* model = body.find("model"); model != nullptr) {
+    if (!model->is_string())
+      return InvalidCompatibilityRequest("'model' must be a string");
+    if (model->str() != b.model_id())
+      return Err(404, "Not Found", "requested model is not loaded",
+                 "invalid_request_error", "model_not_found");
+  }
+  for (const std::string field : {"stream", "echo"}) {
+    if (const auto* value = body.find(field);
+        value != nullptr && !value->is_null() &&
+        (!value->is_bool() || value->as_bool()))
+      return InvalidCompatibilityRequest("'" + field +
+                                         "' must be false with "
+                                         "'prompt_logprobs'");
+  }
+  if (const auto* value = body.find("n");
+      value != nullptr && (!value->is_number() || value->as_double() != 1.0))
+    return InvalidCompatibilityRequest("only 'n=1' is supported");
+  if (const auto* value = body.find("temperature");
+      value != nullptr && !value->is_null() && !value->is_number())
+    return InvalidCompatibilityRequest("'temperature' must be a number");
+  if (const auto* value = body.find("cache_prompt");
+      value != nullptr && !value->is_null() && !value->is_bool())
+    return InvalidCompatibilityRequest("'cache_prompt' must be a boolean");
+  std::size_t max_tokens = 0;
+  if (auto error = ReadIndexField(body, "max_tokens", 1, &max_tokens))
+    return std::move(*error);
+  TextGenerationBackend::ScoreRequest score;
+  score.client_id = req.client_id;
+  if (auto error = ReadIndexField(body, "prompt_logprobs", kMaxPromptLogprobs,
+                                  &score.top_k))
+    return std::move(*error);
+  const auto* prompt = body.find("prompt");
+  if (prompt == nullptr || !prompt->is_array() || prompt->size() < 2)
+    return InvalidCompatibilityRequest(
+        "'prompt' must be an array of at least two token IDs with "
+        "'prompt_logprobs'");
+  score.tokens.reserve(prompt->size());
+  for (const auto& token : prompt->items()) {
+    const double number = token.as_double(-1.0);
+    if (!token.is_number() || number < 0.0 || number != std::floor(number) ||
+        number > static_cast<double>(std::numeric_limits<std::int32_t>::max()))
+      return InvalidCompatibilityRequest(
+          "'prompt' token IDs must be non-negative integers");
+    score.tokens.push_back(static_cast<tokenization::TokenId>(number));
+  }
+  score.start = 1;
+  if (auto error = ReadIndexField(body, "prompt_logprobs_start",
+                                  score.tokens.size() - 1, &score.start))
+    return std::move(*error);
+  if (score.start == 0)
+    return InvalidCompatibilityRequest(
+        "'prompt_logprobs_start' must be at least 1");
+
+  const auto res = b.score(score, req.is_cancelled);
+  if (res.cancelled)
+    return Err(499, "Client Closed Request", "request cancelled",
+               "invalid_request_error", "cancelled");
+  if (res.prompt_logprobs.size() != score.tokens.size() - score.start)
+    throw std::runtime_error("prompt scoring returned " +
+                             std::to_string(res.prompt_logprobs.size()) +
+                             " positions, expected " +
+                             std::to_string(score.tokens.size() - score.start));
+  json::Value positions = json::Value::array();
+  for (std::size_t index = 0; index < score.start; ++index)
+    positions.push_back(json::Value());
+  for (const auto& position : res.prompt_logprobs) {
+    json::Value entry = json::Value::object();
+    entry["token"] = static_cast<std::size_t>(position.token);
+    entry["logprob"] = position.logprob;
+    entry["rank"] = position.rank;
+    if (position.nonfinite != 0)
+      entry["nonfinite"] = position.nonfinite;
+    json::Value top = json::Value::array();
+    for (const auto& candidate : position.top) {
+      json::Value item = json::Value::object();
+      item["token"] = static_cast<std::size_t>(candidate.token);
+      item["logprob"] = candidate.logprob;
+      top.push_back(std::move(item));
+    }
+    entry["top_logprobs"] = std::move(top);
+    positions.push_back(std::move(entry));
+  }
+  json::Value resp = json::Value::object();
+  resp["id"] = "cmpl-" + RandomId();
+  resp["object"] = "text_completion";
+  resp["created"] = Now();
+  resp["model"] = b.model_id();
+  json::Value choices = json::Value::array();
+  json::Value c = json::Value::object();
+  c["text"] = "";
+  c["index"] = 0;
+  c["logprobs"] = json::Value();
+  c["prompt_logprobs"] = std::move(positions);
+  c["finish_reason"] = "length";
+  choices.push_back(std::move(c));
+  resp["choices"] = std::move(choices);
+  auto usage_result = res;
+  usage_result.prompt_tokens = score.tokens.size();
+  resp["usage"] = UsageJson(usage_result);
+  resp["timings"] = GenerationTimings(res);
+  return WithTiming(Ok(resp), res);
+}
+
 HttpResponse OpenAiCompletions(const HttpRequest& req,
                                TextGenerationBackend& b) try {
   json::Value body;
@@ -872,6 +1008,8 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
     return Err(400, "Bad Request", e.what(), "invalid_request_error",
                "parse_error");
   }
+  if (body.is_object() && body.contains("prompt_logprobs"))
+    return ScorePromptTokens(req, body, b);
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
@@ -920,6 +1058,19 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
       return InvalidCompatibilityRequest("'cache_prompt' must be a boolean");
     cache_prompt = value->as_bool();
   }
+  // vLLM's `return_token_ids`: the prompt's and the completion's token IDs,
+  // so a client can replay exactly this history, as prompt scoring does.
+  bool return_token_ids = false;
+  if (const auto* value = body.find("return_token_ids");
+      value != nullptr && !value->is_null()) {
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest(
+          "'return_token_ids' must be a boolean");
+    return_token_ids = value->as_bool();
+    if (return_token_ids && stream)
+      return InvalidCompatibilityRequest(
+          "'return_token_ids' is not supported with streaming");
+  }
   std::vector<std::string> stop_sequences;
   if (const auto error = ParseStopSequences(
           body.find("stop"), StopSequenceFormat::kOpenAi, &stop_sequences))
@@ -933,6 +1084,13 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   if (prompt.empty()) {
     return Err(400, "Bad Request", "'prompt' is required",
                "invalid_request_error", "missing_prompt");
+  }
+  std::optional<std::vector<tokenization::TokenId>> prompt_token_ids;
+  if (return_token_ids) {
+    prompt_token_ids = b.tokenize(prompt);
+    if (!prompt_token_ids)
+      return InvalidCompatibilityRequest(
+          "'return_token_ids' is not supported by the loaded backend");
   }
 
   auto generation = b.start_complete(
@@ -1086,6 +1244,16 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
       res.finish_reason == TextGenerationBackend::FinishReason::kLength
           ? "length"
           : "stop";
+  if (prompt_token_ids) {
+    json::Value prompt_ids = json::Value::array();
+    for (const auto token : *prompt_token_ids)
+      prompt_ids.push_back(static_cast<std::size_t>(token));
+    json::Value token_ids = json::Value::array();
+    for (const auto token : res.tokens)
+      token_ids.push_back(static_cast<std::size_t>(token));
+    c["prompt_token_ids"] = std::move(prompt_ids);
+    c["token_ids"] = std::move(token_ids);
+  }
   choices.push_back(std::move(c));
   resp["choices"] = std::move(choices);
   resp["usage"] = UsageJson(res);

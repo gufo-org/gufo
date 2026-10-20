@@ -167,9 +167,15 @@ public:
       const std::vector<std::string>& stop_sequences = {},
       bool return_progress = false, bool cache_prompt = true) override;
 
+  Result score(const ScoreRequest& request,
+               const CancellationCheck& is_cancelled = {}) override;
+
   Result chat(const std::vector<tokenization::ChatMessage>& messages,
               std::size_t max_tokens, const sampling::SamplingConfig& sampling,
               const CancellationCheck& is_cancelled = {});
+
+  [[nodiscard]] std::optional<std::vector<tokenization::TokenId>> tokenize(
+      std::string_view text) const override;
 
   /// Token count of raw text (no generation).
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override;

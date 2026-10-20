@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "src/cli/serve/component_cache_metrics.hpp"
+#include "src/cli/serve/prompt_logprobs.hpp"
 #include "src/core/reasoning.hpp"
 #include "src/core/sampling.hpp"
 #include "src/core/text_sampling_defaults.hpp"
@@ -190,6 +191,8 @@ public:
     std::optional<ComponentCacheMetrics> component_cache;
     std::string text;
     std::vector<tokenization::TokenId> tokens;
+    /// One entry per scored position of a `score` request, in order.
+    std::vector<PromptTokenLogprobs> prompt_logprobs;
     std::size_t prompt_tokens{0};
     std::size_t cached_prompt_tokens{0};
     std::size_t cache_restore_bytes{0};
@@ -376,6 +379,36 @@ public:
     sampling::SamplingConfig config;
     config.temperature = temperature;
     return start_chat(request, max_tokens, config, is_cancelled, stream_output);
+  }
+
+  /// A teacher-forced scoring request: the model reads `tokens` in order and
+  /// reports its next-token distribution before each of tokens[start, end).
+  struct ScoreRequest {
+    std::vector<tokenization::TokenId> tokens;
+    /// First scored position; earlier tokens are only prefilled. At least 1.
+    std::size_t start{1};
+    /// Most probable tokens reported per position, at most
+    /// kMaxPromptLogprobs.
+    std::size_t top_k{0};
+    std::string client_id{"anonymous"};
+  };
+
+  /// Scores `request` without sampling or generating. Never reuses a cached
+  /// prefix, so repeated requests run the same model calls.
+  virtual Result score(const ScoreRequest& request,
+                       const CancellationCheck& is_cancelled = {}) {
+    (void)request;
+    (void)is_cancelled;
+    throw std::invalid_argument(
+        "prompt_logprobs is not supported by the loaded backend");
+  }
+
+  /// Token IDs of raw completion text, as `start_complete` tokenizes it.
+  /// Empty when the backend cannot tell.
+  [[nodiscard]] virtual std::optional<std::vector<tokenization::TokenId>>
+  tokenize(std::string_view text) const {
+    (void)text;
+    return std::nullopt;
   }
 
   [[nodiscard]] virtual std::size_t count_tokens(
