@@ -6254,6 +6254,20 @@ void TestParallelCallSeparatorIsNotContent() {
           Expect(stream ? content.empty() : null_content,
                  "whitespace between parallel calls is not content");
         }
+  // Responses and Messages share the parser; neither reports a text item.
+  const std::string noop =
+      "<tool_call>\n<function=noop>\n</function>\n</tool_call>";
+  std::vector<std::string> pieces;
+  for (char byte : noop + "\n" + noop + "\n")
+    pieces.emplace_back(1, byte);
+  for (const int api : {1, 2})
+    for (const bool stream : {false, true}) {
+      const auto out = ToolBoundaryRequest(
+          pieces, gufo::sampling::JsonConstraint::ToolFormat::kQwen, api,
+          stream);
+      Expect(!out.failed && out.names.size() == 2 && out.content.empty(),
+             "Responses and Messages omit whitespace between parallel calls");
+    }
 }
 
 int main() {
