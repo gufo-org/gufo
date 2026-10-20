@@ -80,7 +80,9 @@ def chat(label, messages, max_tokens=16):
         selected = assert_checkpoint_selection(
             out, label, result,
             restart=label in {"deep_after_restart", "deep_after_second_restart"},
-            minimum=last_deep_selected if is_deep else 1)
+            # The first short chat learns the system-prompt boundary, which
+            # the cold deep prompt has no checkpoint for; later ones reuse it.
+            minimum=last_deep_selected if is_deep else int(label != "short_0_0"))
         if is_deep:
             last_deep_selected = selected
     print(json.dumps(row), flush=True)

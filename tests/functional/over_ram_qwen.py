@@ -67,7 +67,13 @@ def chat(label, messages):
         assert_cancelled_frontier(out, label, result, cancel_observation,
                                   component=args.expect_component)
     if args.expect_component and label != "A1_cold":
-        minimum = 1 if label.startswith("D_short_") else last_deep_selected
+        # A cold deep prompt is checkpointed at its stable boundary and grid
+        # points, not at the system prompt. The first short chat learns that
+        # shared boundary; the later ones must reuse it.
+        if label.startswith("D_short_"):
+            minimum = 0 if label == "D_short_0" else 1
+        else:
+            minimum = last_deep_selected
         selected = assert_checkpoint_selection(out, label, result, minimum=minimum)
         if not label.startswith("D_short_"):
             last_deep_selected = selected
