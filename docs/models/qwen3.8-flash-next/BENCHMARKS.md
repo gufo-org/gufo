@@ -2,8 +2,8 @@
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target and
 shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.
-The main depth/concurrency tables were measured October 18, 2026, with
-`fec4759d` and the validated host-memory and cache-stall fixes.
+All Gufo tables measured October 18, 2026, with `fec4759d` and the
+validated host-memory and cache-stall fixes.
 Reference results remain unchanged from September 22–23.
 llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
 
@@ -125,19 +125,3 @@ C1, context capacity 133121, AR. Peak memory reported by HIP.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory.svg)
-
-## Component-cache admission controls (October 20)
-
-Matched production main `e121a214` and PR code `195f9374`, HTTP, greedy,
-thinking off; approximately pp2048/tg128 at d0 with context 4096. One retained
-sample per workload, with matching output hashes and prompt/cache counts.
-These are narrow controls; the depth/concurrency tables above retain their
-October 18 measurements. Rates describe these runs, rather than an isolated
-cache-admission speedup. Individual functional timings remain partly
-[inconclusive](QUALITY.md).
-
-| Workload | Main pp (tok/s) | PR pp (tok/s) | Main tg (tok/s) | PR tg (tok/s) |
-| --- | ---: | ---: | ---: | ---: |
-| AR | 1573.07 | 1741.79 | 27.33 | 28.22 |
-| MTP mixed | 1682.67 | 1679.98 | 35.50 | 35.54 |
-| MTP repetitive | 1691.46 | 1696.92 | 115.87 | 116.87 |

@@ -34,7 +34,7 @@ The AR cold-request queue median is 3.593 → 2.661 ms; MTP is 4.834 → 2.698 m
 (55 cold requests in each matched 81-request history). These distributions
 are descriptive. Remaining prefill, token-gap, snapshot, queue and TTFT
 flags stay unqualified; faster requests never offset slower ones. The
-[benchmark controls](BENCHMARKS.md#component-cache-admission-controls-october-20)
+[PR comparison](https://github.com/gufo-org/gufo/pull/680)
 retain current d0 rates; short public-corpus C1/C2/C4/C6/C8 checks additionally
 retain exact outputs, actual drafts and individual phase timings. This benchmark
 pair retains 80 queue and 28 TTFT flags as inconclusive; its other measured
