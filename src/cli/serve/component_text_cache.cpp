@@ -1340,6 +1340,8 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
       auto checkpoint = entry->retry.lock();
       if (checkpoint && checkpoint->Input() == input &&
           std::ranges::equal(checkpoint->Tokens(), request.capture_tokens) &&
+          std::ranges::equal(checkpoint->Components(), positions, {},
+                             &cache::CheckpointComponent::position) &&
           cache.index.IsResidentCoherent(*checkpoint)) {
         auto snapshot = std::make_unique<ComponentSnapshot>();
         snapshot->checkpoint = std::move(checkpoint);

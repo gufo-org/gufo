@@ -366,9 +366,15 @@ void ConcurrentRetriesShareCompletedCapture() {
   assert(runner->adapter->RecurrentHash(c.slot) == hash);
 }
 void RetryCaptureRequiresMatchingInputAndLiveOwner() {
-  enum class Source { kExpired, kDifferentInput, kContinuation };
+  enum class Source {
+    kExpired,
+    kDifferentInput,
+    kContinuation,
+    kDifferentPositions
+  };
   for (const auto scenario :
-       {Source::kExpired, Source::kDifferentInput, Source::kContinuation}) {
+       {Source::kExpired, Source::kDifferentInput, Source::kContinuation,
+        Source::kDifferentPositions}) {
     auto runner = std::make_shared<Runner>();
     ComponentTextCache cache(runner, 2, 1 << 22, {});
     const std::vector<TextRunnerToken> prompt{1, 2, 3};
@@ -382,7 +388,9 @@ void RetryCaptureRequiresMatchingInputAndLiveOwner() {
     auto& a = dynamic_cast<State&>(first->state());
     auto& b = dynamic_cast<State&>(second->state());
     runner->adapter->Append(a.slot, prompt, prompt);
-    runner->adapter->Append(b.slot, prompt, prompt);
+    const auto executed = std::span(prompt).first(
+        prompt.size() - (scenario == Source::kDifferentPositions));
+    runner->adapter->Append(b.slot, executed, executed);
     assert(first->TryReserveSnapshot(
         first->CaptureBytes(), prompt.size(), false,
         scenario == Source::kContinuation ? SnapshotPurpose::kContinuation
