@@ -201,12 +201,19 @@ def check_http(binary, model, draft, policies, selection="both"):
                         log.seek(0)
                         raise AssertionError(f"server startup failed: {log.read()}")
                     try:
-                        request("/health")
-                        break
-                    except (urllib.error.URLError, ConnectionError):
-                        if time.monotonic() >= deadline:
-                            raise TimeoutError("server readiness")
-                        time.sleep(0.1)
+                        with urllib.request.urlopen(
+                                f"http://127.0.0.1:{port}/health", timeout=1):
+                            break
+                    except urllib.error.HTTPError as error:
+                        # The port answers 503 `Loading model` while the weights load.
+                        payload = error.read().decode()
+                        if error.code != 503 or '"loading"' not in payload:
+                            raise AssertionError(f"/health: {error.code} {payload}")
+                    except OSError:
+                        pass
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("server readiness")
+                    time.sleep(0.1)
                 if request("/v1/models")["data"][0]["id"] != "qwen27b-wiring-test":
                     raise AssertionError("served model name was not wired")
                 defaulted = request("/v1/completions", {"prompt": prompt})
@@ -236,21 +243,27 @@ def check_http(binary, model, draft, policies, selection="both"):
                     if (raw["choices"] != replay["choices"] or
                             (drafts > 0) != bool(backend)):
                         raise AssertionError(f"HTTP sampling backend or replay differs: {config}")
-                    for path, payload in (("/completion", {"prompt": prompt}),
-                                          ("/infill", {"input_prefix": prompt})):
-                        if request(path, {**payload, **sampling})["content"] != text:
-                            raise AssertionError(f"{path} sampling differs from completions")
+                    if request("/completion", {"prompt": prompt, **sampling})["content"] != text:
+                        raise AssertionError("/completion sampling differs from completions")
                     chat = request("/v1/chat/completions", {"messages": messages, **sampling})
-                    chat_text = chat["choices"][0]["message"]["content"]
+                    # Qwen27B chat thinks by default, so compare every generated
+                    # token, reasoning included, across the adapters.
+                    message = chat["choices"][0]["message"]
+                    chat_text = message.get("reasoning_content", "") + message["content"]
                     anthropic = request("/v1/messages", {"messages": messages, **sampling})
                     responses = request("/v1/responses", {"input": prompt, **sampling})
-                    if (anthropic["content"][0]["text"] != chat_text or
-                            responses["output"][0]["content"][0]["text"] != chat_text):
+                    anthropic_text = "".join(block.get("thinking", block.get("text", ""))
+                                             for block in anthropic["content"])
+                    responses_text = "".join(
+                        part["text"] for item in responses["output"]
+                        for part in item.get("summary", item.get("content", [])))
+                    if anthropic_text != chat_text or responses_text != chat_text:
                         raise AssertionError("chat API adapters use different sampling")
                 streamed = request("/v1/chat/completions", {
                     "messages": messages, **sampling, "stream": True,
                     "stream_options": {"include_usage": True}})
-                streamed_text = "".join(choice.get("delta", {}).get("content", "")
+                streamed_text = "".join(choice.get("delta", {}).get("reasoning_content", "") +
+                                        choice.get("delta", {}).get("content", "")
                                         for chunk in streamed for choice in chunk.get("choices", []))
                 if streamed_text != chat_text:
                     raise AssertionError("streaming changed sampled output")
@@ -272,7 +285,6 @@ def check_http(binary, model, draft, policies, selection="both"):
                     ("/v1/responses", {"input": prompt}),
                     ("/v1/messages", {"messages": messages}),
                     ("/completion", {"prompt": prompt}),
-                    ("/infill", {"input_prefix": prompt}),
                 ):
                     for field, value in (
                             ("draft_temperature", 0.8), ("top_p", -0.01),
@@ -285,8 +297,10 @@ def check_http(binary, model, draft, policies, selection="both"):
                             ("xtc_probability", 0.5), ("dry_multiplier", 0.8),
                             ("top_n_sigma", 2), ("logit_bias", {"42": 1})):
                         request(path, {**payload, field: value}, expected=400)
+                # Suffix-conditioned infill is not implemented (docs/SERVER.md).
+                request("/infill", {"input_prefix": prompt}, expected=501)
                 print(f"{policy}: {len(SAMPLING_CASES)} sampling configurations, "
-                      "serve defaults, six HTTP adapters, replay, SSE and C2 exact")
+                      "serve defaults, five HTTP adapters, replay, SSE and C2 exact")
             finally:
                 process.terminate()
                 try:
