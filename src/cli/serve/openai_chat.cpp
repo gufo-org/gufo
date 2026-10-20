@@ -1256,6 +1256,10 @@ std::string_view ContentBefore(std::string_view full, std::size_t begin,
       begin = cursor;
   }
   const auto slice = full.substr(begin, stop - begin);
+  // The newline a model writes between or after its calls is layout, not a
+  // reply: a turn of parallel calls would otherwise carry content "\n" (#673).
+  if (after_call && Trim(slice).empty())
+    return {};
   const bool adjacent_envelope =
       after_call && Trim(slice).starts_with(kEnvelopeHeads.front());
   if (const auto block = EnvelopeBlockStart(full, stop, begin, closers, tools,
