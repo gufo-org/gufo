@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Compile the standalone gfx1151 microbenchmarks with hipcc.
+# Compile the standalone RDNA 3.5 microbenchmarks with hipcc.
+#
+# GUFO_HIP_ARCH selects the target (default gfx1151); gfx1150 is Strix Point.
 #
 # hipcc invokes the raw HIP clang++, not the Nix cc wrapper, so the include and
 # library search paths that `nix develop` exports through NIX_CFLAGS_COMPILE /
@@ -53,7 +55,7 @@ for t in "${targets[@]}"; do
     extra+=(-lhipblas -lhipblaslt -lrocblas)
   fi
   echo "==> $src -> $out"
-  compile=(hipcc -O3 --offload-arch=gfx1151 -std=c++20
+  compile=(hipcc -O3 "--offload-arch=${GUFO_HIP_ARCH:-gfx1151}" -std=c++20
     -I. "${inc[@]}" -Rpass-analysis=kernel-resource-usage)
   if [[ "$src" -ef tools/qwen27b/dflash_gemm_bench.hip ]]; then
     # Exact projection comparisons use the production compiler optimization level.
@@ -95,7 +97,7 @@ for t in "${targets[@]}"; do
           -o "$objects/quant.o" || exit 1
         native_objects+=("$objects/quant.o")
       fi
-      hipcc --offload-arch=gfx1151 "${lib[@]}" \
+      hipcc "--offload-arch=${GUFO_HIP_ARCH:-gfx1151}" "${lib[@]}" \
         "$objects/main.o" "${native_objects[@]}" "${extra[@]}" -o "$out"
     ) 2>"/tmp/${t}.build.log" ||
       { tail -40 "/tmp/${t}.build.log"; exit 1; }

@@ -42,6 +42,7 @@ static int g_rocm_mmq_ready;
 #ifndef DS4_ROCM_LT_ROUTE_DEFAULT_MASK
 #define DS4_ROCM_LT_ROUTE_DEFAULT_MASK 23
 #endif
+#include "src/core/hip/arch.hpp"
 #ifdef __HIP_PLATFORM_AMD__
 #include "ds4_rocm_hipblaslt.hip.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
@@ -777,11 +778,15 @@ extern "C" int ds4_gpu_init(void) {
     g_rocm_gfx1151 = 0;
     hipDeviceProp_t prop;
     if (hipGetDeviceProperties(&prop, dev) == hipSuccess) {
-        g_rocm_gfx1151 = prop.major == 11 && prop.minor == 5;
+        /* The tuned routes below were scored on gfx1151 only, so key them on
+         * the driver's architecture string rather than on the compute
+         * capability. gfx1150 (Strix Point) also reports 11.5, and a
+         * capability test would silently enable Strix Halo launch geometry on
+         * a 16-CU part. */
+        g_rocm_gfx1151 = gufo::hip::IsStrixHalo(prop.gcnArchName);
         gufo::server::Logger::LogFormatted(
             gufo::server::LogLevel::kInfo, "ds4",
-            "backend initialized on %s (sm_%d%d)", prop.name, prop.major,
-            prop.minor);
+            "backend initialized on %s (%s)", prop.name, prop.gcnArchName);
     }
     if (!g_hipblas_ready) {
         if (!hipblas_ok(hipblasCreate(&g_hipblas), "create handle")) return 0;

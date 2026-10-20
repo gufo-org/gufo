@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/arch.hpp"
 #include "src/models/minimax_h3/attention.hip.hpp"
 #include "src/models/minimax_h3/dense.hip.hpp"
 #include "src/models/minimax_h3/dit.hpp"
@@ -87,11 +88,10 @@ bool ValidateTarget(int* device, std::string* error) {
     SetError(error, HipError("hipGetDeviceProperties", status));
     return false;
   }
-  if (!std::string_view(properties.gcnArchName).starts_with("gfx1151") ||
-      properties.integrated == 0) {
+  if (!gufo::hip::IsRdna35(properties.gcnArchName) || properties.integrated == 0) {
     SetError(error,
-             "MiniMax H3 DiT supports only integrated gfx1151 Strix Halo; "
-             "detected " +
+             "MiniMax H3 DiT supports only integrated RDNA 3.5 APUs (gfx1151 "
+             "Strix Halo, gfx1150 Strix Point); detected " +
                  std::string(properties.gcnArchName));
     return false;
   }

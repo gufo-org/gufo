@@ -291,7 +291,7 @@ def demangle(names):
 
 
 def waves(vgpr: int) -> int:
-    """Return the VGPR-limited waves per SIMD on gfx1151 (1536 VGPRs, granule 24, maximum 16)."""
+    """Return the VGPR-limited waves per SIMD on RDNA 3.5 (1536 VGPRs, granule 24, maximum 16)."""
     granule = -(-max(vgpr, 1) // 24) * 24
     return min(16, 1536 // granule)
 

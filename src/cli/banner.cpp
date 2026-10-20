@@ -60,7 +60,7 @@ void PrintStartupBanner(std::string_view version,
   std::clog << "  " << tint << ",___," << reset << "   " << bold << "gufo"
             << reset << ' ' << version << '\n'
             << "  " << tint << eyes << reset << "   Fast LLM & DiT inference"
-            << separator << "gfx1151\n"
+            << separator << "RDNA 3.5\n"
             << std::flush;
 }
 

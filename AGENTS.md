@@ -2,8 +2,10 @@
 
 ## Platform and build
 
-Production targets Linux x86-64 AMD Strix Halo (`gfx1151`) only. CMake owns
-compiler flags, dependencies and installation; Nix supplies the pinned toolchain.
+Production targets Linux x86-64 on an AMD RDNA 3.5 integrated GPU: `gfx1151`
+(Strix Halo) or `gfx1150` (Strix Point). The part is chosen at configure time
+with `-DCMAKE_HIP_ARCHITECTURES`; the default is `gfx1151`. CMake owns compiler
+flags, dependencies and installation; Nix supplies the pinned toolchain.
 Linux source-build prerequisites are in [README.md](README.md#build-from-source).
 
 ```sh

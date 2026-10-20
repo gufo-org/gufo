@@ -158,7 +158,7 @@ static __device__ void no_device_code(
 
 }
 
-#define NO_DEVICE_CODE no_device_code(__FILE__, __LINE__, __FUNCTION__, "gfx1151")
+#define NO_DEVICE_CODE no_device_code(__FILE__, __LINE__, __FUNCTION__, "gfx1150/gfx1151")
 
 // The compiler is always able to unroll loops if they contain continue expressions.
 // In such cases loop unrolling can still be achieved via recursion:
@@ -180,12 +180,13 @@ struct ggml_hip_unroll<1> {
 };
 
 // Lane i receives lane (i ^ offset)'s value, as __shfl_xor does for a full
-// wave. On gfx1151 this is a DPP row_xmask (offsets below 16) or
-// v_permlanex16 (16): a register move, not a round trip through the LDS
-// crossbar (ds_bpermute). Only the transport differs, so sums stay bitwise.
+// wave. On RDNA 3.5 (gfx1151 Strix Halo, gfx1150 Strix Point) this is a DPP
+// row_xmask (offsets below 16) or v_permlanex16 (16): a register move, not a
+// round trip through the LDS crossbar (ds_bpermute). Only the transport
+// differs, so sums stay bitwise.
 template<int offset>
 static __device__ __forceinline__ int xor_lane(int x) {
-#if defined(__gfx1151__)
+#if defined(__gfx1150__) || defined(__gfx1151__)
     if constexpr (offset < 16) {
         return __builtin_amdgcn_update_dpp(0, x, 0x160 | offset, 0xF, 0xF, false);
     } else if constexpr (offset == 16) {

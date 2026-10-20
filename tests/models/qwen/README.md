@@ -5,7 +5,7 @@ validation target:
 
 - `cpu/` — model-level CPU reference, forward, generator, and SSM behavior.
 - `modules/` — narrow contracts for extracted norm, FFN, and SSM modules.
-- `hip/` — pure route-policy tests plus gfx1151 kernel and integration tests,
+- `hip/` — pure route-policy tests plus RDNA 3.5 kernel and integration tests,
   grouped by attention, FFN, quant, and basic operation ownership.
 - `tokenization/` — tokenizer and chat-template behavior.
 - `support/` — deterministic Qwen-only fixtures; repository-wide assertions
@@ -44,7 +44,7 @@ device gate still run normally and cannot skip merely because the property is
 present.
 
 Labels add `qwen` and the relevant tier, allowing focused runs on a supported
-Linux x86-64 Strix Halo host:
+Linux x86-64 RDNA 3.5 host:
 
 ```sh
 nix develop -c ctest --test-dir build/gpu-test -L qwen --output-on-failure
@@ -57,7 +57,7 @@ nix develop -c ctest --test-dir build/gpu-test \
 `hip/attention_policy_test.cpp`, `hip/execution_policy_test.cpp`, and
 `gemm_route_test.cpp` exercise pure route selection and do not require a GPU
 even though they mirror HIP composition. The other files under `hip/` require
-the supported gfx1151 target.
+a supported RDNA 3.5 target (`gfx1151` or `gfx1150`).
 
 The module-seam integration test does not yet cover the complete production
 executor: embedding, fused attention/SSM composition, unembedding, sampling,

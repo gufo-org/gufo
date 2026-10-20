@@ -1041,7 +1041,7 @@ int main(int argc, char** argv) {
     assert(argc == 1);
   hipDeviceProp_t properties{};
   assert(hipGetDeviceProperties(&properties, 0) == hipSuccess);
-  assert(std::strncmp(properties.gcnArchName, "gfx1151", 7) == 0);
+  assert(std::strncmp(properties.gcnArchName, "gfx115", 6) == 0);
   Backing();
   GroupedBacking();
   CheckpointLifetimes();

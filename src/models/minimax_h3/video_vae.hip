@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/arch.hpp"
 #include "src/models/minimax_h3/json.hpp"
 #include "src/models/minimax_h3/video_vae.hpp"
 #include "src/models/minimax_h3/video_vae_ops.hip.hpp"
@@ -82,7 +83,7 @@ bool ValidateTarget(int* device, std::string* error) {
     SetError(error, HipError("hipGetDeviceProperties", status));
     return false;
   }
-  if (!std::string_view(properties.gcnArchName).starts_with("gfx1151") ||
+  if (!gufo::hip::IsRdna35(properties.gcnArchName) ||
       properties.integrated == 0) {
     SetError(error,
              "MiniMax H3 VisualVAE supports only integrated gfx1151 Gufo "

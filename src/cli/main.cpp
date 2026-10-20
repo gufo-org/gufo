@@ -32,8 +32,8 @@ void print_version() {
 void print_help(std::string_view program_name) {
   std::cout
       << "Usage: " << program_name << " <COMMAND> [OPTIONS]\n\n"
-      << "Fast LLM & DiT video inference engine for AMD Strix Halo "
-         "(gfx1151).\n\n"
+      << "Fast LLM & DiT video inference engine for AMD RDNA 3.5 APUs\n"
+         "(gfx1151 Strix Halo, gfx1150 Strix Point).\n\n"
       << "Commands:\n"
       << "  serve          Start the OpenAI-compatible HTTP server\n"
       << "  prompt         Execute one prompt request and exit\n"

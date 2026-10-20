@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/arch.hpp"
 #include "src/core/mapped_prefetch.hpp"
 #include "src/models/minimax_h3/prompt_encoder.hpp"
 #include "src/models/minimax_h3/prompt_encoder_ops.hip.hpp"
@@ -106,7 +107,7 @@ bool ValidateTarget(int* device, std::string* error) {
     SetError(error, HipError("hipGetDeviceProperties", status));
     return false;
   }
-  if (!std::string_view(properties.gcnArchName).starts_with("gfx1151") ||
+  if (!gufo::hip::IsRdna35(properties.gcnArchName) ||
       properties.integrated == 0) {
     SetError(error,
              "MiniMax H3 prompt encoder supports only integrated gfx1151 "
