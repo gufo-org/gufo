@@ -145,7 +145,7 @@ private:
 void PrintHelp(std::string_view program) {
   std::cout
       << "Usage: " << program << " [options]\n\n"
-      << "Benchmark existing gfx1151 GPU kernels with unprofiled HIP-event "
+      << "Benchmark existing RDNA 3.5 GPU kernels with unprofiled HIP-event "
          "timing.\n\n"
       << "Options:\n"
       << "  --kernel <LIST>       Comma-separated cases: decode-attention, "
