@@ -1778,6 +1778,36 @@ def check_tool_edges(client, model, checks, sampling_preset=None):
             if sampling_preset == "deepseek4" and "tool" in order:
                 assert "text" not in order[order.index("tool"):], result
 
+    # The newline a model writes between parallel calls is layout, not a reply.
+    # The turn has no text, as with one call, with or without thinking (#673).
+    pair = [{"name": name, "description": f"Return {name[4:]}.",
+             "parameters": {"type": "object", "properties": {}}}
+            for name in ("get_alpha", "get_beta")]
+    prompt = "Call both tools in one parallel block: get_alpha and get_beta."
+    for effort in ("none", "low"):
+        for endpoint in ("chat", "responses"):
+            for stream in (False, True):
+                if endpoint == "chat":
+                    result = chat_result(client, dict(
+                        **common, messages=[{"role": "user", "content": prompt}],
+                        tools=[{"type": "function", "function": tool} for tool in pair],
+                        tool_choice="auto", parallel_tool_calls=True,
+                        reasoning_effort=effort, max_completion_tokens=1024), stream)
+                else:
+                    result = response_result(client, dict(
+                        **common, input=prompt,
+                        tools=[{"type": "function", **tool} for tool in pair],
+                        tool_choice="auto", parallel_tool_calls=True,
+                        reasoning={"effort": effort}, max_output_tokens=1024,
+                        store=False), stream)
+                name = f"parallel_separator_{endpoint}_{effort}_stream{stream}"
+                checks[name] = result
+                print(f"CHECK {name}", file=sys.stderr, flush=True)
+                assert result["finish"] == "tool_calls", result
+                assert sorted(call["function"]["name"] for call in result["tools"]) == [
+                    "get_alpha", "get_beta"], result
+                assert not result["text"] or result["text"].strip(), result
+
 
 def check_state_edges(client, model, checks, speculative, vision=False, server_log=None):
     """Mode proof and request-local grammar state across limits, errors and reuse."""
