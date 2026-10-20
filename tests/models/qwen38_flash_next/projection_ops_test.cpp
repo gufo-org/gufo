@@ -936,6 +936,10 @@ int main() {
     CheckSmallProjection(q::WeightType::kF32, 513, 2560);
     CheckSmallProjection(q::WeightType::kF32, 96, 2560);
     CheckSmallProjection(q::WeightType::kBF16, 129, 2560);
+    CheckSmallProjection(q::WeightType::kF16, 513, 2560);
+    CheckSmallProjection(q::WeightType::kF16, 96, 2560);
+    CheckSmallProjection(q::WeightType::kBF16, 128, 2560);
+    CheckSmallProjection(q::WeightType::kBF16, 512, 2560);
     CheckSmallProjection(q::WeightType::kF16, 7, 131);
     CheckDecodeGrouping(64, 2560);
     CheckDecodeGrouping(320, 10240);
