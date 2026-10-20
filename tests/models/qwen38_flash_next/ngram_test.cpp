@@ -397,6 +397,74 @@ void TestReplacedPath() {
   std::filesystem::remove(name);
 }
 
+// Gathers attribute every row to the sequence that requested it: copied from
+// a duplicate in the same gather, a row-cache hit or a disk read.
+void TestCounters() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "qwen38_ngram_counters.bin";
+  const std::uint32_t dim = 4;
+  const std::uint64_t rows = 4096;
+  {
+    std::ofstream out(path, std::ios::binary);
+    const std::vector<char> zeros(rows * dim * 2, 0);
+    out.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+  }
+  std::string error;
+  auto table =
+      OpenTable(path, 0, rows, dim, gufo::core::GgmlType::kBF16, &error);
+  Check(table != nullptr, error.c_str());
+  if (table) {
+    const auto balanced = [](const q::NgramTotals& t) {
+      return t.rows == t.dedup_rows + t.cache_hits + t.disk_reads;
+    };
+    q::NgramCounters first, second;
+    const std::vector<std::uint32_t> ids{5, 6, 5, 9, 6, 9, 10};
+    std::vector<float> out(ids.size() * dim);
+    const std::array owners{q::NgramGatherOwner{4, &first},
+                            q::NgramGatherOwner{3, &second}};
+    Check(table->StartRead(ids, out, owners) && table->WaitRead(),
+          "owned gather completes");
+    const auto a = first.Load(), b = second.Load();
+    Check(a.rows == 4 && a.dedup_rows == 1 && a.cache_hits == 0 &&
+              a.disk_reads == 3,
+          "first owner pays its own reads");
+    Check(b.rows == 3 && b.dedup_rows == 2 && b.cache_hits == 0 &&
+              b.disk_reads == 1,
+          "second owner copies rows the first one read");
+
+    const std::array whole{q::NgramGatherOwner{ids.size(), &first}};
+    Check(table->Read(ids, out) && table->StartRead(ids, out, whole) &&
+              table->WaitRead(),
+          "repeated gather completes");
+    const auto repeated = first.Load();
+    Check(repeated.rows == 11 && repeated.dedup_rows == 4 &&
+              repeated.cache_hits + repeated.disk_reads == 7 &&
+              repeated.disk_reads >= 3,
+          "repeated rows hit the row cache");
+    Check(balanced(repeated) && second.Load().rows == 3,
+          "unowned gathers are not counted");
+
+    // Large gathers read on the worker pool.
+    std::vector<std::uint32_t> wide(3000);
+    for (std::size_t i = 0; i < wide.size(); ++i)
+      wide[i] = static_cast<std::uint32_t>((i * 7) % 2048 + 1024);
+    std::vector<float> wide_out(wide.size() * dim);
+    q::NgramCounters pooled;
+    const std::array pooled_owner{q::NgramGatherOwner{wide.size(), &pooled}};
+    Check(table->StartRead(wide, wide_out, pooled_owner) && table->WaitRead(),
+          "pooled gather completes");
+    const auto p = pooled.Load();
+    Check(p.rows == wide.size() && p.dedup_rows == wide.size() - 2048 &&
+              balanced(p),
+          "pooled gather balances");
+
+    const std::array short_owner{q::NgramGatherOwner{ids.size() - 1, &first}};
+    Check(!table->StartRead(ids, out, short_owner),
+          "owners must cover the gather");
+    Check(first.Load().rows == repeated.rows, "rejected gather is uncounted");
+  }
+  std::filesystem::remove(path);
+}
 }  // namespace
 
 int main() {
@@ -405,6 +473,7 @@ int main() {
   TestTable();
   TestQuantizedRows();
   TestDistantRows();
+  TestCounters();
   if (failures != 0) {
     std::fprintf(stderr, "%d failures\n", failures);
     return 1;

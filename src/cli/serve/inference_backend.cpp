@@ -3155,6 +3155,14 @@ public:
     return RequireQwenFlashNextState(state).position();
   }
 
+  [[nodiscard]] TextRunnerNgramRows NgramRows(
+      const TextRunnerState& state) const override {
+    const auto totals =
+        RequireQwenFlashNextState(state).session().NgramRowTotals();
+    return {totals.rows, totals.dedup_rows, totals.cache_hits,
+            totals.disk_reads};
+  }
+
 private:
   mutable models::qwen::vision::ImageCache image_cache_;
   std::shared_ptr<QwenFlashNextModel> model_;

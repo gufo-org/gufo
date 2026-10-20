@@ -18,6 +18,7 @@
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
+#include "src/models/qwen38_flash_next/ngram.hpp"
 #include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
@@ -28,7 +29,6 @@ namespace gufo::models::qwen38_flash_next {
 
 struct ModelWeights;
 struct MtpWeights;
-class NgramTable;
 struct MtpCandidateLogits;
 class ContinuationAdapter;
 class ContinuationHooks;
@@ -223,6 +223,9 @@ public:
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
   }
+  /// PLE rows gathered by this execution slot since creation; zero without
+  /// a PLE table.
+  [[nodiscard]] NgramTotals NgramRowTotals() const noexcept;
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
   static constexpr std::uint32_t kSnapshotPayloadVersion = 18;

@@ -2176,10 +2176,12 @@ bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
     HashNgramRows(c, session.ngram_, tokens,
                   std::span<std::uint32_t>(host_rows_.data(), n * c.ple_heads));
   }
+  const NgramGatherOwner owner{n * c.ple_heads, &session.ngram_counters_};
   ple_pending_ = ngram_->StartRead(
       std::span<const std::uint32_t>(host_rows_.data(), n * c.ple_heads),
       std::span<float>(host_emb_,
-                       static_cast<std::size_t>(n) * c.PleEmbeddingDim()));
+                       static_cast<std::size_t>(n) * c.PleEmbeddingDim()),
+      std::span(&owner, 1));
   if (!ple_pending_) {
     AssignError(error_msg, "n-gram table read could not start");
   }
@@ -2228,8 +2230,10 @@ void Executor::PrefetchPle(const Session& session,
   if (prefetch_.rows.size() < count) {
     prefetch_.rows.resize(count);
   }
+  const NgramGatherOwner owner{rows.size(), &session.ngram_counters_};
   prefetch_.pending =
-      ngram_->StartRead(rows, std::span<float>(prefetch_.rows.data(), count));
+      ngram_->StartRead(rows, std::span<float>(prefetch_.rows.data(), count),
+                        std::span(&owner, 1));
 }
 
 void Executor::FinishPrefetch() const {

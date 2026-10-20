@@ -188,6 +188,11 @@ inline std::string GenerationLogDetails(
   if (result.lookup_tokens > 0)
     out << " lookup_accepted=" << result.lookup_accepted_tokens
         << " lookup_proposed=" << result.lookup_tokens;
+  if (result.ngram_rows > 0)
+    out << " ngram_rows=" << result.ngram_rows
+        << " ngram_dedup_rows=" << result.ngram_dedup_rows
+        << " ngram_cache_hits=" << result.ngram_cache_hits
+        << " ngram_disk_reads=" << result.ngram_disk_reads;
   if (result.cache_snapshot_bytes > 0)
     out << " cache_snapshot_bytes=" << result.cache_snapshot_bytes;
   if (result.cache_disk_queued_bytes > 0)

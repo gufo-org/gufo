@@ -36,6 +36,41 @@ void HashNgramRows(const Config& config, NgramHistory& history,
                    std::span<const std::int32_t> tokens,
                    std::span<std::uint32_t> rows);
 
+/// Rows a sequence gathered. Every row is a deduplicated copy of another row
+/// in the same gather, a row-cache hit or a disk read, so
+/// rows == dedup_rows + cache_hits + disk_reads once its gathers complete.
+struct NgramTotals {
+  std::uint64_t rows{0};
+  std::uint64_t dedup_rows{0};
+  std::uint64_t cache_hits{0};
+  std::uint64_t disk_reads{0};
+};
+
+/// Per-sequence counters. Gathers and table readers update them concurrently.
+class NgramCounters {
+public:
+  [[nodiscard]] NgramTotals Load() const noexcept {
+    return {rows_.load(std::memory_order_relaxed),
+            dedup_rows_.load(std::memory_order_relaxed),
+            cache_hits_.load(std::memory_order_relaxed),
+            disk_reads_.load(std::memory_order_relaxed)};
+  }
+
+private:
+  friend class NgramTable;
+  std::atomic<std::uint64_t> rows_{0};
+  std::atomic<std::uint64_t> dedup_rows_{0};
+  std::atomic<std::uint64_t> cache_hits_{0};
+  std::atomic<std::uint64_t> disk_reads_{0};
+};
+
+/// The next `rows` rows of a gather belong to the sequence counted by
+/// `counters`, which may be null.
+struct NgramGatherOwner {
+  std::size_t rows{0};
+  NgramCounters* counters{nullptr};
+};
+
 /// Reads n-gram embedding rows from the GGUF shard with direct I/O and a
 /// bounded cache of compressed rows. The table stays out of the page cache.
 /// Rows are dequantized to F32 and laid out [token][head][ple_head_dim].
@@ -62,8 +97,10 @@ public:
 
   /// Starts a gather on the resident readers. The output must stay alive
   /// until WaitRead; only one gather may be outstanding on this table.
+  /// `owners` partitions `rows` in order; empty leaves the gather uncounted.
   [[nodiscard]] bool StartRead(std::span<const std::uint32_t> rows,
-                               std::span<float> out);
+                               std::span<float> out,
+                               std::span<const NgramGatherOwner> owners = {});
   [[nodiscard]] bool WaitRead();
 
   [[nodiscard]] std::uint32_t RowDim() const noexcept { return row_dim_; }
@@ -76,6 +113,7 @@ private:
   struct Job {
     std::uint32_t row;
     float* dst;
+    NgramCounters* owner;
   };
   struct Copy {
     const float* src;
@@ -86,7 +124,8 @@ private:
   std::vector<std::size_t> first_rows_;
   void DecodeRow(const std::uint8_t* src, float* dst) const;
   bool ReadCached(std::uint32_t row, float* dst);
-  bool ReadOne(std::uint32_t row, float* dst, std::vector<std::uint8_t>& buf);
+  bool ReadOne(std::uint32_t row, float* dst, std::vector<std::uint8_t>& buf,
+               NgramCounters* owner);
   void Worker();
 
   struct CacheEntry {

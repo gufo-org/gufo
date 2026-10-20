@@ -953,6 +953,12 @@ struct TextGenerationScheduler::Impl {
     // A stop may land on a preview, an unadvanced AR token, or inside an
     // accepted speculative block. Retain only correctly labelled executed
     // state, using the same cache reconciliation as an interrupted request.
+    // Read before the commit returns the leased state.
+    const auto ngram = request->runner_request.ngram_rows();
+    request->result.ngram_rows = ngram.rows;
+    request->result.ngram_dedup_rows = ngram.dedup_rows;
+    request->result.ngram_cache_hits = ngram.cache_hits;
+    request->result.ngram_disk_reads = ngram.disk_reads;
     const auto cache_commit =
         finish_reason == TextGenerationBackend::FinishReason::kStopSequence
             ? request->runner_request.Cancel()

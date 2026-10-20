@@ -120,6 +120,10 @@ public:
     return mutation_epoch_;
   }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  /// PLE rows this session has gathered, including prefetches, since creation.
+  [[nodiscard]] NgramTotals NgramRowTotals() const noexcept {
+    return ngram_counters_.Load();
+  }
   [[nodiscard]] bool OwnsSnapshot(
       const SnapshotState& snapshot) const noexcept {
     return snapshots_ == snapshot.registry_;
@@ -192,6 +196,8 @@ private:
   RollbackRows ple_snapshots_;   ///< [max_spec-1][PleConvHistory()][hc_dim]
   NgramHistory ngram_;
   std::vector<NgramHistory> ngram_snapshots_;
+  // Prefetches count against the const session that will consume them.
+  mutable NgramCounters ngram_counters_;
   std::uint32_t spec_base_{0};    ///< position before the speculative batch
   std::uint32_t spec_tokens_{0};  ///< tokens of the pending speculative batch
   MtpState mtp_;
@@ -708,6 +714,7 @@ private:
   mutable hip::HostAllocations host_allocations_;
   float* host_emb_{nullptr};
   mutable std::vector<std::uint32_t> host_rows_;
+  mutable std::vector<NgramGatherOwner> ngram_owners_;
   mutable bool ple_pending_{false};
   /// The rows a prefill chunk reads are a pure function of its tokens and
   /// the n-gram history before them, so prefetched rows are claimed only by

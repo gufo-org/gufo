@@ -839,6 +839,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   }
   FinishPrefetch();
   batch_rows_ = 0;
+  ngram_owners_.clear();
   for (std::size_t i = 0; i < items.size(); ++i) {
     const auto& item = items[i];
     auto& session = *item.session;
@@ -850,6 +851,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     std::copy(item.tokens.begin(), item.tokens.end(),
               tokens_host_ + offsets[i]);
     if (c.ple_layer >= 0) {
+      ngram_owners_.push_back(
+          {item.tokens.size() * c.ple_heads, &session.ngram_counters_});
       for (std::size_t t = 0; t < item.tokens.size(); ++t) {
         HashNgramRows(
             c, session.ngram_, item.tokens.subspan(t, 1),
@@ -865,7 +868,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     if (ngram_ == nullptr ||
         !ngram_->StartRead(std::span(host_rows_).first(rows * c.ple_heads),
                            std::span(host_emb_, static_cast<std::size_t>(rows) *
-                                                    c.PleEmbeddingDim()))) {
+                                                    c.PleEmbeddingDim()),
+                           ngram_owners_)) {
       return Fail(error, "batched n-gram read could not start");
     }
     ple_pending_ = true;

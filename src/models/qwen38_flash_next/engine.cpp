@@ -273,6 +273,10 @@ std::size_t Session::AllocatedBytes() const noexcept {
   return session_->AllocatedBytes();
 }
 
+NgramTotals Session::NgramRowTotals() const noexcept {
+  return session_->NgramRowTotals();
+}
+
 bool Session::MtpEnabled() const noexcept {
   return session_->mtp_enabled();
 }

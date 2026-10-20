@@ -180,6 +180,15 @@ struct TextPrefillStep {
   double checkpoint_ms{0};
 };
 
+/// Hashed n-gram embedding rows a request gathered. Each row was copied from
+/// a duplicate in the same gather, served by the row cache or read from disk.
+struct TextRunnerNgramRows {
+  std::uint64_t rows{0};
+  std::uint64_t dedup_rows{0};
+  std::uint64_t cache_hits{0};
+  std::uint64_t disk_reads{0};
+};
+
 struct TextDecodeSelection {
   bool stop{false};
   TextRunnerToken token{0};
@@ -382,6 +391,13 @@ public:
     (void)state;
     (void)prefix;
   }
+  /// Cumulative n-gram rows gathered through this state; models without an
+  /// n-gram table report none.
+  [[nodiscard]] virtual TextRunnerNgramRows NgramRows(
+      const TextRunnerState& state) const {
+    (void)state;
+    return {};
+  }
   /// Tells a request state that its next execution will use a multi-request
   /// batch. Runners with request-local speculative state may discard work that
   /// the batched path cannot consume.
@@ -524,6 +540,8 @@ public:
     [[nodiscard]] std::size_t cache_restore_bytes() const noexcept;
     [[nodiscard]] double cache_restore_ms() const noexcept;
     [[nodiscard]] bool cache_disk_hit() const noexcept;
+    /// N-gram rows gathered since this request leased its state.
+    [[nodiscard]] TextRunnerNgramRows ngram_rows() const;
     [[nodiscard]] std::optional<ComponentCacheMetrics> component_cache_metrics()
         const;
     [[nodiscard]] std::size_t prompt_tokens() const noexcept;
