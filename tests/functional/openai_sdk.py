@@ -2441,7 +2441,8 @@ def check_prompt_progress(client, model, checks, width, vision, allow_missing, s
 
     if vision:
         image_request = {**cached, "messages": [{"role": "user", "content": [
-            image_content("red"), {"type": "text", "text": "Name the color of this image."}]}]}
+            image_content("red"),
+            {"type": "text", "text": "Name the color of this image. Reply in one lowercase word."}]}]}
         a = chat("progress_image_off", image_request, False)
         b = chat("progress_image_on_cached", image_request)
         assert signature(a) == signature(b) and "red" in b["text"].lower()
