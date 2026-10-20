@@ -219,6 +219,17 @@ public:
   void SetStopAtEos(bool value) noexcept { stop_at_eos_ = value; }
   [[nodiscard]] bool stop_at_eos() const noexcept { return stop_at_eos_; }
 
+  /// Prompt tokens past the next Prefill's frontier, up to the frontier
+  /// planned after it. A runner may read their inputs ahead during that call
+  /// but never consumes them. Empty outside a prefill step.
+  void SetPrefillLookahead(std::span<const TextRunnerToken> tokens) noexcept {
+    prefill_lookahead_ = tokens;
+  }
+  [[nodiscard]] std::span<const TextRunnerToken> prefill_lookahead()
+      const noexcept {
+    return prefill_lookahead_;
+  }
+
   /// Installs a request-scoped cancellation check for model calls that can
   /// yield internally. Implementations that only yield between work units may
   /// keep the default no-op behavior.
@@ -232,6 +243,7 @@ public:
 
 private:
   bool stop_at_eos_{true};
+  std::span<const TextRunnerToken> prefill_lookahead_;
 };
 
 /// Immutable model-owned continuation payload.

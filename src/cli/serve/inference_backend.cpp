@@ -2883,14 +2883,17 @@ public:
     const std::size_t next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
     // The next step most likely takes the same budget; its n-gram rows are
-    // read during this one and used only if it does.
-    const std::size_t after = prompt.size() - next_position;
-    const auto next = QwenFlashNextEngineTokens(prompt.subspan(
-        next_position,
-        std::min<std::size_t>({max_input_tokens, after,
-                               after <= model_->PrefillThroughCapacity()
-                                   ? model_->PrefillThroughCapacity()
-                                   : model_->PrefillCapacity()})));
+    // read during this one and used for the tokens it shares. A step ending
+    // at a cache frontier continues into the pool's lookahead.
+    const auto rest = next_position == prompt.size()
+                          ? state.prefill_lookahead()
+                          : prompt.subspan(next_position);
+    const std::size_t after = rest.size();
+    const auto next = QwenFlashNextEngineTokens(rest.subspan(
+        0, std::min<std::size_t>({max_input_tokens, after,
+                                  after <= model_->PrefillThroughCapacity()
+                                      ? model_->PrefillThroughCapacity()
+                                      : model_->PrefillCapacity()})));
     std::string error;
     if (!qfn.session().Sync(prefix, &error, next)) {
       qfn.set_position(0);

@@ -1531,6 +1531,23 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   // Fallback captures and admission must finish before pinning starts. The
   // chunk's GPU work can overlap preparation; cached decode never calls it.
   impl_->lease.PreparePrefill(std::min(remaining, max_input_tokens));
+  // The following step starts at this frontier and stops at the next one, so
+  // a runner may read its inputs during this step.
+  auto lookahead_end = impl_->prompt.size();
+  for (const auto point : impl_->checkpoints)
+    if (point > frontier)
+      lookahead_end = std::min(lookahead_end, point);
+  for (const auto point : impl_->boundaries)
+    if (point > frontier)
+      lookahead_end = std::min(lookahead_end, point);
+  if (snapshot_position > frontier)
+    lookahead_end = std::min(lookahead_end, snapshot_position);
+  struct ClearLookahead {
+    TextRunnerState& state;
+    ~ClearLookahead() { state.SetPrefillLookahead({}); }
+  } clear_lookahead{state};
+  state.SetPrefillLookahead(std::span<const TextRunnerToken>(impl_->prompt)
+                                .subspan(frontier, lookahead_end - frontier));
   auto step =
       in_pass ? impl_->runner->PrefillThrough(
                     state, model_prompt, impl_->prefill_offset,

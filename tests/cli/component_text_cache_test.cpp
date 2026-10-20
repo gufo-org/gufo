@@ -454,6 +454,47 @@ void CancelledPrefillKeepsCompletedSteps() {
     resend.Invalidate();
   }
 }
+void PrefillLookaheadReachesTheNextFrontier() {
+  class LookaheadRunner final : public Runner {
+  public:
+    struct Step {
+      std::size_t frontier, end;
+    };
+    mutable std::vector<Step> steps;
+    mutable const TextRunnerState* state{};
+    TextPrefillStep Prefill(TextRunnerState& state,
+                            std::span<const TextRunnerToken> prompt,
+                            std::size_t offset,
+                            std::size_t budget) const override {
+      const auto ahead = state.prefill_lookahead();
+      assert(ahead.empty() || ahead.data() == prompt.data() + prompt.size());
+      steps.push_back({prompt.size(), prompt.size() + ahead.size()});
+      this->state = &state;
+      return Runner::Prefill(state, prompt, offset, budget);
+    }
+  };
+  auto runner = std::make_shared<LookaheadRunner>();
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(4000);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto request = pool.Acquire(prompt);
+  while (!request.Prefill(1024).decode_ready) {
+  }
+  assert(runner->state && runner->state->prefill_lookahead().empty());
+  // A grid checkpoint splits the prompt; every step looks ahead exactly to
+  // the frontier after its own.
+  assert(runner->steps.front().frontier < prompt.size());
+  for (std::size_t i = 0; i < runner->steps.size(); ++i) {
+    const auto [frontier, end] = runner->steps[i];
+    auto next = prompt.size();
+    for (std::size_t j = i + 1; j < runner->steps.size(); ++j)
+      if (runner->steps[j].frontier > frontier) {
+        next = runner->steps[j].frontier;
+        break;
+      }
+    assert(end == (frontier == prompt.size() ? frontier : next));
+  }
+}
 void BackingPreparationFollowsCaptures() {
   class PrepareRunner final : public Runner {
   public:
@@ -1426,6 +1467,7 @@ int main() {
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
   BackingPreparationFollowsCaptures();
+  PrefillLookaheadReachesTheNextFrontier();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();

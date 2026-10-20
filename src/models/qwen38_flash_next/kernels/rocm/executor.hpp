@@ -718,13 +718,16 @@ private:
   mutable bool ple_pending_{false};
   /// The rows a prefill chunk reads are a pure function of its tokens and
   /// the n-gram history before them, so prefetched rows are claimed only by
-  /// a batch with exactly those tokens and that history, whichever session
-  /// it belongs to. A claim copies them into host_emb_, whose stable address
-  /// is retained by captured graphs.
+  /// a batch with that history whose tokens extend, or are extended by, the
+  /// prefetched ones, whichever session it belongs to. A claim copies them
+  /// into host_emb_, whose stable address is retained by captured graphs.
   struct PlePrefetch {
     bool pending{false};  ///< read in flight
     bool ready{false};    ///< rows complete in `rows`
-    bool claimed{false};  ///< WaitPle collects them for the current batch
+    /// Leading batch tokens whose rows WaitPle collects from `rows`.
+    std::size_t claimed{0};
+    /// The batch extends past `tokens`; the table reads its remaining rows.
+    bool tail{false};
     NgramHistory before;
     NgramHistory after;
     std::vector<std::int32_t> tokens;
