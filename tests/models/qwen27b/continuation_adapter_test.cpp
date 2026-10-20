@@ -154,6 +154,12 @@ struct Guard final : cache::MutationGuard {
         Require(detached[i], "mutation missed a borrowed component");
     borrowed = nullptr;
   }
+  void Untouched() {
+    Require(!release_failed, "borrower release failed");
+    for (std::size_t i = 0; i < detached.size(); ++i)
+      Require(!detached[i], "rollback preserved unchanged rows");
+    borrowed = nullptr;
+  }
   bool release_failed{};
   bool refuse{};
 };
@@ -319,11 +325,15 @@ void Check(const std::shared_ptr<const hip::QwenGpuModel>& model, bool fp16) {
       a.RestoreCompactSnapshot(payload, 1282);
     }
     if (mutation == 3) {
+      // Rollback swaps recurrent state only: rows below the saved position
+      // stay borrowed, which keeps disk-only checkpoints publishable.
       a.SaveState(1282);
       Reject([&] { (void)Capture(adapter, *source, pool); });
       (void)a.ForwardToken(tokens[1282], 1282);
       a.RestoreState();
       a.FinishVerification();
+      ga.Untouched();
+      continue;
     }
     if (mutation == 4)
       (void)a.ForwardPromptBatch(std::span(edited).subspan(5, 7), 5);

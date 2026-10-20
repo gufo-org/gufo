@@ -22,6 +22,9 @@ public:
   virtual void BeforeReset() = 0;
   virtual void AfterReset() = 0;
   virtual void BeforeRestore() = 0;
+  // Speculative rollback swaps recurrent state only; attention rows below the
+  // saved position are unchanged, and later overwrites pass BeforeWrite.
+  virtual void BeforeRollback() = 0;
   virtual void AfterRestore(std::uint32_t position) noexcept = 0;
   virtual void AfterSaveState() noexcept = 0;
   virtual void AfterFinishVerification() noexcept = 0;
@@ -63,8 +66,11 @@ private:
 };
 class ContinuationRestore {
 public:
-  explicit ContinuationRestore(ContinuationHooks* hooks) : hooks_(hooks) {
-    if (hooks_)
+  explicit ContinuationRestore(ContinuationHooks* hooks, bool rollback = false)
+      : hooks_(hooks) {
+    if (hooks_ && rollback)
+      hooks_->BeforeRollback();
+    else if (hooks_)
       hooks_->BeforeRestore();
   }
   ContinuationRestore(const ContinuationRestore&) = delete;

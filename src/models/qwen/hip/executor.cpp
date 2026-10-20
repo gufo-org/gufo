@@ -226,7 +226,7 @@ void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
 
 void QwenGpuExecutor::RestoreState() {
   CheckReset();
-  models::qwen::ContinuationRestore restore(continuation_hooks_);
+  models::qwen::ContinuationRestore restore(continuation_hooks_, true);
   if (arena_.IsSsmReplayCaptureActive())
     arena_.DisableSsmReplayCapture();
   arena_.RestoreState();

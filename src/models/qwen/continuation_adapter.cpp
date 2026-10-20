@@ -169,6 +169,11 @@ public:
     failed = true;
     native_restoring = true;
   }
+  void BeforeRollback() override {
+    BeforeExecution();
+    failed = true;
+    native_restoring = true;
+  }
   void AfterRestore(std::uint32_t target) noexcept override {
     position = target;
     logits_valid = false;
