@@ -504,6 +504,7 @@ bool FakeAdapter::Validate(Slot& slot,
   return complete;
 }
 bool FakeAdapter::Invalidate(Slot& slot) noexcept {
+  invalidations_.fetch_add(1, std::memory_order_relaxed);
   auto& state = AsSlot(slot);
   if (state.Busy())
     return false;

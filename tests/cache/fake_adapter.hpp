@@ -1,6 +1,7 @@
 #ifndef GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 #define GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -90,6 +91,9 @@ public:
   void GuardRows(Slot&, ComponentId, Rows first, Rows end);
   void FailNextAllocation() noexcept;
   void FailNextTransfer() noexcept;
+  [[nodiscard]] std::size_t Invalidations() const noexcept {
+    return invalidations_.load(std::memory_order_relaxed);
+  }
 
 private:
   [[nodiscard]] Completion SubmitRead(const Slot&, Stream&,
@@ -98,6 +102,7 @@ private:
                                       std::function<TransferResult()>);
   bool fail_allocation_{false};
   bool fail_transfer_{false};
+  std::atomic<std::size_t> invalidations_{};
   Rows prefill_pass_rows_{2048};
 };
 

@@ -172,6 +172,9 @@ struct ComponentTextCache::Impl {
     // not establish that a durable chunk belongs to this execution.
     std::shared_ptr<const void> branch;
     std::shared_ptr<const cache::DiskDescription> durable;
+    // A completed full-prompt retry copy can serve identical peers before its
+    // owner commits. Weak ownership never extends the checkpoint's retention.
+    std::weak_ptr<const cache::Checkpoint> retry;
     // The live frontier's prompt, to tell whether any checkpoint covers it.
     std::vector<cache::Token> live_tokens;
     cache::Identity live_input;
@@ -221,8 +224,12 @@ struct ComponentTextCache::Impl {
         identity(resources->adapter->CompatibilityIdentity()),
         index(ledger),
         retention(ledger, index, &events) {
-    metadata = ledger.Reserve(cache::ResourceCategory::kMetadata, sizeof(Impl))
-                   .Convert();
+    metadata =
+        ledger
+            .Reserve(cache::ResourceCategory::kMetadata,
+                     sizeof(Impl) +
+                         count * sizeof(std::weak_ptr<const cache::Checkpoint>))
+            .Convert();
     crypto::Sha256Hasher hash;
     hash.Update(identity);
     digest = hash.Finish();
@@ -915,14 +922,27 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
                 std::max(deepest, static_cast<std::size_t>(candidate.boundary));
         return e.live_tokens.size() - deepest > kUncoveredTokens;
       };
+      using Rank = std::tuple<bool, bool, bool, bool, std::uint64_t>;
       const auto rank = [&](const Impl::Entry& e) {
-        return std::tuple{uncovered(e), !e.slot->PreservationComplete(),
-                          bool(e.live),
-                          e.live_tokens.size() >= kUncoveredTokens, e.used};
+        return Rank{uncovered(e), !e.slot->PreservationComplete(), bool(e.live),
+                    e.live_tokens.size() >= kUncoveredTokens, e.used};
       };
-      for (auto& candidate : impl_->entries)
-        if (!candidate->busy && (!entry || rank(*candidate) < rank(*entry)))
+      std::optional<Rank> selected_rank;
+      for (auto& candidate : impl_->entries) {
+        if (candidate->busy)
+          continue;
+        if (!entry) {
           entry = candidate.get();
+          continue;
+        }
+        if (!selected_rank)
+          selected_rank = rank(*entry);
+        const auto candidate_rank = rank(*candidate);
+        if (candidate_rank < *selected_rank) {
+          entry = candidate.get();
+          selected_rank = candidate_rank;
+        }
+      }
     }
     if (!entry)
       throw cache::SlotBusy();
@@ -948,6 +968,9 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     request.state->SetStopAtEos(stop_at_eos);
     impl_->runner->SetPromptContext(*request.state, context);
     const auto started = Clock::now();
+    // Cold Acquire has already reset the slot. Only an attempted restore (or
+    // an unusable live frontier) can require another reset before cold use.
+    bool clean = !live;
     bool restored = bool(live);
     if (live)
       request.cached = found.selected->boundary;
@@ -962,6 +985,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           std::vector<cache::ComponentPosition> positions;
           for (const auto& c : checkpoint.Components())
             positions.push_back(c.position);
+          clean = false;
           impl_->resources->adapter->BeginRestore(request.slot.Execution(),
                                                   positions);
           // Every pin outlives all submitted loads, including failure drain.
@@ -1069,6 +1093,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           }
           restored = true;
         } else if (candidate.durable && impl_->streaming) {
+          clean = false;
           cache::TransferTiming timing;
           const auto id = candidate.durable->Manifest().checkpoint;
           restored = impl_->streaming->Restore(
@@ -1111,11 +1136,13 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       } catch (...) {
         if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
           throw;
+        clean = true;
         request.restored = 0;
       }
     }
     if (!restored) {
-      if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
+      if (!clean &&
+          !impl_->resources->adapter->Invalidate(request.slot.Execution()))
         throw std::runtime_error("component cold initialization failed");
       entry->history = std::make_unique<cache::ExecutionHistory>(
           cache::ExecutionHistory::Cold(impl_->ledger,
@@ -1300,6 +1327,27 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   auto positions =
       cache.resources->adapter->Positions(request.slot.Execution());
   const auto bytes = request.entry->history->NewPayloadBytes(positions);
+  // Retry captures are complete decode frontiers. Stable/in-pass and grid
+  // captures may lack that frontier, even at the same token boundary, and
+  // must never substitute for a retry. Reuse a completed immutable checkpoint,
+  // without inferring chunk provenance for this slot's execution history.
+  const bool retry = request.purpose == SnapshotPurpose::kRetry &&
+                     request.capture_tokens.size() == request.prompt.size();
+  if (retry) {
+    const auto input = At(request.input, request.capture_tokens.size());
+    const std::lock_guard lock(cache.mutex);
+    for (const auto& entry : cache.entries) {
+      auto checkpoint = entry->retry.lock();
+      if (checkpoint && checkpoint->Input() == input &&
+          std::ranges::equal(checkpoint->Tokens(), request.capture_tokens) &&
+          cache.index.IsResidentCoherent(*checkpoint)) {
+        auto snapshot = std::make_unique<ComponentSnapshot>();
+        snapshot->checkpoint = std::move(checkpoint);
+        snapshot->bytes = bytes;
+        return snapshot;
+      }
+    }
+  }
   const auto retain = request.Retain(request.capture_tokens, bytes);
   if (bytes > cache.ledger.Limits().ram_bytes)
     return request.CaptureDurable();
@@ -1458,6 +1506,10 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   request.metrics.captured_bytes += captured_capacity;
   request.metrics.borrowed_capacity_bytes += borrowed_capacity;
   request.metrics.copied_payload_bytes += copied_payload;
+  if (retry) {
+    const std::lock_guard lock(cache.mutex);
+    request.entry->retry = checkpoint;
+  }
   auto snapshot = std::make_unique<ComponentSnapshot>();
   snapshot->checkpoint = std::move(checkpoint);
   snapshot->bytes = bytes;
