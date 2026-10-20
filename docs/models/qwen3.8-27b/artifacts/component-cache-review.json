@@ -834,9 +834,7 @@
       "note": "Job status verified; full log download failed with a gateway timeout. Implementation-head CI log remains retained separately."
     }
   },
-  "remaining": [
-    "ReconcileComponentState placeholder frontier token 0 on exact-length hit at a cancelled partial-prefill checkpoint (review finding, not reproduced)"
-  ],
+  "remaining": [],
   "limitations": [
     "No new upstream-model or weight-conversion parity claim",
     "Earlier cold-prefill versus decoded-history vision differences remain historical, unqualified model behavior; scalar-equivalent prefill remains rejected for its sevenfold prefill regression",
@@ -1062,12 +1060,14 @@
     "merge": "8ed4da99",
     "fixes": {
       "4d802349": "fix(qwen): keep borrowed rows across speculative rollback",
-      "e8713aba": "test(qwen): let the first short chat learn the system boundary"
+      "e8713aba": "test(qwen): let the first short chat learn the system boundary",
+      "94fee48e": "fix(cache): recompute prompts that end at a partial-prefill frontier"
     },
     "binaries": {
       "main": "/nix/store/sl0bsz4lqvwlpc760vknd5fh5wq0k5mq-gufo-0-unstable-1b0a5a8",
       "merge": "/nix/store/nfrv8pn69hmwlqd3dahj1z1nccdxa2af-gufo-0-unstable-8ed4da9",
-      "fixed": "/nix/store/zv4a29a5170jgz2n95yb5vjmp209ld44-gufo-0-unstable-e8713ab"
+      "fixed": "/nix/store/zv4a29a5170jgz2n95yb5vjmp209ld44-gufo-0-unstable-e8713ab",
+      "frontier_fix": "/nix/store/hrlclc1lhx4iilvlw5y9wq1rdlqvr24w-gufo-0-unstable-94fee48"
     },
     "raw_evidence_directory": "/home/mixer/gufo-qualification/pr540-2026-10-20",
     "server_settings": "--sessions 4 --context 32768 --prefill-chunk 1024 --cache-ram-bytes 16GiB (Flash MTP 8GiB) --sampling-preset qwen38",
@@ -1124,6 +1124,11 @@
     "decisions": {
       "timing": "queue_ms admission floor and cache_snapshot_ms increases accepted by the user as component cache cost; optimization tracked in #678 with Flash requalification",
       "over_ram_e2": "left unqualified by user decision: disk-throughput dependent, queue reordering would not have met the 36.6 s bound"
+    },
+    "partial_frontier_fix": {
+      "cause": "ReconcileComponentState gave a frontier-less restored or live state a placeholder token 0; an exact-length hit then decoded from it",
+      "fix": "Acquire falls back to a shallower boundary when the selected boundary equals the prompt length and the runner reports no decode frontier (Qwen: token plus valid logits or retained frontier logits; other runners unchanged)",
+      "checks": "new CPU regression test fails without the fix; server-labelled CPU tests 33/33; Q4 adapter, draft adapter and serving-cache GPU checks pass; Q4 AR and DFlash2 HTTP suites pass with identical work (DFlash2 290/290 cached counts and 3,423/2,016 drafts identical; AR 289/290 identical, one cancellation request reused 310 instead of 305 tokens)"
     }
   }
 }

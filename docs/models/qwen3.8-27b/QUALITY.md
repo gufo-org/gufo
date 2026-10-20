@@ -171,7 +171,9 @@ and the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
 ## Component serving migration
 
 October 20 refresh: main `1b0a5a84` is merged (`8ed4da99`), with fixes
-`4d802349` and `e8713aba`. Q4/Q8 native adapter, DFlash2 state, serving-cache,
+`4d802349`, `e8713aba` and `94fee48e`. The last stops a prompt that ends
+exactly at a partial-prefill frontier from decoding a placeholder token; it
+recomputes from a shallower boundary, and Q4 AR/DFlash2 suites do the same work. Q4/Q8 native adapter, DFlash2 state, serving-cache,
 target numerical and attention operator checks pass. Restored component bytes
 and full logits match across FP16/FP32 KV, edits, rollback, images, sampled
 frontiers, cancellation, disk compatibility, concurrent forks and cleanup.
