@@ -139,7 +139,7 @@ void QwenGpuExecutor::Reset() noexcept {
   }
   replaying_ssm_state_ = false;
   next_token_.reset();
-  h_prompt_hidden_.clear();
+  h_prompt_hidden_.Clear();
   h_verification_hidden_.clear();
   h_verification_logits_.clear();
   h_last_hidden_.clear();
@@ -181,7 +181,7 @@ void QwenGpuExecutor::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
   models::qwen::ContinuationRestore restore(continuation_hooks_);
   replaying_ssm_state_ = false;
   next_token_.reset();
-  h_prompt_hidden_.clear();
+  h_prompt_hidden_.Clear();
   h_verification_hidden_.clear();
   h_verification_logits_.clear();
   h_last_hidden_.clear();
@@ -200,7 +200,7 @@ void QwenGpuExecutor::RestoreCompactSnapshot(
   models::qwen::ContinuationRestore restore(continuation_hooks_);
   replaying_ssm_state_ = false;
   next_token_.reset();
-  h_prompt_hidden_.clear();
+  h_prompt_hidden_.Clear();
   h_verification_hidden_.clear();
   h_verification_logits_.clear();
   h_last_hidden_.clear();
@@ -463,7 +463,7 @@ std::span<const float> QwenGpuExecutor::CopyVerificationLogits(
 void QwenGpuExecutor::SetPromptHiddenCapture(
     bool enabled, std::span<const std::uint32_t> target_layer_ids) {
   capture_prompt_hidden_ = enabled;
-  h_prompt_hidden_.clear();
+  h_prompt_hidden_.Clear();
   h_verification_hidden_.clear();
   h_verification_logits_.clear();
   arena_.SetTargetLayerCapture(enabled ? target_layer_ids

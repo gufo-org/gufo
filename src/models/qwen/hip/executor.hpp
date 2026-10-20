@@ -31,6 +31,7 @@
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
+#include "src/models/qwen/hip/prompt_hidden_buffer.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
 
 namespace gufo::hip {
@@ -531,7 +532,7 @@ public:
   /// Returns the flattened [prompt_tokens, hidden_size] capture from the most
   /// recent ForwardPromptBatch call.
   [[nodiscard]] std::span<const float> GetPromptHiddenStates() const noexcept {
-    return h_prompt_hidden_;
+    return h_prompt_hidden_.View();
   }
 
   /// Copies the final-layer hidden state from the most recent forward pass.
@@ -613,7 +614,7 @@ private:
   detail::HipGraphDecodeExecutor graph_executor_;
   models::qwen::vision::DeviceInput vision_input_;
   std::vector<float> h_logits_;
-  std::vector<float> h_prompt_hidden_;
+  PromptHiddenBuffer h_prompt_hidden_;
   std::vector<float> h_verification_hidden_;
   std::vector<float> h_verification_logits_;
   std::vector<float> h_last_hidden_;

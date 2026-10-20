@@ -78,6 +78,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/model_loader.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/prefill.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/prefill_chunk.cpp
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/prompt_hidden_buffer.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/ssm_replay.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/model.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/executor.cpp

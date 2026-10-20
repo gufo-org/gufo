@@ -82,6 +82,9 @@ public:
   }
   void Reset() noexcept;
   void Rewind(std::uint32_t position);
+  /// Waits for queued work, including host-to-device copies whose source
+  /// the caller may reuse once this returns.
+  void Synchronize();
 
   [[nodiscard]] tokenization::TokenId ForwardTargetHidden(
       tokenization::TokenId input_token, std::span<const float> target_hidden,
