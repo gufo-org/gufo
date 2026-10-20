@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "issue": "https://github.com/gufo-org/gufo/issues/678",
+  "platform": "Linux x86-64 AMD Strix Halo gfx1151, ROCm 7.2.3",
+  "base_revision": "e121a214",
+  "code_revision": "195f9374",
+  "raw_evidence_directory": "/home/mixer/gufo-qualification/issue678-2026-10-20",
+  "retained_changes": [
+    "Rank each eligible slot once, lazily for multiple candidates.",
+    "Use a checkpoint-presence query for frontier coverage and exact snapshot checks.",
+    "Keep the clean state already established by cold acquisition; reset failed restores."
+  ],
+  "claim_validation": {
+    "cold_acquisitions": 56,
+    "cold_acquire_p50_ms": {
+      "rank": 0.857268,
+      "slot": 1.446427,
+      "reset": 0.706234,
+      "total": 3.0967205
+    },
+    "observations": [
+      "Cold admission resets twice; the second reset is separately timed.",
+      "Ranking repeats full lookups of live frontiers.",
+      "Some identical full-prompt retry captures begin before the leader publishes its completed copy.",
+      "Snapshot elapsed time includes the interval before scheduler collection, overlapping inference."
+    ]
+  },
+  "cpu": {
+    "status": "passed",
+    "tests": [
+      "component_text_cache_test",
+      "text_model_runner_test",
+      "cache_prefix_index_test",
+      "cache_tiered_test"
+    ],
+    "format": "passed",
+    "regression_before": "ColdAcquireResetsOnce fails on main at Invalidations() == 1."
+  },
+  "prefix_index_microbenchmark": {
+    "tokens": 131072,
+    "checkpoints": 128,
+    "iterations": 1000,
+    "lookup_us": 107.05,
+    "presence_us": 31.4893,
+    "scope": "CPU fixture with three component descriptors; not inference latency."
+  },
+  "flash_ar": {
+    "suites": [
+      "cache-concurrency",
+      "state-edges",
+      "cache-shared-prefix"
+    ],
+    "requests": 81,
+    "output_and_expected_cache_prefill_work": "exact",
+    "timing": {
+      "margin_percent": 5,
+      "noise_ms": 3,
+      "passed": 1186,
+      "inconclusive": 16,
+      "failed": 0,
+      "status": "inconclusive",
+      "reason": "The remaining flags also occur in unchanged-main controls; no blanket phase timing pass."
+    },
+    "cold_queue_p50_ms": {
+      "main": 3.593165,
+      "candidate": 2.660608
+    },
+    "scope": "Distribution summary is descriptive; every request/phase remains in raw comparisons."
+  },
+  "rejected_retry_sharing": {
+    "code_revision": "8117de62",
+    "copied_bytes_saved_in_identical_cohort": 399388752,
+    "quality": "Exact responses and cache/prefill counts; sampled MTP peers also match fresh execution and zero-prefill replay, with 117 actual drafts.",
+    "timing": {
+      "status": "failed",
+      "failed_measurements": 8,
+      "reason": "Repeated 7\u20139 ms decode-phase increases as short peers enter larger physical batches; total request latency improves but the phase gate fails."
+    },
+    "decision": "Removed from the default fix; checkpoint capture and retention behavior stay as before."
+  },
+  "pending": [
+    "Flash-Next AR/MTP cache and long-context qualification",
+    "Flash-Next MTP matched affected timing controls",
+    "Qwen 27B compatibility on open #540, Q4/Q8 AR/DFlash2",
+    "standard speed benchmark and affected concurrency controls",
+    "independent draft PR review iterations"
+  ],
+  "binaries": {
+    "baseline": {
+      "path": "/home/mixer/gufo-qualification/issue678-2026-10-20/baseline/gufo",
+      "sha256": "97bb98b373d1184b1634ff8a35bde90ca7684139c9734909011530f8e55ea851"
+    },
+    "presence": {
+      "path": "/home/mixer/gufo-qualification/issue678-2026-10-20/presence/gufo",
+      "sha256": "721215cd5c0168943d41cb713fea89f5169ec0239ad801433e8cd137dde26758"
+    }
+  }
+}

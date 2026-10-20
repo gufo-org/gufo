@@ -1,5 +1,16 @@
 # Qwen3.8 Flash-Next quality
 
+**Component-cache admission, October 20 (draft qualification):** `195f9374`
+avoids duplicate cold resets, repeated slot ranks and full lookup results for
+checkpoint-presence checks. The focused cache/runner/index/RAM-and-disk CPU
+checks pass. All 81 AR HTTP requests in `cache-concurrency`, `state-edges` and
+`cache-shared-prefix` preserve responses and expected cache/prefill work.
+At the unchanged 5% and 3 ms gate, 1,186 measurements pass and 16 remain
+inconclusive against unchanged-main controls; there is no blanket timing pass.
+Further AR/MTP continuation qualification is pending. The
+[measurement record](artifacts/component-cache-admission.json) retains the scope,
+raw evidence location and rejected retry-sharing experiment.
+
 **Host-memory stalls, October 18:** `fec4759d` protects runtime-owned queue-save,
 launch/copy and code-loading buffers from host compaction while preserving
 application managed memory and ordinary fine-grained host allocations. Owned
