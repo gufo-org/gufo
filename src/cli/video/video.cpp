@@ -245,7 +245,7 @@ void PrintVideoHelp(std::string_view program_name) {
   VideoOverrides overrides;
   ArgParser parser(
       std::string(program_name) + " video",
-      "Generate MiniMax H3 text-to-video on a Strix Halo gfx1151 GPU.\n"
+      "Generate MiniMax H3 text-to-video on an AMD RDNA 3.5 GPU.\n"
       "Supply a model directory and a positional text prompt. Canvas, frame,\n"
       "and denoising defaults come from the selected preset.");
   RegisterVideoOptions(parser, options, overrides);

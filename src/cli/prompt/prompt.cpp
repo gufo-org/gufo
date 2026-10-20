@@ -394,7 +394,7 @@ int GenerateDeepSeekResponse(
   session.BeginRequest();
 
   if (opt.verbose) {
-    std::cout << "[Engine]: DeepSeek V4 Flash ROCm (gfx1151)\n"
+    std::cout << "[Engine]: DeepSeek V4 Flash ROCm (RDNA 3.5)\n"
               << "Model: " << model->ModelName() << '\n'
               << "Prompt tokens: " << prompt_tokens.size() << '\n'
               << "Max tokens: " << opt.max_tokens << '\n'
@@ -1104,7 +1104,7 @@ int RunPrompt(std::span<const char* const> args) {
 
       if (opt.verbose) {
         const auto& config = gpu_exec->GetConfig();
-        std::cout << "[Engine]: AMD Strix Halo gfx1151 GPU Executor\n"
+        std::cout << "[Engine]: AMD RDNA 3.5 GPU Executor\n"
                   << "Model: " << config.architecture << " ("
                   << config.num_layers
                   << " layers, hidden=" << config.hidden_size
@@ -1292,7 +1292,7 @@ int RunChat(std::span<const char* const> args) {
     tokenizer = &gpu_executor->GetTokenizer();
     architecture = gpu_executor->GetConfig().architecture;
     if (opt.verbose)
-      std::cout << "[Engine]: AMD Strix Halo gfx1151 GPU Executor\n";
+      std::cout << "[Engine]: AMD RDNA 3.5 GPU Executor\n";
   }
 #endif
   if (tokenizer == nullptr) {
