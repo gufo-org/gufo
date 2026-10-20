@@ -2,8 +2,10 @@
 
 ## Platform and build
 
-Production packages target Linux x86-64 AMD Strix Halo (`gfx1151`); Windows
-is a supported native build target for development. CMake owns
+Production packages target Linux x86-64 on an AMD RDNA 3.5 integrated GPU:
+`gfx1151` (Strix Halo) or `gfx1150` (Strix Point); Windows is a supported native
+build target for development. The part is chosen at configure time with
+`-DCMAKE_HIP_ARCHITECTURES`; the default is `gfx1151`. CMake owns
 compiler flags, dependencies and installation; Nix supplies the pinned toolchain.
 Linux source-build prerequisites are in [README.md](README.md#build-from-source).
 
