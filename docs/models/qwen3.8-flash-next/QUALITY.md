@@ -1,15 +1,58 @@
 # Qwen3.8 Flash-Next quality
 
-**Component-cache admission, October 20 (draft qualification):** `195f9374`
-avoids duplicate cold resets, repeated slot ranks and full lookup results for
-checkpoint-presence checks. The focused cache/runner/index/RAM-and-disk CPU
-checks pass. All 81 AR HTTP requests in `cache-concurrency`, `state-edges` and
-`cache-shared-prefix` preserve responses and expected cache/prefill work.
-At the unchanged 5% and 3 ms gate, 1,186 measurements pass and 16 remain
-inconclusive against unchanged-main controls; there is no blanket timing pass.
-Further AR/MTP continuation qualification is pending. The
-[measurement record](artifacts/component-cache-admission.json) retains the scope,
-raw evidence location and rejected retry-sharing experiment.
+**Component-cache admission, October 20:** production code `195f9374` avoids
+repeated slot ranking, full checkpoint lookup results for presence checks and
+a second cold reset. Focused cache/runner/index/RAM-and-disk CPU tests pass;
+the cold-reset regression fails on main. Native Flash AR/MTP slot reuse and
+cancellation/reset pass. Native MTP greedy/default-sampled RAM/serialized replay
+remains exact.
+
+All six HTTP profiles pass correctness: Flash AR/MTP and Qwen Q4/Q8 AR/DFlash2.
+Each candidate profile retains 81 matched responses and expected cache/prefill
+counts, plus 65 continuation requests covering long context, cancellation,
+images and disk restart: 876 recorded requests in total. Speculative modes
+perform actual drafts; AR performs none. Qwen compatibility uses the open #540
+adapter at `7f822ff4` versus that adapter plus this fix (`982e54c6`), separately
+from the PR's main baseline `e121a214`.
+
+Timing uses the unchanged 5% and 3 ms gate, per request and phase, including
+startup. Flash AR uses unchanged-main controls; Flash MTP and Qwen Q4/Q8 AR
+also use focused alternating repeats. Qwen Q4/Q8 DFlash2 retains one matched
+pair each, with flags unqualified. Every observation remains retained.
+**No profile has a blanket timing pass.**
+
+| Profile | Passed measurements | Inconclusive | Confirmed failures |
+| --- | ---: | ---: | ---: |
+| Flash AR | 1,187 | 16 | 0 |
+| Flash MTP | 1,078 | 125 | 0 |
+| Qwen Q4 AR | 1,177 | 27 | 0 |
+| Qwen Q4 DFlash2 | 1,198 | 7 | 0 |
+| Qwen Q8 AR | 1,178 | 26 | 0 |
+| Qwen Q8 DFlash2 | 1,185 | 20 | 0 |
+
+The AR cold-request queue median is 3.593 → 2.661 ms; MTP is 4.834 → 2.698 ms
+(55 cold requests in each matched 81-request history). These distributions
+are descriptive. Remaining prefill, token-gap, snapshot, queue and TTFT
+flags stay unqualified; faster requests never offset slower ones. The
+[benchmark controls](BENCHMARKS.md#component-cache-admission-controls-october-20)
+retain current d0 rates; short public-corpus C1/C2/C4/C6/C8 checks additionally
+retain exact outputs, actual drafts and individual phase timings. This benchmark
+pair retains 80 queue and 28 TTFT flags as inconclusive; its other measured
+phases stay within the gate.
+
+Snapshot elapsed time includes delayed scheduler collection and overlaps
+inference. A completed 133 MB capture call took 7.77 ms in the instrumented
+identical cohort; collection measurements include 104.77 ms. Capture-call time
+includes planning and transfer completion. A retry-sharing experiment saved
+three copies but repeatedly added 7–9 ms to some decode phases; it was removed.
+
+Production binaries, hashes, commands, all reports, failed experiments and
+interrupted attempts remain in
+`/home/mixer/gufo-qualification/issue678-2026-10-20` (`provenance.json`,
+`retained-*-qualified.json`, `retained-speed-summary.json`). The benchmark's
+source field identifies the harness tree; provenance maps the measured binaries
+to their actual source revisions. A stopped Q4 DFlash2 benchmark has no completed
+report and is retained separately from its completed `-resume1` run.
 
 **Host-memory stalls, October 18:** `fec4759d` protects runtime-owned queue-save,
 launch/copy and code-loading buffers from host compaction while preserving

@@ -4,7 +4,7 @@
 
 | Experiment | Outcome |
 | --- | --- |
-| One rank per eligible slot, checkpoint-presence queries and one cold reset | Retained candidate: the 128-checkpoint CPU fixture measures 107.05 µs for a full lookup and 31.49 µs for presence. The first 81-request AR comparison preserves outputs and cache/prefill work; remaining timing and continuation qualification is in the [record](artifacts/component-cache-admission.json). |
+| One rank per eligible slot, checkpoint-presence queries and one cold reset | Retained: the 128-checkpoint CPU fixture measures 107.05 µs for a full lookup and 31.49 µs for presence. All six HTTP profiles pass correctness, with exact responses and cache/prefill work. Native AR/MTP replay and d0/C1–C8 controls retain quality. Per-request timings remain partly inconclusive; see [qualification](QUALITY.md). |
 | Share completed full-prompt retry captures across peers | Rejected under the existing phase gate. The identical cohort avoids three 133,129,584-byte copies, and sampled MTP replies replay exactly, but larger physical decode batches repeatedly add 7–9 ms to some decode phases. Total request time improves; eight phase measurements fail. The default fix preserves capture behavior. |
 
 ## Host compaction and cache transfers (October 18, 2026)
