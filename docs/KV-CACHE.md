@@ -362,7 +362,7 @@ host RAM, respecting container/cgroup limits. Inactive page cache, such as
 recently read model files, counts as available because the kernel reclaims it
 before failing an allocation. Dirty and writeback pages do not. 27B also clamps this to HIP's free
 device memory. CPU and GPU allocations compete for the same physical RAM on
-Strix Halo, so HIP's free-memory estimate alone is not enough.
+a unified-memory APU, so HIP's free-memory estimate alone is not enough.
 For example, 44 GiB available at load gives a 22 GiB automatic RAM cache and
 allows an explicit limit of up to 40 GiB, even when HIP reports more free
 memory.

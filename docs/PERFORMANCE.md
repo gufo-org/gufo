@@ -1,4 +1,4 @@
-# Strix Halo Performance Engineering
+# RDNA 3.5 Performance Engineering
 
 Status: stable guidance, 2026-08-19.
 
@@ -358,7 +358,7 @@ including quantization scales and sums. Other probes report their numerical
 error beside timings. Retained changes are validated with Nix release model
 measurements and the affected operator checks.
 
-**Size the working set like the model does.** Strix Halo has a 32 MB MALL, and a
+**Size the working set like the model does.** RDNA 3.5 parts have a 32 MB MALL, and a
 single decoder projection is 4-25 MB. Timing one shape in a repeat loop leaves it
 cache resident and reports 400-860 GB/s for a kernel that sustains 124 GB/s in
 the model. A decode-bandwidth harness must therefore allocate the whole per-token

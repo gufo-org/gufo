@@ -1,6 +1,6 @@
 ---
 name: benchmark-model
-description: Measure every retained number in a Gufo model's BENCHMARKS.md on Strix Halo gfx1151 over HTTP, run the same workload against the reference project's OpenAI-compatible server (llama.cpp, audio.cpp, ...), and report the gain per cell.
+description: Measure every retained number in a Gufo model's BENCHMARKS.md on RDNA 3.5 hardware (gfx1151 Strix Halo, gfx1150 Strix Point) over HTTP, run the same workload against the reference project's OpenAI-compatible server (llama.cpp, audio.cpp, ...), and report the gain per cell.
 metadata:
   origin: gufo
 ---

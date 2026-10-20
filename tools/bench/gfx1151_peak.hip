@@ -1,6 +1,9 @@
-// Achievable-peak calibration for gfx1151 (Strix Halo).
+// Achievable-peak calibration for RDNA 3.5 GPUs (gfx1151 Strix Halo,
+// gfx1150 Strix Point). The file name predates gfx1150 support; the probes are
+// architecture-neutral and report the device they ran on.
 //
 // Build: nix develop -c tools/bench/build.sh gfx1151_peak
+//        GUFO_HIP_ARCH=gfx1150 nix develop -c tools/bench/build.sh gfx1151_peak
 // Run: /tmp/gfx1151_peak
 //
 // Every accumulator is consumed, every thread has a separate checksum, and

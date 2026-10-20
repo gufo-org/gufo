@@ -1,11 +1,11 @@
 ---
 name: optimize-kernel
-description: Optimize Gufo inference on Strix Halo gfx1151 using focused profiles, independent quality checks, and matched end-to-end measurements.
+description: Optimize Gufo inference on RDNA 3.5 GPUs (gfx1151 Strix Halo, gfx1150 Strix Point) using focused profiles, independent quality checks, and matched end-to-end measurements.
 metadata:
   origin: gufo
 ---
 
-# Optimize gfx1151 kernels
+# Optimize RDNA 3.5 kernels
 
 Read the affected model's `docs/models/<model>/{BENCHMARKS,QUALITY,EXPERIMENTS}.md`
 and its launch code. Establish the timed scope and arithmetic contract before
