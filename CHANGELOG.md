@@ -4,6 +4,32 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.19.0](https://github.com/gufo-org/gufo/compare/v0.18.0...v0.19.0) (2026-10-20)
+
+
+### Features
+
+* **serve:** report model, build, context, sessions and vision in /props ([#669](https://github.com/gufo-org/gufo/issues/669)) ([4862410](https://github.com/gufo-org/gufo/commit/4862410edc6852305e3b0f1b226332591fc56948))
+
+
+### Bug Fixes
+
+* **ci:** refresh the release app token after waiting for release checks ([#665](https://github.com/gufo-org/gufo/issues/665)) ([270b533](https://github.com/gufo-org/gufo/commit/270b53338829d25ea05dab633fb924621d9168f9))
+* **ds4:** stop the batched greedy DSpark frontier before an accepted EOS ([#668](https://github.com/gufo-org/gufo/issues/668)) ([1b0a5a8](https://github.com/gufo-org/gufo/commit/1b0a5a845f18ad67fde0920d44785c2ffa1bd7d5))
+* **qwen-flash:** store d*sum(q) as the q8_1 block sum ([#667](https://github.com/gufo-org/gufo/issues/667)) ([86730bd](https://github.com/gufo-org/gufo/commit/86730bda292fc15d8fbbb37cc89e1268431f3b48))
+
+
+### Performance
+
+* **qwen-flash:** let sampled requests use the small MTP draft head on multi-session servers ([#655](https://github.com/gufo-org/gufo/issues/655)) ([b6a671c](https://github.com/gufo-org/gufo/commit/b6a671c813f6ff35d9a2a0d2a57f59dad870c1a4))
+* **qwen27b:** run verification attention rows &gt; 1 as wave64 with shared per-head steps ([#660](https://github.com/gufo-org/gufo/issues/660)) ([d1830de](https://github.com/gufo-org/gufo/commit/d1830de7df21815ace54ecc76df738ed04e7d5c7))
+* **qwen38_flash_next:** price greedy MTP drafts at the decoding occupancy ([#664](https://github.com/gufo-org/gufo/issues/664)) ([2caf2a8](https://github.com/gufo-org/gufo/commit/2caf2a82f5620d8de77661cb64e5af1bed044a89))
+
+
+### Documentation
+
+* note Claude Code is unsupported with Qwen ([#672](https://github.com/gufo-org/gufo/issues/672)) ([8775189](https://github.com/gufo-org/gufo/commit/877518953c153b2aac57f7b77fc904e8540b1fde))
+
 ## [0.18.0](https://github.com/gufo-org/gufo/compare/v0.17.1...v0.18.0) (2026-10-19)
 
 
