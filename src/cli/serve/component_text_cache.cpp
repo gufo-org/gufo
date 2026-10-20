@@ -172,9 +172,6 @@ struct ComponentTextCache::Impl {
     // not establish that a durable chunk belongs to this execution.
     std::shared_ptr<const void> branch;
     std::shared_ptr<const cache::DiskDescription> durable;
-    // A completed full-prompt retry copy can serve identical peers before its
-    // owner commits. Weak ownership never extends the checkpoint's retention.
-    std::weak_ptr<const cache::Checkpoint> retry;
     // The live frontier's prompt, to tell whether any checkpoint covers it.
     std::vector<cache::Token> live_tokens;
     cache::Identity live_input;
@@ -224,12 +221,8 @@ struct ComponentTextCache::Impl {
         identity(resources->adapter->CompatibilityIdentity()),
         index(ledger),
         retention(ledger, index, &events) {
-    metadata =
-        ledger
-            .Reserve(cache::ResourceCategory::kMetadata,
-                     sizeof(Impl) +
-                         count * sizeof(std::weak_ptr<const cache::Checkpoint>))
-            .Convert();
+    metadata = ledger.Reserve(cache::ResourceCategory::kMetadata, sizeof(Impl))
+                   .Convert();
     crypto::Sha256Hasher hash;
     hash.Update(identity);
     digest = hash.Finish();
@@ -912,15 +905,10 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       const auto uncovered = [&](const Impl::Entry& e) {
         if (!e.live || e.live_tokens.size() <= kUncoveredTokens)
           return false;
-        const auto covering = impl_->index.Lookup(
+        return !impl_->index.HasCheckpoint(
             {impl_->identity, e.live_tokens,
-             cache::InputIdentity(e.live_tokens.size(), e.live_input)});
-        std::size_t deepest = 0;
-        for (const auto& candidate : covering.candidates)
-          if (!candidate.live)
-            deepest =
-                std::max(deepest, static_cast<std::size_t>(candidate.boundary));
-        return e.live_tokens.size() - deepest > kUncoveredTokens;
+             cache::InputIdentity(e.live_tokens.size(), e.live_input)},
+            e.live_tokens.size() - kUncoveredTokens);
       };
       using Rank = std::tuple<bool, bool, bool, bool, std::uint64_t>;
       const auto rank = [&](const Impl::Entry& e) {
@@ -1272,12 +1260,10 @@ ContinuationLookup ComponentTextCache::Lease::lookup() const noexcept {
 bool ComponentTextCache::Lease::HasSnapshotFor(
     std::span<const ContinuationToken> tokens) const {
   const std::lock_guard lock(impl_->cache->mutex);
-  auto found = impl_->cache->index.Lookup(
+  return impl_->cache->index.HasCheckpoint(
       {impl_->cache->identity, tokens,
-       cache::InputIdentity(tokens.size(), At(impl_->input, tokens.size()))});
-  return std::any_of(
-      found.candidates.begin(), found.candidates.end(),
-      [&](const auto& c) { return !c.live && c.boundary == tokens.size(); });
+       cache::InputIdentity(tokens.size(), At(impl_->input, tokens.size()))},
+      tokens.size());
 }
 bool ComponentTextCache::Lease::TryReserveSnapshot(
     std::size_t bytes, std::size_t boundary, bool preserve,
@@ -1327,29 +1313,6 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   auto positions =
       cache.resources->adapter->Positions(request.slot.Execution());
   const auto bytes = request.entry->history->NewPayloadBytes(positions);
-  // Retry captures are complete decode frontiers. Stable/in-pass and grid
-  // captures may lack that frontier, even at the same token boundary, and
-  // must never substitute for a retry. Reuse a completed immutable checkpoint,
-  // without inferring chunk provenance for this slot's execution history.
-  const bool retry = request.purpose == SnapshotPurpose::kRetry &&
-                     request.capture_tokens.size() == request.prompt.size();
-  if (retry) {
-    const auto input = At(request.input, request.capture_tokens.size());
-    const std::lock_guard lock(cache.mutex);
-    for (const auto& entry : cache.entries) {
-      auto checkpoint = entry->retry.lock();
-      if (checkpoint && checkpoint->Input() == input &&
-          std::ranges::equal(checkpoint->Tokens(), request.capture_tokens) &&
-          std::ranges::equal(checkpoint->Components(), positions, {},
-                             &cache::CheckpointComponent::position) &&
-          cache.index.IsResidentCoherent(*checkpoint)) {
-        auto snapshot = std::make_unique<ComponentSnapshot>();
-        snapshot->checkpoint = std::move(checkpoint);
-        snapshot->bytes = bytes;
-        return snapshot;
-      }
-    }
-  }
   const auto retain = request.Retain(request.capture_tokens, bytes);
   if (bytes > cache.ledger.Limits().ram_bytes)
     return request.CaptureDurable();
@@ -1508,10 +1471,6 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   request.metrics.captured_bytes += captured_capacity;
   request.metrics.borrowed_capacity_bytes += borrowed_capacity;
   request.metrics.copied_payload_bytes += copied_payload;
-  if (retry) {
-    const std::lock_guard lock(cache.mutex);
-    request.entry->retry = checkpoint;
-  }
   auto snapshot = std::make_unique<ComponentSnapshot>();
   snapshot->checkpoint = std::move(checkpoint);
   snapshot->bytes = bytes;

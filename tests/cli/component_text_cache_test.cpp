@@ -331,82 +331,6 @@ void FailedRestoreResetsOnce() {
   assert(runner->adapter->RecurrentHash(cold.slot) ==
          runner->adapter->RecurrentHash(state.slot));
 }
-void ConcurrentRetriesShareCompletedCapture() {
-  auto runner = std::make_shared<Runner>();
-  runner->defer_idle = true;
-  ComponentTextCache cache(runner, 3, 1 << 22, {});
-  std::vector<TextRunnerToken> prompt(40);
-  std::iota(prompt.begin(), prompt.end(), 10);
-  auto first = cache.Acquire(prompt, {}, {}, true, 0, true);
-  auto second = cache.Acquire(prompt, {}, {}, true, 0, true);
-  auto& a = dynamic_cast<State&>(first->state());
-  auto& b = dynamic_cast<State&>(second->state());
-  runner->adapter->Append(a.slot, prompt, prompt);
-  runner->adapter->Append(b.slot, prompt, prompt);
-  assert(first->TryReserveSnapshot(first->CaptureBytes(), prompt.size(), false,
-                                   SnapshotPurpose::kRetry, {}));
-  std::shared_ptr<const TextRunnerSnapshot> captured = first->Capture();
-  const auto allocations = runner->captures;
-  assert(second->TryReserveSnapshot(second->CaptureBytes(), prompt.size(),
-                                    false, SnapshotPurpose::kRetry, {}));
-  auto shared = second->Capture();
-  assert(runner->captures == allocations);
-  assert(second->Metrics().captures == 0);
-  assert(shared->PayloadBytes() == second->CaptureBytes());
-  // The leader has finished copying but has not published or committed yet.
-  // Either owner can publish, and replacing that publication keeps it valid.
-  assert(second->PublishSnapshot(prompt, std::move(shared), false));
-  assert(first->PublishSnapshot(prompt, std::move(captured), false));
-  const auto hash = runner->adapter->RecurrentHash(a.slot);
-  const std::array<cache::Token, 1> next{999};
-  runner->adapter->Append(a.slot, next, next);
-  auto restored = cache.Acquire(prompt, {}, {}, true, 0, true);
-  assert(restored->cached_tokens() == prompt.size());
-  const auto& c = dynamic_cast<State&>(restored->state());
-  assert(runner->adapter->RecurrentHash(c.slot) == hash);
-}
-void RetryCaptureRequiresMatchingInputAndLiveOwner() {
-  enum class Source {
-    kExpired,
-    kDifferentInput,
-    kContinuation,
-    kDifferentPositions
-  };
-  for (const auto scenario :
-       {Source::kExpired, Source::kDifferentInput, Source::kContinuation,
-        Source::kDifferentPositions}) {
-    auto runner = std::make_shared<Runner>();
-    ComponentTextCache cache(runner, 2, 1 << 22, {});
-    const std::vector<TextRunnerToken> prompt{1, 2, 3};
-    auto context = std::make_shared<TextPromptContext>();
-    context->cache_identity = {1};
-    auto other = std::make_shared<TextPromptContext>(*context);
-    if (scenario == Source::kDifferentInput)
-      other->cache_identity = {2};
-    auto first = cache.Acquire(prompt, {}, context, true, 0, true);
-    auto second = cache.Acquire(prompt, {}, other, true, 0, true);
-    auto& a = dynamic_cast<State&>(first->state());
-    auto& b = dynamic_cast<State&>(second->state());
-    runner->adapter->Append(a.slot, prompt, prompt);
-    const auto executed = std::span(prompt).first(
-        prompt.size() - (scenario == Source::kDifferentPositions));
-    runner->adapter->Append(b.slot, executed, executed);
-    assert(first->TryReserveSnapshot(
-        first->CaptureBytes(), prompt.size(), false,
-        scenario == Source::kContinuation ? SnapshotPurpose::kContinuation
-                                          : SnapshotPurpose::kRetry,
-        {}));
-    auto captured = first->Capture();
-    if (scenario == Source::kExpired)
-      captured.reset();
-    const auto allocations = runner->captures;
-    assert(second->TryReserveSnapshot(second->CaptureBytes(), prompt.size(),
-                                      false, SnapshotPurpose::kRetry, {}));
-    auto independent = second->Capture();
-    assert(runner->captures > allocations);
-    assert(second->Metrics().captures == 1);
-  }
-}
 void RestoreFromBusyBorrowedSource() {
   auto runner = std::make_shared<Runner>();
   ComponentTextCache cache(runner, 2, 1 << 22, {});
@@ -1540,8 +1464,6 @@ int main() {
   InPassCapturePreservesBoundaryAndLiveTail();
   ColdAcquireResetsOnce();
   FailedRestoreResetsOnce();
-  ConcurrentRetriesShareCompletedCapture();
-  RetryCaptureRequiresMatchingInputAndLiveOwner();
   RestoreFromBusyBorrowedSource();
   ImageAfterCachedTextPrefixCaptures();
   ColdAssignmentPrefersPreservedSlot();
