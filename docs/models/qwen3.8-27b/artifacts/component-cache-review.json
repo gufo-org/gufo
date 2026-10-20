@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "date": "2026-10-19",
-  "status": "qualification_paused_by_user",
+  "date": "2026-10-20",
+  "status": "qualification_in_progress",
   "main": "270b53338829d25ea05dab633fb924621d9168f9",
   "merge": "79c62c9e390456b7ebe783217e86fcbf80c8d2bd",
   "fixture_fix": "6f62a09d1d27cc9e4775e0bbe9e6f236e7cd9ab2",
@@ -835,11 +835,10 @@
     }
   },
   "remaining": [
-    "Finish Flash AR shared-prefix, state-edge, cancellation and disk-replay checks; run Flash MTP shared-path controls",
-    "Matched current-main affected-history timings, including cold snapshots, concurrent TTFT, configured high-context probes and focused first-request AR followup; investigate retained flags and fix confirmed regressions",
-    "Standard pp2048/tg128 production main/candidate speed checks",
-    "Real Pi tool/edit/bugfix workflows with actual tool-result inspection",
-    "Over-RAM completed-prefill cancellation/publication waits and deep peer crash/restart/resource workflows"
+    "queue_ms admission floor (+3-6 ms) on 27B; shared with Flash component cache",
+    "cache_snapshot_ms increases in cache-concurrency",
+    "over-RAM E2 publication wait ordering (deeper pending job behind older jobs)",
+    "ReconcileComponentState fake frontier token 0 on exact-length hit at a cancelled partial-prefill checkpoint (review finding, not reproduced)"
   ],
   "limitations": [
     "No new upstream-model or weight-conversion parity claim",
@@ -1042,7 +1041,6 @@
       "interpretation": "At readiness the component cache prepares bounded backing before serving. This is a real resident-memory cost versus main 27B legacy cache; prepared bytes account for most observed anonymous RSS difference. Startup time is not qualified because file-cache history was not matched."
     }
   },
-  "pause_reason": "User requested push and stop with 5% of allowance remaining. Owned validation jobs stopped; incomplete checks remain unqualified.",
   "flash_http_checks": {
     "off": {
       "status": "interrupted_by_user",
@@ -1060,6 +1058,71 @@
     },
     "mtp": {
       "status": "not_run"
+    }
+  },
+  "refresh_2026_10_20": {
+    "main": "1b0a5a84",
+    "merge": "8ed4da99",
+    "fixes": {
+      "4d802349": "fix(qwen): keep borrowed rows across speculative rollback",
+      "e8713aba": "test(qwen): let the first short chat learn the system boundary"
+    },
+    "binaries": {
+      "main": "/nix/store/sl0bsz4lqvwlpc760vknd5fh5wq0k5mq-gufo-0-unstable-1b0a5a8",
+      "merge": "/nix/store/nfrv8pn69hmwlqd3dahj1z1nccdxa2af-gufo-0-unstable-8ed4da9",
+      "fixed": "/nix/store/zv4a29a5170jgz2n95yb5vjmp209ld44-gufo-0-unstable-e8713ab"
+    },
+    "raw_evidence_directory": "/home/mixer/gufo-qualification/pr540-2026-10-20",
+    "server_settings": "--sessions 4 --context 32768 --prefill-chunk 1024 --cache-ram-bytes 16GiB (Flash MTP 8GiB) --sampling-preset qwen38",
+    "native_checks": "8ed4da99: 9/9 native (Q4/Q8 adapter, draft adapter, serving cache, target) and 3/3 attention operator checks pass; e8713ab: Q4 adapter, draft adapter and serving-cache checks pass",
+    "http_checks": {
+      "q4/off": "8ed4da99 pass x2 (23 stages, 290 requests each)",
+      "q4/dflash2": "8ed4da99 pass x2 (3,423 proposed / 2,016 accepted); e8713ab pass",
+      "q8/dflash2": "8ed4da99 pass",
+      "flash/off": "main and candidate pass x2",
+      "flash/mtp": "main and candidate pass (8 GiB RAM cache)",
+      "main q4/dflash2": "fails cache-edits only (legacy cache capability), x3"
+    },
+    "speculative_rollback_fix": {
+      "symptom": "DFlash2 disk persistence failed with \"borrowed rows retired\" for 5 of 6 over-RAM checkpoints and the deep-peer 142K checkpoint; AR unaffected",
+      "cause": "QwenGpuExecutor::RestoreState (speculative rollback) ran GuardAll over every attention row although it only swaps recurrent buffers; RAM-preservable rows were copied in the foreground on each rejected draft, disk-only rows were retired",
+      "result": "all over-RAM DFlash2 checkpoints publish; concurrent cold DFlash2 decode per token returns to main (53 ms vs 60-64 ms before; stem 106 vs 125 ms)"
+    },
+    "phase2_e8713ab": {
+      "high_context_probes": "off and dflash2 main/candidate/candidate/main pass, equal work",
+      "first_request_probe": "pass, equal work",
+      "standard_speed_8ed4da99": "pp2048/tg128 within 1.6% of main for Q4/Q8 AR and DFlash2 (Q4 AR pp2048 625 vs 635)",
+      "pi_agent": "dflash2 pass; ar tools case fails only because the model wrote \"bonjour\\n\" (all three tool calls and results correct, cache reuse assertions pass)",
+      "deep_peers": "ar and dflash2 pass: 142K crash recovery from disk, 12 short peers reuse 4,870 tokens, second restart reuses 142,476",
+      "over_ram": "ar and dflash2 pass through E1; E2_rewritten released its publication wait at the 36.6 s cost bound 6 s before the deeper 108,980-token checkpoint published (queued behind two older 6.4 GB/0.4 GB jobs); reused 96,256 instead of >=97,424. Timing-dependent, retained unqualified"
+    },
+    "memory": {
+      "readiness": "component cache commits ~2.27 GB backing before readiness (GrowAhead 2 GiB) in every mode, as Flash on main",
+      "dflash2_checkpoint": "fixed +84.7 MB draft ring/feature state per DFlash2 checkpoint",
+      "peak_memavailable_drop_gib": {
+        "q4/off": {
+          "main": 52.4,
+          "candidate": 50.3
+        },
+        "q4/dflash2": {
+          "main": 57.37,
+          "candidate": 54.97
+        },
+        "flash/off": {
+          "main": 100.11,
+          "candidate": 100.95
+        },
+        "flash/mtp": {
+          "main": 97.1,
+          "candidate": 97.05
+        }
+      },
+      "note": "main's legacy 27B snapshots are device (GTT) allocations; candidate holds them in host RAM. Peak GTT main 35.65/38.55 GiB vs candidate 19.49/22.29 GiB; peak anon RSS 17.48/19.12 vs 30.87/32.47 GiB"
+    },
+    "timing": {
+      "flash": "5 repeated flags; depth_branches TTFT flag is a completion-order artifact (identical {197,351,549} ms distributions on both arms)",
+      "q4_queue_ms": "repeated +3-6 ms floor (p10 0.5->3.6-5.5 ms) on non-disk requests; disk requests queue less (disk-spacing p50 690->173 ms). Instrumented: component Acquire ~2.8 ms p50 (slot rank ~0.8 ms incl. frontier lookups, slot acquire ~0.85 ms, cold reset ~0.7 ms). Flash on main shows the same floor. Unfixed, open",
+      "q4_cache_snapshot_ms": "repeated increases where main captured nothing or less (identical 0 -> 114-292 ms, fanout 570-633 -> 715-786 ms, cancelled_leader 0-34 -> 126-173 ms). Open"
     }
   }
 }

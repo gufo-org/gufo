@@ -170,43 +170,47 @@ and the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
 
 ## Component serving migration
 
-October 19 refresh: main `270b5333` is merged into the component-cache PR.
-Qualification was paused at the user’s request after the four 27B HTTP profiles
-passed. Flash and timing/recovery checks below remain incomplete.
-Q4/Q8 native adapter, DFlash2 state, serving-cache and target numerical checks
-pass on the candidate. Restored component bytes and full logits match; checks
-include FP16/FP32 KV, edits, rollback, images, sampled frontiers, cancellation,
-disk compatibility, concurrent forks and cleanup. The shared byte-copy control
-also covers registered/pageable memory, unaligned tails and peer graph capture.
+October 20 refresh: main `1b0a5a84` is merged (`8ed4da99`), with fixes
+`4d802349` and `e8713aba`. Q4/Q8 native adapter, DFlash2 state, serving-cache,
+target numerical and attention operator checks pass. Restored component bytes
+and full logits match across FP16/FP32 KV, edits, rollback, images, sampled
+frontiers, cancellation, disk compatibility, concurrent forks and cleanup.
 
-Q4/Q8 AR/DFlash2 startup checks pass for RAM, disk and restart. RAM-only
-serving does not fingerprint the artifacts; durable restart restores the same
-reply. Loaded modes and actual draft counts are verified. Main's shared
-backing, admission, retention and publication fixes are preserved, and 27B
-uses the shared mapped snapshot copy kernels for private state and FP16 rows.
-FP32's canonical head-major transfers retain their strided representation.
+All selected HTTP profiles pass every stage (23 stages, 290 requests): Q4 AR
+and DFlash2 twice, Q8 DFlash2, and Flash-Next AR twice and MTP once on both
+main and the candidate, because the PR moves the shared snapshot copy helper
+and touches the shared verifier, backend and scheduler. Q4 DFlash2 observes
+3,423 proposed and 2,016 accepted draft tokens. Main fails only `cache-edits`,
+which its legacy 27B cache does not support.
 
-At readiness with four 32K sessions and a 16 GiB cache budget, the component
-cache commits 2,270,560,256 bytes of backing before serving, as Flash's shared
-policy does. Anonymous RSS is about 2.1 GiB above main's legacy 27B cache in
-both modes; that reserve accounts for all but 6.6–11.6 MB of the observed
-difference. This is a resident-memory cost of preparing captures in advance.
-The startup timing observations do not establish readiness latency parity
-because filesystem-cache histories were not matched.
+Speculative rollback (`RestoreState`) previously guarded every attention row
+although it only swaps recurrent buffers. Each rejected draft therefore copied
+borrowed rows in the foreground, and disk-only checkpoints were retired before
+publication. After the fix, every over-RAM DFlash2 checkpoint publishes and
+concurrent cold DFlash2 decode returns to main's 53 ms per token from 60–64 ms.
 
-Short-request main/PR/PR/main controls preserve every output and draft count.
-DFlash2 passes the per-request timing limits against main. AR has an
-inconclusive first-request queue flag. Against the merged branch without the
-copy change, one initial AR snapshot outlier and token-gap flags in both modes
-remain inconclusive. All four selected Q4/Q8 AR/DFlash2 HTTP runs
-each pass all 23 stages and 290 recorded requests,
-including long-context, conversation, image-count, edits, growth, depth,
-concurrency, learned shared prefixes, state edges, cancellation and durable
-restart/replay. The Q4 DFlash2 run observes 3,419 proposed and 2,016 accepted draft
-tokens; Q8 DFlash2 also verifies actual draft execution. Flash shared-path controls,
-deep/recovery workflows and complete latency qualification remain open.
-See the [dated review record](artifacts/component-cache-review.json) for
-commands, binary identities, every short-request observation and outstanding
-checks. Earlier capacity and vision evidence does not qualify this revision.
-The earlier cold-prefill versus decoded-history vision difference remains
-unqualified; the wide prefill route restored by `dabc85cf` is retained.
+High-context and first-request probes (main/PR/PR/main) pass with equal work.
+Standard pp2048/tg128 stays within 1.6% of main. Deep-peer AR and DFlash2
+pass 142K crash recovery, twelve short peers reusing the system boundary and a
+second restart. Pi DFlash2 passes. Pi AR fails only because the model wrote a
+trailing newline; every tool call, tool result and cache reuse is correct.
+Over-RAM passes through `E1`. `E2` released its publication wait at the
+36.6 s cost bound, 6 s before the deeper checkpoint, which was queued behind
+two older jobs, was published. That timing-dependent case remains unqualified.
+
+Memory: the component cache commits about 2.27 GB of backing before readiness
+in every mode (`GrowAhead`), as Flash does on main. Each DFlash2 checkpoint
+also carries a fixed 84.7 MB of draft ring and feature state. Main's legacy
+snapshots live in device (GTT) memory and the component cache keeps them in
+host RAM, so compare system totals: the peak MemAvailable drop over a full run
+is 50.3 GiB versus main's 52.4 GiB (Q4 AR) and 55.0 versus 57.4 GiB (Q4
+DFlash2).
+
+Open timing flags, repeated in both observations: a 3–6 ms admission floor in
+`queue_ms` (component acquire costs about 2.8 ms; Flash shows the same floor
+on main) and higher `cache_snapshot_ms` where main captured nothing or less
+in `cache-concurrency`. Disk requests queue less than on main. See the
+[dated review record](artifacts/component-cache-review.json) for commands,
+binaries and every observation. The earlier cold-prefill versus
+decoded-history vision difference remains unqualified; the wide prefill route
+restored by `dabc85cf` is retained.
