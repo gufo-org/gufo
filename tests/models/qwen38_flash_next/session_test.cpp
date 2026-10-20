@@ -756,8 +756,10 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
       for (std::size_t i = 0; i < width; ++i) {
         const std::size_t budget = 1 + (i * 3 + cycle * 5 + 7) % 8;
         before.push_back(serial[i]->Statistics());
+        // Unplanned greedy rows price drafts at the cohort width.
         Require(serial[i]->DecodeStep(budget, serial_samplers[i], &expected[i],
-                                      &error, false),
+                                      &error, false,
+                                      static_cast<std::uint32_t>(width)),
                 error);
         requests.push_back(
             {batched[i].get(), budget, &batch_samplers[i], &actual[i], false});
@@ -886,8 +888,9 @@ void CheckLookupBatch(const std::shared_ptr<qfn::Model>& model) {
       std::vector<qfn::Session::DecodeRequest> requests;
       for (std::size_t i = 0; i < width; ++i) {
         const std::size_t budget = cycle == 2 && i % 3 == 0 ? 3 : 8;
+        // Unplanned greedy rows price drafts at the cohort width.
         Require(serial[i]->DecodeStep(budget, samplers[i], &expected[i], &error,
-                                      false),
+                                      false, static_cast<std::uint32_t>(width)),
                 error);
         requests.push_back(
             {batched[i].get(), budget, &twins[i], &actual[i], false});
@@ -1203,8 +1206,9 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
     std::vector<qfn::Session::DecodeResult> expected(3), actual(3);
     std::vector<qfn::Session::DecodeRequest> requests;
     for (std::size_t i = 0; i < 3; ++i) {
+      // Unplanned greedy rows price drafts at the cohort width.
       Require(serial[i]->DecodeStep(8, serial_samplers[i], &expected[i], &error,
-                                    false),
+                                    false, 3),
               error);
       requests.push_back(
           {batched[i].get(), 8, &batch_samplers[i], &actual[i], false});

@@ -163,11 +163,14 @@ public:
   /// RNG consumption includes proposal and verification draws. A
   /// one-token budget or a model without MTP uses ordinary decoding.
   /// Benchmarks may continue past EOS by setting stop_at_eos to false.
+  /// A greedy step prices its drafts as one of `occupancy` decoding requests,
+  /// as DecodeBatch does for an unplanned cohort of that width.
   [[nodiscard]] bool DecodeStep(std::size_t max_tokens,
                                 sampling::SamplerState& sampler,
                                 DecodeResult* result,
                                 std::string* error_msg = nullptr,
-                                bool stop_at_eos = true);
+                                bool stop_at_eos = true,
+                                std::uint32_t occupancy = 1);
   struct BatchOutcome {
     bool completed{false};
     std::string error{};
