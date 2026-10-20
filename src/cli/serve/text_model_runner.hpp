@@ -388,6 +388,11 @@ public:
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter&, cache::Slot&) const;
   virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const;
+  /// Whether restored component state can select its next token. A boundary
+  /// captured between prefill passes cannot, so it serves only longer prompts.
+  [[nodiscard]] virtual bool HasDecodeFrontier(const TextRunnerState&) const {
+    return true;
+  }
 
   /// Optional first-token preview without advancing model state. The caller
   /// supplies a copy of the sampler; normal decoding must reproduce the token.

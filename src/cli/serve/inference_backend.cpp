@@ -467,6 +467,10 @@ public:
     }
   }
 
+  [[nodiscard]] bool HasDecodeFrontier() const {
+    return adapter_->HasDecodeFrontier(*slot_);
+  }
+
   [[nodiscard]] bool speculative() const noexcept {
     return verifier_ != nullptr;
   }
@@ -1061,6 +1065,10 @@ public:
     if (!qwen.frontier())
       qwen.set_frontier(
           0);  // Partial prefill: the suffix computes its frontier.
+  }
+  [[nodiscard]] bool HasDecodeFrontier(
+      const TextRunnerState& state) const override {
+    return RequireQwenState(state).HasDecodeFrontier();
   }
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {

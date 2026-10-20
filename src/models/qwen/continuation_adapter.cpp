@@ -338,6 +338,11 @@ ContinuationFrontier& ContinuationAdapter::GetFrontier(cache::Slot& slot) {
   state.BeforeExecution();
   return state.frontier;
 }
+bool ContinuationAdapter::HasDecodeFrontier(const cache::Slot& slot) const {
+  const auto& state = As(slot);
+  return state.frontier.token &&
+         (state.logits_valid || !state.frontier.logits.empty());
+}
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
   return {.continuation = true, .persistent_encoding = true};
 }

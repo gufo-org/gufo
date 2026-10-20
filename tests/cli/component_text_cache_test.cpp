@@ -586,6 +586,51 @@ void BackingPreparationFollowsCaptures() {
   }
 }
 
+void PartialFrontierDoesNotServeAnEqualPrompt() {
+  // A prefill cancelled between steps keeps a frontier with no next token. A
+  // prompt ending exactly there must recompute its tail instead of decoding
+  // from a placeholder, whether the frontier is live or restored.
+  class FrontierRunner final : public Runner {
+  public:
+    mutable std::vector<std::size_t> ready;
+    TextPrefillStep Prefill(TextRunnerState& state,
+                            std::span<const TextRunnerToken> prompt,
+                            std::size_t offset,
+                            std::size_t budget) const override {
+      const auto step = Runner::Prefill(state, prompt, offset, budget);
+      if (step.decode_ready)
+        ready.push_back(CheckpointPosition(state));
+      return step;
+    }
+    bool HasDecodeFrontier(const TextRunnerState& state) const override {
+      return std::ranges::find(ready, CheckpointPosition(state)) != ready.end();
+    }
+  };
+  for (const bool replace_slot : {false, true}) {
+    auto runner = std::make_shared<FrontierRunner>();
+    runner->partial = true;
+    TextRunnerPool pool(runner, 1);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto request = pool.Acquire(prompt, {}, [] { return false; }, {}, true, 0);
+    assert(request.Prefill(16).consumed_tokens == 16);
+    (void)request.Cancel();
+    if (replace_slot) {
+      auto unrelated = prompt;
+      unrelated.front() = 999;
+      auto other = pool.Acquire(unrelated, {}, {}, {}, true, 0);
+      Prefill(other);
+      (void)other.Commit();
+    }
+    const std::vector<TextRunnerToken> equal(prompt.begin(),
+                                             prompt.begin() + 16);
+    auto resend = pool.Acquire(equal, {}, {}, {}, true, 0);
+    assert(resend.cached_prompt_tokens() < equal.size());
+    Prefill(resend);
+    (void)Generate(resend);
+    resend.Invalidate();
+  }
+}
 void CompletedCancelledPromptGetsARetrySnapshot() {
   auto runner = std::make_shared<Runner>();
   runner->partial = true;
@@ -1501,6 +1546,7 @@ int main() {
   CancelledPrefillKeepsCompletedSteps();
   BackingPreparationFollowsCaptures();
   PrefillLookaheadReachesTheNextFrontier();
+  PartialFrontierDoesNotServeAnEqualPrompt();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();

@@ -31,6 +31,9 @@ public:
   [[nodiscard]] hip::QwenGpuExecutor& GetExecutor(cache::Slot&);
   [[nodiscard]] hip::QwenDFlashGpuDraftBackend* GetDraftBackend(cache::Slot&);
   [[nodiscard]] ContinuationFrontier& GetFrontier(cache::Slot&);
+  // A next-token frontier with logits from the last executed position. A
+  // partial-prefill restore carries a placeholder token without logits.
+  [[nodiscard]] bool HasDecodeFrontier(const cache::Slot&) const;
   [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
       std::size_t ram_bytes) const {
     return layout_.BackingPlan(ram_bytes);

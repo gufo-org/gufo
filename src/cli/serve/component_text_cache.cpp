@@ -959,6 +959,18 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     // Cold Acquire has already reset the slot. Only an attempted restore (or
     // an unusable live frontier) can require another reset before cold use.
     bool clean = !live;
+    // A frontier captured between prefill passes cannot select the next token
+    // of a prompt that ends there; serve that prompt from a shallower boundary.
+    const auto decodable = [&](std::size_t boundary) {
+      return boundary < prompt.size() ||
+             impl_->runner->HasDecodeFrontier(*request.state);
+    };
+    if (live && !decodable(found.selected->boundary)) {
+      live.reset();
+      const std::lock_guard lock(impl_->mutex);
+      entry->branch = std::make_shared<const std::uint8_t>(0);
+      entry->durable.reset();
+    }
     bool restored = bool(live);
     if (live)
       request.cached = found.selected->boundary;
@@ -1115,6 +1127,16 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             const std::lock_guard lock(impl_->mutex);
             impl_->catalog->Touch(id);
           }
+        }
+        if (restored && !decodable(candidate.boundary)) {
+          if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
+            throw std::runtime_error("component restore reset failed");
+          entry->history.reset();
+          request.source = {};
+          request.restored = 0;
+          request.disk_hit = false;
+          restored = false;
+          continue;
         }
         if (restored) {
           request.cached = candidate.boundary;
