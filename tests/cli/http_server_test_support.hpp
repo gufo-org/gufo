@@ -133,6 +133,13 @@ public:
   std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
+  std::optional<std::vector<std::uint32_t>> tokenize(
+      std::string_view text) const override {
+    if (!tokenizes)
+      return std::nullopt;
+    return std::vector<std::uint32_t>(text.begin(), text.end());
+  }
+  bool tokenizes{true};
   std::optional<std::size_t> count_chat_tokens(
       const gufo::server::ChatRequest& request) const override {
     counted_messages = request.messages.size();
@@ -199,6 +206,7 @@ public:
       result.text = output_;
     }
     result.prompt_tokens = 10;
+    result.tokens = {42, 43};
     result.cached_prompt_tokens = 8;
     result.cache_hit = true;
     result.draft_accepted_tokens = 4;
@@ -240,6 +248,30 @@ public:
     }
     return result;
   }
+  Result score(const ScoreRequest& request,
+               const CancellationCheck& cancel) override {
+    ++score_calls;
+    if (!scoring)
+      return TextGenerationBackend::score(request, cancel);
+    last_score = request;
+    Result result;
+    result.prompt_tokens = request.start;
+    for (std::size_t i = request.start; i < request.tokens.size(); ++i) {
+      gufo::server::PromptTokenLogprobs position;
+      position.token = request.tokens[i];
+      position.logprob = -0.5 * static_cast<double>(i);
+      position.rank = i;
+      for (std::size_t k = 0; k < request.top_k; ++k)
+        position.top.push_back({.token = static_cast<std::uint32_t>(100 + k),
+                                .logprob = -static_cast<double>(k)});
+      result.prompt_logprobs.push_back(std::move(position));
+    }
+    result.finish_reason = FinishReason::kLength;
+    return result;
+  }
+  std::atomic<int> score_calls{0};
+  bool scoring{true};
+  ScoreRequest last_score;
   std::atomic<int> calls{0};
   std::atomic<bool> last_ignore_eos{false};
   std::atomic<bool> last_cache_prompt{true};

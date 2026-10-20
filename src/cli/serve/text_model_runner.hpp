@@ -464,6 +464,14 @@ public:
   [[nodiscard]] virtual TextDecodeSelection SelectNext(
       TextRunnerState& state, sampling::SamplerState& sampler) const = 0;
   virtual void Advance(TextRunnerState& state, TextRunnerToken token) const = 0;
+  /// Raw next-token logits at the state's frontier, read without selecting,
+  /// for teacher-forced scoring. Empty when the runner cannot expose them.
+  /// Valid until the next call on the state.
+  [[nodiscard]] virtual std::span<const float> FrontierLogits(
+      TextRunnerState& state) const {
+    (void)state;
+    return {};
+  }
   [[nodiscard]] virtual TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const;
@@ -608,6 +616,10 @@ public:
     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
     [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();
+    /// Teacher forcing: the frontier's logits, then advancing a token the
+    /// caller chose instead of a selected one. Neither samples.
+    [[nodiscard]] std::span<const float> FrontierLogits();
+    void AdvanceForced(TextRunnerToken token);
     [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);
 
     /// Publishes a reusable continuation boundary.

@@ -107,6 +107,14 @@ NLL/perplexity, top-1 agreement, and top-k overlap as applicable. Aggregates
 are over scored positions. A changed tokenizer, template, suite, or history
 changes the comparison identity.
 
+Between two servers, for example a Q8_0 reference and a smaller quantization,
+`tools/quality/matched_kl.py run --teacher URL --candidate URL --out-dir DIR`
+generates each history once on the teacher and scores it on both through
+[prompt scoring](SERVER.md#prompt-scoring). Its KL covers the teacher's top-20
+tokens plus the remaining mass. Without imputed candidate probabilities
+(counted in the report) that is a lower bound of the full KL; imputed positions
+can move it either way.
+
 Capability evaluation is separate: [gufo eval](CLI.md#benchmarks-and-evaluations) grades free-running
 answers through the OpenAI-compatible server.
 

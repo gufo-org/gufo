@@ -777,7 +777,7 @@ The other compatibility routes are deliberately limited:
 
 | Route | Supported request | Output limit |
 | --- | --- | --- |
-| `/v1/completions` | One prompt string, buffered or SSE completion | `max_tokens` |
+| `/v1/completions` | One prompt string, buffered or SSE completion; token-ID prompt scoring | `max_tokens` |
 | `/v1/messages` | Text, image, thinking and tool blocks, optional text system instructions and custom tools; buffered or SSE | `max_tokens` |
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
@@ -832,6 +832,37 @@ capacity remains the hard limit. Chat Completions, Responses, Messages and
 `/completion` reject `ignore_eos`: Raw Completions owns the fixed-length
 contract. `GET /v1/models` reports that configured limit as `context_length` on
 the loaded text model.
+
+### Prompt scoring
+
+Raw Completions scores a fixed token history for
+[matched-token quality](BENCHMARKS.md#quality-method-matched-token-per-position)
+comparisons. A buffered request with `return_token_ids: true` adds the prompt's
+`prompt_token_ids` and the completion's `token_ids` to its choice, as vLLM does.
+A request with `prompt_logprobs: K` (0 to 20) and `prompt` as an array of token
+IDs generates nothing: the model reads the IDs in order and reports, for each
+position from `prompt_logprobs_start` (default 1) on, the log-softmax of its raw
+logits before that token. `choices[0].prompt_logprobs` has one entry per prompt
+token, `null` before the start:
+
+```json
+{"token": 9, "logprob": -0.42, "rank": 1,
+ "top_logprobs": [{"token": 9, "logprob": -0.42}, {"token": 4, "logprob": -1.3}]}
+```
+
+`rank` is one-based, ties ranking by lower ID; `nonfinite` counts NaN or
+infinite logits when there are any. Earlier positions are prefilled and later
+ones advanced one token at a time, outside decode batches, so a scored request
+costs about one decode step per scored position. Each concurrent scored request
+adds its own single-token model call to every scheduler step, so other streams
+on the same server slow down accordingly; score on an otherwise idle server and
+bound client concurrency (`matched_kl.py --concurrency`). It never samples or
+restores a cached prefix (`cache_prompt` is ignored), so a repeated request
+makes the same model calls; it otherwise schedules like any request.
+`max_tokens` may be 0 or 1; streaming, stop sequences and other generation
+fields are rejected. Models that do not expose their logits reject the request;
+Qwen3.8 Flash-Next exposes them. `tools/quality/matched_kl.py` drives the
+comparison.
 
 `ignore_eos` measures decode past the model's stop tokens, which speculative
 backends do not accelerate: verification ends its accepted run at every EOS it

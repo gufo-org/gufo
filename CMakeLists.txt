@@ -771,6 +771,18 @@ if (BUILD_TESTING)
   set_tests_properties(logit_sampler_test PROPERTIES
     LABELS "cpu;server;sampling")
 
+  add_executable(prompt_scoring_test
+    tests/cli/prompt_scoring_test.cpp
+    src/cli/serve/continuation_cache.cpp
+    src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/component_text_cache.cpp
+    src/cli/serve/text_model_runner.cpp
+    src/cli/serve/text_generation_scheduler.cpp)
+  target_link_libraries(prompt_scoring_test PRIVATE gufo_logging gufo_core gufo_cache)
+  add_test(NAME prompt_scoring_test COMMAND prompt_scoring_test)
+  set_tests_properties(prompt_scoring_test PROPERTIES
+    LABELS "cpu;server;scheduler;scoring" TIMEOUT 60)
+
   add_executable(text_generation_scheduler_test
     tests/cli/text_generation_scheduler_test.cpp
     src/cli/serve/continuation_cache.cpp
@@ -863,6 +875,12 @@ if (BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_profile_report_test.py)
   set_tests_properties(h3_profile_report_test PROPERTIES
     LABELS "cpu;tools;models;minimax-h3;profiling")
+
+  add_test(NAME matched_kl_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/matched_kl_test.py)
+  set_tests_properties(matched_kl_test PROPERTIES
+    LABELS "cpu;tools;quality;server" TIMEOUT 60)
 
   add_test(NAME serving_bench_test
     COMMAND ${Python3_EXECUTABLE}
