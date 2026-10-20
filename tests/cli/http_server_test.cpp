@@ -767,6 +767,46 @@ void TestFramingAndMetrics() {
   assert(timings->member_double("prompt_per_token_ms") == 2);
 }
 
+// curl sends "Expect: 100-continue" before a body over 1 MiB and waits for
+// the interim response; without it, every large upload stalls for a second.
+void TestExpectContinue() {
+  RunningServer server({.max_request_body_bytes = 8192});
+  for (const std::string expect :
+       {"Expect: 100-continue", "expect: 100-Continue"}) {
+    const int fd = server.Connect();
+    const std::string head =
+        "POST /echo HTTP/1.1\r\n" + expect + "\r\nContent-Length: 5\r\n\r\n";
+    assert(::send(fd, head.data(), head.size(), MSG_NOSIGNAL) ==
+           static_cast<ssize_t>(head.size()));
+    // The interim response arrives before any body byte is sent.
+    const std::string_view interim = "HTTP/1.1 100 Continue\r\n\r\n";
+    std::string response;
+    char buffer[4096];
+    while (response.size() < interim.size()) {
+      const auto count = ::read(fd, buffer, interim.size() - response.size());
+      assert(count > 0);
+      response.append(buffer, static_cast<std::size_t>(count));
+    }
+    assert(response == interim);
+    assert(::send(fd, "hello", 5, MSG_NOSIGNAL) == 5);
+    response.clear();
+    for (;;) {
+      const auto count = ::read(fd, buffer, sizeof(buffer));
+      assert(count >= 0);
+      if (count == 0)
+        break;
+      response.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(fd);
+    ExpectStatus(response, 200);
+    assert(response.substr(response.find("\r\n\r\n") + 4) == "hello");
+  }
+  // An oversized body gets its final status instead of the interim one.
+  ExpectStatus(server.Send("POST /echo HTTP/1.1\r\nExpect: 100-continue\r\n"
+                           "Content-Length: 8193\r\n\r\n"),
+               413);
+}
+
 void TestFallbackBackendMetrics() {
   namespace metrics = gufo::server::detail;
   RunningServer server;
@@ -3053,6 +3093,7 @@ int main() {
   TestQueryParameters();
   TestAuthorization();
   TestFramingAndMetrics();
+  TestExpectContinue();
   TestFallbackBackendMetrics();
   TestLlamaProps();
   TestLlamaSlotsAndMetrics();
