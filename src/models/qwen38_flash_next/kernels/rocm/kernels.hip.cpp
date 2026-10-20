@@ -6236,8 +6236,8 @@ bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const std::int32_t* rows_in,
                         const std::int32_t* rows_out, __half* out,
                         std::size_t m, std::size_t k, hipStream_t stream) {
-  // 128-token tiles decode each expert's weights once per wide bucket; at
-  // 1024+ batch rows they also beat 64-token tiles on short buckets.
+  // 128-token tiles decode each expert's weights once per wide bucket; in
+  // prefill they also beat narrower tiles on short buckets.
   constexpr int BN = 128;
   if (m == 0 || k == 0 || k % 256 != 0 || n_tiles == 0 || out == nullptr) {
     return false;
@@ -6966,7 +6966,7 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
                       std::uint32_t n_tokens, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
                       const qwen::vision::DeviceRope* rope) {
-  if (n_tokens < 1024 || weights == nullptr || input == nullptr ||
+  if (n_tokens == 0 || weights == nullptr || input == nullptr ||
       q_gamma == nullptr || k_gamma == nullptr || query == nullptr ||
       gate == nullptr || keys == nullptr || values == nullptr ||
       position == nullptr)
@@ -7119,7 +7119,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
                      hipStream_t stream, std::uint32_t checkpoint_tokens) {
-  if (n_tokens < 1024 || m != 16384 || k != 2560 || channels != 10240 ||
+  if (n_tokens == 0 || m != 16384 || k != 2560 || channels != 10240 ||
       kernel != kSsmConvTaps) {
     return false;
   }

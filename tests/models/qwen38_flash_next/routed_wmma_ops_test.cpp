@@ -448,7 +448,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       throw std::runtime_error("routed F16 output overwrote its guard");
   }
 
-  if (tile_rows == 48 &&
+  // Prefill pairs gate/up for buckets the separate 16- and 48-row tiles take.
+  if ((tile_rows == 16 || tile_rows == 48) &&
       (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K)) {
     // Different gate/up weights, with the up scale small enough that these
     // deliberately large synthetic weights do not overflow the F16 output.

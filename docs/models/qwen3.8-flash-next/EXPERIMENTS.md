@@ -1,5 +1,11 @@
 # Qwen3.8 Flash-Next experiments
 
+## Mid-size prefill passes (October 21, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| Wide prefill routes for every prefill pass above eight rows | Retained: the fused SSM projection/convolution, fused attention projection, half-only HC mix, last-layer query skip and paired 128-row gate/up with 64-row down tiles started at 1,024 rows, so pp1023 ran at 1,432 tok/s against 1,624 for pp1024. Native AR pp, before → after: pp9 93.5 → 98.3, pp33 229.8 → 243.7, pp128 541.7 → 594.1, pp256 802.5 → 899.3, pp470 1,054.4 → 1,225.5, pp768 1,216.7 → 1,446.9, pp1023 1,432.2 → 1,578.7; pp1024+ unchanged. The paired experts supply most of the gain (pp470 1,082 → 1,225). Every row's prefill logits are byte-identical to main at 30–845 tokens and for 2,518 tokens split at 2,048; AR/MTP tg64 after 33/470/900-token prefixes keeps output hashes and draft counts. Decode and verification batches keep their routes. HTTP, pi system prompt on a new prefix (2,048 + 477-token passes), alternating arms: TTFT 1,745–1,756 → 1,684–1,696 ms; a 2,968-token single pass is unchanged. |
+
 ## Component-cache admission (October 20, 2026)
 
 | Experiment | Outcome |
