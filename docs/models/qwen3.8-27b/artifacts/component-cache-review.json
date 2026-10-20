@@ -835,10 +835,7 @@
     }
   },
   "remaining": [
-    "queue_ms admission floor (+3-6 ms) on 27B; shared with Flash component cache",
-    "cache_snapshot_ms increases in cache-concurrency",
-    "over-RAM E2 publication wait ordering (deeper pending job behind older jobs)",
-    "ReconcileComponentState fake frontier token 0 on exact-length hit at a cancelled partial-prefill checkpoint (review finding, not reproduced)"
+    "ReconcileComponentState placeholder frontier token 0 on exact-length hit at a cancelled partial-prefill checkpoint (review finding, not reproduced)"
   ],
   "limitations": [
     "No new upstream-model or weight-conversion parity claim",
@@ -1092,7 +1089,7 @@
       "high_context_probes": "off and dflash2 main/candidate/candidate/main pass, equal work",
       "first_request_probe": "pass, equal work",
       "standard_speed_8ed4da99": "pp2048/tg128 within 1.6% of main for Q4/Q8 AR and DFlash2 (Q4 AR pp2048 625 vs 635)",
-      "pi_agent": "dflash2 pass; ar tools case fails only because the model wrote \"bonjour\\n\" (all three tool calls and results correct, cache reuse assertions pass)",
+      "pi_agent": "ar and dflash2 pass tools, edit and bugfix; the first AR run failed only because the model wrote \"bonjour\\n\" (tool calls, results and cache reuse correct)",
       "deep_peers": "ar and dflash2 pass: 142K crash recovery from disk, 12 short peers reuse 4,870 tokens, second restart reuses 142,476",
       "over_ram": "ar and dflash2 pass through E1; E2_rewritten released its publication wait at the 36.6 s cost bound 6 s before the deeper 108,980-token checkpoint published (queued behind two older 6.4 GB/0.4 GB jobs); reused 96,256 instead of >=97,424. Timing-dependent, retained unqualified"
     },
@@ -1123,6 +1120,10 @@
       "flash": "5 repeated flags; depth_branches TTFT flag is a completion-order artifact (identical {197,351,549} ms distributions on both arms)",
       "q4_queue_ms": "repeated +3-6 ms floor (p10 0.5->3.6-5.5 ms) on non-disk requests; disk requests queue less (disk-spacing p50 690->173 ms). Instrumented: component Acquire ~2.8 ms p50 (slot rank ~0.8 ms incl. frontier lookups, slot acquire ~0.85 ms, cold reset ~0.7 ms). Flash on main shows the same floor. Unfixed, open",
       "q4_cache_snapshot_ms": "repeated increases where main captured nothing or less (identical 0 -> 114-292 ms, fanout 570-633 -> 715-786 ms, cancelled_leader 0-34 -> 126-173 ms). Open"
+    },
+    "decisions": {
+      "timing": "queue_ms admission floor and cache_snapshot_ms increases accepted by the user as component cache cost; optimization tracked in #678 with Flash requalification",
+      "over_ram_e2": "left unqualified by user decision: disk-throughput dependent, queue reordering would not have met the 36.6 s bound"
     }
   }
 }

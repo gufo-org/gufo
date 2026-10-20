@@ -192,8 +192,8 @@ concurrent cold DFlash2 decode returns to main's 53 ms per token from 60–64 ms
 High-context and first-request probes (main/PR/PR/main) pass with equal work.
 Standard pp2048/tg128 stays within 1.6% of main. Deep-peer AR and DFlash2
 pass 142K crash recovery, twelve short peers reusing the system boundary and a
-second restart. Pi DFlash2 passes. Pi AR fails only because the model wrote a
-trailing newline; every tool call, tool result and cache reuse is correct.
+second restart. Pi AR and DFlash2 pass tools, edit and bugfix workflows; a first
+AR run failed only because the model wrote a trailing newline.
 Over-RAM passes through `E1`. `E2` released its publication wait at the
 36.6 s cost bound, 6 s before the deeper checkpoint, which was queued behind
 two older jobs, was published. That timing-dependent case remains unqualified.
@@ -206,10 +206,11 @@ host RAM, so compare system totals: the peak MemAvailable drop over a full run
 is 50.3 GiB versus main's 52.4 GiB (Q4 AR) and 55.0 versus 57.4 GiB (Q4
 DFlash2).
 
-Open timing flags, repeated in both observations: a 3–6 ms admission floor in
-`queue_ms` (component acquire costs about 2.8 ms; Flash shows the same floor
+Accepted timing costs, repeated in both observations: a 3–6 ms admission floor
+in `queue_ms` (component acquire costs about 2.8 ms; Flash shows the same floor
 on main) and higher `cache_snapshot_ms` where main captured nothing or less
-in `cache-concurrency`. Disk requests queue less than on main. See the
+in `cache-concurrency`. Optimization is tracked in
+[#678](https://github.com/gufo-org/gufo/issues/678). Disk requests queue less than on main. See the
 [dated review record](artifacts/component-cache-review.json) for commands,
 binaries and every observation. The earlier cold-prefill versus
 decoded-history vision difference remains unqualified; the wide prefill route
