@@ -554,6 +554,97 @@ void SlotPreference() {
   assert(fallback.Location().slot == SlotId{1});
   f.Verify();
 }
+void BatchedReassignment() {
+  for (int mode = 0; mode < 4; ++mode) {
+    ResourceLedger ledger{{1 << 20, 1 << 20, 0, 1 << 20}};
+    LedgerAudit audit{ledger};
+    AdapterFixture adapter;
+    FakeStream foreground;
+    std::atomic<int> attempts{};
+    LeasedSlot slot{ledger, adapter, foreground, SlotId{1},
+                    IdleSpillConfig{8,
+                                    [&]() -> std::unique_ptr<Stream> {
+                                      if (++attempts == 4 && mode == 3)
+                                        return {};
+                                      return std::make_unique<FakeStream>(true);
+                                    },
+                                    [] { return false; }, mode == 3 ? 4U : 3U}};
+    auto lease = slot.Acquire();
+    const std::array<Token, 13> tokens{1, 2, 3,  4,  5,  6, 7,
+                                       8, 9, 10, 11, 12, 13};
+    adapter.fake.Append(lease.Execution(), tokens, tokens);
+    struct Kept {
+      Rows first, end;
+      ResourceCharge pool;
+      std::shared_ptr<std::vector<std::byte>> buffer;
+      std::shared_ptr<BorrowedRows> rows;
+    };
+    std::vector<Kept> kept;
+    for (Rows first = 0; first < tokens.size();) {
+      const auto end = first < 8 ? first + 2 : tokens.size();
+      auto buffer = std::make_shared<std::vector<std::byte>>((end - first) *
+                                                             sizeof(Token));
+      auto pool = ledger.Reserve(ResourceCategory::kBackingFree, buffer->size())
+                      .Convert();
+      auto rows =
+          lease.Borrow(kTarget, first, end,
+                       pool.ReserveBacking(ResourceCategory::kBackingAssigned),
+                       buffer, *buffer);
+      kept.push_back({first, end, std::move(pool), buffer, std::move(rows)});
+      first = end;
+    }
+    const auto live = lease.Location();
+    auto reader = kept.front().rows->Pin();
+    lease.Commit();
+    if (mode == 2)
+      adapter.fake.FailNextTransfer();
+    std::stop_source stop;
+    auto replacement = std::async(
+        std::launch::async, [&] { return slot.Acquire({}, stop.get_token()); });
+    // Every copy is gated. Three submissions before the first completion
+    // prove the bounded batch does not synchronize one range at a time.
+    adapter.gate.WaitFor(3);
+    if (mode == 1)
+      stop.request_stop();
+    adapter.gate.Allow(3);
+    if (mode == 0) {
+      const auto deadline = std::chrono::steady_clock::now() + 5s;
+      while (kept[2].rows->Location()) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::yield();
+      }
+      // Publication of other rows cannot be held behind this earlier pin.
+      assert(replacement.wait_for(20ms) == std::future_status::timeout);
+    }
+    reader = {};
+    adapter.gate.Allow(100);
+    if (mode == 1 || mode == 2) {
+      bool failed = false;
+      try {
+        lease = replacement.get();
+      } catch (const std::runtime_error&) {
+        failed = true;
+      }
+      assert(failed);
+      lease = slot.Acquire(live);
+      const auto bytes = adapter.fake.BorrowRowsView(lease.Execution(), kTarget,
+                                                     0, tokens.size());
+      assert(bytes.size() == sizeof(tokens));
+      assert(std::memcmp(bytes.data(), tokens.data(), sizeof(tokens)) == 0);
+      lease.Commit();
+      lease = slot.Acquire();
+    } else {
+      lease = replacement.get();
+    }
+    for (const auto& k : kept) {
+      assert(k.rows->IsValid() && !k.rows->Location());
+      assert(std::memcmp(k.buffer->data(), tokens.data() + k.first,
+                         k.buffer->size()) == 0);
+    }
+    assert(slot.Metrics().idle_bytes == 0);
+    slot.StopIdleSpill();
+  }
+}
 }  // namespace
 int main() {
   IdleAndZeroIdle();
@@ -568,4 +659,5 @@ int main() {
   SlotPreference();
   RetainedCheckpoints();
   PersistencePublicationRace();
+  BatchedReassignment();
 }

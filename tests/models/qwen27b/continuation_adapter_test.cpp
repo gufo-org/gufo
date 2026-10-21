@@ -7,6 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/cache/slot.hpp"
@@ -43,15 +44,16 @@ struct Checkpoint {
   std::vector<std::vector<std::byte>> bytes;
 };
 Checkpoint Capture(qwen::ContinuationAdapter& adapter, cache::Slot& slot,
-                   hip::TransferPool& pool) {
+                   hip::TransferPool& pool, std::byte fill = std::byte{}) {
   Checkpoint checkpoint{adapter.Positions(slot), {}};
   checkpoint.bytes.resize(adapter.Components().size());
   for (std::size_t i = 0; i < checkpoint.bytes.size(); ++i) {
     const auto& descriptor = adapter.Components()[i];
     auto& bytes = checkpoint.bytes[i];
-    bytes.resize(descriptor.row_bytes
+    bytes.assign(descriptor.row_bytes
                      ? checkpoint.positions[i].valid_rows * descriptor.row_bytes
-                     : descriptor.state_bytes);
+                     : descriptor.state_bytes,
+                 fill);
     auto stream = pool.TryAcquire();
     Require(bool(stream), "transfer pool did not recycle");
     if (descriptor.row_bytes)
@@ -632,6 +634,64 @@ void CheckImageSuffix(const std::shared_ptr<const hip::QwenGpuModel>& model) {
   }
   std::cout << "image_suffix,PASS\n";
 }
+void CheckPrefillCancellation(
+    const std::shared_ptr<const hip::QwenGpuModel>& model, bool fp16) {
+  auto policy = hip::QwenExecutionPolicy::Production();
+  policy.kv_cache_storage =
+      fp16 ? hip::QwenKvCacheStorage::kFp16 : hip::QwenKvCacheStorage::kFp32;
+  qwen::ContinuationAdapter adapter(model, 512, {'c', 'a', 'n', 'c', 'e', 'l'},
+                                    policy);
+  Guard ga, gb;
+  hip::TransferPool pool(2);
+  auto source = adapter.CreateSlot(ga), control = adapter.CreateSlot(gb);
+  auto& a = adapter.GetExecutor(*source);
+  auto& b = adapter.GetExecutor(*control);
+  const auto fixture = model->GetTokenizer().Encode(
+      "Prompt cancellation must preserve the completed recurrent state. ");
+  Require(!fixture.empty(), "empty cancellation fixture");
+  std::vector<Token> tokens(256);
+  for (std::size_t i = 0; i < tokens.size(); ++i)
+    tokens[i] = fixture[i % fixture.size()];
+  for (const auto prefix : {0U, 37U}) {
+    for (const auto stop : {4U, 12U}) {
+      Require(adapter.Invalidate(*source) && adapter.Invalidate(*control),
+              "cancellation fixture reset failed");
+      if (prefix) {
+        (void)a.ForwardPromptBatch(std::span(tokens).first(prefix));
+        (void)b.ForwardPromptBatch(std::span(tokens).first(prefix));
+      }
+      const auto before = Capture(adapter, *source, pool);
+      unsigned polls = 0;
+      a.SetCancellationCheck([&] { return ++polls >= stop; });
+      adapter.BeginPrefill(*source);
+      bool interrupted = false;
+      try {
+        (void)a.ForwardPromptBatch(std::span(tokens).subspan(prefix, 129),
+                                   prefix);
+      } catch (const hip::QwenPrefillCancelled&) {
+        adapter.RollbackPrefill(*source);
+        interrupted = true;
+      }
+      a.SetCancellationCheck({});
+      Require(interrupted && polls >= stop,
+              "prefill ignored cancellation between layers");
+      Require(Capture(adapter, *source, pool, std::byte{0x5a}).bytes ==
+                  before.bytes,
+              "cancelled prefill changed its completed frontier");
+      adapter.BeginPrefill(*source);
+      (void)a.ForwardPromptBatch(std::span(tokens).subspan(prefix, 129),
+                                 prefix);
+      adapter.FinishPrefill(*source);
+      (void)b.ForwardPromptBatch(std::span(tokens).subspan(prefix, 129),
+                                 prefix);
+      SameLogits(a, b);
+      Require(Capture(adapter, *source, pool).bytes ==
+                  Capture(adapter, *control, pool).bytes,
+              "prefill rollback changed resumed state");
+    }
+  }
+  std::cout << (fp16 ? "FP16" : "FP32") << ",prefill_cancellation,PASS\n";
+}
 void CheckDraftComponents(std::shared_ptr<const hip::QwenGpuModel> model,
                           const char* draft_path) {
   std::string error;
@@ -679,6 +739,26 @@ void CheckDraftComponents(std::shared_ptr<const hip::QwenGpuModel> model,
   const auto logits = a.CopyLastLogits();
   frontier.logits.assign(logits.begin(), logits.end());
   const auto checkpoint = Capture(adapter, *source, pool);
+  Require(Capture(adapter, *source, pool, std::byte{0xa5}).bytes ==
+              checkpoint.bytes,
+          "draft checkpoint depends on recycled destination bytes");
+  for (std::size_t i = 0; i < adapter.Components().size(); ++i) {
+    const auto& descriptor = adapter.Components()[i];
+    if (descriptor.kind != cache::ComponentKind::kPrivateState)
+      continue;
+    std::vector<std::byte> pieces(descriptor.state_bytes, std::byte{0x5a});
+    const auto cut = std::min<std::size_t>(37, pieces.size());
+    for (const auto [first, count] : {std::pair{cut, pieces.size() - cut},
+                                      std::pair{std::size_t{0}, cut}}) {
+      auto stream = pool.TryAcquire();
+      Require(bool(stream), "private-piece stream unavailable");
+      Wait(adapter.CapturePrivatePiece(*source, descriptor.id, first,
+                                       std::span(pieces).subspan(first, count),
+                                       *stream));
+    }
+    Require(pieces == checkpoint.bytes[i],
+            "partial draft capture differs from the canonical checkpoint");
+  }
   Require(da.GetInjectedContextLength() == 64 &&
               checkpoint.positions.front().valid_rows == 67,
           "draft frontier was replaced by target frontier");
@@ -714,10 +794,12 @@ int main(int argc, const char* const* argv) {
     const bool guard_only = argc == 3 && std::string(argv[2]) == "--guard-only";
     const bool image_only = argc == 3 && std::string(argv[2]) == "--image-only";
     const bool draft_only = argc == 4 && std::string(argv[2]) == "--draft";
-    if (argc != 2 && !guard_only && !image_only && !draft_only)
+    const bool cancel_only =
+        argc == 3 && std::string(argv[2]) == "--prefill-cancel";
+    if (argc != 2 && !guard_only && !image_only && !draft_only && !cancel_only)
       throw std::invalid_argument(
           "Usage: continuation_adapter_test MODEL.gguf "
-          "[--guard-only|--image-only|--draft DRAFT.gguf]");
+          "[--guard-only|--image-only|--prefill-cancel|--draft DRAFT.gguf]");
     std::string error;
     auto reader = gufo::core::GgufReader::OpenFile(argv[1], &error);
     Require(bool(reader), error.c_str());
@@ -726,6 +808,11 @@ int main(int argc, const char* const* argv) {
         std::shared_ptr<const gufo::core::GgufReader>(std::move(reader)),
         &error, encoder);
     Require(bool(model), error.c_str());
+    if (cancel_only) {
+      CheckPrefillCancellation(model, true);
+      CheckPrefillCancellation(model, false);
+      return 0;
+    }
     if (draft_only) {
       CheckDraftComponents(model, argv[3]);
       std::cout << "Qwen continuation draft adapter: PASS\n";
@@ -734,6 +821,8 @@ int main(int argc, const char* const* argv) {
     if (!guard_only && !image_only) {
       Check(model, true);
       Check(model, false);
+      CheckPrefillCancellation(model, true);
+      CheckPrefillCancellation(model, false);
     }
     if (!image_only) {
       CheckLeasedGuard(model);

@@ -51,6 +51,7 @@ struct ComponentCacheResources {
   // batch settles its own leases and retries. One keeps generic providers
   // usable without a pool-capacity contract.
   std::size_t transfer_batch_size{1};
+  std::size_t reassignment_batch_size{1};
 };
 
 class ComponentTextCache {

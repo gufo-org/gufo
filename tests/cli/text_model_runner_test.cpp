@@ -536,6 +536,36 @@ public:
   mutable std::vector<bool> armed_during_prefill;
 };
 
+class InterruptedPrefillRunner final : public SnapshotRunner {
+public:
+  InterruptedPrefillRunner(std::shared_ptr<FakeStats> stats, bool& cancelled)
+      : SnapshotRunner(std::move(stats), 64, 256, 1), cancelled_(cancelled) {}
+  TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = SnapshotRunner::Descriptor();
+    descriptor.capabilities.partial_prefill_retention = true;
+    descriptor.capabilities.prefill_rollback = supports_rollback;
+    return descriptor;
+  }
+  TextPrefillStep Prefill(TextRunnerState& state,
+                          std::span<const TextRunnerToken> prompt,
+                          std::size_t offset,
+                          std::size_t max_input_tokens) const override {
+    if (!offset)
+      return SnapshotRunner::Prefill(state, prompt, offset, max_input_tokens);
+    armed = RequireFakeState(state).cancellation_armed;
+    cancelled_ = cancel;
+    if (corrupt_position)
+      ++RequireFakeState(state).position;
+    return {.consumed_tokens = consumed, .interrupted = true};
+  }
+  bool supports_rollback{true}, cancel{true}, corrupt_position{false};
+  std::size_t consumed{};
+  mutable bool armed{};
+
+private:
+  bool& cancelled_;
+};
+
 class InPassRunner final : public SnapshotRunner {
 public:
   using SnapshotRunner::SnapshotRunner;
@@ -1019,6 +1049,40 @@ void TestCancelledPrefillRetainsCompletedChunks() {
              "runners without the capability discard a partial prefill");
     }
     continuation.Invalidate();
+  }
+}
+
+void TestInterruptedPrefillRetainsOnlyItsEntryFrontier() {
+  for (int scenario = 0; scenario < 5; ++scenario) {
+    bool cancelled = false;
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<InterruptedPrefillRunner>(stats, cancelled);
+    runner->supports_rollback = scenario != 1;
+    runner->cancel = scenario != 2;
+    runner->corrupt_position = scenario == 3;
+    runner->consumed = scenario == 4 ? 1 : 0;
+    TextRunnerPool pool(runner, 1);
+    auto request = pool.Acquire(
+        {1, 2, 3, 4, 5, 6}, {}, [&] { return cancelled; }, {}, true, 5);
+    Expect(request.Prefill(4).consumed_tokens == 4,
+           "a completed chunk precedes the interrupted pass");
+    std::string error;
+    try {
+      (void)request.Prefill(2);
+    } catch (const std::runtime_error& failure) {
+      error = failure.what();
+    }
+    Expect(error == (scenario == 0 ? "generation cancelled"
+                                   : "invalid interrupted prefill frontier"),
+           "only a cancelled, rolled-back pass may retain its entry frontier");
+    if (runner->supports_rollback)
+      Expect(runner->armed, "rollback runners keep layer cancellation armed");
+    request.Cancel();
+    cancelled = false;
+    auto resumed = pool.Acquire({1, 2, 3, 4, 5, 6, 7});
+    Expect(resumed.cached_prompt_tokens() == (scenario == 0 ? 4 : 0),
+           "invalid interrupted state must never become a cache hit");
+    resumed.Invalidate();
   }
 }
 
@@ -2468,6 +2532,7 @@ int main() {
   TestGeneratedFrontierPersistsForForks();
   TestCancellationRetainsOnlyCompletedWork();
   TestCancelledPrefillRetainsCompletedChunks();
+  TestInterruptedPrefillRetainsOnlyItsEntryFrontier();
   TestPromptReuseCanBeDisabledPerRequest();
   TestStableChatPrefixSurvivesInterruptedFraming();
   TestWarmChatCheckpointsStopAtTheStableBoundary();

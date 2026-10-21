@@ -255,12 +255,14 @@ struct ComponentTextCache::Impl {
       entry->slot = std::make_unique<cache::LeasedSlot>(
           ledger, *resources->adapter, *entry->preservation,
           cache::SlotId{i + 1},
-          cache::IdleSpillConfig{1ULL << 20, resources->stream, [this] {
+          cache::IdleSpillConfig{1ULL << 20, resources->stream,
+                                 [this] {
                                    const std::lock_guard lock(mutex);
                                    return std::ranges::none_of(
                                        entries,
                                        [](const auto& e) { return e->busy; });
-                                 }});
+                                 },
+                                 resources->reassignment_batch_size});
       entries.push_back(std::move(entry));
     }
     std::size_t automatic_bytes{}, max_bytes{};
@@ -930,6 +932,54 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           entry = candidate.get();
           selected_rank = candidate_rank;
         }
+      }
+      // Keep ordinary cold selection unchanged. Only a cancelled executor
+      // with outstanding work needs an alternative; do not query every
+      // stream or look up exact checkpoint coverage on normal admissions.
+      if (entry && !entry->slot->ExecutionComplete()) {
+        if (!selected_rank)
+          selected_rank = rank(*entry);
+        Impl::Entry* ready = nullptr;
+        std::optional<Rank> ready_rank;
+        for (auto& candidate : impl_->entries) {
+          if (candidate.get() == entry || candidate->busy ||
+              !candidate->slot->ExecutionComplete())
+            continue;
+          const auto candidate_rank = rank(*candidate);
+          // A ready slot must not sacrifice uncovered work or introduce
+          // foreground preservation. Keep a deep generated tail unless an
+          // exact checkpoint or another idle live copy still covers it.
+          const auto live_copy = [&] {
+            return candidate->history &&
+                   std::ranges::any_of(impl_->entries, [&](const auto& other) {
+                     return other != candidate && !other->busy && other->live &&
+                            other->history &&
+                            other->history->Lineage() ==
+                                candidate->history->Lineage() &&
+                            other->live_input == candidate->live_input &&
+                            other->live_tokens == candidate->live_tokens;
+                   });
+          };
+          if (std::tie(std::get<0>(candidate_rank),
+                       std::get<1>(candidate_rank)) >
+                  std::tie(std::get<0>(*selected_rank),
+                           std::get<1>(*selected_rank)) ||
+              (candidate->live &&
+               candidate->live_tokens.size() >= kUncoveredTokens &&
+               !impl_->index.HasCheckpoint(
+                   {impl_->identity, candidate->live_tokens,
+                    cache::InputIdentity(candidate->live_tokens.size(),
+                                         candidate->live_input)},
+                   candidate->live_tokens.size()) &&
+               !live_copy()))
+            continue;
+          if (!ready || candidate_rank < *ready_rank) {
+            ready = candidate.get();
+            ready_rank = candidate_rank;
+          }
+        }
+        if (ready)
+          entry = ready;
       }
     }
     if (!entry)

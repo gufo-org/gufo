@@ -123,6 +123,9 @@ struct IdleSpillConfig {
   // Scheduler admission, checked before EVERY idle piece. False yields to
   // device model work. Already submitted pieces drain before yielding.
   std::function<bool()> device_idle;
+  // Cold reassignment may submit bounded complete ranges before waiting.
+  // Idle copies still yield after each piece. One preserves the serial path.
+  std::size_t reassignment_batch_size{1};
 };
 struct SpillMetrics {
   std::size_t idle_bytes{}, foreground_bytes{};
@@ -154,6 +157,7 @@ public:
   // Snapshot only: another acquirer may win before Acquire. Busy slots return
   // false; successful acquisitions still enforce exclusive generation checks.
   [[nodiscard]] bool PreservationComplete() const;
+  [[nodiscard]] bool ExecutionComplete() const;
   [[nodiscard]] SpillMetrics Metrics() const;
   // Stop at a piece boundary, drain its completion and release source pins.
   // Retained partial ranges stay borrowed and can finish in the foreground.

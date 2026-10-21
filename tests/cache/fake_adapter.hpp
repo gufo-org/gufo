@@ -53,6 +53,7 @@ public:
   [[nodiscard]] std::vector<Rows> PlanPrefill(const Slot&, Rows first,
                                               Rows end) const override;
   void SetPrefillPassRows(Rows rows);
+  void SetExecutionComplete(Slot&, bool);
   [[nodiscard]] std::vector<ComponentPosition> PrefillCheckpointPositions(
       const Slot&, Rows boundary) const override;
   void BeginRestore(Slot&, std::span<const ComponentPosition>) override;

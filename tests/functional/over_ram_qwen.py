@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """dblaber's #562 steps C, D and E2 with a conversation larger than the RAM budget.
 
-C: deep turn with many new tokens, client disconnects ~20 ms in, then resend.
+C: deep turn with many new tokens, disconnect after a completed pass, then resend.
 D: three short same-system chats (sessions=3), then a deep append.
 E: deep append, then the same history with the final user message rewritten.
 """
@@ -72,6 +72,12 @@ def chat(label, messages):
         # shared boundary; the later ones must reuse it.
         if label.startswith("D_short_"):
             minimum = 0 if label == "D_short_0" else 1
+        elif label == "E2_rewritten":
+            # Editing the final message forks the live execution. Its previous
+            # selected boundary need not exist as a restorable checkpoint.
+            # The publication assertion below requires the actual pending
+            # checkpoint to publish and become this request's selected frontier.
+            minimum = 1
         else:
             minimum = last_deep_selected
         selected = assert_checkpoint_selection(out, label, result, minimum=minimum)
@@ -112,6 +118,22 @@ def disconnect(messages, after):
         connection.request("POST", "/v1/chat/completions", body(messages),
                            {"Content-Type": "application/json"})
         sent = time.monotonic()
+        # Cancellation can now roll back an interrupted pass. Observe actual
+        # completed work before disconnecting, instead of relying on the server
+        # finishing its first pass after the client has already gone away.
+        deadline = sent + 120
+        while True:
+            with log_path.open("rb") as stream:
+                stream.seek(offset)
+                segment = stream.read().decode(errors="replace")
+            try:
+                completed_partial_prefill(segment)
+                break
+            except ValueError as error:
+                reason = str(error)
+            if server.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError(f"No completed pass before cancellation: {reason}")
+            time.sleep(0.01)
         time.sleep(after)
         # Closing the connection releases both its socket and HTTP state.
         connection.close()
@@ -152,7 +174,7 @@ deep = [{"role": "system", "content": SYSTEM},
 deep.append({"role": "assistant", "content": chat("A1_cold", deep)})
 deep += [{"role": "user", "content": "Reply with only ONE."}]
 deep.append({"role": "assistant", "content": chat("A2_append", deep)})
-# C: many new tokens, disconnect 20 ms in, resend.
+# C: many new tokens, disconnect 20 ms after a completed pass, resend.
 c = deep + [{"role": "user", "content": lines(20000, 300) + "Reply with only TWO."}]
 disconnect(c, 0.02)
 answer = chat("C_resend", c)

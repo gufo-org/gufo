@@ -411,28 +411,30 @@ public:
   }
 
   void SetCancellationCheck(const CancellationCheck& check) override {
-    cancellation_check_ = check;
-    if (!check) {
-      executor_->SetCancellationCheck({});
-      return;
-    }
-    executor_->SetCancellationCheck([this] {
-      return !prefill_active_ && cancellation_check_ && cancellation_check_();
-    });
+    executor_->SetCancellationCheck(check);
   }
   ~QwenTextRunnerState() override { executor_->SetCancellationCheck({}); }
 
   class PrefillScope {
   public:
-    explicit PrefillScope(QwenTextRunnerState& state) : state_(state) {
-      state_.prefill_active_ = true;
+    explicit PrefillScope(QwenTextRunnerState& state)
+        : state_(state), pending_size_(state.resume_tokens_.size()) {
+      std::ranges::copy(state.resume_tokens_, pending_.begin());
+      state_.adapter_->BeginPrefill(*state_.slot_);
     }
-    ~PrefillScope() { state_.prefill_active_ = false; }
+    ~PrefillScope() { state_.adapter_->FinishPrefill(*state_.slot_); }
+    void Rollback() {
+      state_.adapter_->RollbackPrefill(*state_.slot_);
+      state_.resume_tokens_.assign(pending_.begin(),
+                                   pending_.begin() + pending_size_);
+    }
     PrefillScope(const PrefillScope&) = delete;
     PrefillScope& operator=(const PrefillScope&) = delete;
 
   private:
     QwenTextRunnerState& state_;
+    std::array<TextRunnerToken, kQwenMaxResumeTokens> pending_{};
+    std::size_t pending_size_;
   };
   [[nodiscard]] PrefillScope BeginPrefill() { return PrefillScope(*this); }
 
@@ -746,8 +748,6 @@ private:
   hip::QwenDFlashGpuDraftBackend* draft_backend_{nullptr};
   models::qwen::ContinuationAdapter* adapter_{};
   cache::Slot* slot_{};
-  CancellationCheck cancellation_check_;
-  bool prefill_active_{};
   std::vector<TextRunnerToken> sequence_;
   std::size_t position_{0};
   std::optional<TextRunnerToken>& frontier_;
@@ -872,19 +872,16 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
       throw std::invalid_argument("insufficient component backing budget");
     const auto& allocation = plan.front();
     // Pages commit as captures need them. A payload cannot span segments,
-    // so the edge of each one strands space a ~140 MB private state cannot
-    // use; equal segments of about 1 GiB, and at least two private states,
-    // keep that small. A step costs about 60 ms while the host has free
-    // pages (up to seconds when it must reclaim page cache) and does not
-    // stall other HIP work, so it runs ahead on a background thread; only a
-    // capture that outruns it grows on its own thread. Growth stops early
-    // when the host would keep less than its reserve.
+    // so segments of about 128 MiB bound registration pauses and stranded
+    // edge space, fitting at least two of the largest payloads. Prefill
+    // chunks prepare backing before GPU work, after any fallback capture.
+    // Growth stops when the host keeps less than its reserve.
     std::size_t largest = 0;
     for (const auto& [id, bytes] : backing->component_classes)
       largest = std::max(largest, bytes);
     const auto block = allocation.block_bytes;
     const auto target =
-        std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
+        std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
     const auto parts =
         std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
     const auto segment = (allocation.blocks + parts - 1) / parts * block;
@@ -933,6 +930,25 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
               limited->refused = now;
               return false;
             }});
+    // Prepare a bounded reserve before readiness. The first shared-prefix
+    // capture needs more than one segment; preparing 2 GiB avoids moving
+    // registration onto that request's capture or decode path.
+    backing->pool->GrowAhead(2ULL << 30);
+    backing->pool->WaitForGrowth();
+    Logger::Info(
+        "cache",
+        "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
+            std::to_string(backing->pool->CommittedBytes()) +
+            " long_term_pinned_bytes=" +
+            std::to_string(backing->pool->LongTermPinnedBytes()));
+  };
+  result->prepare_prefill = [backing](std::size_t tokens) {
+    // Prepare after any fallback capture, alongside actual prefill work.
+    // Short turns need a smaller reserve for private states and row tails.
+    backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
+  };
+  result->can_capture = [backing](auto payloads) {
+    return backing->pool->CanFit(payloads);
   };
   result->owner = backing;
   result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
@@ -957,16 +973,16 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
           "schema=component-cache-v1 event=backing_grown committed_bytes=" +
               std::to_string(backing->pool->CommittedBytes()) + " segments=" +
               std::to_string(backing->pool->PageCommitAllocations()) +
+              " long_term_pinned_bytes=" +
+              std::to_string(backing->pool->LongTermPinnedBytes()) +
               " acquire_ms=" +
               std::to_string(std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - started)
                                  .count()));
     if (!block)
       throw cache::ResourceExhausted();
-    // Commit the next segment off the capturing thread, which otherwise
-    // stalls this and every peer request for the allocation (up to seconds
-    // while the host reclaims page cache).
-    backing->pool->GrowAhead();
+    // Do not start registration between a capture's allocations and copies.
+    // Each prefill chunk prepares its own reserve before GPU work.
     auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
     return ComponentCaptureBuffer{
         owner->Bytes(),
@@ -982,12 +998,13 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
         }};
   };
   result->staging = [](std::size_t bytes) {
+    auto allocation = std::make_shared<hip::HostAllocations>();
     void* data = nullptr;
-    const auto status = hipHostMalloc(&data, bytes, hipHostMallocCoherent);
+    const auto status =
+        allocation->Allocate(&data, bytes, hipHostMallocCoherent);
     if (status != hipSuccess)
       throw std::runtime_error(hipGetErrorString(status));
-    auto owner = std::shared_ptr<void>(
-        data, [](void* value) { (void)hipHostFree(value); });
+    auto owner = std::shared_ptr<void>(std::move(allocation), data);
     std::memset(data, 0, bytes);
     return cache::StagingAllocation{std::move(owner),
                                     {static_cast<std::uint8_t*>(data), bytes}};
@@ -1042,7 +1059,7 @@ public:
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
     (void)ram;
-    return CreateHipComponentCacheResources(
+    auto resources = CreateHipComponentCacheResources(
         std::make_unique<models::qwen::ContinuationAdapter>(
             model_, max_context_, component_identity_, execution_policy_,
             dflash_model_,
@@ -1051,6 +1068,10 @@ public:
                 .max_draft_tokens = speculative_options_.max_draft_tokens,
                 .policy = speculative_options_.dflash_policy}),
         ledger);
+    // Qwen's 256-row chunks are small. Preserve a bounded group before
+    // waiting, instead of synchronizing every half-MiB range individually.
+    resources->reassignment_batch_size = 16;
+    return resources;
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {
@@ -1095,6 +1116,7 @@ public:
                     speculative_enabled ? MaximumDecodeBatchWidth() : 0,
                 .prefix_reuse = true,
                 .partial_prefill_retention = true,
+                .prefill_rollback = true,
             },
         .persistence = persistence_,
     };
@@ -1103,6 +1125,8 @@ public:
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
     auto usage = hip::QwenGpuExecutor::EstimateMemoryUsage(
         model_->GetConfig(), max_context_, execution_policy_);
+    usage.request_state_bytes += hip::QwenGpuArena::RecurrentStateBytes(
+        model_->GetConfig(), execution_policy_);
     std::size_t resident_weights = model_->GetResidentBytes();
     if (dflash_model_ != nullptr) {
       const auto draft = hip::QwenDFlashGpuExecutor::EstimateMemoryUsage(
@@ -1238,64 +1262,69 @@ public:
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
     auto& qwen = RequireQwenState(state);
-    // A started pass must finish target and draft state together. Cancellation
-    // is observed between passes, where its completed frontier is retainable.
+    // Keep the entry recurrence pinned so cancellation can stop between
+    // layers without discarding already completed prompt work.
     auto activity = qwen.BeginPrefill();
-    if (offset != qwen.position()) {
-      throw std::logic_error(
-          "Qwen prefill offset does not match retained state");
-    }
-    if (offset >= prompt.size()) {
-      throw std::logic_error("Qwen prefill has no remaining input");
-    }
-    max_input_tokens = std::min<std::size_t>(
-        max_input_tokens, qwen.executor().GetMaxPromptBatch());
-    if (max_input_tokens != 0 && offset != 0 &&
-        qwen.ResumeGeneratedToken(prompt[offset],
-                                  offset + 1 == prompt.size())) {
-      return {.consumed_tokens = 1,
-              .decode_ready = offset + 1 == prompt.size()};
-    }
-    if (qwen.speculative()) {
-      if (offset == 0) {
-        const auto consumed = std::min(max_input_tokens, prompt.size());
+    try {
+      if (offset != qwen.position()) {
+        throw std::logic_error(
+            "Qwen prefill offset does not match retained state");
+      }
+      if (offset >= prompt.size()) {
+        throw std::logic_error("Qwen prefill has no remaining input");
+      }
+      max_input_tokens = std::min<std::size_t>(
+          max_input_tokens, qwen.executor().GetMaxPromptBatch());
+      if (max_input_tokens != 0 && offset != 0 &&
+          qwen.ResumeGeneratedToken(prompt[offset],
+                                    offset + 1 == prompt.size())) {
+        return {.consumed_tokens = 1,
+                .decode_ready = offset + 1 == prompt.size()};
+      }
+      if (qwen.speculative()) {
+        if (offset == 0) {
+          const auto consumed = std::min(max_input_tokens, prompt.size());
+          if (consumed == 0) {
+            throw std::logic_error(
+                "Qwen prefill requires a nonzero token budget");
+          }
+          qwen.PrimeSpeculative(prompt.first(consumed),
+                                consumed == prompt.size());
+          return {.consumed_tokens = consumed,
+                  .decode_ready = consumed == prompt.size()};
+        }
+        const std::size_t consumed =
+            std::min(max_input_tokens, prompt.size() - offset);
         if (consumed == 0) {
           throw std::logic_error(
-              "Qwen prefill requires a nonzero token budget");
+              "Qwen DFlash retained prefix has no suffix to prefill");
         }
-        qwen.PrimeSpeculative(prompt.first(consumed),
-                              consumed == prompt.size());
-        return {.consumed_tokens = consumed,
-                .decode_ready = consumed == prompt.size()};
+        qwen.ExtendSpeculative(prompt.subspan(offset, consumed),
+                               offset + consumed == prompt.size());
+        return {
+            .consumed_tokens = consumed,
+            .decode_ready = offset + consumed == prompt.size(),
+        };
       }
+
       const std::size_t consumed =
           std::min(max_input_tokens, prompt.size() - offset);
-      if (consumed == 0) {
-        throw std::logic_error(
-            "Qwen DFlash retained prefix has no suffix to prefill");
+      const bool decode_ready = offset + consumed == prompt.size();
+      const auto frontier = qwen.executor().ForwardPromptBatch(
+          prompt.subspan(offset, consumed), static_cast<std::uint32_t>(offset),
+          decode_ready);
+      qwen.set_position(offset + consumed);
+      if (decode_ready) {
+        qwen.set_frontier(frontier);
       }
-      qwen.ExtendSpeculative(prompt.subspan(offset, consumed),
-                             offset + consumed == prompt.size());
       return {
           .consumed_tokens = consumed,
-          .decode_ready = offset + consumed == prompt.size(),
+          .decode_ready = decode_ready,
       };
+    } catch (const hip::QwenPrefillCancelled&) {
+      activity.Rollback();
+      return {.interrupted = true};
     }
-
-    const std::size_t consumed =
-        std::min(max_input_tokens, prompt.size() - offset);
-    const bool decode_ready = offset + consumed == prompt.size();
-    const auto frontier = qwen.executor().ForwardPromptBatch(
-        prompt.subspan(offset, consumed), static_cast<std::uint32_t>(offset),
-        decode_ready);
-    qwen.set_position(offset + consumed);
-    if (decode_ready) {
-      qwen.set_frontier(frontier);
-    }
-    return {
-        .consumed_tokens = consumed,
-        .decode_ready = decode_ready,
-    };
   }
 
   [[nodiscard]] TextDecodeSelection SelectNext(

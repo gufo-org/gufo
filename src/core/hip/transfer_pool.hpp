@@ -23,6 +23,10 @@ enum class CopyDirection { kDeviceToHost, kHostToDevice };
 class TransferStream final : public cache::Stream {
 public:
   ~TransferStream() override;
+  // Before any Native submission, use an existing execution stream instead of
+  // the pool's stream. Retain its owner until both this lease and completion
+  // are released; synchronization and error draining use the bound stream.
+  void BindTo(hipStream_t, std::shared_ptr<void> owner);
   [[nodiscard]] hipStream_t Native() const;
   [[nodiscard]] cache::TransferResult Synchronize() noexcept override;
   [[nodiscard]] cache::Completion Complete();

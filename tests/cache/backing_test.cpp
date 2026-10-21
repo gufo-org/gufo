@@ -684,6 +684,60 @@ void Transfers() {
   assert(allocations == before + 2);  // only the explicitly created other pool
   assert(hipFree(device) == hipSuccess);
 }
+void BoundTransfers() {
+  struct Owner {
+    hipStream_t stream{};
+    bool& destroyed;
+    explicit Owner(bool& destroyed) : destroyed(destroyed) {
+      assert(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) ==
+             hipSuccess);
+    }
+    ~Owner() {
+      assert(hipStreamDestroy(stream) == hipSuccess);
+      destroyed = true;
+    }
+  };
+  for (const bool record_failure : {false, true}) {
+    bool destroyed = false;
+    auto owner = std::make_shared<Owner>(destroyed);
+    hip::TransferPool pool(1);
+    auto stream = pool.TryAcquire();
+    stream->BindTo(owner->stream, owner);
+    assert(stream->Native() == owner->stream);
+    Throws<std::logic_error>([&] { stream->BindTo(owner->stream, owner); });
+    std::atomic<bool> ran{false};
+    assert(hipLaunchHostFunc(
+               stream->Native(),
+               [](void* value) {
+                 static_cast<std::atomic<bool>*>(value)->store(true);
+               },
+               &ran) == hipSuccess);
+    owner.reset();
+    assert(!destroyed);
+    if (record_failure) {
+      fail_record = true;
+      Throws<std::runtime_error>([&] { (void)stream->Complete(); });
+      fail_record = false;
+      assert(ran && !destroyed);
+      stream.reset();
+      assert(destroyed && !pool.TryAcquire());
+    } else {
+      std::optional<cache::Completion> done(stream->Complete());
+      assert(done->Wait() == Result::kSucceeded && ran);
+      stream.reset();
+      assert(!destroyed && !pool.TryAcquire());
+      done.reset();
+      assert(destroyed && pool.TryAcquire());
+    }
+  }
+  bool destroyed = false;
+  auto owner = std::make_shared<Owner>(destroyed);
+  hip::TransferPool pool(1);
+  auto stream = pool.TryAcquire();
+  Throws<std::invalid_argument>([&] { stream->BindTo(nullptr, owner); });
+  (void)stream->Native();
+  Throws<std::logic_error>([&] { stream->BindTo(owner->stream, owner); });
+}
 void LifetimeAndFailures() {
   std::optional<cache::Completion> completion;
   {
@@ -1048,6 +1102,7 @@ int main(int argc, char** argv) {
   OnDemandBacking();
   CaptureCapacity();
   Transfers();
+  BoundTransfers();
   LifetimeAndFailures();
   PendingStreams();
   AcquireAllocationFailure();

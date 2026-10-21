@@ -44,7 +44,7 @@ SAMPLING = {
     "--repeat-penalty": ("repeat_penalty", float),
     "--repeat-last-n": ("repeat_last_n", int),
 }
-COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "tier", "request_timeout",
+COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "request_timeout", "tier",
                      "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256",
                      "expected_input_modalities")
 
@@ -343,8 +343,7 @@ def main():
               "binary": str(Path(command[0]).resolve()),
               "mode": "baseline" if args.record_baseline else "qualification",
               "sampling_preset": args.sampling_preset, "sampling_overrides": overrides,
-              "tier": args.tier,
-              "request_timeout": args.request_timeout,
+              "request_timeout": args.request_timeout, "tier": args.tier,
               "vision": vision, "speculative": speculative,
               "suites": {}, "through_case": args.through_case,
               "allow_missing_progress": args.allow_missing_progress,

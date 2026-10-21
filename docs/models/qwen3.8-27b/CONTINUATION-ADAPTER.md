@@ -72,11 +72,25 @@ requires an invalidation; image inputs after its frontier can be attached.
 Legacy snapshots retain their existing caller responsibility to supply the
 matching image input; their payload format is unchanged.
 
-Serving uses committed host backing in equal segments of about 1 GiB, admitted
-above both host and device heap reserves, and fixed 1 MiB disk staging. Completed
-prefill passes finish target and draft state together before cancellation is
-observed. Qwen's legacy server snapshot hooks are removed; standalone native
+Serving uses committed host backing in equal segments of about 128 MiB, admitted
+above both host and device heap reserves, and fixed 1 MiB disk staging. Each
+prefill pass pins its entry recurrent buffer; writes use the existing rollback
+pair. Cancellation can stop between layers and restore that pointer, preserving
+completed prompt work without copying another checkpoint. The second recurrent
+buffer is allocated before readiness and counted in the per-session memory
+claim. Cancellation occurs before the target vocabulary head and draft
+catch-up, leaving their previous frontier intact. Qwen's legacy server snapshot
+hooks are removed; standalone native
 snapshots remain available and DeepSeek keeps its legacy serving path.
+
+Qwen restores use the destination executor's stream to avoid the pooled-stream
+wait observed behind another session's cancelled prefill. Cold reassignment
+preserves up to sixteen complete row chunks before waiting for their copies.
+All copies and existing source readers settle before the old execution can be
+reset; cancellation or a failed copy drains pending work before releasing its
+source pins. Larger
+ranges retain bounded piecewise preservation. Idle copying and disk staging
+keep their existing bounds, and Flash-Next retains serial reassignment.
 
 Earlier capacity and capture/restore measurements remain recorded in card 15
 against their original revisions. Current Q4/Q8 AR/DFlash2 cache-serving checks
@@ -95,7 +109,9 @@ nix develop -c cmake --build --preset gpu-test \
 nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test "$MODEL"
 ```
 
-`--guard-only`, `--image-only` and `--draft "$DRAFT"` select focused follow-ups.
+`--guard-only`, `--image-only`, `--prefill-cancel` and `--draft "$DRAFT"` select
+focused follow-ups. The cancellation check compares full component bytes and
+resumed logits against an uninterrupted pass in both KV layouts.
 The draft check restores into another slot and checks component bytes, injected
 position, sampled proposals/RNG and feedback/controller state. The portable
 `qwen27b_continuation_layout_test` covers checked geometry and policy identity;

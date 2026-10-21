@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -33,6 +34,11 @@
 #include "src/models/qwen/vision/device_input.hpp"
 
 namespace gufo::hip {
+
+class QwenPrefillCancelled final : public std::runtime_error {
+public:
+  QwenPrefillCancelled() : std::runtime_error("Qwen prefill cancelled") {}
+};
 
 class HipblasLtGemm;
 class QwenGpuExecutor;
@@ -341,6 +347,8 @@ public:
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
       const core::ModelConfig& config, std::uint32_t max_context,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+  [[nodiscard]] static std::size_t RecurrentStateBytes(
+      const core::ModelConfig& config, QwenExecutionPolicy policy);
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;

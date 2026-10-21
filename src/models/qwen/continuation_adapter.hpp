@@ -34,6 +34,9 @@ public:
   // A next-token frontier with logits from the last executed position. A
   // partial-prefill restore carries a placeholder token without logits.
   [[nodiscard]] bool HasDecodeFrontier(const cache::Slot&) const;
+  void BeginPrefill(cache::Slot&);
+  void FinishPrefill(cache::Slot&) noexcept;
+  void RollbackPrefill(cache::Slot&);
   [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
       std::size_t ram_bytes) const {
     return layout_.BackingPlan(ram_bytes);

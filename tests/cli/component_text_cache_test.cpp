@@ -311,6 +311,101 @@ void ColdAcquireResetsOnce() {
   assert(!second->cache_hit());
   assert(runner->adapter->Invalidations() == 2);
 }
+void ColdAssignmentAvoidsDrainingCancelledSlot(bool deep = false) {
+  auto runner = std::make_shared<Runner>();
+  runner->defer_idle = true;
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  std::vector<TextRunnerToken> prompt(deep ? 4096 : 3);
+  std::iota(prompt.begin(), prompt.end(), 1);
+  auto completed = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(completed->state());
+  auto* ready_slot = &state.slot;
+  runner->adapter->Append(state.slot, prompt, prompt);
+  const auto hash = runner->adapter->RecurrentHash(state.slot);
+  if (deep) {
+    assert(completed->TryReserveSnapshot(
+        completed->CaptureBytes(), prompt.size(), false,
+        SnapshotPurpose::kContinuation, prompt));
+    assert(completed->PublishSnapshot(prompt, completed->Capture(), false));
+    runner->adapter->GuardRows(state.slot, cache::testing::kTarget, 0,
+                               prompt.size());
+    runner->adapter->GuardRows(state.slot, cache::testing::kDraft, 0,
+                               prompt.size());
+  }
+  (void)completed->Commit({}, {}, prompt);
+
+  const std::vector<TextRunnerToken> long_prompt{11, 12, 13};
+  auto cancelled = cache.Acquire(long_prompt, {}, {}, true, 0, true);
+  auto* draining = &dynamic_cast<State&>(cancelled->state()).slot;
+  assert(draining != ready_slot);
+  runner->adapter->SetExecutionComplete(*draining, false);
+  cancelled->Invalidate();
+
+  const std::vector<TextRunnerToken> unrelated{21, 22, 23};
+  auto peer = cache.Acquire(unrelated, {}, {}, true, 0, true);
+  assert(&dynamic_cast<State&>(peer->state()).slot == ready_slot &&
+         "an unrelated peer waited for a draining cancelled slot");
+  // Readiness is a preference, not an admission condition. If the ready slot
+  // is occupied, the remaining slot is still available for ordered reuse.
+  auto fallback = cache.Acquire(unrelated, {}, {}, false, 0, true);
+  assert(&dynamic_cast<State&>(fallback->state()).slot == draining);
+  runner->adapter->SetExecutionComplete(*draining, true);
+  peer->Invalidate();
+  fallback->Invalidate();
+  if (deep) {
+    auto restored = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(restored->cached_tokens() == prompt.size());
+    auto& restored_state = dynamic_cast<State&>(restored->state());
+    assert(runner->adapter->RecurrentHash(restored_state.slot) == hash);
+  }
+}
+void ColdAssignmentKeepsOneDuplicateDeepFrontier() {
+  auto runner = std::make_shared<Runner>();
+  runner->defer_idle = true;
+  ComponentTextCache cache(runner, 3, 1 << 22, {});
+  std::vector<TextRunnerToken> conversation(4096);
+  std::iota(conversation.begin(), conversation.end(), 10);
+  const auto prefix = std::span(conversation).first(4088);
+  const auto reply = std::span(conversation).last(8);
+  auto first = cache.Acquire(conversation, {}, {}, true, 0, true);
+  auto& first_state = dynamic_cast<State&>(first->state());
+  runner->adapter->Append(first_state.slot, prefix, prefix);
+  assert(first->TryReserveSnapshot(first->CaptureBytes(), prefix.size(), false,
+                                   SnapshotPurpose::kContinuation, prefix));
+  assert(first->PublishSnapshot({prefix.begin(), prefix.end()},
+                                first->Capture(), false));
+  runner->adapter->GuardRows(first_state.slot, cache::testing::kTarget, 0,
+                             prefix.size());
+  runner->adapter->GuardRows(first_state.slot, cache::testing::kDraft, 0,
+                             prefix.size());
+  // A sibling restores the same ancestor while the leader remains leased.
+  auto second = cache.Acquire(conversation, {}, {}, true, 0, true);
+  assert(second->cached_tokens() == prefix.size());
+  auto& second_state = dynamic_cast<State&>(second->state());
+  runner->adapter->Append(first_state.slot, reply, reply);
+  runner->adapter->Append(second_state.slot, reply, reply);
+  const auto hash = runner->adapter->RecurrentHash(first_state.slot);
+  assert(runner->adapter->RecurrentHash(second_state.slot) == hash);
+  (void)first->Commit({}, {}, conversation);
+  (void)second->Commit({}, {}, conversation);
+
+  const std::vector<TextRunnerToken> short_prompt{2, 3, 4};
+  auto cancelled = cache.Acquire(short_prompt, {}, {}, true, 0, true);
+  auto* draining = &dynamic_cast<State&>(cancelled->state()).slot;
+  runner->adapter->SetExecutionComplete(*draining, false);
+  cancelled->Invalidate();
+  auto peer = cache.Acquire(short_prompt, {}, {}, false, 0, true);
+  assert(&dynamic_cast<State&>(peer->state()).slot != draining);
+  // Once one copy is reassigned, the other is unique and must stay live.
+  auto fallback = cache.Acquire(short_prompt, {}, {}, false, 0, true);
+  assert(&dynamic_cast<State&>(fallback->state()).slot == draining);
+  auto retained = cache.Acquire(conversation, {}, {}, true, 0, true);
+  assert(retained->cached_tokens() == conversation.size() &&
+         !retained->restored_snapshot_bytes());
+  assert(runner->adapter->RecurrentHash(
+             dynamic_cast<State&>(retained->state()).slot) == hash);
+  runner->adapter->SetExecutionComplete(*draining, true);
+}
 void FailedRestoreResetsOnce() {
   auto runner = std::make_shared<Runner>();
   ComponentTextCache cache(runner, 2, 1 << 22, {});
@@ -486,6 +581,37 @@ void CancelledPrefillKeepsCompletedSteps() {
     assert(resend.cached_prompt_tokens() == (partial ? 16 : 0));
     resend.Invalidate();
   }
+}
+void SharedPeerReusesTheCurrentStableCapture() {
+  for (const bool settled : {false, true}) {
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 2);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto leader = pool.Acquire(prompt, {}, {}, {}, true, 33);
+    const auto first = leader.Prefill(64);
+    assert(first.consumed_tokens == 33 && !first.decode_ready);
+    if (settled)
+      leader.CapturePromptSnapshot();
+    assert(leader.ShareCheckpoint(prompt.size()) == 33 &&
+           "sharing inserted an extra prefill after the stable boundary");
+    const auto last = leader.Prefill(64);
+    assert(last.consumed_tokens == 7 && last.decode_ready);
+    auto peer = pool.Acquire(prompt, {}, {}, {}, true, 33);
+    assert(peer.cached_prompt_tokens() == 33);
+    assert(peer.Prefill(64).consumed_tokens == 7);
+    assert(Generate(peer) == Generate(leader));
+    peer.Invalidate();
+    leader.Invalidate();
+  }
+  auto runner = std::make_shared<Runner>();
+  TextRunnerPool pool(runner, 1);
+  const std::vector<TextRunnerToken> prompt(40, 9);
+  auto leader = pool.Acquire(prompt);
+  assert(leader.Prefill(16).consumed_tokens == 16);
+  assert(leader.ShareCheckpoint(prompt.size()) > 16 &&
+         "an uncaptured partial pass cannot be offered to a peer");
+  leader.Invalidate();
 }
 void PrefillLookaheadReachesTheNextFrontier() {
   class LookaheadRunner final : public Runner {
@@ -721,6 +847,9 @@ void ColdSideRequestsKeepPreservedDeepFrontier() {
     auto side = cache.Acquire(short_prompt, {}, {}, true, 0, true);
     auto& state = dynamic_cast<State&>(side->state());
     runner->adapter->Append(state.slot, short_prompt, short_prompt);
+    // Readiness must not let short cancelled traffic evict the deep reply,
+    // even though its older checkpoint has finished preservation.
+    runner->adapter->SetExecutionComplete(state.slot, false);
     (void)side->Commit({}, {}, short_prompt);
   }
   auto resumed = cache.Acquire(conversation, {}, {}, true, 0, true);
@@ -1544,6 +1673,7 @@ void UnbackedDeepRowsSurviveDiskRestart() {
 int main() {
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
+  SharedPeerReusesTheCurrentStableCapture();
   BackingPreparationFollowsCaptures();
   PrefillLookaheadReachesTheNextFrontier();
   PartialFrontierDoesNotServeAnEqualPrompt();
@@ -1551,6 +1681,9 @@ int main() {
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
   ColdAcquireResetsOnce();
+  ColdAssignmentAvoidsDrainingCancelledSlot();
+  ColdAssignmentAvoidsDrainingCancelledSlot(true);
+  ColdAssignmentKeepsOneDuplicateDeepFrontier();
   FailedRestoreResetsOnce();
   RestoreFromBusyBorrowedSource();
   ImageAfterCachedTextPrefixCaptures();

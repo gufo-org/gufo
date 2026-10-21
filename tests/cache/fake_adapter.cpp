@@ -86,6 +86,9 @@ public:
     ReleaseRows();
   }
   bool IsValid() const noexcept override { return valid; }
+  bool ExecutionComplete() const noexcept override {
+    return execution_complete;
+  }
   void ReleaseRows() noexcept {
     if (!target.empty())
       guard_.BeforeRelease(kTarget, 0, target.size());
@@ -105,6 +108,7 @@ public:
   mutable std::size_t pending_reads{0};
   std::size_t pending_loads{0};
   bool valid{true};
+  bool execution_complete{true};
   bool restoring{false};
   bool private_loaded{false};
   std::array<bool, 32> private_pieces{};
@@ -251,6 +255,9 @@ void FakeAdapter::SetPrefillPassRows(Rows rows) {
   if (!rows)
     throw std::invalid_argument("empty prefill pass");
   prefill_pass_rows_ = rows;
+}
+void FakeAdapter::SetExecutionComplete(Slot& slot, bool complete) {
+  AsSlot(slot).execution_complete = complete;
 }
 std::vector<Rows> FakeAdapter::PlanPrefill(const Slot& slot, Rows first,
                                            Rows end) const {

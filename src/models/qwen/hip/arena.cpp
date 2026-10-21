@@ -417,21 +417,34 @@ QwenGpuMemoryUsage QwenGpuArena::EstimateMemoryUsage(
       policy.UsesFp16AttentionKv() ? sizeof(std::uint16_t) : sizeof(float),
       &state);
 
+  CheckedAdd(RecurrentStateBytes(config, policy), &state);
+  return usage;
+}
+
+std::size_t QwenGpuArena::RecurrentStateBytes(const core::ModelConfig& config,
+                                              QwenExecutionPolicy policy) {
+  std::size_t state = 0;
   const std::size_t total_conv = CheckedMultiply(
-      CheckedMultiply(config.SsmLayerCount(), ssm_qkv), config.ssm_conv_kernel);
+      CheckedMultiply(config.SsmLayerCount(), config.SsmQkvSize()),
+      config.ssm_conv_kernel);
   AddAllocation(total_conv, sizeof(float), &state);
   const std::size_t total_deltanet = CheckedMultiply(
-      CheckedMultiply(CheckedMultiply(config.SsmLayerCount(), time_step),
-                      config.ssm_state_size),
+      CheckedMultiply(
+          CheckedMultiply(config.SsmLayerCount(), config.ssm_time_step_rank),
+          config.ssm_state_size),
       config.SsmValueSize());
   AddAllocation(total_deltanet,
                 QwenRecurrentStateElementBytes(policy.recurrent_state_storage),
                 &state);
-  return usage;
+  return state;
 }
 
 QwenGpuMemoryUsage QwenGpuArena::GetMemoryUsage() const {
-  return EstimateMemoryUsage(config_, max_context_, policy_);
+  auto usage = EstimateMemoryUsage(config_, max_context_, policy_);
+  if (d_ssm_conv_buffers_[1] && d_ssm_deltanet_buffers_[1])
+    CheckedAdd(RecurrentStateBytes(config_, policy_),
+               &usage.request_state_bytes);
+  return usage;
 }
 
 std::size_t QwenGpuArena::SnapshotPayloadBytes(

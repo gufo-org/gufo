@@ -3,6 +3,53 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+Qwen 27B deep-history recovery uses separate, explicitly selected workloads:
+
+```sh
+python3 tests/functional/deep_peers_qwen.py \
+  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --mode ar --source-revision BUILD_SHA --expect-component --out /tmp/qwen-deep
+python3 tests/functional/over_ram_qwen.py \
+  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --mode dflash2 --draft /path/to/dflash2.gguf \
+  --source-revision BUILD_SHA --expect-component --out /tmp/qwen-over-ram
+```
+
+Each starts its own loopback server, retains responses, loaded mode, actual draft
+counts and process/host memory samples, and removes only its owned disk cache
+after retaining an inventory. Use a new output directory for every invocation.
+The deep workload verifies 140K+ tokens, observes a published checkpoint before
+SIGKILL, checks newest compatible checkpoint selection after restarts and peers,
+and compares recovery with `cache_prompt: false` at temperature zero. The over-RAM
+workload verifies a completed cancellation frontier survives short peers and
+requires a rewritten final message to wait for successful deeper publication.
+That edited fork must select the observed published frontier; it cannot require
+a previous live boundary that has no restorable checkpoint.
+It fails if that publication race was not exercised. These are correctness
+workloads outside hosted model CI; retained phase times do not qualify speed.
+CPU evidence-refusal checks run with
+`python3 -m unittest discover -s tests/functional -p test_qwen_recovery.py`;
+they do not establish model correctness.
+
+Qwen 27B cancellation inside a prefill pass has a focused latency regression
+check. It disconnects both a cold prompt and a partially completed prompt,
+serves a short cached peer, then verifies retained work and resumed output:
+
+```sh
+nix develop -c python3 tests/functional/qwen_prefill_cancel.py \
+  --output /tmp/qwen-prefill-cancel -- \
+  /path/to/production/gufo serve llm --model /path/to/qwen27b.gguf \
+  --speculative dflash2 --dflash-model /path/to/draft.gguf
+```
+
+Use `--speculative off` for AR. The test owns its loopback server, records each
+request's phase timings and rejects a multi-second prefill blocking the short
+peer. Apply the usual matched 5% and 3 ms timing gates to its retained results.
+Add `--deep-peers` before `--` and serve with `--sessions 4` to fill the other
+slots with duplicate deep conversations. This checks that a short request
+after cancellation can reuse a redundant slot while another live copy retains
+the generated frontier. It also rejects the roughly 280 ms restore stall.
+
 Flash-Next prompt lookup has a focused MTP runner. It requires actual accepted
 copies, compares isolated and C2/C4/C6/C8 requests under greedy and the model's
 default sampling, mixes greedy copies with new text at C8, and checks stops
@@ -62,31 +109,6 @@ use its target weights, and select `--speculative off` or
 `--speculative dflash2 --dflash-model /path/to/draft.gguf` in the server command.
 Commands, startup times, request timings, responses and logs
 remain in the output directory. This check stays outside hosted model CI.
-Qwen 27B deep-history recovery uses separate, explicitly selected workloads:
-
-```sh
-python3 tests/functional/deep_peers_qwen.py \
-  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
-  --mode ar --source-revision BUILD_SHA --expect-component --out /tmp/qwen-deep
-python3 tests/functional/over_ram_qwen.py \
-  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
-  --mode dflash2 --draft /path/to/dflash2.gguf \
-  --source-revision BUILD_SHA --expect-component --out /tmp/qwen-over-ram
-```
-
-Each starts its own loopback server, retains responses, loaded mode, actual draft
-counts and process/host memory samples, and removes only its owned disk cache
-after retaining an inventory. Use a new output directory for every invocation.
-The deep workload verifies 140K+ tokens, observes a published checkpoint before
-SIGKILL, checks newest compatible checkpoint selection after restarts and peers,
-and compares recovery with `cache_prompt: false` at temperature zero. The over-RAM
-workload verifies a completed cancellation frontier survives short peers and
-requires a rewritten final message to wait for successful deeper publication.
-It fails if that publication race was not exercised. These are correctness
-workloads outside hosted model CI; retained phase times do not qualify speed.
-CPU evidence-refusal checks run with
-`python3 -m unittest discover -s tests/functional -p test_qwen_recovery.py`;
-they do not establish model correctness.
 
 The cluster workflow uses [impact.json](impact.json) to select suites from changed
 paths. Inspect a plan locally without running Gufo:

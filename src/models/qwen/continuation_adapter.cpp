@@ -117,6 +117,10 @@ public:
   bool IsValid() const noexcept override {
     return guarding || (!restoring && !failed && !executor->reset_failure_);
   }
+  bool ExecutionComplete() const noexcept override {
+    return hipStreamQuery(executor->arena_.stream) == hipSuccess &&
+           (!draft || hipStreamQuery(draft->executor_->stream_) == hipSuccess);
+  }
   void BeforeExecution() override {
     if (invalidating)
       return;
@@ -156,12 +160,15 @@ public:
     failed = true;
   }
   void AfterReset() override {
-    Check(hipStreamSynchronize(executor->arena_.stream));
+    // Execution uses this same stream, and cross-stream captures explicitly
+    // wait for it. A reset need not block admission of an unrelated request.
     position = 0;
     logits_valid = false;
     verification = false;
     failed = false;
     native_restoring = false;
+    if (prefill_position)
+      executor->arena_.SaveState(0);
   }
   void BeforeRestore() override {
     BeforeExecution();
@@ -219,14 +226,17 @@ public:
     bool previous;
   };
   void Stable() const {
-    if (!IsValid() || verification || (draft && draft->proposal_active_))
+    if (!IsValid() || verification || prefill_position ||
+        (draft && draft->proposal_active_))
       throw std::logic_error("Qwen capture requires a stable frontier");
   }
   ContinuationAdapter& adapter;
   cache::MutationGuard& guard;
-  std::unique_ptr<hip::QwenGpuExecutor> executor;
+  std::shared_ptr<hip::QwenGpuExecutor> executor;
   std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
   std::uint32_t position{};
+  std::optional<std::uint32_t> prefill_position;
+  bool prefill_logits{};
   bool logits_valid{}, verification{}, restoring{}, guarding{}, invalidating{},
       native_restoring{}, validating{};
   std::atomic<bool> failed{false};
@@ -343,6 +353,33 @@ bool ContinuationAdapter::HasDecodeFrontier(const cache::Slot& slot) const {
   return state.frontier.token &&
          (state.logits_valid || !state.frontier.logits.empty());
 }
+void ContinuationAdapter::BeginPrefill(cache::Slot& slot) {
+  auto& state = As(slot);
+  state.Stable();
+  state.BeforeExecution();
+  state.executor->arena_.SaveState(state.position);
+  state.prefill_position = state.position;
+  state.prefill_logits = state.logits_valid;
+}
+void ContinuationAdapter::FinishPrefill(cache::Slot& slot) noexcept {
+  auto& state = static_cast<State&>(slot);
+  state.executor->arena_.has_saved_state_ = false;
+  state.prefill_position.reset();
+}
+void ContinuationAdapter::RollbackPrefill(cache::Slot& slot) {
+  auto& state = As(slot);
+  if (!state.prefill_position)
+    throw std::logic_error("Qwen prefill has no rollback frontier");
+  auto& executor = *state.executor;
+  // Prefill cancellation is checked before the vocabulary head and before
+  // draft catch-up. Only the other recurrent buffer and suffix KV changed.
+  executor.arena_.RestoreState();
+  executor.h_prompt_hidden_.clear();
+  state.position = *state.prefill_position;
+  state.logits_valid = state.prefill_logits;
+  state.failed = false;
+  FinishPrefill(slot);
+}
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
   return {.continuation = true, .persistent_encoding = true};
 }
@@ -357,6 +394,9 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
     cache::MutationGuard& guard) {
   auto executor =
       std::make_unique<hip::QwenGpuExecutor>(model_, context_, policy_);
+  // Prepare the rollback pair before readiness. Pinning the current buffer
+  // for a prefill pass then requires neither an allocation nor a state copy.
+  executor->arena_.AllocateRecurrentSnapshot();
   std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
   if (draft_model_) {
     std::string error;
@@ -445,6 +485,11 @@ cache::Completion ContinuationAdapter::Transfer(
     State& state, bool load, cache::Stream& stream,
     const std::function<void(hip::TransferStream&)>& submit) {
   auto& native = dynamic_cast<hip::TransferStream&>(stream);
+  // Restore through the exclusively leased destination session. A pooled
+  // transfer stream can be queued behind another session's cancelled prefill.
+  // The stream lease keeps this executor alive through completion and cleanup.
+  if (load)
+    native.BindTo(state.executor->arena_.stream, state.executor);
   auto job = std::make_shared<State::Job>();
   job->owner = &state;
   job->load = load;
@@ -586,11 +631,15 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
         total / draft.history_capacity_ *
         std::min(draft.injected_context_len_, draft.history_capacity_);
     return Transfer(state, false, stream, [&](hip::TransferStream& transfer) {
-      std::ranges::fill(bytes, std::byte{});
-      if (offset < valid)
-        Check(hip::CopySnapshotToHost(
-            bytes.data(), static_cast<std::byte*>(source) + offset,
-            std::min(bytes.size(), valid - offset), transfer.Native()));
+      // The copy overwrites valid ring bytes. Only the unused tail needs
+      // canonical zeros, including when a piece straddles that boundary.
+      const auto copied =
+          offset < valid ? std::min(bytes.size(), valid - offset) : 0;
+      std::fill(bytes.begin() + copied, bytes.end(), std::byte{});
+      if (copied)
+        Check(hip::CopySnapshotToHost(bytes.data(),
+                                      static_cast<std::byte*>(source) + offset,
+                                      copied, transfer.Native()));
     });
   }
   return Transfer(state, false, stream, [&](hip::TransferStream& transfer) {
