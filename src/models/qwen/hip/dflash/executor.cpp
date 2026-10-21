@@ -842,6 +842,12 @@ bool QwenDFlashGpuExecutor::InjectTargetContextChunk(
   if (cpy_err != hipSuccess) {
     return false;
   }
+  // The caller may reuse pinned prompt rows on every return, including when a
+  // later operation throws. Keep the existing wait on the successful path.
+  struct DrainContextUpload {
+    hipStream_t stream;
+    ~DrainContextUpload() { (void)hipStreamSynchronize(stream); }
+  } drain{stream_};
 
   // FC Projection & Norm
   RunInjectGemm(weights.fc_projection, d_target_features_, d_fused_features_,
@@ -902,7 +908,6 @@ bool QwenDFlashGpuExecutor::InjectTargetContextChunk(
 
   injected_context_len_ =
       std::max(injected_context_len_, position + num_tokens);
-  (void)hipStreamSynchronize(stream_);
   return true;
 }
 
