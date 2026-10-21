@@ -170,6 +170,30 @@ def main():
                     replay = record(f"resume-{row}", chat_result(client, bodies[row], True))
                     same(controls[row], replay)
 
+                # Exercise the exact compact-target boundary and its complete
+                # vocabulary fallbacks. Each mode must replay through a warm
+                # cache and a stop inside the copied passage.
+                for label, settings in (
+                    ("top64", {"top_k": 64}),
+                    ("top65", {"top_k": 65}),
+                    ("unbounded", {"top_k": 0}),
+                    ("floor65", {"top_k": 20, "min_keep": 65}),
+                ):
+                    body = {**bodies[1], "extra_body": settings}
+                    control = record(
+                        f"sampling-{label}", chat_result(client, body, True))
+                    assert not control["reasoning"] and not control["tools"], control
+                    assert control["text"] and sources[1].startswith(control["text"]), control
+                    replay = record(
+                        f"sampling-{label}-replay", chat_result(client, body))
+                    same(control, replay)
+                    assert replay["usage"]["gufo"]["prefill_tokens"] == 0, replay
+                    marker = "Friday, Monday"
+                    stopped = record(f"sampling-{label}-stop", chat_result(
+                        client, {**body, "stop": marker}, True))
+                    assert stopped["text"] == control["text"].split(marker)[0], stopped
+                    assert stopped["finish"] == "stop", stopped
+
                 if option(command, "--mmproj") is not None:
                     for row in (0, 1):
                         body = {**bodies[row], "messages": [

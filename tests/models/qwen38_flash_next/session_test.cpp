@@ -878,6 +878,13 @@ void CheckLookupBatch(const std::shared_ptr<qfn::Model>& model) {
     config.repeat_penalty = 1;
     config.frequency_penalty = 0;
     config.presence_penalty = 0;
+    if (i % 4 == 1) {
+      // Mix default sampled verification with unbounded sampling and greedy
+      // peers, retaining exact per-session logits and replay across C2..C8.
+      config.top_k = 20;
+      config.top_p = 0.8F;
+      config.presence_penalty = 1.5F;
+    }
     samplers.emplace_back(
         config, std::vector<sampling::TokenId>(prompt.begin(), prompt.end()));
     twins.push_back(samplers.back());

@@ -28,6 +28,10 @@ public:
     is_cancelled_ = std::move(check);
   }
   void RestoreLayout(const RopeLayout& layout, hipStream_t stream);
+  /// Reserve the stable empty descriptor before capturing text graphs in a
+  /// session that can later receive images. Existing graphs then keep the
+  /// same pointer when the image layout is installed.
+  void PrepareRope(hipStream_t stream);
   void Inject(float* hidden, std::uint32_t position, std::uint32_t count,
               std::uint32_t width, std::uint32_t hc, hipStream_t stream);
   [[nodiscard]] const DeviceRope* rope() const noexcept { return descriptor_; }

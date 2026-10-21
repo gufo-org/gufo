@@ -2,8 +2,8 @@
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target and
 shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.
-All Gufo tables measured October 18, 2026, with `fec4759d` and the
-validated host-memory and cache-stall fixes.
+The complete October 18, 2026 Gufo sweeps use `fec4759d` and the validated
+host-memory and cache-stall fixes; the focused October 21 follow-up is separate.
 Reference results remain unchanged from September 22–23.
 llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
 
@@ -24,6 +24,73 @@ the sweep and one focused repeat. Initial PP dips at 16K/32K/64K did not
 repeat against current main; both observations remain included.
 Prior mixed MTP C2 repeats show two draft-controller trajectories (about 54
 and 60 tok/s, identical text), so its gain is not entirely attributable to lookup.
+
+## Sampled decode follow-up, October 21
+
+Focused production comparison against main `0c03748a`, candidate `1d3b8c68`,
+with the same Nix toolchain, weights and ordered request histories. Model
+defaults are used for sampled requests; concurrency is physical, and the C>1
+rates sum the individual decode rates. These measurements qualify the decode
+changes separately from the complete October 18 tables below. They do not
+refresh the reference data.
+
+| Workload | Main tok/s | Candidate tok/s |
+| --- | ---: | ---: |
+| Copy existing code, default sampling, C1 | 109.59 | 112.30 |
+| Generate new code, default sampling, C1 | 75.18 | 75.40 |
+| Generate prose, default sampling, C1 | 39.74 | 39.76 |
+| Thinking/code, default sampling, C1 | 51.93 | 52.05 |
+| Greedy code control, C1 | 70.42 | 70.51 |
+| Default-sampled copying, C2 aggregate | 132.93 | 135.45 |
+
+These 128-token screens retain identical outputs and prompt/cache counts;
+all 276 matched request/phase measurements pass the 5% and 3 ms gate. The
+screens measure speed, not complete coding-task accuracy.
+
+Earlier complete-workflow and mixed-cohort checks against main `da5d5a2b`,
+before rebasing onto the merged small-prefill changes, remain separate:
+
+| Workload | Main tok/s | Candidate tok/s |
+| --- | ---: | ---: |
+| Extraction with thinking, 726 tokens | 82.52 | 82.76 |
+| Generate and execute URI tests, 441 tokens | 78.54 | 78.79 |
+| File-edit tool call at 32K, thinking off | 76.42 | 77.01 |
+| File-edit tool call at 32K, thinking on | 72.40 | 72.47 |
+| Mixed greedy/default-sampled copying, C2 | 137.63 | 139.50 |
+| Mixed greedy/default-sampled copying, C4 | 200.22 | 202.94 |
+| Mixed greedy/default-sampled copying, C6 | 218.78 | 221.54 |
+| Mixed greedy/default-sampled copying, C8 | 237.34 | 240.87 |
+
+All outputs in these matched captures agree. The extraction, URI and file-edit
+fixtures check their actual results. A real Pi conversation also passes, with ten
+successful tool calls and executed assertions; its unseeded run is correctness
+evidence, not a matched speed claim.
+
+Canonical greedy pp2048/tg128 spots on current main and candidate use the
+original single-user context capacity and cache preparation:
+
+| Mode | Cached depth | Main PP | Candidate PP | Main TG | Candidate TG |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 0 | 1793.17 | 1792.97 | 28.87 | 28.88 |
+| AR | 32,768 | 1651.93 | 1650.85 | 28.74 | 28.77 |
+| MTP mixed | 0 | 1724.11 | 1727.57 | 36.18 | 36.31 |
+| MTP mixed | 32,768 | 1607.67 | 1605.39 | 40.56 | 40.51 |
+| MTP repetitive | 0 | 1737.22 | 1733.71 | 118.61 | 120.25 |
+| MTP repetitive | 32,768 | 1609.07 | 1609.65 | 113.61 | 115.07 |
+
+Concurrent greedy TG: repetitive C2 166.15 → 170.96, repetitive C8
+245.05 → 247.09, mixed C8 133.65 → 134.61 tok/s. All measured concurrent
+completions match isolated AR controls.
+
+Mixed C2 remains variable: the current pair is 62.17 → 55.30 tok/s and the
+focused reverse-order control is 53.30 → 55.29. The pre-rebase pair was
+62.17 → 55.36 and its reverse-order repeat was 53.30 → 64.03. Main proposes
+93 versus 39 drafts per response across its current runs; the final candidate
+proposes 56 in both. Both builds produce identical text. These observations do
+**not** establish a C2 speedup or a confirmed slowdown. Individual cache,
+queue and preparation timing flags remain visible in the
+[quality record](QUALITY.md#exact-sampled-decode-october-21-2026); no blanket
+timing pass is claimed.
 
 ## Single user, autoregressive
 
