@@ -25,6 +25,58 @@ repeat against current main; both observations remain included.
 Prior mixed MTP C2 repeats show two draft-controller trajectories (about 54
 and 60 tok/s, identical text), so its gain is not entirely attributable to lookup.
 
+## Sampled decode follow-up, October 21
+
+Focused production comparison against main `da5d5a2b`, same Nix toolchain,
+weights and ordered request histories. Model defaults are used for sampled
+requests; concurrency is physical, and the C>1 rates sum the individual decode
+rates. These measurements qualify the decode changes separately from the
+complete October 18 tables below. They do not refresh the reference data.
+
+| Default-sampled workload | Main tok/s | Candidate tok/s |
+| --- | ---: | ---: |
+| Copy existing code, C1, 128-token screen | 109.54 | 112.26 |
+| Generate new code, C1, 128-token screen | 75.27 | 75.42 |
+| Thinking/code, C1, 128-token screen | 51.90 | 52.03 |
+| Extraction with thinking, 726 tokens | 82.52 | 82.76 |
+| Generate and execute URI tests, 441 tokens | 78.54 | 78.79 |
+| File-edit tool call at 32K, thinking off | 76.42 | 77.01 |
+| File-edit tool call at 32K, thinking on | 72.40 | 72.47 |
+| Copying, C2 | 137.63 | 139.50 |
+| Copying, C4 | 200.22 | 202.94 |
+| Copying, C6 | 218.78 | 221.54 |
+| Copying, C8 | 237.34 | 240.87 |
+
+All outputs in these matched captures agree. The short screens measure speed,
+not complete coding-task accuracy; the extraction, URI and file-edit fixtures
+check their actual results. A real Pi conversation also passes, with ten
+successful tool calls and executed assertions; its unseeded run is correctness
+evidence, not a matched speed claim.
+
+Canonical greedy pp2048/tg128 spots use the original single-user context
+capacity and cache preparation:
+
+| Mode | Cached depth | Main PP | Candidate PP | Main TG | Candidate TG |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 0 | 1794.21 | 1792.43 | 28.85 | 28.87 |
+| AR | 32,768 | 1651.02 | 1650.28 | 28.73 | 28.78 |
+| MTP mixed | 0 | 1726.71 | 1726.83 | 36.19 | 36.31 |
+| MTP mixed | 32,768 | 1606.99 | 1607.96 | 40.57 | 40.56 |
+| MTP repetitive | 0 | 1738.07 | 1738.72 | 118.80 | 120.27 |
+| MTP repetitive | 32,768 | 1612.41 | 1610.90 | 113.59 | 114.81 |
+
+Concurrent greedy TG: repetitive C2 166.10 → 168.04, repetitive C8
+244.65 → 246.54, mixed C8 132.97 → 134.67 tok/s. All measured concurrent
+completions match isolated AR controls.
+
+Mixed C2 remains variable: the initial pair is 62.17 → 55.36 tok/s; the
+reverse-order repeat is 53.30 → 64.03. Both builds take different adaptive
+draft trajectories while producing identical text. These observations do
+**not** establish a C2 speedup or a confirmed slowdown. Individual cache,
+queue and preparation timing flags remain visible in the
+[quality record](QUALITY.md#exact-sampled-decode-october-21-2026); no blanket
+timing pass is claimed.
+
 ## Single user, autoregressive
 
 Approximately pp2048 / tg128; depth is the cached prefix in tokens.

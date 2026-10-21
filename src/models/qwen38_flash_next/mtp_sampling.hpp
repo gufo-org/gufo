@@ -75,18 +75,19 @@ struct MtpVerification {
 
 /// The same FP64 target distribution drives AR draws, support, acceptance
 /// and residual correction. Only proposal q uses the compact F32 masses.
-inline MtpVerification VerifyMtpProposal(std::span<const float> logits,
-                                         const MtpProposal& proposal,
-                                         sampling::SamplerState& sampler) {
+template<typename Target>
+inline MtpVerification VerifyMtpTarget(std::size_t vocab,
+                                       const MtpProposal& proposal,
+                                       sampling::SamplerState& sampler,
+                                       Target&& distribution) {
   if (proposal.size == 0 || proposal.size > kMtpCandidates ||
-      proposal.token >= logits.size() || !std::isfinite(proposal.probability) ||
+      proposal.token >= vocab || !std::isfinite(proposal.probability) ||
       proposal.probability <= 0 || proposal.probability > 1)
     throw std::invalid_argument("invalid MTP proposal");
   double total = 0;
   double selected = 0;
   for (std::size_t i = 0; i < proposal.size; ++i) {
-    if (proposal.ids[i] >= logits.size() ||
-        !std::isfinite(proposal.probabilities[i]) ||
+    if (proposal.ids[i] >= vocab || !std::isfinite(proposal.probabilities[i]) ||
         proposal.probabilities[i] < 0)
       throw std::invalid_argument("invalid MTP proposal mass");
     total += proposal.probabilities[i];
@@ -95,7 +96,7 @@ inline MtpVerification VerifyMtpProposal(std::span<const float> logits,
   }
   if (total != 1 || selected != proposal.probability)
     throw std::invalid_argument("MTP proposal masses do not match the draw");
-  const auto target = sampler.Distribution(logits);
+  const auto target = distribution();
   if (sampler.Uniform() * proposal.probability <
       target.probability(proposal.token))
     return {proposal.token, true};
@@ -104,6 +105,21 @@ inline MtpVerification VerifyMtpProposal(std::span<const float> logits,
               std::span(proposal.probabilities).first(proposal.size),
               sampler.mutable_rng_state()),
           false};
+}
+
+inline MtpVerification VerifyMtpProposal(std::span<const float> logits,
+                                         const MtpProposal& proposal,
+                                         sampling::SamplerState& sampler) {
+  return VerifyMtpTarget(logits.size(), proposal, sampler,
+                         [&] { return sampler.Distribution(logits); });
+}
+
+inline MtpVerification VerifyMtpProposal(
+    std::span<const sampling::LogitCandidate> candidates, std::size_t vocab,
+    const MtpProposal& proposal, sampling::SamplerState& sampler) {
+  return VerifyMtpTarget(vocab, proposal, sampler, [&] {
+    return sampler.DistributionFromCandidates(candidates);
+  });
 }
 
 /// The draft is deterministic, so an exact target sample decides acceptance.

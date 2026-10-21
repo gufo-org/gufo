@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "src/models/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -254,6 +255,12 @@ void CheckAttentionProjection(const void* weights, const __half* input,
   hipGraph_t graph = nullptr;
   hipGraphExec_t replay = nullptr;
   CheckHip(hipStreamCreate(&stream), "attention stream");
+  gufo::models::qwen::vision::DeviceInput vision;
+  vision.PrepareRope(stream);
+  const auto* descriptor = vision.rope();
+  vision.PrepareRope(stream);
+  if (descriptor == nullptr || vision.rope() != descriptor)
+    throw std::runtime_error("prepared image descriptor is not stable");
   CheckHip(hipStreamBeginCapture(stream, hipStreamCaptureModeGlobal),
            "attention capture");
   if (!q::AttentionF16Gemm(weights, input, device_gamma, device_gamma + 256,
@@ -261,12 +268,15 @@ void CheckAttentionProjection(const void* weights, const __half* input,
                            static_cast<float*>(actual[1]) + 8,
                            static_cast<__half*>(actual[2]) + 8,
                            static_cast<__half*>(actual[3]) + 8, batch, position,
-                           1e7F, 1e-6F, stream))
+                           1e7F, 1e-6F, stream, vision.rope()))
     throw std::runtime_error("attention fusion rejected the model shape");
   CheckHip(hipStreamEndCapture(stream, &graph), "attention capture end");
   CheckHip(hipGraphInstantiate(&replay, graph, nullptr, nullptr, 0),
            "attention graph");
   for (unsigned repetition = 0; repetition < 2; ++repetition) {
+    vision.RestoreLayout({}, stream);
+    if (vision.rope() != descriptor)
+      throw std::runtime_error("text restore replaced the image descriptor");
     for (unsigned i = 0; i < 4; ++i)
       CheckHip(hipMemsetAsync(actual[i], 0xA5,
                               i < 2 ? query_bytes : cache_bytes, stream),

@@ -463,7 +463,8 @@ void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
 void AuditMtpCosts(q::rocm::Executor& exec,
                    const gufo::tokenization::QwenTokenizer& tokenizer,
                    std::span<const std::uint32_t> depths,
-                   std::uint32_t selected_concurrency) {
+                   std::span<const std::uint32_t> concurrencies,
+                   bool sampled_head) {
   using Clock = std::chrono::steady_clock;
   const auto elapsed = [](auto start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start)
@@ -474,6 +475,7 @@ void AuditMtpCosts(q::rocm::Executor& exec,
   std::string error;
   const auto vocab = exec.config().vocab_size;
   std::vector<float> logits(vocab);
+  std::printf("MTP cost head=%s\n", sampled_head ? "sampled-prefix" : "full");
   for (const auto depth : depths) {
     const auto prefix_size = depth + 32;
     const auto capacity = prefix_size + 64;
@@ -502,7 +504,8 @@ void AuditMtpCosts(q::rocm::Executor& exec,
     Require(exec.SaveSnapshot(*base, 0, common, &error), error);
     base.reset();
     for (const unsigned concurrency : {1, 2, 4, 6, 8}) {
-      if (selected_concurrency != 0 && selected_concurrency != concurrency)
+      if (!concurrencies.empty() &&
+          std::ranges::find(concurrencies, concurrency) == concurrencies.end())
         continue;
       std::vector<std::unique_ptr<q::rocm::Session>> sessions;
       std::vector<std::vector<std::uint8_t>> snapshots;
@@ -550,7 +553,8 @@ void AuditMtpCosts(q::rocm::Executor& exec,
             replays[i].assign(tails[i].end() - width + 1, tails[i].end());
             replays[i].push_back(anchors[i]);
             catchup.push_back({sessions[i].get(), replays[i],
-                               static_cast<std::int32_t>(8 - width)});
+                               static_cast<std::int32_t>(8 - width),
+                               width == 1});
           }
           const auto catchup_start = Clock::now();
           Require(exec.MtpForwardBatch(catchup, &error), error);
@@ -559,6 +563,19 @@ void AuditMtpCosts(q::rocm::Executor& exec,
           for (unsigned i = 0; i < concurrency; ++i)
             chains[i].push_back(anchors[i]);
           const auto proposal_start = Clock::now();
+          std::array<q::MtpCandidateLogits, 8> candidates;
+          std::vector<gufo::sampling::SamplerState> samplers;
+          std::array<std::uint64_t, 8> random{};
+          for (unsigned i = 0; sampled_head && i < concurrency; ++i) {
+            samplers.emplace_back(
+                gufo::sampling::SamplingConfig{.temperature = 0.7F,
+                                               .top_k = 20,
+                                               .top_p = 0.8F,
+                                               .seed = 31,
+                                               .presence_penalty = 1.5F});
+            random[i] = 31 + i;
+            samplers.back().Accept(anchors[i]);
+          }
           for (unsigned step = 1; step < width; ++step) {
             if (step > 1) {
               std::vector<q::rocm::Executor::MtpBatchItem> body;
@@ -568,10 +585,21 @@ void AuditMtpCosts(q::rocm::Executor& exec,
             }
             std::vector<q::rocm::Executor::MtpHeadItem> heads;
             for (unsigned i = 0; i < concurrency; ++i)
-              heads.push_back({sessions[i].get(), {.token = &next[i]}});
+              heads.push_back(
+                  {sessions[i].get(),
+                   {.token = sampled_head ? nullptr : &next[i],
+                    .candidates = sampled_head ? &candidates[i] : nullptr,
+                    .draft_subset = sampled_head}});
             Require(exec.MtpHeads(heads, &error), error);
-            for (unsigned i = 0; i < concurrency; ++i)
+            for (unsigned i = 0; i < concurrency; ++i) {
+              if (sampled_head) {
+                next[i] =
+                    q::SampleMtpProposal(candidates[i], samplers[i], &random[i])
+                        .token;
+                samplers[i].Accept(next[i]);
+              }
               chains[i].push_back(next[i]);
+            }
           }
           const double proposal_ms = elapsed(proposal_start);
           const auto target_start = Clock::now();

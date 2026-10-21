@@ -3765,6 +3765,93 @@ __global__ void CopyKernel(const float* src, float* dst, std::size_t count) {
   }
 }
 
+template<bool First>
+__global__ void VerificationCandidateTileKernel(
+    const float* logits, GreedyPenaltyRows penalties,
+    const std::uint32_t* input, std::uint32_t* output, std::uint32_t size,
+    std::uint32_t vocab, std::uint32_t stride) {
+  using Sort = hipcub::BlockRadixSort<float, kThreads, 4, std::uint32_t>;
+  __shared__ Sort::TempStorage scratch;
+  __shared__ unsigned excluded[kMtpCandidateTile / 32];
+  __shared__ unsigned first_penalty;
+  const unsigned row = blockIdx.y;
+  const auto begin = blockIdx.x * kMtpCandidateTile;
+  if constexpr (First) {
+    if (threadIdx.x < kMtpCandidateTile / 32)
+      excluded[threadIdx.x] = 0;
+    if (threadIdx.x == 0) {
+      auto lo = penalties.offsets[row];
+      auto hi = penalties.offsets[row + 1];
+      while (lo < hi) {
+        const auto mid = lo + (hi - lo) / 2;
+        if (penalties.penalties[mid].token < begin)
+          lo = mid + 1;
+        else
+          hi = mid;
+      }
+      first_penalty = lo;
+    }
+    __syncthreads();
+    for (auto i = first_penalty + threadIdx.x; i < penalties.offsets[row + 1];
+         i += blockDim.x) {
+      const auto token = penalties.penalties[i].token;
+      if (token >= begin + kMtpCandidateTile)
+        break;
+      const auto offset = token - begin;
+      atomicOr(&excluded[offset / 32], 1U << (offset % 32));
+    }
+    __syncthreads();
+  }
+  float keys[4];
+  std::uint32_t ids[4];
+#pragma unroll
+  for (unsigned j = 0; j < 4; ++j) {
+    const auto offset = threadIdx.x * 4 + j;
+    const auto i = begin + offset;
+    auto id = i < size ? (First ? i : input[std::size_t(row) * stride + i])
+                       : UINT32_MAX;
+    if constexpr (First) {
+      if ((excluded[offset / 32] >> (offset % 32)) & 1U)
+        id = UINT32_MAX;
+    }
+    const float value =
+        id < vocab ? logits[std::size_t(row) * vocab + id] : -INFINITY;
+    // Drop the ID too: a subsequent pass must never resurrect an excluded
+    // or nonfinite entry by reading its original logit.
+    ids[j] = isfinite(value) ? id : UINT32_MAX;
+    keys[j] = isfinite(value) ? (value == 0.0F ? 0.0F : value) : -INFINITY;
+  }
+  Sort(scratch).SortDescending(keys, ids);
+#pragma unroll
+  for (unsigned j = 0; j < 4; ++j) {
+    const auto rank = threadIdx.x * 4 + j;
+    if (rank < kMtpCandidates)
+      output[std::size_t(row) * stride + blockIdx.x * kMtpCandidates + rank] =
+          ids[j];
+  }
+}
+
+__global__ void GatherVerificationCandidatesKernel(
+    const float* logits, GreedyPenaltyRows penalties, const std::uint32_t* ids,
+    sampling::LogitCandidate* out, std::uint32_t vocab, std::uint32_t stride) {
+  const auto row = blockIdx.x;
+  const auto count =
+      kMtpCandidates + penalties.offsets[row + 1] - penalties.offsets[row];
+  auto* destination = out + row * kMtpCandidates + penalties.offsets[row];
+  for (unsigned i = threadIdx.x; i < count; i += blockDim.x) {
+    const auto id =
+        i < kMtpCandidates
+            ? ids[std::size_t(row) * stride + i]
+            : penalties.penalties[penalties.offsets[row] + i - kMtpCandidates]
+                  .token;
+    destination[i] =
+        id < vocab
+            ? sampling::LogitCandidate{id,
+                                       logits[std::size_t(row) * vocab + id]}
+            : sampling::LogitCandidate{UINT32_MAX, -INFINITY};
+  }
+}
+
 inline unsigned Blocks(std::size_t count) {
   return static_cast<unsigned>((count + kThreads - 1) / kThreads);
 }
@@ -7802,6 +7889,33 @@ void SelectMtpCandidates(const float* logits, std::uint32_t* ids,
 std::uint32_t MtpCandidateWorkspaceSize(std::uint32_t vocab) {
   const auto tiles = (vocab + 1023) / 1024;
   return (tiles > 2 ? tiles : 2) * kMtpCandidates;
+}
+
+void VerificationCandidates(const float* logits, GreedyPenaltyRows penalties,
+                            std::uint32_t* ids, std::uint32_t* scratch_ids,
+                            sampling::LogitCandidate* out, std::uint32_t rows,
+                            std::uint32_t vocab, hipStream_t stream) {
+  if (!logits || !ids || !scratch_ids || !out || !vocab || !rows || rows > 7)
+    throw std::invalid_argument("invalid verification candidate shape");
+  const auto stride = MtpCandidateWorkspaceSize(vocab);
+  const auto tiles = [](std::uint32_t n) { return 1U + (n - 1U) / 1024; };
+  auto size = vocab;
+  auto blocks = tiles(size);
+  VerificationCandidateTileKernel<true>
+      <<<dim3(blocks, rows), kThreads, 0, stream>>>(logits, penalties, nullptr,
+                                                    ids, size, vocab, stride);
+  auto* source = ids;
+  auto* destination = scratch_ids;
+  while (blocks > 1) {
+    size = blocks * kMtpCandidates;
+    blocks = tiles(size);
+    VerificationCandidateTileKernel<false>
+        <<<dim3(blocks, rows), kThreads, 0, stream>>>(
+            logits, penalties, source, destination, size, vocab, stride);
+    std::swap(source, destination);
+  }
+  GatherVerificationCandidatesKernel<<<rows, kThreads, 0, stream>>>(
+      logits, penalties, source, out, vocab, stride);
 }
 
 void MtpTopCandidates(const float* logits, std::uint32_t* ids,

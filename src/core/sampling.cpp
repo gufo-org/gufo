@@ -686,7 +686,11 @@ SamplingDistribution SamplerState::Distribution(
     return LinearDistribution(logits);
   auto working = *this;
   working.PrepareSelected(logits);
-  auto& candidates = working.candidate_scratch_;
+  return working.SelectedDistribution();
+}
+
+SamplingDistribution SamplerState::SelectedDistribution() {
+  auto& candidates = candidate_scratch_;
   const double maximum = candidates.front().value;
   double total = 0;
   for (auto& candidate : candidates) {
@@ -695,6 +699,36 @@ SamplingDistribution SamplerState::Distribution(
     total += candidate.value;
   }
   return SamplingDistribution(std::move(candidates), total);
+}
+
+SamplingDistribution SamplerState::DistributionFromCandidates(
+    std::span<const LogitCandidate> logits) const {
+  config_.Validate();
+  if (config_.temperature <= 0 || config_.top_k <= 0 || NeedsConstraintMask())
+    throw std::invalid_argument("compact target requires unconstrained top-k");
+  auto working = *this;
+  auto& candidates = working.candidate_scratch_;
+  candidates.reserve(logits.size());
+  for (const auto& candidate : logits) {
+    if (!std::isfinite(candidate.value))
+      continue;
+    const double adjusted = AdjustedLogit(candidate.token, candidate.value);
+    if (!std::isfinite(adjusted))
+      throw std::runtime_error(
+          "sampling penalties produced a non-finite logit");
+    candidates.push_back({candidate.token, adjusted});
+  }
+  if (candidates.empty())
+    throw std::runtime_error("logit distribution contains no finite values");
+  const auto keep =
+      std::min(candidates.size(),
+               std::max<std::size_t>(
+                   config_.top_k, std::max<std::size_t>(config_.min_keep, 1)));
+  std::partial_sort(candidates.begin(), candidates.begin() + keep,
+                    candidates.end(), IsBetterProbability);
+  candidates.resize(keep);
+  working.FilterSelected();
+  return working.SelectedDistribution();
 }
 
 SamplingDistribution SamplerState::Distribution(
@@ -1061,7 +1095,11 @@ void SamplerState::PrepareSelected(std::span<const float> logits) {
   if (candidate_scratch_.empty()) {
     throw std::runtime_error("logit distribution contains no finite values");
   }
+  FilterSelected(full_softmax_sum, has_full_softmax_sum);
+}
 
+void SamplerState::FilterSelected(double full_softmax_sum,
+                                  bool has_full_softmax_sum) {
   std::size_t keep = candidate_scratch_.size();
   const std::size_t minimum = MinimumKept(config_, candidate_scratch_.size());
   if (config_.top_p < 1.0F && keep > 1) {

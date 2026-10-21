@@ -68,6 +68,11 @@ struct Probability {
   double value{0.0};
 };
 
+struct LogitCandidate {
+  TokenId token;
+  float value;
+};
+
 /// A normalized, post-filter sampling distribution.
 class SamplingDistribution {
 public:
@@ -158,6 +163,13 @@ public:
   /// Compact logits use token_ids for penalties; returned IDs index logits.
   [[nodiscard]] SamplingDistribution Distribution(
       std::span<const float> logits, std::span<const TokenId> token_ids) const;
+  /// Exact target top-k from a complete candidate union. The caller proves
+  /// that omitted tokens cannot enter the post-penalty top-k. Candidates
+  /// have unique vocabulary IDs; returned IDs are those vocabulary IDs.
+  /// Requires bounded top-k, positive temperature and no active constraint.
+  /// Retains the full-row sampler's FP64 filtering and normalization.
+  [[nodiscard]] SamplingDistribution DistributionFromCandidates(
+      std::span<const LogitCandidate> logits) const;
   /// Retain a speculative residual draw for the next Sample call. Copies
   /// preserve this draw along with the RNG; resetting history discards it.
   void DeferSample(TokenId token);
@@ -180,6 +192,9 @@ private:
   [[nodiscard]] SamplingDistribution LinearDistribution(
       std::span<const float> logits) const;
   void PrepareSelected(std::span<const float> logits);
+  void FilterSelected(double full_softmax_sum = 0,
+                      bool has_full_softmax_sum = false);
+  [[nodiscard]] SamplingDistribution SelectedDistribution();
   void StartReasoning();
   void AdvanceReasoning(TokenId token);
 

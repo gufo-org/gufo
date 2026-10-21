@@ -53,7 +53,9 @@ the generated frontier. It also rejects the roughly 280 ms restore stall.
 Flash-Next prompt lookup has a focused MTP runner. It requires actual accepted
 copies, compares isolated and C2/C4/C6/C8 requests under greedy and the model's
 default sampling, mixes greedy copies with new text at C8, and checks stops
-followed by full replay:
+followed by full replay. It also checks top-k 64/65, disabled top-k and a
+65-token minimum support across warm replay and stops, covering compact
+sampled verification and its complete-vocabulary fallbacks:
 
 ```sh
 nix develop -c python3 tests/functional/prompt_lookup.py \

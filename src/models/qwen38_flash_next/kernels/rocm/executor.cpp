@@ -713,6 +713,12 @@ void Session::RestoreVisionLayout(const qwen::vision::RopeLayout& layout,
   }
 }
 
+void Session::PrepareVision(hipStream_t stream) {
+  vision_input_.PrepareRope(stream);
+  for (auto& attention : attention_)
+    attention.rope = vision_input_.rope();
+}
+
 void Session::ConfigureVision(
     std::shared_ptr<const qwen::vision::Prompt> prompt,
     std::shared_ptr<qwen::vision::Encoder> encoder, hipStream_t stream) {
@@ -1229,6 +1235,27 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     std::construct_at(e->mtp_candidates_host_);
     e->mtp_candidates_host_->size =
         std::min<std::size_t>(c.vocab_size, kMtpCandidates);
+    const auto rows = std::min<std::size_t>(7, e->options_.max_speculative - 1);
+    if (rows != 0) {
+      e->verification_ids_ = Alloc<std::uint32_t>(
+          a, rows * MtpCandidateWorkspaceSize(c.vocab_size), error_msg);
+      e->verification_scratch_ids_ = Alloc<std::uint32_t>(
+          a, rows * MtpCandidateWorkspaceSize(c.vocab_size), error_msg);
+      const auto candidates = rows * (kMtpCandidates + kCompactPenaltyLimit);
+      e->verification_candidates_ =
+          Alloc<sampling::LogitCandidate>(a, candidates, error_msg);
+      if (!Check(e->host_allocations_.Allocate(
+                     &e->verification_candidates_host_,
+                     candidates * sizeof(sampling::LogitCandidate)),
+                 "pinned verification candidates", error_msg) ||
+          !Check(hip::AllocateDevice(&e->verification_penalties_,
+                                     rows * kCompactPenaltyLimit *
+                                         sizeof(sampling::TokenPenalty)),
+                 "verification penalties", error_msg))
+        return nullptr;
+      e->verification_penalty_capacity_ = rows * kCompactPenaltyLimit;
+      e->verification_penalty_host_.reserve(e->verification_penalty_capacity_);
+    }
   }
   for (void* p : a) {
     if (p == nullptr) {
@@ -4136,6 +4163,66 @@ bool Executor::GreedyMtpPredictions(std::span<ArgmaxCandidate> predictions,
   const bool completed = Check(hipStreamSynchronize(stream_),
                                "greedy MTP verification", error_msg);
   return copied && completed;
+}
+
+bool Executor::CanCompactMtpVerification(
+    const sampling::SamplerState& sampler) {
+  const auto& config = sampler.config();
+  return config.uses_random_sampling() && config.top_k > 0 &&
+         std::size_t(config.top_k) <= kMtpCandidates &&
+         config.min_keep <= kMtpCandidates &&
+         sampler.penalties().size() + 8 <= kCompactPenaltyLimit &&
+         !sampler.NeedsConstraintMask();
+}
+
+bool Executor::SampledMtpCandidates(
+    std::span<std::span<const sampling::LogitCandidate>> output,
+    const sampling::SamplerState& sampler, std::span<const std::int32_t> drafts,
+    std::string* error_msg) const {
+  const auto rows = output.size();
+  if (rows == 0 || rows > 7 || rows >= options_.max_speculative ||
+      rows != drafts.size() || verification_ids_ == nullptr ||
+      !CanCompactMtpVerification(sampler)) {
+    AssignError(error_msg, "invalid compact MTP verification request");
+    return false;
+  }
+  auto& penalties = verification_penalty_host_;
+  penalties.clear();
+  GreedyPenaltyRows batch{};
+  auto tentative = sampler.WithoutConstraint();
+  for (std::size_t row = 0; row < rows; ++row) {
+    const auto counts = tentative.penalties();
+    penalties.insert(penalties.end(), counts.begin(), counts.end());
+    batch.offsets[row + 1] = penalties.size();
+    if (row + 1 < rows)
+      tentative.Accept(static_cast<sampling::TokenId>(drafts[row]));
+  }
+  batch.penalties = verification_penalties_;
+  if (!penalties.empty() &&
+      !Check(hipMemcpyAsync(verification_penalties_, penalties.data(),
+                            penalties.size() * sizeof(penalties[0]),
+                            hipMemcpyHostToDevice, stream_),
+             "compact verification penalties", error_msg))
+    return false;
+  VerificationCandidates(VerificationLogits(), batch, verification_ids_,
+                         verification_scratch_ids_, verification_candidates_,
+                         rows, config().vocab_size, stream_);
+  const auto count = rows * kMtpCandidates + penalties.size();
+  const bool copied = Check(
+      hipMemcpyAsync(verification_candidates_host_, verification_candidates_,
+                     count * sizeof(sampling::LogitCandidate),
+                     hipMemcpyDeviceToHost, stream_),
+      "compact verification candidates", error_msg);
+  const bool completed =
+      Check(hipStreamSynchronize(stream_), "compact verification", error_msg);
+  if (!copied || !completed)
+    return false;
+  for (std::size_t row = 0; row < rows; ++row)
+    output[row] = {
+        verification_candidates_host_ + row * kMtpCandidates +
+            batch.offsets[row],
+        kMtpCandidates + batch.offsets[row + 1] - batch.offsets[row]};
+  return true;
 }
 
 bool Executor::MtpForward(Session& session,

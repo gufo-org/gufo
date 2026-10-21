@@ -570,6 +570,18 @@ void GatherArgmaxCandidates(const float* logits, const std::uint32_t* ids,
                             ArgmaxCandidate* out, std::uint32_t rows,
                             std::uint32_t vocab, hipStream_t stream);
 
+/// Exact top-64 unpenalized tokens plus every penalized token, retaining
+/// original F32 logits. This union contains the target's complete top-k for
+/// k <= 64, even when penalties promote tokens. The CPU keeps its existing
+/// FP64 penalties, filtering, normalization and rejection sampler.
+/// Each ID workspace holds rows * MtpCandidateWorkspaceSize(vocab) entries.
+/// Output row r starts at r * 64 + penalties.offsets[r]; invalid IDs have
+/// -infinity logits.
+void VerificationCandidates(const float* logits, GreedyPenaltyRows penalties,
+                            std::uint32_t* ids, std::uint32_t* scratch_ids,
+                            sampling::LogitCandidate* out, std::uint32_t rows,
+                            std::uint32_t vocab, hipStream_t stream);
+
 /// Draft logits of empty table slots (table[i] < 0) become -infinity.
 void MaskDraftLogits(float* logits, const std::int32_t* table, std::uint32_t n,
                      hipStream_t stream);

@@ -1,5 +1,82 @@
 # Qwen3.8 Flash-Next quality
 
+## Exact sampled decode, October 21, 2026
+
+The candidate retains target weights and forward arithmetic. Its compact
+verification union contains the best 64 finite unpenalized logits and every
+penalized token. An omitted token therefore cannot enter a post-penalty top-k
+of at most 64. Existing FP64 penalty/filter/normalization and rejection
+correction operate on the original F32 values and vocabulary IDs. Negative
+penalties and repeat penalties below one are included in this proof.
+Grammar activation, forced reasoning closure, unbounded/larger top-k and
+excessive penalty history keep the full-row path.
+
+The independent GPU/CPU candidate oracle covers real vocabulary size 248,320,
+ragged sizes, 1–7 rows, ties/signed zero, nonfinite inputs and promoted penalty
+tokens. Target probability bits, accepted/rejected tokens, residual correction
+and RNG agree with full-row sampling. Shared core sampling and existing MTP
+sampling tests pass. The independent predictor audit checks KV-only/full
+catch-up at 1/8/9/32/33 rows, full-width normalization, attention and recursive
+carry. Native C2/4/6/8 checks retain exact full logits, sampled RNG, failure and
+cancellation isolation, mixed head eligibility and used-session restores.
+
+Native sampling and cache suites pass default thinking/nonthinking, greedy,
+unbounded sampling, EOS, short budgets, RAM and serialized replay. HTTP tests
+pass bounded/unbounded top-k and min-keep boundaries, actual concurrent
+drafting, stops, cancellation, images and exact warm replay. The selected API
+suites pass structured output, reasoning budgets, sampling defaults, tools,
+long context and cache/disk restart. Public extraction, executable URI tests
+(including three rejected mutants) and 32K source-edit tool calls pass with
+thinking on/off and literal protocol tags. A real Pi 0.87.0 continued session
+passes editing, code creation and literal-tag fixtures: 12 HTTP requests,
+10 successful tool calls, and actual executed assertions.
+
+The stronger sampled-copy bypass changes proposal policy only after a
+previous copy establishes its source and a full 24-token match remains.
+Target rejection is still mandatory. The matched captures above retain
+identical wording, but a proposal-policy change does not promise identical
+seeded text across versions for every prompt. The target sampling distribution
+and deterministic replay within a version are the contracts.
+
+An image cancellation/resume timing flag reproduced twice: TTFT
+3.62–3.78 → 9.45–9.46 ms. Admission profiling isolates 5.61 ms in image
+context setup, where a first image descriptor invalidates captured text
+graphs. Image-capable Flash-Next slots now prepare an empty stable descriptor
+before any graph capture. The affected request measures 3.71 ms TTFT and
+1462.23 ms decode, versus main's 3.78 ms and 1494.80 ms. The complete lookup
+history retains every output and expected prefill/cache count; no PP/decode
+or token-gap flag remains in that pair.
+
+The comparison uses main `da5d5a2b` and production release binaries with the
+same Nix toolchain; builds and inference never overlap. All observations,
+including failed prototypes and harness-only failures, remain in
+`/tmp/gufo-flash-decode-20261021` on the test host and
+`/Users/fbozzo/projects/flash-decode-20261021` on the editing host. The benchmark
+artifact's source field identifies its harness tree; the retained binary
+paths and hashes identify each measured implementation. No llama.cpp values
+or reference accuracy claims are changed.
+
+Initial comparisons retain 938 lookup phase measurements (six queue/TTFT
+flags), 80 workflow measurements (one 3.24 ms snapshot flag), and 242
+concurrent benchmark measurements. The latter flags include the variable
+mixed-C2 controller, unordered peer preparation/queue latencies and one
+5.76 ms seven-token prefill difference. Outputs and prompt/cache work agree.
+Timing uses the unchanged 5% and 3 ms gate per request/phase. Faster requests
+never offset slower ones; remaining variable observations are not timing
+passes. The two workflow pairs leave 78 of 80 phases passing, two snapshot
+observations inconclusive and no confirmed failure. The initial image-resume
+failure and its fix are retained separately.
+
+The raw C4 queue comparison also flags the same body twice, but its recorded
+admission rank changes from second on main to fourth on the candidate. Both
+arms reach the first token at about 10–11 ms. This is unmatched scheduling
+work, not evidence of slower inference; its queue timing stays unqualified.
+Other variable C6/C8 queue and first-token observations remain unqualified.
+Focused repeats, admission counters and every comparison are retained with
+the raw reports.
+
+## Earlier qualification
+
 **Component-cache admission, October 20:** production code `195f9374` avoids
 repeated slot ranking, full checkpoint lookup results for presence checks and
 a second cold reset. Focused cache/runner/index/RAM-and-disk CPU tests pass;

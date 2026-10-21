@@ -292,7 +292,8 @@ private:
   bool DraftReplay(std::int32_t next_token, std::vector<std::int32_t>* replay,
                    std::int32_t* hidden_row, std::string* error_msg) const;
   static bool DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
-                                std::string* error_msg);
+                                std::string* error_msg,
+                                std::span<const std::uint8_t> propose = {});
   template<class Request>
   static bool RunIsolatedBatch(std::span<const Request> requests,
                                std::string* error_msg);
@@ -308,7 +309,7 @@ private:
   static void AppendDraft(PendingDecode& pending);
   /// Appends copies within the prepared budget, stopping at EOG when enabled.
   bool AppendLookup(PendingDecode& pending, bool stop_at_eos,
-                    std::size_t minimum = 1);
+                    std::size_t minimum = 1, bool require_resume = false);
   bool FinishDecode(const DecodeRequest& request, const PendingDecode& pending,
                     std::string* error_msg);
 

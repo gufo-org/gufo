@@ -1,8 +1,10 @@
 #include "src/core/sampling.hpp"
 
+#include <bit>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -200,6 +202,46 @@ void TestReasoningBudgetWithGrammar() {
          "after the forced end the answer still follows the grammar");
 }
 
+void TestCompactTargetContract() {
+  using gufo::sampling::LogitCandidate;
+  const std::vector<float> logits{0.0F, 0.75F, -1.0F, 0.75F, 3.0F, 0.1F};
+  // Deliberately unordered IDs. A frequency penalty can promote a token
+  // whose raw logit is far below the original top-k.
+  const std::vector<LogitCandidate> candidates{
+      {4, 3.0F}, {2, -1.0F}, {3, 0.75F}, {1, 0.75F}};
+  SamplingConfig config{.temperature = 0.7F,
+                        .top_k = 2,
+                        .top_p = 0.8F,
+                        .frequency_penalty = -5.0F};
+  SamplerState state(config);
+  state.Accept(2);
+  const auto expected = state.Distribution(logits);
+  const auto actual = state.DistributionFromCandidates(candidates);
+  Expect(expected.entries().size() == actual.entries().size(),
+         "compact target retains full top-k support");
+  for (std::size_t i = 0; i < expected.entries().size(); ++i)
+    Expect(expected.entries()[i].token == actual.entries()[i].token &&
+               std::bit_cast<std::uint64_t>(expected.entries()[i].value) ==
+                   std::bit_cast<std::uint64_t>(actual.entries()[i].value),
+           "compact target retains exact FP64 probabilities");
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    auto unsupported = config;
+    if (mode == 0)
+      unsupported.temperature = 0;
+    else if (mode == 1)
+      unsupported.top_k = 0;
+    else
+      unsupported.reasoning_budget = Budget(0);
+    bool refused = false;
+    try {
+      (void)SamplerState(unsupported).DistributionFromCandidates(candidates);
+    } catch (const std::invalid_argument&) {
+      refused = true;
+    }
+    Expect(refused, "compact target refuses unsupported selection semantics");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -208,6 +250,7 @@ int main() {
   TestReasoningBudgetMatchesLlamaCpp();
   TestReasoningBudgetKeepsLiteralAnswer();
   TestReasoningBudgetWithGrammar();
+  TestCompactTargetContract();
   std::cout << "sampling_test passed\n";
   return 0;
 }
