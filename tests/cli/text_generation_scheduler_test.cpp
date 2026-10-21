@@ -1243,7 +1243,7 @@ void TestArrivalDoesNotWaitForAnotherLongChunk() {
   }
 }
 
-void TestLongPrefillsKeepWideFairTurns() {
+void TestEqualLongPrefillsFinishInArrivalOrder() {
   auto control = std::make_shared<FakeControl>();
   control->prefill_capacity = 4;
   control->block_prefill_label = 1;
@@ -1256,16 +1256,18 @@ void TestLongPrefillsKeepWideFairTurns() {
   control->ReleasePrefill();
   Expect(first.Wait().tokens == ExpectedTokens(1, 2) &&
              second.Wait().tokens == ExpectedTokens(2, 2),
-         "interleaved prefills preserve both outputs");
+         "sequential prefills preserve both outputs");
   const auto events = control->Events();
-  const auto a = EventIndex(events, EventKind::kPrefill, 1, 1);
+  const auto last_a = EventIndex(events, EventKind::kPrefill, 1, 2);
   const auto b = EventIndex(events, EventKind::kPrefill, 2);
-  const auto next_b = EventIndex(events, EventKind::kPrefill, 2, 1);
-  Expect(b < a && a < next_b,
-         "the newcomer gets one turn, then the older prefill progresses");
-  Expect(
-      events[a].count == 4 && events[b].count == 4 && events[next_b].count == 4,
-      "long waiting prefills keep wide chunks before any decoder is ready");
+  Expect(EventIndex(events, EventKind::kPrefill, 1, 1) < b && last_a < b,
+         "the older prefill keeps its turns until its prompt is done");
+  Expect(events[EventIndex(events, EventKind::kPrefill, 1, 1)].count == 4 &&
+             events[last_a].count == 4,
+         "long waiting prefills keep wide chunks before any decoder is ready");
+  Expect(EventIndex(events, EventKind::kAdvance, 1) <
+             EventIndex(events, EventKind::kPrefill, 2, 1),
+         "the first prompt decodes before the second finishes prefill");
 }
 
 void TestShortArrivalBehindWaitingPrefill() {
@@ -1285,12 +1287,12 @@ void TestShortArrivalBehindWaitingPrefill() {
          "three independent requests preserve their outputs");
   const auto events = control->Events();
   const auto second_start = EventIndex(events, EventKind::kPrefill, 2);
-  Expect(events[second_start].count == 2,
-         "a long peer gets bounded work ahead of a waiting short request");
-  Expect(second_start < EventIndex(events, EventKind::kPrefill, 3) &&
-             EventIndex(events, EventKind::kAdvance, 3) <
-                 EventIndex(events, EventKind::kPrefill, 1, 1),
-         "the short newcomer gets its first token without repeating the round");
+  const auto first_resume = EventIndex(events, EventKind::kPrefill, 1, 1);
+  Expect(EventIndex(events, EventKind::kPrefill, 3) < second_start &&
+             EventIndex(events, EventKind::kAdvance, 3) < first_resume,
+         "the short newcomer gets its first token before longer prefills");
+  Expect(first_resume < second_start,
+         "equal remaining prompts resume in arrival order");
 }
 
 void TestDecodeActivePrefillIsBounded(bool multi_token, bool batched) {
@@ -3058,7 +3060,7 @@ int main() {
   TestBatchDeviceLossFailsSuccessfulPeers();
   TestMultiResidentPrefillUsesBoundedWorkUnits();
   TestArrivalDoesNotWaitForAnotherLongChunk();
-  TestLongPrefillsKeepWideFairTurns();
+  TestEqualLongPrefillsFinishInArrivalOrder();
   TestShortArrivalBehindWaitingPrefill();
   for (const bool multi_token : {false, true}) {
     for (const bool batched : {false, true}) {

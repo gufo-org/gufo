@@ -1269,15 +1269,7 @@ struct TextGenerationScheduler::Impl {
           request->decode_due = true;
           decoding.push_back(std::move(request));
         } else {
-          // The last-served prefill just moved to the back of its round.
-          // Give an arrival its first turn before repeating that work, while
-          // retaining the order of peers that have already been waiting.
-          auto next = prefilling.end();
-          if (!prefilling.empty() &&
-              prefilling.back()->id == last_prefill_request_id) {
-            --next;
-          }
-          prefilling.insert(next, std::move(request));
+          prefilling.push_back(std::move(request));
         }
       } catch (...) {
         CompleteFailure(request, std::current_exception());
@@ -1294,7 +1286,6 @@ struct TextGenerationScheduler::Impl {
 
       request->phase.store(TextRequestPhase::kPrefilling,
                            std::memory_order_release);
-      last_prefill_request_id = request->id;
       // Bound work for short waiting prefills and captures as well as decoders.
       // Long prefills alone retain the model's efficient chunk size.
       const bool bounded_prefill =
@@ -1866,6 +1857,30 @@ struct TextGenerationScheduler::Impl {
     }
   }
 
+  /// Moves the prefill with the fewest remaining prompt tokens, the oldest
+  /// among equals, to the front. A short prompt still overtakes a long one,
+  /// while equal long prompts finish in arrival order instead of alternating
+  /// chunks, so the first one decodes early and consecutive chunks continue
+  /// one session (#687).
+  static void FrontShortestPrefill(
+      std::deque<std::shared_ptr<ScheduledRequest>>& prefilling) {
+    const auto remaining = [](const auto& request) {
+      return request->runner_request.prompt_tokens() -
+             request->runner_request.prefill_position();
+    };
+    const auto next =
+        std::min_element(prefilling.begin(), prefilling.end(),
+                         [&](const auto& left, const auto& right) {
+                           const auto left_remaining = remaining(left);
+                           const auto right_remaining = remaining(right);
+                           return left_remaining != right_remaining
+                                      ? left_remaining < right_remaining
+                                      : left->id < right->id;
+                         });
+    if (next != prefilling.end())
+      std::rotate(prefilling.begin(), next, std::next(next));
+  }
+
   [[nodiscard]] static std::shared_ptr<ScheduledRequest> PopDecoder(
       std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
       bool require_due) {
@@ -1985,6 +2000,7 @@ struct TextGenerationScheduler::Impl {
       }
 
       progress.fetch_add(1, std::memory_order_relaxed);
+      FrontShortestPrefill(prefilling);
       const bool due_decoder = HasDueDecoder(decoding);
       const std::size_t resident_count = prefilling.size() + decoding.size();
       const bool preparing_multi_token_batch =
@@ -2109,7 +2125,6 @@ struct TextGenerationScheduler::Impl {
           TextGenerationErrorCode::kDeviceLost, kDeviceLostMessage));
   std::vector<std::shared_ptr<ScheduledRequest>> device_lost_requests;
   std::size_t consecutive_active_prefill_chunks{0};
-  std::uint64_t last_prefill_request_id{0};
   std::atomic<std::uint64_t> next_request_id{1};
   // Written by the scheduler thread and read by the stall monitor. `progress`
   // advances when a request is admitted, a work unit starts, a pending
