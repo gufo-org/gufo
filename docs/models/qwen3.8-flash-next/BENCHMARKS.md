@@ -25,6 +25,75 @@ repeat against current main; both observations remain included.
 Prior mixed MTP C2 repeats show two draft-controller trajectories (about 54
 and 60 tok/s, identical text), so its gain is not entirely attributable to lookup.
 
+## Orca packed K16 loads — rejected trial
+
+**These gains are not retained:** strict repeated HTTP phase checks fail.
+Runtime code was restored to the rebased control; faster native prefill does
+not override slower individual served phases.
+
+October 21: main `f020bd3a` plus the existing mixed-quant implementation and
+its dispatch integration fix (`14954fe2`) versus `f75eb7d9`. The trial groups
+Q4_K/Q6_K code loads only at 2048 or more prompt rows; smaller batches and
+Q5_0 keep their original reader. Same pinned Nix toolchain, Orca shards and
+MTP draft; C1, depth zero, three repetitions, mean ± reported standard
+deviation. PP and TG are separate tests; TG starts from 16 tokens.
+
+| Mode | Control pp2048 (tok/s) | Trial pp2048 (tok/s) | PP gain | Control tg128 (tok/s) | Trial tg128 (tok/s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 385.00 ± 5.63 | 467.62 ± 3.03 | 21.5% | 17.01 ± 0.23 | 16.74 ± 0.52 |
+| MTP, up to 7 drafts | 379.93 ± 1.16 | 460.05 ± 5.91 | 21.1% | 30.67 ± 0.30 | 30.64 ± 0.43 |
+
+A separate pp2048/tg1 capture reduces mixed dense GPU time from 9.18 to
+7.13 seconds and total kernel time from 11.10 to 9.05 seconds, with the
+same logical dispatch/grid counts. Captures include startup/warmup;
+whole-capture idle percentages are not inference utilization.
+
+All 30,543,360 matched-history logits after a 3720-token prompt remain
+byte-identical to the control. Nevertheless, repeated HTTP evidence with
+contemporaneous unchanged controls confirms five AR and eight MTP phase
+failures. The earlier unrestricted variant also failed qualification.
+No decode speedup or production promotion is claimed. The service pin and
+disabled state, and all UD-Q4_K_XL/llama.cpp benchmark cells, remain unchanged.
+[Measurements, rejection and remaining limits](artifacts/mixed-prefill-k16.json).
+
+## Orca Q4_K_M optimized prefill — local native capture
+
+**Experimental: matched prior-output qualification has not passed.** These
+are measured speeds, not a production-promotion claim.
+
+October 20, `5f3c5b11` versus `40a68da4`, identical Orca shards and matching
+MTP sidecar, pinned production Nix builds, C1, greedy, depth zero. Three
+repetitions, mean ± reported standard deviation. Native `pp2048` and `tg128`
+are **separate tests**: the TG test starts from 16 tokens, not the PP request.
+These numbers do not compare Orca with the different Unsloth weights below.
+
+| Mode | Vector baseline pp (tok/s) | Matrix-core pp (tok/s) | PP factor | Baseline tg (tok/s) | Candidate tg (tok/s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 142.59 ± 0.33 | **379.84 ± 1.53** | **2.66×** | 16.77 ± 0.36 | 16.91 ± 0.09 |
+| MTP, up to 7 drafts | 142.59 ± 2.16 | **378.30 ± 1.83** | **2.65×** | 32.23 ± 0.44 | 30.16 ± 0.35 |
+
+No decode speedup is claimed: MTP TG is 6.4% lower in this capture, and the
+prefill arithmetic is not byte-compatible with the initial implementation.
+See the explicit numerical comparison in [QUALITY.md](QUALITY.md).
+
+A separate matched `pp2048/tg1` profile reduces mixed-projection GPU time from
+27.46 to 9.19 seconds and total kernel time from 30.05 to 11.11 seconds.
+The captures include model startup; their whole-capture idle percentages are
+not serving utilization measurements. This is bounded local qualification,
+not vision, deep-context or unquantized-model accuracy qualification.
+[Commands, build identities, raw results and limitations](artifacts/mixed-prefill-wmma.json).
+All existing UD-Q4_K_XL production and llama.cpp tables remain unchanged.
+
+## Initial Orca Q4_K_M compatibility sample
+
+October 20: one native pp2048/tg128 sample on the assertion-enabled development
+build measures **143.94 pp / 16.61 tg tok/s AR** and **142.16 pp / 31.97 tg tok/s
+MTP**. That initial build used eight-row vector tiles, before the optimized
+mixed-quant prefill routes. These are observational smoke results, not a
+matched performance qualification or a comparison with the different Unsloth
+weights below. [Commands, identities and limits](artifacts/mixed-q4-k-m.json).
+All existing production and llama.cpp tables remain unchanged.
+
 ## Single user, autoregressive
 
 Approximately pp2048 / tg128; depth is the cached prefix in tokens.

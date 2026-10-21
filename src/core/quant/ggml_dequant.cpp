@@ -255,6 +255,23 @@ std::size_t EncodedSizeBytes(core::GgmlType type,
   }
 }
 
+void DequantizeQ5_0(const void* src, float* dst, std::size_t k) {
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 32; ++b) {
+    const auto* block = bytes + b * 22;
+    std::uint16_t scale;
+    std::uint32_t high;
+    std::memcpy(&scale, block, sizeof(scale));
+    std::memcpy(&high, block + 2, sizeof(high));
+    const float d = Fp16ToFloat(scale);
+    for (unsigned j = 0; j < 32; ++j) {
+      const int low = (block[6 + j % 16] >> (j / 16 * 4)) & 15;
+      const int q = static_cast<int>(low | (((high >> j) & 1U) << 4)) - 16;
+      dst[b * 32 + j] = d * q;
+    }
+  }
+}
+
 void DequantizeQ4_K(const void* src, float* dst, std::size_t k) {
   const auto* blocks = static_cast<const block_q4_K*>(src);
   const std::size_t nb = k / 256;

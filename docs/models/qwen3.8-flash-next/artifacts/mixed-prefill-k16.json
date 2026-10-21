@@ -1,0 +1,488 @@
+{
+  "status": "rejected: strict repeated served-phase regressions; prior runtime implementation restored",
+  "revert_commit": "2f04917261129ba8c5924ba751361b7274a19ae9",
+  "current_runtime_matches_control": "14954fe2a46b5a26e11ae2a282404a8107354cb9",
+  "date_utc": "2026-10-21",
+  "source": {
+    "upstream_main": "f020bd3a037d58aa42138ca11fa895524e43cdd6",
+    "pre_rebase_backup": "evidence/orca-before-main-rebase-24feb0c9",
+    "rebased_control": "14954fe2a46b5a26e11ae2a282404a8107354cb9",
+    "all_format_word_load_experiment": "8e39a51448de1f24be12317922cccc4feae0de29",
+    "unrestricted_q4_q6_trial": "becdf9bf7a00824a5b4b304a8d77c917850f09f0",
+    "candidate": "f75eb7d98c5b689cb4d96d8268235f162ff834cf",
+    "integration_fix": "Restrict upstream whole-pass vector-load dispatch to F32/F16/BF16, excluding packed formats."
+  },
+  "mechanism": "Q4_K/Q6_K prefill batches of at least 2048 rows fetch sixteen packed codes as words and decode shared scale/min metadata once. Smaller batches and Q5_0 retain RowElement. No matrix math, precision, K64 accumulation, decode/verification, head, storage layout or activation staging changes.",
+  "snapshot_payload_version": 19,
+  "toolchain": "warning: Git tree '/home/lm/dev/gufo' is dirty\nupstream=f020bd3a037d58aa42138ca11fa895524e43cdd6\ncontrol=14954fe2a46b5a26e11ae2a282404a8107354cb9\ntrial=f75eb7d98c5b689cb4d96d8268235f162ff834cf\nrestored=2f04917261129ba8c5924ba751361b7274a19ae9\nnixpkgs-AMD clang version 22.0.0 (https://github.com/ROCm/llvm-project/tree/rocm-7.2.3 rocm-7.2.3)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /nix/store/i3m3xm2jph0nmdjynjpsidg49sk0drhs-rocm-toolchain/bin\nConfiguration file: /nix/store/i3m3xm2jph0nmdjynjpsidg49sk0drhs-rocm-toolchain/bin/x86_64-unknown-linux-gnu.cfg\ngcc (GCC) 15.3.0\nfaabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6  flake.lock\n",
+  "production_binary_sha256": "68f34433aedf1b9e55911ace8d153ec12bd6659538f67a1b69e42c2aca2d9cd1  /nix/store/0a9m8gna69rh316sd6slk2hvz8xbmhbc-gufo-0-unstable-14954fe/bin/gufo\n74cb2059add49a62df33bb9c521d059764837883363b9a9012d584ef1ee9e398  /nix/store/gi2j15ix2ggpbn1rpv4h23s5ss47a4bw-gufo-0-unstable-f75eb7d/bin/gufo\n",
+  "benchmarks": {
+    "ar": {
+      "baseline": {
+        "pp2048": {
+          "tokens_per_second": 385.0,
+          "reported_stddev": 5.63
+        },
+        "tg128": {
+          "tokens_per_second": 17.01,
+          "reported_stddev": 0.23
+        }
+      },
+      "candidate": {
+        "pp2048": {
+          "tokens_per_second": 467.62,
+          "reported_stddev": 3.03
+        },
+        "tg128": {
+          "tokens_per_second": 16.74,
+          "reported_stddev": 0.52
+        }
+      }
+    },
+    "mtp": {
+      "baseline": {
+        "pp2048": {
+          "tokens_per_second": 379.93,
+          "reported_stddev": 1.16
+        },
+        "tg128": {
+          "tokens_per_second": 30.67,
+          "reported_stddev": 0.3
+        }
+      },
+      "candidate": {
+        "pp2048": {
+          "tokens_per_second": 460.05,
+          "reported_stddev": 5.91
+        },
+        "tg128": {
+          "tokens_per_second": 30.64,
+          "reported_stddev": 0.43
+        }
+      }
+    }
+  },
+  "benchmark_scope": "Pinned production Nix builds, identical Orca shards and matching MTP draft, gfx1151, C1 d0, three repetitions. pp2048 and tg128 are separate tests; TG starts at 16 tokens. Not a refresh of UD-Q4_K_XL/llama.cpp tables.",
+  "profile": {
+    "baseline": {
+      "dispatches": 9259,
+      "kernel_ms": 11099.740615,
+      "mixed_dense_ms": 9181.893326999985,
+      "mixed_dense_by_type": {
+        "12": {
+          "calls": 1302,
+          "ms": 7484.772116999986
+        },
+        "6": {
+          "calls": 360,
+          "ms": 682.5557140000002
+        },
+        "14": {
+          "calls": 144,
+          "ms": 1014.5654959999997
+        }
+      }
+    },
+    "candidate": {
+      "dispatches": 9259,
+      "kernel_ms": 9054.688508,
+      "mixed_dense_ms": 7132.780624000006,
+      "mixed_dense_by_type": {
+        "12": {
+          "calls": 1302,
+          "ms": 5618.764302000007
+        },
+        "6": {
+          "calls": 360,
+          "ms": 680.2490879999996
+        },
+        "14": {
+          "calls": 144,
+          "ms": 833.7672339999995
+        }
+      }
+    },
+    "logical_kernel_grid_multiset_identical": true,
+    "name_normalization": "Ignore only the new final compile-time packed-word-fetch boolean in DenseF16GEMMKernel signatures.",
+    "scope": "Separate pp2048/tg1 capture, including startup/warmup. Whole-capture idle fraction is not inference utilization."
+  },
+  "resources_assertion_build": {
+    "12:words": {
+      "group_segment_fixed_size": 32768,
+      "private_segment_fixed_size": 0,
+      "next_free_vgpr": 233
+    },
+    "12:scalar": {
+      "group_segment_fixed_size": 32768,
+      "private_segment_fixed_size": 0,
+      "next_free_vgpr": 241
+    },
+    "6:scalar": {
+      "group_segment_fixed_size": 32768,
+      "private_segment_fixed_size": 0,
+      "next_free_vgpr": 240
+    },
+    "14:words": {
+      "group_segment_fixed_size": 32768,
+      "private_segment_fixed_size": 0,
+      "next_free_vgpr": 234
+    },
+    "14:scalar": {
+      "group_segment_fixed_size": 32768,
+      "private_segment_fixed_size": 0,
+      "next_free_vgpr": 233
+    }
+  },
+  "quality": {
+    "gpu_suites": [
+      "hc_mix_ops",
+      "mixed_quant_ops",
+      "projection_ops",
+      "routed_wmma_ops",
+      "moe_epilogue_ops"
+    ],
+    "fp64_dense_cases": 88,
+    "relative_rms_limit_unchanged": 0.002,
+    "max_relative_rms": 3.88122e-05,
+    "basis_unique_coefficients": 5600,
+    "basis_checked_outputs": 30720,
+    "dispatch_boundary_rows": [
+      2047,
+      2048,
+      2049
+    ],
+    "basis_tolerance": "Existing Close: 2e-4 + 2e-5 * abs(expected), independent host decode, output guards.",
+    "full_logits": {
+      "prompt_tokens": 3720,
+      "batch": 2048,
+      "rows": 123,
+      "vocabulary": 248320,
+      "finite_values": 30543360,
+      "byte_identical_to_rebased_control": true,
+      "sha256": "bc78b01b3c9f7d702089016b5edbb5cd50ea68f12941080b65def79a4da0a67e",
+      "all_finite": true
+    },
+    "continuation_ids_identical": true,
+    "native_execution": "execution_tokens=2048 image=0 execution_modes=independent AR_predictor_bytes=0 mixed_batch_exact=1 RAM_serialized_sampled_replay=1 obsolete_payload_rejected=1\n",
+    "native_chunks": "prefill chunks: length=136 boundary=94 four logit rows and sampled MTP replay exact\nprefill chunks: length=136 boundary=103 four logit rows and sampled MTP replay exact\nprefill chunks: length=136 boundary=104 four logit rows and sampled MTP replay exact\nprefill chunks: length=136 boundary=127 four logit rows and sampled MTP replay exact\nprefill chunks: length=136 boundary=128 four logit rows and sampled MTP replay exact\nprefill chunks: length=136 boundary=135 four logit rows and sampled MTP replay exact\nprefill chunks: length=2048 boundary=1025 four logit rows and sampled MTP replay exact\nprefill chunks: length=4096 boundary=2048 four logit rows and sampled MTP replay exact\n",
+    "scalar_cpu_reference": "prompt tokens (5)\npos   0 ref    220 gpu    220 OK    KL 0.00000  max|d| 0.003\npos   1 ref    314 gpu    314 OK    KL 0.00000  max|d| 0.006\npos   2 ref    279 gpu    279 OK    KL 0.00000  max|d| 0.004\npos   3 ref    369 gpu    369 OK    KL 0.00030  max|d| 0.565\npos   4 ref  11751 gpu  11751 OK    KL 0.00022  max|d| 0.144\n",
+    "http": {
+      "off": {
+        "suite_status": {
+          "tools": "passed",
+          "batch": "passed"
+        },
+        "comparison_status": "inconclusive",
+        "requests": 133,
+        "quality_or_coverage_changes": [],
+        "phase_gate": {
+          "slowdown_tolerance": 0.05,
+          "noise_ms": 3
+        },
+        "measurements": {
+          "passed": 1738,
+          "inconclusive": 139
+        },
+        "timing_flags_by_metric": {
+          "ttft_ms": 22,
+          "client_ttft_ms": 13,
+          "max_inter_token_ms": 24,
+          "queue_ms": 6,
+          "wall_ms": 9,
+          "decode_ms": 12,
+          "decode_ms_per_token": 12,
+          "mean_inter_token_ms": 10,
+          "server_duration_ms": 9,
+          "cache_snapshot_ms": 6,
+          "prefill_ms": 7,
+          "prefill_ms_per_token": 7,
+          "predicted_per_token_ms": 2
+        },
+        "raw_comparison": "/home/lm/dev/gufo-orca-rebase-results/large-only/http-candidate-off/comparison.json",
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0
+      },
+      "mtp": {
+        "suite_status": {
+          "tools": "passed",
+          "batch": "passed"
+        },
+        "comparison_status": "inconclusive",
+        "requests": 133,
+        "quality_or_coverage_changes": [],
+        "phase_gate": {
+          "slowdown_tolerance": 0.05,
+          "noise_ms": 3
+        },
+        "measurements": {
+          "passed": 1681,
+          "inconclusive": 196
+        },
+        "timing_flags_by_metric": {
+          "client_ttft_ms": 29,
+          "ttft_ms": 24,
+          "queue_ms": 26,
+          "wall_ms": 15,
+          "decode_ms": 19,
+          "decode_ms_per_token": 19,
+          "max_inter_token_ms": 18,
+          "mean_inter_token_ms": 17,
+          "server_duration_ms": 15,
+          "prefill_ms": 2,
+          "prefill_ms_per_token": 2,
+          "cache_snapshot_ms": 9,
+          "predicted_per_token_ms": 1
+        },
+        "raw_comparison": "/home/lm/dev/gufo-orca-rebase-results/large-only/http-candidate-mtp/comparison.json",
+        "draft_tokens": 2727,
+        "draft_tokens_accepted": 2263
+      }
+    },
+    "http_repeated_qualification": {
+      "off": {
+        "status": "failed",
+        "quality_or_coverage_changes": [],
+        "measurements": {
+          "passed": 1455,
+          "inconclusive": 417,
+          "failed": 5
+        },
+        "confirmed_failures": [
+          {
+            "case": "batch.requests.json:batch_c8_independent_samplers_and_grammars:0",
+            "metric": "max_inter_token_ms",
+            "baseline_range": [
+              58.253925,
+              59.46716
+            ],
+            "candidate_range": [
+              67.54869,
+              67.587132
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "tools.requests.json:auto_prose_thinkingTrue:0",
+            "metric": "decode_ms",
+            "baseline_range": [
+              1609.661038,
+              1630.829083
+            ],
+            "candidate_range": [
+              1729.6757200000006,
+              1744.108353
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "tools.requests.json:auto_prose_thinkingTrue:0",
+            "metric": "decode_ms_per_token",
+            "baseline_range": [
+              59.61707548148148,
+              60.401077148148154
+            ],
+            "candidate_range": [
+              64.06206370370373,
+              64.59660566666668
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "tools.requests.json:auto_prose_thinkingTrue:0",
+            "metric": "max_inter_token_ms",
+            "baseline_range": [
+              73.173551,
+              75.230362
+            ],
+            "candidate_range": [
+              154.255807,
+              156.514096
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "tools.requests.json:auto_prose_thinkingTrue:0",
+            "metric": "mean_inter_token_ms",
+            "baseline_range": [
+              59.66933611538461,
+              60.44896734615384
+            ],
+            "candidate_range": [
+              63.890581076923084,
+              64.80922903846154
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          }
+        ],
+        "raw_evidence": "/home/lm/dev/gufo-orca-rebase-results/large-only/http-off-qualification-current-control.json",
+        "method": "Official compare.py; two independent candidate observations, three independent main observations including a contemporaneous unchanged control, original 5% and 3 ms margins, no duplicated runs."
+      },
+      "mtp": {
+        "status": "failed",
+        "quality_or_coverage_changes": [],
+        "measurements": {
+          "passed": 1498,
+          "inconclusive": 371,
+          "failed": 8
+        },
+        "confirmed_failures": [
+          {
+            "case": "batch.requests.json:batch_c8_cancelled_peer_isolation:8",
+            "metric": "client_ttft_ms",
+            "baseline_range": [
+              18.709869123995304,
+              19.696960924193263
+            ],
+            "candidate_range": [
+              22.719527827575803,
+              22.81391597352922
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "batch.requests.json:batch_c8_greedy_short_replies_match_serial:1",
+            "metric": "queue_ms",
+            "baseline_range": [
+              2.177468,
+              3.878482
+            ],
+            "candidate_range": [
+              12.365573,
+              357.46682
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "batch.requests.json:batch_c8_greedy_short_replies_match_serial:1",
+            "metric": "queue_ms",
+            "baseline_range": [
+              1.918841,
+              3.690171
+            ],
+            "candidate_range": [
+              11.744033,
+              357.903131
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "batch.requests.json:batch_c8_greedy_short_replies_match_serial:1",
+            "metric": "queue_ms",
+            "baseline_range": [
+              4.62264,
+              5.077661
+            ],
+            "candidate_range": [
+              10.267783,
+              358.592238
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "batch.requests.json:batch_c8_independent_samplers_and_grammars:0",
+            "metric": "queue_ms",
+            "baseline_range": [
+              5.64237,
+              7.748585
+            ],
+            "candidate_range": [
+              12.057553,
+              16.873341
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "batch.requests.json:batch_c8_greedy_short_replies_match_serial:1",
+            "metric": "queue_ms",
+            "baseline_range": [
+              2.103146,
+              2.81588
+            ],
+            "candidate_range": [
+              11.125097,
+              360.990665
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "batch.requests.json:batch_c8_cancelled_peer_isolation:2",
+            "metric": "client_ttft_ms",
+            "baseline_range": [
+              16.858061077073216,
+              18.79031304270029
+            ],
+            "candidate_range": [
+              22.923281881958246,
+              24.05563392676413
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          },
+          {
+            "case": "tools.requests.json:strict_tool_required:0",
+            "metric": "max_inter_token_ms",
+            "baseline_range": [
+              157.230922,
+              160.329993
+            ],
+            "candidate_range": [
+              171.822742,
+              315.468081
+            ],
+            "reason": "reproduced slowdown across observed ranges"
+          }
+        ],
+        "raw_evidence": "/home/lm/dev/gufo-orca-rebase-results/large-only/http-mtp-qualification-current-control.json",
+        "method": "Official compare.py; two independent candidate observations, three independent main observations including a contemporaneous unchanged control, original 5% and 3 ms margins, no duplicated runs."
+      }
+    }
+  },
+  "rejected_or_scoped_experiments": [
+    "The large-only f75eb7d9 guard restores the original C4 TTFT behavior, but five AR and eight MTP phase failures remain after strict repeats and current unchanged controls. Its native gains are not retained in the default runtime.",
+    "Unrestricted Q4_K/Q6_K word fetching: rejected by the unchanged strict HTTP gate after two independent candidate observations and three main observations. One AR C4 TTFT and two MTP C8 first-token phase regressions remain confirmed; raw reports are in final-q4-q6. Final source retains the original reader below 2048 rows.",
+    "Grouped Q5_0 word fetching: first matched full-model profile increased its kernel time 682.56 -> 720.34 ms. Final source restores the original scalar reader rather than retaining an unproven specialization.",
+    "A proposed exact CPU high/low reconstitution basis oracle rejected both the control and candidate. Basis checks use the existing independent host-decode contract, not that invalid oracle; existing tolerances/goldens remain unchanged.",
+    "All-format experiment AR HTTP candidate was interrupted before final refinement; its raw data remain in the parent evidence directory and are not final qualification.",
+    "An AR control attempt reordered semantically identical CLI arguments; the unchanged strict comparison_command guard rejected it. It is retained but not used as qualifying control evidence. The earlier independent 14954fe2 capture matches every guard and is used instead.",
+    "A concurrent nix-portable shell launch failed while creating its Git symlink; the sequential relaunch succeeded before any timed inference. The failed launch log is retained."
+  ],
+  "inherited_limits": [
+    "Comparison with original vector 5f3c5b11 still has 12 output-hash/token-count differences in each mode. This tuning preserves the optimized predecessor; it does not waive that original gate.",
+    "Original matched-history comparison remains 114/123 argmaxes, mean KL 0.128852 and max KL 4.526042; bounded operator checks do not prove full-model upstream accuracy.",
+    "No promotion, service enablement, service pin change, vision/full-262144-context or full-concurrency/depth qualification. Routed Q6_K experts remain unsupported."
+  ],
+  "raw_evidence": "/home/lm/dev/gufo-orca-rebase-results/large-only",
+  "initial_experiment_evidence": "/home/lm/dev/gufo-orca-rebase-results",
+  "reproduction_scripts": [
+    "orca-large-quality.sh",
+    "orca-large-perf.sh",
+    "orca-large-current-controls.sh"
+  ],
+  "restoration_proof": {
+    "kernel_source_identical_to_control": true,
+    "sha256": "11725ba756261e9238a9a224c2496eba65fabedbf7f943a8b0db21266a3846ee",
+    "five_operator_suites_pass": true,
+    "expanded_fp64_cases": 88,
+    "raw_log": "/home/lm/dev/gufo-orca-rebase-results/restored-operators.log"
+  },
+  "model_identity_evidence": "mixed-q4-k-m.json",
+  "target": "/home/lm/models/Qwen3.8-Flash-Next-GGUF-Orca/Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00001-of-00003.gguf",
+  "draft": "/home/lm/models/Qwen3.8-Flash-Next-GGUF-Orca/Qwen3.8-Flash-Next-Uncensored-MTP-draft.gguf",
+  "http_scope": {
+    "sessions": 8,
+    "context": 8192,
+    "max_pending_per_client": 16,
+    "sampling_preset": "qwen38",
+    "suites": [
+      "tools",
+      "batch"
+    ],
+    "original_service_configuration_not_requalified": true
+  },
+  "historical_benchmark_tables": {
+    "unchanged_against": [
+      "evidence/orca-before-main-rebase-24feb0c9",
+      "origin/main"
+    ],
+    "sha256": "f2c130bd9482248fad9bbb669d5f111c3c10f12a3c8b9e256a752b08bae2c1ee"
+  }
+}

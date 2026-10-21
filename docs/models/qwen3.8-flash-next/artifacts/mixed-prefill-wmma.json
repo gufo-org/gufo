@@ -1,0 +1,336 @@
+{
+  "date": "2026-10-20",
+  "status": "experimental; prior-output promotion gate failed; not deployed",
+  "baseline_revision": "5f3c5b1155aa9c0ca21e88cd37490ebb3d3145f0",
+  "candidate_revision": "40a68da4e79d367a97427a927dd49ac096892cf3",
+  "arithmetic_control_revision": "48aef723699294299ac114450e57078d8e792bc7",
+  "arithmetic_control_local_ref": "evidence/orca-prefill-arithmetic-48aef723",
+  "branch": "feat/flash-next-q4-k-m",
+  "platform": "AMD Strix Halo gfx1151, Linux, 128 GB unified memory",
+  "build": {
+    "kind": "pinned production Nix builds",
+    "baseline_store": "/nix/store/nrqcxzdj0rj8y3lf1qpghkywjp8jfsmn-gufo-0-unstable-5f3c5b1",
+    "candidate_store": "/nix/store/7asf1g7y7lxc41aj309p2kv4x1xvha9y-gufo-0-unstable-40a68da",
+    "candidate_gc_root": "/home/lm/dev/gufo/result-orca-prefill-40a68da4",
+    "elf_sha256": {
+      "baseline": "db2d269f94329719aa8b94635814b1e49a5361571aaf1dc31f3b18e02de4c64e",
+      "candidate": "471c9cf0d86a8481f3748e3da39af90b198afc032a723d15892702b65961560c"
+    },
+    "flake_lock_sha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+    "toolchain": "GCC 15.3.0, HIP Clang 22.0.0, ROCm 7.2.3; shared pinned dependencies"
+  },
+  "weights": [
+    {
+      "file": "Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00001-of-00003.gguf",
+      "bytes": 44598509600
+    },
+    {
+      "file": "Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00002-of-00003.gguf",
+      "bytes": 44693535520
+    },
+    {
+      "file": "Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00003-of-00003.gguf",
+      "bytes": 29858677824
+    },
+    {
+      "file": "Qwen3.8-Flash-Next-Uncensored-MTP-draft.gguf",
+      "bytes": 4135893632
+    }
+  ],
+  "implementation": {
+    "dense": "packed Q4_K/Q5_0/Q6_K, tile-local split halves, four products, compensated K64 F32 accumulation",
+    "expert": "prefill-only Q5_0 routed F16 down; original decode/verification arithmetic retained",
+    "storage": "original packed weights, no model-wide dequantization/requantization or extra global activation staging",
+    "tile": [
+      64,
+      64,
+      64
+    ],
+    "cooperative_decode_elements_per_thread": 16,
+    "forced_inline_tile_decoder": true,
+    "snapshot_payload_version": 19
+  },
+  "native_benchmark": {
+    "scope": "separate native PP/TG tests, C1, depth 0, greedy; excludes model load; PP has untimed warmup",
+    "prompt_tokens": 2048,
+    "generation_tokens": 128,
+    "tg_prefix_tokens": 16,
+    "repetitions": 3,
+    "candidate_commands": {
+      "ar": "/nix/store/7asf1g7y7lxc41aj309p2kv4x1xvha9y-gufo-0-unstable-40a68da/bin/gufo bench --model /home/lm/models/Qwen3.8-Flash-Next-GGUF-Orca/Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00001-of-00003.gguf --speculative off -p 2048 -n 128 -r 3",
+      "mtp": "/nix/store/7asf1g7y7lxc41aj309p2kv4x1xvha9y-gufo-0-unstable-40a68da/bin/gufo bench --model /home/lm/models/Qwen3.8-Flash-Next-GGUF-Orca/Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00001-of-00003.gguf --speculative mtp --mtp-model /home/lm/models/Qwen3.8-Flash-Next-GGUF-Orca/Qwen3.8-Flash-Next-Uncensored-MTP-draft.gguf --draft-tokens 7 -p 2048 -n 128 -r 3"
+    },
+    "measurements": {
+      "ar": {
+        "baseline": {
+          "pp2048": {
+            "mean": 142.59,
+            "standard_deviation": 0.33
+          },
+          "tg128": {
+            "mean": 16.77,
+            "standard_deviation": 0.36
+          }
+        },
+        "candidate": {
+          "pp2048": {
+            "mean": 379.84,
+            "standard_deviation": 1.53
+          },
+          "tg128": {
+            "mean": 16.91,
+            "standard_deviation": 0.09
+          }
+        },
+        "prefill_factor": 2.6638614208570024,
+        "decode_change_percent": 0.8348240906380422
+      },
+      "mtp": {
+        "baseline": {
+          "pp2048": {
+            "mean": 142.59,
+            "standard_deviation": 2.16
+          },
+          "tg128": {
+            "mean": 32.23,
+            "standard_deviation": 0.44
+          }
+        },
+        "candidate": {
+          "pp2048": {
+            "mean": 378.3,
+            "standard_deviation": 1.83
+          },
+          "tg128": {
+            "mean": 30.16,
+            "standard_deviation": 0.35
+          }
+        },
+        "prefill_factor": 2.6530612244897958,
+        "decode_change_percent": -6.422587651256584
+      }
+    },
+    "interpretation": "Prefill improves; no decode speedup claimed. MTP TG is lower and prefix arithmetic differs from the initial implementation."
+  },
+  "profile": {
+    "command_scope": "native AR pp2048/tg1, r1; includes warmup, timed prefill, tiny decode and startup",
+    "baseline_kernel_sum_ms": 30051.24,
+    "candidate_kernel_sum_ms": 11110.72,
+    "baseline_mixed_projection_ms": 27461.09,
+    "candidate_mixed_projection_ms": 9192.31,
+    "baseline_dispatches": 10099,
+    "candidate_dispatches": 9259,
+    "warning": "Whole-capture wall span/idle include approximately 21 seconds of model startup; they are not inference-utilization measurements.",
+    "resource_comparison_scope": "Packed WMMA kernels only: original is the 48aef723 pre-tuning prototype, cooperative is an intermediate, inline is 40a68da4; these are not resource counts for the initial vector baseline.",
+    "resources": {
+      "original": {
+        "12": {
+          "group_segment_fixed_size": 32768,
+          "private_segment_fixed_size": 376,
+          "next_free_vgpr": 242
+        },
+        "6": {
+          "group_segment_fixed_size": 32768,
+          "private_segment_fixed_size": 376,
+          "next_free_vgpr": 242
+        },
+        "14": {
+          "group_segment_fixed_size": 32768,
+          "private_segment_fixed_size": 376,
+          "next_free_vgpr": 242
+        }
+      },
+      "cooperative": {
+        "12": {
+          "group_segment_fixed_size": 32768,
+          "private_segment_fixed_size": 248,
+          "next_free_vgpr": 235
+        },
+        "6": {
+          "group_segment_fixed_size": 32768,
+          "private_segment_fixed_size": 0,
+          "next_free_vgpr": 240
+        },
+        "14": {
+          "group_segment_fixed_size": 32768,
+          "private_segment_fixed_size": 248,
+          "next_free_vgpr": 235
+        }
+      },
+      "inline": {
+        "12": {
+          "group_segment_fixed_size": 32768,
+          "private_segment_fixed_size": 0,
+          "next_free_vgpr": 241
+        },
+        "6": {
+          "group_segment_fixed_size": 32768,
+          "private_segment_fixed_size": 0,
+          "next_free_vgpr": 240
+        },
+        "14": {
+          "group_segment_fixed_size": 32768,
+          "private_segment_fixed_size": 0,
+          "next_free_vgpr": 233
+        }
+      }
+    }
+  },
+  "checks": {
+    "cpp_format": "PASS; shared formatter and git diff --check",
+    "operator_suites": [
+      "hc_mix_ops",
+      "moe_epilogue_ops",
+      "projection_ops",
+      "routed_wmma_ops",
+      "mixed_quant_ops"
+    ],
+    "operator_result": "PASS, unchanged tolerances",
+    "dense_fp64_cases": 72,
+    "dense_fp64_relative_rms_limit": 0.002,
+    "dense_fp64_worst_relative_rms": 3.88122e-05,
+    "real_first_projection": {
+      "tensor": "blk.0.hc_attn_down.weight",
+      "rows": 8,
+      "m": 320,
+      "k": 10240,
+      "changed": 2208,
+      "max_delta": 6.10352e-05,
+      "old_relative_rms": 1.15799e-07,
+      "new_relative_rms": 1.46536e-07
+    },
+    "real_first_projection_all_129_columns_exact": true,
+    "native_execution": "PASS at 2048 tokens; AR/MTP target logits, independent mixed execution, RAM/serialized sampled replay and obsolete-payload rejection",
+    "native_chunks": "PASS at all 8 cases, including 1/8/9-token tails, 2048/1025 and 4096/2048",
+    "scalar_cpu_reference": "5/5 winners; maximum reported KL 0.00030; bounded five-token case only",
+    "against_initial_fallback": {
+      "rows": 123,
+      "vocabulary": 248320,
+      "finite": true,
+      "argmax_matches": 114,
+      "mean_kl": 0.1288518611985303,
+      "max_kl": 4.526042157154951,
+      "max_abs": 9.634334564208984,
+      "rmse": 0.36689624476698945,
+      "token_ids_identical": true
+    },
+    "against_arithmetic_control": "30,543,360 logits byte-identical to 48aef723; cooperative/inlining changes preserve the earlier matrix-core arithmetic",
+    "http": {
+      "baseline_off": {
+        "status": "passed",
+        "functional_status": "passed",
+        "comparison_status": null,
+        "suites": {
+          "tools": "passed",
+          "batch": "passed"
+        },
+        "execution": {
+          "loaded_mode": "off",
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "draft_execution_observed": false
+        },
+        "raw": "/home/lm/dev/gufo-orca-prefill-results/final-40a68da4/http-baseline-off"
+      },
+      "candidate_off": {
+        "status": "failed",
+        "functional_status": "passed",
+        "comparison_status": "failed",
+        "suites": {
+          "tools": "passed",
+          "batch": "passed"
+        },
+        "execution": {
+          "loaded_mode": "off",
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "draft_execution_observed": false
+        },
+        "raw": "/home/lm/dev/gufo-orca-prefill-results/final-40a68da4/http-candidate-off",
+        "quality_or_coverage_changes": [
+          "batch.requests.json:batch_c8_chat_responses_completions_replay:0: output_sha256 changed",
+          "batch.requests.json:batch_c8_chat_responses_completions_replay:1: output_sha256 changed",
+          "batch.requests.json:batch_c8_cancelled_peer_isolation:2: output_sha256 changed",
+          "batch.requests.json:batch_c8_rejected_peer_isolation:3: output_sha256 changed",
+          "tools.requests.json:responses_literal_call_argument:0: completion_tokens changed (36 -> 37)",
+          "tools.requests.json:required_forced_decoding:0: completion_tokens changed (34 -> 27)",
+          "tools.requests.json:responses_tool_thinking_high:0: output_sha256 changed",
+          "tools.requests.json:responses_tool_thinking_high:0: completion_tokens changed (71 -> 74)",
+          "tools.requests.json:auto_chat_thinking_high:0: output_sha256 changed",
+          "tools.requests.json:auto_chat_thinking_high:0: completion_tokens changed (71 -> 53)",
+          "tools.requests.json:chat_tool_thinking_low:0: output_sha256 changed",
+          "tools.requests.json:responses_tool_c4_isolation:0: completion_tokens changed (43 -> 42)"
+        ],
+        "timing_failures": 0,
+        "timing_failures_by_metric": {}
+      },
+      "baseline_mtp": {
+        "status": "passed",
+        "functional_status": "passed",
+        "comparison_status": null,
+        "suites": {
+          "tools": "passed",
+          "batch": "passed"
+        },
+        "execution": {
+          "loaded_mode": "mtp",
+          "draft_tokens": 2712,
+          "draft_tokens_accepted": 2185,
+          "draft_execution_observed": true
+        },
+        "raw": "/home/lm/dev/gufo-orca-prefill-results/final-40a68da4/http-baseline-mtp"
+      },
+      "candidate_mtp": {
+        "status": "failed",
+        "functional_status": "passed",
+        "comparison_status": "failed",
+        "suites": {
+          "tools": "passed",
+          "batch": "passed"
+        },
+        "execution": {
+          "loaded_mode": "mtp",
+          "draft_tokens": 2732,
+          "draft_tokens_accepted": 2264,
+          "draft_execution_observed": true
+        },
+        "raw": "/home/lm/dev/gufo-orca-prefill-results/final-40a68da4/http-candidate-mtp",
+        "quality_or_coverage_changes": [
+          "batch.requests.json:batch_c8_chat_responses_completions_replay:0: output_sha256 changed",
+          "batch.requests.json:batch_c8_chat_responses_completions_replay:1: output_sha256 changed",
+          "batch.requests.json:batch_c8_cancelled_peer_isolation:2: output_sha256 changed",
+          "batch.requests.json:batch_c8_rejected_peer_isolation:3: output_sha256 changed",
+          "tools.requests.json:responses_literal_call_argument:0: completion_tokens changed (36 -> 37)",
+          "tools.requests.json:required_forced_decoding:0: completion_tokens changed (34 -> 27)",
+          "tools.requests.json:responses_tool_thinking_high:0: output_sha256 changed",
+          "tools.requests.json:responses_tool_thinking_high:0: completion_tokens changed (71 -> 74)",
+          "tools.requests.json:auto_chat_thinking_high:0: output_sha256 changed",
+          "tools.requests.json:auto_chat_thinking_high:0: completion_tokens changed (71 -> 53)",
+          "tools.requests.json:chat_tool_thinking_low:0: output_sha256 changed",
+          "tools.requests.json:responses_tool_c4_isolation:0: completion_tokens changed (43 -> 42)"
+        ],
+        "timing_failures": 0,
+        "timing_failures_by_metric": {}
+      }
+    }
+  },
+  "promotion": {
+    "qualified": false,
+    "reason": "Original-package HTTP output hashes/token counts changed; goldens and comparison tolerances were not changed.",
+    "service_changed": false,
+    "service": "gufo-orca-qwen3.8-flash-next.service",
+    "service_original_pin": "5f3c5b11",
+    "enabled_by_this_work": false,
+    "observed_active_state": "inactive",
+    "observed_unit_file_state": "disabled"
+  },
+  "limitations": [
+    "No official/unquantized teacher, statistical language accuracy or conversion-parity qualification.",
+    "No initial-fallback output parity; forced continuation IDs establish matched inputs, not completion parity.",
+    "No vision or deep-context qualification; HTTP coverage is tools and mixed C8 batching, not a full C1-C8/depth performance sweep.",
+    "MTP TG measured 6.4% below the earlier capture; no decode-throughput improvement claimed.",
+    "Routed Q6_K experts remain unsupported. Existing UD-Q4_K_XL and llama.cpp tables were not remeasured or changed."
+  ],
+  "raw_results": "/home/lm/dev/gufo-orca-prefill-results",
+  "final_raw_results": "/home/lm/dev/gufo-orca-prefill-results/final-40a68da4"
+}

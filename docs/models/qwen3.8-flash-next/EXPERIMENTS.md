@@ -1,11 +1,67 @@
 # Qwen3.8 Flash-Next experiments
 
+## Packed K16 code loads after rebase (October 21, 2026)
+
+Main `f020bd3a` is integrated without changing the historical benchmark
+captures. Its whole-pass small-projection dispatch is restricted to
+F32/F16/BF16 so newly supported packed formats cannot enter that path.
+The control is `14954fe2`. Unrestricted `becdf9bf` and large-only `f75eb7d9`
+are rejected; `2f049172` restores the kernel file exactly to the control.
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| Q4_K/Q6_K word-sized K16 code loads at every prefill width | Rejected in unrestricted form: numerics remain exact and native C1 pp2048 improves 385.00 → 457.10 tok/s AR and 379.93 → 467.66 MTP, but strict alternating HTTP controls confirm one AR and two MTP phase regressions. No thresholds were widened. |
+| Limit grouped Q4_K/Q6_K reads to at least 2048 rows | Rejected: fixes the earlier C4 TTFT case, retains 21.5% AR / 21.1% MTP native PP gains and exact 3720-token mixed-dispatch history, but two candidate observations plus current unchanged controls still confirm five AR and eight MTP phase failures. The restored implementation retains all 88 FP64 cases and new one-hot/boundary checks. |
+| Apply grouped loads to Q5_0 as well | Rejected: the first matched full-model trace increases its kernel time 682.56 → 720.34 ms. Final source retains the original coefficient reader; the final trace measures 672.60 ms. Both trials and the interrupted first HTTP attempt remain in raw evidence. |
+| Exact CPU high/low reconstitution as a new basis oracle | Rejected during test construction: it rejects the control too. New one-hot coefficient checks use the existing independent host-decode tolerance; existing numerical bounds and goldens are unchanged. Full matched-history logits remain byte-exact. |
+
+Numerical equality does not establish serving-speed qualification. Unchanged
+controls reproduce many stalls, but not every slowdown can be dismissed as
+noise. The failed routes are removed from the default implementation; their
+source ref, binaries and every observation remain in evidence. The earlier
+original-vector output-parity and model-accuracy limits remain unchanged.
+No service promotion or enablement is performed.
+[Commands, controls and qualification](artifacts/mixed-prefill-k16.json).
+
 ## Component-cache admission (October 20, 2026)
 
 | Experiment | Outcome |
 | --- | --- |
 | One rank per eligible slot, checkpoint-presence queries and one cold reset | Retained: the 128-checkpoint CPU fixture measures 107.05 µs for a full lookup and 31.49 µs for presence. All six HTTP profiles pass correctness, with exact responses and cache/prefill work. Native AR/MTP replay and d0/C1–C8 controls retain quality. Per-request timings remain partly inconclusive; see [qualification](QUALITY.md). |
 | Share completed full-prompt retry captures across peers | Rejected under the existing phase gate. The identical cohort avoids three 133,129,584-byte copies, and sampled MTP replies replay exactly, but larger physical decode batches repeatedly add 7–9 ms to some decode phases. Total request time improves; eight phase measurements fail. The default fix preserves capture behavior. |
+
+## Packed mixed-quant prefill (October 20, 2026)
+
+Retained below means kept on the development branch, not approved for
+production: the matched prior-output comparison still fails. The service pin
+is unchanged, and no goldens or qualification thresholds were relaxed.
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| Single-F16 packed dense operands | Rejected: relative FP64 RMS `0.00255` exceeded the existing `0.002` bound. The tolerance was not widened. |
+| Split-half dense GEMM, four products and compensated K64 accumulation | Retained: packed weights, tile-local conversion, unchanged FP64 bounds, ragged guards, exact sliced replay and complete bounded native AR/MTP checks. This changes the initial fallback's prefill numerics; it is not a parity claim. |
+| Keep the original integer expert prefill pipeline | Rejected for this layout: the vector control still fails exact 2048/1025 chunk replay after fixing HC normalization. Q5_0 down weights instead expand signed codes into the existing F16 routed fragments; decode/verification retain the old path. |
+| Switch F32 HC norm kernels below 16 prompt rows | Removed for prefill: it changed normalization at a nine-token tail. Prompt chunks now use one reduction tree; short decode/verification batches keep their scalar dispatch. |
+| Matrix-core dispatch alone | Not a win: production pp2048 stayed near 142 tok/s. Outlined tile decoding introduced 376 private bytes/thread. |
+| Cooperative K16 loads plus forced-inline decoding | Retained: all waves decode sixteen values, all three packed variants use zero private bytes/thread (32 KiB LDS), and the real HC component falls from 11.29 to 5.13 ms. Production AR prefill rises from 142.59 to 379.84 tok/s. All 30,543,360 matched-history logits remain byte-identical to the pre-tuning matrix-core build. |
+| Third operand plane | Removed: larger LDS use did not restore initial-fallback full-model parity; the retained split-half route already passes the unchanged independent bound. |
+
+[Performance, numerical changes and raw evidence](artifacts/mixed-prefill-wmma.json).
+All existing UD-Q4_K_XL and llama.cpp benchmark captures remain unchanged.
+
+## Initial mixed Q4_K_M compatibility (October 20, 2026)
+
+Packed Q4_K/Q5_0/Q6_K dense/embedding reads and Q5_0 routed dispatch support
+the Orca layout without model-wide dequantization or requantization. The large
+Q5_0 PLE table stays disk-backed; only its small F16 convolution filter is
+widened exactly to F32. Existing Q8 fast paths are unchanged. All-zero draft-only
+compression metadata uses the pinned ratio-four predictor, while invalid target
+metadata remains rejected. Operator, native execution and bounded HTTP checks
+pass. That initial change used eight-row dense tiles for compatibility, before
+the matrix-core prefill work; it claimed no optimized dispatch or performance
+comparison.
+[Evidence and remaining limits](artifacts/mixed-q4-k-m.json).
+
 
 ## Host compaction and cache transfers (October 18, 2026)
 

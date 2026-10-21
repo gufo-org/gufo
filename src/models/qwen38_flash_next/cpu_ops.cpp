@@ -63,6 +63,9 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
     case GgmlType::kQ8_0:
       gufo::quant::DequantizeQ8_0(src, out, k);
       break;
+    case GgmlType::kQ5_0:
+      gufo::quant::DequantizeQ5_0(src, out, k);
+      break;
     case GgmlType::kQ5_1:
       DequantizeQ5_1(src, out, k);
       break;

@@ -231,7 +231,9 @@ public:
   [[nodiscard]] NgramTotals NgramRowTotals() const noexcept;
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
+  // Prefill matrix arithmetic and short-tail normalization changed. Do not
+  // reuse frontiers produced by the previous mixed-quant implementation.
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 19;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(

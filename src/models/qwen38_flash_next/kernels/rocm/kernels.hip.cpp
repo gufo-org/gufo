@@ -109,7 +109,7 @@ __device__ __forceinline__ float Bf16ToF32(std::uint16_t h) {
   return __uint_as_float(static_cast<std::uint32_t>(h) << 16);
 }
 
-/// Reads element i of a Q8_0 / F32 / BF16 / F16 row.
+/// Reads one packed weight without changing its quantization.
 __device__ __forceinline__ float RowElement(const void* row, WeightType type,
                                             std::uint32_t i) {
   switch (type) {
@@ -119,6 +119,41 @@ __device__ __forceinline__ float RowElement(const void* row, WeightType type,
       return Bf16ToF32(static_cast<const std::uint16_t*>(row)[i]);
     case WeightType::kF16:
       return __half2float(static_cast<const __half*>(row)[i]);
+    case WeightType::kQ5_0: {
+      const auto* b = static_cast<const std::uint8_t*>(row) + (i / 32) * 22;
+      const unsigned j = i % 32;
+      const unsigned high = (b[2 + j / 8] >> (j % 8)) & 1U;
+      const int q = ((b[6 + j % 16] >> (4 * (j / 16))) & 15) | (high << 4);
+      return Materialize(__half2float(*reinterpret_cast<const __half*>(b)) *
+                         (q - 16));
+    }
+    case WeightType::kQ4_K: {
+      const auto* b = static_cast<const std::uint8_t*>(row) + (i / 256) * 144;
+      const unsigned j = i % 256;
+      const unsigned g = j / 32;
+      const auto* s = b + 4;
+      const unsigned sc =
+          g < 4 ? s[g] & 63 : (s[g + 4] & 15) | ((s[g - 4] >> 6) << 4);
+      const unsigned mn =
+          g < 4 ? s[g + 4] & 63 : (s[g + 4] >> 4) | ((s[g] >> 6) << 4);
+      const unsigned q = (b[16 + (g / 2) * 32 + j % 32] >> (4 * (g % 2))) & 15;
+      const float d = __half2float(*reinterpret_cast<const __half*>(b));
+      const float dm = __half2float(*reinterpret_cast<const __half*>(b + 2));
+      return Materialize(Materialize(d * sc * q) - dm * mn);
+    }
+    case WeightType::kQ6_K: {
+      const auto* b = static_cast<const std::uint8_t*>(row) + (i / 256) * 210;
+      const unsigned j = i % 256;
+      const unsigned h = j / 128, seg = (j % 128) / 32, lane = j % 32;
+      const unsigned lo =
+          (b[h * 64 + (seg % 2) * 32 + lane] >> (4 * (seg / 2))) & 15;
+      const unsigned hi = (b[128 + h * 32 + lane] >> (2 * seg)) & 3;
+      const int q = static_cast<int>(lo | (hi << 4)) - 32;
+      const int sc = reinterpret_cast<const std::int8_t*>(
+          b + 192)[h * 8 + lane / 16 + seg * 2];
+      return Materialize(
+          __half2float(*reinterpret_cast<const __half*>(b + 208)) * sc * q);
+    }
     case WeightType::kQ8_0: {
       const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 32) * 34;
       const __half d = *reinterpret_cast<const __half*>(blk);
@@ -138,6 +173,12 @@ __device__ __forceinline__ std::size_t RowBytes(WeightType type,
     case WeightType::kBF16:
     case WeightType::kF16:
       return static_cast<std::size_t>(k) * 2;
+    case WeightType::kQ5_0:
+      return static_cast<std::size_t>(k / 32) * 22;
+    case WeightType::kQ4_K:
+      return static_cast<std::size_t>(k / 256) * 144;
+    case WeightType::kQ6_K:
+      return static_cast<std::size_t>(k / 256) * 210;
     case WeightType::kQ8_0:
       return static_cast<std::size_t>(k / 32) * 34;
   }
@@ -4943,6 +4984,7 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
   return kType == WeightType::kQ4_K   ? (k / 256) * sizeof(Q4KBlock)
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
+         : kType == WeightType::kQ5_0 ? (k / 32) * 22
                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
@@ -4994,7 +5036,8 @@ __launch_bounds__(256) __global__
   constexpr int kWaveRowTiles = BM / 128;  // 16-row tiles per wave
   constexpr bool kQ5 = kType == WeightType::kQ5_1;
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
-  constexpr bool kQ8 = kType == WeightType::kQ8_0;
+  constexpr bool kQ5Zero = kType == WeightType::kQ5_0;
+  constexpr bool kQ8 = kType == WeightType::kQ8_0 || kQ5Zero;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
@@ -5152,11 +5195,32 @@ __launch_bounds__(256) __global__
 #pragma unroll
     for (int u = 0; u < (kQ5 ? 0 : kWaveRowTiles); ++u) {
       if constexpr (kQ8) {
-        // block_q8_0 is 34 bytes, so the code loads are 2-byte aligned.
-        const auto* blk = f_ptr[u] + ((kb0 + f_c) * 34);
+        // Q5_0's signed 5-bit codes share the Q8 LDS/fragments after exact
+        // integer expansion. The global weights stay packed (22 B/block).
+        const auto* blk = f_ptr[u] + ((kb0 + f_c) * (kQ5Zero ? 22 : 34));
         f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
-        __builtin_memcpy(&f_codes[u], blk + 2, 16);
-        __builtin_memcpy(&f_codes_hi[u], blk + 18, 16);
+        if constexpr (kQ5Zero) {
+          std::uint32_t high, packed[4];
+          __builtin_memcpy(&high, blk + 2, sizeof(high));
+          __builtin_memcpy(packed, blk + 6, sizeof(packed));
+          std::uint32_t codes[8];
+#pragma unroll
+          for (unsigned i = 0; i < 4; ++i) {
+            const auto lo = (packed[i] & 0x0F0F0F0FU) |
+                            SpreadHighBits((high >> (4 * i)) & 15U);
+            const auto hi = ((packed[i] >> 4) & 0x0F0F0F0FU) |
+                            SpreadHighBits((high >> (16 + 4 * i)) & 15U);
+            // Bias every byte above 16 before subtracting, so ordinary
+            // integer subtraction cannot borrow across byte boundaries.
+            codes[i] = ((lo | 0x80808080U) - 0x10101010U) ^ 0x80808080U;
+            codes[i + 4] = ((hi | 0x80808080U) - 0x10101010U) ^ 0x80808080U;
+          }
+          __builtin_memcpy(&f_codes[u], codes, 16);
+          __builtin_memcpy(&f_codes_hi[u], codes + 4, 16);
+        } else {
+          __builtin_memcpy(&f_codes[u], blk + 2, 16);
+          __builtin_memcpy(&f_codes_hi[u], blk + 18, 16);
+        }
       } else {
         constexpr int kBlockChunks = kQ5K ? 11 : 9;
         constexpr int kCodeChunk = kQ5K ? 3 : 1;
@@ -5775,10 +5839,9 @@ void HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
                bool decode) {
-  // One block per token wants a batch: a decode step keeps the
-  // one-block-per-stream kernel's parallelism.
-  if (!decode && n_tokens >= 16 && streams == 4 && hidden % 128 == 0 &&
-      hidden <= 2560) {
+  // Prefill keeps one normalization tree even for a one-token tail.
+  // Decode explicitly selects the one-block-per-stream kernel instead.
+  if (!decode && streams == 4 && hidden % 128 == 0 && hidden <= 2560) {
     hipLaunchKernelGGL(HcCombineVec4Kernel<float>, dim3(n_tokens),
                        dim3(kThreads), 0, stream, res, block_out, inject,
                        inject_parts, gamma, xn, nullptr, hidden, eps, nullptr);
@@ -6173,6 +6236,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
             rows_out, swiglu_gate, out, out_half, m, k, nullptr);
         return true;
       }
+    case WeightType::kQ5_0:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ5_0, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
     case WeightType::kQ5_1:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ5_1, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
@@ -6340,10 +6409,14 @@ struct AttentionProjectionOutput {
 /// and the activations are F16 rows [batch][k], so the matrix cores
 /// accumulate in F32 with no per-block scaling. SSM waves retain their
 /// decoded weight rows in registers instead of staging them in LDS. F16 weights
-/// skip decoding and use the same ordered K16 products. y is [batch][m].
+/// skip decoding and use the same ordered K16 products. Mixed packed weights
+/// and F32 activations use tile-local high/low halves and a separate correction
+/// accumulator; residual halves are scaled by 2^10 to retain small values.
+/// y is [batch][m].
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
-         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false>
+         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false,
+         WeightType kPacked = WeightType::kQ8_0>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
@@ -6357,6 +6430,9 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   // 16-bit weight rows staged as they are: F16, or BF16 with BF16
   // activations.
   constexpr bool kRawWeights = kHalfWeights || kBf16;
+  constexpr bool kMixed = kPacked != WeightType::kQ8_0;
+  constexpr bool kStagedHalves = kRawWeights || kMixed;
+  static_assert(!kMixed || (!kRawWeights && !kSsmConv && !kHcMix));
   constexpr bool kRegisterWeights = kSsmConv;
   static_assert(!kRegisterWeights ||
                 (BM == 256 && BK == 2 && WM == 8 && WN == 1));
@@ -6366,15 +6442,22 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   constexpr int kWaveTokTiles = kTokTiles / WN;
   // Weight and activation K blocks staged per thread; a unit past the
   // stage's block count is idle.
-  constexpr int kAUnits = BM * BK;
-  constexpr int kBUnits = BN * BK;
+  // Split each packed K32 row between two threads. Every thread decodes
+  // only sixteen values, so all waves participate and prefetch fragments
+  // do not exhaust VGPRs while the current tile is being multiplied.
+  constexpr int kParts = kMixed ? 2 : 1;
+  constexpr int kStageElements = 32 / kParts;
+  constexpr int kStageChunks = 4 / kParts;
+  constexpr int kAUnits = BM * BK * kParts;
+  constexpr int kBUnits = BN * BK * kParts;
   constexpr int kAPer = (kAUnits + 255) / 256;
   constexpr int kBPer = (kBUnits + 255) / 256;
 
   // One K block of one row or token is four 16-byte chunks; the chunks of
   // nearby rows are permuted so a fragment read (one row per lane, 64-byte
   // stride) covers all bank groups.
-  constexpr int kLdsChunks = BK * ((kRegisterWeights ? 0 : BM) + BN) * 4;
+  constexpr int kLdsChunks =
+      BK * ((kRegisterWeights ? 0 : BM) + BN) * 4 * (kMixed ? 2 : 1);
   constexpr int kTransposeChunks = 8 *
                                    (kSsmConv ? kSsmProjectionTileTokens : 16) *
                                    36 * sizeof(float) / sizeof(uint4);
@@ -6384,6 +6467,10 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   auto* s_a = reinterpret_cast<uint4(*)[BM][4]>(s_lds);
   auto* s_b = reinterpret_cast<uint4(*)[BN][4]>(
       s_lds + (kRegisterWeights ? 0 : BK * BM * 4));
+  auto* s_a_low = reinterpret_cast<uint4(*)[BM][4]>(
+      s_lds + (kMixed ? BK * (BM + BN) * 4 : 0));
+  auto* s_b_low = reinterpret_cast<uint4(*)[BN][4]>(
+      s_lds + (kMixed ? BK * (2 * BM + BN) * 4 : 0));
   const auto swizzle = [](int row, int c) { return c ^ ((row >> 1) & 3); };
 
   const int num_kb = static_cast<int>(k / 32);
@@ -6431,36 +6518,59 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 #pragma unroll
   for (int p = 0; p < kAPer; ++p) {
     const int idx = (p * 256) + tid;
-    const int r = r_block + (kRegisterWeights ? tid : idx / BK);
+    const int r = r_block + (kRegisterWeights ? tid : idx / (BK * kParts));
     a_live[p] = idx < kAUnits && r < m_i;
     // Interleave the four gate streams within the tile, without repacking
     // weights. Each group of four rows produces one mixed hidden element.
     const int weight_row = kHcMix ? (r % 4) * (m_i / 4) + r / 4 : r;
-    a_ptr[p] = w_bytes +
-               static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1)) *
-                   static_cast<std::size_t>(num_kb) * (kRawWeights ? 64 : 34);
+    a_ptr[p] =
+        w_bytes + static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1)) *
+                      (kMixed ? RowBytes(kPacked, k)
+                              : static_cast<std::size_t>(num_kb) *
+                                    (kRawWeights ? 64 : 34));
   }
-  const __half* b_ptr[kBPer];
+  using InputScalar = std::conditional_t<kMixed, float, __half>;
+  const auto* input = reinterpret_cast<const InputScalar*>(x);
+  const InputScalar* b_ptr[kBPer];
 #pragma unroll
   for (int p = 0; p < kBPer; ++p) {
     const int idx = (p * 256) + tid;
-    const int t = token_of(idx / BK);
-    b_ptr[p] =
-        idx < kBUnits && t < static_cast<int>(batch)
-            ? x + (static_cast<std::size_t>(t) * (kStrided ? input_stride : k))
-            : nullptr;
+    const int t = token_of(idx / (BK * kParts));
+    b_ptr[p] = idx < kBUnits && t < static_cast<int>(batch)
+                   ? input + (static_cast<std::size_t>(t) *
+                              (kStrided ? input_stride : k))
+                   : nullptr;
   }
   uint4 a_codes[kAPer][2];
-  uint4 a_half[kRawWeights ? kAPer : 1][4];
+  uint4 a_half[kStagedHalves ? kAPer : 1][kStageChunks];
+  uint4 a_low[kMixed ? kAPer : 1][kStageChunks];
   std::uint32_t a_d[kAPer];
-  uint4 b_data[kBPer][4];
+  uint4 b_data[kBPer][kStageChunks];
+  uint4 b_low[kMixed ? kBPer : 1][kStageChunks];
 
-  const auto fetch_stage = [&](int kb0) {
+  // Outlining the packed decoder forces these fragments through private
+  // memory on every K tile. Keep them in registers across the pipeline.
+  const auto fetch_stage = [&](int kb0) __attribute__((always_inline)) {
 #pragma unroll
     for (int p = 0; p < kAPer; ++p) {
-      const int kb = kb0 + (kRegisterWeights ? p : (((p * 256) + tid) % BK));
+      const int idx = (p * 256) + tid;
+      const int kb = kb0 + (kRegisterWeights ? p : (idx / kParts) % BK);
       const bool live = a_live[p] && kb < num_kb;
-      if constexpr (kRawWeights) {
+      if constexpr (kMixed) {
+        // Split the exact F32 dequantization into high/low halves only for
+        // this tile. Residual matrix products preserve small/cancelling
+        // signals that a single F16 rounding can lose.
+        __half high[kStageElements], low[kStageElements];
+#pragma unroll
+        for (unsigned i = 0; i < kStageElements; ++i) {
+          const unsigned column = kb * 32 + (idx % kParts) * kStageElements + i;
+          const float v = live ? RowElement(a_ptr[p], kPacked, column) : 0.0F;
+          high[i] = __float2half_rn(v);
+          low[i] = __float2half_rn((v - __half2float(high[i])) * 1024.0F);
+        }
+        __builtin_memcpy(a_half[p], high, sizeof(high));
+        __builtin_memcpy(a_low[p], low, sizeof(low));
+      } else if constexpr (kRawWeights) {
         const auto* src = reinterpret_cast<const uint4*>(
             a_ptr[p] + static_cast<std::size_t>(rotate(kb)) * 64);
 #pragma unroll
@@ -6477,8 +6587,21 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     }
 #pragma unroll
     for (int p = 0; p < kBPer; ++p) {
-      const int kb = kb0 + (((p * 256) + tid) % BK);
-      if (b_ptr[p] != nullptr && kb < num_kb) {
+      const int idx = (p * 256) + tid;
+      const int kb = kb0 + (idx / kParts) % BK;
+      if constexpr (kMixed) {
+        __half high[kStageElements], low[kStageElements];
+#pragma unroll
+        for (unsigned i = 0; i < kStageElements; ++i) {
+          const unsigned column = kb * 32 + (idx % kParts) * kStageElements + i;
+          const float v =
+              b_ptr[p] != nullptr && kb < num_kb ? b_ptr[p][column] : 0.0F;
+          high[i] = __float2half_rn(v);
+          low[i] = __float2half_rn((v - __half2float(high[i])) * 1024.0F);
+        }
+        __builtin_memcpy(b_data[p], high, sizeof(high));
+        __builtin_memcpy(b_low[p], low, sizeof(low));
+      } else if (b_ptr[p] != nullptr && kb < num_kb) {
         const auto* src =
             reinterpret_cast<const uint4*>(b_ptr[p] + (rotate(kb) * 32));
 #pragma unroll
@@ -6507,12 +6630,19 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       if (idx >= kAUnits) {
         break;
       }
-      const int row = idx / BK;
-      const int kk = idx % BK;
-      if constexpr (kRawWeights) {
+      const int row = idx / (BK * kParts);
+      const int kk = (idx / kParts) % BK;
+      const int first_chunk = (idx % kParts) * kStageChunks;
+      if constexpr (kStagedHalves) {
 #pragma unroll
-        for (int c = 0; c < 4; ++c)
-          s_a[kk][row][swizzle(row, c)] = a_half[p][c];
+        for (int c = 0; c < kStageChunks; ++c)
+          s_a[kk][row][swizzle(row, first_chunk + c)] = a_half[p][c];
+        if constexpr (kMixed) {
+#pragma unroll
+          for (int c = 0; c < kStageChunks; ++c) {
+            s_a_low[kk][row][swizzle(row, first_chunk + c)] = a_low[p][c];
+          }
+        }
       } else {
         // Q8_0 codes are signed; flipping the sign bit carries q + 128, which
         // the 1152 magic takes back out.
@@ -6546,11 +6676,15 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       if (idx >= kBUnits) {
         break;
       }
-      const int t = idx / BK;
-      const int kk = idx % BK;
+      const int t = idx / (BK * kParts);
+      const int kk = (idx / kParts) % BK;
+      const int first_chunk = (idx % kParts) * kStageChunks;
 #pragma unroll
-      for (int c = 0; c < 4; ++c) {
-        s_b[kk][t][swizzle(t, c)] = b_data[p][c];
+      for (int c = 0; c < kStageChunks; ++c) {
+        s_b[kk][t][swizzle(t, first_chunk + c)] = b_data[p][c];
+        if constexpr (kMixed) {
+          s_b_low[kk][t][swizzle(t, first_chunk + c)] = b_low[p][c];
+        }
       }
     }
   };
@@ -6560,6 +6694,10 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   // unquantized router/gate projections, with the same order in every chunk.
   v8f acc_high[kHalfWeights ? kWaveRowTiles : 1]
               [kHalfWeights ? kWaveTokTiles : 1]{};
+  v8f correction[kMixed ? kWaveRowTiles : 1][kMixed ? kWaveTokTiles : 1]{};
+  v8f remainder[kMixed ? kWaveRowTiles : 1][kMixed ? kWaveTokTiles : 1]{};
+  v8f total[kMixed ? kWaveRowTiles : 1][kMixed ? kWaveTokTiles : 1]{};
+  v8f carry[kMixed ? kWaveRowTiles : 1][kMixed ? kWaveTokTiles : 1]{};
 #pragma unroll
   for (int i = 0; i < kWaveRowTiles; ++i) {
 #pragma unroll
@@ -6588,6 +6726,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       for (int kb = 0; kb < BK; ++kb) {
         v16h a_lo[kWaveRowTiles];
         v16h a_hi[kWaveRowTiles];
+        v16h residual_lo[kMixed ? kWaveRowTiles : 1];
+        v16h residual_hi[kMixed ? kWaveRowTiles : 1];
         if constexpr (kRegisterWeights) {
           using v8u = __attribute__((__vector_size__(32))) std::uint32_t;
           const v8u own_lo = __builtin_bit_cast(v8u, own_a_lo[kb]);
@@ -6615,6 +6755,13 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
             }
             __builtin_memcpy(&a_lo[i], &c[0], 32);
             __builtin_memcpy(&a_hi[i], &c[2], 32);
+            if constexpr (kMixed) {
+#pragma unroll
+              for (int q = 0; q < 4; ++q)
+                c[q] = s_a_low[kb][row][swizzle(row, q)];
+              __builtin_memcpy(&residual_lo[i], &c[0], 32);
+              __builtin_memcpy(&residual_hi[i], &c[2], 32);
+            }
           }
         }
 #pragma unroll
@@ -6633,6 +6780,14 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
           v16h b_hi;
           __builtin_memcpy(&b_lo, &c[0], 32);
           __builtin_memcpy(&b_hi, &c[2], 32);
+          v16h b_residual_lo, b_residual_hi;
+          if constexpr (kMixed) {
+#pragma unroll
+            for (int q = 0; q < 4; ++q)
+              c[q] = s_b_low[kb][t][swizzle(t, q)];
+            __builtin_memcpy(&b_residual_lo, &c[0], 32);
+            __builtin_memcpy(&b_residual_hi, &c[2], 32);
+          }
 #pragma unroll
           for (int i = 0; i < kWaveRowTiles; ++i) {
             if constexpr (kBf16) {
@@ -6645,7 +6800,45 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
             } else {
               acc[i][j] = Wmma(a_lo[i], b_lo, acc[i][j]);
               acc[i][j] = Wmma(a_hi[i], b_hi, acc[i][j]);
+              if constexpr (kMixed) {
+                correction[i][j] = Wmma(residual_lo[i], b_lo, correction[i][j]);
+                correction[i][j] =
+                    Wmma(a_lo[i], b_residual_lo, correction[i][j]);
+                correction[i][j] = Wmma(residual_hi[i], b_hi, correction[i][j]);
+                correction[i][j] =
+                    Wmma(a_hi[i], b_residual_hi, correction[i][j]);
+                remainder[i][j] =
+                    Wmma(residual_lo[i], b_residual_lo, remainder[i][j]);
+                remainder[i][j] =
+                    Wmma(residual_hi[i], b_residual_hi, remainder[i][j]);
+              }
             }
+          }
+        }
+      }
+      if constexpr (kMixed) {
+        // Bound each WMMA chain to one K tile. A long FP32 WMMA chain can
+        // move MoE routing decisions even when a local RMS check passes.
+        // Materialize each Kahan operation against fast-math reassociation.
+#pragma unroll
+        for (int i = 0; i < kWaveRowTiles; ++i) {
+#pragma unroll
+          for (int j = 0; j < kWaveTokTiles; ++j) {
+#pragma unroll
+            for (int lane = 0; lane < 8; ++lane) {
+              const float value = __builtin_fmaf(
+                  remainder[i][j][lane], 1.0F / 1048576.0F,
+                  __builtin_fmaf(correction[i][j][lane], 1.0F / 1024.0F,
+                                 acc[i][j][lane]));
+              const float adjusted = Materialize(value - carry[i][j][lane]);
+              const float next = Materialize(total[i][j][lane] + adjusted);
+              const float delta = Materialize(next - total[i][j][lane]);
+              carry[i][j][lane] = Materialize(delta - adjusted);
+              total[i][j][lane] = next;
+            }
+            acc[i][j] = v8f{};
+            correction[i][j] = v8f{};
+            remainder[i][j] = v8f{};
           }
         }
       }
@@ -6661,6 +6854,13 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     accumulate.template operator()<false>();
   }
 
+  if constexpr (kMixed) {
+#pragma unroll
+    for (int i = 0; i < kWaveRowTiles; ++i)
+#pragma unroll
+      for (int j = 0; j < kWaveTokTiles; ++j)
+        acc[i][j] = total[i][j];
+  }
   if constexpr (kHalfWeights) {
 #pragma unroll
     for (int i = 0; i < kWaveRowTiles; ++i) {
@@ -7114,6 +7314,37 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
   return true;
 }
 
+template<WeightType type>
+bool LaunchPackedF16(const void* w, const float* x, float* out,
+                     std::size_t batch, std::size_t m, std::size_t k,
+                     hipStream_t stream) {
+  const dim3 grid(static_cast<unsigned>((batch + 63) / 64),
+                  static_cast<unsigned>((m + 63) / 64));
+  hipLaunchKernelGGL((DenseF16GEMMKernel<64, 64, 2, 2, 4, 1, false, false,
+                                         false, false, false, false, type>),
+                     grid, dim3(kThreads), 0, stream, w,
+                     reinterpret_cast<const __half*>(x), out, batch, m, k);
+  return true;
+}
+
+bool DensePackedF16Gemm(const void* w, WeightType type, const float* x,
+                        float* out, std::size_t batch, std::size_t m,
+                        std::size_t k, hipStream_t stream) {
+  const unsigned block = type == WeightType::kQ5_0 ? 32 : 256;
+  if (!w || !x || !out || batch == 0 || m == 0 || k == 0 || k % block != 0)
+    return false;
+  switch (type) {
+    case WeightType::kQ4_K:
+      return LaunchPackedF16<WeightType::kQ4_K>(w, x, out, batch, m, k, stream);
+    case WeightType::kQ5_0:
+      return LaunchPackedF16<WeightType::kQ5_0>(w, x, out, batch, m, k, stream);
+    case WeightType::kQ6_K:
+      return LaunchPackedF16<WeightType::kQ6_K>(w, x, out, batch, m, k, stream);
+    default:
+      return false;
+  }
+}
+
 bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
@@ -7141,7 +7372,8 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
 template<WeightType type, unsigned tokens>
 void LaunchSmallGemm(const void* w, const float* x, float* out, std::uint32_t m,
                      std::uint32_t k, hipStream_t stream) {
-  if constexpr (type != WeightType::kQ8_0) {
+  if constexpr (type == WeightType::kF32 || type == WeightType::kF16 ||
+                type == WeightType::kBF16) {
     // Rows of whole four-step passes (K 2560: router and GDN alpha/beta in
     // F16, indexer in BF16) take the unchecked vector loads, four steps at a
     // time at any width: the same products in the same order.
@@ -7203,6 +7435,15 @@ void SmallGemm(const void* w, WeightType type, const float* x, float* out,
                std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                hipStream_t stream) {
   switch (type) {
+    case WeightType::kQ4_K:
+      return SmallGemmForType<WeightType::kQ4_K>(w, x, out, n_tokens, m, k,
+                                                 stream);
+    case WeightType::kQ5_0:
+      return SmallGemmForType<WeightType::kQ5_0>(w, x, out, n_tokens, m, k,
+                                                 stream);
+    case WeightType::kQ6_K:
+      return SmallGemmForType<WeightType::kQ6_K>(w, x, out, n_tokens, m, k,
+                                                 stream);
     case WeightType::kF32:
       return SmallGemmForType<WeightType::kF32>(w, x, out, n_tokens, m, k,
                                                 stream);

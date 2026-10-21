@@ -69,6 +69,12 @@ WeightType SmallType(GgmlType type) {
       return WeightType::kBF16;
     case GgmlType::kF16:
       return WeightType::kF16;
+    case GgmlType::kQ4_K:
+      return WeightType::kQ4_K;
+    case GgmlType::kQ5_0:
+      return WeightType::kQ5_0;
+    case GgmlType::kQ6_K:
+      return WeightType::kQ6_K;
     case GgmlType::kQ8_0:
       return WeightType::kQ8_0;
     case GgmlType::kF32:
@@ -1707,7 +1713,28 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     }
     return true;
   }
-  if (!MatrixRows(n_tokens)) {
+  const bool mixed = w.type == GgmlType::kQ4_K || w.type == GgmlType::kQ5_0 ||
+                     w.type == GgmlType::kQ6_K;
+  if (mixed && prefill_phase) {
+    // Matrix-core prefill with tile-local high/low precision correction,
+    // without persistent expanded weights. Even short prompt tails use this
+    // route, so chunking cannot select a different dot-product order.
+    const auto piece = static_cast<std::uint32_t>(options_.max_batch);
+    for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += piece) {
+      const auto rows = std::min(piece, n_tokens - r0);
+      const float* src = x + std::size_t{r0} * w.cols;
+      if (!DensePackedF16Gemm(w.data, SmallType(w.type), src,
+                              out + std::size_t{r0} * w.rows, rows, w.rows,
+                              w.cols, stream_)) {
+        AssignError(error_msg, "packed F16 prefill GEMM failed");
+        return false;
+      }
+    }
+    return true;
+  }
+  // Decode/verification and vocabulary heads retain their original packed
+  // vector arithmetic. Never reinterpret a packed matrix as BLAS halves.
+  if (!MatrixRows(n_tokens) || mixed) {
     SmallGemm(w.data, SmallType(w.type), x, out, n_tokens, w.rows, w.cols,
               stream_);
     return true;
@@ -1844,6 +1871,9 @@ bool Executor::Experts(const DeviceTensor& w, const float* x,
         break;
       case GgmlType::kQ5_K:
         rc = qfn_mmq_q5_K_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
+        break;
+      case GgmlType::kQ5_0:
+        rc = qfn_mmq_q5_0_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
         break;
       case GgmlType::kQ5_1:
         rc = qfn_mmq_q5_1_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
@@ -1999,8 +2029,11 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
     xn_q8_ready_ = {s_.xn, s_.xn_q8_1, n_tokens, c.HcDim()};
     return;
   }
+  // Prompt tails must keep the wide F32 normalization tree too. Preserve
+  // the existing scalar route for short decode/verification batches.
   HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, n_tokens,
-            c.hidden_size, c.hc_count, c.rms_eps, stream_);
+            c.hidden_size, c.hc_count, c.rms_eps, stream_,
+            !prefill_phase && n_tokens < 16);
 }
 
 bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
@@ -2695,7 +2728,8 @@ bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
           l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
          l.ffn_up_exps.type == l.ffn_gate_exps.type &&
          (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
-          l.ffn_down_exps.type == GgmlType::kQ8_0) &&
+          l.ffn_down_exps.type == GgmlType::kQ8_0 ||
+          (prefill_phase && l.ffn_down_exps.type == GgmlType::kQ5_0)) &&
          c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
 }
 
@@ -2756,9 +2790,10 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
       AssignError(error_msg, "routed F16 gate/up GEMM failed");
       return false;
     }
-    const WeightType down_type = l.ffn_down_exps.type == GgmlType::kQ8_0
-                                     ? WeightType::kQ8_0
-                                     : WeightType::kQ5_1;
+    const WeightType down_type =
+        l.ffn_down_exps.type == GgmlType::kQ8_0   ? WeightType::kQ8_0
+        : l.ffn_down_exps.type == GgmlType::kQ5_0 ? WeightType::kQ5_0
+                                                  : WeightType::kQ5_1;
     // Wide batches take the 64-token down tiles: they decode each expert's
     // weights over more rows, also where 48-token tiles would be fewer.
     const bool wide_down = routed_64_tiles_ != 0;

@@ -465,6 +465,53 @@ void TestCounters() {
   }
   std::filesystem::remove(path);
 }
+// Q5_0 has a four-byte high-bit plane before its nibble payload. A 160-wide
+// PLE row has five blocks (110 bytes), so adjacent rows are not sector aligned.
+void TestQ5Rows() {
+  const auto path =
+      std::filesystem::temp_directory_path() / "qwen38_ngram_q5.bin";
+  constexpr unsigned dim = 160, rows = 41, offset = 4137;
+  {
+    std::ofstream file(path, std::ios::binary);
+    std::vector<char> padding(offset, 0);
+    file.write(padding.data(), padding.size());
+    for (unsigned r = 0; r < rows; ++r) {
+      for (unsigned b = 0; b < dim / 32; ++b) {
+        std::array<unsigned char, 22> block{};
+        block[1] = 0x38;  // half scale = 0.5
+        for (unsigned j = 0; j < 32; ++j) {
+          const unsigned code = (j + r + b) % 32;
+          block[2 + j / 8] |= (code >> 4) << (j % 8);
+          block[6 + j % 16] |= (code & 15) << (4 * (j / 16));
+        }
+        file.write(reinterpret_cast<const char*>(block.data()), block.size());
+      }
+    }
+  }
+  std::string error;
+  auto table =
+      OpenTable(path, offset, rows, dim, gufo::core::GgmlType::kQ5_0, &error);
+  Check(table != nullptr, error.c_str());
+  if (table) {
+    Check(!OpenTable(path, offset, rows, 159, gufo::core::GgmlType::kQ5_0,
+                     &error),
+          "misaligned Q5 row rejected");
+    const std::array<std::uint32_t, 6> ids{40, 0, 17, 40, 1, 17};
+    for (unsigned replay = 0; replay < 2; ++replay) {
+      std::vector<float> out(ids.size() * dim + 1, -123.0F);
+      Check(table->StartRead(ids, std::span(out).first(ids.size() * dim)) &&
+                table->WaitRead(),
+            "Q5 asynchronous gather");
+      for (unsigned r = 0; r < ids.size(); ++r)
+        for (unsigned j = 0; j < dim; ++j) {
+          const int code = (j % 32 + ids[r] + j / 32) % 32;
+          Check(out[r * dim + j] == 0.5F * (code - 16), "Q5 decoded value");
+        }
+      Check(out.back() == -123.0F, "Q5 gather guard");
+    }
+  }
+  std::filesystem::remove(path);
+}
 }  // namespace
 
 int main() {
@@ -472,6 +519,7 @@ int main() {
   TestHash();
   TestTable();
   TestQuantizedRows();
+  TestQ5Rows();
   TestDistantRows();
   TestCounters();
   if (failures != 0) {

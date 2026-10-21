@@ -138,6 +138,14 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
     const auto ratios = r.U64Array(key("attention.compress_ratios"));
     if (ratios.size() != c.num_layers_all || c.full_attention_interval == 0) {
       r.Fail("attention.compress_ratios must describe every layer");
+    } else if (!require_trunk && c.nextn_layers == 1 &&
+               std::all_of(ratios.begin(), ratios.end(),
+                           [](std::uint64_t ratio) { return ratio == 0; })) {
+      // Draft-only Orca exports contain no trunk tensors and write a zero
+      // placeholder for every ratio. As with the zero nextn entry below,
+      // the exported indexer belongs to the ratio-four Flash-Next predictor.
+      // MtpMatches still requires agreement with the validated target.
+      c.compress_ratio = 4;
     } else {
       for (std::size_t i = 0; i < ratios.size(); ++i) {
         if (i >= c.num_layers) {

@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 #include <initializer_list>
 #include <utility>
 
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/weight_upload.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -108,6 +110,47 @@ struct Uploader {
     return d;
   }
 
+  // Small convolution filters are consumed as F32 by both execution paths.
+  // Widen F16 exactly, without expanding the large packed matrices/tables.
+  DeviceTensor CopyF32(const TensorRef& t) {
+    if (t.empty() || t.type == core::GgmlType::kF32 || !ok)
+      return Copy(t);
+    if (t.type != core::GgmlType::kF16) {
+      Fail("F32 filter upload needs F32 or F16 weights");
+      return {};
+    }
+    DeviceTensor d;
+    const std::size_t count = t.cols * t.rows;
+    const std::size_t size = count * sizeof(float);
+    if (Allocate(&d.data, size + kTailMargin) != hipSuccess) {
+      Fail("F32 filter allocation failed");
+      return d;
+    }
+    if (Measuring())
+      return d;
+    allocations.push_back(d.data);
+    bytes += size + kTailMargin;
+    std::vector<float> values(count);
+    const auto* source = static_cast<const std::uint8_t*>(t.data);
+    for (std::size_t i = 0; i < count; ++i) {
+      std::uint16_t bits;
+      std::memcpy(&bits, source + i * sizeof(bits), sizeof(bits));
+      values[i] = quant::Fp16ToFloat(bits);
+    }
+    if (hipMemcpy(d.data, values.data(), size, hipMemcpyHostToDevice) !=
+            hipSuccess ||
+        hipMemset(static_cast<std::uint8_t*>(d.data) + size, 0, kTailMargin) !=
+            hipSuccess) {
+      Fail("F32 filter upload failed");
+      return d;
+    }
+    d.type = core::GgmlType::kF32;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = 1;
+    return d;
+  }
+
   // GGUF packs [fc_embedding | fc_hidden] across each row. Split on a
   // quantization-block boundary without dequantizing or changing any weight.
   void SplitMtpProjection(const TensorRef& t, DeviceTensor& embedding,
@@ -153,10 +196,9 @@ struct Uploader {
   }
 
   /// Uploads matrices of one type stacked along rows; every input shares
-  /// `cols`. An F32 stack (router logits, GDN alpha/beta: the only
-  /// unquantized projections) is narrowed to F16, which the wide-batch GEMM
-  /// tier runs at speed. A Q8_0 stack merges projections of one input into
-  /// a single decode GEMV.
+  /// `cols`. F32 stacks (router logits and unquantized GDN alpha/beta)
+  /// are narrowed to F16 for the wide-batch GEMM tier. Other stacks retain
+  /// their packed format, merging projections of one input into one GEMV.
   DeviceTensor Stack(std::initializer_list<const TensorRef*> parts) {
     DeviceTensor d;
     if (!ok) {
@@ -166,9 +208,8 @@ struct Uploader {
     std::size_t size = 0;
     const core::GgmlType type = (*parts.begin())->type;
     for (const TensorRef* t : parts) {
-      if (t->empty() || t->type != type || t->cols != (*parts.begin())->cols ||
-          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0)) {
-        Fail("stacked upload needs F32 or Q8_0 tensors of one shape");
+      if (t->empty() || t->type != type || t->cols != (*parts.begin())->cols) {
+        Fail("stacked upload needs tensors of one format and row width");
         return d;
       }
       rows += t->rows;
@@ -192,7 +233,7 @@ struct Uploader {
         offset += t->SizeBytes();
       }
     }
-    if (type == core::GgmlType::kQ8_0) {
+    if (type != core::GgmlType::kF32) {
       if (Measuring()) {
         return d;
       }
@@ -202,7 +243,10 @@ struct Uploader {
       d.type = type;
       d.cols = static_cast<std::uint32_t>((*parts.begin())->cols);
       d.rows = static_cast<std::uint32_t>(rows);
-      max_q8_cols = std::max<std::size_t>(max_q8_cols, d.cols);
+      if (type == core::GgmlType::kQ8_0)
+        max_q8_cols = std::max<std::size_t>(max_q8_cols, d.cols);
+      if (type == core::GgmlType::kF16 || type == core::GgmlType::kBF16)
+        max_half_cols = std::max<std::size_t>(max_half_cols, d.cols);
       return d;
     }
     const std::size_t count = size / sizeof(float);
@@ -283,7 +327,7 @@ struct Uploader {
     d.ple_norm_key = Copy(l.ple_norm_key);
     d.ple_norm_query = Copy(l.ple_norm_query);
     d.ple_norm_conv = Copy(l.ple_norm_conv);
-    d.ple_conv1d = Copy(l.ple_conv1d);
+    d.ple_conv1d = CopyF32(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
@@ -357,8 +401,8 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
-  // The CPU reference also reads Q6_K, but the production embedding, dense
-  // and routed kernels do not. Reject it before allocating device weights.
+  // Dense/embedding Q6_K is supported; routed Q6_K is not yet implemented.
+  // Reject unsupported experts before allocating device weights.
   const auto supported = [&](const TensorRef& t) {
     if (t.type != core::GgmlType::kQ6_K)
       return true;
@@ -370,8 +414,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     return supported(l.ffn_gate_exps) && supported(l.ffn_up_exps) &&
            supported(l.ffn_down_exps);
   };
-  if (!supported(w.token_embd) || !supported(w.output) ||
-      !std::all_of(w.layers.begin(), w.layers.end(), layer_supported) ||
+  if (!std::all_of(w.layers.begin(), w.layers.end(), layer_supported) ||
       (mtp != nullptr && !layer_supported(mtp->block))) {
     return nullptr;
   }

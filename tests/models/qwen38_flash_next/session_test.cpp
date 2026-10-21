@@ -326,6 +326,18 @@ void CheckPrefillChunks(const std::shared_ptr<qfn::Model>& model) {
     std::vector<sampling::TokenId> history(tokens.begin(), tokens.end());
     for (unsigned step = 0; step < 4; ++step) {
       const auto logits = bulk->Logits();
+      if (std::memcmp(logits.data(), split->Logits().data(),
+                      logits.size_bytes()) != 0) {
+        double max_error = 0;
+        unsigned changed = 0;
+        for (std::size_t i = 0; i < logits.size(); ++i) {
+          max_error = std::max(
+              max_error, std::abs(double(logits[i]) - split->Logits()[i]));
+          changed += logits[i] != split->Logits()[i];
+        }
+        std::cerr << "chunk diagnostic: changed=" << changed
+                  << " max_error=" << max_error << '\n';
+      }
       RequireExact(
           logits, split->Logits(),
           "prefill chunking changed logits: length=" + std::to_string(length) +
@@ -1620,6 +1632,13 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
     if (serialized) {
       std::vector<std::uint8_t> bytes(ar_snapshot->SizeBytes());
       Require(ar_snapshot->CopyTo(bytes), "serialize AR frontier");
+      const std::uint32_t version = qfn::Session::kSnapshotPayloadVersion;
+      const std::uint32_t obsolete = version - 1;
+      std::memcpy(bytes.data() + 8, &obsolete, sizeof(obsolete));
+      Require(!ar->RestoreSnapshot(bytes, &error),
+              "obsolete prefill-arithmetic snapshot accepted");
+      std::memcpy(bytes.data() + 8, &version, sizeof(version));
+      error.clear();
       Require(ar->RestoreSnapshot(bytes, &error), error);
     } else {
       Require(ar->RestoreSnapshot(*ar_snapshot, &error), error);
@@ -1639,7 +1658,8 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
           "snapshots crossed execution modes");
   std::cout << "execution_tokens=" << prompt_tokens << " image=" << with_image
             << " execution_modes=independent AR_predictor_bytes=0 "
-               "mixed_batch_exact=1 RAM_serialized_sampled_replay=1\n"
+               "mixed_batch_exact=1 RAM_serialized_sampled_replay=1 "
+               "obsolete_payload_rejected=1\n"
             << std::flush;
 }
 
@@ -1885,19 +1905,23 @@ int main(int argc, char** argv) {
       argc == 6 && std::string_view(argv[5]) == "--batch-only";
   const bool prefill_only =
       argc == 6 && std::string_view(argv[5]) == "--prefill-only";
+  const bool chunks_only =
+      argc == 6 && std::string_view(argv[5]) == "--chunks-only";
   const bool sampling_only =
       argc == 6 && std::string_view(argv[5]) == "--sampling-only";
   const bool cache_only =
       argc == 6 && std::string_view(argv[5]) == "--cache-only";
   const bool eos_only = argc == 6 && std::string_view(argv[5]) == "--eos-only";
-  if ((argc != 5 && !batch_only && !prefill_only && !sampling_only &&
-       !cache_only && !eos_only && !execution_only && !lookup_only) ||
+  if ((argc != 5 && !batch_only && !prefill_only && !chunks_only &&
+       !sampling_only && !cache_only && !eos_only && !execution_only &&
+       !lookup_only) ||
       std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
-    std::cerr << "Usage: session_test --model FIRST.gguf --mtp-model MTP.gguf "
-                 "[--batch-only | --prefill-only | --sampling-only | "
-                 "--cache-only | --eos-only | --lookup-only | "
-                 "--execution-only TOKENS]\n";
+    std::cerr
+        << "Usage: session_test --model FIRST.gguf --mtp-model MTP.gguf "
+           "[--batch-only | --prefill-only | --chunks-only | --sampling-only | "
+           "--cache-only | --eos-only | --lookup-only | "
+           "--execution-only TOKENS]\n";
     return 77;
   }
   if (execution_only) {
@@ -1920,6 +1944,10 @@ int main(int argc, char** argv) {
          .decode_concurrency = 8},
         &error);
     Require(model != nullptr, error);
+    if (chunks_only) {
+      CheckPrefillChunks(model);
+      return 0;
+    }
     if (lookup_only) {
       CheckLookupBatch(model);
       return 0;

@@ -237,6 +237,21 @@ void CheckMalformedMetadata() {
   const auto draft = Parse(sidecar, false);
   const auto trunk = Parse(valid);
   assert(draft && trunk && draft->MtpMatches(*trunk));
+
+  // Draft-only converters may emit all-zero placeholders, not a trunk
+  // compression schedule. Do not accept that metadata for a target model.
+  auto placeholders = sidecar;
+  placeholders["qwen4exp.attention.compress_ratios"] =
+      std::vector<std::uint64_t>(49, 0);
+  const auto placeholder_draft = Parse(placeholders, false);
+  assert(placeholder_draft && placeholder_draft->MtpMatches(*trunk));
+  assert(!Parse(placeholders, true));
+  auto& ratios = std::get<std::vector<std::uint64_t>>(
+      placeholders["qwen4exp.attention.compress_ratios"]);
+  ratios.back() = 8;
+  assert(!Parse(placeholders, false));
+  ratios.pop_back();
+  assert(!Parse(placeholders, false));
 }
 
 }  // namespace

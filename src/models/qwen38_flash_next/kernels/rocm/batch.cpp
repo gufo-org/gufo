@@ -43,6 +43,12 @@ WeightType EmbeddingType(core::GgmlType type) {
       return WeightType::kBF16;
     case core::GgmlType::kF16:
       return WeightType::kF16;
+    case core::GgmlType::kQ4_K:
+      return WeightType::kQ4_K;
+    case core::GgmlType::kQ5_0:
+      return WeightType::kQ5_0;
+    case core::GgmlType::kQ6_K:
+      return WeightType::kQ6_K;
     case core::GgmlType::kQ8_0:
       return WeightType::kQ8_0;
     case core::GgmlType::kF32:

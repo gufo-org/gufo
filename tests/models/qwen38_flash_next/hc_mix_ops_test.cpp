@@ -296,6 +296,32 @@ int main() {
     const auto res_ref = Download(&d_res_ref, kRows);
     const auto res_f16 = Download(&d_res_f16, kRows);
     const auto xn_ref = Download(&d_xn_ref, kRows);
+    // Prompt tails must not select a different F32 normalization tree.
+    // These short chunks reproduce the mixed-quant model's legacy tail bug.
+    // The F16 epilogue above rewrote d_inject_vec; replay the original inputs.
+    HipBuffer<float> d_split_inject(vec_inject);
+    Upload(&d_split_inject, inject_vec);
+    for (unsigned chunk : {1U, 8U, 9U, 16U}) {
+      HipBuffer<float> d_split_res(kRows), d_split_xn(kRows);
+      Upload(&d_split_res, res);
+      for (unsigned offset = 0; offset < kTokens; offset += chunk) {
+        const unsigned count = std::min(chunk, kTokens - offset);
+        q::HcCombine(
+            d_split_res.get() + std::size_t(offset) * kHcDim,
+            d_block_out.get() + std::size_t(offset) * kHidden,
+            d_split_inject.get() + std::size_t(offset) * kStreams * vec_parts,
+            vec_parts, d_gamma.get(),
+            d_split_xn.get() + std::size_t(offset) * kHcDim, count, kHidden,
+            kStreams, kEps, nullptr);
+      }
+      const auto split_res = Download(&d_split_res, kRows);
+      const auto split_xn = Download(&d_split_xn, kRows);
+      if (std::memcmp(split_res.data(), res_ref.data(),
+                      kRows * sizeof(float)) != 0 ||
+          std::memcmp(split_xn.data(), xn_ref.data(), kRows * sizeof(float)) !=
+              0)
+        throw std::runtime_error("F32 prefill combine depends on chunk width");
+    }
     // CPU reference of the combine (residual update and grouped norm) over
     // the same inject partials.
     {

@@ -7,6 +7,45 @@ Original unquantized-model and GGUF-conversion parity remain unqualified.
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
+## Mixed Q4_K_M weights
+
+The loader also accepts the mixed layout used by the Orca
+`Qwen3.8-Flash-Next-Uncensored-Q4_K_M` shards: Q4_K token embeddings and
+projections, Q6_K dense projections/output head, Q5_0 HC/shared/routed weights
+and disk-backed PLE table, and F16 PLE convolution filters. `Q4_K_M` is a
+quantization recipe, not a tensor type; opening only the Q4_K embedding path
+is insufficient. Routed Q6_K experts remain unsupported. Draft-only sidecars
+with an all-zero compression schedule use the pinned ratio-four predictor;
+target compression schedules remain strictly validated.
+
+Packed matrices stay in their original format (no model-wide dequantization
+or requantization). Mixed dense prefill uses tile-local split-half matrix-core
+GEMMs with compensated F32 accumulation; Q5_0 expert down projections use the
+routed F16 matrix-core path. Short prompt tails keep the same prefill arithmetic.
+Decode/verification and vocabulary heads retain their original packed-vector
+arithmetic. Prefill is not byte-identical to the initial vector implementation;
+snapshot payload version 19 rejects its old frontiers. These new layouts do not
+inherit the published UD-Q4_K_XL speed or quality qualifications.
+
+**The optimized Orca path remains experimental:** functional assertions pass,
+but comparison with the initial package reports changed outputs/token counts.
+It is not a drop-in, output-compatible upgrade; see [quality](QUALITY.md).
+The existing user service has not been repinned or enabled.
+
+October 21 grouped-code-load trials gained about 21% native prefill but
+failed strict served-phase timing checks and were reverted. The expanded
+numerical tests remain. [Rejected experiment evidence](artifacts/mixed-prefill-k16.json).
+
+Use the matching Orca MTP sidecar, not an unrelated fine-tune's predictor. A vision projector must be supplied separately when
+needed; its compatibility is not implied by text loading.
+
+```sh
+MODEL=/path/to/Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00001-of-00003.gguf
+MTP=/path/to/Qwen3.8-Flash-Next-Uncensored-MTP-draft.gguf
+./result/bin/gufo serve --port 8084 llm --model "$MODEL" \
+  --speculative mtp --mtp-model "$MTP" --draft-tokens 7
+```
+
 ## Load and run
 
 ```sh

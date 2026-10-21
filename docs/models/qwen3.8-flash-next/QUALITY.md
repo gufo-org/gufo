@@ -54,6 +54,121 @@ source field identifies the harness tree; provenance maps the measured binaries
 to their actual source revisions. A stopped Q4 DFlash2 benchmark has no completed
 report and is retained separately from its completed `-resume1` run.
 
+## Packed K16 load trials after rebase (October 21, 2026)
+
+**Rejected; no new grouped-load path remains in the default runtime.** Main
+`f020bd3a` is integrated, including a semantic dispatch fix that excludes
+packed formats from the upstream F16/BF16 whole-pass load specialization.
+`2f049172` restores the kernel file byte-for-byte to control `14954fe2`.
+
+The unrestricted `becdf9bf` trial passes functional assertions and exact
+response/cache/prefill comparisons, but strict alternating controls confirm
+one AR C4 TTFT and two MTP C8 first-token phase regressions. Large-only
+`f75eb7d9` fixes those cases but still fails other individual phases. The
+final evidence retains two independent candidate observations and three main
+observations per mode, including contemporaneous unchanged controls. The
+official qualifier keeps the original 5% and 3 ms margins:
+
+| Large-only trial | Passed measurements | Inconclusive | Confirmed failures |
+| --- | ---: | ---: | ---: |
+| Orca AR | 1455 | 417 | 5 |
+| Orca MTP | 1498 | 371 | 8 |
+
+Confirmed flags include AR prose decode/token-gap phases and MTP queue,
+client-first-token and maximum-gap phases. Unchanged controls also exhibit
+multi-second stalls, but that does not excuse stable adverse ranges. No
+averaging, regenerated goldens, widened margins or blanket timing pass is used.
+
+Numerical checks pass: all five GPU suites; 88 independent FP64 dense cases
+with unchanged `0.002` RMS limit (worst `3.88122e-5`); guarded one-hot checks
+covering 5600 distinct coefficients; and exact sliced replay across 2047/2048/
+2049 rows. A 3720-token prompt exercises both load selections; all 30,543,360
+finite logits over 123 fixed continuation steps match the control byte-for-byte.
+Native 2048-token independent AR/MTP execution, mixed execution, RAM/serialized
+sampled replay, obsolete-payload rejection and all eight chunk cases pass.
+Snapshot arithmetic version remains 19.
+
+After rejection, all five operator suites and the expanded 88-case test pass
+again on the restored implementation. The extra tests, main integration fix
+and raw rejected experiments are retained; there is no deployment or service
+pin change. Original-vector parity, vision/deep-context and unquantized-model
+accuracy remain unqualified as described below.
+[Commands, hashes, all timing evidence and rejected controls](artifacts/mixed-prefill-k16.json).
+
+## Mixed Q4_K_M matrix-core prefill (October 20, 2026)
+
+**Production promotion remains blocked by prior-output parity.** The matched
+AR and MTP OpenAI SDK runs pass their tools and C8 mixed-batch functional
+assertions, but each comparison reports the same 12 output-hash/token-count
+changes against `5f3c5b11`. Neither comparison reports a phase-timing failure.
+The candidate MTP run proposes 2,732 drafts and accepts 2,264, confirming actual
+speculative execution. No goldens or comparison thresholds were changed.
+The existing user service remains on the initial package, stopped and disabled.
+
+`40a68da4` enables packed Q4_K/Q5_0/Q6_K dense prefill and routed Q5_0
+F16 expert down projections. Dense tiles split operands into high/low halves,
+include all four products, and combine bounded K64 tiles with compensated F32
+accumulation. No expanded model or persistent activation copy is added.
+Decode/verification and vocabulary-head arithmetic are retained.
+
+Five operator suites pass with unchanged tolerances: mixed quantization,
+projection, routed WMMA, HC mix and MoE epilogue. The 72 independent FP64 dense
+cases include production shapes, tiny signals, ragged rows and 1/8/9/32/33/
+127/128/129/2049 tokens; worst relative RMS is below `3.9e-5` against the
+unchanged `0.002` limit. Guards and sliced-input equality pass. Routed Q5_0
+checks cover F32/F16 outputs and 16/48/64-token tiles. A real first-layer
+320-by-10240 HC projection has relative FP64 RMS `1.47e-7`; replaying its
+input at all 129 tested token columns is byte-exact.
+
+The native 2048-token AR/MTP execution check passes exact target logits,
+independent mixed execution, RAM/serialized sampled replay and rejection of
+obsolete payloads. All eight chunk cases pass exact full-vocabulary logits
+and sampled MTP replay, including 1/8/9-token tails, 2048 split at 1025, and
+4096 split at 2048. The original vector control exposed a short-tail HC norm
+reduction change (`0.373075` maximum logit difference); fixing that alone
+still exposed a 2048/1025 mismatch on the original integer expert prefill
+pipeline (`0.610292`). Prefill now keeps one HC norm tree and the routed F16
+expert policy across chunk widths. Snapshot payload **19** rejects older
+frontiers rather than mixing arithmetic versions.
+
+**This is not byte-compatible with the initial vector prefill.** After the
+same 1860-token prompt and 123 forced continuation tokens, `5f3c5b11` and this
+build agree on 114/123 argmaxes over 30,543,360 finite logits (mean KL
+`0.128852`, maximum KL `4.526042`). Matching continuation IDs establish the
+input history, not completion parity. The first changed operation is the
+first HC attention-down projection: both old and new results are within
+FP32-level error against FP64. Five separate scalar-CPU-reference positions
+agree on their winners (maximum reported KL `0.00030`). These bounded checks
+do not establish which complete model variant is more accurate.
+
+The cooperative-load/inlining optimization itself preserves all 30,543,360
+logits byte-for-byte against the earlier matrix-core implementation
+`48aef723`. Native performance is reported separately, not substituted into
+the UD-Q4_K_XL/llama.cpp tables. Vision, deep-context, conversion/unquantized
+accuracy and full concurrency qualification remain open.
+[Commands, measurements and limits](artifacts/mixed-prefill-wmma.json).
+
+## Initial mixed Q4_K_M support (October 20, 2026)
+
+Orca's three-shard Q4_K_M target and its Q8_0 MTP draft load and execute on
+gfx1151. Independent packed-weight/FP64 operator checks cover Q4_K, Q5_0 and
+Q6_K embeddings/dense projections, scalar/batched equality, partial rows and
+Q5_0 vector/tiled routed experts. Existing projection checks and disk-backed
+PLE gathers pass. Metadata regressions accept the draft-only all-zero ratio
+placeholder without accepting invalid target schedules.
+
+The native 256-token execution test retains exact AR/MTP target logits and
+RAM/serialized sampled replay. Seven MTP HTTP requests pass discovery, greeting,
+forced tool arguments, SSE, seeded sampled replay and two concurrent replies;
+85 drafts are proposed and 43 accepted. No vision projector is loaded.
+These are bounded compatibility checks, **not** unquantized-model accuracy,
+conversion parity, deep-context or full concurrency qualification. This initial
+capture used eight-row vector prefill, before the matrix-core work. One native
+pp2048/tg128 development-build sample measures 143.94/16.61 tok/s AR and
+142.16/31.97 tok/s MTP; these do not replace the production benchmark tables.
+[Artifact identities, commands and limits](artifacts/mixed-q4-k-m.json).
+
+
 **Host-memory stalls, October 18:** `fec4759d` protects runtime-owned queue-save,
 launch/copy and code-loading buffers from host compaction while preserving
 application managed memory and ordinary fine-grained host allocations. Owned

@@ -145,6 +145,9 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
 // Standard 16-bit float helper
 float Fp16ToFloat(std::uint16_t h) noexcept;
 
+// Dequantize row of Q5_0 to float
+void DequantizeQ5_0(const void* src, float* dst, std::size_t k);
+
 // Dequantize row of Q4_K to float
 void DequantizeQ4_K(const void* src, float* dst, std::size_t k);
 

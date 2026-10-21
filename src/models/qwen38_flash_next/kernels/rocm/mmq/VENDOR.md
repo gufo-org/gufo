@@ -6,7 +6,7 @@ The upstream source directory is `ggml/src/ggml-cuda`; Gufo builds these
 sources with HIP for AMD Strix Halo (`gfx1151`).
 
 `qfn_mmq.h` is the public adapter. It supplies Q8_0 dense projections and
-Q4_K, Q5_K, Q5_1 and Q8_0 routed expert projections, including the paired
+Q4_K, Q5_K, Q5_0, Q5_1 and Q8_0 routed expert projections, including the paired
 Q4_K gate/up path. `qfn_ggml_stubs.*` supplies the minimal context and scratch
 pool without the ggml graph runtime. Gufo owns scheduling and HIP graphs.
 

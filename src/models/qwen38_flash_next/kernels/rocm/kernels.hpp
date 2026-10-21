@@ -39,14 +39,16 @@ void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
 enum class WeightType : std::uint32_t {
   kF32 = 0,
   kF16 = 1,
+  kQ5_0 = 6,
   kQ5_1 = 7,
   kQ8_0 = 8,
   kQ4_K = 12,
   kQ5_K = 13,
+  kQ6_K = 14,
   kBF16 = 30,
 };
 
-/// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0 rows).
+/// res[t][s][hidden] = table[tokens[t]] for every stream s.
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                  float* res, std::uint32_t n_tokens, std::uint32_t hidden,
                  std::uint32_t streams, hipStream_t stream);
@@ -91,7 +93,9 @@ void HcMixEpilogueVec4F16(const __half* xn, const float* gate,
 /// when `gamma` is non-null also the next mixer's grouped RMSNorm of the
 /// updated residual into `xn`.
 /// `inject` is [t][s][inject_parts] partial sums (1 part for a plain GEMM).
-/// Concatenated decode requests retain scalar reduction with `decode=true`.
+/// Prefill retains the vector normalization tree at every chunk width.
+/// Short/concatenated decode requests retain scalar reduction with
+/// `decode=true`.
 void HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t inject_parts, const float* gamma, float* xn,
                std::uint32_t n_tokens, std::uint32_t hidden,
@@ -239,6 +243,16 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
 bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
+/// Packed Q4_K/Q5_0/Q6_K prefill projection over F32 activation rows.
+/// Tile-local high/low F16 fragments supply four matrix-core products,
+/// combined with a compensated F32 sum of bounded K tiles. This avoids
+/// single-F16 rounding loss without persistent expanded weights or buffers.
+/// Handles partial token/output tiles without padded allocations.
+/// Unsupported formats/shapes launch nothing.
+bool DensePackedF16Gemm(const void* w, WeightType type, const float* x,
+                        float* out, std::size_t batch, std::size_t m,
+                        std::size_t k, hipStream_t stream);
+
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains
 /// every Z row plus the QKV rows required for tile boundaries and rolling
@@ -272,8 +286,8 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
 /// projection's F32 output over the same rows) turns it into
 /// silu(gate) * result.
 /// `tile_rows` is the token rows per tile the map was built with: 16 or 48,
-/// or 64 for Q5_1/Q8_0.
-/// Q4_K and Q5_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other types
+/// or 64 for Q5_0/Q5_1/Q8_0.
+/// Q4_K and Q5_K need k % 256 == 0, Q5_0/Q5_1/Q8_0 k % 64 == 0; other types
 /// and tile widths return false.
 bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const std::int32_t* tiles, std::uint32_t n_tiles,

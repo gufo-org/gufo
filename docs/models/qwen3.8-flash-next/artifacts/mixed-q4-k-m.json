@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-20",
+  "base_revision": "62c840ee",
+  "branch": "feat/flash-next-q4-k-m",
+  "platform": "AMD Strix Halo gfx1151, Linux, 128 GB unified memory",
+  "build": {
+    "preset": "gpu-test (RelWithDebInfo, assertions enabled)",
+    "toolchain": "pinned Nix GCC 15.3.0, HIP Clang 22.0.0, ROCm 7.2.3",
+    "binary_sha256": "6cc1d6969b057549e6aa94869623383f45fb17f90308eedf8390b20ea7450790",
+    "portable_host_note": "Local linking explicitly preferred the pinned glibc 2.42 library directory to avoid resolving Fedora's libm at link time. No project toolchain configuration was changed."
+  },
+  "artifacts": [
+    {"file": "Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00001-of-00003.gguf", "bytes": 44598509600},
+    {"file": "Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00002-of-00003.gguf", "bytes": 44693535520},
+    {"file": "Qwen3.8-Flash-Next-Uncensored-Q4_K_M-00003-of-00003.gguf", "bytes": 29858677824},
+    {"file": "Qwen3.8-Flash-Next-Uncensored-MTP-draft.gguf", "bytes": 4135893632}
+  ],
+  "target_tensor_counts": {"F32": 388, "F16": 1, "Q5_0": 146, "Q8_0": 48, "Q4_K": 568, "Q6_K": 49, "BF16": 24},
+  "mtp_tensor_counts": {"F32": 11, "Q8_0": 23},
+  "checks": {
+    "format": "PASS, 593 C++ files",
+    "ctest": {
+      "qwen38_flash_next.config": "PASS; includes draft-only zero compression placeholders and invalid target/sidecar rejection",
+      "qwen38_flash_next.ngram": "PASS; includes Q5_0 direct-I/O gathers, cached replay, duplicates, unaligned file offsets, output guard and misaligned row rejection",
+      "qwen38_flash_next.projection_ops": "PASS; existing Q8/F16 projection regression suite",
+      "qwen38_flash_next.mixed_quant_ops": "PASS; independent host dequantization/FP64 dot products, embeddings, dense rows 1/2/7/8/9/32/33, byte-exact scalar/batched outputs, Q5_0 vector/tiled routed experts with one/two selected experts, guards"
+    },
+    "native_execution": {
+      "command_suffix": "qwen38_flash_next_session_test --model TARGET --mtp-model MTP --execution-only 256",
+      "result": "PASS; exact AR/MTP target prefill logits, independent mixed execution, AR predictor allocation exclusion, RAM/serialized sampled replay"
+    },
+    "http": {
+      "result": "PASS",
+      "context": 8192,
+      "sessions": 2,
+      "speculative": "mtp",
+      "draft_tokens": 7,
+      "requests": 7,
+      "coverage": ["health", "model discovery", "greeting", "forced echo tool call with exact arguments", "SSE", "seeded sampled replay", "two concurrent arithmetic replies"],
+      "draft_proposed": 85,
+      "draft_accepted": 43
+    }
+  },
+  "native_benchmark": {
+    "command_suffix": "gufo bench --model TARGET --speculative MODE [--mtp-model MTP --draft-tokens 7] -p 2048 -n 128 -r 1",
+    "ar": {"load_seconds": 20.18, "pp_tokens_per_second": 143.94, "tg_tokens_per_second": 16.61},
+    "mtp": {"load_seconds": 21.55, "pp_tokens_per_second": 142.16, "tg_tokens_per_second": 31.97},
+    "qualification": "One warmed benchmark sample per mode on the development binary; no matched-main performance comparison, production-build qualification or statistical speed claim. Existing published UD-Q4_K_XL tables are unchanged."
+  },
+  "raw_results": "/home/lm/dev/gufo-orca-results",
+  "limitations": [
+    "No unquantized teacher, statistical language-quality or GGUF conversion parity qualification.",
+    "No vision-projector, deep-context or full C1-C8 functional qualification for Orca.",
+    "Mixed dense projections use bounded eight-row vector tiles at all batch widths; prefill is not tuned to the existing Q8 fast paths.",
+    "Routed Q6_K experts remain explicitly unsupported.",
+    "Systemd service remains stopped, disabled and pinned to the pre-feature package; this change does not deploy the new binary."
+  ]
+}
