@@ -42,10 +42,10 @@ inline constexpr float kMtpCycleMilliseconds[3][5][8] = {
     },
 };
 
-// Sampled policy uses fixed configured capacity for reproducibility; greedy
-// batch policy uses these curves to bootstrap each physical occupancy, and a
-// greedy request decoding alone or beside sampled ones uses the row for the
-// requests decoding with it.
+// Seeded sampled policy uses fixed configured capacity for reproducibility;
+// greedy batch policy uses these curves to bootstrap each physical occupancy,
+// and a greedy or unseeded sampled request uses the row for the requests
+// decoding with it (MtpPolicyConcurrency).
 // Intermediate capacities use the next measured cohort. Context costs
 // interpolate, then extrapolate the measured QSA slope to the native limit.
 [[nodiscard]] inline std::array<float, 8> MtpCycleCosts(

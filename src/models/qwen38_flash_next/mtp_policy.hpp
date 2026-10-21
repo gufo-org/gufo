@@ -14,6 +14,17 @@ namespace gufo::models::qwen38_flash_next {
 
 inline constexpr std::uint32_t kMaxMtpDraftTokens = 7;
 
+/// The occupancy an unplanned draft cycle is priced at, or 0 for the
+/// configured session count. Greedy output does not depend on the width, and
+/// an unseeded sampled request has nothing to replay, so both price at the
+/// requests decoding now. A seeded sampled request keeps the configured count
+/// so it replays the same widths, and a planned batch keeps its plan's row.
+[[nodiscard]] constexpr std::uint32_t MtpPolicyConcurrency(
+    bool sampled, bool seeded, bool planned_batch,
+    std::uint32_t occupancy) noexcept {
+  return (sampled && seeded) || planned_batch ? 0 : occupancy;
+}
+
 struct MtpLengthState {
   std::array<float, kMaxMtpDraftTokens> successes;
   std::array<float, kMaxMtpDraftTokens> failures;
@@ -37,8 +48,7 @@ public:
   }
 
   // `concurrency` prices this cycle at another occupancy than the configured
-  // one; 0 keeps the configured value. Sampled requests keep it for seeded
-  // replay. Greedy output does not depend on the width.
+  // one; 0 keeps the configured value (MtpPolicyConcurrency).
   [[nodiscard]] std::uint32_t Choose(
       std::uint32_t budget, std::uint32_t context = 0,
       std::uint32_t concurrency = 0) const noexcept {

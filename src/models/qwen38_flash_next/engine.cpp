@@ -955,13 +955,9 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   const bool allow_subset =
       MtpDraftSubsetAllowed(sampler.config().uses_random_sampling(), unmodified,
                             concurrency, batch_drafts.has_value());
-  // Unplanned greedy cycles are priced at the requests decoding now. Sampled
-  // ones keep the configured concurrency so a seeded request replays the same
-  // widths, and a planned batch keeps the row its plan used.
-  pending->policy_concurrency =
-      sampler.config().uses_random_sampling() || batch_drafts.has_value()
-          ? 0
-          : occupancy;
+  pending->policy_concurrency = MtpPolicyConcurrency(
+      sampler.config().uses_random_sampling(), sampler.config().seed >= 0,
+      batch_drafts.has_value(), occupancy);
   const std::size_t width =
       MtpEnabled() && cap > 1
           ? 1 + (batch_drafts ? std::min<std::uint32_t>(*batch_drafts, cap - 1)

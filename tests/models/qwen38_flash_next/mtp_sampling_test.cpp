@@ -119,6 +119,21 @@ void CheckOccupancyOverride() {
   }
 }
 
+void CheckPolicyConcurrency() {
+  // Greedy and unseeded sampled cycles price at the live occupancy; seeded
+  // sampled cycles and planned batches keep the configured row.
+  Require(qfn::MtpPolicyConcurrency(false, false, false, 1) == 1 &&
+              qfn::MtpPolicyConcurrency(false, true, false, 3) == 3,
+          "an unplanned greedy cycle did not price at its occupancy");
+  Require(qfn::MtpPolicyConcurrency(true, false, false, 1) == 1,
+          "an unseeded sampled cycle did not price at its occupancy");
+  Require(qfn::MtpPolicyConcurrency(true, true, false, 1) == 0,
+          "a seeded sampled cycle did not keep the configured row");
+  Require(qfn::MtpPolicyConcurrency(false, false, true, 2) == 0 &&
+              qfn::MtpPolicyConcurrency(true, false, true, 2) == 0,
+          "a planned batch did not keep its plan's row");
+}
+
 void CheckCompactProposals() {
   const std::array<float, 5> target_logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
   const std::array<sampling::TokenId, 4> history{2, 3, 2, 0};
@@ -410,6 +425,7 @@ int main() {
     CheckVerificationBoundaries();
     CheckLengthController();
     CheckOccupancyOverride();
+    CheckPolicyConcurrency();
     CheckCalibratedCosts();
     CheckBatchProfitability();
     CheckCompactProposals();
