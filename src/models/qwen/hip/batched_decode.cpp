@@ -129,7 +129,6 @@ void LaunchMoeFfn(const models::QwenLayerWeights& layer,
   const std::size_t expert_ff = config.expert_ff_length;
   const std::size_t shared_ff = config.expert_shared_ff_length;
   const std::uint32_t slots = static_cast<std::uint32_t>(batch_size) * n_used;
-  constexpr int kGgmlQ8_0 = static_cast<int>(core::GgmlType::kQ8_0);
 
   LaunchProjection(view.router, scratch.decode.normed.data(),
                    moe.router_logits.data(), batch_size, n_experts, hidden,
@@ -152,8 +151,8 @@ void LaunchMoeFfn(const models::QwenLayerWeights& layer,
   LaunchProjection(view.shexp_down, moe.shexp_act.data(), moe.shexp_out.data(),
                    batch_size, hidden, shared_ff, stream);
 
-  if (view.gate_exps.type == core::GgmlType::kQ8_0 &&
-      view.up_exps.type == core::GgmlType::kQ8_0) {
+  if (IsMmqRoutedFormat(view.gate_exps.type) &&
+      view.up_exps.type == view.gate_exps.type) {
     // The Q8_0 gated vector kernel takes at most 8 token rows per launch
     // (MMVQ_MAX_BATCH_SIZE), but concurrent verification stacks up to
     // kMaxDecodeBatch rows per session. Rows are independent, so launch
@@ -162,8 +161,8 @@ void LaunchMoeFfn(const models::QwenLayerWeights& layer,
     for (std::size_t row = 0; row < batch_size; row += kGatedVecMaxRows) {
       const std::size_t rows = std::min(kGatedVecMaxRows, batch_size - row);
       if (qfn_mmq_moe_gated_vec(
-              kGgmlQ8_0, view.gate_exps.data, view.up_exps.data,
-              scratch.decode.normed.data() + row * hidden,
+              static_cast<int>(view.gate_exps.type), view.gate_exps.data,
+              view.up_exps.data, scratch.decode.normed.data() + row * hidden,
               moe.ids.data() + row * n_used,
               moe.gate_e.data() + row * n_used * expert_ff,
               static_cast<int>(expert_ff), static_cast<int>(hidden),
@@ -178,12 +177,13 @@ void LaunchMoeFfn(const models::QwenLayerWeights& layer,
         view.up_exps.type, scratch.decode.normed.data(), moe.ids.data(),
         moe.gate_e.data(), expert_ff, hidden, slots, n_used, stream);
   }
-  if (view.down_exps.type == core::GgmlType::kQ8_0) {
-    if (qfn_mmq_moe_vec(kGgmlQ8_0, view.down_exps.data, moe.gate_e.data(),
-                        moe.ids.data(), moe.down_e.data(),
-                        static_cast<int>(hidden), static_cast<int>(expert_ff),
-                        static_cast<int>(slots), static_cast<int>(n_experts), 1,
-                        stream, nullptr, nullptr) != 0) {
+  if (IsMmqRoutedFormat(view.down_exps.type)) {
+    if (qfn_mmq_moe_vec(static_cast<int>(view.down_exps.type),
+                        view.down_exps.data, moe.gate_e.data(), moe.ids.data(),
+                        moe.down_e.data(), static_cast<int>(hidden),
+                        static_cast<int>(expert_ff), static_cast<int>(slots),
+                        static_cast<int>(n_experts), 1, stream, nullptr,
+                        nullptr) != 0) {
       throw std::runtime_error("MoE down expert projection failed");
     }
   } else {
