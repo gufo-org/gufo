@@ -39,7 +39,7 @@ void PromptHiddenBuffer::Resize(std::size_t elements) {
 void PromptHiddenBuffer::Clear() noexcept {
   size_ = 0;
   pageable_.clear();
-  use_pageable_ = false;
+  use_pageable_ = pinned_failed_;
 }
 
 float* PromptHiddenBuffer::Data() noexcept {
@@ -60,7 +60,7 @@ void PromptHiddenBuffer::GrowPinned(std::size_t elements) {
       admission = ledger_->Reserve(cache::ResourceCategory::kMetadata,
                                    elements * sizeof(float));
     } catch (const std::bad_alloc&) {
-      MoveToPageable(elements);
+      StopPinning(elements);
       return;
     }
   }
@@ -69,7 +69,7 @@ void PromptHiddenBuffer::GrowPinned(std::size_t elements) {
   if (owner->Allocate(&data, elements * sizeof(float)) != hipSuccess) {
     // Pinned memory is an optimization; keep capturing into pageable memory.
     (void)hipGetLastError();
-    MoveToPageable(elements);
+    StopPinning(elements);
     return;
   }
   if (size_ > 0) {
@@ -81,6 +81,17 @@ void PromptHiddenBuffer::GrowPinned(std::size_t elements) {
   charge_ = std::move(charge);
   pinned_ = data;
   pinned_capacity_ = elements;
+}
+
+void PromptHiddenBuffer::StopPinning(std::size_t elements) {
+  pinned_failed_ = true;
+  MoveToPageable(elements);
+  // The rows are copied and no capture pins again: free the pages, then
+  // release their charge.
+  pinned_owner_.reset();
+  charge_ = {};
+  pinned_ = nullptr;
+  pinned_capacity_ = 0;
 }
 
 void PromptHiddenBuffer::MoveToPageable(std::size_t elements) {

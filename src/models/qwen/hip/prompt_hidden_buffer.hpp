@@ -18,8 +18,9 @@ namespace gufo::hip {
 /// pinned size stays bounded. Grow-only like the std::vector it replaces:
 /// Clear() keeps the pinned capacity. Resize() does not zero new elements;
 /// every capture fills the rows it adds. With a ledger, the pinned bytes are
-/// charged as RAM before they are allocated, and a refused charge captures
-/// into pageable memory instead.
+/// charged as RAM before they are allocated. After a refused charge or a
+/// failed pinned allocation, every later capture uses pageable memory, so
+/// requests do not retry the allocation or pin a capacity sized to themselves.
 class PromptHiddenBuffer {
 public:
   /// Sets the pinned bound for the next prompt and makes room for `elements`.
@@ -34,6 +35,7 @@ public:
 
 private:
   void GrowPinned(std::size_t elements);
+  void StopPinning(std::size_t elements);
   void MoveToPageable(std::size_t elements);
 
   cache::ResourceLedger* ledger_{};
@@ -45,6 +47,7 @@ private:
   std::size_t pinned_limit_{};
   std::vector<float> pageable_;
   bool use_pageable_{};
+  bool pinned_failed_{};
   std::size_t size_{};
 };
 

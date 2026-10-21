@@ -141,6 +141,14 @@ void TestLedgerCharge() {
   Check(!IsPinned(refused.Data()), "a refused charge must capture pageable");
   Check(Holds(refused), "a refused charge must keep its rows");
   Check(ChargedBytes(small) == 0, "a refused charge must not be held");
+
+  // The fallback is sticky: a later prompt does not retry the pinned
+  // allocation, even one the ledger could now admit.
+  refused.Clear();
+  refused.Reserve(512, 8192);
+  refused.Resize(512);
+  Check(!IsPinned(refused.Data()), "a failed pin must not be retried");
+  Check(ChargedBytes(small) == 0, "a failed pin must stay uncharged");
 }
 
 }  // namespace
