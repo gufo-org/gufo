@@ -3,7 +3,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -157,6 +160,38 @@ void TestDirectVocabularyTokenizer() {
   auto decoded = tok->Decode(encoded);
   Expect(decoded == "<|im_start|>Hello World<|im_end|>",
          "Decoded text matches original");
+}
+
+void TestOrnithTemplateDispatchFromGguf() {
+  std::ifstream input(std::filesystem::path(__FILE__).parent_path() /
+                          "ornith_chat_template.jinja",
+                      std::ios::binary);
+  const std::string reference{std::istreambuf_iterator<char>(input),
+                              std::istreambuf_iterator<char>()};
+  Expect(!reference.empty(), "Official Ornith template fixture is readable");
+  const auto check = [&](std::string_view chat_template, bool expected) {
+    GgufTokenizerBuilder builder;
+    builder.AddMetadataString("tokenizer.ggml.model", "gpt2");
+    builder.AddMetadataString("tokenizer.ggml.pre", "qwen35");
+    builder.AddMetadataString("tokenizer.chat_template", chat_template);
+    builder.AddMetadataStringArray("tokenizer.ggml.tokens",
+                                   {"a", "b", "<|im_end|>"});
+    auto bytes = builder.Build();
+    std::string error;
+    auto reader =
+        gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size(), &error);
+    Expect(reader != nullptr, "Synthetic tokenizer GGUF opens: " + error);
+    auto tokenizer =
+        gufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &error);
+    Expect(tokenizer != nullptr, "Synthetic tokenizer loads: " + error);
+    Expect(tokenizer->UsesOrnithChatTemplate() == expected,
+           "Tokenizer selects Ornith only for the official artifact templates");
+  };
+  check(reference, true);
+  check(reference + "\n", true);
+  check(reference + " ", false);
+  check("{{ messages[0].content }}", false);
+  check("", false);
 }
 
 void TestGgufTokenizerLoading() {
@@ -367,6 +402,7 @@ int main() {
   std::cout << "Running QwenTokenizer unit tests...\n";
   TestDirectVocabularyTokenizer();
   TestGgufTokenizerLoading();
+  TestOrnithTemplateDispatchFromGguf();
   TestStopTokensFollowVocabulary();
   TestUnicodeContractionBoundary();
   TestEmptyAndSpecialEdgeCases();

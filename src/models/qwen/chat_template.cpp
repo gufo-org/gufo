@@ -52,6 +52,14 @@ ChatTemplateOptions ResolveQwenChatOptions(const ReasoningOptions& reasoning,
   return options;
 }
 
+ChatTemplateOptions ResolveOrnithChatOptions(const ReasoningOptions& reasoning,
+                                             bool add_vision_id) {
+  auto options = ResolveQwenChatOptions(reasoning, add_vision_id);
+  options.dialect = ChatTemplateOptions::Dialect::kOrnith;
+  options.preserve_thinking = true;
+  return options;
+}
+
 namespace {
 
 constexpr std::string_view kDefaultChatmlTemplate =
@@ -143,7 +151,8 @@ std::string PythonJsonSpacing(std::string_view value) {
 
 void AppendReasoningInstruction(std::string& output,
                                 const ChatTemplateOptions& options) {
-  if (!options.enable_thinking) {
+  if (!options.enable_thinking ||
+      options.dialect == ChatTemplateOptions::Dialect::kOrnith) {
     return;
   }
   switch (options.reasoning_effort) {
@@ -314,7 +323,7 @@ void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools) {
 
 void AppendToolCalls(std::string& output,
                      std::span<const ChatMessage::ToolCall> calls,
-                     std::vector<ContentSpan>* content_spans) {
+                     std::vector<ContentSpan>* content_spans, bool ornith) {
   bool first_call = true;
   for (const auto& call : calls) {
     if (!first_call) {
@@ -330,7 +339,18 @@ void AppendToolCalls(std::string& output,
       output.append(QwenToolSyntax::kParameterOpen);
       output.append(argument.name);
       output.append(">\n");
-      AppendContent(output, content_spans, argument.value);
+      // Containers already carry the API's tojson spelling; scalar bool/null
+      // use Python str in the Ornith reference, not JSON spelling.
+      std::string_view value = argument.value;
+      if (ornith && !argument.is_string) {
+        if (value == "true")
+          value = "True";
+        else if (value == "false")
+          value = "False";
+        else if (value == "null")
+          value = "None";
+      }
+      AppendContent(output, content_spans, value);
       output.push_back('\n');
       output.append(QwenToolSyntax::kParameterClose);
       output.push_back('\n');
@@ -529,6 +549,14 @@ QwenToolCallScan ScanQwenToolCall(std::string_view text) {
   return result;
 }
 
+bool QwenChatTemplate::IsOrnithTemplate(std::string_view raw_template) {
+  if (TemplateSha256(raw_template) == OrnithTemplateSha256())
+    return true;
+  return raw_template.ends_with("\n") &&
+         TemplateSha256(raw_template.substr(0, raw_template.size() - 1)) ==
+             OrnithTemplateSha256();
+}
+
 std::unique_ptr<QwenChatTemplate> QwenChatTemplate::CreateFromGguf(
     const core::GgufReader& reader, std::string* error_msg) {
   auto template_str = reader.GetMetadataString("tokenizer.chat_template");
@@ -546,9 +574,11 @@ std::unique_ptr<QwenChatTemplate> QwenChatTemplate::CreateFromGguf(
     }
     return CreateDefault();
   }
-  const Profile profile = IsQwen38ReasoningTemplate(*template_str)
-                              ? Profile::kQwen38Reasoning
-                              : Profile::kLegacyChatMl;
+  const Profile profile = IsOrnithTemplate(*template_str)
+                              ? Profile::kOrnith
+                              : (IsQwen38ReasoningTemplate(*template_str)
+                                     ? Profile::kQwen38Reasoning
+                                     : Profile::kLegacyChatMl);
   if (IsQwen38Artifact(reader) && profile != Profile::kQwen38Reasoning) {
     if (error_msg != nullptr) {
       *error_msg =
@@ -579,12 +609,16 @@ std::unique_ptr<QwenChatTemplate> QwenChatTemplate::CreateDefault(
   }
   return std::unique_ptr<QwenChatTemplate>(new QwenChatTemplate(
       std::string(raw_template), TemplateSha256(raw_template),
-      IsQwen38ReasoningTemplate(raw_template) ? Profile::kQwen38Reasoning
-                                              : Profile::kLegacyChatMl));
+      IsOrnithTemplate(raw_template) ? Profile::kOrnith
+                                     : (IsQwen38ReasoningTemplate(raw_template)
+                                            ? Profile::kQwen38Reasoning
+                                            : Profile::kLegacyChatMl)));
 }
 
 std::string_view QwenChatTemplate::GetTemplateId() const noexcept {
   switch (profile_) {
+    case Profile::kOrnith:
+      return "ornith-compiled-v1";
     case Profile::kLegacyChatMl:
       return "qwen-chatml-compiled-v1";
     case Profile::kQwen38Reasoning:
@@ -713,7 +747,8 @@ std::optional<std::string> QwenChatTemplate::Render(
   system_prefix.append(system_content);
   for (const auto& span : system_content_spans)
     system_spans.push_back({system_content_offset + span.offset, span.size});
-  if (!system_prefix.empty()) {
+  const bool ornith = options.dialect == ChatTemplateOptions::Dialect::kOrnith;
+  if (!system_prefix.empty() || (ornith && message_index != 0)) {
     output.append(kImStart).append("system\n");
     const auto prefix_offset = output.size();
     output.append(system_prefix);
@@ -782,8 +817,9 @@ std::optional<std::string> QwenChatTemplate::Render(
     // Current tool-cycle assistants retain their reasoning even when older
     // reasoning is disabled. A new user turn removes it, including empty
     // <think> framing. Keep a checkpoint before the first affected assistant.
-    if (!options.preserve_thinking && msg.role == ChatRole::kAssistant &&
-        message_index > last_user_index && !mutable_reasoning)
+    if (!ornith && !options.preserve_thinking &&
+        msg.role == ChatRole::kAssistant && message_index > last_user_index &&
+        !mutable_reasoning)
       mutable_reasoning = output.size();
     if (msg.role == ChatRole::kAssistant)
       seen_assistant = true;
@@ -795,21 +831,46 @@ std::optional<std::string> QwenChatTemplate::Render(
     output.append(role_name);
     output.push_back('\n');
 
-    const std::string_view thought = Trim(msg.thought);
+    std::string_view thought = Trim(msg.thought);
+    std::optional<ChatMessage> extracted;
+    if (ornith && msg.role == ChatRole::kAssistant && msg.thought.empty()) {
+      const auto content = Trim(msg.content);
+      const auto close = content.find("</think>");
+      if (close != std::string_view::npos) {
+        thought = content.substr(0, close);
+        const auto open = thought.rfind("<think>");
+        if (open != std::string_view::npos)
+          thought.remove_prefix(open + std::string_view("<think>").size());
+        thought = Trim(thought);
+        auto answer = content.substr(content.rfind("</think>") +
+                                     std::string_view("</think>").size());
+        while (answer.starts_with("\n"))
+          answer.remove_prefix(1);
+        extracted = msg;
+        extracted->content = answer;
+      }
+    }
     if (msg.role == ChatRole::kAssistant &&
-        (options.preserve_thinking || message_index > last_user_index)) {
+        (ornith || options.preserve_thinking ||
+         message_index > last_user_index)) {
       output.append("<think>\n");
       AppendContent(output, content_spans, thought);
       output.append("\n</think>\n\n");
     }
 
-    const bool has_content = AppendMessageContent(
-        output, msg, options, image_count, image_offsets, content_spans);
+    bool has_content;
+    if (extracted) {
+      AppendContent(output, content_spans, extracted->content);
+      has_content = !Trim(extracted->content).empty();
+    } else {
+      has_content = AppendMessageContent(output, msg, options, image_count,
+                                         image_offsets, content_spans);
+    }
     if (msg.role == ChatRole::kAssistant && !msg.tool_calls.empty()) {
       if (has_content) {
         output.append("\n\n");
       }
-      AppendToolCalls(output, msg.tool_calls, content_spans);
+      AppendToolCalls(output, msg.tool_calls, content_spans, ornith);
     }
     output.append(kImEnd).append("\n");
 

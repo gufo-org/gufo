@@ -74,6 +74,10 @@ public:
     return id_to_token_.size();
   }
 
+  [[nodiscard]] bool UsesOrnithChatTemplate() const noexcept {
+    return ornith_chat_template_;
+  }
+
   [[nodiscard]] TokenId GetEosTokenId() const noexcept { return eos_token_id_; }
   [[nodiscard]] TokenId GetBosTokenId() const noexcept { return bos_token_id_; }
   [[nodiscard]] TokenId GetPadTokenId() const noexcept { return pad_token_id_; }
@@ -94,6 +98,8 @@ public:
   }
 
 private:
+  bool ornith_chat_template_{false};
+
   enum class PreTokenizer : std::uint8_t {
     kNone,
     kQwen35,

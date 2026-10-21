@@ -44,12 +44,12 @@ namespace {
 constexpr std::uint32_t kHeadDim = 256;
 
 // Every head geometry the kernels are instantiated for: Qwen3.6-27B (GQA 6)
-// and Qwen3.6-35B-A3B (GQA 8).
+// Qwen3.6-35B-A3B (GQA 8), and Ornith-1.5-122B (GQA 16).
 struct HeadShape {
   std::uint32_t heads;
   std::uint32_t kv_heads;
 };
-constexpr std::array<HeadShape, 2> kShapes{{{24, 4}, {16, 2}}};
+constexpr std::array<HeadShape, 3> kShapes{{{24, 4}, {16, 2}, {32, 2}}};
 
 class Rng {
 public:
@@ -203,11 +203,12 @@ void RunCase(HeadShape shape, std::uint32_t start_pos, std::size_t batch_size,
   // Independent FP64 attention over the original FP32 inputs, before the
   // kernel rounds Q/K/V and probabilities. Include the first and last query
   // so partial causal tiles cannot hide behind kernel agreement, and the first
-  // and last head so a wrong query-to-KV-head mapping cannot either: the two
-  // kernels share that mapping, so their agreement alone would not catch it.
+  // and last head plus both sides of the first KV-group boundary so a wrong
+  // query-to-KV-head mapping cannot either: the kernels share that mapping,
+  // so their agreement alone would not catch it.
   std::vector<float> oracle, selected;
   const std::uint32_t group = kNumHeads / kNumKvHeads;
-  for (const std::uint32_t head : {0U, kNumHeads - 1})
+  for (const std::uint32_t head : {0U, group - 1, group, kNumHeads - 1})
     for (const auto row : {std::size_t{0}, batch_size - 1}) {
       const std::size_t kv_head = head / group;
       const std::size_t q_base = row * attention_size + head * kHeadDim;
@@ -493,6 +494,15 @@ int main() {
     RunCase(shape, 8192, 1024, true, 16);
     RunCase(shape, 8192, 1024, true, 17);
     RunCase(shape, 8192, 1024, false, 9216);
+    if (shape.heads == 32 && shape.kv_heads == 2) {
+      // Exercise Ornith continuation tails above the documented 16K baseline
+      // failure depth, including an unaligned prefix and a partial query tile.
+      // These call the tiled/WMMA operators directly; executor dispatch into
+      // a baseline kernel still needs separate integration coverage.
+      RunCase(shape, 16384, 1, false);
+      RunCase(shape, 16387, 9, false);
+      RunCase(shape, 16387, 9, true);
+    }
   }
 
   std::cout << "Qwen WMMA prefill attention ops test passed on gfx1151.\n";

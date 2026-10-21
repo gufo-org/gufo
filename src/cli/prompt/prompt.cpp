@@ -291,6 +291,17 @@ ReasoningOptions PromptReasoningOptions(const PromptOptions& options) {
   return reasoning;
 }
 
+tokenization::ChatTemplateOptions PromptChatOptions(
+    const PromptOptions& options, const core::GgufReader& reader) {
+  const auto reasoning = PromptReasoningOptions(options);
+  return tokenization::QwenChatTemplate::IsOrnithTemplate(
+             reader.GetMetadataString("tokenizer.chat_template").value_or(""))
+             ? tokenization::ResolveOrnithChatOptions(reasoning,
+                                                      options.add_vision_id)
+             : tokenization::ResolveQwenChatOptions(reasoning,
+                                                    options.add_vision_id);
+}
+
 void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
   sampling::TextModelPreset preset = sampling::TextModelPreset::kUnspecified;
   const auto artifact_architecture =
@@ -644,7 +655,11 @@ std::shared_ptr<const models::qwen::vision::Prompt> PrepareVision(
   return std::make_shared<models::qwen::vision::Prompt>(
       models::qwen::vision::Prepare(
           tokenizer, messages, {},
-          tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
+          (tokenizer.UsesOrnithChatTemplate()
+               ? tokenization::ResolveOrnithChatOptions(reasoning,
+                                                        opt.add_vision_id)
+               : tokenization::ResolveQwenChatOptions(reasoning,
+                                                      opt.add_vision_id)),
           encoder->identity(), kDefaultContext));
 }
 
@@ -1032,11 +1047,9 @@ int RunPrompt(std::span<const char* const> args) {
     }
     messages.push_back(
         {tokenization::ChatRole::kUser, opt.prompt_text, "", ""});
-    const auto reasoning = PromptReasoningOptions(opt);
     const auto rendered = tokenization::QwenChatTemplate::Render(
-        messages, {},
-        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
-        nullptr, nullptr, nullptr, &content_spans);
+        messages, {}, PromptChatOptions(opt, *reader), nullptr, nullptr,
+        nullptr, &content_spans);
     if (rendered.has_value()) {
       rendered_prompt = *rendered;
     } else {
@@ -1341,12 +1354,10 @@ int RunChat(std::span<const char* const> args) {
     }
 
     history.push_back({tokenization::ChatRole::kUser, user_input, "", ""});
-    const auto reasoning = PromptReasoningOptions(opt);
     std::vector<tokenization::ContentSpan> content_spans;
     const auto rendered_prompt = tokenization::QwenChatTemplate::Render(
-        history, {},
-        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
-        nullptr, nullptr, nullptr, &content_spans);
+        history, {}, PromptChatOptions(opt, *reader), nullptr, nullptr, nullptr,
+        &content_spans);
     if (!rendered_prompt.has_value()) {
       std::cerr << "Error formatting chat template.\n";
       return 1;
@@ -1401,8 +1412,7 @@ int RunChat(std::span<const char* const> args) {
 
     std::cout << '\n';
     tokenization::ChatMessage reply{tokenization::ChatRole::kAssistant, ""};
-    if (tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id)
-            .enable_thinking) {
+    if (PromptChatOptions(opt, *reader).enable_thinking) {
       constexpr std::string_view end = "</think>";
       const auto boundary = assistant_reply.find(end);
       reply.thought = assistant_reply.substr(0, boundary);

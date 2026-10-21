@@ -29,3 +29,9 @@ if (ENGINE_ENABLE_HIP)
     ${CMAKE_CURRENT_SOURCE_DIR}/prefill_chunk_bench.cpp)
   target_link_libraries(qwen35ba3b_prefill_chunk_bench PRIVATE gufo_core)
 endif()
+
+# Offline AR teacher-forcing logits dump (not a ctest).
+if (ENGINE_ENABLE_HIP)
+  add_executable(qwen_kl_probe ${PROJECT_SOURCE_DIR}/tools/qwen/kl_probe.cpp)
+  target_link_libraries(qwen_kl_probe PRIVATE gufo_core)
+endif()

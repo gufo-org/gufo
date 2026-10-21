@@ -467,9 +467,14 @@ bool LaunchBatchedAttentionTile(
   if (num_heads == detail::kTiledAttentionShape27B.query_heads) {
     launch.template operator()<detail::kTiledAttentionShape27B.query_heads,
                                detail::kTiledAttentionShape27B.kv_heads>();
-  } else {
+  } else if (num_heads == detail::kTiledAttentionShape35BA3B.query_heads) {
     launch.template operator()<detail::kTiledAttentionShape35BA3B.query_heads,
                                detail::kTiledAttentionShape35BA3B.kv_heads>();
+  } else if (num_heads == detail::kTiledAttentionShape122BA10B.query_heads) {
+    launch.template operator()<detail::kTiledAttentionShape122BA10B.query_heads,
+                               detail::kTiledAttentionShape122BA10B.kv_heads>();
+  } else {
+    return false;
   }
   return true;
 }

@@ -60,11 +60,14 @@ RoutedHostState& GetRoutedHostState() {
 }
 
 /// The routed F16 GEMM's decode of an expert tensor, if it has one here:
-/// Q8_0 (whole 64-element blocks) and Q6_K (whole 256-element superblocks).
+/// Q8_0 (whole 64-element blocks), Q4_K and Q6_K (256-element superblocks).
 std::optional<routed::WeightType> RoutedWeightType(core::GgmlType type,
                                                    std::size_t k) {
   if (type == core::GgmlType::kQ8_0 && k % 64 == 0) {
     return routed::WeightType::kQ8_0;
+  }
+  if (type == core::GgmlType::kQ4_K && k % 256 == 0) {
+    return routed::WeightType::kQ4_K;
   }
   if (type == core::GgmlType::kQ6_K && k % 256 == 0) {
     return routed::WeightType::kQ6_K;
@@ -154,11 +157,11 @@ bool LaunchStackedSsmControls(QwenGpuArena& arena,
 
 /// Batched routed MoE FFN (qwen35moe) for one prefill chunk. The router and
 /// shared expert reuse the dense prefill GEMM routes. Each routed projection
-/// picks its own route: Q8_0 / Q6_K take Flash-Next's routed F16 WMMA GEMM,
-/// BF16 (kept by UD quants in a few layers) the grouped WMMA GEMM, and any
-/// other format the per-slot warp GEMV. Every expert row is its (token, slot)
-/// index, so the SwiGLU activation moves between routes as F32 (`gate_e`) or
-/// F16 (`up_e`) rows.
+/// picks its own route: Q4_K / Q8_0 / Q6_K take Flash-Next's routed F16 WMMA
+/// GEMM, BF16 (kept by UD quants in a few layers) the grouped WMMA GEMM, and
+/// any other format the per-slot warp GEMV. Every expert row is its (token,
+/// slot) index, so the SwiGLU activation moves between routes as F32 (`gate_e`)
+/// or F16 (`up_e`) rows.
 template<typename GemmWeight, typename ReadsQ8>
 void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                             const models::QwenLayerWeights& layer,
@@ -257,10 +260,12 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
   // one wide tile holds its rows, and all of an expert's tiles stay in one
   // launch, consecutive, where the later ones find its weights cached. The
   // paired kernel writes F16 only, so a layer whose down projection reads F32
-  // rows keeps the unpaired launches.
+  // rows keeps the unpaired launches. Q4_K down also keeps the unpaired
+  // launches because its kernel cannot consume the wider paired tile map.
   const bool pair =
       routed_gate_up && routed_down && batch_size >= kRoutedPairMinTokens &&
-      *gate_type == *up_type && routed::RoutedGatedF16Supported(*gate_type);
+      *gate_type == *up_type && routed::RoutedGatedF16Supported(*gate_type) &&
+      IsMoeRoutedWideDownSupported(view.down_exps.type);
   std::uint32_t tile_rows = 16;
   std::uint32_t n_tiles = 0;
   std::uint32_t n_pair = 0;

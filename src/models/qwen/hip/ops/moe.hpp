@@ -11,6 +11,15 @@
 
 namespace gufo::hip {
 
+/// The paired gate/up path reuses its 64/128-row tile map for down. Q4_K
+/// down kernels only accept 16/48-row tiles, so Q4_K down retains the
+/// unpaired map even when its gate/up format supports pairing.
+[[nodiscard]] constexpr bool IsMoeRoutedWideDownSupported(
+    core::GgmlType type) noexcept {
+  return type == core::GgmlType::kQ8_0 || type == core::GgmlType::kQ6_K ||
+         type == core::GgmlType::kQ5_1;
+}
+
 /// Softmax over the full router logits, then top-k selection with lowest-index
 /// tie-break and renormalized weights (sum floored at 2^-14). logits is
 /// [n_tokens, logits_stride] with n_experts valid entries per row; ids and

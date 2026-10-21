@@ -703,8 +703,8 @@ void LaunchWmmaAttentionShape(
           static_cast<std::size_t>(first) * kGqa * kHeadDim;
       PackAttentionHeads<kKvHeads>
           <<<dim3(heads, (length + 15u) / 16u), block_size, 0, stream>>>(
-              layer_k + first * kHeadDim, layer_v + first * kHeadDim,
-              packed_k, packed_v, length);
+              layer_k + first * kHeadDim, layer_v + first * kHeadDim, packed_k,
+              packed_v, length);
       const dim3 group_grid(grid.x, heads * (kGqa / kWmmaHeads));
       WmmaCausalAttention<kQueryHeads, kKvHeads, kWmmaQueryRows, kWmmaKeys,
                           true><<<group_grid, block_size, 0, stream>>>(
@@ -749,18 +749,27 @@ bool LaunchQwenWmmaAttention(
   // IsTiledAttentionSupported admitted exactly one instantiated shape.
   constexpr auto k27B = detail::kTiledAttentionShape27B;
   constexpr auto k35BA3B = detail::kTiledAttentionShape35BA3B;
+  constexpr auto k122BA10B = detail::kTiledAttentionShape122BA10B;
   if (num_heads == k27B.query_heads) {
     LaunchWmmaAttentionShape<k27B.query_heads, k27B.kv_heads>(
         q, k, v, gate, k_cache, v_cache, k_cache_f16, v_cache_f16, out_context,
         layer_idx, start_pos, batch_size, max_context, stream, lse_out,
         key_begin, skip_kv_write, packed_k_workspace, packed_v_workspace,
         static_cast<std::uint32_t>(first_query));
-  } else {
+  } else if (num_heads == k35BA3B.query_heads) {
     LaunchWmmaAttentionShape<k35BA3B.query_heads, k35BA3B.kv_heads>(
         q, k, v, gate, k_cache, v_cache, k_cache_f16, v_cache_f16, out_context,
         layer_idx, start_pos, batch_size, max_context, stream, lse_out,
         key_begin, skip_kv_write, packed_k_workspace, packed_v_workspace,
         static_cast<std::uint32_t>(first_query));
+  } else if (num_heads == k122BA10B.query_heads) {
+    LaunchWmmaAttentionShape<k122BA10B.query_heads, k122BA10B.kv_heads>(
+        q, k, v, gate, k_cache, v_cache, k_cache_f16, v_cache_f16, out_context,
+        layer_idx, start_pos, batch_size, max_context, stream, lse_out,
+        key_begin, skip_kv_write, packed_k_workspace, packed_v_workspace,
+        static_cast<std::uint32_t>(first_query));
+  } else {
+    return false;
   }
   return true;
 }

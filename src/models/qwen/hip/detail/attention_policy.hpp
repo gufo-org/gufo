@@ -24,14 +24,19 @@ struct TiledAttentionHeadShape {
 };
 inline constexpr TiledAttentionHeadShape kTiledAttentionShape27B{24, 4};
 inline constexpr TiledAttentionHeadShape kTiledAttentionShape35BA3B{16, 2};
+inline constexpr TiledAttentionHeadShape kTiledAttentionShape122BA10B{32, 2};
 // The launchers pick an instantiation by query-head count alone.
 static_assert(kTiledAttentionShape27B.query_heads !=
               kTiledAttentionShape35BA3B.query_heads);
+static_assert(kTiledAttentionShape122BA10B.query_heads !=
+                  kTiledAttentionShape27B.query_heads &&
+              kTiledAttentionShape122BA10B.query_heads !=
+                  kTiledAttentionShape35BA3B.query_heads);
 
 [[nodiscard]] constexpr bool IsTiledAttentionHeadShape(
     std::uint32_t query_heads, std::uint32_t kv_heads) noexcept {
-  for (const auto shape :
-       {kTiledAttentionShape27B, kTiledAttentionShape35BA3B}) {
+  for (const auto shape : {kTiledAttentionShape27B, kTiledAttentionShape35BA3B,
+                           kTiledAttentionShape122BA10B}) {
     if (query_heads == shape.query_heads && kv_heads == shape.kv_heads) {
       return true;
     }

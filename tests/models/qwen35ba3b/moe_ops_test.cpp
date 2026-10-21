@@ -34,6 +34,13 @@ using gufo::core::GgmlType;
 using gufo::models::QwenTensorRef;
 using Q8_0Block = gufo::quant::block_q8_0;
 
+// Production pairing reuses its tile map for down: Q4_K down must reject
+// those widths, while mixed Q4_K gate/up + Q6_K down remains eligible.
+static_assert(!gufo::hip::IsMoeRoutedWideDownSupported(GgmlType::kQ4_K));
+static_assert(!gufo::hip::IsMoeRoutedWideDownSupported(GgmlType::kQ5_K));
+static_assert(gufo::hip::IsMoeRoutedWideDownSupported(GgmlType::kQ6_K));
+static_assert(gufo::hip::IsMoeRoutedWideDownSupported(GgmlType::kQ8_0));
+
 std::uint32_t seed = 20260926U;
 std::uint32_t Rnd() {
   seed = seed * 1664525U + 1013904223U;
@@ -623,18 +630,36 @@ std::vector<std::uint8_t> RandomQ6K(std::size_t rows, std::size_t cols) {
   return out;
 }
 
-/// Flash-Next's routed F16 expert GEMM on this model's Q8_0 and Q6_K expert
+/// Arbitrary valid Q4_K codes and packed 6-bit scale/min fields, with small
+/// superblock scales so paired SwiGLU also exercises unsaturated inputs.
+std::vector<std::uint8_t> RandomQ4K(std::size_t rows, std::size_t cols) {
+  constexpr std::size_t kBlockBytes = 144;
+  std::vector<std::uint8_t> out(rows * (cols / 256) * kBlockBytes);
+  for (std::size_t b = 0; b < out.size() / kBlockBytes; ++b) {
+    auto* block = out.data() + b * kBlockBytes;
+    const auto d = FloatToFp16Bits(RndFloat(0.00005F, 0.00015F));
+    const auto dmin = FloatToFp16Bits(RndFloat(0.0002F, 0.0012F));
+    std::memcpy(block, &d, sizeof(d));
+    std::memcpy(block + 2, &dmin, sizeof(dmin));
+    for (std::size_t i = 4; i < kBlockBytes; ++i)
+      block[i] = static_cast<std::uint8_t>(Rnd() >> 16);
+  }
+  return out;
+}
+
+/// Flash-Next's routed F16 expert GEMM on Q8_0, Q6_K and Ornith Q4_K expert
 /// shapes, against the per-slot GEMV (FP32 activations, same weights). The
 /// difference is the F16 rounding of the activation rows (and, for Q6_K,
 /// of the per-16 scale).
 void CheckRoutedF16(hipStream_t stream) {
   namespace routed = gufo::models::qwen38_flash_next::rocm;
-  for (const GgmlType type : {GgmlType::kQ8_0, GgmlType::kQ6_K}) {
-    const auto weight_type = type == GgmlType::kQ8_0
-                                 ? routed::WeightType::kQ8_0
-                                 : routed::WeightType::kQ6_K;
-    const char* type_name = type == GgmlType::kQ8_0 ? "Q8_0" : "Q6_K";
-    constexpr std::uint32_t kExperts = 64;
+  for (const GgmlType type :
+       {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kQ4_K}) {
+    const auto weight_type = static_cast<routed::WeightType>(type);
+    const char* type_name = type == GgmlType::kQ8_0   ? "Q8_0"
+                            : type == GgmlType::kQ4_K ? "Q4_K"
+                                                      : "Q6_K";
+    const std::uint32_t kExperts = type == GgmlType::kQ4_K ? 16 : 64;
     constexpr std::uint32_t kUsed = 8;
     struct Shape {
       const char* name;
@@ -642,8 +667,10 @@ void CheckRoutedF16(hipStream_t stream) {
       std::size_t k;
       bool per_slot_input;
     };
-    for (const Shape shape :
-         {Shape{"gate/up", 512, 2048, false}, Shape{"down", 2048, 512, true}}) {
+    const std::size_t hidden = type == GgmlType::kQ4_K ? 3072 : 2048;
+    const std::size_t ff = type == GgmlType::kQ4_K ? 1024 : 512;
+    for (const Shape shape : {Shape{"gate/up", ff, hidden, false},
+                              Shape{"down", hidden, ff, true}}) {
       std::vector<std::uint8_t> w_bytes;
       if (type == GgmlType::kQ8_0) {
         std::vector<float> w_src(static_cast<std::size_t>(kExperts) * shape.m *
@@ -655,11 +682,16 @@ void CheckRoutedF16(hipStream_t stream) {
             QuantizeQ8_0(w_src.data(), kExperts * shape.m, shape.k);
         w_bytes.resize(w_q.size() * sizeof(Q8_0Block));
         std::memcpy(w_bytes.data(), w_q.data(), w_bytes.size());
+      } else if (type == GgmlType::kQ4_K) {
+        w_bytes = RandomQ4K(kExperts * shape.m, shape.k);
       } else {
         w_bytes = RandomQ6K(kExperts * shape.m, shape.k);
       }
       gufo::test::DeviceBuffer<std::uint8_t> d_w(w_bytes);
-      for (const std::uint32_t tokens : {1U, 7U, 100U, 512U}) {
+      const auto batches = type == GgmlType::kQ4_K
+                               ? std::vector<std::uint32_t>{1, 9, 65}
+                               : std::vector<std::uint32_t>{1, 7, 100, 512};
+      for (const std::uint32_t tokens : batches) {
         const std::uint32_t slots = tokens * kUsed;
         std::vector<std::int32_t> ids(slots);
         for (std::uint32_t t = 0; t < tokens; ++t) {
@@ -743,6 +775,33 @@ void CheckRoutedF16(hipStream_t stream) {
                     << ": rel=" << rel << " non_finite=" << non_finite << "\n";
           Expect(non_finite == 0, "routed F16 GEMM left slots unwritten");
           Expect(rel < 1e-2, "routed F16 GEMM disagrees with the slot GEMV");
+          if (type == GgmlType::kQ4_K && shape.per_slot_input) {
+            // Production down writes F16 for the fused MoE combine. Verify
+            // that output mode too, with NaNs exposing every unwritten slot.
+            gufo::test::DeviceBuffer<std::uint16_t> d_half(
+                std::vector<std::uint16_t>(slots * shape.m, 0x7E00U));
+            Expect(
+                routed::RoutedF16Gemm(
+                    d_w.data(), weight_type,
+                    reinterpret_cast<const __half*>(d_x_half.data()),
+                    d_tiles.data(), static_cast<std::uint32_t>(tiles.size()),
+                    tile_rows, d_bounds.data(), rows_in, d_rows_slot.data(),
+                    nullptr, nullptr, reinterpret_cast<__half*>(d_half.data()),
+                    shape.m, shape.k, stream),
+                "Q4_K down rejected F16 output");
+            HIP_CHECK(hipStreamSynchronize(stream));
+            const auto half = d_half.CopyToHost();
+            double half_error = 0;
+            for (std::size_t i = 0; i < ref.size(); ++i) {
+              const float value = gufo::quant::Fp16ToFloat(half[i]);
+              Expect(std::isfinite(value),
+                     "Q4_K down left F16 slots unwritten");
+              half_error = std::max(half_error,
+                                    std::fabs(double(value) - double(ref[i])));
+            }
+            Expect((magnitude > 0 ? half_error / magnitude : half_error) < 1e-2,
+                   "Q4_K F16 down disagrees with the slot GEMV");
+          }
         }
       }
     }
@@ -780,16 +839,19 @@ float Fp16BitsToFloat(std::uint16_t h) {
 /// silu(gate) * up from two per-slot GEMVs on the same weights.
 void CheckRoutedPair(hipStream_t stream) {
   namespace routed = gufo::models::qwen38_flash_next::rocm;
-  constexpr std::uint32_t kExperts = 64;
   constexpr std::uint32_t kUsed = 8;
-  constexpr std::size_t kM = 512;
-  constexpr std::size_t kK = 2048;
-  for (const GgmlType type : {GgmlType::kQ6_K, GgmlType::kQ8_0}) {
-    const auto weight_type = type == GgmlType::kQ8_0
-                                 ? routed::WeightType::kQ8_0
-                                 : routed::WeightType::kQ6_K;
-    const char* type_name = type == GgmlType::kQ8_0 ? "Q8_0" : "Q6_K";
+  for (const GgmlType type :
+       {GgmlType::kQ6_K, GgmlType::kQ8_0, GgmlType::kQ4_K}) {
+    const std::uint32_t kExperts = type == GgmlType::kQ4_K ? 16 : 64;
+    const std::size_t kM = type == GgmlType::kQ4_K ? 1024 : 512;
+    const std::size_t kK = type == GgmlType::kQ4_K ? 3072 : 2048;
+    const auto weight_type = static_cast<routed::WeightType>(type);
+    const char* type_name = type == GgmlType::kQ8_0   ? "Q8_0"
+                            : type == GgmlType::kQ4_K ? "Q4_K"
+                                                      : "Q6_K";
     const auto make = [&] {
+      if (type == GgmlType::kQ4_K)
+        return RandomQ4K(kExperts * kM, kK);
       if (type == GgmlType::kQ6_K) {
         return RandomQ6K(kExperts * kM, kK);
       }
@@ -804,7 +866,10 @@ void CheckRoutedPair(hipStream_t stream) {
     };
     gufo::test::DeviceBuffer<std::uint8_t> d_gate(make());
     gufo::test::DeviceBuffer<std::uint8_t> d_up(make());
-    for (const std::uint32_t tokens : {100U, 512U, 1024U}) {
+    const auto batches = type == GgmlType::kQ4_K
+                             ? std::vector<std::uint32_t>{9, 65, 129}
+                             : std::vector<std::uint32_t>{100, 512, 1024};
+    for (const std::uint32_t tokens : batches) {
       const std::uint32_t slots = tokens * kUsed;
       std::vector<std::int32_t> ids(slots);
       for (std::uint32_t t = 0; t < tokens; ++t) {

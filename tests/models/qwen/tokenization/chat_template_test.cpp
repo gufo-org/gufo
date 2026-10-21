@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -294,6 +295,85 @@ void TestGgufTemplateExtraction() {
   Expect(gufo::tokenization::QwenChatTemplate::CreateFromGguf(*lookalike_reader,
                                                               &err) == nullptr,
          "Qwen3.8 look-alike template is rejected by hash");
+}
+
+// Independent Jinja 3.1.6 renders of ornith_chat_template.jinja, using the
+// Hugging Face tojson filter (json.dumps with ensure_ascii=False). The fixture
+// is the official template, not derived from the compiled formatter.
+void TestOrnithReferenceGoldens() {
+  using namespace gufo::tokenization;
+  const auto raw = ReadText((std::filesystem::path(__FILE__).parent_path() /
+                             "ornith_chat_template.jinja")
+                                .string());
+  Expect(Sha256(raw) == QwenChatTemplate::OrnithTemplateSha256(),
+         "Ornith reference retains its pinned SHA");
+  Expect(QwenChatTemplate::IsOrnithTemplate(raw + "\n"),
+         "Ornith GGUF newline variant recognized");
+  Expect(!QwenChatTemplate::IsOrnithTemplate(raw + " "),
+         "Modified Ornith template rejected");
+  Expect(QwenChatTemplate::CreateDefault(raw)->GetProfile() ==
+             QwenChatTemplate::Profile::kOrnith,
+         "Ornith profile recognized");
+  GgufTemplateBuilder builder;
+  builder.AddMetadataString("tokenizer.chat_template", raw + "\n");
+  auto binary = builder.Build();
+  auto reader =
+      gufo::core::GgufReader::OpenMemory(binary.data(), binary.size());
+  Expect(reader != nullptr, "Ornith template GGUF loads");
+  Expect(QwenChatTemplate::CreateFromGguf(*reader)->GetProfile() ==
+             QwenChatTemplate::Profile::kOrnith,
+         "Ornith GGUF profile recognized");
+  const std::vector<ChatMessage> base = {{ChatRole::kUser, "Hello"}};
+  const std::vector<ChatMessage> history = {
+      {ChatRole::kSystem, "  "},
+      {ChatRole::kUser, "Hello"},
+      {ChatRole::kAssistant, " Hi ", "", " historical reasoning "},
+      {ChatRole::kUser, "Again"}};
+  const std::vector<ChatMessage> inline_history = {
+      {ChatRole::kUser, "Hello"},
+      {ChatRole::kAssistant, "<think>\ninline reasoning\n</think>\n\nHi"},
+      {ChatRole::kUser, "Again"}};
+  ChatMessage call{ChatRole::kAssistant, "", "", " read it "};
+  call.tool_calls.push_back(
+      {.name = "read",
+       .arguments = {
+           {.name = "path", .value = "/tmp/a"},
+           {.name = "lines", .value = "[1, 2]", .is_string = false},
+           {.name = "enabled", .value = "true", .is_string = false},
+           {.name = "missing", .value = "null", .is_string = false}}});
+  const std::vector<ChatMessage> cycle = {{ChatRole::kUser, "Hello"},
+                                          call,
+                                          {ChatRole::kTool, " one "},
+                                          {ChatRole::kTool, "two"}};
+  const std::vector<ChatTool> tools = {
+      {.name = "read", .description = "Read file", .parameters_json = "{}"}};
+  auto options = ResolveOrnithChatOptions({});
+  const auto check = [&](const auto& messages,
+                         std::span<const ChatTool> functions,
+                         std::string_view expected) {
+    const auto rendered =
+        QwenChatTemplate::Render(messages, functions, options);
+    Expect(rendered.has_value(), "Ornith render succeeds");
+    Expect(Sha256(*rendered) == expected,
+           "Ornith matches independent Jinja render");
+  };
+  check(base, {},
+        "bcff7d22d26a515874d02d760f5e74dfd8a8ce843e7ed891465246371b3c7821");
+  options.enable_thinking = false;
+  check(base, {},
+        "13071b0f0e23e97681f6f39247dbb715973302580660a81dbae994fe8064e7d3");
+  options.enable_thinking = true;
+  options.preserve_thinking = false;
+  options.reasoning_effort = QwenReasoningEffort::kLow;
+  check(history, {},
+        "f0c96e4285f9b51c56d2b8c41498bae21a7c95203a8a194a5b05757c5f169a39");
+  check(inline_history, {},
+        "7f2d0034292708cbefb07f7b2fdc3aa9568aa89cd0f8f8dca34c6a4c760053c1");
+  check(cycle, tools,
+        "bdf7944b0fee7140846703767e28eb5d77e803238439fe48c158150a9d51ad09");
+  options.add_generation_prompt = false;
+  check(cycle, {},
+        "5d61982050390bfcc544fc6ec44856ef9bde4cd295c5a74a884dea493926897f");
 }
 
 void TestHuggingFaceRenderedGoldens() {
@@ -1205,6 +1285,7 @@ int main() {
   TestRenderedPromptBoundFollowsContext();
   TestGgufTemplateExtraction();
   TestHuggingFaceRenderedGoldens();
+  TestOrnithReferenceGoldens();
   TestRenderAndTokenize();
   TestContentSpellingATokenIsNotParsedAsOne();
   TestToolReplayArgumentsAreContent();

@@ -100,10 +100,14 @@ struct QwenImageContext final : TextPromptContext {
   std::shared_ptr<const models::qwen::vision::Prompt> prompt;
 };
 
-tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
-                                                  std::uint32_t max_context) {
-  auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
-                                                      request.add_vision_id);
+tokenization::ChatTemplateOptions QwenChatOptions(
+    const ChatRequest& request, std::uint32_t max_context,
+    const tokenization::QwenTokenizer& tokenizer) {
+  auto options = tokenizer.UsesOrnithChatTemplate()
+                     ? tokenization::ResolveOrnithChatOptions(
+                           request.reasoning, request.add_vision_id)
+                     : tokenization::ResolveQwenChatOptions(
+                           request.reasoning, request.add_vision_id);
   // gufo #285: the rendered prompt may be as long as the context can hold.
   options.max_output_bytes =
       tokenization::RenderedPromptBoundBytes(max_context);
@@ -114,7 +118,7 @@ std::optional<std::size_t> CountQwenPromptTokens(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
     std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
-  const auto options = QwenChatOptions(request, max_context);
+  const auto options = QwenChatOptions(request, max_context, tokenizer);
   const auto tools =
       request.tool_choice == ChatRequest::ToolChoice::kNone
           ? std::span<const tokenization::ChatTool>{}
@@ -145,7 +149,7 @@ TextPreparedPrompt PrepareQwenPrompt(
     std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
-  const auto options = QwenChatOptions(request, max_context);
+  const auto options = QwenChatOptions(request, max_context, tokenizer);
   auto prompt = std::make_shared<models::qwen::vision::Prompt>(
       models::qwen::vision::Prepare(
           tokenizer, request.messages,
@@ -351,7 +355,8 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
     std::string_view artifact_fingerprint,
     std::string_view draft_artifact_fingerprint, std::uint32_t max_context,
     const hip::QwenExecutionPolicy& execution_policy, QwenDraftKind draft_kind,
-    const speculative::SpeculativeOptions& speculative_options) {
+    const speculative::SpeculativeOptions& speculative_options,
+    bool ornith_template) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen disk cache requires an artifact fingerprint");
@@ -370,9 +375,15 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
            << "tokenizer=embedded-in-artifact\n"
-           << "chat_template=qwen38-reasoning-compiled-v3\n"
+           << "chat_template="
+           << (ornith_template ? "ornith-compiled-v1"
+                               : "qwen38-reasoning-compiled-v3")
+           << '\n'
            << "chat_template_reference_sha256="
-           << tokenization::QwenChatTemplate::OfficialTemplateSha256() << '\n'
+           << (ornith_template
+                   ? tokenization::QwenChatTemplate::OrnithTemplateSha256()
+                   : tokenization::QwenChatTemplate::OfficialTemplateSha256())
+           << '\n'
            << "state_abi=" << state_abi << "-component-v2\n"
            << "payload_layout=qwen-component-v2\n"
            // Older learned boundaries could keep logits from an earlier
@@ -1143,7 +1154,8 @@ public:
       persistence_ = TextRunnerPersistenceDescriptor{
           .compatibility_identity = QwenCompatibilityIdentity(
               artifact_fingerprint, draft_artifact_fingerprint, max_context_,
-              execution_policy_, DraftKind(), speculative_options_),
+              execution_policy_, DraftKind(), speculative_options_,
+              model_->GetTokenizer().UsesOrnithChatTemplate()),
           .payload_version = kQwenComponentPayloadVersion,
       };
       component_identity_ = persistence_->compatibility_identity;
@@ -1334,7 +1346,7 @@ public:
         request.tool_choice == ChatRequest::ToolChoice::kNone
             ? std::span<const tokenization::ChatTool>{}
             : std::span<const tokenization::ChatTool>{request.tools},
-        QwenChatOptions(request, max_context_));
+        QwenChatOptions(request, max_context_, model_->GetTokenizer()));
   }
 
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
@@ -1360,7 +1372,8 @@ public:
 
   [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
       const ChatRequest& request) const override {
-    return QwenChatOptions(request, max_context_).enable_thinking
+    return QwenChatOptions(request, max_context_, model_->GetTokenizer())
+                   .enable_thinking
                ? TextGenerationBackend::InitialOutputState::kReasoning
                : TextGenerationBackend::InitialOutputState::kContent;
   }
@@ -2677,7 +2690,7 @@ public:
         request.tool_choice == ChatRequest::ToolChoice::kNone
             ? std::span<const tokenization::ChatTool>{}
             : std::span<const tokenization::ChatTool>{request.tools},
-        QwenChatOptions(request, max_context_));
+        QwenChatOptions(request, max_context_, model_->tokenizer()));
   }
 
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
@@ -2703,7 +2716,8 @@ public:
 
   [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
       const ChatRequest& request) const override {
-    return QwenChatOptions(request, max_context_).enable_thinking
+    return QwenChatOptions(request, max_context_, model_->tokenizer())
+                   .enable_thinking
                ? TextGenerationBackend::InitialOutputState::kReasoning
                : TextGenerationBackend::InitialOutputState::kContent;
   }

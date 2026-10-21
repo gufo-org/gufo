@@ -65,6 +65,13 @@ void TestBackendSupportPredicates() {
   params.num_heads = 16;
   params.num_kv_heads = 2;
   Check(IsTiledAttentionSupported(params), "35B-A3B attention geometry");
+  params.num_heads = 32;
+  Check(IsTiledAttentionSupported(params), "122B-A10B attention geometry");
+  params.num_kv_heads = 4;
+  Check(!IsTiledAttentionSupported(params), "122B rejects mismatched KV heads");
+  params.num_kv_heads = 2;
+  params.head_dim = 128;
+  Check(!IsTiledAttentionSupported(params), "122B rejects mismatched head dim");
   params = valid;
   params.num_heads = 16;
   Check(!IsTiledAttentionSupported(params), "unsupported query-head count");
