@@ -72,6 +72,8 @@ void PromptHiddenBuffer::GrowPinned(std::size_t elements) {
     StopPinning(elements);
     return;
   }
+  // Callers have synchronized the stream: no copy is still in flight to the
+  // old pages, which this reads and then frees.
   if (size_ > 0) {
     std::memcpy(data, pinned_, size_ * sizeof(float));
   }

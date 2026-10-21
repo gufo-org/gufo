@@ -632,7 +632,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             scratch.decode.hidden.data(), hidden_size * sizeof(float),
             hidden_size * sizeof(float), batch_size, hipMemcpyDeviceToHost,
             arena_.stream));
-        // A pageable copy blocked here; keep cancellable prefill as shallow.
+        // Bound the work queued past a tap, as the blocking pageable copy
+        // did, so cancelling a prefill stays prompt.
         if (cancellation_check_) {
           HIP_CHECK(hipStreamSynchronize(arena_.stream));
         }
