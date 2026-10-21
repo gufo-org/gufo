@@ -3004,7 +3004,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const TextSpeculativeConfig& speculative_config,
                             const TextDiskCacheConfig& disk_cache_config,
                             const std::string& vision_model_path,
-                            TextRunnerRamCacheOptions ram_cache_config) {
+                            TextRunnerRamCacheOptions ram_cache_config,
+                            bool enable_yarn) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -3016,6 +3017,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
   const auto architecture =
       reader->GetMetadataString("general.architecture").value_or("");
+  if (enable_yarn && architecture != "qwen4exp") {
+    SetError(error, "--enable-yarn applies only to Qwen3.8-Flash-Next");
+    return false;
+  }
   // Read once, reused below to derive YaRN from --context for qwen4exp.
   const std::uint32_t qwen4exp_native_context =
       architecture == "qwen4exp"
@@ -3035,6 +3040,15 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       return false;
     }
     max_context = static_cast<std::uint32_t>(native);
+  }
+  // Static YaRN changes every request, so a context above Flash-Next's
+  // native one needs --enable-yarn. Checked before any weights load.
+  std::optional<models::qwen38_flash_next::RopeScaling> rope_scaling;
+  if (architecture == "qwen4exp" &&
+      !models::qwen38_flash_next::ResolveRopeScaling(
+          max_context, qwen4exp_native_context, enable_yarn, &rope_scaling,
+          error)) {
+    return false;
   }
 
   if (reader->GetMetadataString("general.architecture") == "deepseek4") {
@@ -3122,10 +3136,6 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                "Unsupported Qwen3.8-Flash-Next chat template: " + load_error);
       return false;
     }
-    // Static YaRN, derived from the requested --context; a request at or
-    // below the artifact's native context leaves it off.
-    const auto rope_scaling = models::qwen38_flash_next::RopeScalingForContext(
-        max_context, qwen4exp_native_context);
     // The model owns prefill geometry for both bulk and scheduled requests.
     auto model = models::qwen38_flash_next::Model::Load(
         model_path,
@@ -3218,6 +3228,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   (void)disk_cache_config;
   (void)vision_model_path;
   (void)ram_cache_config;
+  (void)enable_yarn;
   SetError(error, "HTTP inference requires the HIP backend");
   return false;
 #endif

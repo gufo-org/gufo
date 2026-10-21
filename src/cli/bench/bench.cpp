@@ -243,6 +243,10 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
         return true;
       });
   RegisterSamplingOptions(parser, &opt.sampling, "Sampling", false);
+  parser.AddFlag("", "--enable-yarn",
+                 "Flash-Next: static YaRN, required when depth + prompt or "
+                 "generation exceeds the native 262144",
+                 "Model", &opt.enable_yarn);
   parser.AddFlag("-v", "--verbose",
                  "Print detailed timing, latency breakdown, and tok/s metrics",
                  "General", &opt.verbose);
@@ -886,19 +890,13 @@ int RunQwen38FlashNextBenchmark(
     return values.empty() ? std::size_t{0}
                           : *std::max_element(values.begin(), values.end());
   };
-  const std::size_t max_depth = max_or_zero(options.n_depths);
-  const std::size_t max_prompt = max_or_zero(options.n_prompts);
-  const std::size_t max_generation = max_or_zero(options.n_gens);
-  if (std::max({max_depth, max_prompt, max_generation,
-                options.validate_prefill_tokens}) >
+  if (std::max({max_or_zero(options.n_depths), max_or_zero(options.n_prompts),
+                max_or_zero(options.n_gens), options.validate_prefill_tokens}) >
       std::numeric_limits<std::uint32_t>::max()) {
     std::cerr << "Error: benchmark workload exceeds the context range\n";
     return 1;
   }
-  const std::size_t required_context =
-      std::max({std::size_t{4096}, max_depth + max_prompt + 1,
-                std::max<std::size_t>(max_depth, 16) + max_generation + 1,
-                options.validate_prefill_tokens + 1});
+  const std::size_t required_context = FlashNextBenchContext(options);
   const bool mtp = options.speculative_backend == "mtp";
   if (!options.speculative_backend.empty() && !mtp) {
     std::cerr << "Error: Qwen3.8-Flash-Next supports only --speculative mtp "
@@ -923,13 +921,17 @@ int RunQwen38FlashNextBenchmark(
     return 1;
   }
 
-  // Static YaRN, derived from the same required_context that sizes the
-  // benchmark's own request; a required context at or below the artifact's
-  // native context leaves it off.
+  // The same --enable-yarn rule as serve, applied to the context that sizes
+  // the benchmark's own requests.
   const std::uint32_t qwen4exp_native_context =
       reader->GetMetadataUint32("qwen4exp.context_length").value_or(0);
-  const auto rope_scaling = qfn::RopeScalingForContext(
-      static_cast<std::uint32_t>(required_context), qwen4exp_native_context);
+  std::optional<qfn::RopeScaling> rope_scaling;
+  std::string yarn_error;
+  if (!ResolveFlashNextBenchYarn(options, qwen4exp_native_context,
+                                 &rope_scaling, &yarn_error)) {
+    std::cerr << "Error: Flash-Next benchmark: " << yarn_error << '\n';
+    return 1;
+  }
 
   std::string error;
   auto model = qfn::Model::Load(
@@ -1159,6 +1161,34 @@ int RunQwen38FlashNextBenchmark(
 
 }  // namespace
 
+std::size_t FlashNextBenchContext(const BenchOptions& options) {
+  const auto max_or_zero = [](const std::vector<std::size_t>& values) {
+    return values.empty() ? std::size_t{0}
+                          : *std::max_element(values.begin(), values.end());
+  };
+  const std::size_t max_depth = max_or_zero(options.n_depths);
+  return std::max(
+      {std::size_t{4096}, max_depth + max_or_zero(options.n_prompts) + 1,
+       std::max<std::size_t>(max_depth, 16) + max_or_zero(options.n_gens) + 1,
+       options.validate_prefill_tokens + 1});
+}
+
+bool ResolveFlashNextBenchYarn(
+    const BenchOptions& options, std::uint32_t native,
+    std::optional<models::qwen38_flash_next::RopeScaling>* scaling,
+    std::string* error) {
+  const std::size_t context = FlashNextBenchContext(options);
+  if (context > std::numeric_limits<std::uint32_t>::max()) {
+    *scaling = std::nullopt;
+    if (error != nullptr)
+      *error = "benchmark workload exceeds the context range";
+    return false;
+  }
+  return models::qwen38_flash_next::ResolveRopeScaling(
+      static_cast<std::uint32_t>(context), native, options.enable_yarn, scaling,
+      error);
+}
+
 void PrintBenchHelp(std::string_view program_name) {
   BenchOptions opt;
   bool explicit_p = false;
@@ -1278,6 +1308,10 @@ int RunBench(std::span<const char* const> args) {
       std::move(reader_owner));
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (opt.enable_yarn && !IsQwen38FlashNext(*reader)) {
+    std::cerr << "Error: --enable-yarn applies only to Qwen3.8-Flash-Next\n";
+    return 1;
+  }
   if (IsDeepSeekV4Flash(*reader)) {
     return RunDeepSeekBenchmark(opt, reader, model_load_start);
   }

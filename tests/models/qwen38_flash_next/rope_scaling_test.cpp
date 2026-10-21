@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -145,8 +146,9 @@ void CheckPositionPolicy() {
   std::cout << "position policy strings pinned\n";
 }
 
-// Serve and bench derive YaRN from the requested --context (Qwen's own
-// advice: factor = typical context / 262,144); no GGUF key sets it.
+// With --enable-yarn, serve and bench derive YaRN from the requested
+// context (Qwen's own advice: factor = typical context / 262,144); no GGUF
+// key sets it.
 void CheckContextDerivation() {
   Require(!qfn::RopeScalingForContext(262144, 262144).has_value(),
           "native context must not enable YaRN");
@@ -197,6 +199,69 @@ void CheckContextDerivation() {
                "non-power-of-two, out-of-range and native == 0 requests\n";
 }
 
+// --enable-yarn: required above the native context (static YaRN changes
+// every request), rejected at or below it, and the factor still covers the
+// request exactly.
+void CheckEnableYarnRule() {
+  std::optional<qfn::RopeScaling> scaling = Yarn(9.0F);
+  std::string error;
+  Require(!qfn::ResolveRopeScaling(409600, 262144, false, &scaling, &error),
+          "context above native must need --enable-yarn");
+  Require(error ==
+              "context above the native 262144 tokens needs static YaRN, "
+              "which applies to every request; pass --enable-yarn "
+              "(requested 409600)",
+          "startup error must name the flag and the trade-off: " + error);
+  Require(!scaling.has_value(), "a rejected request must not keep a scaling");
+  error.clear();
+  Require(!qfn::ResolveRopeScaling(262145, 262144, false, &scaling, &error) &&
+              error.find("pass --enable-yarn") != std::string::npos,
+          "one token above native must need --enable-yarn");
+
+  for (const std::uint32_t context : {1U, 32768U, 262144U}) {
+    error.clear();
+    Require(!qfn::ResolveRopeScaling(context, 262144, true, &scaling, &error),
+            "--enable-yarn at or below native must be rejected");
+    Require(error == "--enable-yarn has no effect: context " +
+                         std::to_string(context) +
+                         " is within the native 262144 tokens",
+            "no-op error must say the flag has no effect: " + error);
+    error.clear();
+    Require(qfn::ResolveRopeScaling(context, 262144, false, &scaling, &error) &&
+                !scaling.has_value() && error.empty(),
+            "without the flag a native-or-shorter context stays off");
+  }
+
+  const struct {
+    std::uint32_t context;
+    float factor;
+  } extended[] = {{409600, 1.5625F}, {655360, 2.5F}, {1015808, 3.875F}};
+  for (const auto& c : extended) {
+    Require(
+        qfn::ResolveRopeScaling(c.context, 262144, true, &scaling, &error) &&
+            scaling && scaling->factor == c.factor &&
+            scaling->original_context == 262144,
+        "--enable-yarn must keep factor = context / 262144");
+  }
+  Require(qfn::ResolveRopeScaling(600000, 262144, true, &scaling, &error) &&
+              scaling &&
+              std::fabs(scaling->factor - 600000.0F / 262144.0F) < 1e-6F &&
+              qfn::ScaledContextLength(*scaling, 262144) >= 600000,
+          "a non-multiple context must derive the smallest covering factor");
+  Require(scaling == qfn::RopeScalingForContext(600000, 262144),
+          "the flag must not change the derived factor");
+
+  error.clear();
+  Require(qfn::ResolveRopeScaling(300000, 0, false, &scaling, &error) &&
+              !scaling.has_value(),
+          "an unknown native context leaves YaRN off for the model check");
+  Require(!qfn::ResolveRopeScaling(300000, 0, true, &scaling, &error) &&
+              error.find("--enable-yarn") != std::string::npos,
+          "--enable-yarn without a native context must be rejected");
+  std::cout << "--enable-yarn is required above native, rejected within it, "
+               "and keeps factor = context / native\n";
+}
+
 }  // namespace
 
 int main() {
@@ -207,6 +272,7 @@ int main() {
     CheckNormalizedRopeScaling();
     CheckPositionPolicy();
     CheckContextDerivation();
+    CheckEnableYarnRule();
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';
     return 1;

@@ -68,6 +68,11 @@ def main():
     assert "8589934592" in help_text
     assert "0 = auto, at most the disk budget and 1/8 available RAM" in help_text
     assert "--log-progress" in help_text
+    assert "--enable-yarn" in help_text
+    assert "it applies to every request" in help_text
+    # The flag is a plain switch: it must not swallow the next argument.
+    check(["serve", "llm", "--enable-yarn", "--model", "missing.gguf"], 1,
+          "Error loading model 'missing.gguf'")
 
     # Verbosity must change the output, not merely parse. The config line is
     # emitted at the debug tier before the model file is opened, so these all

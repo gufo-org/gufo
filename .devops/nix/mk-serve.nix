@@ -37,6 +37,7 @@
   # LLM Options
   servedModelName ? null,
   context ? null,
+  enableYarn ? false, # Flash-Next: required for context above 262144
   maxTokens ? null,
   temperature ? null,
   topP ? null,
@@ -146,6 +147,7 @@ let
         "--context"
         (toString context)
       ]
+      ++ lib.optionals enableYarn [ "--enable-yarn" ]
       ++ lib.optionals (maxTokens != null) [
         "--max-tokens"
         (toString maxTokens)

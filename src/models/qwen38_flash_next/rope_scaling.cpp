@@ -7,6 +7,7 @@
 #include <numbers>
 #include <optional>
 #include <sstream>
+#include <utility>
 
 namespace gufo::models::qwen38_flash_next {
 
@@ -72,6 +73,35 @@ std::optional<RopeScaling> RopeScalingForContext(
         std::nextafter(scaling.factor, std::numeric_limits<float>::infinity());
   }
   return scaling;
+}
+
+bool ResolveRopeScaling(std::uint32_t requested, std::uint32_t native,
+                        bool enable_yarn, std::optional<RopeScaling>* scaling,
+                        std::string* error) {
+  *scaling = std::nullopt;
+  const auto fail = [&](std::string message) {
+    if (error != nullptr)
+      *error = std::move(message);
+    return false;
+  };
+  if (native == 0 && enable_yarn)
+    return fail("--enable-yarn needs the model's native context length");
+  if (native == 0)
+    return true;
+  const std::string native_text = std::to_string(native);
+  if (requested > native && !enable_yarn) {
+    return fail("context above the native " + native_text +
+                " tokens needs static YaRN, which applies to every "
+                "request; pass --enable-yarn (requested " +
+                std::to_string(requested) + ")");
+  }
+  if (requested <= native && enable_yarn) {
+    return fail("--enable-yarn has no effect: context " +
+                std::to_string(requested) + " is within the native " +
+                native_text + " tokens");
+  }
+  *scaling = RopeScalingForContext(requested, native);
+  return true;
 }
 
 YarnRope MakeYarnRope(const RopeScaling& scaling, std::uint32_t rotary_dim,

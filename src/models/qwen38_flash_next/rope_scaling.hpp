@@ -60,6 +60,17 @@ struct YarnRope {
 [[nodiscard]] std::optional<RopeScaling> RopeScalingForContext(
     std::uint32_t requested, std::uint32_t native) noexcept;
 
+/// Applies the `--enable-yarn` opt-in to a requested context. Above `native`
+/// the flag is required, and `*scaling` receives `RopeScalingForContext`;
+/// at or below `native` the flag has no effect and is rejected. Returns
+/// false and sets `*error` on either violation. An unknown `native` (0)
+/// leaves YaRN off, so the model's own context check rejects the request,
+/// and rejects the flag.
+[[nodiscard]] bool ResolveRopeScaling(std::uint32_t requested,
+                                      std::uint32_t native, bool enable_yarn,
+                                      std::optional<RopeScaling>* scaling,
+                                      std::string* error);
+
 /// Correction range and scale for a rotary dimension and base.
 [[nodiscard]] YarnRope MakeYarnRope(const RopeScaling& scaling,
                                     std::uint32_t rotary_dim,
