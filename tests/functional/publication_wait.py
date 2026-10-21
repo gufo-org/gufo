@@ -36,6 +36,17 @@ def signature(answer):
     return (answer["choices"], answer["usage"]["completion_tokens"])
 
 
+def answer_of(result):
+    # A waiter that re-prefills from a shallow checkpoint splits prefill into
+    # different passes than a cold run. That can change its reasoning text
+    # without a cache bug, as cache_growth.py notes, so compare the answer
+    # and whether it reasoned.
+    choice = result["choices"][0]
+    message = choice["message"]
+    return (message.get("content"), message.get("tool_calls"), choice["finish_reason"],
+            bool((message.get("reasoning_content") or "").strip()))
+
+
 def archive():
     rng = random.Random(617)
     words = ("configuration checkpoint retention validation filesystem scheduler "
@@ -136,7 +147,11 @@ def run_case(args, command, case, report):
             wait_until(lambda: max(published()) >= 50000, 60, "deep publication")
             retried = chat("retry", follow)
             cold = chat("cold", follow, cache=False)
-            assert signature(waited) == signature(retried) == signature(cold)
+            assert signature(retried) == signature(cold)
+            if case == "publish":
+                assert signature(waited) == signature(cold)
+            else:
+                assert answer_of(waited) == answer_of(cold), (answer_of(waited), answer_of(cold))
             usage = waited["usage"]
             timing = usage["gufo"]
             assert retried["usage"]["gufo"]["cache_disk_hit"], retried["usage"]
@@ -156,7 +171,9 @@ def run_case(args, command, case, report):
                 assert 0 < float(ended["wait_ms"]) < float(start["limit_ms"]), (start, ended)
                 row["wait_release"] = ended
             else:
-                assert not timing["cache_disk_hit"], timing
+                # A tight RAM budget can leave only a shallow seed checkpoint
+                # on disk. The waiter may restore it, but not the held checkpoint.
+                assert usage["cached_tokens"] < 4096, usage
                 assert timing["prefill_tokens"] > 4096, timing
                 if args.expect == "cap":
                     limit = 120000
