@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "qfn_mmq.h"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/models/qwen/gemm_route.hpp"
@@ -176,6 +177,31 @@ void ExecuteDenseGemv(models::qwen::QwenGemmRoute route, const void* A,
   FastGEMVBlockKernel<<<M, block_size, 0, stream>>>(A, a_type, x, y, M, K);
 }
 
+// The vendored vector kernel reads a routed expert id per row; a dense weight
+// is expert 0 of one.
+__device__ std::int32_t gDenseExpertId = 0;
+
+void ExecuteMmvqGemv(const void* A, core::GgmlType a_type, const float* x,
+                     float* y, std::size_t M, std::size_t K,
+                     hipStream_t stream) {
+  static const std::int32_t* const kExpertId = [] {
+    void* address = nullptr;
+    if (hipGetSymbolAddress(&address, HIP_SYMBOL(gDenseExpertId)) !=
+        hipSuccess) {
+      std::abort();
+    }
+    return static_cast<const std::int32_t*>(address);
+  }();
+  detail::EmitGemvDispatch(M, K, false,
+                           models::qwen::QwenGemmRouteName(
+                               models::qwen::QwenGemmRoute::kHipQuantMmvq));
+  if (qfn_mmq_moe_vec(static_cast<int>(a_type), A, x, kExpertId, y,
+                      static_cast<int>(M), static_cast<int>(K), 1, 1, 1,
+                      stream) != 0) {
+    std::abort();
+  }
+}
+
 }  // namespace
 
 void LaunchGEMVRows(const void* A, core::GgmlType a_type, const float* x,
@@ -222,6 +248,9 @@ void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
   switch (resolution.route) {
     case models::qwen::QwenGemmRoute::kHipQuantDirect:
       LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
+      return;
+    case models::qwen::QwenGemmRoute::kHipQuantMmvq:
+      ExecuteMmvqGemv(A, a_type, x, y, M, K, stream);
       return;
     case models::qwen::QwenGemmRoute::kHipF32Baseline256:
     case models::qwen::QwenGemmRoute::kHipF32Baseline512:

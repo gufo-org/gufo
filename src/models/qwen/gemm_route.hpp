@@ -25,6 +25,7 @@ enum class QwenGemmRoute : std::uint8_t {
   kCpuF16Rows,
   kCpuQuantDot,
   kHipQuantDirect,
+  kHipQuantMmvq,
   kHipF32Baseline256,
   kHipF32Baseline512,
   kHipBf16Baseline256,
@@ -123,6 +124,8 @@ struct QwenGemmRequest {
     case QwenGemmRoute::kHipQuantDirect:
     case QwenGemmRoute::kHipPrefillQuantDirect:
       return "quant_direct";
+    case QwenGemmRoute::kHipQuantMmvq:
+      return "quant_mmvq";
     case QwenGemmRoute::kHipF32Baseline256:
     case QwenGemmRoute::kHipF32Baseline512:
     case QwenGemmRoute::kHipBf16Baseline256:
@@ -225,6 +228,14 @@ struct QwenGemmResolution {
   }
 
   if (format.quantized) {
+    // The Ornith-1.5-122B linear-attention and attention output projections
+    // (Q4_K, 8192 to 3072) take the vendored llama.cpp vector kernel, which
+    // reads weights at a higher rate than the two-row block GEMV.
+    if (request.mode == QwenGemmMode::kHipDecode &&
+        request.type == core::GgmlType::kQ4_K && request.batch_size == 1 &&
+        request.m == 3072 && request.k == 8192) {
+      return {.route = QwenGemmRoute::kHipQuantMmvq};
+    }
     return {.route = QwenGemmRoute::kHipQuantDirect};
   }
   if (request.type == core::GgmlType::kF32) {
