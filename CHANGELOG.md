@@ -4,6 +4,27 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.20.0](https://github.com/gufo-org/gufo/compare/v0.19.0...v0.20.0) (2026-10-21)
+
+
+### Features
+
+* **cache:** add Qwen 27B AR and DFlash2 cache continuation ([#540](https://github.com/gufo-org/gufo/issues/540)) ([da5d5a2](https://github.com/gufo-org/gufo/commit/da5d5a2b237c654bc0523e33fdee10465240da0c))
+
+
+### Bug Fixes
+
+* **rocm:** let DeepSeek V4 Flash load when weights exceed the device pool ([#609](https://github.com/gufo-org/gufo/issues/609)) ([a7ca5f0](https://github.com/gufo-org/gufo/commit/a7ca5f0fc143203219dc71e079683d16642c6f15))
+* **serve:** answer Expect: 100-continue before reading the body ([#686](https://github.com/gufo-org/gufo/issues/686)) ([f020bd3](https://github.com/gufo-org/gufo/commit/f020bd3a037d58aa42138ca11fa895524e43cdd6))
+* **serve:** report no content for whitespace between parallel tool calls ([#676](https://github.com/gufo-org/gufo/issues/676)) ([9a9717c](https://github.com/gufo-org/gufo/commit/9a9717c1dae67a2623ba862b775bd9ba24633e0a))
+
+
+### Performance
+
+* **cache:** avoid repeated resets and full checkpoint lookups ([#680](https://github.com/gufo-org/gufo/issues/680)) ([887c38a](https://github.com/gufo-org/gufo/commit/887c38a17896d7c01095dfd0cf4b990378442846))
+* **qwen-flash:** prefetch n-gram rows across cache checkpoints ([#683](https://github.com/gufo-org/gufo/issues/683)) ([62c840e](https://github.com/gufo-org/gufo/commit/62c840ee71cf203f2d1d0078f010bb0fec49b759))
+* **qwen38_flash_next:** take the vector-load small projection path for F16 and BF16 weights ([#681](https://github.com/gufo-org/gufo/issues/681)) ([ae9ec69](https://github.com/gufo-org/gufo/commit/ae9ec6918350a97f78eeb680ae4ebf8fc0e9ad86))
+
 ## [0.19.0](https://github.com/gufo-org/gufo/compare/v0.18.0...v0.19.0) (2026-10-20)
 
 
