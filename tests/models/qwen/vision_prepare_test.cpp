@@ -77,6 +77,19 @@ int main(int argc, char** argv) {
     }
     const auto width = static_cast<std::uint32_t>(
         reader->GetMetadataUint64("clip.vision.projection_dim").value_or(0));
+    // A trunk width the tower does not serve, or a served width that differs
+    // from this sidecar's projection, is rejected before any upload.
+    for (const std::uint32_t wrong : {4096U, width == 5120 ? 3072U : 5120U}) {
+      bool rejected = false;
+      try {
+        (void)Encoder::Open({}, argv[1], wrong);
+      } catch (const std::invalid_argument&) {
+        rejected = true;
+      }
+      Require(rejected, "sidecar accepted output width " +
+                            std::to_string(wrong) + " for projection " +
+                            std::to_string(width));
+    }
     auto encoder = Encoder::Open({}, argv[1], width);
     Require(encoder != nullptr && encoder->ResidentBytes() == 0,
             "opening the sidecar uploaded weights");

@@ -3362,12 +3362,18 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
-    if (reader->GetMetadataUint64("qwen35.embedding_length") == 5120) {
+    // The Qwen3.8-27B and Ornith-1.5-122B (qwen35moe) trunks take the shared
+    // vision tower at their own width.
+    const std::uint32_t width =
+        reader->GetMetadataUint64("qwen35.embedding_length") == 5120      ? 5120
+        : reader->GetMetadataUint64("qwen35moe.embedding_length") == 3072 ? 3072
+                                                                          : 0;
+    if (width != 0) {
       vision = models::qwen::vision::Encoder::Open(model_path,
-                                                   vision_model_path, 5120);
+                                                   vision_model_path, width);
     } else if (!vision_model_path.empty()) {
       throw std::invalid_argument(
-          "image input supports Qwen3.8-27B and Flash-Next");
+          "image input supports Qwen3.8-27B, Ornith-1.5-122B and Flash-Next");
     }
   } catch (const std::exception& e) {
     SetError(error, e.what());
