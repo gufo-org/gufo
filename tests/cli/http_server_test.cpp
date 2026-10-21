@@ -3109,6 +3109,11 @@ void TestPromptLogprobs() {
       server.Post("/v1/completions", R"({"model":"other","prompt":[1,2],)"
                                      R"("prompt_logprobs":1})"),
       404);
+  // A null `prompt_logprobs` is absent: an ordinary completion.
+  ExpectStatus(
+      server.Post("/v1/completions", R"({"prompt":"ab","max_tokens":2,)"
+                                     R"("prompt_logprobs":null})"),
+      200);
   assert(server.backend->score_calls == before);
 
   // The teacher's history comes back as token IDs, for an exact replay.
