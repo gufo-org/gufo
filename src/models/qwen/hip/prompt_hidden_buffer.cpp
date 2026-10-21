@@ -2,11 +2,15 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 namespace gufo::hip {
 
-void PromptHiddenBuffer::Reserve(std::size_t elements,
-                                 std::size_t pinned_limit) {
+void PromptHiddenBuffer::Reserve(std::size_t elements, std::size_t pinned_limit,
+                                 cache::ResourceLedger* ledger) {
+  if (ledger) {
+    ledger_ = ledger;
+  }
   pinned_limit_ = pinned_limit;
   if (use_pageable_ || elements > pinned_limit_) {
     MoveToPageable(elements);
@@ -47,6 +51,19 @@ std::span<const float> PromptHiddenBuffer::View() const noexcept {
 }
 
 void PromptHiddenBuffer::GrowPinned(std::size_t elements) {
+  // Locked pages are host RAM the cache cannot reclaim. Admit them before
+  // allocating, as streaming.cpp admits staging; a failed allocation drops
+  // the admission.
+  cache::ResourceReservation admission;
+  if (ledger_) {
+    try {
+      admission = ledger_->Reserve(cache::ResourceCategory::kMetadata,
+                                   elements * sizeof(float));
+    } catch (const std::bad_alloc&) {
+      MoveToPageable(elements);
+      return;
+    }
+  }
   auto owner = std::make_unique<HostAllocations>();
   float* data = nullptr;
   if (owner->Allocate(&data, elements * sizeof(float)) != hipSuccess) {
@@ -58,7 +75,10 @@ void PromptHiddenBuffer::GrowPinned(std::size_t elements) {
   if (size_ > 0) {
     std::memcpy(data, pinned_, size_ * sizeof(float));
   }
+  auto charge = admission ? admission.Convert() : cache::ResourceCharge{};
+  // Free the previous pages before releasing their charge.
   pinned_owner_ = std::move(owner);
+  charge_ = std::move(charge);
   pinned_ = data;
   pinned_capacity_ = elements;
 }

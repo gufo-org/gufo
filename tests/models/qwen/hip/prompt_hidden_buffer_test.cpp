@@ -6,6 +6,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
+#include "src/cache/ledger.hpp"
 #include "src/models/qwen/hip/prompt_hidden_buffer.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 
@@ -100,6 +101,48 @@ void TestPageableBeyondBound() {
   Check(IsPinned(grown.Data()), "the next bounded prompt must be pinned again");
 }
 
+std::size_t ChargedBytes(const gufo::cache::ResourceLedger& ledger) {
+  return ledger.Snapshot().bytes[static_cast<std::size_t>(
+      gufo::cache::ResourceCategory::kMetadata)];
+}
+
+// A ledger is charged for exactly the pinned capacity until the buffer frees
+// it. A refused charge captures into pageable memory and holds nothing.
+void TestLedgerCharge() {
+  constexpr std::size_t kLimit = std::size_t{1} << 20;
+  gufo::cache::ResourceLedger ledger({kLimit, kLimit, 0, kLimit});
+  {
+    gufo::hip::PromptHiddenBuffer buffer;
+    buffer.Reserve(1024, 8192, &ledger);
+    Check(IsPinned(buffer.Data()), "a charged capture must be pinned");
+    Check(ChargedBytes(ledger) == 1024 * sizeof(float),
+          "the pinned bytes must be charged");
+    buffer.Resize(1024);
+    Fill(buffer, 0);
+    buffer.Resize(6000);
+    Fill(buffer, 1024);
+    Check(Holds(buffer), "charged growth must keep the captured rows");
+    Check(ChargedBytes(ledger) == 6000 * sizeof(float),
+          "growth must charge only the new capacity");
+    // The ledger stays attached: a later prompt that grows is charged too.
+    buffer.Clear();
+    buffer.Reserve(8192, 8192);
+    Check(IsPinned(buffer.Data()), "a later growth must stay pinned");
+    Check(ChargedBytes(ledger) == 8192 * sizeof(float),
+          "a later growth must be charged");
+  }
+  Check(ChargedBytes(ledger) == 0, "destruction must release the charge");
+
+  gufo::cache::ResourceLedger small({4096, 4096, 0, 4096});
+  gufo::hip::PromptHiddenBuffer refused;
+  refused.Reserve(4096, 8192, &small);
+  refused.Resize(4096);
+  Fill(refused, 0);
+  Check(!IsPinned(refused.Data()), "a refused charge must capture pageable");
+  Check(Holds(refused), "a refused charge must keep its rows");
+  Check(ChargedBytes(small) == 0, "a refused charge must not be held");
+}
+
 }  // namespace
 #endif  // defined(ENGINE_ENABLE_HIP)
 
@@ -113,6 +156,7 @@ int main() {
   TestPinnedWithinBound();
   TestPinnedGrowth();
   TestPageableBeyondBound();
+  TestLedgerCharge();
   std::cout << "Prompt hidden buffer tests passed.\n";
   return EXIT_SUCCESS;
 #else

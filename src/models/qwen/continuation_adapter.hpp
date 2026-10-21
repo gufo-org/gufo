@@ -26,7 +26,8 @@ public:
       cache::Identity,
       hip::QwenExecutionPolicy = hip::QwenExecutionPolicy::Production(),
       std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model = nullptr,
-      hip::QwenDFlashGpuDraftConfig draft_config = {});
+      hip::QwenDFlashGpuDraftConfig draft_config = {},
+      cache::ResourceLedger* ledger = nullptr);
   ~ContinuationAdapter() override;
   [[nodiscard]] hip::QwenGpuExecutor& GetExecutor(cache::Slot&);
   [[nodiscard]] hip::QwenDFlashGpuDraftBackend* GetDraftBackend(cache::Slot&);
@@ -101,6 +102,8 @@ private:
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model_;
   hip::QwenDFlashGpuDraftConfig draft_config_;
+  // Charged for each slot's pinned prompt capture; outlives the slots.
+  cache::ResourceLedger* ledger_;
   hip::QwenExecutionPolicy policy_;
   std::uint32_t context_;
   ContinuationLayout layout_;

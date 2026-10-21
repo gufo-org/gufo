@@ -525,8 +525,10 @@ public:
       double draft_token_probability, sampling::SamplerState& sampler);
 
   /// Pins the prompt-capture bound for `layer_count` captured layers up front,
-  /// so no request pays for the pinned allocation.
-  void ReservePromptHiddenCapture(std::size_t layer_count);
+  /// so no request pays for the pinned allocation. A ledger is charged for
+  /// the pinned bytes while the executor holds them.
+  void ReservePromptHiddenCapture(std::size_t layer_count,
+                                  cache::ResourceLedger* ledger = nullptr);
 
   /// Enables host capture of every final-layer prompt hidden state. Disabled
   /// by default so ordinary prefill does not incur device-to-host copies.

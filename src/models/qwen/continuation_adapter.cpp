@@ -256,10 +256,11 @@ ContinuationAdapter::ContinuationAdapter(
     std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t context,
     cache::Identity identity, hip::QwenExecutionPolicy policy,
     std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model,
-    hip::QwenDFlashGpuDraftConfig draft_config)
+    hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger)
     : model_(std::move(model)),
       draft_model_(std::move(draft_model)),
       draft_config_(draft_config),
+      ledger_(ledger),
       policy_(policy),
       context_(context),
       layout_(model_ ? model_->GetConfig() : core::ModelConfig{}, policy,
@@ -404,7 +405,8 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
                                                    &error);
     if (!draft)
       throw std::runtime_error("cannot create component draft: " + error);
-    executor->ReservePromptHiddenCapture(draft->TargetHiddenLayerIds().size());
+    executor->ReservePromptHiddenCapture(draft->TargetHiddenLayerIds().size(),
+                                         ledger_);
   }
   return std::make_unique<State>(*this, guard, std::move(executor),
                                  std::move(draft));

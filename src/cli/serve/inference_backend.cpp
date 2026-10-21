@@ -1066,7 +1066,8 @@ public:
             hip::QwenDFlashGpuDraftConfig{
                 .max_context = max_context_,
                 .max_draft_tokens = speculative_options_.max_draft_tokens,
-                .policy = speculative_options_.dflash_policy}),
+                .policy = speculative_options_.dflash_policy},
+            &ledger),
         ledger);
     // Qwen's 256-row chunks are small. Preserve a bounded group before
     // waiting, instead of synchronizing every half-MiB range individually.
