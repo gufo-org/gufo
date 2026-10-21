@@ -1072,6 +1072,11 @@ public:
     // Qwen's 256-row chunks are small. Preserve a bounded group before
     // waiting, instead of synchronizing every half-MiB range individually.
     resources->reassignment_batch_size = 16;
+    const auto& adapter =
+        static_cast<models::qwen::ContinuationAdapter&>(*resources->adapter);
+    resources->pinned_bytes = [qwen = &adapter] {
+      return qwen->PinnedCaptureBytes();
+    };
     return resources;
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(

@@ -31,6 +31,10 @@ public:
   void Clear() noexcept;
   [[nodiscard]] float* Data() noexcept;
   [[nodiscard]] std::size_t Size() const noexcept { return size_; }
+  /// Pinned bytes charged to the ledger.
+  [[nodiscard]] std::size_t ChargedBytes() const noexcept {
+    return charge_ ? pinned_capacity_ * sizeof(float) : 0;
+  }
   [[nodiscard]] std::span<const float> View() const noexcept;
 
 private:

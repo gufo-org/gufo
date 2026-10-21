@@ -649,11 +649,13 @@ struct TextRunnerPool::Impl {
               : std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
                          automatic);
       // This is an upper bound. Providers commit backing only after their
-      // slots allocate and the cache observes remaining host capacity. The
-      // state claim includes lazy image/rollback storage, not startup usage.
+      // slots allocate and the cache observes remaining host capacity. Slots
+      // allocate under the ceiling; what they pin is charged on top of this.
+      // The state claim includes lazy image/rollback storage, not startup
+      // usage.
       component_cache = std::make_unique<ComponentTextCache>(
           validated.runner, state_count, std::min(requested, ceiling),
-          disk_cache_options, !ram_cache_options.capacity_bytes);
+          disk_cache_options, !ram_cache_options.capacity_bytes, ceiling);
       if (disk_cache_options) {
         shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
         shared_prefix_max_boundaries =

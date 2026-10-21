@@ -1367,6 +1367,111 @@ void StagingCountsAgainstRamCeiling() {
   }
   std::filesystem::remove_all(directory);
 }
+// Slots that pin host memory lower both measured budgets and are charged in
+// the ledger. They count once, on top of the cache's budget: backing gets the
+// whole budget unless the host ceiling binds.
+void PinnedSlotBytesCountOnce() {
+  constexpr std::size_t kPin = 512 << 10;
+  class PinningRunner final : public Runner {
+  public:
+    mutable std::size_t committed{}, limit{};
+    mutable std::vector<cache::ResourceCharge> pins;
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      // Automatic is half the available RAM; the ceiling is all of it.
+      claim.retained_snapshot_capacity_bytes =
+          (2 << 20) - pins.size() * kPin / 2;
+      claim.retained_snapshot_ceiling_bytes = (4 << 20) - pins.size() * kPin;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      // Each slot takes a stream as it allocates; pin one buffer per slot.
+      resources->stream = [this, &ledger,
+                           stream = std::move(resources->stream)] {
+        if (!committed)
+          pins.push_back(
+              ledger.Reserve(cache::ResourceCategory::kMetadata, kPin)
+                  .Convert());
+        return stream();
+      };
+      resources->pinned_bytes = [this] { return pins.size() * kPin; };
+      resources->commit_backing = [this, &ledger](std::size_t budget) {
+        committed = budget;
+        limit = ledger.Limits().ram_bytes;
+      };
+      return resources;
+    }
+  };
+  // Automatic, an explicit budget smaller than the pins, and one the 4 MiB
+  // host ceiling cuts to make room for them.
+  for (const auto& [requested, backing] :
+       {std::pair{0ULL, 2ULL << 20}, std::pair{1ULL << 20, 1ULL << 20},
+        std::pair{8ULL << 20, 3ULL << 20}}) {
+    auto runner = std::make_shared<PinningRunner>();
+    TextRunnerPool pool(runner, 2, {}, {.capacity_bytes = requested});
+    assert(runner->pins.size() == 2);
+    assert(runner->committed == backing);
+    assert(runner->limit == backing + 2 * kPin);
+  }
+  // Pins never raise the limit past a budget the other charges exceed: the
+  // fake backing alone holds 40 KiB.
+  bool refused = false;
+  try {
+    TextRunnerPool pool(std::make_shared<PinningRunner>(), 2, {},
+                        {.capacity_bytes = 16 << 10});
+  } catch (const std::exception&) {
+    refused = true;
+  }
+  assert(refused);
+  // Staging shares the ceiling: the limit is 4 MiB less 1 MiB of staging.
+  char pattern[] = "/tmp/gufo-component-pinned-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  {
+    const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                          .capacity_bytes = 1 << 20};
+    auto runner = std::make_shared<PinningRunner>();
+    TextRunnerPool pool(runner, 2, disk, {.capacity_bytes = 8 << 20});
+    assert(runner->limit == 3 << 20);
+    assert(runner->committed == 2 << 20);
+  }
+  std::filesystem::remove_all(directory);
+}
+// Without pins the limit ends at the requested budget, whether or not the
+// runner commits backing, and a budget below what is already charged still
+// fails at startup.
+void UnpinnedRunnersKeepTheirLimit() {
+  class LimitRunner final : public Runner {
+  public:
+    bool commit{};
+    mutable cache::ResourceLedger* ledger{};
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& l, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(l, ram);
+      ledger = &l;
+      if (commit)
+        resources->commit_backing = [](std::size_t) {};
+      return resources;
+    }
+  };
+  for (const bool commit : {false, true}) {
+    auto runner = std::make_shared<LimitRunner>();
+    runner->commit = commit;
+    {
+      TextRunnerPool pool(runner, 2, {}, {.capacity_bytes = 1 << 20});
+      assert(runner->ledger->Limits().ram_bytes == 1 << 20);
+    }
+    // The fake backing alone holds 40 KiB.
+    bool refused = false;
+    try {
+      TextRunnerPool pool(runner, 2, {}, {.capacity_bytes = 16 << 10});
+    } catch (const std::exception&) {
+      refused = true;
+    }
+    assert(refused);
+  }
+}
 void DiskDirectoryHasOneOwner() {
   class CommitRunner final : public Runner {
   public:
@@ -1703,6 +1808,8 @@ int main() {
   OrphansLeaveBeforeCheckpoints();
   StagingIsInternal();
   StagingCountsAgainstRamCeiling();
+  PinnedSlotBytesCountOnce();
+  UnpinnedRunnersKeepTheirLimit();
   DiskDirectoryHasOneOwner();
   GridDoesNotSuppressFirstDiskPrompt();
   NearTailDiskBranchSurvivesRestart();

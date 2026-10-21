@@ -45,6 +45,10 @@ struct ComponentCacheResources {
   // Optional initialization step after slots allocate. The provider leaves
   // payload backing uncommitted until serving selects the post-slot budget.
   std::function<void(std::size_t)> commit_backing;
+  // Optional host bytes the slots pinned and charged to the ledger as they
+  // allocated. Serving charges them on top of the cache's budget, and adds
+  // them back to the runner's claim, which measures the host after them.
+  std::function<std::size_t()> pinned_bytes;
   cache::PersistenceSource::CopyRows copy_observed_rows;
   // At most this many transfers of one capture/restore are in flight before
   // waiting (16 at most). When the shared pool is momentarily exhausted, the
@@ -94,10 +98,13 @@ public:
     friend class ComponentTextCache;
     std::unique_ptr<Impl> impl_;
   };
+  // Slots allocate under the larger of ram_bytes and ceiling_bytes, so a
+  // smaller budget does not refuse what they pin. The RAM limit then becomes
+  // the budget plus those pins, within the host ceiling.
   ComponentTextCache(std::shared_ptr<TextModelRunner>, std::size_t,
                      std::size_t ram_bytes,
                      const std::optional<TextRunnerDiskCacheOptions>&,
-                     bool automatic_ram = false);
+                     bool automatic_ram = false, std::size_t ceiling_bytes = 0);
   ~ComponentTextCache();
   [[nodiscard]] std::unique_ptr<Lease> Acquire(
       std::span<const ContinuationToken>,

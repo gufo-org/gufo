@@ -63,6 +63,8 @@ public:
         draft(std::move(draft)) {
     this->executor->continuation_hooks_ = this;
     this->executor->vision_input_.continuation_hooks_ = this;
+    pinned_capture = this->executor->PromptHiddenChargedBytes();
+    adapter.pinned_capture_bytes_ += pinned_capture;
     if (this->draft) {
       this->draft->continuation_hooks_ = this;
       this->draft->executor_->continuation_hooks_ = this;
@@ -113,6 +115,7 @@ public:
     }
     executor->continuation_hooks_ = nullptr;
     executor->vision_input_.continuation_hooks_ = nullptr;
+    adapter.pinned_capture_bytes_ -= pinned_capture;
   }
   bool IsValid() const noexcept override {
     return guarding || (!restoring && !failed && !executor->reset_failure_);
@@ -234,6 +237,7 @@ public:
   cache::MutationGuard& guard;
   std::shared_ptr<hip::QwenGpuExecutor> executor;
   std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
+  std::size_t pinned_capture{};
   std::uint32_t position{};
   std::optional<std::uint32_t> prefill_position;
   bool prefill_logits{};

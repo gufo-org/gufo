@@ -362,7 +362,14 @@ A positive value replaces the automatic budget and may exceed it: it trades the
 free half of host RAM for retention, but always leaves 4 GiB to the OS and other
 processes. For an 8 GiB cap, use `--cache-ram-bytes 8589934592`. The startup
 line reports the selected `capacity_bytes`, the `automatic_bytes` budget and
-the `max_bytes` an explicit value may claim.
+the `max_bytes` an explicit value may claim. With a DFlash2 draft, each
+Qwen3.8-27B session also pins about 400 MiB of prompt capture at startup,
+reported as `slot_pinned_bytes`. It is charged on top of `capacity_bytes`: an
+explicit value may claim at most `max_bytes` minus `slot_pinned_bytes`, or the
+startup ceiling minus `slot_pinned_bytes` when that ceiling binds.
+`automatic_bytes` is half the available RAM measured before the pins. The
+`global_ram_bytes` gauge and the metadata category include the pins, so live
+usage can exceed `capacity_bytes`.
 
 Both are sampled after weights and execution states are allocated, then fixed
 for the server run. Flash-Next and Qwen3.8-27B use half the available
@@ -403,7 +410,8 @@ and retry copies are refused. This is a hardware ratio, not a cache policy:
 weights, execution states and the OS leave no more memory. To keep more deep
 conversations:
 
-- Raise `--cache-ram-bytes` towards the reported `max_bytes`: about 10.5 GB
+- Raise `--cache-ram-bytes` towards the reported `max_bytes` (less
+  `slot_pinned_bytes` on Qwen3.8-27B): about 10.5 GB
   here, enough for a 200k-token checkpoint plus a 50k one instead of only the
   first.
 - Run fewer `--sessions`: each Flash-Next session at 262144 context holds about
@@ -440,8 +448,9 @@ Each Flash-Next checkpoint holds about 132 MB of
 private state, so below a budget of about 19 GB that state caps the checkpoint
 count under 128; only larger explicit budgets can reach the record limit. The startup line
 `schema=component-cache-v1 event=configured` reports `capacity_bytes`,
-`automatic_bytes`, `max_bytes`, `staging_capacity_bytes` and
-`disk_capacity_bytes`.
+`automatic_bytes`, `max_bytes`, `staging_capacity_bytes`,
+`disk_capacity_bytes` and `slot_pinned_bytes` (host memory the sessions pinned
+at startup, charged on top of `capacity_bytes`).
 
 Flash-Next prepares a bounded two-segment reserve before readiness and can
 prepare the next segment before a prefill with at least 512 tokens remaining

@@ -529,6 +529,9 @@ public:
   /// the pinned bytes while the executor holds them.
   void ReservePromptHiddenCapture(std::size_t layer_count,
                                   cache::ResourceLedger* ledger = nullptr);
+  [[nodiscard]] std::size_t PromptHiddenChargedBytes() const noexcept {
+    return h_prompt_hidden_.ChargedBytes();
+  }
 
   /// Enables host capture of every final-layer prompt hidden state. Disabled
   /// by default so ordinary prefill does not incur device-to-host copies.
