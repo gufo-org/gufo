@@ -524,6 +524,10 @@ public:
       std::span<const float> draft_candidate_probabilities,
       double draft_token_probability, sampling::SamplerState& sampler);
 
+  /// Pins the prompt-capture bound for `layer_count` captured layers up front,
+  /// so no request pays for the pinned allocation.
+  void ReservePromptHiddenCapture(std::size_t layer_count);
+
   /// Enables host capture of every final-layer prompt hidden state. Disabled
   /// by default so ordinary prefill does not incur device-to-host copies.
   void SetPromptHiddenCapture(

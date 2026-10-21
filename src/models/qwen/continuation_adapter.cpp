@@ -404,6 +404,7 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
                                                    &error);
     if (!draft)
       throw std::runtime_error("cannot create component draft: " + error);
+    executor->ReservePromptHiddenCapture(draft->TargetHiddenLayerIds().size());
   }
   return std::make_unique<State>(*this, guard, std::move(executor),
                                  std::move(draft));

@@ -460,6 +460,12 @@ std::span<const float> QwenGpuExecutor::CopyVerificationLogits(
   return h_logits_;
 }
 
+void QwenGpuExecutor::ReservePromptHiddenCapture(std::size_t layer_count) {
+  const std::size_t bound = std::size_t{GetMaxPromptBatch()} * layer_count *
+                            weights_.config.hidden_size;
+  h_prompt_hidden_.Reserve(bound, bound);
+}
+
 void QwenGpuExecutor::SetPromptHiddenCapture(
     bool enabled, std::span<const std::uint32_t> target_layer_ids) {
   capture_prompt_hidden_ = enabled;
