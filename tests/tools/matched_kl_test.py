@@ -208,8 +208,9 @@ def test_end_to_end():
             try:
                 matched_kl.compare(str(Path(directory, "teacher.jsonl")),
                                    narrow)
-            except RuntimeError:
-                pass
+            except RuntimeError as error:
+                check("different histories" in str(error),
+                      f"compare refused: {error}")
             else:
                 check(False, "teacher and candidate top-K must match")
     finally:
