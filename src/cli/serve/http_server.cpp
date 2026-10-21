@@ -965,7 +965,10 @@ HttpResponse ScorePromptTokens(const HttpRequest& req, const json::Value& body,
   for (const auto& position : res.prompt_logprobs) {
     json::Value entry = json::Value::object();
     entry["token"] = static_cast<std::size_t>(position.token);
-    entry["logprob"] = position.logprob;
+    // A non-finite target logit has logprob -inf, which JSON cannot carry.
+    entry["logprob"] = std::isfinite(position.logprob)
+                           ? json::Value(position.logprob)
+                           : json::Value();
     entry["rank"] = position.rank;
     if (position.nonfinite != 0)
       entry["nonfinite"] = position.nonfinite;

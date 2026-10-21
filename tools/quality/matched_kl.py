@@ -274,7 +274,9 @@ def score_one(endpoint, record, top_k, include_prompt, timeout):
                                f"{record['tokens'][position]}")
         positions.append({
             "token": entry["token"],
-            "logprob": entry["logprob"],
+            # The server reports a non-finite target logit as null.
+            "logprob": (-math.inf if entry["logprob"] is None
+                        else entry["logprob"]),
             "rank": entry["rank"],
             "nonfinite": entry.get("nonfinite", 0),
             "top": [[item["token"], item["logprob"]]

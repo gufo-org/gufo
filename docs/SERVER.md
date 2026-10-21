@@ -754,18 +754,19 @@ token, `null` before the start:
 ```
 
 `rank` is one-based, ties ranking by lower ID; `nonfinite` counts NaN or
-infinite logits when there are any. Earlier positions are prefilled and later
-ones advanced one token at a time, outside decode batches, so a scored request
-costs about one decode step per scored position. Each concurrent scored request
-adds its own single-token model call to every scheduler step, so other streams
-on the same server slow down accordingly; score on an otherwise idle server and
-bound client concurrency (`matched_kl.py --concurrency`). It never samples or
-restores a cached prefix (`cache_prompt` is ignored), so a repeated request
-makes the same model calls; it otherwise schedules like any request.
-`max_tokens` may be 0 or 1; streaming, stop sequences and other generation
-fields are rejected. Models that do not expose their logits reject the request;
-Qwen3.8 Flash-Next exposes them. `tools/quality/matched_kl.py` drives the
-comparison.
+infinite logits when there are any. A token whose own logit is not finite has
+`logprob: null` and ranks after every finite token. Earlier positions are
+prefilled and later ones advanced one token at a time, outside decode batches,
+so a scored request costs about one decode step per scored position. Each
+concurrent scored request adds its own single-token model call to every
+scheduler step, so other streams on the same server slow down accordingly;
+score on an otherwise idle server and bound client concurrency
+(`matched_kl.py --concurrency`). It never samples or restores a cached prefix
+(`cache_prompt` is ignored), so a repeated request makes the same model calls;
+it otherwise schedules like any request. `max_tokens` may be 0 or 1; streaming,
+stop sequences and other generation fields are rejected. Models that do not
+expose their logits reject the request; Qwen3.8 Flash-Next exposes them.
+`tools/quality/matched_kl.py` drives the comparison.
 
 `ignore_eos` measures decode past the model's stop tokens, which speculative
 backends do not accelerate: verification ends its accepted run at every EOS it
