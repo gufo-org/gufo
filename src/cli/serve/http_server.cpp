@@ -890,7 +890,8 @@ HttpResponse ScorePromptTokens(const HttpRequest& req, const json::Value& body,
                                          "'prompt_logprobs'");
   }
   if (const auto* value = body.find("n");
-      value != nullptr && (!value->is_number() || value->as_double() != 1.0))
+      value != nullptr && !value->is_null() &&
+      (!value->is_number() || value->as_double() != 1.0))
     return InvalidCompatibilityRequest("only 'n=1' is supported");
   if (const auto* value = body.find("temperature");
       value != nullptr && !value->is_null() && !value->is_number())

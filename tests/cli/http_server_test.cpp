@@ -2903,6 +2903,12 @@ void TestPromptLogprobs() {
   assert(body.find("usage")->member_size("prompt_tokens") == 4);
   assert(body.find("usage")->member_size("completion_tokens") == 0);
 
+  // Null optional fields are absent.
+  ExpectStatus(server.Post("/v1/completions",
+                           R"({"prompt":[1,2,3],"prompt_logprobs":0,"n":null,)"
+                           R"("max_tokens":null,"temperature":null})"),
+               200);
+
   // The start defaults to the second token, as in vLLM.
   ExpectStatus(server.Post("/v1/completions",
                            R"({"prompt":[1,2,3],"prompt_logprobs":0})"),
