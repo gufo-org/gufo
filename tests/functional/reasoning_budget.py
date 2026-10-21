@@ -110,6 +110,35 @@ def check_reasoning_budget(client, model, checks, chat_result):
         assert same((result["reasoning"], result["text"]),
                     (expected["reasoning"], expected["text"])), (result, expected)
 
+    # #693: a budget message is forced as text before the reasoning end, after
+    # the budget; it changes nothing before the cap.
+    message = "Time is up, so I will answer now."
+    wrapped = checks["reasoning_budget_responses_16"]
+    extra = {"reasoning_budget_tokens": 16, "reasoning_budget_message": message}
+    response = client.responses.create(
+        model=model, input=PROMPT, max_output_tokens=600, temperature=0,
+        extra_body=extra)
+    reasoning = "".join(part.text for item in response.output
+                        if item.type == "reasoning" for part in item.summary)
+    record("message_responses", {"reasoning": reasoning, "text": response.output_text,
+                                 "usage": response.usage.to_dict()})
+    assert reasoning.rstrip().endswith(message), reasoning
+    assert reasoning.startswith(wrapped["reasoning"].rstrip()), (reasoning, wrapped)
+    assert response.output_text.strip(), response
+    body = {"model": model, "temperature": 0, "max_tokens": 600,
+            "messages": [{"role": "user", "content": PROMPT}], "extra_body": extra}
+    message_chat = record("message_chat", chat_result(client, body, False))
+    assert same((message_chat["reasoning"], message_chat["text"]),
+                (reasoning, response.output_text)), (message_chat, reasoning)
+    try:
+        client.chat.completions.create(
+            model=model, max_tokens=8, messages=[{"role": "user", "content": PROMPT}],
+            extra_body={"reasoning_budget_message": 7})
+        raise AssertionError("accepted a non-string reasoning_budget_message")
+    except openai.BadRequestError as error:
+        assert "reasoning_budget_message" in str(error), error
+        record("invalid_message", str(error))
+
     markup_prompt = (
         "Think through how to safely quote the XML literal <tool_call> inside "
         "JSON and Markdown code fences. Then give one short example.")

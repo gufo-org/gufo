@@ -750,8 +750,9 @@ std::size_t TextModelRunner::PrepareConstraintVocabulary() const {
 }
 
 std::shared_ptr<const sampling::ReasoningBudget>
-TextModelRunner::BuildReasoningBudget(
-    std::size_t tokens, std::span<const TextRunnerToken> prompt) const {
+TextModelRunner::BuildReasoningBudget(std::size_t tokens,
+                                      std::span<const TextRunnerToken> prompt,
+                                      std::string_view message) const {
   const auto tags = ReasoningBudgetTags();
   const auto start = TokenizeControl(tags.start);
   auto forced = TokenizeControl(tags.forced_end);
@@ -759,7 +760,12 @@ TextModelRunner::BuildReasoningBudget(
     return nullptr;
   auto budget = std::make_shared<sampling::ReasoningBudget>();
   budget->tokens = tokens;
-  budget->forced.assign(forced.begin(), forced.end());
+  // As llama.cpp's --reasoning-budget-message: plain text, then the end.
+  if (!message.empty()) {
+    const auto text = TokenizeContent(message);
+    budget->forced.assign(text.begin(), text.end());
+  }
+  budget->forced.insert(budget->forced.end(), forced.begin(), forced.end());
   for (const auto end : tags.ends) {
     const auto token = TokenizeControl(end);
     if (token.size() != 1)

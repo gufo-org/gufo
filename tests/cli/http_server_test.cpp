@@ -1680,6 +1680,37 @@ void TestCompatibilityRequests() {
     ExpectStatus(rejected, 400);
     assert(rejected.find("thinking.budget_tokens") != std::string::npos);
   }
+  // The budget message: server default, per-request override, null keeps it.
+  server.backend->reasoning.budget_message = "Default.";
+  for (const auto* path : {"/v1/chat/completions", "/v1/responses"}) {
+    auto body = gufo::json::parse(
+        std::string_view(path) == "/v1/responses"
+            ? R"({"input":"hi"})"
+            : R"({"model":"test","messages":[{"role":"user","content":"hi"}]})");
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_message ==
+           "Default.");
+    body["reasoning_budget_message"] = "Wrap up.";
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_message ==
+           "Wrap up.");
+    body["reasoning_budget_message"] = "";
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_message == "");
+    body["reasoning_budget_message"] = gufo::json::Value{};
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_message ==
+           "Default.");
+    body["reasoning_budget_message"] = 42;
+    const auto rejected = server.Post(path, body.dump());
+    ExpectStatus(rejected, 400);
+    assert(rejected.find("reasoning_budget_message") != std::string::npos);
+  }
+  response_body(server.Post(
+      "/v1/messages", R"({"messages":[{"role":"user","content":"hi"}]})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_message ==
+         "Default.");
+  server.backend->reasoning.budget_message.reset();
   server.backend->reasoning.budget_tokens.reset();
   assert(replayed.messages.size() == 3 &&
          replayed.messages[1].thought == "plan" &&

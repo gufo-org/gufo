@@ -743,6 +743,16 @@ bool ParseReasoningOptions(const json::Value& body, ReasoningOptions* options,
 // An explicit canonical value takes precedence; -1 keeps the server default.
 std::optional<HttpResponse> ParseReasoningBudget(const json::Value& body,
                                                  ReasoningOptions* options) {
+  // llama.cpp's --reasoning-budget-message, per request; null keeps the
+  // server default.
+  if (const auto* message = body.find("reasoning_budget_message");
+      message != nullptr && !message->is_null()) {
+    if (!message->is_string())
+      return Error(400, "Bad Request",
+                   "'reasoning_budget_message' must be a string",
+                   "invalid_reasoning");
+    options->budget_message = message->str();
+  }
   const char* field = "reasoning_budget_tokens";
   const auto* budget = body.find(field);
   if (budget == nullptr || budget->is_null()) {
@@ -903,6 +913,9 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   }
   if (!output->chat.reasoning.budget_tokens.has_value()) {
     output->chat.reasoning.budget_tokens = defaults.budget_tokens;
+  }
+  if (!output->chat.reasoning.budget_message.has_value()) {
+    output->chat.reasoning.budget_message = defaults.budget_message;
   }
 
   if (const json::Value* stream = body.find("stream");

@@ -588,6 +588,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
     std::int64_t reasoning_budget = -1;
+    std::string reasoning_budget_message;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
@@ -658,6 +659,10 @@ void PrintServeHelp(std::string_view program_name,
         "Reasoning tokens before </think> is forced: -1 unlimited, 0 none "
         "(default: -1)",
         "Reasoning Defaults", &reasoning_budget);
+    parser.AddOption("", "--reasoning-budget-message", "TEXT",
+                     "Text forced before </think> when the budget ends "
+                     "(default: empty)",
+                     "Reasoning Defaults", &reasoning_budget_message);
 
     // Speculative & Hardware
     parser.AddOption("", "--speculative", "MODE",
@@ -1140,6 +1145,7 @@ int RunServe(std::span<const char* const> args) {
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
     std::int64_t reasoning_budget = -1;
+    std::string reasoning_budget_message;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
@@ -1206,6 +1212,10 @@ int RunServe(std::span<const char* const> args) {
         "Reasoning tokens before </think> is forced: -1 unlimited, 0 none "
         "(default: -1)",
         "Reasoning Defaults", &reasoning_budget);
+    llm_parser.AddOption("", "--reasoning-budget-message", "TEXT",
+                         "Text forced before </think> when the budget ends "
+                         "(default: empty)",
+                         "Reasoning Defaults", &reasoning_budget_message);
     llm_parser.AddOption("", "--speculative", "MODE",
                          "HTTP draft backend: dspark, dflash2, mtp, or off",
                          "Speculative", &speculative_backend);
@@ -1367,6 +1377,8 @@ int RunServe(std::span<const char* const> args) {
     if (reasoning_budget >= 0)
       reasoning_defaults->budget_tokens =
           static_cast<std::size_t>(reasoning_budget);
+    if (!reasoning_budget_message.empty())
+      reasoning_defaults->budget_message = reasoning_budget_message;
 
     server::TextSpeculativeConfig speculative_config;
     if (speculative_backend.empty() && !dspark_model_path.empty()) {

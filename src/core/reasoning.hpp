@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace gufo {
 
@@ -25,6 +26,8 @@ struct ReasoningOptions {
   std::optional<bool> preserve_thinking;
   /// Reasoning tokens before the end of thinking is forced (#266).
   std::optional<std::size_t> budget_tokens;
+  /// Text forced before the reasoning end once the budget is spent (#693).
+  std::optional<std::string> budget_message;
 };
 
 }  // namespace gufo
