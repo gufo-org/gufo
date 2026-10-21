@@ -374,7 +374,7 @@ void ContinuationAdapter::RollbackPrefill(cache::Slot& slot) {
   // Prefill cancellation is checked before the vocabulary head and before
   // draft catch-up. Only the other recurrent buffer and suffix KV changed.
   executor.arena_.RestoreState();
-  executor.h_prompt_hidden_.clear();
+  executor.h_prompt_hidden_.Clear();
   state.position = *state.prefill_position;
   state.logits_valid = state.prefill_logits;
   state.failed = false;
@@ -972,7 +972,7 @@ bool ContinuationAdapter::Validate(
   executor.next_token_ =
       metadata.has_next ? std::optional<tokenization::TokenId>{metadata.next}
                         : std::nullopt;
-  executor.h_prompt_hidden_.clear();
+  executor.h_prompt_hidden_.Clear();
   executor.h_verification_hidden_.clear();
   executor.h_verification_logits_.clear();
   executor.h_last_hidden_.clear();
