@@ -17,6 +17,8 @@
 
 namespace {
 using namespace gufo::models::qwen::vision;
+using ImageDetail = gufo::tokenization::ChatMessage::ImageDetail;
+constexpr auto kAuto = ImageDetail::kAuto;
 
 std::shared_ptr<const std::vector<std::uint8_t>> Encoded(
     std::uint8_t value, std::uint32_t width = 256, std::uint32_t height = 256) {
@@ -35,50 +37,51 @@ void TestReuseAndEviction() {
   constexpr std::size_t bytes = 256 * 256 * 3;
   ImageCache cache(2 * (bytes + std::max({red->capacity(), blue->capacity(),
                                           green->capacity()})));
-  auto first = cache.Get(red);
-  const auto second = cache.Get(blue);
+  auto first = cache.Get(red, kAuto);
+  const auto second = cache.Get(blue, kAuto);
   // Fresh request buffers containing identical bytes must share the result.
   const auto copy = std::make_shared<const std::vector<std::uint8_t>>(*red);
-  assert(cache.Get(copy) == first);
+  assert(cache.Get(copy, kAuto) == first);
   auto stats = cache.GetStats();
   assert(stats.hits == 1 && stats.misses == 2 && stats.entries == 2 &&
          stats.pixel_bytes == 2 * bytes &&
          stats.encoded_bytes == red->capacity() + blue->capacity());
   // Red was just touched, so blue is the victim. Eviction cannot invalidate
   // the request's pixels, nor retain a second copy when red hits again.
-  (void)cache.Get(green);
-  assert(cache.Get(red) == first);
+  (void)cache.Get(green, kAuto);
+  assert(cache.Get(red, kAuto) == first);
   assert(second->pixels == std::vector<std::uint8_t>(bytes, 42));
-  const auto replaced = cache.Get(blue);
+  const auto replaced = cache.Get(blue, kAuto);
   assert(replaced != second && replaced->pixels == second->pixels);
   stats = cache.GetStats();
   assert(stats.evictions == 2 && stats.entries == 2 &&
          stats.pixel_bytes == 2 * bytes);
   // Oversized entries bypass retention and do not evict useful small ones.
-  (void)cache.Get(Encoded(9, 768));
+  (void)cache.Get(Encoded(9, 768), kAuto);
   assert(cache.GetStats().pixel_bytes == 2 * bytes);
   assert(cache.GetStats().evictions == 2);
   // Encoded owners count against the same budget, not only RGB storage.
   ImageCache pixel_only_budget(bytes);
-  (void)pixel_only_budget.Get(red);
+  (void)pixel_only_budget.Get(red, kAuto);
   assert(pixel_only_budget.GetStats().entries == 0);
   ImageCache lifetime(bytes + std::max(red->capacity(), blue->capacity()));
   auto encoded_owner = Encoded(17);
   const std::weak_ptr<const std::vector<std::uint8_t>> weak = encoded_owner;
-  const auto retained_pixels = lifetime.Get(encoded_owner);
+  const auto retained_pixels = lifetime.Get(encoded_owner, kAuto);
   encoded_owner.reset();
   assert(!weak.expired());
-  (void)lifetime.Get(blue);
+  (void)lifetime.Get(blue, kAuto);
   assert(weak.expired() && retained_pixels->pixels.front() == 17);
   ImageCache disabled(0);
-  const auto a = disabled.Get(red), b = disabled.Get(red);
+  const auto a = disabled.Get(red, kAuto), b = disabled.Get(red, kAuto);
   assert(a != b && a->pixels == b->pixels);
   assert(disabled.GetStats().entries == 0);
   for (int attempt = 0; attempt < 2; ++attempt) {
     bool rejected = false;
     try {
       (void)cache.Get(std::make_shared<const std::vector<std::uint8_t>>(
-          std::vector<std::uint8_t>{1, 2, 3}));
+                          std::vector<std::uint8_t>{1, 2, 3}),
+                      kAuto);
     } catch (const std::invalid_argument&) {
       rejected = true;
     }
@@ -97,7 +100,7 @@ void TestConcurrentMisses() {
     workers.emplace_back([&, i] {
       start.arrive_and_wait();
       for (int repeat = 0; repeat < 16; ++repeat)
-        results[i] = cache.Get(bytes);
+        results[i] = cache.Get(bytes, kAuto);
     });
   }
   for (auto& worker : workers)
@@ -124,7 +127,7 @@ void EqualPrompts(const Prompt& a, const Prompt& b) {
   }
 }
 
-void TestPromptIdentities() {
+auto MakeTokenizer() {
   using namespace gufo::tokenization;
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i)
@@ -136,9 +139,14 @@ void TestPromptIdentities() {
     specials.emplace(token, static_cast<TokenId>(vocab.size()));
     vocab.emplace_back(token);
   }
-  const auto tokenizer =
-      QwenTokenizer::CreateFromVocabulary(vocab, {}, specials);
+  auto tokenizer = QwenTokenizer::CreateFromVocabulary(vocab, {}, specials);
   assert(tokenizer);
+  return tokenizer;
+}
+
+void TestPromptIdentities() {
+  using namespace gufo::tokenization;
+  const auto tokenizer = MakeTokenizer();
   const auto red = Encoded(17, 48, 32);
   const auto blue = Encoded(42);
   std::vector<ChatMessage> messages{{ChatRole::kUser, "beforeafter"}};
@@ -198,16 +206,62 @@ void TestPromptIdentities() {
   }
   assert(rejected);
 }
+
+void TestDetailKeysCache() {
+  const auto large = Encoded(7, 1024, 768);
+  ImageCache cache;
+  const auto low = cache.Get(large, ImageDetail::kLow);
+  const auto automatic = cache.Get(large, kAuto);
+  assert(automatic->width == 1024 && automatic->height == 768);
+  assert(low->width == 512 && low->height == 384);
+  assert(cache.GetStats().entries == 2 && cache.GetStats().misses == 2);
+  assert(cache.Get(large, ImageDetail::kLow) == low);
+  assert(cache.Get(large, kAuto) == automatic);
+  assert(cache.GetStats().entries == 2 && cache.GetStats().hits == 2);
+}
+
+void TestDetailPrompts() {
+  using namespace gufo::tokenization;
+  const auto tokenizer = MakeTokenizer();
+  ChatTemplateOptions options;
+  options.enable_thinking = false;
+  ImageCache cache;
+  const auto prepare =
+      [&](const std::shared_ptr<const std::vector<std::uint8_t>>& image,
+          ImageDetail detail, ImageCache* reuse) {
+        std::vector<ChatMessage> messages{{ChatRole::kUser, "look"}};
+        messages.front().images = {{4, image, detail}};
+        return Prepare(*tokenizer, messages, {}, options, "encoder", 8192,
+                       reuse);
+      };
+  const auto large = Encoded(7, 1024, 768);
+  const auto low = prepare(large, ImageDetail::kLow, &cache);
+  const auto automatic = prepare(large, kAuto, &cache);
+  EqualPrompts(prepare(large, ImageDetail::kLow, nullptr), low);
+  EqualPrompts(prepare(large, kAuto, nullptr), automatic);
+  assert(low.images[0].grid != automatic.images[0].grid);
+  assert(low.images[0].grid.height <= 16 && low.images[0].grid.width <= 16);
+  assert(low.tokens.size() < automatic.tokens.size());
+  assert(low.cache_identity != automatic.cache_identity);
+  // Images below the low limit resize the same for both details, so their
+  // prompts share one identity.
+  const auto small = Encoded(9, 320, 240);
+  const auto small_low = prepare(small, ImageDetail::kLow, &cache);
+  const auto small_auto = prepare(small, kAuto, &cache);
+  EqualPrompts(small_low, small_auto);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   TestReuseAndEviction();
   TestConcurrentMisses();
   TestPromptIdentities();
+  TestDetailKeysCache();
+  TestDetailPrompts();
   if (argc == 2 && std::string_view(argv[1]) == "--capacity-probe") {
     ImageCache cache;
     for (std::uint8_t i = 0; i < 22; ++i)
-      (void)cache.Get(Encoded(i, 1920, 1088));
+      (void)cache.Get(Encoded(i, 1920, 1088), kAuto);
     const auto stats = cache.GetStats();
     assert(stats.entries == 21 && stats.pixel_bytes == 21 * 1920 * 1088 * 3 &&
            stats.evictions == 1 &&

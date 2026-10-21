@@ -9,7 +9,8 @@
 namespace gufo::models::qwen::vision {
 
 std::shared_ptr<const core::Image> ImageCache::Get(
-    const std::shared_ptr<const std::vector<std::uint8_t>>& encoded) {
+    const std::shared_ptr<const std::vector<std::uint8_t>>& encoded,
+    tokenization::ChatMessage::ImageDetail detail) {
   if (!encoded)
     throw std::invalid_argument("image input has no encoded bytes");
   const std::hash<std::string_view> hash;
@@ -17,7 +18,8 @@ std::shared_ptr<const core::Image> ImageCache::Get(
       hash({reinterpret_cast<const char*>(encoded->data()), encoded->size()}) ^
       hash(kImagePreprocessingVersion);
   const auto matches = [&](const Entry& entry) {
-    return entry.key == key && std::ranges::equal(*entry.encoded, *encoded);
+    return entry.key == key && entry.detail == detail &&
+           std::ranges::equal(*entry.encoded, *encoded);
   };
   {
     std::lock_guard lock(mutex_);
@@ -32,7 +34,7 @@ std::shared_ptr<const core::Image> ImageCache::Get(
   // Decode outside the lock so a new upload cannot block historical hits.
   // A concurrent miss may duplicate work, but only one result is retained.
   auto image = std::make_shared<const core::Image>(
-      ResizeImage(core::DecodeImage(*encoded)));
+      ResizeImage(core::DecodeImage(*encoded), detail));
   const auto pixels = image->pixels.capacity();
   if (pixels > capacity_bytes_ ||
       encoded->capacity() > capacity_bytes_ - pixels)
@@ -50,7 +52,7 @@ std::shared_ptr<const core::Image> ImageCache::Get(
     entries_.pop_back();
     ++stats_.evictions;
   }
-  entries_.push_front({key, encoded, image});
+  entries_.push_front({key, detail, encoded, image});
   stats_.pixel_bytes += pixels;
   stats_.encoded_bytes += encoded->capacity();
   return image;

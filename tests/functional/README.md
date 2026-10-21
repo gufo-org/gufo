@@ -445,6 +445,7 @@ RAM, disk and restart settings once their contracts pass.
 | `image-inputs` | PNG, JPEG and WebP uploads in Chat and Responses; URL spellings, bad uploads and recovery; Messages image blocks in a user turn and a tool result |
 | `tool-images` | Chat/Responses function and custom-call image outputs; text/image order, image-only output, actual colors, streamed retries, changed pixels, continuation reuse, role/URL errors and unchanged text-only controls |
 | `image-count` | 17+ images in one message and across turns; Chat/Responses, sampled thinking/JSON, concurrent colors, limits, cancellation and RAM/disk replay |
+| `image-detail` | `detail` `auto` and `low` on a 1536 × 1024 image, where `low` resizes it to 512 × 320, uses fewer prompt tokens, and reuses no image tokens from `auto` |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata, foreign tool markers in prose and parallel calls (no DeepSeek text after the call block) |
@@ -503,6 +504,13 @@ controls on main, stop at
 `--through-case tool-images:tool_images_control_complete`; full candidate runs
 continue into the newly supported image-bearing tool outputs. A text-only
 model must not qualify the image suite by skipping its assertions.
+
+`image-detail` also requires `--mmproj`. Each of its two requests leaves a new
+stable boundary in the RAM cache. Retry copies cannot displace stable
+boundaries, as [KV-CACHE.md](../../docs/KV-CACHE.md) describes, so in a full
+cache these two boundaries can make a later unchanged retry prefill its
+assistant opening again. Select `image-detail` after `image-count`, whose
+unchanged retries expect full reuse.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
