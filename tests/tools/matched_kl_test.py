@@ -189,6 +189,29 @@ def test_end_to_end():
             check(control["overall"]["kl_max"] < 1e-12 and
                   control["overall"]["top1_agreement"] == 1.0,
                   "an identical candidate has zero KL")
+
+            # Results scored with another top-K are never mixed in.
+            try:
+                matched_kl.main(["score", "--endpoint", url(identical),
+                                 "--history", str(Path(directory,
+                                                       "history.jsonl")),
+                                 "--out", same, "--top-k", "2"])
+            except RuntimeError as error:
+                check("top-K" in str(error), f"resume refused: {error}")
+            else:
+                check(False, "a resume with another top-K is refused")
+            narrow = str(Path(directory, "narrow.jsonl"))
+            matched_kl.main(["score", "--endpoint", url(identical),
+                             "--history", str(Path(directory,
+                                                   "history.jsonl")),
+                             "--out", narrow, "--top-k", "2"])
+            try:
+                matched_kl.compare(str(Path(directory, "teacher.jsonl")),
+                                   narrow)
+            except RuntimeError:
+                pass
+            else:
+                check(False, "teacher and candidate top-K must match")
     finally:
         for server in (teacher, candidate, identical):
             server.shutdown()

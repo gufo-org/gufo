@@ -297,7 +297,13 @@ def score_one(endpoint, record, top_k, include_prompt, timeout):
 def score(endpoint, history, out_path, top_k, include_prompt, concurrency,
           timeout):
     records = read_jsonl(history)
-    done = {(record["id"], record["digest"]) for record in read_jsonl(out_path)}
+    previous = read_jsonl(out_path)
+    # A resume keeps earlier results, so they must use the same top-K.
+    other = sorted({record["top_k"] for record in previous} - {top_k})
+    if other:
+        raise RuntimeError(f"{out_path} was scored with top-K {other}, not "
+                           f"{top_k}; use another output")
+    done = {(record["id"], record["digest"]) for record in previous}
     todo = [record for record in records
             if (record["id"], record["digest"]) not in done]
     with open(out_path, "a", encoding="utf-8") as out, \
@@ -414,6 +420,7 @@ def compare(teacher_path, candidate_path):
             skipped.append(ident)
             continue
         if (t["digest"] != c["digest"] or t["start"] != c["start"] or
+                t["top_k"] != c["top_k"] or
                 len(t["positions"]) != len(c["positions"])):
             raise RuntimeError(f"{ident}: teacher and candidate scored "
                                "different histories")
