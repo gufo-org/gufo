@@ -791,7 +791,8 @@ static void LaunchSplitKAttentionHalfPartials(
     unsigned rows, std::uint32_t max_context, std::uint32_t num_heads,
     std::uint32_t num_kv_heads, std::uint32_t splits, hipStream_t stream) {
   // Share each KV tile across the query heads of its KV head (six on the
-  // 27B, eight on the 35B-A3B) in both scalar decoding and verification.
+  // 27B, eight on the 35B-A3B, sixteen on Ornith-1.5-122B) in both scalar
+  // decoding and verification.
   // Rows retain independent causal endpoints and scratch.
   const bool deep = static_cast<std::size_t>(start_pos) + 1 >= 512;
   const dim3 shared_grid(num_kv_heads, rows, splits);
@@ -821,6 +822,19 @@ static void LaunchSplitKAttentionHalfPartials(
     } else {
       QwenDecodeSplitKAttentionHalfPartialsKernel<8>
           <<<shared_grid, 256, 0, stream>>>(q, k_cache, v_cache, scratch,
+                                            layer_idx, start_pos, max_context,
+                                            num_heads, num_kv_heads, splits);
+    }
+  } else if (num_heads == 16 * num_kv_heads && deep) {
+    // Ornith-1.5-122B: 32 query heads over two KV heads.
+    if (rows > 1) {
+      QwenDecodeSplitKAttentionHalfPartialsKernel<16, 16>
+          <<<shared_grid, 256, 0, stream>>>(q, k_cache, v_cache, scratch,
+                                            layer_idx, start_pos, max_context,
+                                            num_heads, num_kv_heads, splits);
+    } else {
+      QwenDecodeSplitKAttentionHalfPartialsKernel<16>
+          <<<shared_grid, 512, 0, stream>>>(q, k_cache, v_cache, scratch,
                                             layer_idx, start_pos, max_context,
                                             num_heads, num_kv_heads, splits);
     }
