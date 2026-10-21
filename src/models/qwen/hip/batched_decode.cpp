@@ -32,6 +32,19 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
                       float* output, std::size_t batch_size,
                       std::size_t output_size, std::size_t input_size,
                       hipStream_t stream) {
+  // Rows of a shape that single-token decode sends to the vendored vector
+  // kernel take it here too, so drafted and verified tokens match plain
+  // decode.
+  const auto single_row = models::qwen::ResolveQwenGemmRoute(
+      {.type = weight.type,
+       .m = output_size,
+       .k = input_size,
+       .mode = models::qwen::QwenGemmMode::kHipDecode});
+  if (single_row.route == models::qwen::QwenGemmRoute::kHipQuantMmvq) {
+    LaunchGEMVRows(weight.data, weight.type, input, output, batch_size,
+                   output_size, input_size, stream);
+    return;
+  }
   if (SupportsExactSharedProjection(weight.type)) {
     LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
                                batch_size, output_size, input_size, stream);
