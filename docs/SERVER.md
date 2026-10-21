@@ -188,10 +188,12 @@ Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 
 Qwen image requests reuse decoded and resized RGB pixels using a fast lookup
-hash and exact encoded-byte comparison under the preprocessing version. Each
-loaded Qwen runner retains up to 128 MiB of encoded bytes and resized pixel
-vectors combined, evicting least-recently-used images; entry metadata is also
-bounded. `cache_prompt: false` bypasses this reuse as well as continuation reuse.
+hash and exact encoded-byte comparison under the preprocessing version and
+whether the `low` dimension bound applies. `high`, `original`, and `auto` share
+entries. Each loaded Qwen runner retains up to 128 MiB of encoded bytes and
+resized pixel vectors combined, evicting least-recently-used images; entry
+metadata is also bounded. `cache_prompt: false` bypasses this reuse as well as
+continuation reuse.
 Requests share immutable buffers, so eviction does not invalidate an in-flight
 request. This CPU cache is separate from the snapshot budget below and is not
 written to disk. A resized 1920×1080 screenshot takes about 6 MiB of RGB storage,
@@ -717,8 +719,17 @@ as literal tool-history data. This does not enable custom-tool generation.
 Chat Completions also accepts `image_url` parts in `role:"tool"` content.
 Existing text-string outputs keep their prompt representation. Images remain
 unsupported in assistant/system/developer messages. Image resolution is
-model-owned: `detail` accepts `auto`, `low`, `high` and `original`, and all of
-them behave as `auto`. File IDs and `input_file` parts remain unsupported.
+model-owned: `detail` accepts `auto`, `low`, `high` and `original`. For Qwen
+models, `low` scales the image down to fit within 512 × 512 pixels and keeps its
+aspect ratio, so it uses at most 256 merged image tokens. The model's
+65,536-pixel minimum still applies, so a very small or very narrow image can be
+enlarged. The other values behave as `auto` and use the model's full resolution
+range. When either side of the image, rounded to a multiple of 32 pixels,
+exceeds 512, a `low` request and an `auto` request get different resized images
+and share only the prompt text before the image. The exception is an image whose
+size the 65,536-pixel minimum sets under both values. Otherwise both resize the
+same way, and the two requests share the cached prefix. File IDs and
+`input_file` parts remain unsupported.
 
 Responses report `incomplete` with reason `max_output_tokens` when generation
 hits its limit. Otherwise they report `completed`. `stream: true` sends typed

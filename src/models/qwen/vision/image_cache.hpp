@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/core/image.hpp"
+#include "src/models/qwen/chat_template.hpp"
 
 namespace gufo::models::qwen::vision {
 
@@ -17,7 +18,7 @@ inline constexpr std::string_view kImagePreprocessingVersion =
     "qwen38-image-bicubic-rgb8-bf16-v1";
 
 /// Backend-owned CPU preprocessing reuse, independent of continuation state.
-/// Only encoded bytes and the fixed resize policy affect RGB pixels; the
+/// Only the encoded bytes and the image detail affect the RGB pixels. The
 /// encoder identity still participates in each prompt's continuation identity.
 /// The budget counts retained RGB and encoded vector capacity; entry metadata
 /// is bounded too because every resized image contains at least 65536 pixels.
@@ -39,12 +40,14 @@ public:
   };
 
   [[nodiscard]] std::shared_ptr<const core::Image> Get(
-      const std::shared_ptr<const std::vector<std::uint8_t>>& encoded);
+      const std::shared_ptr<const std::vector<std::uint8_t>>& encoded,
+      tokenization::ChatMessage::ImageDetail detail);
   [[nodiscard]] Stats GetStats() const;
 
 private:
   struct Entry {
     std::size_t key;
+    tokenization::ChatMessage::ImageDetail detail;
     // Exact comparison makes lookup-hash collisions harmless. Including these
     // bytes in the budget bounds reuse even for poorly compressible uploads.
     std::shared_ptr<const std::vector<std::uint8_t>> encoded;
