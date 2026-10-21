@@ -6490,25 +6490,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   const unsigned within = (blockIdx.y % kRowGroup) * gridDim.x + blockIdx.x;
   const int r_block = (row_group * kRowGroup + within % kRowGroup) * BM;
   const int t_block = (within / kRowGroup) * BN;
-  // BF16 replaces a library GEMM whose 32-token tile g starts its K loop
-  // (g % 4) * 4 blocks in and wraps. A block takes the four tiles of one
-  // rotation class, one per token wave, so every dot product keeps the
-  // library's order.
-  const int bf16_class = kBf16 ? static_cast<int>(blockIdx.x % 4) : 0;
-  const int k_rotation = kBf16 ? (bf16_class * 4) % num_kb : 0;
-  const auto token_of = [&](int local) {
-    if constexpr (kBf16) {
-      static_assert(BN == 128 && WN == 4 && kRowGroup == 1);
-      return (static_cast<int>(blockIdx.x / 4) * 512) + (bf16_class * 32) +
-             ((local / 32) * 128) + (local % 32);
-    } else {
-      return t_block + local;
-    }
-  };
-  const auto rotate = [&](int kb) {
-    const int r = kb + k_rotation;
-    return r >= num_kb ? r - num_kb : r;
-  };
+  const auto token_of = [&](int local) { return t_block + local; };
 
   // SSM thread tid owns row tid and K block p of the stage. Other paths
   // use row (p*256+tid)/BK and K block (p*256+tid)%BK; rows past m read
@@ -6549,7 +6531,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       const bool live = a_live[p] && kb < num_kb;
       if constexpr (kRawWeights) {
         const auto* src = reinterpret_cast<const uint4*>(
-            a_ptr[p] + static_cast<std::size_t>(rotate(kb)) * 64);
+            a_ptr[p] + static_cast<std::size_t>(kb) * 64);
 #pragma unroll
         for (int c = 0; c < 4; ++c)
           a_half[p][c] = live ? src[c] : make_uint4(0u, 0u, 0u, 0u);
@@ -6567,7 +6549,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       const int kb = kb0 + (((p * 256) + tid) % BK);
       if (b_ptr[p] != nullptr && kb < num_kb) {
         const auto* src =
-            reinterpret_cast<const uint4*>(b_ptr[p] + (rotate(kb) * 32));
+            reinterpret_cast<const uint4*>(b_ptr[p] + (kb * 32));
 #pragma unroll
         for (int c = 0; c < 4; ++c) {
           b_data[p][c] = src[c];
@@ -6723,7 +6705,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 #pragma unroll
           for (int i = 0; i < kWaveRowTiles; ++i) {
             if constexpr (kBf16) {
-              // One K16 chain in K order, as the library GEMM it replaces.
+              // One K16 chain in K order for every token.
               acc[i][j] = WmmaBf16(a_lo[i], b_lo, acc[i][j]);
               acc[i][j] = WmmaBf16(a_hi[i], b_hi, acc[i][j]);
             } else if constexpr (kHalfWeights) {
@@ -7123,12 +7105,11 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    std::size_t m, std::size_t k, hipStream_t stream) {
   if (m == 0 || batch == 0 || k == 0 || k % 32 != 0)
     return false;
-  // Four blocks, one per K rotation class, cover each 512 tokens.
   hipLaunchKernelGGL((DenseF16GEMMKernel<64, 128, 2, 2, 4, 1, false, false,
                                          false, false, true>),
-                     dim3(((batch + 511) / 512) * 4, (m + 63) / 64),
-                     dim3(kThreads), 0, stream, w,
-                     static_cast<const __half*>(x), out, batch, m, k);
+                     dim3((batch + 127) / 128, (m + 63) / 64), dim3(kThreads),
+                     0, stream, w, static_cast<const __half*>(x), out, batch, m,
+                     k);
   return true;
 }
 

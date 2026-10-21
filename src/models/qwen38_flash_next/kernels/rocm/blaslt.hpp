@@ -32,14 +32,13 @@ public:
   [[nodiscard]] bool Gemm(const void* weights, const void* input, float* out,
                           hipDataType type, int m, int n, int k,
                           std::string* error_msg);
-  /// Gemm through the library kernel even where DenseBf16Gemm reproduces it
-  /// (tests compare the two).
+  /// Gemm through the library kernel even where Gemm runs its own kernel
+  /// (benchmarks compare the two).
   [[nodiscard]] bool LibraryGemm(const void* weights, const void* input,
                                  float* out, hipDataType type, int m, int n,
                                  int k, std::string* error_msg);
-  /// Whether Gemm runs DenseBf16Gemm for this shape (tests).
-  [[nodiscard]] bool UsesOwnKernel(hipDataType type, int m, int n, int k,
-                                   std::string* error_msg);
+  /// Whether Gemm runs its own position-invariant kernel for this shape.
+  [[nodiscard]] static bool UsesOwnKernel(hipDataType type, int m, int k);
 
 private:
   BlasLt() = default;
