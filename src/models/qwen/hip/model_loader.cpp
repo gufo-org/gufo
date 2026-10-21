@@ -7,12 +7,16 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "qfn_mmq.h"
+#include "src/core/hip/heap_placement.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
@@ -25,6 +29,8 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
     if (region.host_copy != nullptr) {
       (void)hipHostUnregister(region.host_copy);
       (void)munmap(region.host_copy, region.size);
+    } else if (region.device_owned && region.device_data != nullptr) {
+      (void)hipFree(region.device_data);
     }
     region = {};
   }
@@ -65,6 +71,94 @@ void CopyMappedWeights(const core::GgufMappedRegion& source, void* copy) {
   if (const auto error = failure.load(); error != 0)
     throw std::system_error(error, std::generic_category(),
                             "cannot read mapped Qwen weights");
+}
+
+// Copies a mapped shard into device memory. Each worker stages its chunks
+// through a pinned buffer: a copy from pageable memory pins it page by page
+// and runs at a small fraction of the bus speed.
+void UploadMappedWeights(const core::GgufMappedRegion& source, void* device) {
+  constexpr std::size_t kChunkBytes = 64ULL << 20;
+  const auto chunks =
+      source.size / kChunkBytes + (source.size % kChunkBytes != 0);
+  std::atomic<std::size_t> next{0};
+  std::atomic<int> failure{0};
+  std::atomic<hipError_t> hip_failure{hipSuccess};
+  auto copy_chunk = [&] {
+    void* staging = nullptr;
+    if (const auto status = hipHostMalloc(&staging, kChunkBytes);
+        status != hipSuccess) {
+      hip_failure.store(status, std::memory_order_relaxed);
+      return;
+    }
+    while (failure.load(std::memory_order_relaxed) == 0 &&
+           hip_failure.load(std::memory_order_relaxed) == hipSuccess) {
+      const auto index = next.fetch_add(1, std::memory_order_relaxed);
+      if (index >= chunks)
+        break;
+      const auto offset = index * kChunkBytes;
+      const auto bytes = std::min(kChunkBytes, source.size - offset);
+      auto* input = const_cast<std::uint8_t*>(
+                        static_cast<const std::uint8_t*>(source.data)) +
+                    offset;
+      if (madvise(input, bytes, MADV_POPULATE_READ) != 0) {
+        failure.store(errno, std::memory_order_relaxed);
+        break;
+      }
+      std::memcpy(staging, input, bytes);
+      // The device copy owns these bytes now; drop the populated PTEs.
+      (void)madvise(input, bytes, MADV_DONTNEED);
+      const auto status = hipMemcpy(static_cast<std::uint8_t*>(device) + offset,
+                                    staging, bytes, hipMemcpyHostToDevice);
+      if (status != hipSuccess) {
+        hip_failure.store(status, std::memory_order_relaxed);
+        break;
+      }
+    }
+    (void)hipHostFree(staging);
+  };
+  {
+    std::vector<std::jthread> workers;
+    for (std::size_t i = 1; i < std::min<std::size_t>(8, chunks); ++i)
+      workers.emplace_back(copy_chunk);
+    copy_chunk();
+  }
+  if (const auto error = failure.load(); error != 0)
+    throw std::system_error(error, std::generic_category(),
+                            "cannot read mapped Qwen weights");
+  if (const auto status = hip_failure.load(); status != hipSuccess)
+    throw std::runtime_error(std::string("cannot upload Qwen weights: ") +
+                             hipGetErrorString(status));
+}
+
+// Device memory is not on the kernel's page LRU, so compaction never migrates
+// it. A registered anonymous copy is: every migration makes the driver evict
+// and restore the GPU mapping, and kernels reading it stall for seconds.
+[[nodiscard]] bool MapDeviceRegion(const core::GgufMappedRegion& source,
+                                   QwenGpuWeightRegion& destination) {
+  std::size_t free_bytes = 0;
+  std::size_t total_bytes = 0;
+  if (hipMemGetInfo(&free_bytes, &total_bytes) != hipSuccess ||
+      !HeapFitsAboveReserve(free_bytes, source.size)) {
+    (void)hipGetLastError();
+    return false;
+  }
+  void* device_data = nullptr;
+  if (hipMalloc(&device_data, source.size) != hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  try {
+    UploadMappedWeights(source, device_data);
+  } catch (...) {
+    (void)hipFree(device_data);
+    throw;
+  }
+  destination = {.host_data = source.data,
+                 .device_data = device_data,
+                 .host_copy = nullptr,
+                 .size = source.size,
+                 .device_owned = true};
+  return true;
 }
 
 [[nodiscard]] hipError_t MapRegisteredRegion(
@@ -114,7 +208,9 @@ void CopyMappedWeights(const core::GgufMappedRegion& source, void* copy) {
     auto& destination = weight_regions[i];
     hipError_t map_error;
     try {
-      map_error = MapRegisteredRegion(source, destination);
+      map_error = MapDeviceRegion(source, destination)
+                      ? hipSuccess
+                      : MapRegisteredRegion(source, destination);
     } catch (const std::exception& e) {
       ReleaseWeightRegions(weight_regions);
       if (error_msg)
