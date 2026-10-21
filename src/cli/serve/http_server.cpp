@@ -987,7 +987,10 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
     return Err(400, "Bad Request", e.what(), "invalid_request_error",
                "parse_error");
   }
-  if (body.is_object() && body.contains("prompt_logprobs"))
+  // `"prompt_logprobs": null` means absent, as in vLLM.
+  if (const auto* scoring =
+          body.is_object() ? body.find("prompt_logprobs") : nullptr;
+      scoring != nullptr && !scoring->is_null())
     return ScorePromptTokens(req, body, b);
 
   std::size_t max_tokens = 0;
