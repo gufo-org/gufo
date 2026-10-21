@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -261,6 +262,10 @@ public:
       position.token = request.tokens[i];
       position.logprob = -0.5 * static_cast<double>(i);
       position.rank = i;
+      if (nonfinite_target && i + 1 == request.tokens.size()) {
+        position.logprob = -std::numeric_limits<double>::infinity();
+        position.nonfinite = 1;
+      }
       for (std::size_t k = 0; k < request.top_k; ++k)
         position.top.push_back({.token = static_cast<std::uint32_t>(100 + k),
                                 .logprob = -static_cast<double>(k)});
@@ -271,6 +276,7 @@ public:
   }
   std::atomic<int> score_calls{0};
   bool scoring{true};
+  std::atomic<bool> nonfinite_target{false};
   ScoreRequest last_score;
   std::atomic<int> calls{0};
   std::atomic<bool> last_ignore_eos{false};

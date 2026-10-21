@@ -2909,6 +2909,25 @@ void TestPromptLogprobs() {
                            R"("max_tokens":null,"temperature":null})"),
                200);
 
+  // A non-finite target logit scores as null instead of failing the response,
+  // which JSON cannot carry as -inf.
+  server.backend->nonfinite_target = true;
+  const auto nonfinite = server.Post(
+      "/v1/completions", R"({"prompt":[7,8,9],"prompt_logprobs":1})");
+  server.backend->nonfinite_target = false;
+  ExpectStatus(nonfinite, 200);
+  const auto nonfinite_body =
+      parse(nonfinite.substr(nonfinite.find("\r\n\r\n") + 4));
+  const auto& nonfinite_positions = nonfinite_body.find("choices")
+                                        ->items()
+                                        .front()
+                                        .find("prompt_logprobs")
+                                        ->items();
+  assert(nonfinite_positions.size() == 3);
+  assert(nonfinite_positions[1].member_double("logprob") == -0.5);
+  assert(nonfinite_positions[2].find("logprob")->is_null());
+  assert(nonfinite_positions[2].member_size("nonfinite") == 1);
+
   // The start defaults to the second token, as in vLLM.
   ExpectStatus(server.Post("/v1/completions",
                            R"({"prompt":[1,2,3],"prompt_logprobs":0})"),

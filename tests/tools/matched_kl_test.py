@@ -36,8 +36,12 @@ def log_softmax(values):
     return [v - total for v in values]
 
 
-def make_server(shift):
-    """A fake endpoint whose distribution is shifted by `shift` logits."""
+def make_server(shift, null_last=False):
+    """A fake endpoint whose distribution is shifted by `shift` logits.
+
+    With `null_last`, the last scored token's own logit is non-finite and
+    reported as a null logprob.
+    """
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -62,6 +66,9 @@ def make_server(shift):
                         "top_logprobs": [{"token": t, "logprob": lp[t]}
                                          for t in order[:k]],
                     })
+                if null_last:
+                    entries[-1]["logprob"] = None
+                    entries[-1]["nonfinite"] = 1
                 choice = {"text": "", "prompt_logprobs": entries}
             else:
                 check(body["return_token_ids"] is True, "asks for token IDs")
@@ -103,6 +110,30 @@ def test_compare_position():
           "disagreement statistics")
     check(abs(row["nll_candidate"] + math.log(0.3)) < 1e-12,
           "NLL of the teacher token under the candidate")
+
+
+def test_null_logprob():
+    teacher, _ = make_server(0.0)
+    candidate, _ = make_server(0.0, null_last=True)
+    try:
+        url = lambda s: f"http://127.0.0.1:{s.server_address[1]}"
+        record = {"id": "p0", "category": "code", "digest": "d",
+                  "tokens": [1, 2, 3, 4, 5], "start": 3}
+        scored = [matched_kl.score_one(url(server), record, 4, False, 10)
+                  for server in (teacher, candidate)]
+        check(scored[1]["positions"][-1]["logprob"] == -math.inf,
+              "a null logprob reads as -inf")
+        rows = [matched_kl.compare_position(t, c) for t, c in
+                zip(scored[0]["positions"], scored[1]["positions"])]
+        summary = matched_kl.summarize(rows)
+        check(summary["infinite_nll"] == 1 and
+              summary["nonfinite_logits"] == 1,
+              "the non-finite position is reported, not dropped")
+        check(math.isfinite(summary["nll_candidate"]),
+              "finite positions keep a finite NLL")
+    finally:
+        for server in (teacher, candidate):
+            server.shutdown()
 
 
 def test_end_to_end():
@@ -165,5 +196,6 @@ def test_end_to_end():
 
 if __name__ == "__main__":
     test_compare_position()
+    test_null_logprob()
     test_end_to_end()
     print("matched_kl_test: ok")
