@@ -198,7 +198,7 @@ void Run(unsigned vocab, unsigned rows, unsigned mode, bool bench) {
     Compare(full, reconstructed, result, states[row]);
   }
   if (bench) {
-    // Diagnostic only: complete transfer, reconstruction and CPU target
+    // Diagnostic only: complete selection, transfer and CPU target
     // distributions; serving measurements decide whether to retain it.
     std::vector<float> downloaded(logits.size());
     double sink = 0;

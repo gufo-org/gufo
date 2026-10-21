@@ -47,8 +47,10 @@ before any graph capture. The affected request measures 3.71 ms TTFT and
 history retains every output and expected prefill/cache count; no PP/decode
 or token-gap flag remains in that pair.
 
-The comparison uses main `da5d5a2b` and production release binaries with the
-same Nix toolchain; builds and inference never overlap. All observations,
+Initial comparisons use main `da5d5a2b`. Final production binaries compare
+main `0c03748a` with candidate `1d3b8c68`, after rebasing onto the merged
+small-prefill changes. They use the same Nix toolchain; builds and inference
+never overlap. All observations,
 including failed prototypes and harness-only failures, remain in
 `/tmp/gufo-flash-decode-20261021` on the test host and
 `/Users/fbozzo/projects/flash-decode-20261021` on the editing host. The benchmark
@@ -74,6 +76,40 @@ work, not evidence of slower inference; its queue timing stays unqualified.
 Other variable C6/C8 queue and first-token observations remain unqualified.
 Focused repeats, admission counters and every comparison are retained with
 the raw reports.
+
+Final native candidate checks pass again: independent target-candidate and
+predictor oracles, batch isolation, sampling, and RAM/serialized cache replay.
+The image-descriptor operator test compares captured fused attention against
+an independent null-descriptor reference near 128K, including guard bytes,
+idempotent preparation and empty-layout restore. The six selected API suites
+pass again, including image/thinking/tool cancellation and disk restart. The
+final real Pi conversation passes 13 requests and ten successful tool calls;
+the generated files and actual Node/Python assertions were inspected.
+
+The current-main default-sampled screen retains identical outputs and expected
+cache work, with all 276 per-request/phase measurements passing. Its two
+simultaneous requests are identified by their submission cohort, since network
+arrival order can swap within a cohort; bodies, outputs, measured values and
+the order between cohorts are unchanged. The original label-based comparison
+is retained separately.
+
+All six final canonical AR/MTP depth spots retain completion hashes and
+prompt/cache/draft counts. Prefill rates differ by at most 0.21%. The raw
+concurrent comparison retains 342 phase measurements including single-user
+prefix preparation. Identical C8 peers exchange request indices and admission
+roles: matching their recorded cache work and `resident_at_admission`, without
+sorting by timings, removes the apparent preparation and queue slowdowns.
+The separate admission comparison has 288 measurements, with only greedy C2
+decode/duration flags remaining. Its first cold seven-token tails improve
+from about 108.6/105.7 to 95.4/92.5 ms for mixed/repetitive input.
+
+Greedy C2 remains unqualified: the final pair is 62.17 → 55.30 tok/s, while
+the focused reverse-order control is 53.30 → 55.29. Main proposes 93 versus
+39 drafts per response across its runs; the candidate proposes 56 in both.
+Every completion still matches isolated AR. These different adaptive paths
+do not establish a branch speedup or an attributable slowdown. The raw flags,
+earlier controls and all retained observations remain available; no global
+timing pass is claimed.
 
 ## Earlier qualification
 
