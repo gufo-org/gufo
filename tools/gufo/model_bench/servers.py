@@ -116,24 +116,31 @@ class Server:
             self.command, stdout=log, stderr=subprocess.STDOUT, env=env,
             start_new_session=True,
         )
-        deadline = started + timeout
-        url = self.base_url + self.readiness
-        while time.perf_counter() < deadline:
-            if self.process.poll() is not None:
-                self.failure_exit_code = self.process.returncode
-                raise RuntimeError(
-                    f"server exited with {self.process.returncode} before readiness; see {self.log_path}"
-                )
-            try:
-                with urllib.request.urlopen(url, timeout=5) as response:
-                    if response.status == 200:
-                        self.ready_seconds = time.perf_counter() - started
-                        return self
-            except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError):
-                pass
-            time.sleep(0.05)
-        self.stop()
-        raise RuntimeError(f"server not ready within {timeout:.0f} s; see {self.log_path}")
+        try:
+            deadline = started + timeout
+            url = self.base_url + self.readiness
+            while time.perf_counter() < deadline:
+                if self.process.poll() is not None:
+                    self.failure_exit_code = self.process.returncode
+                    raise RuntimeError(
+                        f"server exited with {self.process.returncode} before readiness; see {self.log_path}"
+                    )
+                try:
+                    with urllib.request.urlopen(url, timeout=5) as response:
+                        if response.status == 200:
+                            self.ready_seconds = time.perf_counter() - started
+                            return self
+                except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError):
+                    pass
+                time.sleep(0.05)
+            self.stop()
+            raise RuntimeError(f"server not ready within {timeout:.0f} s; see {self.log_path}")
+        except BaseException:
+            # Ctrl-C included: the server runs in its own session, so the
+            # terminal's SIGINT never reaches it, and __exit__ never runs when
+            # __enter__ raises.
+            self.stop()
+            raise
 
     def stop(self) -> None:
         if self.process is None or self.process.poll() is not None:

@@ -629,6 +629,24 @@ server.process.poll.return_value = -9
 server.__exit__(RuntimeError, RuntimeError("connection closed"), None)
 check(server.failure_exit_code == -9, "an actual process failure remains distinguishable")
 
+# Ctrl-C while the server loads stops it: it runs in its own session, so the
+# terminal's SIGINT never reaches it.
+with tempfile.TemporaryDirectory() as interrupted_dir:
+    interrupted = Server(["sleep", "60"], "/health",
+                         Path(interrupted_dir, "server.log"))
+    with patch("gufo.model_bench.servers.urllib.request.urlopen",
+               side_effect=KeyboardInterrupt):
+        try:
+            interrupted.start()
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("the interrupt must propagate")
+    stopped = (interrupted.process is not None and
+               interrupted.process.poll() is not None)
+    interrupted.stop()
+    check(stopped, "an interrupted start stops the server")
+
 
 def fake_urlopen_diverging(request, timeout):
     del timeout
