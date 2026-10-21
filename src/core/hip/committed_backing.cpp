@@ -2,6 +2,7 @@
 
 #include <hip/hip_runtime.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -13,29 +14,46 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/host_allocations.hpp"
+
 namespace gufo::hip {
 namespace detail {
 namespace {
+struct CommittedPages {
+  void* data{};
+  int pin{-1};
+  explicit operator bool() const { return data != nullptr; }
+};
+
 // Ordinary anonymous pages, then registered with the GPU. Opt out of THP
 // before population: later huge-page promotion can invalidate GPU mappings.
-void* CommitPages(std::size_t bytes) {
+CommittedPages CommitPages(std::size_t bytes) {
   constexpr std::size_t page = 4096;
-  const auto workers = std::min<std::size_t>(4, bytes / (32ULL << 20));
+  const auto workers = std::min<std::size_t>(4, bytes / (128ULL << 20));
   void* data = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (data == MAP_FAILED)
-    return nullptr;
+    return {};
   // Kernels built without THP reject this advice with EINVAL; their pages
   // cannot be promoted. All other failures must release the mapping.
   if (madvise(data, bytes, MADV_NOHUGEPAGE) != 0 && errno != EINVAL) {
     munmap(data, bytes);
-    return nullptr;
+    return {};
   }
   std::atomic<bool> populated{true};
   const auto populate = [&](std::size_t begin, std::size_t end) {
-    if (madvise(static_cast<std::byte*>(data) + begin, end - begin,
-                MADV_POPULATE_WRITE) != 0)
-      populated.store(false, std::memory_order_relaxed);
+    // A long population call holds the process's mapping lock while faulting
+    // pages. Bound each call so request-side heap growth can make progress.
+    constexpr std::size_t piece = 64ULL << 10;
+    for (auto offset = begin; offset < end; offset += piece) {
+      if (!populated.load(std::memory_order_relaxed))
+        break;
+      if (madvise(static_cast<std::byte*>(data) + offset,
+                  std::min(piece, end - offset), MADV_POPULATE_WRITE) != 0) {
+        populated.store(false, std::memory_order_relaxed);
+        break;
+      }
+    }
   };
   if (workers >= 2) {
     // Large serial page faults can hold up inference even when growth runs
@@ -59,26 +77,30 @@ void* CommitPages(std::size_t bytes) {
     populate(0, bytes);
   if (!populated.load(std::memory_order_relaxed)) {
     munmap(data, bytes);
-    return nullptr;
+    return {};
   }
+  const int pin = PinHostPages(data, bytes);
   if (hipHostRegister(data, bytes, hipHostRegisterDefault) != hipSuccess) {
+    UnpinHostPages(pin);
     munmap(data, bytes);
-    return nullptr;
+    return {};
   }
-  return data;
+  return {data, pin};
 }
-void ReleasePages(void* data, std::size_t bytes) {
-  (void)hipHostUnregister(data);
-  munmap(data, bytes);
+void ReleasePages(CommittedPages pages, std::size_t bytes) {
+  (void)hipHostUnregister(pages.data);
+  UnpinHostPages(pages.pin);
+  munmap(pages.data, bytes);
 }
 }  // namespace
 struct BackingState {
   cache::ResourceCharge metadata;
   // Fixed capacity; entries below `committed` are published and never move.
   std::unique_ptr<cache::ResourceCharge[]> blocks;
-  std::unique_ptr<void*[]> segments;
+  std::unique_ptr<CommittedPages[]> segments;
   std::size_t capacity{}, segment_blocks{}, block_bytes{};
   std::atomic<std::size_t> committed{}, next{};
+  std::atomic<std::size_t> pinned_bytes{};
   // Keep private states apart from longer-lived KV rows. Rows and tails grow
   // forward so restore can still join adjacent ranges into large transfers.
   // Both cursors can use the whole pool; there is no partition or extra budget.
@@ -89,7 +111,7 @@ struct BackingState {
   std::mutex growth;
   std::atomic<bool> growing_ahead{};
   std::byte* Address(std::size_t index) const {
-    return static_cast<std::byte*>(segments[index / segment_blocks]) +
+    return static_cast<std::byte*>(segments[index / segment_blocks].data) +
            index % segment_blocks * block_bytes;
   }
   std::size_t SegmentBytes(std::size_t segment) const {
@@ -131,11 +153,13 @@ struct BackingState {
     } catch (const std::bad_alloc&) {
       // Free before the converted charges unwind, as at initialization.
       ReleasePages(data, count * block_bytes);
-      data = nullptr;
+      data = {};
       for (std::size_t i = 0; i < count; ++i)
         blocks[first + i] = {};
       return false;
     }
+    if (data.pin >= 0)
+      pinned_bytes.fetch_add(count * block_bytes, std::memory_order_relaxed);
     committed.store(first + count, std::memory_order_release);
     return true;
   }
@@ -248,7 +272,7 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
                               ? config.segment_bytes / config.block_bytes
                               : std::max<std::size_t>(count, 1);
   state->blocks = std::make_unique<cache::ResourceCharge[]>(count);
-  state->segments = std::make_unique<void*[]>(
+  state->segments = std::make_unique<detail::CommittedPages[]>(
       (count + state->segment_blocks - 1) / state->segment_blocks + 1);
   state->ledger = &ledger;
   state->admit_segment = std::move(config.admit_segment);
@@ -270,12 +294,15 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
       // or converted charges unwind, preserving physical-byte accounting.
       if (data) {
         detail::ReleasePages(data, count * config.block_bytes);
-        data = nullptr;
+        data = {};
       }
       for (std::size_t i = 0; i < count; ++i)
         state->blocks[i] = {};
       throw;
     }
+    if (data.pin >= 0)
+      state->pinned_bytes.store(count * config.block_bytes,
+                                std::memory_order_relaxed);
     state->committed.store(count, std::memory_order_release);
   }
   state_ = std::move(state);
@@ -375,18 +402,16 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
       return std::nullopt;
   }
 }
-void CommittedBackingPool::GrowAhead(std::size_t segments) {
+void CommittedBackingPool::GrowAhead(std::size_t reserve_bytes) {
   const auto committed = state_->committed.load(std::memory_order_acquire);
-  if (!segments || committed == state_->capacity)
+  if (!reserve_bytes || committed == state_->capacity ||
+      state_->growing_ahead.load(std::memory_order_acquire))
     return;
   const auto free_bytes =
       state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
           cache::ResourceCategory::kBackingFree)];
-  const auto target_blocks =
-      segments >= 1 + (state_->capacity - 1) / state_->segment_blocks
-          ? state_->capacity
-          : segments * state_->segment_blocks;
-  const auto target_bytes = target_blocks * state_->block_bytes;
+  const auto target_bytes =
+      std::min(reserve_bytes, state_->capacity * state_->block_bytes);
   if (free_bytes >= target_bytes)
     return;
   const std::lock_guard lock(ahead_mutex_);
@@ -425,6 +450,9 @@ std::size_t CommittedBackingPool::CommittedBytes() const noexcept {
 }
 std::size_t CommittedBackingPool::PageCommitAllocations() const noexcept {
   return state_->SegmentCount();
+}
+std::size_t CommittedBackingPool::LongTermPinnedBytes() const noexcept {
+  return state_->pinned_bytes.load(std::memory_order_relaxed);
 }
 
 }  // namespace gufo::hip

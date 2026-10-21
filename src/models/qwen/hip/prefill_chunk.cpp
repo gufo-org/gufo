@@ -71,6 +71,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   if (batch_size > arena_.GetMaxBatch()) {
     throw std::length_error("prompt chunk exceeds the GPU batch length");
   }
+  models::qwen::ContinuationWrite write(
+      continuation_hooks_, start_pos,
+      start_pos + static_cast<std::uint32_t>(batch_size));
   auto scratch = arena_.GetScratchView(batch_size);
   const auto attention_workspace =
       arena_.GetScratchView(arena_.GetMaxBatch()).ffn;
@@ -169,7 +172,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     }
   };
 
-  // 3. Layer stack
+  // 3. Layer stack. One recurrent pass per chunk.
+  const auto recurrent_state = arena_.BeginRecurrentWrite();
   for (std::uint32_t l = 0; l < config.num_layers; ++l) {
     PrefillLayerCheckpoint(l);
     const auto& layer = weights_.layers[l];
@@ -358,6 +362,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             });
         if (tiled_attention) {
           detail::EmitAttentionDispatch("prefill_tiled", "");
+        } else if (!detail::BatchedAttentionScoresFitLds(visible_context)) {
+          detail::EmitAttentionDispatch(
+              arena_.d_kv_cache != nullptr ? "prefill_online_fp32"
+                                           : "prefill_online_fp16",
+              "prefill_baseline: score_rows_exceed_lds");
         } else {
           detail::EmitAttentionDispatch(
               "prefill_baseline",
@@ -434,9 +443,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       if (ssm_row_split) {
         LaunchBatchedSSMConvRecurrenceRowSplit(
             arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
-            arena_.d_ssm_conv_state, arena_.d_conv_out,
-            arena_.d_ssm_deltanet_state, arena_.d_alpha_buf, arena_.d_beta_buf,
-            static_cast<const float*>(layer.ssm_a.data),
+            recurrent_state, arena_.d_conv_out, arena_.d_alpha_buf,
+            arena_.d_beta_buf, static_cast<const float*>(layer.ssm_a.data),
             static_cast<const float*>(layer.ssm_dt.data),
             static_cast<const float*>(layer.ssm_norm.data), arena_.d_ssm_gate,
             arena_.d_ssm_out,
@@ -450,9 +458,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       } else {
         LaunchBatchedSSMConvRecurrence(
             arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
-            arena_.d_ssm_conv_state, arena_.d_conv_out,
-            arena_.d_ssm_deltanet_state, arena_.d_alpha_buf, arena_.d_beta_buf,
-            static_cast<const float*>(layer.ssm_a.data),
+            recurrent_state, arena_.d_conv_out, arena_.d_alpha_buf,
+            arena_.d_beta_buf, static_cast<const float*>(layer.ssm_a.data),
             static_cast<const float*>(layer.ssm_dt.data),
             static_cast<const float*>(layer.ssm_norm.data), arena_.d_ssm_gate,
             arena_.d_ssm_out, config.SsmLayerIndex(l), batch_size, ssm_qkv_size,
@@ -644,6 +651,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   last_hidden_offset_ = (batch_size - 1) * hidden_size;
 
   if (!compute_logits) {
+    write.Commit(start_pos + static_cast<std::uint32_t>(batch_size), false);
     return 0;
   }
 
@@ -670,7 +678,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                            hipMemcpyDeviceToHost, arena_.stream));
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
 
-  return CheckedSampleToken(next_token_id, config.vocab_size);
+  const auto result = CheckedSampleToken(next_token_id, config.vocab_size);
+  write.Commit(start_pos + static_cast<std::uint32_t>(batch_size), true);
+  return result;
 }
 
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
@@ -686,6 +696,13 @@ void QwenGpuExecutor::CommitVerificationChunk(
   if (committed_tokens.empty()) {
     return;
   }
+  CheckReset();
+  if (start_pos > arena_.GetMaxContext() ||
+      committed_tokens.size() > arena_.GetMaxContext() - start_pos)
+    throw std::length_error("committed Qwen chunk exceeds context");
+  models::qwen::ContinuationWrite write(
+      continuation_hooks_, start_pos,
+      start_pos + static_cast<std::uint32_t>(committed_tokens.size()));
   std::size_t replayed = 0;
   if (replaying_ssm_state_) {
     while (replayed < committed_tokens.size() &&
@@ -696,8 +713,11 @@ void QwenGpuExecutor::CommitVerificationChunk(
       ReplaySsmState(start_pos, static_cast<std::uint32_t>(replayed));
   }
   replaying_ssm_state_ = false;
-  if (replayed == committed_tokens.size())
+  if (replayed == committed_tokens.size()) {
+    write.Commit(
+        start_pos + static_cast<std::uint32_t>(committed_tokens.size()), false);
     return;
+  }
   arena_.DisableSsmReplayCapture();
 
   const bool capture_hidden = capture_prompt_hidden_;
@@ -713,6 +733,8 @@ void QwenGpuExecutor::CommitVerificationChunk(
     throw;
   }
   capture_prompt_hidden_ = capture_hidden;
+  write.Commit(start_pos + static_cast<std::uint32_t>(committed_tokens.size()),
+               false);
 }
 
 }  // namespace gufo::hip

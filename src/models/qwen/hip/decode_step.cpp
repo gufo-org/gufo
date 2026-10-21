@@ -32,6 +32,7 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
                        const QwenExecutionPolicy& policy,
                        tokenization::TokenId token_id, std::uint32_t pos,
                        bool compute_logits,
+                       QwenRecurrentStateIo recurrent_state,
                        models::qwen::vision::DeviceInput* image_input) {
   const auto* rope = image_input != nullptr ? image_input->rope() : nullptr;
   (void)token_id;
@@ -193,9 +194,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
           time_step_rank, arena.stream);
       LaunchSSMConvRecurrence(
           ssm_scratch.qkv.data(),
-          static_cast<const float*>(layer.ssm_conv1d.data),
-          arena.d_ssm_conv_state, ssm_scratch.conv_out.data(),
-          arena.d_ssm_deltanet_state, ssm_scratch.alpha.data(),
+          static_cast<const float*>(layer.ssm_conv1d.data), recurrent_state,
+          ssm_scratch.conv_out.data(), ssm_scratch.alpha.data(),
           ssm_scratch.beta.data(), static_cast<const float*>(layer.ssm_a.data),
           static_cast<const float*>(layer.ssm_dt.data),
           static_cast<const float*>(layer.ssm_norm.data),

@@ -102,5 +102,82 @@
         "loading-reference.json"
       ]
     }
+  },
+  "benchmarks-2026-10-19": {
+    "gufo": {
+      "revision": "d5e90965b3b5ef22d3eeb187faecf9fb60e1bcb9",
+      "dirty": true,
+      "build": "nix release",
+      "store": "798x551s4zgrdhw6w6rk2ysgnsha98kv-gufo-0-unstable-d5e9096-dirty",
+      "wrapperSha256": "7adae75b192e0c5854807d7c9ba1bd316df18721ce41e8f2992a15c56be8a683",
+      "binarySha256": "f6cd1785abb20334ac48597e06d985c49cad360359a24b24cb0cd7e0a57e2b54",
+      "runtimePatchSha256": "7713b4ad9952d44f6e563b9aecb63e28593889c2adb8f2e5b740f416038a4ca6",
+      "localChange": "Qwen persistent serializers clear headers only; payload bytes and model arithmetic unchanged."
+    },
+    "mainControl": {
+      "revision": "e77309421b0013d44d62ec0824be63c057a970e5",
+      "store": "y3hg8aijwcwba9v984kgb286wydxk6m7-gufo-0-unstable-e773094",
+      "wrapperSha256": "fb7e226d73296b883a89a8aaed396c4584c578533882c44c3b34c59ba6809df6",
+      "binarySha256": "31123376f422ffabea819c821b98690a657c6aebfb1e8f5a1ac3a8717ff30c1f"
+    },
+    "originalPrControl": {
+      "revision": "d5e90965b3b5ef22d3eeb187faecf9fb60e1bcb9",
+      "store": "1hi6kz6m9wjlmcr1lyiq077iaxqlafsh-gufo-0-unstable-d5e9096",
+      "wrapperSha256": "9449539ee06f6f0dcbc717bca6b3741643782ccdbc4851913aa8a1bf2c943095",
+      "binarySha256": "3bc01cab1e7e9453fd1deac49d4454f2efcad73b0f5a57d199deff2411b8932c"
+    },
+    "targets": [
+      "Target UD-Q4_K_XL",
+      "Target UD-Q8_K_XL"
+    ],
+    "draft": "Draft Q4_K_M",
+    "scope": "DFlash2 mixed/repetitive single-user depths and short-corpus C1/2/4/6/8. AR, loading, memory and all llama.cpp rows retain September 23 measurements.",
+    "sampling": {
+      "temperature": 0,
+      "seed": 1,
+      "thinking": false
+    },
+    "timedRunsPerPoint": 1,
+    "qualityComparedRequests": {
+      "q4-multi-mixed": 59,
+      "q4-multi-repetition": 21,
+      "q8-multi-mixed": 59,
+      "q8-multi-repetition": 21
+    },
+    "review": "recurrent-fork-review.json",
+    "reference": "llama.cpp b11069; existing measurements unchanged"
+  },
+  "benchmarks-2026-10-19-verify-wave64": {
+    "gufo": {
+      "revision": "11813e51150b1b6f990f57a9fc1b62b8bce494d2",
+      "dirty": false,
+      "build": "nix release",
+      "store": "8fqffr5qr6xpx5fyh5ad273xhz1fmi6n-gufo-0-unstable-11813e5",
+      "wrapperSha256": "70ad9a53b84ea85403025ca5ddcc709c765b838bfb22e0c44285168ca4c8ed6a",
+      "binarySha256": "5463d9d78a461aa73021a082dfbf3a2d08d1282494b3050a825720c3349be275",
+      "change": "PR #660 wave64 verification attention, rebased on main 23fd87dc"
+    },
+    "mainControl": {
+      "revision": "23fd87dc992d958e0c9c1ef5aeb81158463f9e6c",
+      "store": "9ywdh0zvby3y1i6kkj17qbq8kyb06qm0-gufo-0-unstable-23fd87d",
+      "wrapperSha256": "84cdc1631b4b663695dd4a732303c16e94c93d457efcbbdfb383c6884d669ddb",
+      "binarySha256": "07c7511dc892bfa0dd989bbf96a96da506db885a55ce89ec0314a5729f18fc95",
+      "scope": "memory-q4, single-ar-q4 d8K/d32K, single-dflash2-q8 d8K/d16K and multi-dflash2-q4 controls; same hashes and counts as the candidate"
+    },
+    "targets": [
+      "Target UD-Q4_K_XL",
+      "Target UD-Q8_K_XL"
+    ],
+    "draft": "Draft Q4_K_M",
+    "scope": "Every Gufo table: AR and DFlash2 single-user depths, short-corpus C1/2/4/6/8, loading and memory. All llama.cpp rows retain earlier measurements.",
+    "sampling": {
+      "temperature": 0,
+      "seed": 1,
+      "thinking": false
+    },
+    "timedRunsPerPoint": 1,
+    "powerProfile": "performance",
+    "coldFiles": "POSIX_FADV_DONTNEED on target and draft files, zero resident pages verified with mincore before each loading launch",
+    "reference": "llama.cpp b11069; existing measurements unchanged"
   }
 }

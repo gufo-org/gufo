@@ -27,11 +27,19 @@ that is correct for every model, including hybrid-recurrent ones. It costs the
 ability to trim a checkpoint: a saved snapshot can only be reused **whole**,
 and only when its tokens are an exact prefix of the new prompt.
 
-Qwen3.8-Flash-Next no longer uses this snapshot cache: it serves through the
-component cache of the [cache redesign](cache-redesign/RFC.md), whose options
-are described under [Flash-Next budgets](#flash-next-budgets). The rest of this
-document describes the snapshot cache that the other models still use; its
-Flash-Next descriptions and measurements predate the change.
+Qwen3.8-27B (AR and DFlash2) and Qwen3.8-Flash-Next serve through the
+component cache of the [cache redesign](cache-redesign/RFC.md). Its backing
+and disk options are described under [component-cache budgets](#component-cache-budgets).
+Qwen27B retains target KV, convolution and recurrent state, image identity,
+sampled frontier and pending output tokens. DFlash2 adds private ring KV with
+its own injected frontier, pending target features and draft controller state.
+Borrowed target KV rows are preserved before mutation or rollback; private
+frontiers are captured into committed host backing. Disk transfers use fixed
+1 MiB staging regardless of checkpoint size.
+
+The snapshot-cache implementation below remains in use for DeepSeek. Earlier
+Qwen examples and measurements describe its former snapshot implementation;
+they are historical evidence, rather than qualification of the component path.
 
 ## Why it exists
 
@@ -358,7 +366,9 @@ the `max_bytes` an explicit value may claim.
 
 Both are sampled after weights and execution states are allocated, then fixed
 for the server run. Flash-Next and Qwen3.8-27B use half the available
-host RAM, respecting container/cgroup limits. 27B also clamps this to HIP's free
+host RAM, respecting container/cgroup limits. Inactive page cache, such as
+recently read model files, counts as available because the kernel reclaims it
+before failing an allocation. Dirty and writeback pages do not. 27B also clamps this to HIP's free
 device memory. CPU and GPU allocations compete for the same physical RAM on
 Strix Halo, so HIP's free-memory estimate alone is not enough.
 For example, 44 GiB available at load gives a 22 GiB automatic RAM cache and
@@ -368,9 +378,11 @@ Memory that another process claims after startup is not subtracted. When
 other GPU servers share the machine, such as an image or speech server, set an
 explicit `--cache-ram-bytes` that leaves room for their peak use; starting
 them first only accounts for what they hold at that moment.
-The RAM payload budget excludes weights, execution states, token metadata
-and disk staging. It also excludes temporary host buffers used to save
-checkpoints to disk; this is not a limit on total server memory.
+The RAM payload budget excludes weights, execution states, token metadata,
+disk staging and Qwen's separate CPU image-preprocessing cache (up to 128 MiB
+of retained encoded/RGB vectors plus bounded metadata). It also excludes temporary
+host buffers used to save checkpoints to disk; this is not a limit on total
+server memory.
 
 The 32 GiB automatic cap limits default growth on a lightly loaded machine.
 It leaves room for several 27B histories: two 3.7 GB checkpoints per history
@@ -411,18 +423,20 @@ checkpoints at moderate depth without an explicit limit. See #259.
 RAM eviction follows the checkpoint priorities above. Disk eviction remains
 global least-recently-used, without conversation or rebuild-cost awareness.
 
-### Flash-Next budgets
+### Component-cache budgets
 
-Flash-Next keeps the same options with these meanings:
+Qwen27B and Flash-Next use the same options with these meanings:
 
 | Option | Meaning |
 | --- | --- |
 | `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
 | `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the oldest checkpoints by creation order: use history does not survive a restart. |
 | `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 1 MiB pinned buffer; checkpoints of any size stream through it. Its size did not change restore or write speed (#562), and a larger value only took pinned RAM and device heap. Earlier advice to raise staging no longer applies. |
-| `--cache-disk DIR` | Owned by one Flash-Next server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory. Other models do not take this lock. Startup removes earlier-release `*.kvc` and `.tmp-*` files from the directory, including those of another model's server sharing it. |
+| `--cache-disk DIR` | Owned by one Qwen27B or Flash-Next server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory. Other models do not take this lock. Startup removes earlier-release `*.kvc` and `.tmp-*` files from the directory, including those of another model's server sharing it. |
 
-The 128-record limit stays internal. Each checkpoint holds about 132 MB of
+The 128-record limit stays internal. The following measured sizes and timings
+are Flash-Next evidence; Qwen27B qualification is recorded in its model card.
+Each Flash-Next checkpoint holds about 132 MB of
 private state, so below a budget of about 19 GB that state caps the checkpoint
 count under 128; only larger explicit budgets can reach the record limit. The startup line
 `schema=component-cache-v1 event=configured` reports `capacity_bytes`,
@@ -433,6 +447,25 @@ Flash-Next prepares a bounded two-segment reserve before readiness and can
 prepare the next segment before a prefill with at least 512 tokens remaining
 or when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative
 growth; a capture still commits any backing it needs.
+
+Backing excludes transparent huge pages before population and attempts a Linux
+long-term page pin before GPU registration. GPU registration alone leaves
+anonymous pages movable: ordinary memory compaction can invalidate their GPU
+mappings and pause the process's queues. Registered `io_uring` buffers supply
+the extra pin without submitting I/O or running polling threads. Their
+lifetime follows the backing, including blocks that outlive the pool facade;
+cleanup unregisters the GPU mapping and releases the pin before unmapping.
+If `io_uring` or the process's memory-lock limit refuses the pin, the existing
+registered base-page path remains available with the same cache capacity.
+`event=backing_prepared` and `event=backing_grown` report
+`long_term_pinned_bytes` alongside committed bytes, making that fallback visible.
+
+Container seccomp profiles may block `io_uring_setup` and `io_uring_register`.
+An unlimited `memlock` setting alone does not enable them. Check the pin-byte
+counter inside the running container: zero means the extra migration protection
+is unavailable. Enabling it requires allowing these two calls in the
+operator-managed syscall policy; `io_uring_enter` is not used. The registered
+base-page fallback remains compatible with restrictive container policies.
 
 A step of about 1 GiB took 56–58 ms on the capturing thread while the host had
 free pages **(measured)**. Captures run on the scheduler thread, so concurrent

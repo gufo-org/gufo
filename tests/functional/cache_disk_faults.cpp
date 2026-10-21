@@ -10,6 +10,22 @@
 #include <cstring>
 #include <string>
 
+namespace {
+bool MatchesManifest(int descriptor) {
+  if (std::getenv("GUFO_TEST_DISK_MANIFEST_ONLY") == nullptr)
+    return true;
+  char path[64]{};
+  std::snprintf(path, sizeof(path), "/proc/self/fd/%d", descriptor);
+  const int input = open(path, O_RDONLY | O_CLOEXEC);
+  if (input < 0)
+    return false;
+  char magic[8]{};
+  const auto count = pread(input, magic, sizeof(magic), 0);
+  close(input);
+  return count == 8 && std::memcmp(magic, "GUFOMNF2", 8) == 0;
+}
+}  // namespace
+
 extern "C" int fsync(int descriptor) {
   using Function = int (*)(int);
   static const auto original =
@@ -31,7 +47,7 @@ extern "C" int fsync(int descriptor) {
         S_ISREG(status.st_mode) &&
         std::strncmp(filename, root.c_str(), root.size()) == 0 &&
         access((control + "/armed").c_str(), F_OK) == 0 &&
-        !held.exchange(true)) {
+        MatchesManifest(descriptor) && !held.exchange(true)) {
       const int marker = open((control + "/blocked").c_str(),
                               O_WRONLY | O_CREAT | O_EXCL, 0600);
       if (marker >= 0) {
@@ -43,7 +59,8 @@ extern "C" int fsync(int descriptor) {
           return original(descriptor);
         }
         // The harness releases this gate or kills only its own child process.
-        for (unsigned attempt = 0; attempt < 120000; ++attempt) {
+        // Publication-wait controls hold beyond the scheduler's 120s ceiling.
+        for (unsigned attempt = 0; attempt < 300000; ++attempt) {
           if (access((control + "/release").c_str(), F_OK) == 0)
             break;
           usleep(1000);

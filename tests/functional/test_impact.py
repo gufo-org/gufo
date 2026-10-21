@@ -98,6 +98,50 @@ class ImpactTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             impact.plan(self.manifest, paths, ["flash-next-q4/typo"])
 
+    def test_pr_tier_defers_release_suites_unless_escalated(self):
+        mtp = ["flash-next-q4/mtp"]
+        full = impact.plan(self.manifest, ["src/cli/serve/openai_chat.cpp"], mtp)
+        pr = impact.plan(self.manifest, ["src/cli/serve/openai_chat.cpp"], mtp, "pr")
+        self.assertEqual((full["tier"], pr["tier"]), ("full", "pr"))
+        self.assertFalse(full["release_only"])
+        deferred = {row["suite"] for row in pr["release_only"]}
+        self.assertLessEqual({"cache-stalls", "cache-depth", "reasoning-budget"}, deferred)
+        self.assertEqual({group["configuration"] for group in pr["groups"]}, {"standard"})
+        self.assertEqual({row["suite"] for row in full["selected"]},
+                         deferred | {row["suite"] for row in pr["selected"]})
+        # Cache code escalates the deep cache suites; model kernels escalate depth only.
+        cache = impact.plan(self.manifest, ["src/cache/ledger.cpp"], mtp, "pr")
+        self.assertNotIn("cache-stalls", {row["suite"] for row in cache["release_only"]})
+        stalls = next(row for row in cache["selected"] if row["suite"] == "cache-stalls")
+        self.assertEqual(stalls["escalated_by"], ["src/cache/ledger.cpp"])
+        kernel = impact.plan(self.manifest, ["src/models/qwen38_flash_next/engine.cpp"], mtp, "pr")
+        names = {row["suite"] for row in kernel["selected"]}
+        self.assertIn("cache-depth", names)
+        self.assertNotIn("cache-stalls", names)
+        # Editing a release suite runs it.
+        own = impact.plan(self.manifest, ["tests/functional/cache_stalls.py"], mtp, "pr")
+        self.assertIn("cache-stalls", {row["suite"] for row in own["selected"]})
+        with self.assertRaises(ValueError):
+            impact.plan(self.manifest, [], mtp, "nightly")
+        broken = copy.deepcopy(self.manifest)
+        broken["suites"]["discovery"]["escalate"] = ["src/**"]
+        with self.assertRaises(ValueError):
+            impact.validate(broken, impact.suite_names(HERE / "run.py"))
+
+    def test_executor_passes_the_plan_tier(self):
+        plan = impact.plan(self.manifest, ["src/cli/serve/openai_chat.cpp"],
+                           ["flash-next-q4/mtp"], "pr")
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {}, clear=True):
+            output = Path(directory) / "results"
+            with patch("cluster.subprocess.run",
+                       return_value=subprocess.CompletedProcess([], 0)):
+                self.assertEqual(cluster.execute(plan, Path("/binary"), Path("/weights"), output), 0)
+            report = json.loads((output / "summary.json").read_text())
+        self.assertEqual(report["tier"], "pr")
+        self.assertTrue(report["release_only"])
+        args = report["groups"][0]["command"]
+        self.assertEqual(args[args.index("--tier") + 1], "pr")
+
     def test_executor_retains_failed_groups_and_runs_both_modes(self):
         plan = impact.plan(self.manifest, ["src/models/qwen38_flash_next/engine.cpp"], ["flash-next-q4"])
         with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {}, clear=True):

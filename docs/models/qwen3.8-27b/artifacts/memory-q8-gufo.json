@@ -14,15 +14,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "memoryTotalBytes": 134309875712,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "fe5929d418cfe1f7e3aa4a09199012c1fa064859f1fc762a8cbcda970358f158",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-23",
+  "measuredOn": "2026-10-19",
   "mode": null,
   "model": {
     "id": "Qwen3.8-27B",
@@ -35,13 +35,13 @@
   "referenceName": "llama.cpp",
   "rows": {
     "16K prefix, pp4096 + tg128": {
-      "command": "gufo serve --port 45631 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 52.83,
+      "command": "gufo serve --port 37977 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 63.22,
       "idle_gib": 2.38
     },
     "pp2048 + tg128": {
-      "command": "gufo serve --port 45631 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 50.58,
+      "command": "gufo serve --port 37977 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 53.15,
       "idle_gib": 2.38
     }
   },
@@ -51,7 +51,7 @@
       "gufo",
       "serve",
       "--port",
-      "45631",
+      "37977",
       "--sessions",
       "1",
       "llm",
@@ -70,7 +70,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "628ed18ee92a973d5026b33644d9cb906116ff9d"
+    "revision": "11813e51150b1b6f990f57a9fc1b62b8bce494d2"
   },
   "table": "memory-q8",
   "target": "gufo"

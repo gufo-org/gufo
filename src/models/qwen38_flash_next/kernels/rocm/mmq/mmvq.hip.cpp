@@ -682,6 +682,16 @@ static void launch_q8_matrix(const void* weights, const block_q8_1* input,
             input_stride, tokens);
 }
 
+int prepare_q8_decode() {
+  hipFuncAttributes attributes{};
+  return hipFuncGetAttributes(
+             &attributes,
+             reinterpret_cast<const void*>(mul_mat_vec_q8<1, false>)) ==
+                 hipSuccess
+             ? 0
+             : -2;
+}
+
 void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                              const block_q8_1* input, float* output, int k,
                              int rows, int tokens, int input_stride,

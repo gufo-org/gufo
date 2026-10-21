@@ -259,6 +259,15 @@ std::optional<std::size_t> ParseContentLength(const HttpRequest& request) {
   return length.value_or(0);
 }
 
+/// RFC 9110 10.1.1: a client that sends "Expect: 100-continue" (curl does for
+/// bodies over 1 MiB) waits for an interim 100 response before the body.
+bool ExpectsContinue(const HttpRequest& request) {
+  return std::ranges::any_of(request.headers, [](const auto& header) {
+    return ToLower(header.first) == "expect" &&
+           ToLower(header.second) == "100-continue";
+  });
+}
+
 std::string CredentialHash(std::string_view value) {
   return crypto::Sha256Hex(std::span(
       reinterpret_cast<const std::uint8_t*>(value.data()), value.size()));
@@ -1146,8 +1155,9 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
 }
 
 // Messages selects reasoning with thinking.type; adaptive leaves the choice to
-// the server's default. budget_tokens has no native equivalent, so enabled
-// thinking keeps the server's effort unless output_config.effort sets it.
+// the server's default. With enabled thinking, budget_tokens caps the
+// reasoning tokens, as llama.cpp does; enabled thinking keeps the server's
+// effort unless output_config.effort sets it.
 // Reasoning is returned for every display, because replayed thinking blocks
 // restore the cached thought.
 std::optional<HttpResponse> ReadThinking(const json::Value& body,
@@ -1163,10 +1173,15 @@ std::optional<HttpResponse> ReadThinking(const json::Value& body,
         "'thinking.type' must be enabled, adaptive, or disabled");
   if (const auto* budget = thinking->find("budget_tokens");
       budget != nullptr &&
-      (!budget->is_number() || budget->as_double() < 1 ||
+      (!budget->is_number() || !std::isfinite(budget->as_double()) ||
+       budget->as_double() < 1 ||
+       budget->as_double() > std::numeric_limits<std::int32_t>::max() ||
        std::floor(budget->as_double()) != budget->as_double()))
     return InvalidCompatibilityRequest(
-        "'thinking.budget_tokens' must be a positive integer");
+        "'thinking.budget_tokens' must be a positive integer at most "
+        "2147483647");
+  else if (budget != nullptr && type->str() == "enabled")
+    reasoning->budget_tokens = static_cast<std::size_t>(budget->as_double());
   if (const auto* display = thinking->find("display");
       display != nullptr &&
       (!display->is_string() ||
@@ -1382,17 +1397,58 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
              "invalid_prompt");
 }
 
-HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend&) {
-  const std::string model = req.query_param("model");
-  if (model.empty()) {
-    return Err(400, "Bad Request", "'model' query parameter is required",
-               "invalid_request_error", "missing_model");
-  }
+/// llama-server props for a single-model server: what it runs, so a client
+/// can record which model, build and settings answered it. `?model=` is
+/// accepted and not required, as in llama-server outside router mode. Fields
+/// the backend does not report are omitted rather than sent as zero.
+HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
+  const std::string requested = req.query_param("model");
   json::Value resp = json::Value::object();
-  resp["model"] = model;
+  resp["model"] = requested.empty() ? b.model_id() : requested;
+  resp["model_alias"] = b.model_id();
   resp["template"] = "";
-  json::Value model_info = json::Value::object();
-  resp["model_info"] = std::move(model_info);
+  resp["model_info"] = json::Value::object();
+  if (auto path = b.model_path(); !path.empty()) {
+    resp["model_path"] = std::move(path);
+  }
+  if (auto build = b.build_info(); !build.empty()) {
+    resp["build_info"] = std::move(build);
+  }
+  if (const auto sessions = b.session_states().size(); sessions > 0) {
+    resp["total_slots"] = sessions;
+  }
+
+  // What a request without sampling fields gets.
+  const auto defaults = b.sampling_defaults();
+  const auto sampling = defaults.Resolve(b.reasoning_defaults().enabled);
+  json::Value params = json::Value::object();
+  params["temperature"] = static_cast<double>(sampling.temperature);
+  params["top_k"] = static_cast<int>(sampling.top_k);
+  params["top_p"] = static_cast<double>(sampling.top_p);
+  params["min_p"] = static_cast<double>(sampling.min_p);
+  params["seed"] = static_cast<long long>(sampling.seed);
+  params["repeat_penalty"] = static_cast<double>(sampling.repeat_penalty);
+  params["repeat_last_n"] = sampling.repeat_last_n;
+  params["frequency_penalty"] = static_cast<double>(sampling.frequency_penalty);
+  params["presence_penalty"] = static_cast<double>(sampling.presence_penalty);
+  // -1 means no default limit, as in llama-server, which reports both keys.
+  const auto n_predict = defaults.max_tokens > 0
+                             ? static_cast<std::int64_t>(defaults.max_tokens)
+                             : std::int64_t{-1};
+  params["max_tokens"] = n_predict;
+  params["n_predict"] = n_predict;
+  json::Value generation = json::Value::object();
+  if (const std::size_t context = b.max_context(); context > 0) {
+    generation["n_ctx"] = context;
+  }
+  generation["params"] = std::move(params);
+  resp["default_generation_settings"] = std::move(generation);
+
+  json::Value modalities = json::Value::object();
+  modalities["vision"] = b.supports_images();
+  modalities["video"] = false;
+  modalities["audio"] = false;
+  resp["modalities"] = std::move(modalities);
   return Ok(resp);
 }
 
@@ -1501,6 +1557,17 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
       << "# TYPE llamacpp:spec_decode_num_accepted_tokens_total counter\n"
       << "llamacpp:spec_decode_num_accepted_tokens_total "
       << detail::TotalDraftAcceptedTokens().load(std::memory_order_relaxed)
+      << "\n"
+      << "# HELP gufo_spec_lookup_tokens_total Total prompt-lookup copies "
+         "proposed\n"
+      << "# TYPE gufo_spec_lookup_tokens_total counter\n"
+      << "gufo_spec_lookup_tokens_total "
+      << detail::TotalLookupTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP gufo_spec_lookup_accepted_tokens_total Total prompt-lookup "
+         "copies accepted\n"
+      << "# TYPE gufo_spec_lookup_accepted_tokens_total counter\n"
+      << "gufo_spec_lookup_accepted_tokens_total "
+      << detail::TotalLookupAcceptedTokens().load(std::memory_order_relaxed)
       << "\n"
       << "# HELP llamacpp:prompt_tokens_seconds Prompt processing speed in "
          "tokens per second\n"
@@ -2214,7 +2281,10 @@ void HttpServer::handle_connection(int client_fd) {
           payload_too_large = true;
         } else if (content_length > 0) {
           if (remaining > 0) {
-            ok = ReadN(body, client_fd, remaining);
+            // A HTTP/1.0 request's expectation is ignored (RFC 9110 10.1.1).
+            ok = (!http11 || !ExpectsContinue(req) ||
+                  SendAll(client_fd, "HTTP/1.1 100 Continue\r\n\r\n")) &&
+                 ReadN(body, client_fd, remaining);
           } else {
             ok = true;
           }

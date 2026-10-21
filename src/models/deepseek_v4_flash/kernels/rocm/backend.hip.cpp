@@ -44,6 +44,7 @@ extern "C" int ds4_hip_q8_fold_take_q81(
 #include <vector>
 
 #include "resident_api.h"
+#include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/weight_upload.hpp"
 
 #ifndef M_PI

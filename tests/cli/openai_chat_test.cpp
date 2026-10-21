@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -730,6 +731,58 @@ void TestInvalidToolsFailBeforeGeneration() {
       }
     }
   }
+}
+
+void TestResponsesToolStrictness() {
+  // llama.cpp retains the parameter schema for omitted/null strictness. Pi
+  // omits strict, so optional arguments must remain optional on that path too.
+  for (const bool namespaced : {false, true}) {
+    for (const std::string strict : {"omitted", "null", "false", "true"}) {
+      auto tool = gufo::json::parse(R"({
+        "type":"function","name":"todo","parameters":{"type":"object",
+          "properties":{"action":{"type":"string"},"status":{"type":"string"},
+            "id":{"type":"integer"}},"required":["action"],
+          "additionalProperties":false}})");
+      if (strict != "omitted")
+        tool["strict"] = gufo::json::parse(strict);
+      if (strict == "true")
+        tool["parameters"]["required"] =
+            gufo::json::parse(R"(["action","status","id"])");
+      auto body = gufo::json::parse(R"({"tools":[]})");
+      if (namespaced) {
+        auto group = gufo::json::parse(
+            R"({"type":"namespace","name":"tasks","tools":[]})");
+        group["tools"].push_back(tool);
+        body["tools"].push_back(std::move(group));
+      } else {
+        body["tools"].push_back(tool);
+      }
+      gufo::server::ChatRequest chat;
+      Expect(
+          !gufo::server::ParseOpenAiResponseControls(body, &chat) &&
+              chat.tools.size() == 1 && chat.constrained_tools,
+          "Responses accepts each tool strictness without disabling grammar");
+      auto expected = gufo::json::Value::object();
+      for (const auto& [key, value] : tool.members())
+        if (key != "type")
+          expected.append_member(key, value);
+      const auto definition =
+          gufo::json::parse(chat.tools.front().definition_json);
+      Expect(definition.find("function")->dump() == expected.dump() &&
+                 chat.tools.front().parameters_json ==
+                     expected.find("parameters")->dump(),
+             "Responses preserves the supplied schema for every strictness");
+    }
+  }
+  gufo::server::ChatRequest invalid;
+  Expect(gufo::server::ParseOpenAiResponseControls(
+             gufo::json::parse(R"({"tools":[{"type":"function","name":"todo",
+               "strict":true,"parameters":{"type":"object","properties":{
+                 "id":{"type":"integer"}},"required":[],
+               "additionalProperties":false}}]})"),
+             &invalid)
+             .has_value(),
+         "Explicit strict true still rejects optional fields");
 }
 
 void TestResponsesClientCompatTolerances() {
@@ -6139,6 +6192,84 @@ void TestIncrementalToolArguments() {
       }
 }
 
+void TestParallelCallSeparatorIsNotContent() {
+  // Qwen writes a newline between parallel calls and may end with one. That
+  // layout is not a reply: the turn has null content, as with one call (#673).
+  const std::string alpha =
+      "<tool_call>\n<function=get_alpha>\n</function>\n</tool_call>";
+  const std::string beta =
+      "<tool_call>\n<function=get_beta>\n</function>\n</tool_call>";
+  for (const bool thinking : {false, true})
+    for (const bool stream : {false, true})
+      for (const bool constrained : {false, true})
+        for (const std::string separator : {"\n", "\n\n", " \n"}) {
+          auto body = gufo::json::parse(R"({
+            "model":"test-model","messages":[{"role":"user","content":"both"}],
+            "parallel_tool_calls":true,"tool_choice":"auto",
+            "tools":[{"type":"function","function":{"name":"get_alpha",
+              "parameters":{"type":"object","properties":{}}}},
+             {"type":"function","function":{"name":"get_beta",
+              "parameters":{"type":"object","properties":{}}}}]})");
+          body["stream"] = stream;
+          body["chat_template_kwargs"]["enable_thinking"] = thinking;
+          FakeBackend backend;
+          if (constrained)
+            backend.tool_format =
+                gufo::sampling::JsonConstraint::ToolFormat::kQwen;
+          const std::string raw = (thinking ? "Plan.</think>\n\n" : "") +
+                                  alpha + separator + beta + "\n";
+          for (char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+          const auto response =
+              gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          std::string content;
+          std::set<std::string> names;
+          bool null_content = false;
+          if (stream) {
+            response.streaming_body([&](std::string_view chunk) {
+              if (chunk == "data: [DONE]\n\n")
+                return true;
+              const auto event = gufo::json::parse(chunk.substr(6));
+              for (const auto& choice : event.find("choices")->items())
+                if (const auto* delta = choice.find("delta")) {
+                  content += delta->member_str("content");
+                  if (const auto* calls = delta->find("tool_calls"))
+                    for (const auto& call : calls->items())
+                      if (const auto* function = call.find("function"))
+                        if (!function->member_str("name").empty())
+                          names.insert(function->member_str("name"));
+                }
+              return true;
+            });
+          } else {
+            const auto parsed = gufo::json::parse(response.body);
+            const auto& message =
+                *parsed.find("choices")->items()[0].find("message");
+            null_content = message.find("content")->is_null();
+            for (const auto& call : message.find("tool_calls")->items())
+              names.insert(call.find("function")->member_str("name"));
+          }
+          Expect(names == std::set<std::string>{"get_alpha", "get_beta"},
+                 "both parallel calls are returned");
+          Expect(stream ? content.empty() : null_content,
+                 "whitespace between parallel calls is not content");
+        }
+  // Responses and Messages share the parser; neither reports a text item.
+  const std::string noop =
+      "<tool_call>\n<function=noop>\n</function>\n</tool_call>";
+  std::vector<std::string> pieces;
+  for (char byte : noop + "\n" + noop + "\n")
+    pieces.emplace_back(1, byte);
+  for (const int api : {1, 2})
+    for (const bool stream : {false, true}) {
+      const auto out = ToolBoundaryRequest(
+          pieces, gufo::sampling::JsonConstraint::ToolFormat::kQwen, api,
+          stream);
+      Expect(!out.failed && out.names.size() == 2 && out.content.empty(),
+             "Responses and Messages omit whitespace between parallel calls");
+    }
+}
+
 int main() {
   TestToolCallRenderParseRoundTrip();
   TestToolTagBoundaries();
@@ -6159,6 +6290,7 @@ int main() {
   TestStopInsideToolArguments();
   TestResponsesOutput();
   TestNativeToolTransports();
+  TestParallelCallSeparatorIsNotContent();
   TestJsonToolStringOwnership();
   TestNativeToolDialectSelection();
   TestNativeToolTextOutsideEnvelopes();
@@ -6192,6 +6324,7 @@ int main() {
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
   TestInvalidToolsFailBeforeGeneration();
+  TestResponsesToolStrictness();
   TestResponsesClientCompatTolerances();
   TestMidConversationSystemMessagesKeepOrder();
   TestToolNameCharacters();

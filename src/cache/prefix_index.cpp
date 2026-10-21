@@ -754,6 +754,33 @@ PrefixLookup PrefixIndex::Lookup(const PrefixQuery& query) const {
                       : SelectionReason::kDeepestCheckpoint;
   return result;
 }
+bool PrefixIndex::HasCheckpoint(const PrefixQuery& query,
+                                Rows minimum_boundary) const {
+  if (query.input.TokenCount() != query.tokens.size())
+    throw std::invalid_argument("invalid checkpoint presence input");
+  if (minimum_boundary > query.tokens.size())
+    return false;
+  const auto it = impl_->trees.find(query.compatibility);
+  if (it == impl_->trees.end())
+    return false;
+  const auto& tree = it->second;
+  bool found = false;
+  impl_->Path(tree, query.tokens, [&](const auto& node) {
+    if (found)
+      return;
+    for (const auto& [id, record] : node.records) {
+      (void)id;
+      if (!record.live && record.Boundary() >= minimum_boundary &&
+          std::ranges::equal(record.Input(),
+                             query.input.At(record.Boundary())) &&
+          impl_->Candidate(tree, record)) {
+        found = true;
+        break;
+      }
+    }
+  });
+  return found;
+}
 bool PrefixIndex::IsResidentCoherent(const Checkpoint& checkpoint) const {
   const auto it = impl_->trees.find(checkpoint.Compatibility());
   return it != impl_->trees.end() &&

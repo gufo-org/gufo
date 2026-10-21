@@ -100,6 +100,25 @@ void CheckLengthController() {
           "conditional acceptance by depth was collapsed to one probability");
 }
 
+void CheckOccupancyOverride() {
+  // About half of the first drafts are accepted: one draft pays for itself at
+  // the C1 cost row but not at C8, where a lone request would fall back to AR.
+  qfn::MtpLengthController configured_8(7, 8), configured_1(7, 1), lone(7, 8);
+  for (unsigned i = 0; i < 12; ++i) {
+    const unsigned accepted = i % 2;
+    configured_8.Observe(accepted, 1);
+    configured_1.Observe(accepted, 1);
+    lone.Observe(accepted, 1, 0, 1);
+  }
+  Require(configured_8.Choose(7) == 0 && configured_1.Choose(7) > 0,
+          "the C8 cost row did not price out a half-accepted draft");
+  for (unsigned budget = 0; budget <= 8; ++budget) {
+    Require(lone.Choose(budget, 0, 1) == configured_1.Choose(budget),
+            "an occupancy override did not price like a configured lone "
+            "decoder");
+  }
+}
+
 void CheckCompactProposals() {
   const std::array<float, 5> target_logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
   const std::array<sampling::TokenId, 4> history{2, 3, 2, 0};
@@ -250,6 +269,35 @@ void CheckBatchProfitability() {
   policy.Observe(2, 0, 3, 2000.0F);
   Require(policy.Choose(rows, 0) == 3,
           "a width transition charged the preceding chain to the new width");
+  policy.SkipCycle();  // A copy replaced the neural draft work.
+  policy.Observe(2, 0, 3, 100000.0F);
+  Require(policy.Choose(rows, 0) == 3,
+          "lookup catch-up contaminated the neural width estimate");
+  // Copies can leave the physical batch with an AR cost but no measured
+  // neural widths. Repeatedly widening probes never measures a steady cost:
+  // Observe correctly discards every transition's preceding catch-up work.
+  qfn::MtpBatchController after_copy;
+  for (unsigned i = 0; i < 3; ++i)
+    after_copy.Observe(2, 0, 0, 50.0F);
+  for (unsigned i = 0; i < 3; ++i) {
+    Require(after_copy.Choose(rows, 0) == 1,
+            "unmeasured batch widened before qualifying its cheapest draft");
+    after_copy.Observe(2, 0, 1, 1000.0F);
+  }
+  Require(after_copy.Choose(rows, 0) > 1,
+          "qualifying one draft permanently capped speculative width");
+  qfn::MtpLengthController rising_a(7), rising_b(7);
+  rising_a.Observe(4, 4);
+  rising_b.Observe(4, 4);
+  const std::array<qfn::MtpBatchController::Row, 2> rising{
+      {{&rising_a, 7}, {&rising_b, 7}}};
+  qfn::MtpBatchController measured;
+  for (unsigned i = 0; i < 3; ++i)
+    measured.Observe(2, 0, 0, 50.0F);
+  for (unsigned i = 0; i < 3; ++i)
+    measured.Observe(2, 0, 1, 10.0F);
+  Require(measured.Choose(rising, 0) == 1,
+          "acceptance probe ignored a cheaper measured batch width");
   rows[1].budget = 1;
   Require(policy.Choose(rows, 0) <= 1, "batch exceeded one member's budget");
   policy.Observe(2, 0, 0, std::numeric_limits<float>::quiet_NaN());
@@ -277,6 +325,33 @@ void CheckSampledOutputFrequencies() {
       Require(std::abs(double(counts[token]) / trials - p.probability(token)) <
                   0.008,
               "proposal and correction draws distort target frequencies");
+    }
+  }
+}
+
+// Prompt lookup proposes copied tokens as point masses. Whatever token is
+// copied, verification must reproduce the target frequencies: accept with
+// p(token), else resample from p without it.
+void CheckPointMassFrequencies() {
+  const std::array<float, 5> logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
+  constexpr unsigned trials = 100000;
+  for (const float temperature : {0.7F, 1.0F}) {
+    sampling::SamplerState sampler({.temperature = temperature, .seed = 29});
+    const auto p = sampler.Distribution(logits);
+    for (const sampling::TokenId copied : {2U, 4U}) {
+      qfn::MtpProposal proposal;
+      proposal.size = 1;
+      proposal.ids[0] = proposal.token = copied;
+      proposal.probabilities[0] = proposal.probability = 1;
+      std::array<unsigned, 5> counts{};
+      for (unsigned trial = 0; trial < trials; ++trial) {
+        ++counts[qfn::VerifyMtpProposal(logits, proposal, sampler).token];
+      }
+      for (unsigned token = 0; token < counts.size(); ++token) {
+        Require(std::abs(double(counts[token]) / trials -
+                         p.probability(token)) < 0.008,
+                "point-mass proposals distort target frequencies");
+      }
     }
   }
 }
@@ -334,10 +409,12 @@ int main() {
   try {
     CheckVerificationBoundaries();
     CheckLengthController();
+    CheckOccupancyOverride();
     CheckCalibratedCosts();
     CheckBatchProfitability();
     CheckCompactProposals();
     CheckSampledOutputFrequencies();
+    CheckPointMassFrequencies();
     const std::array<float, 5> logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
     const std::array<sampling::TokenId, 4> history{2, 3, 2, 0};
     for (const auto& test : gufo::test::QwenSamplingCases()) {

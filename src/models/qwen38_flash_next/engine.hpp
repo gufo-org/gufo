@@ -19,6 +19,8 @@
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
+#include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
 class GgufReader;
@@ -28,7 +30,6 @@ namespace gufo::models::qwen38_flash_next {
 
 struct ModelWeights;
 struct MtpWeights;
-class NgramTable;
 struct MtpCandidateLogits;
 class ContinuationAdapter;
 class ContinuationHooks;
@@ -163,15 +164,19 @@ public:
   };
   /// Greedy decoding verifies deterministic drafts. Sampled decoding draws
   /// compact MTP proposals and uses target/draft rejection with a residual
-  /// correction. History contains only committed tokens; stochastic RNG
-  /// consumption includes proposal and verification draws. A
+  /// correction. Prompt lookup appends copied tokens to the chain as
+  /// point-mass proposals. History contains only committed tokens; stochastic
+  /// RNG consumption includes proposal and verification draws. A
   /// one-token budget or a model without MTP uses ordinary decoding.
   /// Benchmarks may continue past EOS by setting stop_at_eos to false.
+  /// A greedy step prices its drafts as one of `occupancy` decoding requests,
+  /// as DecodeBatch does for an unplanned cohort of that width.
   [[nodiscard]] bool DecodeStep(std::size_t max_tokens,
                                 sampling::SamplerState& sampler,
                                 DecodeResult* result,
                                 std::string* error_msg = nullptr,
-                                bool stop_at_eos = true);
+                                bool stop_at_eos = true,
+                                std::uint32_t occupancy = 1);
   struct BatchOutcome {
     bool completed{false};
     std::string error{};
@@ -220,10 +225,16 @@ public:
     std::uint64_t accepted{0};
     /// Cycles whose draft scored the small head (draft_vocab.hpp).
     std::uint64_t small_head_cycles{0};
+    /// Of drafted/accepted: proposals copied by prompt lookup.
+    std::uint64_t lookup{0};
+    std::uint64_t lookup_accepted{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
   }
+  /// PLE rows gathered by this execution slot since creation; zero without
+  /// a PLE table.
+  [[nodiscard]] NgramTotals NgramRowTotals() const noexcept;
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
   static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
@@ -253,6 +264,7 @@ private:
   friend class Model;
   friend class ContinuationAdapter;
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
+  void ResetImpl(bool reuse_mtp);
 
   using PrefillCapture = std::function<void(const rocm::PrefillCheckpoint&)>;
   bool SyncThroughComponents(std::span<const std::int32_t>, std::uint32_t,
@@ -297,8 +309,12 @@ private:
   struct PendingDecode;
   bool PrepareDecode(const DecodeRequest& request, PendingDecode* pending,
                      std::string* error_msg, bool defer_head = false,
-                     std::optional<std::uint32_t> batch_drafts = {});
+                     std::optional<std::uint32_t> batch_drafts = {},
+                     std::uint32_t occupancy = 1);
   static void AppendDraft(PendingDecode& pending);
+  /// Appends copies within the prepared budget, stopping at EOG when enabled.
+  bool AppendLookup(PendingDecode& pending, bool stop_at_eos,
+                    std::size_t minimum = 1);
   bool FinishDecode(const DecodeRequest& request, const PendingDecode& pending,
                     std::string* error_msg);
 
@@ -310,6 +326,8 @@ private:
   std::vector<float> verify_logits_;
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
+  /// Index of tokens_ for prompt lookup (single-session MTP drafts).
+  PromptLookup lookup_;
   SpeculativeStats stats_;
   std::shared_ptr<const qwen::vision::Prompt> image_prompt_;
   [[nodiscard]] std::span<const std::uint8_t> ImageIdentity(

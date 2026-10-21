@@ -59,7 +59,11 @@ __global__ void BatchedSSMConvKernel(const float* __restrict__ qkv_in,
   conv_out[(t * qkv_dim) + c] = dot * sig;
 }
 
-template<detail::QwenRecurrentStateElement StateT>
+// A `Diverge` pass reads the conv history and state tile from the buffers
+// pinned for rollback (`conv_in`, `deltanet_in`) and writes the other pair; in
+// place, the `*_in` pointers are unused and the single restrict pointers keep
+// today's aliasing contract and code.
+template<detail::QwenRecurrentStateElement StateT, bool Diverge>
 __global__ void BatchedDeltaNetRecurrenceKernel(
     const float* __restrict__ qkv_in, float* __restrict__ conv_state,
     const float* __restrict__ conv_out, StateT* __restrict__ deltanet_state,
@@ -67,24 +71,29 @@ __global__ void BatchedDeltaNetRecurrenceKernel(
     const float* __restrict__ ssm_a, const float* __restrict__ ssm_dt,
     float* __restrict__ raw_out, std::uint32_t layer_idx,
     std::size_t batch_size, std::size_t qkv_size, std::uint32_t num_key_heads,
-    std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim) {
+    std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim,
+    const float* __restrict__ conv_in, const StateT* __restrict__ deltanet_in) {
   const std::uint32_t h = blockIdx.x;
   if (h >= num_heads) {
     return;
   }
+  const float* conv_history = Diverge ? conv_in : conv_state;
+  const StateT* state_in = Diverge ? deltanet_in : deltanet_state;
 
   const std::size_t tid = threadIdx.x;
   for (std::size_t c = (static_cast<std::size_t>(h) * blockDim.x) + tid;
        c < qkv_size; c += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
-    detail::StoreSSMConvHistory(qkv_in, conv_state, c, batch_size, qkv_size);
+    detail::StoreSSMConvHistory(qkv_in, conv_history, conv_state, c, batch_size,
+                                qkv_size);
   }
   const std::size_t lane_id = tid & 31u;
   const std::size_t warp_id = tid >> 5u;
   const std::uint32_t kh_idx = h % num_key_heads;
 
-  StateT* s_matrix =
-      deltanet_state + ((static_cast<std::size_t>(layer_idx) * num_heads + h) *
-                        key_dim * val_dim);
+  const std::size_t head_offset =
+      (static_cast<std::size_t>(layer_idx) * num_heads + h) * key_dim * val_dim;
+  const StateT* s_matrix_in = state_in + head_offset;
+  StateT* s_matrix = deltanet_state + head_offset;
 
   const float dt = (ssm_dt != nullptr) ? ssm_dt[h] : 0.0F;
   const float a_val = (ssm_a != nullptr) ? ssm_a[h] : -0.05F;
@@ -107,7 +116,7 @@ __global__ void BatchedDeltaNetRecurrenceKernel(
 
   float4 s_reg[row_vectors_per_thread];
   if (j < val_dim) {
-    const StateT* s_row = s_matrix + (j * key_dim) + row_offset;
+    const StateT* s_row = s_matrix_in + (j * key_dim) + row_offset;
 #pragma unroll
     for (std::size_t vi = 0; vi < row_vectors_per_thread; ++vi) {
       s_reg[vi] = detail::LoadRecurrentState4(s_row, vi);
@@ -253,37 +262,45 @@ __global__ void BatchedDeltaNetRecurrenceKernel(
 }
 
 void LaunchBatchedSSMConvRecurrence(
-    const float* qkv_in, const float* conv_weights, float* conv_state,
-    float* conv_out, void* deltanet_state, const float* alpha_buf,
-    const float* beta_buf, const float* ssm_a, const float* ssm_dt,
-    const float* ssm_norm, const float* gate, float* out_buf,
-    std::uint32_t layer_idx, std::size_t batch_size, std::size_t qkv_size,
-    std::uint32_t num_key_heads, std::uint32_t num_heads, std::uint32_t key_dim,
-    std::uint32_t val_dim, hipStream_t stream,
-    QwenRecurrentStateStorage state_storage) {
+    const float* qkv_in, const float* conv_weights, QwenRecurrentStateIo state,
+    float* conv_out, const float* alpha_buf, const float* beta_buf,
+    const float* ssm_a, const float* ssm_dt, const float* ssm_norm,
+    const float* gate, float* out_buf, std::uint32_t layer_idx,
+    std::size_t batch_size, std::size_t qkv_size, std::uint32_t num_key_heads,
+    std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim,
+    hipStream_t stream, QwenRecurrentStateStorage state_storage) {
   const std::size_t block_size = 256;
   const std::size_t grid_x = (qkv_size + block_size - 1) / block_size;
   const dim3 conv_grid(static_cast<unsigned int>(grid_x),
                        static_cast<unsigned int>(batch_size));
-  float* conv_layer_state =
-      conv_state + (static_cast<std::size_t>(layer_idx) * qkv_size * 4);
+  const std::size_t conv_layer_offset =
+      static_cast<std::size_t>(layer_idx) * qkv_size * 4;
+  const float* conv_layer_in = state.conv_in + conv_layer_offset;
+  float* conv_layer_state = state.conv_out + conv_layer_offset;
 
   BatchedSSMConvKernel<<<conv_grid, static_cast<unsigned int>(block_size), 0,
-                         stream>>>(qkv_in, conv_weights, conv_layer_state,
+                         stream>>>(qkv_in, conv_weights, conv_layer_in,
                                    conv_out, batch_size, qkv_size);
 
+  const auto launch = [&]<typename StateT, bool Diverge>() {
+    BatchedDeltaNetRecurrenceKernel<StateT, Diverge>
+        <<<num_heads, 256, 0, stream>>>(
+            qkv_in, conv_layer_state, conv_out,
+            static_cast<StateT*>(state.recurrent_out), alpha_buf, beta_buf,
+            ssm_a, ssm_dt, out_buf, layer_idx, batch_size, qkv_size,
+            num_key_heads, num_heads, key_dim, val_dim, conv_layer_in,
+            static_cast<const StateT*>(state.recurrent_in));
+  };
+  const auto launch_diverge = [&]<typename StateT>() {
+    if (state.Diverges())
+      launch.template operator()<StateT, true>();
+    else
+      launch.template operator()<StateT, false>();
+  };
   if (state_storage == QwenRecurrentStateStorage::kBf16) {
-    BatchedDeltaNetRecurrenceKernel<<<num_heads, 256, 0, stream>>>(
-        qkv_in, conv_layer_state, conv_out,
-        static_cast<hip_bfloat16*>(deltanet_state), alpha_buf,
-        beta_buf, ssm_a, ssm_dt, out_buf, layer_idx, batch_size, qkv_size,
-        num_key_heads, num_heads, key_dim, val_dim);
+    launch_diverge.template operator()<hip_bfloat16>();
   } else {
-    BatchedDeltaNetRecurrenceKernel<<<num_heads, 256, 0, stream>>>(
-        qkv_in, conv_layer_state, conv_out,
-        static_cast<float*>(deltanet_state), alpha_buf, beta_buf,
-        ssm_a, ssm_dt, out_buf, layer_idx, batch_size, qkv_size, num_key_heads,
-        num_heads, key_dim, val_dim);
+    launch_diverge.template operator()<float>();
   }
 
   const dim3 post_grid(num_heads, static_cast<unsigned int>(batch_size));

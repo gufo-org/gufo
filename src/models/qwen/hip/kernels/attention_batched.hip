@@ -7,11 +7,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/ops/attention.hpp"
+#include "src/models/qwen/hip/ops/gemm.hpp"
 
 namespace gufo::hip {
 
@@ -248,6 +250,13 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
                             std::uint32_t num_kv_heads, std::uint32_t head_dim,
                             hipStream_t stream, bool skip_kv_write,
                             void* out_context_bf16) {
+  const std::size_t max_seq_len =
+      static_cast<std::size_t>(start_pos) + batch_size;
+  const bool online = !detail::BatchedAttentionScoresFitLds(max_seq_len);
+  if (online && (head_dim != 256 || num_heads == 0 || num_kv_heads == 0 ||
+                 num_heads % num_kv_heads != 0))
+    throw std::invalid_argument(
+        "long batched attention requires 256-element GQA heads");
   const dim3 kv_grid(num_kv_heads, static_cast<unsigned int>(batch_size));
   if (!skip_kv_write) {
     WriteBatchedKVCacheKernel<<<kv_grid, 256, 0, stream>>>(
@@ -256,9 +265,19 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
         max_context, num_kv_heads, head_dim);
   }
 
+  if (online) {
+    // The FP32 reference layout cannot use the FP16 tiled kernels. Reuse
+    // scalar online arithmetic without context-sized LDS or new scratch.
+    LaunchCausalDecodeAttention(q, gate, k_cache, v_cache, k_cache_f16,
+                                v_cache_f16, out_context, layer_idx, start_pos,
+                                batch_size, max_context, num_heads,
+                                num_kv_heads, head_dim, stream);
+    if (out_context_bf16 != nullptr)
+      LaunchFloatToBfloat16(out_context, out_context_bf16,
+                            batch_size * num_heads * head_dim, stream);
+    return;
+  }
   const dim3 attn_grid(num_heads, static_cast<unsigned int>(batch_size));
-  const std::size_t max_seq_len =
-      static_cast<std::size_t>(start_pos) + batch_size;
   const std::size_t shared_scores_bytes = max_seq_len * sizeof(float);
   BatchedAttentionKernel<<<attn_grid, 256, shared_scores_bytes, stream>>>(
       q, gate, k_cache, v_cache, static_cast<const __half*>(k_cache_f16),

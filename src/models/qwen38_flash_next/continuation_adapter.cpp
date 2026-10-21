@@ -10,9 +10,9 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/snapshot_copy.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
-#include "src/models/qwen38_flash_next/kernels/rocm/snapshot_copy.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
@@ -39,6 +39,7 @@ struct Metadata {
   std::uint32_t residual_valid{}, image_bytes{};
   NgramHistory ngram;
   MtpLengthState policy;
+  PromptLookup::State lookup;
   std::array<std::uint8_t, 32> image{};
 };
 static_assert(sizeof(Metadata) <= kContinuationMetadataBytes);
@@ -421,6 +422,8 @@ void ContinuationAdapter::BeginRestore(
   state.metadata.fill(std::byte{});
   state.restoring = true;
   state.session->valid_ = false;
+  // The restore rewrites the tokens in place, not through RestoreSnapshot.
+  state.session->lookup_.Clear();
   state.session->tokens_.resize(target);
   state.session->ForgetDraftVocab();
   state.session->logits_.resize(model_->VocabSize());
@@ -562,6 +565,7 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     metadata.residual_valid = native.mtp_.residual_valid;
     metadata.ngram = native.ngram_;
     metadata.policy = session.draft_length_.State();
+    metadata.lookup = session.lookup_.Save();
     const auto identity = session.ImageIdentity(native.position_);
     metadata.image_bytes = static_cast<std::uint32_t>(identity.size());
     if (!identity.empty()) {
@@ -610,8 +614,8 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
           if (piece.host)
             std::memcpy(destination, source, end - first);
           else
-            Check(rocm::CopySnapshotToHost(destination, source, end - first,
-                                           transfer.Native()));
+            Check(hip::CopySnapshotToHost(destination, source, end - first,
+                                          transfer.Native()));
         }
       });
 }
@@ -661,8 +665,8 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
             if (piece.host)
               std::memcpy(destination, source, end - first);
             else
-              Check(hipMemcpyAsync(destination, source, end - first,
-                                   hipMemcpyHostToDevice, transfer.Native()));
+              Check(hip::CopySnapshotToDevice(destination, source, end - first,
+                                              transfer.Native()));
           }
         });
   } catch (...) {
@@ -697,8 +701,8 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
         if (component.part == ContinuationPart::kTokens && !bytes.empty())
           std::memcpy(bytes.data(), source, bytes.size());
         else if (!bytes.empty())
-          Check(rocm::CopySnapshotToHost(bytes.data(), source, bytes.size(),
-                                         transfer.Native()));
+          Check(hip::CopySnapshotToHost(bytes.data(), source, bytes.size(),
+                                        transfer.Native()));
       });
 }
 std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
@@ -749,8 +753,8 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
           if (component.part == ContinuationPart::kTokens && !bytes.empty())
             std::memcpy(destination, bytes.data(), bytes.size());
           else if (!bytes.empty())
-            Check(hipMemcpyAsync(destination, bytes.data(), bytes.size(),
-                                 hipMemcpyDefault, transfer.Native()));
+            Check(hip::CopySnapshotToDevice(destination, bytes.data(),
+                                            bytes.size(), transfer.Native()));
         });
   } catch (...) {
     state.failed = true;
@@ -792,7 +796,8 @@ bool ContinuationAdapter::Validate(
       metadata.residual_valid > 1 ||
       (metadata.residual_valid && !metadata.draft) ||
       (metadata.image_bytes != 0 && metadata.image_bytes != 32) ||
-      !policy.Restore(metadata.policy))
+      !policy.Restore(metadata.policy) ||
+      !PromptLookup::Valid(metadata.lookup, metadata.target))
     return refuse();
   try {
     if (layout_.Positions(metadata.target, metadata.draft, metadata.blocks,
@@ -826,6 +831,7 @@ bool ContinuationAdapter::Validate(
   native.snapshot_lineage_.reset();
   session.hidden_base_ = metadata.hidden_base;
   session.draft_length_ = policy;
+  session.lookup_.Restore(metadata.lookup);
   session.draft_token_ = 0;
   session.stats_ = {};
   session.valid_ = true;
@@ -847,7 +853,9 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
       ~ResetScope() { active = false; }
     } reset_scope{state.invalidating};
     state.invalidating = true;
-    state.session->Reset();
+    // Reassign a healthy resident slot without rebuilding its MTP graphs.
+    // Failed state and explicit Session::Reset still release all scratch.
+    state.session->ResetImpl(!state.failed && state.session->IsValid());
     state.failed = false;
     state.restoring = false;
     state.expected.clear();

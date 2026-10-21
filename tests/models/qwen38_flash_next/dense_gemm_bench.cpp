@@ -203,6 +203,35 @@ int main(int argc, char** argv) try {
     CheckHip(hipFree(y), "hipFree");
   }
 
+  // HC up projection fused with the stream mixer: [tokens][320] gates over
+  // four 2560-wide F16 streams into F16 and tiled Q8 mixer rows.
+  {
+    constexpr std::uint32_t hidden = 2560;
+    constexpr std::uint32_t rank = 320;
+    auto* w = Upload(Q8Weights(4 * hidden, rank, 51U));
+    auto* low = Upload(Activations(std::size_t{tokens} * rank, 52U));
+    auto* xn = Upload(Activations(std::size_t{tokens} * 4 * hidden, 53U));
+    auto* mixed = static_cast<__half*>(
+        Zeros(std::size_t{tokens} * hidden * sizeof(__half)));
+    const std::size_t q8_bytes =
+        ((tokens + 15) / 16) * std::size_t{hidden / 32} * 576;
+    auto* mixed_q8 = Zeros(q8_bytes);
+    const double ms = MedianMs(
+        [&] {
+          if (!q::HcMixF16Gemm(w, low, xn, nullptr, nullptr, mixed, mixed_q8,
+                               nullptr, tokens, hidden, rank, nullptr))
+            throw std::runtime_error("HcMixF16Gemm");
+        },
+        reps);
+    report("hcmix", ms, 2.0 * tokens * 4 * hidden * rank,
+           Hash(mixed, std::size_t{tokens} * hidden * sizeof(__half)) ^
+               Hash(mixed_q8, q8_bytes));
+    for (void* p :
+         {static_cast<void*>(w), static_cast<void*>(low),
+          static_cast<void*>(xn), static_cast<void*>(mixed), mixed_q8})
+      CheckHip(hipFree(p), "hipFree");
+  }
+
   // SSM projection fused with the four-tap convolution.
   {
     constexpr std::uint32_t m = 16384;

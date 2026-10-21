@@ -32,6 +32,8 @@ DeviceInput::~DeviceInput() {
 void DeviceInput::Configure(std::shared_ptr<const Prompt> prompt,
                             std::shared_ptr<Encoder> encoder,
                             hipStream_t stream) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeVision(prompt.get(), nullptr);
   if (prompt && !prompt->images.empty() && !encoder) {
     throw std::invalid_argument("image input has no vision encoder");
   }
@@ -48,6 +50,8 @@ void DeviceInput::Configure(std::shared_ptr<const Prompt> prompt,
 }
 
 void DeviceInput::RestoreLayout(const RopeLayout& layout, hipStream_t stream) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeVision(nullptr, &layout);
   layout.Validate(std::numeric_limits<std::int32_t>::max());
   if (layout == layout_ && (descriptor_ != nullptr || layout.images.empty()))
     return;
@@ -93,7 +97,7 @@ void DeviceInput::Inject(float* hidden, std::uint32_t position,
     if (begin >= end)
       continue;
     if (!embeddings_[index])
-      embeddings_[index] = encoder_->Encode(image.pixels, {}, is_cancelled_);
+      embeddings_[index] = encoder_->Encode(*image.pixels, {}, is_cancelled_);
     const auto& embedding = *embeddings_[index];
     if (embedding.width() != width ||
         embedding.rows() != image.grid.height * image.grid.width) {

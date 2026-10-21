@@ -71,9 +71,11 @@ of the release version.
 the Conventional Commit history after the latest release and opens or updates
 one release pull request. That pull request updates `version.txt`,
 `CHANGELOG.md` and the release manifest. It receives the same CI as any other
-change. The workflow waits for the pull request title and repository checks,
-and leaves the pull request open without publishing a release if either check
-fails.
+change, plus the complete Devlab functional suite on Strix Halo (other pull
+requests run its smaller PR tier). The workflow waits up to 160 minutes for the
+pull request title, the repository checks and `devlab/functional`. If any of
+them fails, errors or is still pending, it leaves the pull request open without
+publishing a release and comments on it to notify the maintainers.
 
 After the checks pass, the workflow squash-merges the release pull request and
 immediately creates the immutable tag and GitHub Release. A manually dispatched

@@ -96,16 +96,19 @@ public:
   // uncommitted capacity. Does not allocate or change the search cursor.
   // Fragmentation, growth limits and races still need TryAcquire's checks.
   [[nodiscard]] bool CanFit(std::span<const cache::PayloadRequest>) const;
-  // Starts committing the next on-demand segment on a background thread when
-  // less than one segment of free backing remains, so a later TryAcquire
-  // finds it ready instead of allocating on its own thread. Returns at once.
-  // The count is the desired free-segment reserve, bounded by capacity.
-  void GrowAhead(std::size_t segments = 1);
+  // Prepares free backing on a background thread so a later TryAcquire finds
+  // it ready. Reserve bytes are independent of the physical segment size;
+  // zero does nothing and oversized reserves are bounded by capacity.
+  void GrowAhead(std::size_t reserve_bytes);
   void WaitForGrowth();
   // Committed blocks and bytes; both grow with on-demand segments.
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;
   [[nodiscard]] std::size_t PageCommitAllocations() const noexcept;
+  // Linux long-term pins prevent page migration in addition to GPU
+  // registration. Zero when io_uring or the caller's memlock limit refuses
+  // them; the existing registered-page path remains usable in that case.
+  [[nodiscard]] std::size_t LongTermPinnedBytes() const noexcept;
 
 private:
   std::shared_ptr<detail::BackingState> state_;

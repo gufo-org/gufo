@@ -10,7 +10,7 @@
 namespace gufo::hip {
 void QwenGpuExecutor::CheckPrefillCancellation() const {
   if (cancellation_check_ && cancellation_check_())
-    throw std::runtime_error("Qwen prefill cancelled");
+    throw QwenPrefillCancelled();
 }
 
 void QwenGpuExecutor::PrefillLayerCheckpoint(std::uint32_t layer) {

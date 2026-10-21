@@ -48,6 +48,10 @@ def validate(manifest, names):
             raise ValueError("Unknown configuration: " + name)
         if suite["status"] not in ("active", "deferred"):
             raise ValueError("Unknown suite status: " + name)
+        if suite.get("tier", "pr") not in ("pr", "release"):
+            raise ValueError("Unknown suite tier: " + name)
+        if "escalate" in suite and (suite.get("tier") != "release" or not suite["escalate"]):
+            raise ValueError("Only release suites escalate, by path: " + name)
     if not set(manifest["baseline_suites"]) <= set(names):
         raise ValueError("Unknown baseline suite")
 
@@ -60,7 +64,9 @@ def changed_paths(repo, base, head):
     return [path.decode("utf-8") for path in output.split(b"\0") if path]
 
 
-def plan(manifest, paths, models=None):
+def plan(manifest, paths, models=None, tier="full"):
+    if tier not in ("pr", "full"):
+        raise ValueError("Unknown tier: " + tier)
     selected, deferred, excluded, obligations, resolutions = {}, {}, {}, [], []
     # Entries name a model (all its modes) or one profile such as flash-next-q4/mtp.
     model_filter = set(models) if models else None
@@ -106,14 +112,29 @@ def plan(manifest, paths, models=None):
                                        "configuration": suite["configuration"],
                                        "vision_required": suite["vision_required"], "reasons": []}
                     target[key]["reasons"].append(reason)
+    # The pr tier leaves release suites to the release run unless the change
+    # touches a path the suite escalates on.
+    release_only = {}
+    if tier == "pr":
+        for key, row in list(selected.items()):
+            suite = manifest["suites"][row["suite"]]
+            if suite.get("tier", "pr") != "release":
+                continue
+            escalated = sorted(path for path in set(paths) if any(
+                fnmatch.fnmatchcase(path, pattern) for pattern in suite.get("escalate", [])))
+            if escalated:
+                row["escalated_by"] = escalated
+            else:
+                release_only[key] = selected.pop(key)
     groups = {}
     for row in selected.values():
         key = (row["profile"], row["configuration"])
         groups.setdefault(key, {"profile": key[0], "configuration": key[1],
                                "settings": manifest["configurations"][key[1]], "suites": []})
         groups[key]["suites"].append(row["suite"])
-    return {"schema": 1, "scope": sorted(model_filter or known_models),
+    return {"schema": 1, "tier": tier, "scope": sorted(model_filter or known_models),
             "paths": resolutions, "selected": list(selected.values()),
+            "release_only": list(release_only.values()),
             "groups": list(groups.values()), "deferred": list(deferred.values()),
             "out_of_scope": list(excluded.values()), "obligations": obligations,
             "timing_qualification": "not performed; candidate correctness only"}
@@ -128,6 +149,8 @@ def main():
     parser.add_argument("--head")
     parser.add_argument("--model", action="append",
                         help="Model or model/mode profile to plan; repeatable")
+    parser.add_argument("--tier", choices=("pr", "full"), default="full",
+                        help="pr defers release suites unless their escalation paths changed")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
@@ -139,7 +162,7 @@ def main():
             paths = changed_paths(args.repo, args.base, args.head)
         else:
             paths = args.paths
-        result = plan(manifest, paths, args.model)
+        result = plan(manifest, paths, args.model, args.tier)
         result.update(base=args.base, head=args.head)
         content = json.dumps(result, indent=2) + "\n"
         if args.output:

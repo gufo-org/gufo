@@ -45,6 +45,8 @@ void DeeperDiskAndRAMEviction() {
     assert(lookup.selected->boundary == 40);
     assert(lookup.reason == SelectionReason::kDeepestDurableCheckpoint);
     assert(lookup.selected->disk_pin);
+    assert(f.index.HasCheckpoint(f.Query(), 40));
+    assert(!f.index.HasCheckpoint(f.Query(), 41));
     assert(f.disk.TryRetire(id, durable->Epoch()) == DiskRetireResult::kPinned);
   }
   f.index.Erase(durable_entry);
@@ -63,6 +65,7 @@ void DeeperDiskAndRAMEviction() {
     auto lookup = f.index.Lookup(f.Query());
     assert(lookup.selected->boundary == 40 && !lookup.selected->checkpoint);
     assert(lookup.selected->durable == durable);
+    assert(f.index.HasCheckpoint(f.Query(), 40));
   }
   auto destination = f.adapter.CreateSlot(f.guard);
   TransferTiming timing;
@@ -181,6 +184,7 @@ void MixedSourcesAndCompatibility() {
     assert(!lookup.selected->UsesDisk({3}));
     assert(lookup.selected->checkpoint == checkpoint &&
            lookup.selected->durable == description);
+    assert(f.index.HasCheckpoint(f.Query(), checkpoint->Boundary()));
     f.index.SetAvailability(entry, f.Resident());
     // The retained source plan must survive a later availability replacement.
     assert(lookup.selected->UsesDisk({2}));
@@ -262,6 +266,7 @@ void PublicationCorruptionQuarantinesImmediately() {
     assert(!f.disk.Open(checkpoint->Id()) && !f.disk.Open(second->Id()));
     assert(!f.catalog.Find(checkpoint->Id()));
     assert(!f.index.Lookup(f.Query()).selected);
+    assert(!f.index.HasCheckpoint(f.Query(), 0));
     // No worker mutates the caller-serialized prefix index/catalog. Cleanup
     // reconciles retained descriptions even after disk-layer invalidation.
     f.catalog.Reconcile();

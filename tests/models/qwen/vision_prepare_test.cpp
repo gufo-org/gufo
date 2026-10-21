@@ -13,6 +13,31 @@
 #include "src/models/qwen/vision/encoder.hpp"
 
 namespace {
+bool observe_upload{};
+bool pageable_upload{};
+std::size_t uploaded_bytes{};
+}  // namespace
+
+extern "C" hipError_t __real_hipMemcpyAsync(void*, const void*, std::size_t,
+                                            hipMemcpyKind, hipStream_t);
+extern "C" hipError_t __wrap_hipMemcpyAsync(void* destination,
+                                            const void* source,
+                                            std::size_t bytes,
+                                            hipMemcpyKind kind,
+                                            hipStream_t stream) {
+  if (observe_upload && kind == hipMemcpyHostToDevice) {
+    hipPointerAttribute_t attributes{};
+    const auto status = hipPointerGetAttributes(&attributes, source);
+    pageable_upload |=
+        status != hipSuccess || attributes.type != hipMemoryTypeHost;
+    if (status != hipSuccess)
+      (void)hipGetLastError();
+    uploaded_bytes += bytes;
+  }
+  return __real_hipMemcpyAsync(destination, source, bytes, kind, stream);
+}
+
+namespace {
 using gufo::models::qwen::vision::Encoder;
 
 void Require(bool condition, const std::string& message) {
@@ -57,7 +82,11 @@ int main(int argc, char** argv) {
             "opening the sidecar uploaded weights");
 
     const auto before = FreeDeviceBytes();
+    observe_upload = true;
     encoder->Upload();
+    observe_upload = false;
+    Require(!pageable_upload && uploaded_bytes == expected,
+            "vision upload registered pageable source tensors with the GPU");
     const auto prepared = FreeDeviceBytes();
     Require(encoder->ResidentBytes() == expected,
             "resident bytes differ from the sidecar weights");
@@ -74,7 +103,12 @@ int main(int argc, char** argv) {
         .height = 256,
         .pixels = std::vector<std::uint8_t>(std::size_t{256} * 256 * 3, 128)};
     {
+      observe_upload = true;
       const auto embedding = encoder->Encode(image);
+      observe_upload = false;
+      Require(
+          !pageable_upload && uploaded_bytes == expected + image.pixels.size(),
+          "vision input upload registered pageable pixels with the GPU");
       Require(embedding->rows() == 64 && embedding->width() == width,
               "unexpected embedding shape");
     }

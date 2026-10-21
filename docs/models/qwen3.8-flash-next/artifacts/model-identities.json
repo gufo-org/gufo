@@ -233,5 +233,94 @@
     },
     "measurement": "One warmed sample per point; greedy, thinking off, canonical ordered pp2048/tg128 histories; automatic cache RAM budget; performance platform profile; 90-second idle before each table. Completion hashes match benchmarks-2026-10-16 in every row. Matched controls use main 22e36769 (binary SHA-256 prefix 1316bbc609fa09f6).",
     "reference": "All retained September 22\u201323 llama.cpp data unchanged; not rerun or requalified."
+  },
+  "benchmarks-2026-10-17-pr626": {
+    "scope": "Gufo HTTP C1 AR and mixed/repetitive MTP, canonical eight-depth pp2048/tg128 histories.",
+    "gufo": {
+      "baseRevision": "c1088f891afc306b5fd9d893ed38ab69fc6039ff",
+      "dirty": true,
+      "binarySha256": "fc0a6628055f970e40af56172ece2be9ea3f72519365e8de036ef2264eea48d3",
+      "workingPatchSha256": "63bec959aa6d7471bc95e08bb96023d77ce52810a9dc2c5902c1142c34ddbbea",
+      "sourceNote": "Working patch differs from the production build only by a vision allocation comment.",
+      "build": "nix build, production gfx1151, unchanged pinned toolchain",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+      "productionSourceSha256": {
+        "src/models/qwen/vision/encoder.hip": "92c0f491404066cd2e104eb432a3d09f8cb47580ac747b5e27d9468566c3bc7e",
+        "src/models/qwen38_flash_next/continuation_adapter.cpp": "50de100324f1945cb5366f7d42967b1b8b501c828ac6b6580eda47fc8d4750e0",
+        "src/models/qwen38_flash_next/engine.cpp": "a265b7c32b677c5803a021539e1c15e6d1ed2074a0a0d8400f68e35f6275fea4",
+        "src/models/qwen38_flash_next/engine.hpp": "fa5e8f3e37a83a9c19f0be59a5b9515569e500c5fb0abfaade98f566e640c75e",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": "badd7126e86ed4b470b5e24d9ab31cd9305dc2b710cebccb26f28b5622daccc8",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.hpp": "869b2da2d492871fa5a9ba7326218654537f3e7420567339655562502668fdfc",
+        "src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp": "87ebaf0bc0ae0960d2a06d9a3f6c74ff950e0dbf0949254bf44b5ab28972de2c"
+      }
+    },
+    "measurement": "One warmed sample per point; all preceding depth/calibration requests retained. Mixed 64K uses the fastest unprofiled follow-up with the initial run's exact 17145280512-byte cache budget; the independent follow-ups measure 1551.64 and 1558.51 tok/s. All other rows use the complete final sweep. No model jobs or builds overlap; performance platform and accelerator-performance tuned profiles. Each server starts after at least 90 seconds of idle and recorded CPU/GPU temperature recovery. Full raw attempts, flags and traces are retained outside Git.",
+    "quality": "All 24 retained rows match prior completion hashes and prompt/cache/draft counts. Seventeen million fixed-history logits and the independent attention error report are byte-identical to the PR-head control. Native AR/MTP slot reuse, sampled replay, cancellation and explicit reset pass. Focused HTTP cache and long-context checks use actual default-sampling drafts. Both Flash-Next and 27B retain all 29 encoder stages byte-for-byte with managed vision weights. This is numerical/storage regression evidence, not upstream accuracy qualification.",
+    "timingScope": "All 12 AR requests match current-main inputs and pass the eight-phase gate. The final exact-budget mixed replay matches all 11 requests from the initial candidate history with no eight-phase flags. Four paired image/text requests also pass. These focused checks do not replace the older functional/concurrency timing limitations in QUALITY.md or establish the cause of an intermittent stall.",
+    "retained": "Concurrency retains the October 16 PR #622 capture; loading and memory retain the October 16 fdc21849 capture. Every September 22-23 llama.cpp artifact is unchanged and was not rerun or requalified."
+  },
+  "benchmarks-2026-10-17-pr613": {
+    "scope": "Gufo HTTP C1 AR and mixed/repetitive MTP at all eight depths through 128K, plus C1/2/4/6/8 prepared decoding.",
+    "gufo": {
+      "revision": "3b02d877400d069c392a89adc5dbc37b5f6e2627",
+      "dirty": true,
+      "binarySha256": "93ec6640be94adb915cf36db5e9d00b8121146859024668efdc15837e70c1e32",
+      "build": "nix build, production gfx1151, unchanged pinned toolchain",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
+      "productionSourceSha256": {
+        "src/models/qwen38_flash_next/ngram.cpp": "2c0d15ea9aeebcccd4072e68351f61e31772fc8235878e7813fbce714c22cb5b",
+        "src/models/qwen38_flash_next/ngram.hpp": "18440c41d666b98813a0c9ed9c20ae58ae85964007dc842d4b3f31a62741aa1e",
+        "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": "26ff58343b8d9e5c78f75b598362cfe1c74b704e8ee802c6373d0896ab21018a"
+      },
+      "sourceNote": "Base revision plus reusable PLE gather scratch; file hashes identify the production changes present in the measured binary."
+    },
+    "mainControl": {
+      "revision": "3389a585ef9eb59f8226e177455820c4d8390f46",
+      "binarySha256": "96dbdd563ab040fffee0244c4578408073656303acdbdb18fab229ec32c37a3a"
+    },
+    "measurement": "One warmed sample per point; complete ordered pp2048/tg128 depth histories and a fresh server per concurrency. Greedy, thinking off, automatic RAM cache. All model jobs serialized; no concurrent builds or profiling. Performance platform profile and temperature telemetry retained throughout. Raw requests, original flags, profiles and focused controls retained outside Git.",
+    "quality": "All 24 depth completions and prompt/cache counts match main. All 63 concurrent tg128 completions match isolated AR, with expected prefix reuse. Draft counts can differ. Independent row-value tests and existing model/sampler oracles qualify the unchanged arithmetic; HTTP text consistency is not original-model accuracy qualification.",
+    "timingScope": "The repeated 8K prefill allocation delay is fixed. The 12K repetitive maximum token gap increases by 6-10 ms while total generation more than doubles; this accepted throughput tradeoff is not a timing pass. Other request timing limitations and their controls remain documented in QUALITY.md.",
+    "retained": "Loading and memory retain October 16 fdc21849. All September 22-23 llama.cpp measurements remain unchanged and were not rerun or requalified."
+  },
+  "benchmarks-2026-10-18-host-memory": {
+    "scope": "Complete Gufo single-user, concurrency, cold-file loading and memory refresh.",
+    "gufo": {
+      "revision": "fec4759d064585d72f87c6e11af5cfa0e1fa95c7",
+      "dirty": false,
+      "binarySha256": "1d822fb97b4639c61df61e9f5fcc874d9b639a69c82c484bfa4dafbbcb44a692",
+      "launcherSha256": "04b95b3769f0ab2d61fa2de798257ee70056583dd53bda1dfa272cd6e1956dac",
+      "build": "nix build; same pinned compiler/dependencies, with the retained ROCr host-memory patch",
+      "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6"
+    },
+    "mainControl": {
+      "revision": "f948ddd371bf2a3f7360b7069fc703badbbc07ed",
+      "binarySha256": "a11cfb07072426feb01517aa8ab900ee8d8932e60c85b68c6729fb0a5f04b0cd",
+      "scope": "Focused repetitive-MTP history through 64K, cold loading, cache and screenshot histories."
+    },
+    "measurement": "One warmed sample per point, with one focused ordered repetition repeat through 64K to investigate three PP dips. Repeated rows report mean +/- sample standard deviation and retain both observations. Same prompts and realized 17213143040-byte RAM cache budget; all other rows use the complete sweep. Greedy, thinking off, pp2048/tg128, C1 capacity 133760. Concurrent sessions prepare their prefix before measured tg128.",
+    "quality": "All 24 depth completions and prompt/cache counts agree with the prior qualified sweep. All 63 concurrent completions match fresh AR controls. The focused repeat preserves all work and outputs and passes all compared phases, including prefix preparation. Independent memory, byte-copy, projection, MTP and vision checks qualify unchanged arithmetic; this is not a new original-model accuracy evaluation.",
+    "timingScope": "Initial repetitive PP dips did not repeat against current main; original observations remain in the mean and spread. One cache-history queue/TTFT flag remains inconclusive. See host-memory-stalls-review.json and QUALITY.md.",
+    "conditions": {
+      "platform_profile": "performance",
+      "tuned_profile": "accelerator-performance",
+      "profile_verified_throughout": true,
+      "monitor_samples": 1095,
+      "overlapping_builds_or_model_jobs": false,
+      "temperatures_c": {
+        "k10temp:temp1_input": {
+          "start": 60.625,
+          "minimum": 50.25,
+          "maximum": 93.625
+        },
+        "amdgpu:temp1_input": {
+          "start": 45.0,
+          "minimum": 40.0,
+          "maximum": 79.0
+        }
+      }
+    },
+    "loadingMethod": "Cold target/sidecar files verified with POSIX_FADV_DONTNEED and mincore; C1 MTP capacity 262144. Runtime libraries may be warm.",
+    "reference": "All September 22-23 llama.cpp artifacts, values and provenance unchanged; no new reference run or equivalence qualification."
   }
 }

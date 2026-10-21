@@ -46,6 +46,9 @@ public:
   Slot(Slot&&) = delete;
   Slot& operator=(Slot&&) = delete;
   [[nodiscard]] virtual bool IsValid() const noexcept = 0;
+  // Nonblocking hint for cold slot selection. A cancelled request may have
+  // restored its logical frontier while already-submitted device work drains.
+  [[nodiscard]] virtual bool ExecutionComplete() const noexcept { return true; }
 };
 
 class Adapter {

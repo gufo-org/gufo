@@ -4,6 +4,9 @@
 constexpr int MMVQ_MAX_BATCH_SIZE = 8;
 constexpr int MMVQ_MAX_ROUTED_BATCH = 64;
 
+// Resolve the first dense decode function before serving; launches no work.
+int prepare_q8_decode();
+
 // One expert's independent inputs, in groups of eight. The anchor also
 // identifies an inactive slot that must be zeroed.
 struct MoeBatchGroup {

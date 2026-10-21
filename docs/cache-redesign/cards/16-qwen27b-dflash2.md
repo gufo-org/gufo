@@ -8,6 +8,9 @@
 Extend the Qwen adapter to DFlash2, with draft state restored exactly and
 speculative rollback guarded.
 
+Qwen 27B serving supports AR and DFlash2. This migration covers those modes;
+MTP remains unsupported, as confirmed for the October 13 qualification.
+
 ## Scope
 
 - **Inventory:**
@@ -61,3 +64,22 @@ required (see the README).
 
 ## Review notes
 
+## Qwen27B implementation update
+
+AR and DFlash2 serving now bind component-owned executors. The adapter supplies
+borrowed FP16 target rows, canonical FP32 transfers, bounded private serialization
+and committed backing shared with Flash-Next. Draft components retain physical
+ring KV and its independent frontier, pending target features and controller
+metadata. Sampled frontier logits and up to nine pending output tokens accompany
+the target checkpoint. The Qwen runner's legacy snapshot/persistence hooks are
+removed; DeepSeek keeps its existing snapshot path.
+
+At `c7053529`, Q4 and Q8 full cache-serving checks pass for AR and DFlash2:
+generated frontiers, greedy/seeded forks, cancellation history, disk restart,
+artifact compatibility misses, concurrency and cleanup. The shared verification,
+component cache and runner checks pass, as do all 59 hosted checks and formatting.
+The current DFlash component round-trip also passes. These checks do not qualify
+the outstanding vision cold-prefill discrepancy, deep workloads or resource gates.
+Per user instruction, performance measurements follow functional completion;
+further FP16/FP32 long-capacity telemetry probes are skipped. Historical results
+remain tied to their revisions.

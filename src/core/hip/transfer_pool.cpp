@@ -41,11 +41,17 @@ struct TransferLease {
   std::atomic<bool> failed{false};
   bool sealed{};
   bool claimed{};
+  bool native_used{};
+  hipStream_t bound_stream{};
+  std::shared_ptr<void> bound_owner;
   TransferLease(std::shared_ptr<TransferPoolState> state, std::size_t index)
       : state(std::move(state)), index(index) {}
   auto& Slot() const { return state->slots[index]; }
+  hipStream_t Stream() const {
+    return bound_stream ? bound_stream : Slot().stream;
+  }
   cache::TransferResult Drain() noexcept {
-    if (hipStreamSynchronize(Slot().stream) != hipSuccess)
+    if (hipStreamSynchronize(Stream()) != hipSuccess)
       failed = true;
     return failed ? cache::TransferResult::kFailed
                   : cache::TransferResult::kSucceeded;
@@ -91,10 +97,20 @@ TransferStream::TransferStream(std::shared_ptr<detail::TransferLease> lease)
 TransferStream::~TransferStream() {
   (void)Synchronize();
 }
+void TransferStream::BindTo(hipStream_t stream, std::shared_ptr<void> owner) {
+  if (!stream || !owner)
+    throw std::invalid_argument("bound transfer requires a stream owner");
+  if (lease_->sealed || lease_->failed || lease_->native_used ||
+      lease_->bound_stream)
+    throw std::logic_error("transfer stream was already used");
+  lease_->bound_stream = stream;
+  lease_->bound_owner = std::move(owner);
+}
 hipStream_t TransferStream::Native() const {
   if (lease_->sealed || lease_->failed)
     throw std::logic_error("transfer stream is sealed or failed");
-  return lease_->Slot().stream;
+  lease_->native_used = true;
+  return lease_->Stream();
 }
 cache::TransferResult TransferStream::Synchronize() noexcept {
   return lease_->Drain();

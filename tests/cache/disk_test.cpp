@@ -557,6 +557,149 @@ void BudgetAndDirectories() {
   Reject([&] { DiskStore store(ledger, d.path, UINT64_MAX); });
   assert(fs::is_empty(unrelated.path));
 }
+void CapacityBeforePayloadReads() {
+  Directory directory;
+  auto first = Manifest();
+  first.tokens.resize(2);
+  auto& rows = first.components[0];
+  rows.descriptor.row_bytes = 128 << 10;
+  rows.position.valid_rows = 2;
+  rows.tail.reset();
+  std::vector<std::uint8_t> chunk(256 << 10, 42);
+  std::array<std::uint8_t, 16> state{9};
+  rows.chunks[0] = {Id(1), chunk.size(), DiskChecksum(chunk)};
+  first.components[1].position.valid_rows = 2;
+  first.components[1].private_state =
+      DiskPayload{Id(3), state.size(), DiskChecksum(state)};
+  const std::array<DiskWriteBuffer, 2> buffers{
+      {{false, Id(1), chunk}, {true, Id(3), state}}};
+  const auto capacity =
+      EncodeManifest(first).size() + chunk.size() + state.size();
+  auto next = first;
+  next.checkpoint = {8};
+  // Streamed jobs resolve shared checksums from the store's attestation.
+  next.components[0].chunks[0].checksum = 0;
+  next.components[1].private_state->file = Id(13);
+  next.components[1].private_state->checksum = 0;
+  std::size_t copied = 0;
+  const std::array<DiskWriteSource, 2> sources{{
+      {false, Id(1), chunk.size(),
+       [&](auto offset, auto destination) {
+         std::copy_n(chunk.begin() + offset, destination.size(),
+                     destination.begin());
+         copied += destination.size();
+       }},
+      {true, Id(13), state.size(),
+       [&](auto offset, auto destination) {
+         std::copy_n(state.begin() + offset, destination.size(),
+                     destination.begin());
+         copied += destination.size();
+       }},
+  }};
+  std::array<std::uint8_t, 4096> staging{};
+  for (const auto limit : {capacity, capacity + EncodeManifest(next).size()}) {
+    DiskStore store(ledger, directory.path, limit);
+    if (store.Entries().empty())
+      store.Publish(Id(7), first, buffers);
+    actual_payload_bytes = 0;
+    // Eviction can retry the same checkpoint several times. None of those
+    // refusals should read shared files or copy new payloads.
+    for (int retry = 0; retry < 3; ++retry) {
+      bool exhausted = false;
+      try {
+        (void)store.PublishStream(Id(8), next, sources, staging);
+      } catch (const DiskCapacityExhausted&) {
+        exhausted = true;
+      }
+      assert(exhausted && store.Stats().managed_bytes == capacity);
+    }
+    std::cout << "capacity refusals read " << actual_payload_bytes.load()
+              << " payload bytes\n"
+              << std::flush;
+    assert(actual_payload_bytes == 0 && copied == 0);
+  }
+  {
+    // The entire payload would exceed this budget; its shared chunk already
+    // exists, so only the new manifest and private state need admission.
+    DiskStore store(ledger, directory.path,
+                    capacity + EncodeManifest(next).size() + state.size());
+    actual_payload_bytes = 0;
+    (void)store.PublishStream(Id(8), next, sources, staging);
+    assert(store.Open({7}) && store.Open({8}));
+    assert(actual_payload_bytes == chunk.size() && copied == state.size());
+  }
+  {
+    DiskStore store(ledger, directory.path, 2 * capacity);
+    // Admitting the write must still verify every reused byte, including
+    // corruption in a file already referenced by multiple checkpoints.
+    chunk[0] ^= 1;
+    Write(directory.path / "v2/chunks" / DiskFileName(Id(1)), chunk);
+    auto corrupted = next;
+    corrupted.checkpoint = {9};
+    bool rejected = false;
+    try {
+      (void)store.PublishStream(Id(9), corrupted, sources, staging);
+    } catch (const DiskDependencyError&) {
+      rejected = true;
+    }
+    assert(rejected && !store.Open({7}) && !store.Open({8}));
+  }
+}
+void VerifiedDependencies() {
+  Directory directory;
+  DiskStore store(ledger, directory.path, 1ULL << 30);
+  std::vector<std::uint8_t> chunk(8, 42);
+  std::array<std::uint8_t, 16> state{};
+  unsigned shared = 1;
+  auto publish = [&](unsigned checkpoint) {
+    auto m = Manifest();
+    m.checkpoint = {checkpoint};
+    m.tokens.resize(2);
+    m.components[0].chunks[0] = {Id(shared), chunk.size(), DiskChecksum(chunk)};
+    m.components[0].tail.reset();
+    m.components[0].position.valid_rows = 2;
+    m.components[1].position.valid_rows = 2;
+    state[0] = checkpoint;
+    m.components[1].private_state =
+        DiskPayload{Id(checkpoint + 100), state.size(), DiskChecksum(state)};
+    const std::array<DiskWriteBuffer, 2> buffers{
+        {{false, Id(shared), chunk}, {true, Id(checkpoint + 100), state}}};
+    actual_payload_bytes = 0;
+    store.Publish(Id(checkpoint), m,
+                  std::span(buffers).subspan(store.Entries().empty() ? 0 : 1));
+    return actual_payload_bytes.load();
+  };
+  auto retire = [&] {
+    for (unsigned id : {7, 8, 9})
+      (void)store.Retire({id});
+    store.ReclaimOrphans();
+    store.WaitForReclamation();
+    assert(store.Entries().empty());
+    return ledger.Snapshot().total_bytes;
+  };
+  // Inherited chunks are read once after they were written, then their
+  // unchanged identity is trusted by later publications.
+  assert(publish(7) == 0);
+  assert(publish(8) == chunk.size());
+  assert(publish(9) == 0);
+  const auto settled = retire();
+  // Removing a file releases its verification record.
+  shared = 2;
+  assert(publish(7) == 0);
+  assert(publish(8) == chunk.size());
+  // A rewritten file changes identity and is verified again.
+  chunk[0] ^= 1;
+  Write(directory.path / "v2/chunks" / DiskFileName(Id(shared)), chunk);
+  chunk[0] ^= 1;
+  bool rejected = false;
+  try {
+    (void)publish(9);
+  } catch (const DiskDependencyError&) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(retire() == settled);
+}
 }  // namespace
 int main() {
   Format();
@@ -567,6 +710,8 @@ int main() {
   Conflicts();
   Cleanup();
   BudgetAndDirectories();
+  CapacityBeforePayloadReads();
+  VerifiedDependencies();
   InterruptedCleanup();
   RootSymlinks();
   ParentPathResolution();

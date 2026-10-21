@@ -33,15 +33,27 @@ int main() {
       checksum += result.selected->boundary;
     }
     const auto elapsed = std::chrono::steady_clock::now() - start;
-    std::cout << "tokens=131072 checkpoints=128 iterations=" << iterations
-              << " lookup_us="
-              << std::chrono::duration<double, std::micro>(elapsed).count() /
-                     iterations
-              << " empty_index_bytes=" << empty
-              << " retained_index_bytes=" << retained
-              << " incremental_bytes_per_checkpoint="
-              << static_cast<double>(retained - empty) / 128
-              << " checksum=" << checksum << '\n';
+    const auto presence_start = std::chrono::steady_clock::now();
+    for (unsigned i = 0; i < iterations; ++i) {
+      if (!index.HasCheckpoint(query, prompt.size() - 4096))
+        return 1;
+      ++checksum;
+    }
+    const auto presence_elapsed =
+        std::chrono::steady_clock::now() - presence_start;
+    std::cout
+        << "tokens=131072 checkpoints=128 iterations=" << iterations
+        << " lookup_us="
+        << std::chrono::duration<double, std::micro>(elapsed).count() /
+               iterations
+        << " presence_us="
+        << std::chrono::duration<double, std::micro>(presence_elapsed).count() /
+               iterations
+        << " empty_index_bytes=" << empty
+        << " retained_index_bytes=" << retained
+        << " incremental_bytes_per_checkpoint="
+        << static_cast<double>(retained - empty) / 128
+        << " checksum=" << checksum << '\n';
   }
   if (ledger.Snapshot().total_bytes != 0)
     return 1;

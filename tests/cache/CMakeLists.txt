@@ -12,7 +12,9 @@ if (ENGINE_ENABLE_HIP)
     -Wl,--wrap=hipEventQuery -Wl,--wrap=hipEventSynchronize
     -Wl,--wrap=hipStreamSynchronize)
   add_test(NAME cache_backing_test COMMAND cache_backing_test)
-  set_tests_properties(cache_backing_test PROPERTIES
+  add_test(NAME cache_backing_restricted_test
+    COMMAND cache_backing_test --deny-long-term-pins)
+  set_tests_properties(cache_backing_test cache_backing_restricted_test PROPERTIES
     LABELS "hip;gpu;gfx1151;cache" TIMEOUT 60)
 endif()
 target_link_libraries(gufo_cache_fake PUBLIC gufo_cache)

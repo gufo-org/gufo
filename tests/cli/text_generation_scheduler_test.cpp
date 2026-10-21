@@ -29,6 +29,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
+#include "src/core/json.hpp"
 
 namespace {
 
@@ -61,6 +62,39 @@ void Expect(bool condition, std::string_view message) {
     std::cerr << "Assertion failed: " << message << '\n';
     std::exit(1);
   }
+}
+
+void TestPublicationWaitUsesRecentSubstantialPrefill() {
+  using gufo::server::detail::PublicationWaitEstimate;
+  PublicationWaitEstimate estimate;
+  Expect(!estimate.Limit(55000),
+         "an uncalibrated model must not park admission");
+  for (const auto milliseconds :
+       {0.0, -1.0, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()})
+    estimate.Observe(4096, milliseconds);
+  estimate.Observe(32, 500);
+  estimate.Observe(4096, 0.1);
+  Expect(!estimate.Limit(55000),
+         "invalid timings and tiny/overhead-dominated work cannot calibrate");
+
+  estimate.Observe(55022, 32643.778743);
+  const auto limit = estimate.Limit(55017);
+  Expect(limit && limit->count() > 32640 && limit->count() < 32644,
+         "the reproduced prefix gain costs about 32.64s, not 120s");
+  Expect(estimate.Limit(0)->count() == 0,
+         "no remaining saved prefill work permits no wait");
+  Expect(estimate.Limit(10000000) == PublicationWaitEstimate::kMaximumWait,
+         "large recomputation estimates retain the absolute ceiling");
+
+  // Recent fast prefill must displace slow startup work rather than retain a
+  // process-lifetime average. Token/time weighting ignores sample boundaries.
+  for (int i = 0; i < 16; ++i)
+    estimate.Observe(4096, 100);
+  Expect(estimate.Limit(8192)->count() == 200,
+         "recent prefill replaces stale startup measurements");
+  PublicationWaitEstimate other_model;
+  Expect(!other_model.Limit(8192), "another model/pool starts uncalibrated");
 }
 
 enum class EventKind : std::uint8_t {
@@ -158,6 +192,9 @@ struct FakeControl {
   bool release_prefill{false};
   std::atomic<std::size_t> invalidations{0};
   std::atomic<std::size_t> states_created{0};
+  bool structured_output{false};
+  bool vocabulary_failure{false};
+  std::atomic<std::size_t> vocabulary_builds{0};
   std::atomic<std::size_t> decode_calls{0};
   std::atomic<std::size_t> batch_preparations{0};
   std::atomic<std::int64_t> first_request_advance_ns{0};
@@ -276,6 +313,20 @@ public:
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     return {static_cast<TextRunnerToken>(text.size())};
+  }
+
+  [[nodiscard]] std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    if (!control_->structured_output)
+      return TextModelRunner::BuildConstraintVocabulary();
+    if (control_->vocabulary_failure)
+      throw std::runtime_error("vocabulary build failed");
+    control_->vocabulary_builds.fetch_add(1, std::memory_order_relaxed);
+    return std::make_shared<gufo::sampling::ConstraintVocabulary>(
+        256, [](std::uint32_t id) {
+          return gufo::sampling::ConstraintVocabulary::Piece{
+              std::string(1, static_cast<char>(id)), false};
+        });
   }
 
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
@@ -2579,6 +2630,62 @@ void TestShutdownCancelsRunnerAcquisition() {
   stopped.get();
 }
 
+void TestStructuredOutputIsPreparedBeforeServing() {
+  // The scheduler is created during model loading, before load_completed and
+  // before the server listens. The vocabulary is ready when
+  // construction returns, and constrained requests reuse it.
+  const auto control = std::make_shared<FakeControl>();
+  control->structured_output = true;
+  std::ostringstream output;
+  auto* previous = std::clog.rdbuf(output.rdbuf());
+  auto scheduler = MakeScheduler(control, 1);
+  std::clog.rdbuf(previous);
+  Expect(control->vocabulary_builds == 1,
+         "the vocabulary is built before the scheduler admits a request");
+  const auto log = output.str();
+  Expect(log.find("event=structured_output_prepared vocabulary_tokens=256 "
+                  "prepare_ms=") != std::string::npos &&
+             log.find(" rss_delta_kib=") != std::string::npos,
+         "preparation reports its time and memory");
+  const auto grammar = gufo::sampling::JsonConstraint::Compile(
+      gufo::json::parse(
+          R"({"type":"object","properties":{},"additionalProperties":false})"),
+      false);
+  const auto binding = scheduler->runner().BindConstraint(grammar);
+  Expect(binding->vocabulary && control->vocabulary_builds == 1,
+         "a constrained request reuses the prepared vocabulary");
+  Expect(scheduler->Submit({7, 70}, 2, 0.0F).Wait().tokens.size() == 2,
+         "a prepared scheduler serves requests");
+
+  // Runners without structured output can still serve ordinary text, but
+  // reject an explicit constrained request as before.
+  const auto plain = MakeScheduler(std::make_shared<FakeControl>(), 1);
+  Expect(plain->runner().PrepareConstraintVocabulary() == 0 &&
+             plain->Submit({7, 70}, 2, 0.0F).Wait().tokens.size() == 2,
+         "unsupported runners retain ordinary text serving");
+  std::string error;
+  try {
+    (void)plain->runner().BindConstraint(grammar);
+  } catch (const std::invalid_argument& exception) {
+    error = exception.what();
+  }
+  Expect(error.find("does not support structured output") != std::string::npos,
+         "unsupported runners still reject structured output");
+
+  // A supported runner with a broken vocabulary must fail startup.
+  const auto broken = std::make_shared<FakeControl>();
+  broken->structured_output = true;
+  broken->vocabulary_failure = true;
+  error.clear();
+  try {
+    (void)MakeScheduler(broken, 1);
+  } catch (const std::runtime_error& exception) {
+    error = exception.what();
+  }
+  Expect(error == "vocabulary build failed",
+         "vocabulary build failures stop startup");
+}
+
 void TestProgressLoggingIsOptInAndBounded() {
   auto run = [](bool enabled) {
     auto control = std::make_shared<FakeControl>();
@@ -2869,10 +2976,12 @@ void TestEmptyTokenIsPublished() {
 }
 
 int main() {
+  TestPublicationWaitUsesRecentSubstantialPrefill();
   // Log assertions in this binary match the plain "[LEVEL] [component]" text
   // captured from a redirected sink; a TTY stderr would tint the level tag.
   ::setenv("NO_COLOR", "1", 1);
   TestProgressLoggingIsOptInAndBounded();
+  TestStructuredOutputIsPreparedBeforeServing();
   TestAdmissionLoggingIsDebugTierOnly();
   TestPromptProgressPrecedesStreamedTokens();
   TestStreamStartPrecedesPrefill();

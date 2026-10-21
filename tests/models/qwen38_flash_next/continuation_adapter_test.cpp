@@ -228,6 +228,63 @@ void SameLogits(const qfn::Session& a, const qfn::Session& b) {
                           a.Logits().size_bytes()) == 0,
           "restored next-step logits differ");
 }
+void CheckSlotReuse(const std::shared_ptr<qfn::Model>& model, bool mtp) {
+  const auto mode = mtp ? gufo::core::SessionMode::kSpeculative
+                        : gufo::core::SessionMode::kAutoregressive;
+  qfn::ContinuationAdapter adapter(model, mode, 4096,
+                                   {'r', 'e', 'u', 's', 'e'});
+  Guard guard;
+  auto slot = adapter.CreateSlot(guard);
+  auto& reused = adapter.GetSession(*slot);
+  std::string error;
+  auto fresh = model->CreateSession(mode, 4096, &error);
+  Require(bool(fresh), error);
+  const auto empty_bytes = reused.AllocatedBytes();
+  const auto first = model->Tokenize("Continue: red, blue, red, blue,");
+  const auto next = model->Tokenize(
+      "Write a Python function that retries a failed request three times.");
+  Require(reused.Sync(first, &error), error);
+  (void)Decode(reused, 48);
+  for (const bool sampled : {false, true}) {
+    const auto warm_bytes = reused.AllocatedBytes();
+    Require(warm_bytes <= model->SessionBytes(mode, 4096),
+            "slot scratch exceeded its admission bound");
+    if (mtp)
+      Require(warm_bytes > empty_bytes && reused.Statistics().drafted > 0,
+              "slot reuse did not exercise MTP rollback");
+    Require(adapter.Invalidate(*slot), "slot reassignment failed");
+    Require(reused.Position() == 0 && reused.Tokens().empty(),
+            "slot reassignment retained logical state");
+    Require(reused.AllocatedBytes() == warm_bytes,
+            "slot reassignment discarded reusable rollback");
+    fresh->Reset();
+    Require(reused.Sync(next, &error) && fresh->Sync(next, &error), error);
+    SameLogits(reused, *fresh);
+    const auto reused_before = reused.Statistics();
+    const auto fresh_before = fresh->Statistics();
+    Require(Decode(reused, 48, sampled) == Decode(*fresh, 48, sampled),
+            "retained slot scratch changed continuation tokens");
+    SameLogits(reused, *fresh);
+    Require(reused.Statistics().drafted - reused_before.drafted ==
+                    fresh->Statistics().drafted - fresh_before.drafted &&
+                reused.Statistics().accepted - reused_before.accepted ==
+                    fresh->Statistics().accepted - fresh_before.accepted,
+            "retained slot scratch changed draft acceptance");
+  }
+  reused.SetCancellationCheck([] { return true; });
+  Require(!reused.Evaluate(first.front(), &error) && !reused.IsValid(),
+          "cancelled slot remained valid");
+  reused.SetCancellationCheck({});
+  Require(adapter.Invalidate(*slot) && reused.AllocatedBytes() == empty_bytes,
+          "failed slot retained rollback scratch");
+  Require(reused.Sync(next, &error), error);
+  (void)Decode(reused, 16);
+  reused.Reset();
+  Require(reused.AllocatedBytes() == empty_bytes,
+          "explicit reset retained rollback scratch");
+  std::cout << (mtp ? "MTP" : "AR")
+            << ",slot_reuse,sampled/greedy/cancellation/reset,PASS\n";
+}
 void CheckInPass(const std::shared_ptr<qfn::Model>& model, bool mtp,
                  std::span<const std::int32_t> prompt) {
   gufo::hip::TransferPool streams(2);
@@ -718,7 +775,8 @@ void CheckImages(const std::shared_ptr<qfn::Model>& model, bool mtp) {
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = blue ? 2 : 0; i < pixels.pixels.size(); i += 3)
       pixels.pixels[i] = 255;
-    prompt->images.push_back({std::move(pixels), grid});
+    prompt->images.push_back(
+        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
     prompt->images.back().prefix_identity.fill(blue ? 2 : 1);
     prompt->cache_identity.assign(32, blue ? 2 : 1);
     return prompt;
@@ -853,13 +911,16 @@ int main(int argc, char** argv) {
       argc == 6 && std::string_view(argv[5]) == "--in-pass-only";
   const bool policy_only =
       argc == 6 && std::string_view(argv[5]) == "--policy-only";
+  const bool reuse_only =
+      argc == 6 && std::string_view(argv[5]) == "--reuse-only";
   if ((argc != 5 && !guard_only && !image_only && !in_pass_only &&
-       !policy_only) ||
+       !policy_only && !reuse_only) ||
       std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
     std::cerr << "Usage: continuation_adapter_test --model FIRST.gguf "
                  "--mtp-model MTP.gguf "
-                 "[--guard-only|--image-only|--in-pass-only|--policy-only]\n";
+                 "[--guard-only|--image-only|--in-pass-only|--policy-only|"
+                 "--reuse-only]\n";
     return 77;
   }
   try {
@@ -869,6 +930,11 @@ int main(int argc, char** argv) {
     Require(bool(model), error);
     if (policy_only) {
       CheckLearnedDraftPolicy(model);
+      return 0;
+    }
+    if (reuse_only) {
+      CheckSlotReuse(model, false);
+      CheckSlotReuse(model, true);
       return 0;
     }
     const auto pattern = model->Tokenize(
@@ -907,6 +973,8 @@ int main(int argc, char** argv) {
       Check(model, false, prompt);
       Check(model, true, prompt);
       CheckLearnedDraftPolicy(model);
+      CheckSlotReuse(model, false);
+      CheckSlotReuse(model, true);
     }
     CheckImages(model, false);
     CheckImages(model, true);

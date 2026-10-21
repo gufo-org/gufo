@@ -207,6 +207,14 @@ public:
     std::size_t draft_rounds{0};
     std::size_t draft_tokens{0};
     std::size_t draft_accepted_tokens{0};
+    std::size_t lookup_tokens{0};
+    std::size_t lookup_accepted_tokens{0};
+    /// Hashed n-gram embedding rows gathered for this request, split by how
+    /// each was served.
+    std::size_t ngram_rows{0};
+    std::size_t ngram_dedup_rows{0};
+    std::size_t ngram_cache_hits{0};
+    std::size_t ngram_disk_reads{0};
     std::size_t prefill_tokens{0};
     std::size_t prefill_chunks{0};
     std::size_t active_decode_prefill_chunks{0};
@@ -295,6 +303,10 @@ public:
   }
   /// Whether the loaded backend accepts image inputs in chat requests.
   [[nodiscard]] virtual bool supports_images() const { return false; }
+  /// The served model file and build revision, as llama-server's /props
+  /// reports them. Empty when unknown.
+  [[nodiscard]] virtual std::string model_path() const { return {}; }
+  [[nodiscard]] virtual std::string build_info() const { return {}; }
   [[nodiscard]] virtual SamplingDefaults sampling_defaults() const {
     return {};
   }

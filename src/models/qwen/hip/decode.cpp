@@ -15,10 +15,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
   if (pos >= arena_.GetMaxContext()) {
     throw std::length_error("token position exceeds the GPU context length");
   }
+  models::qwen::ContinuationWrite write(continuation_hooks_, pos, pos + 1);
 
   if (replaying_ssm_state_ && !compute_logits) {
     if (arena_.CanReplaySsmPosition(pos)) {
       ReplaySsmState(pos);
+      write.Commit(pos + 1, false);
       return 0;
     }
     replaying_ssm_state_ = false;
@@ -29,6 +31,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
   }
 
   arena_.MarkSsmReplayPosition(pos);
+  // One recurrent pass per step. Its buffer pair is part of the graph key below
+  // because the captured launches bake the state pointers.
+  const auto recurrent_state = arena_.BeginRecurrentWrite();
   last_hidden_offset_ = 0;
   const auto& config = weights_.config;
   const std::size_t sequence_length = static_cast<std::size_t>(pos) + 1;
@@ -54,6 +59,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
     graph_key.workload_identity =
         ExtendQwenGraphWorkloadIdentity(graph_key.workload_identity, layer);
   }
+  graph_key.workload_identity = ExtendQwenGraphWorkloadIdentity(
+      graph_key.workload_identity, arena_.RecurrentIoIdentity());
   const QwenGraphRejection graph_rejections = ResolveQwenGraphRejections(
       compute_logits, use_split_k_decode,
       graph_executor_.IsEnabled() &&
@@ -80,21 +87,22 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
       const bool ok =
           graph_executor_.TryCapture(arena_.stream, graph_key, [&]() {
             ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
-                              compute_logits, &vision_input_);
+                              compute_logits, recurrent_state, &vision_input_);
           });
       if (ok) {
         launch_captured_graph();
       } else {
         ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
-                          compute_logits, &vision_input_);
+                          compute_logits, recurrent_state, &vision_input_);
       }
     }
   } else {
     ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos, compute_logits,
-                      &vision_input_);
+                      recurrent_state, &vision_input_);
   }
 
   if (!compute_logits) {
+    write.Commit(pos + 1, false);
     return 0;
   }
 
@@ -103,7 +111,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
                            hipMemcpyDeviceToHost, arena_.stream));
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
 
-  return CheckedSampleToken(next_token_id, config.vocab_size);
+  const auto result = CheckedSampleToken(next_token_id, config.vocab_size);
+  write.Commit(pos + 1, true);
+  return result;
 }
 
 }  // namespace gufo::hip

@@ -1,5 +1,357 @@
 # Qwen3.8 Flash-Next quality
 
+**Component-cache admission, October 20:** production code `195f9374` avoids
+repeated slot ranking, full checkpoint lookup results for presence checks and
+a second cold reset. Focused cache/runner/index/RAM-and-disk CPU tests pass;
+the cold-reset regression fails on main. Native Flash AR/MTP slot reuse and
+cancellation/reset pass. Native MTP greedy/default-sampled RAM/serialized replay
+remains exact.
+
+All six HTTP profiles pass correctness: Flash AR/MTP and Qwen Q4/Q8 AR/DFlash2.
+Each candidate profile retains 81 matched responses and expected cache/prefill
+counts, plus 65 continuation requests covering long context, cancellation,
+images and disk restart: 876 recorded requests in total. Speculative modes
+perform actual drafts; AR performs none. Qwen compatibility uses the open #540
+adapter at `7f822ff4` versus that adapter plus this fix (`982e54c6`), separately
+from the PR's main baseline `e121a214`.
+
+Timing uses the unchanged 5% and 3 ms gate, per request and phase, including
+startup. Flash AR uses unchanged-main controls; Flash MTP and Qwen Q4/Q8 AR
+also use focused alternating repeats. Qwen Q4/Q8 DFlash2 retains one matched
+pair each, with flags unqualified. Every observation remains retained.
+**No profile has a blanket timing pass.**
+
+| Profile | Passed measurements | Inconclusive | Confirmed failures |
+| --- | ---: | ---: | ---: |
+| Flash AR | 1,187 | 16 | 0 |
+| Flash MTP | 1,078 | 125 | 0 |
+| Qwen Q4 AR | 1,177 | 27 | 0 |
+| Qwen Q4 DFlash2 | 1,198 | 7 | 0 |
+| Qwen Q8 AR | 1,178 | 26 | 0 |
+| Qwen Q8 DFlash2 | 1,185 | 20 | 0 |
+
+The AR cold-request queue median is 3.593 → 2.661 ms; MTP is 4.834 → 2.698 ms
+(55 cold requests in each matched 81-request history). These distributions
+are descriptive. Remaining prefill, token-gap, snapshot, queue and TTFT
+flags stay unqualified; faster requests never offset slower ones. The
+[PR comparison](https://github.com/gufo-org/gufo/pull/680)
+retain current d0 rates; short public-corpus C1/C2/C4/C6/C8 checks additionally
+retain exact outputs, actual drafts and individual phase timings. This benchmark
+pair retains 80 queue and 28 TTFT flags as inconclusive; its other measured
+phases stay within the gate.
+
+Snapshot elapsed time includes delayed scheduler collection and overlaps
+inference. A completed 133 MB capture call took 7.77 ms in the instrumented
+identical cohort; collection measurements include 104.77 ms. Capture-call time
+includes planning and transfer completion. A retry-sharing experiment saved
+three copies but repeatedly added 7–9 ms to some decode phases; it was removed.
+
+Production binaries, hashes, commands, all reports, failed experiments and
+interrupted attempts remain in
+`/home/mixer/gufo-qualification/issue678-2026-10-20` (`provenance.json`,
+`retained-*-qualified.json`, `retained-speed-summary.json`). The benchmark's
+source field identifies the harness tree; provenance maps the measured binaries
+to their actual source revisions. A stopped Q4 DFlash2 benchmark has no completed
+report and is retained separately from its completed `-resume1` run.
+
+**Host-memory stalls, October 18:** `fec4759d` protects runtime-owned queue-save,
+launch/copy and code-loading buffers from host compaction while preserving
+application managed memory and ordinary fine-grained host allocations. Owned
+HIP host buffers retain their coherence policy and gain best-effort long-term
+pins. Cache backing grows in bounded pieces before actual prefill work, after
+pending captures. Cold HC, Q8 and argmax functions resolve before readiness
+without trial launches. Model arithmetic, sampling and checkpoint contents are
+unchanged. The Nix package selects the patched ROCr runtime automatically.
+
+Independent memory checks cover GPU/CPU visibility, managed fallback and
+restricted pinning. Weight-upload bytes, bounds and failed-read cleanup pass.
+All 903,984,064 vision-upload bytes are checked, and 29 vision stages containing
+8,421,376 finite floats remain byte-identical to main. Independent projection,
+MTP and bidirectional snapshot-copy checks pass, including pageable/unaligned
+fallbacks, borrowed device sources, guards and graph replay.
+
+Controls on main `bff0eec6` pass all 1,918 sampling/stop measurements, 345
+measurements across the 24-request history through 56K, and 302 concurrent
+measurements against the control with matching admission order. Original
+request-index flags remain recorded. After rebasing onto `f948ddd3` and its
+image-preprocessing cache, the production package passes cache correctness and
+every compared prefill, decode and disk-restore phase. Eight image-history
+requests with one/four 1080p screenshots and text controls retain exact outputs
+and cache work; all 56 phase checks pass. Pi passes tools, editing and code
+creation with thinking enabled, ten HTTP requests, nine successful tool calls
+and executed tests.
+
+The complete HTTP benchmark refresh retains all 24 depth completion hashes
+and prompt/cache counts, and all 63 concurrent completions match fresh AR
+controls. Initial repetitive-MTP PP samples at 16K/32K/64K were
+1573/1541/1469 tok/s. A matched ordered repeat measures 1647/1624/1567,
+versus current main's 1654/1634/1570. All nine observed requests pass 63
+phase comparisons; server logs also confirm matching work and passing phases
+for all sixteen requests including prefix preparation. Both candidate samples
+contribute to the published mean and standard deviation. The initial dips'
+cause remains unproven. Cold-file loading takes 16.42 seconds versus main's
+15.95 seconds, within the timing gate.
+
+One fully cached thinking replay retains a queue/TTFT flag of about 3.22 ms:
+queue time is 7.70 → 10.93 ms, while an earlier unchanged-main control reaches
+11.47 ms. This remains **inconclusive**, not a timing pass. The post-build probe
+retains all twelve outputs/tool arguments and observes 98.5–101.4 ms maximum
+token gaps, versus 208–283 ms in the incomplete fix. Its small 4 ms total KFD
+eviction counter is retained; this is not a guarantee that every possible
+operating-system or concurrency stall is eliminated.
+[Detailed controls and failed observations](artifacts/host-memory-stalls-review.json).
+
+**Issue #632, October 17:** compared with merged main `8497711e`, indexer plan
+preparation moves the first hipBLASLt module load before readiness without
+running trial GEMMs. The independent F64 projection check and prepared/lazy
+F16/BF16 replay pass for 45 shapes, including ragged widths. Native AR/MTP
+snapshot, borrowed-state, sampled/serialized replay and device-exhaustion
+checks remain exact. Cache backing tests cover real long-term pins, allocations
+larger than 1 GiB, GPU/CPU bytes, failed registration, lifetime and low-memlock
+fallback; a separate process also passes with the io_uring syscalls denied.
+
+The new explicit `cache-stalls` suite uses a public equivalent of the report's
+24 ordered requests through 56K tokens. The supplied archive omits the inner
+prompt script, so this is not an exact reporter replay. Final candidate
+correctness and all 345 compared phase measurements pass. The standard d0
+pp2048/tg128 control retains all 12 outputs and token/cache/draft counts, with no
+timing flags. First-prompt PP drops from 257–260 to 145–146 ms; measured TG is
+28.27 → 28.29 tok/s AR, 35.79 → 35.76 mixed MTP, and 116.95 → 116.88 repetitive
+MTP. A real Pi conversation passes tools, editing and code generation with
+thinking, 10 HTTP requests, 9 successful tool calls and executed tests.
+
+Cache correctness also passes, including cancellation, image continuation and
+disk restart. Timing is **not globally qualified**: after two final/main pairs
+and an unchanged-main control, 843 of 860 measures pass and 17 remain
+inconclusive. The queue outlier overlaps main's 9.30–13.70 ms range. One image
+resume takes 181 versus 167 ms of decode in one pair and matches in the other;
+individual thinking/token-gap and disk-snapshot variation remains recorded.
+No timing margin was widened.
+
+An earlier main run had a 2.83-second token gap during page migration and
+reclaim. A matched control holding another 4 GiB retains all 24 outputs and
+phases within the timing gate, but neither arm repeats that large gap. Long-term
+pins prevent migration of the cache pages; these observations do not prove the
+entire original pause came from their migration. Container syscall restrictions
+can disable this extra protection; see [cache pinning](../../KV-CACHE.md).
+The cold-prompt setup fix also works when pinning is unavailable.
+
+**PR #613 review, October 17:** prompt lookup remains local to each Flash-Next
+MTP session and now works in batched decoding. Greedy requests can bypass the
+neural head; sampled requests retain a neural proposal first and require a
+24-token match. Fewer than half the copied proposals being accepted disables
+short resumption. Matches count only tokens generated since the request's first
+speculative step, so shared chat wrappers cannot qualify a new answer.
+Sampled copy sources stop at the request's starting context; greedy requests
+can also copy repetition within their current answer. This avoids displacing
+useful neural drafts with superficially similar parts of a new answer.
+Fully reused prompts reset this state even without `Sync`. Snapshots retain
+the request boundary and resume cursor; the payload compatibility version is 18.
+Version-17 disk entries are not reused after upgrading, so their first request
+needs a fresh prefill. New version-18 entries support normal restart reuse.
+
+The prefill follow-up replaces the per-gather allocating n-gram map with
+reusable scratch prepared before serving. It preserves token-to-row hashing, first
+occurrences, I/O order, dequantization and copied values. The independent
+n-gram tests pass, including 32,768-row, three-row and 32,769-row gathers
+through the same storage, with reference BF16 values and untouched guards.
+The repeated 8K MTP prefill flag is fixed: the same 2,042 input tokens after
+8,189 cached tokens take 1,220 ms rather than 1,330 ms, matching main's
+1,219 ms. The focused history retains every completion hash and cache/token
+count. This fixes prefill allocation stalls; speculative output still arrives
+in bursts, whose largest gaps are reported separately from total decode time.
+At 12K repetition, the largest gap is 73.86 ms versus main's 63.58 ms, while
+the same 128 output tokens take 1.218 seconds versus 2.634 seconds.
+The full-width copy path is retained for throughput; that accepted 10 ms
+burst-gap increase is not reported as a timing pass.
+The final AR, mixed MTP and repetitive MTP sweeps cover all eight depths
+from 0 to 128K. All 24 completion hashes and prompt/cache counts match main
+`3389a585`; prefill, total decode and first-token phases pass the same gate.
+The 12K burst-gap flag remains in the full sweep (64.02 → 70.19 ms).
+
+The final C1/C2/C4/C6/C8 sweep retains all 63 AR-equivalent completions and
+expected cache work. C8 ordinary/repetitive MTP reaches 126.87/245.11 versus
+main's 124.94/196.31 tok/s. Five preparation flags compare different admission
+positions: corresponding server admission, cache and batch roles agree across
+all 60 C>1 preparations, including conservative log-rounding bounds.
+The original request-index flags are retained.
+
+C8 AR has a separate maximum-gap limitation: the initial pair measures about
+72 → 103 ms, and a reverse-order repeat about 73 → 104 ms, with total
+throughput within 0.3%. A matched pair recording individual HTTP events gives
+72.74–72.87 ms on main and 72.36–72.52 ms on the candidate; its largest gap is
+on the first generated step. Output and cache work remain identical.
+This does not establish the cause of the earlier spikes: their attribution
+remains inconclusive, and they are not reported as a timing pass.
+
+Native tests with the same C8 model configuration compare isolated execution
+with C2/C4/C6/C8 cohorts: tokens, full logits, RNG, accepted/proposed counts and
+snapshot bytes agree exactly. They mix greedy and sampled requests,
+vary budgets and peer order, and require accepted copies in both modes
+(118 greedy and 43 sampled copies in the final run). Restoring into a used
+session and rewinding into a copy also replay exactly. Direct, RAM and serialized
+200-token continuations pass, including learned policies and both real sampling
+presets. Regressions cover the first step, rejected-copy resumption, a shared
+wrapper followed by a short answer, reindexing, boundary restoration, exclusion
+of a sampled answer's own repetitions and eligibility on the next request.
+
+The independent MTP oracle passes normalization, attention, recursive carry,
+full Q8 head, ragged catch-up and independent batches. Point-mass frequency and
+filter-boundary tests retain the target sampling distribution; target arithmetic
+and the neural sampler are unchanged throughout the follow-up. Native EOS and
+ignore-EOS checks pass. The final HTTP lookup test reaches every physical width
+C2/C4/C6/C8 and accepts 3,172 copied tokens, including an all-greedy C8 mix of
+copies and new text whose outputs match isolated execution. With the vision
+projector loaded, greedy and default-sampled image requests cancel after 40 and
+16 accepted copies respectively; both replay the exact uninterrupted response
+from RAM with zero prefill.
+
+A focused production run records 219 requests across sampling defaults, stops,
+image inputs and cache histories. Sampling overrides, thinking, concurrent
+seeded requests, Unicode stops, tools, PNG/JPEG/WebP and the Chat, Responses
+and Messages image paths pass. Text, thinking, tool and image cancellation
+histories also pass after a process restart with actual disk-cache hits and
+exact replay. These are correctness checks, not matched timing comparisons.
+The preceding batch, tool-agent and long-context checks remain applicable;
+this was not an all-model or all-functional-suite run.
+
+The expanded ordinary corpus uses real non-thinking defaults (temperature 0.7,
+top-p 0.8, top-k 20, presence penalty 1.5), seed 31 and main `3389a585`.
+All nine ordinary answers now match main exactly: aggregate decode is
+46.57 → 46.60 tok/s on the final scratch build. Copying from the current
+sampled answer had changed two
+answers, slowed C++ generation by about 4% and made a debugging answer 5.5%
+longer in wall time with an unsupported statistic. Restricting the sources
+removes both divergences. All 14 corpus/coding/tool outputs retain exact text,
+reasoning and tool arguments; prefill, total decode and first-token phases pass
+the unchanged 5% and 3 ms gate. One JSON response's largest gap increases
+130.96 → 150.03 ms. Replaying its complete preceding request history gives
+154.84 ms on unchanged main and 150.77 ms on the candidate, with identical work
+and no phase flags. The initial gap remains inconclusive.
+Generated C++ passes an independent
+deque oracle, wraparound and move-only checks; generated Python LRU code passes
+independent replacement, eviction and value-preservation checks.
+
+Three existing-file edits retain the exact intended content and improve
+85.44 → 105.93 tok/s in aggregate (9.06 → 7.54 seconds for the requests).
+Fresh Python LRU generation remains exact at 74.82 → 75.51 tok/s.
+A separate tool-write case omits the final newline on both main and candidate;
+its strict byte-preservation check fails equally and is not a qualified
+copy-speed result. The JSON schedule's original checker incorrectly required
+a particular goal field name absent from the prompt; saved outputs pass the
+corrected checker, with the original failure reports retained.
+
+The Pi and 115K measurements below precede the scratch-only follow-up; the
+final row-value, corpus, image/cancellation and benchmark checks above qualify
+that unchanged arithmetic and state handling.
+Real Pi 0.87.0 runs read/edit/write/test tools across five continued tasks.
+With thinking off, all 21 requests and 16 tool calls retain identical assistant
+content, tool arguments and tool results. Agent-process time is 26.12 → 25.92
+seconds; the original identical-code slowdown is gone. Precise child-exit
+timestamps exclude the functional harness's 500 ms polling granularity.
+A reverse-order repeat retains every observation: one prefill delay also
+appears on unchanged main, while maximum-gap flags move between requests and
+overlap passing observations. These phases remain inconclusive, not a global
+timing pass.
+
+With thinking enabled and about 25K source tokens, all five tasks pass
+(17 tool calls): 107.36 → 104.96 seconds. File timestamps are fixed before each
+task because an earlier `ls -la` result changed the prompts between arms;
+that earlier comparison is retained but cannot attribute latency to the PR.
+The corrected code-creation task is 33.45 → 33.37 seconds with identical work.
+The bug-fix task produces 35 extra sampled tokens and takes 21.35 → 22.22
+seconds; the following literal-protocol task needs one fewer request.
+The whole-agent result includes those different sampled choices and is not an
+isolated inference speedup. Every comparable request phase passes the gate.
+Sessions and actual tool results are retained outside Git.
+
+New public workflow fixtures substitute for the author's unavailable private
+prompts. Extraction checks exact records; generated URI tests must pass correct
+code and detect three deliberate defects. A frozen 115K-token source archive
+precedes a tool-driven edit that must preserve every unrelated byte, including
+literal thinking/tool tags. Default sampling is used with fixed seeds:
+
+| Request | Main tok/s | Candidate tok/s | Quality/work |
+| --- | ---: | ---: | --- |
+| Extraction, thinking | 84.49 | 84.59 | Exact answer and reasoning, 707 tokens |
+| URI test generation, no thinking | 82.99 | 83.47 | Exact tests, all three mutants detected, 435 tokens |
+| 115K agent edit, no thinking | 63.26 | 73.69 | Exact file/tool arguments, 187 tokens; cached continuation |
+| 115K agent edit, thinking | 67.50 | 75.18 | Exact file/tool arguments and reasoning, 219 tokens |
+
+The final scratch build repeats extraction and URI generation with exact
+outputs; all eight captured phases pass the same timing gate.
+The first final 115K run flags one maximum token gap (120 → 137 ms);
+prefill, total decode time, output and expected cache work pass.
+A focused main/candidate repeat of the same warmup and cached edit passes all
+32 measured phases: the maximum gaps are 120.07/120.18 ms and decode rates
+63.37/75.14 tok/s. The original gap remains inconclusive; the table retains
+the first observation rather than substituting the faster repeat.
+Tool-call IDs are generated independently and excluded from content comparison.
+Changing thinking mode changes the rendered prefix, so its full prefill is
+expected. The original main run's erroneous cache-hit assertion is retained;
+its saved outputs and cache work were independently revalidated after fixing
+that assertion, without rerunning or replacing the measurements. A second seed
+also passes extraction and URI quality checks on the preceding candidate.
+
+Before the scratch follow-up, canonical prepared pp2048/tg128 repetition
+reaches 115.77 versus 73.18 tok/s at C1.
+At C6, aggregate ordinary/repetitive rates are 109.54/231.31 versus
+108.74/177.98; all measured completion hashes and cache/prefill counts agree.
+Five C6 preparation flags remain in the raw request-index comparison: the
+identical requests were admitted in different orders. Server logs show the
+same admission/cache roles and costs (the first cached seven-token prefill is
+102.23 versus 102.13 ms). Comparing each corresponding admission role passes
+without averaging or changing limits. Earlier first-token variability reversed
+in the unchanged-main control and remains inconclusive, not a global timing
+pass.
+
+A separate C8 history runs copies, then new text, then four of each. Its mixed
+copy step initially verified 44 rows and raised the longest pause from main's
+157–163 ms to 200 ms. Bounding greedy copied suffixes in mixed cohorts reduces
+that pause to 145 ms. Copying/new-text rates in the final mixed cohort are
+28.08/18.58 versus main's 21.63/17.95 tok/s; all-copy cohorts retain full width
+and reach 31.42 versus 25.29 tok/s. All 24 responses retain exact text and
+expected cache work. Ordinary generation immediately after copies remains
+18.00 → 17.56 tok/s per session, with its longest pause reduced from 215 to
+162 ms. Small first-token flags remain inconclusive: main's 23–31 ms variation
+changes which request indices flag across unchanged controls, while the
+candidate takes about 29–31 ms. No decode or maximum-gap phase flags remain
+against either final main control. This is not a global timing pass.
+These focused observations do not replace the complete benchmark table or
+establish statistical language quality.
+
+llama.cpp `10b8b755` also verifies context proposals against the target, but its
+ngram path samples the target directly and compares the token. Gufo retains
+point-mass rejection sampling for copies alongside its neural p/q proposals.
+Both preserve the target distribution; identical seeded streams or a speed
+advantage over llama.cpp are not claimed. Target arithmetic and weights are
+unchanged.
+
+**PR #626 follow-up, October 17:** sparse attention bounds temporary K-fragment
+scheduling while retaining every dot product and softmax operation. Healthy
+MTP cache-slot reassignment retains bounded rollback scratch and its graphs;
+failure and explicit reset still free it. Prepared Qwen vision weights use
+coarse managed storage, removing the reproduced text-dispatch stalls after
+sidecar upload. Image activations and encoder arithmetic are unchanged.
+The focused numerical, cache and image checks are listed below.
+
+The complete HTTP C1 sweep retains all 24 completion hashes and prompt/cache/
+draft counts. Its 12 AR requests match current main `78248de2` and pass every
+measured phase at 5% and 3 ms. The affected mixed-MTP history was replayed
+through 64K; two unprofiled follow-ups reach 1551.64 and 1558.51 tok/s. The
+second pins the initial run's exact cache budget and matches all 11 request
+identities with no phase flags against that candidate control. That request
+shows no reclaim, swap or compaction activity. The table uses the faster
+follow-up; neither a specific driver cause nor worst-case latency is claimed.
+Raw attempts and diagnostics remain outside Git.
+
+The canonical repetitive d0 measurement is 73.80 tok/s with the full vision
+sidecar ready. In the isolated allocation control it is 73.77, versus 73.35
+on the exact published `32c4ece8` binary and 42.53 with the current raw device
+uploads. Four image/text HTTP controls preserve outputs and cache/draft work
+and pass the per-request phase gate. This focused evidence does not replace
+the older functional timing limits or upstream accuracy qualifications below.
+
 **PR #603's reduced draft vocabulary preserves the target distribution and
 supports the real sampling defaults.** The final review keeps the established
 length controller and AR backoff for every request; it removes the proposed
@@ -169,6 +521,9 @@ Concurrent setup and maximum-token-gap flags are also retained in the evidence.
 
 | Check | Result |
 | --- | --- |
+| Vision weight storage, October 17 | Flash-Next and 27B each retain 29 finite, byte-identical encoder stages on a deterministic 1024² texture: 134,742,016 and 137,363,456 F32 values respectively. Prepared upload, repeated upload, resident-byte accounting and later encoding pass with both projectors. Four matched production image/text requests retain exact outputs and token/cache/draft counts, with no phase exceeding both 5% and 3 ms; cached image retry performs zero prefill. The original uncached repetitive text history recovers 73.77 tok/s with the full vision sidecar prepared, versus 73.35 on the exact published binary. Native storage parity does not resolve the existing image accuracy gap against the reference. |
+| Sparse scheduling, October 17 | Against PR #626 head `c1088f89`, 17,134,080 finite full-vocabulary logits are byte-identical after 133,945 prompt tokens and 69 fixed continuation steps. The complete independent FP64 attention error report is identical, including ragged and 128K cases; all 12 saved real selection masks retain exact attention outputs. |
+| Healthy MTP slot reassignment, October 17 | The new adapter regression fails before the fix and passes afterward in AR/MTP. Reused and fresh sessions agree on full logits, greedy/sampled tokens and draft counts; memory stays within the existing reservation, while cancellation and explicit reset release scratch. Guard lifetime and seeded native RAM/serialized cache replay pass. The focused HTTP `cache` and `long-context` suites pass with the Qwen sampling preset, 624 actual drafts and 458 accepted drafts, including text/thinking/tool/image cancellation and disk resume. These are correctness results, not a global timing pass. |
 | Wave-owned prefill weights, October 13 | Routed WMMA, projection/convolution, MoE epilogue and HC mix checks pass with unchanged tolerances. Routed inputs end at their allocation boundary; independently reset output tails retain their guards. Fused SSM output/state/replay and full fixed-history logits are exact. HTTP C1 pp2048/tg128, two AR captures with two repetitions and two mixed/repetitive MTP captures: 16 exact measured completions, including actual drafts. All request phases pass the timing gate; the anomalous first mixed-MTP control is excluded. |
 | Decode-kernel review, October 10 | All 13 operator tests and native snapshot/session/deep-execution checks pass. Independent MTP formulas: worst relative RMS 0.0007655 (limit 0.002), 41 reported comparisons over eight text/image states. Sampled replay, cancellation, C2/4/6/8 and RAM/disk restoration pass. [Evidence](artifacts/decode-kernels-review.json). |
 | Focused HTTP regression, October 10 | `state-edges`, `tool-agent`, `long-context`, `cache`, Flash AR/MTP only. Two main/PR pairs plus unchanged-main controls; no output or expected cache/prefill-work changes. Timing failures remain visible above and in the [evidence](artifacts/decode-kernels-review.json). |
@@ -281,33 +636,35 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-All six Gufo benchmark sections were refreshed on October 16, 2026.
-Loading and memory use clean production Nix build `fdc21849` of PR #615
-(binary SHA-256 prefix `b1ab0e9795df6fba`). Single-user and concurrency tables
-were then remeasured with clean production build `32c4ece8`, PR #622 rebased on
-`22e36769` (binary SHA-256 prefix `2361bcffddf74773`), with the unchanged pinned
-toolchain. Every row reproduced the `fdc21849` completion hashes; single-user
-draft counts were also identical. Alternating native `gufo bench -p 16 -n 64`
-controls against main `22e36769` measured decode +2.9% MTP and +0.8% AR at 128K,
-+0.8% MTP at 32K and no change at depth 0. Four alternating mixed MTP C2
-repeats gave 110 drafts (about 54 tok/s) on main twice and the PR once, and 144
-drafts (about 60 tok/s) on the PR once, all with identical text.
-The platform profile is `performance`, with tuned `accelerator-performance`;
-temperatures and the profile are monitored throughout. Each independent AR,
-mixed MTP and repetitive MTP depth server starts after at least 90 seconds of
-idle recovery and the recorded temperature limits. Commands, binary/model identities, counts and
+All Gufo tables were refreshed on October 18, 2026, with the clean production
+Nix build `fec4759d` (ELF SHA-256 prefix `1d822fb97b4639c61`).
+The pinned compiler and dependencies are unchanged; the package includes the
+qualified ROCr host-memory patch. Every single-user row reproduces the
+previous qualified completion hashes and prompt/cache counts.
+Four prior alternating mixed
+MTP C2 repeats gave 110 drafts (about 54 tok/s) on main twice and the PR once,
+and 144 drafts (about 60 tok/s) on the PR once, all with identical text.
+The checked platform profile is `performance`, with tuned
+`accelerator-performance`. Temperature telemetry is retained throughout.
+Model jobs run sequentially without overlapping builds or profiling.
+Commands, binary/model identities, counts and
 retained samples are in [artifacts](artifacts/bench.json) and
 [model identities](artifacts/model-identities.json). Full raw requests, phase
 timings, diagnostic profiles and repeated controls are retained outside Git.
 
 The driver is `tools/bench/model-bench.py run --target gufo --fresh`.
 One warmed sample per point, HTTP, greedy, thinking off, penalties disabled;
-automatic cache RAM budget. Single-user uses ordered pp2048/tg128 histories at
+automatic cache RAM budget. Repetitive MTP through 64K also includes one
+focused repeat, preserving the ordered history and the initial sweep's realized
+17,213,143,040-byte RAM cache budget. Those rows report mean ± sample standard
+deviation, retaining the initial slower samples. Both repeat arms start after
+GPU temperature recovery; telemetry and the initial flags remain recorded.
+Single-user uses ordered pp2048/tg128 histories at
 every depth from 0 to 131072, with capacity 133760. MTP pp is the maximum across
 the independently retained mixed/repetitive workloads. Diagnostic profiled
-runs and abandoned candidates do not supply published cells. Matched main
-controls use post-#603 main `51a8b00d` (the same source tree as reviewed
-`c4177e37`), identical prompts, settings and ordered cache histories;
+runs and abandoned candidates do not supply published cells. Focused repetitive
+MTP, loading, cache and screenshot controls use current main `f948ddd3`.
+Controls preserve prompts, settings and ordered cache histories;
 per-request phase flags require both a 5% and a 3 ms increase.
 
 C1/2/4/6/8 use the same d0 prompts. Every session prefills before measured tg128,

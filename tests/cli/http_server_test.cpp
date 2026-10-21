@@ -98,6 +98,10 @@ public:
   std::uint32_t max_context() const override { return 65536; }
   std::vector<SessionState> session_states() const override { return sessions; }
   std::vector<SessionState> sessions;
+  std::string model_path() const override { return served_path; }
+  std::string build_info() const override { return served_build; }
+  std::string served_path;
+  std::string served_build;
   std::shared_ptr<GenerationRequest> start_complete(
       std::string_view prompt, std::size_t max_tokens,
       const gufo::sampling::SamplingConfig& sampling,
@@ -763,6 +767,46 @@ void TestFramingAndMetrics() {
   assert(timings->member_double("prompt_per_token_ms") == 2);
 }
 
+// curl sends "Expect: 100-continue" before a body over 1 MiB and waits for
+// the interim response; without it, every large upload stalls for a second.
+void TestExpectContinue() {
+  RunningServer server({.max_request_body_bytes = 8192});
+  for (const std::string expect :
+       {"Expect: 100-continue", "expect: 100-Continue"}) {
+    const int fd = server.Connect();
+    const std::string head =
+        "POST /echo HTTP/1.1\r\n" + expect + "\r\nContent-Length: 5\r\n\r\n";
+    assert(::send(fd, head.data(), head.size(), MSG_NOSIGNAL) ==
+           static_cast<ssize_t>(head.size()));
+    // The interim response arrives before any body byte is sent.
+    const std::string_view interim = "HTTP/1.1 100 Continue\r\n\r\n";
+    std::string response;
+    char buffer[4096];
+    while (response.size() < interim.size()) {
+      const auto count = ::read(fd, buffer, interim.size() - response.size());
+      assert(count > 0);
+      response.append(buffer, static_cast<std::size_t>(count));
+    }
+    assert(response == interim);
+    assert(::send(fd, "hello", 5, MSG_NOSIGNAL) == 5);
+    response.clear();
+    for (;;) {
+      const auto count = ::read(fd, buffer, sizeof(buffer));
+      assert(count >= 0);
+      if (count == 0)
+        break;
+      response.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(fd);
+    ExpectStatus(response, 200);
+    assert(response.substr(response.find("\r\n\r\n") + 4) == "hello");
+  }
+  // An oversized body gets its final status instead of the interim one.
+  ExpectStatus(server.Send("POST /echo HTTP/1.1\r\nExpect: 100-continue\r\n"
+                           "Content-Length: 8193\r\n\r\n"),
+               413);
+}
+
 void TestFallbackBackendMetrics() {
   namespace metrics = gufo::server::detail;
   RunningServer server;
@@ -844,6 +888,52 @@ void TestFallbackBackendMetrics() {
   }
 }
 
+// /props reports what the server runs, as llama-server's does, so a client
+// can record which model, build and settings answered it.
+void TestLlamaProps() {
+  RunningServer server;
+  const auto props = [&](const std::string& path) {
+    const auto response = server.Send("GET " + path + " HTTP/1.1\r\n\r\n");
+    ExpectStatus(response, 200);
+    return gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+  };
+
+  // Nothing is invented for what the backend does not report.
+  const auto bare = props("/props");
+  assert(bare.member_str("model") == "test");
+  assert(bare.member_str("model_alias") == "test");
+  assert(!bare.contains("model_path"));
+  assert(!bare.contains("build_info"));
+  assert(!bare.contains("total_slots"));
+  const auto* generation = bare.find("default_generation_settings");
+  assert(generation != nullptr && generation->member_size("n_ctx") == 65536);
+  const auto* params = generation->find("params");
+  assert(params->contains("temperature"));
+  assert(params->find("n_predict")->as_double() == -1.0);
+  assert(params->find("max_tokens")->as_double() == -1.0);
+  assert(!bare.find("modalities")->find("vision")->as_bool(true));
+
+  server.backend->served_path = "/models/model-00001-of-00002.gguf";
+  server.backend->served_build = "0.2.0 (abc1234)";
+  server.backend->sessions.resize(2);
+  server.backend->image_support = true;
+  server.backend->defaults.max_tokens = 512;
+  const auto full = props("/props");
+  assert(full.member_str("model_path") == "/models/model-00001-of-00002.gguf");
+  assert(full.member_str("build_info") == "0.2.0 (abc1234)");
+  assert(full.member_size("total_slots") == 2);
+  assert(full.find("default_generation_settings")
+             ->find("params")
+             ->member_size("n_predict") == 512);
+  assert(full.find("modalities")->find("vision")->as_bool());
+
+  // ?model= is accepted and not required, as outside llama-server router mode.
+  const auto named = props("/props?model=alias");
+  assert(named.member_str("model") == "alias");
+  assert(named.member_str("model_alias") == "test");
+  assert(named.member_str("build_info") == "0.2.0 (abc1234)");
+}
+
 void TestLlamaSlotsAndMetrics() {
   RunningServer server;
   const auto get = [&](const std::string& path) {
@@ -921,6 +1011,11 @@ void TestLlamaSlotsAndMetrics() {
   assert(metrics.find("# TYPE gufo_device_lost_total counter\n") !=
          std::string::npos);
   assert(metrics.find("gufo_device_lost_total 0\n") != std::string::npos);
+  for (const std::string counter : {"gufo_spec_lookup_tokens_total",
+                                    "gufo_spec_lookup_accepted_tokens_total"}) {
+    assert(metrics.find("# TYPE " + counter + " counter\n") !=
+           std::string::npos);
+  }
   const std::string ratio_prefix = "llamacpp:kv_cache_usage_ratio ";
   const auto ratio_pos = metrics.find("\n" + ratio_prefix);
   assert(ratio_pos != std::string::npos);
@@ -1475,6 +1570,9 @@ void TestCompatibilityRequests() {
          blocks[1].member_str("type") == "text" &&
          blocks[1].member_str("text") == "answer");
   assert(server.backend->LastCall().chat.reasoning.enabled == true);
+  // budget_tokens caps the reasoning that the sampler allows (#266).
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{1024});
   response_body(server.Post("/v1/messages", R"({"messages":[
       {"role":"user","content":"hi"},
       {"role":"assistant","content":[
@@ -1483,7 +1581,106 @@ void TestCompatibilityRequests() {
       {"role":"user","content":"next"}],
     "thinking":{"type":"disabled"}})"));
   const auto replayed = server.backend->LastCall().chat;
-  assert(replayed.reasoning.enabled == false);
+  assert(replayed.reasoning.enabled == false &&
+         !replayed.reasoning.budget_tokens);
+
+  // --reasoning-budget is a server default for Chat, Responses and Messages;
+  // Messages budget_tokens overrides it per request.
+  server.backend->reasoning.budget_tokens = 50;
+  response_body(server.Post("/v1/responses", R"({"input":"hi"})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  response_body(
+      server.Post("/v1/chat/completions", R"({"model":"test","messages":[
+      {"role":"user","content":"hi"}]})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  response_body(server.Post("/v1/messages", R"({"messages":[
+      {"role":"user","content":"hi"}],
+      "thinking":{"type":"enabled","budget_tokens":8}})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{8});
+  // As in llama.cpp, adaptive thinking takes no budget_tokens.
+  response_body(server.Post("/v1/messages", R"({"messages":[
+      {"role":"user","content":"hi"}],
+      "thinking":{"type":"adaptive","budget_tokens":8}})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  // llama.cpp's thinking_budget_tokens sets it on Chat and Responses; -1
+  // keeps the server default and 0 ends reasoning at once.
+  response_body(
+      server.Post("/v1/chat/completions", R"({"model":"test","messages":[
+      {"role":"user","content":"hi"}],"thinking_budget_tokens":0})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{0});
+  response_body(
+      server.Post("/v1/chat/completions", R"({"model":"test","messages":[
+      {"role":"user","content":"hi"}],"thinking_budget_tokens":-1})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{50});
+  response_body(server.Post("/v1/responses",
+                            R"({"input":"hi","thinking_budget_tokens":12})"));
+  assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+         std::size_t{12});
+  for (const auto* invalid : {"-2", "1.5", "\"8\""}) {
+    const auto rejected = server.Post(
+        "/v1/chat/completions", std::string(R"({"model":"test","messages":[
+        {"role":"user","content":"hi"}],"thinking_budget_tokens":)") +
+                                    invalid + "}");
+    ExpectStatus(rejected, 400);
+    assert(rejected.find("thinking_budget_tokens") != std::string::npos);
+  }
+  for (const auto* path : {"/v1/chat/completions", "/v1/responses"}) {
+    const auto input = gufo::json::parse(
+        std::string_view(path) == "/v1/responses"
+            ? R"({"input":"hi"})"
+            : R"({"model":"test","messages":[{"role":"user","content":"hi"}]})");
+    for (const auto* field :
+         {"reasoning_budget_tokens", "thinking_budget_tokens"}) {
+      for (const auto* value : {"-1", "0", "16", "2147483647"}) {
+        auto body = input;
+        body[field] = gufo::json::parse(value);
+        response_body(server.Post(path, body.dump()));
+        const auto expected =
+            std::string_view(value) == "-1"
+                ? std::size_t{50}
+                : static_cast<std::size_t>(body[field].as_double());
+        assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+               expected);
+      }
+      for (const auto* invalid : {"-2", "1.5", "\"8\"", "2147483648", "1e30"}) {
+        auto body = input;
+        body[field] = gufo::json::parse(invalid);
+        const auto rejected = server.Post(path, body.dump());
+        ExpectStatus(rejected, 400);
+        assert(rejected.find(field) != std::string::npos);
+      }
+    }
+    auto body = input;
+    body["reasoning_budget_tokens"] = 4;
+    body["thinking_budget_tokens"] = 16;
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+           std::size_t{4});
+    body["reasoning_budget_tokens"] = -1;
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+           std::size_t{50});
+    body["reasoning_budget_tokens"] = gufo::json::Value{};
+    response_body(server.Post(path, body.dump()));
+    assert(server.backend->LastCall().chat.reasoning.budget_tokens ==
+           std::size_t{16});
+  }
+  for (const auto* invalid : {"2147483648", "18446744073709551616", "1e30"}) {
+    const auto rejected =
+        server.Post("/v1/messages",
+                    std::string(R"({"messages":[{"role":"user","content":"hi"}],
+        "thinking":{"type":"enabled","budget_tokens":)") +
+                        invalid + "}}");
+    ExpectStatus(rejected, 400);
+    assert(rejected.find("thinking.budget_tokens") != std::string::npos);
+  }
+  server.backend->reasoning.budget_tokens.reset();
   assert(replayed.messages.size() == 3 &&
          replayed.messages[1].thought == "plan" &&
          replayed.messages[1].content == "answer");
@@ -2896,7 +3093,9 @@ int main() {
   TestQueryParameters();
   TestAuthorization();
   TestFramingAndMetrics();
+  TestExpectContinue();
   TestFallbackBackendMetrics();
+  TestLlamaProps();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
   TestTextOnlyBackendRefusesImagesBeforeReading();

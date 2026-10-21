@@ -392,8 +392,7 @@ __global__ void LinearSpeculativeSamplingKernel(
     }
     draft_target_probability /= target_total;
     accepted =
-        acceptance_uniform * draft_token_probability <
-        draft_target_probability;
+        acceptance_uniform * draft_token_probability < draft_target_probability;
     *out_accepted = accepted ? 1U : 0U;
     if (accepted) {
       *out_token = draft_token;
@@ -410,8 +409,7 @@ __global__ void LinearSpeculativeSamplingKernel(
     if (!isfinite(value) || value < min_p_threshold) {
       continue;
     }
-    const float target_weight =
-        expf((value - maximum) * inverse_temperature);
+    const float target_weight = expf((value - maximum) * inverse_temperature);
     const float draft_probability = draft_probabilities[index];
     local_sum += fmaxf(target_weight - draft_probability * target_total, 0.0F);
   }
@@ -473,13 +471,11 @@ __global__ void LinearSpeculativeSamplingKernel(
       if (!isfinite(value) || value < min_p_threshold) {
         continue;
       }
-      const float target_weight =
-          expf((value - maximum) * inverse_temperature);
+      const float target_weight = expf((value - maximum) * inverse_temperature);
       float weight = target_weight;
       if (use_residual) {
         const float draft_probability = draft_probabilities[index];
-        weight =
-            fmaxf(target_weight - draft_probability * target_total, 0.0F);
+        weight = fmaxf(target_weight - draft_probability * target_total, 0.0F);
       }
       if (weight <= 0.0F) {
         continue;
@@ -826,8 +822,7 @@ __global__ void SortedSpeculativeSamplingKernel(
     }
     const float draft_target_probability = draft_target_weight / target_total;
     accepted =
-        acceptance_uniform * draft_token_probability <
-        draft_target_probability;
+        acceptance_uniform * draft_token_probability < draft_target_probability;
     *out_accepted = accepted ? 1U : 0U;
     if (accepted) {
       *out_token = draft_token;
@@ -902,8 +897,7 @@ __global__ void SortedSpeculativeSamplingKernel(
       if (use_residual) {
         const float draft_probability =
             draft_probabilities[sorted_token_ids[index]];
-        weight =
-            fmaxf(target_weight - draft_probability * target_total, 0.0F);
+        weight = fmaxf(target_weight - draft_probability * target_total, 0.0F);
       }
       if (weight <= 0.0F) {
         continue;
@@ -1025,6 +1019,19 @@ __global__ void BatchedArgmaxKernel(const float* __restrict__ logits,
   }
 }
 
+hipError_t PrepareBatchedGPUArgmax() {
+  for (const void* kernel :
+       {reinterpret_cast<const void*>(BatchedArgmaxKernel<true>),
+        reinterpret_cast<const void*>(BatchedArgmaxKernel<false, true>),
+        reinterpret_cast<const void*>(BatchedArgmaxKernel<>)}) {
+    hipFuncAttributes attributes{};
+    const auto status = hipFuncGetAttributes(&attributes, kernel);
+    if (status != hipSuccess)
+      return status;
+  }
+  return hipSuccess;
+}
+
 void LaunchBatchedGPUArgmax(const float* logits, std::uint32_t* out_tokens,
                             std::size_t batch_size, std::size_t vocab_size,
                             std::span<float> scratch, hipStream_t stream) {
@@ -1057,9 +1064,9 @@ std::size_t EstimateGpuSamplingWorkspaceBytes(std::size_t vocab_size,
   workspace.vocab_size = vocab_size;
   workspace.penalty_capacity = penalty_capacity;
   HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(
-      nullptr, workspace.sort_temp_storage_bytes,
-      workspace.adjusted_logits, workspace.sorted_logits,
-      workspace.token_ids, workspace.sorted_token_ids, vocab_size));
+      nullptr, workspace.sort_temp_storage_bytes, workspace.adjusted_logits,
+      workspace.sorted_logits, workspace.token_ids, workspace.sorted_token_ids,
+      vocab_size));
   return workspace.SizeBytes();
 }
 
@@ -1075,8 +1082,7 @@ void AllocateGpuSamplingWorkspace(GpuSamplingWorkspace* workspace,
   try {
     HIP_CHECK(
         hipMalloc(&workspace->adjusted_logits, vocab_size * sizeof(float)));
-    HIP_CHECK(
-        hipMalloc(&workspace->sorted_logits, vocab_size * sizeof(float)));
+    HIP_CHECK(hipMalloc(&workspace->sorted_logits, vocab_size * sizeof(float)));
     HIP_CHECK(
         hipMalloc(&workspace->token_ids, vocab_size * sizeof(std::uint32_t)));
     HIP_CHECK(hipMalloc(&workspace->sorted_token_ids,
@@ -1092,9 +1098,9 @@ void AllocateGpuSamplingWorkspace(GpuSamplingWorkspace* workspace,
     HIP_CHECK(
         hipMalloc(&workspace->speculative_accepted, sizeof(std::uint32_t)));
     HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(
-        nullptr, workspace->sort_temp_storage_bytes,
-        workspace->adjusted_logits, workspace->sorted_logits,
-        workspace->token_ids, workspace->sorted_token_ids, vocab_size));
+        nullptr, workspace->sort_temp_storage_bytes, workspace->adjusted_logits,
+        workspace->sorted_logits, workspace->token_ids,
+        workspace->sorted_token_ids, vocab_size));
     HIP_CHECK(hipMalloc(&workspace->sort_temp_storage,
                         workspace->sort_temp_storage_bytes));
   } catch (...) {
@@ -1238,14 +1244,12 @@ void LaunchGPUSpeculativeSampling(
     throw std::invalid_argument("invalid GPU speculative sampling launch");
   }
 
+  HIP_CHECK(hipMemcpyAsync(workspace->draft_candidate_ids, draft_candidate_ids,
+                           draft_candidate_count * sizeof(std::uint32_t),
+                           hipMemcpyHostToDevice, stream));
   HIP_CHECK(hipMemcpyAsync(
-      workspace->draft_candidate_ids, draft_candidate_ids,
-      draft_candidate_count * sizeof(std::uint32_t), hipMemcpyHostToDevice,
-      stream));
-  HIP_CHECK(hipMemcpyAsync(
-      workspace->draft_candidate_probabilities,
-      draft_candidate_probabilities, draft_candidate_count * sizeof(float),
-      hipMemcpyHostToDevice, stream));
+      workspace->draft_candidate_probabilities, draft_candidate_probabilities,
+      draft_candidate_count * sizeof(float), hipMemcpyHostToDevice, stream));
 
   const bool has_penalties = penalty_count > 0;
   const bool needs_ordering =

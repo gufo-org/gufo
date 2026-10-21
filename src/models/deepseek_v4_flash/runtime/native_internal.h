@@ -43,7 +43,26 @@ struct ds4_rocm_verify_item {
    * floats each). The frontier gather is skipped for such items because the
    * caller decides acceptance by sampling those rows. */
   float* row_logits;
+  /* Greedy items: the token the request stops at, or -1. The frontier gather
+   * stops before an accepted stop token exactly as the CPU commit does. */
+  int stop_token = -1;
 };
+
+/* Greedy acceptance of a verified DSpark block: tokens[0] is the anchor and
+ * row_tops[i] the target argmax after tokens[i]. Accepts while the argmax
+ * reproduces the next token and stops before an accepted stop_token (-1 for
+ * none), so frontier row accepted - 1 proposes it as the next anchor. The CPU
+ * commit and the GPU frontier gather both use it and must agree. */
+inline uint32_t ds4_dspark_greedy_accept(const int32_t* row_tops,
+                                         const int32_t* tokens,
+                                         uint32_t n_tokens, int stop_token) {
+  uint32_t accepted = 1;
+  while (accepted < n_tokens && row_tops[accepted - 1] == tokens[accepted] &&
+         tokens[accepted] != stop_token) {
+    accepted++;
+  }
+  return accepted;
+}
 
 struct ds4_rocm_dspark_draft_item {
   ds4_rocm_graph* graph;

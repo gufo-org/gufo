@@ -121,6 +121,11 @@ public:
   void SetLiveAvailable(IndexEntryId, bool);
   void Erase(IndexEntryId);
   [[nodiscard]] PrefixLookup Lookup(const PrefixQuery&) const;
+  // Presence only: no live frontiers, candidate list or sorting. Ignores the
+  // query's stable-prefix rules and reuse flag, as CachedPrefixTokens does.
+  // The complete checkpoint must be usable at or beyond minimum_boundary.
+  [[nodiscard]] bool HasCheckpoint(const PrefixQuery&,
+                                   Rows minimum_boundary) const;
   // Validate an admission against the registered inventory/layout and exact
   // private-state boundary, without publishing or allocating index metadata.
   [[nodiscard]] bool IsResidentCoherent(const Checkpoint&) const;

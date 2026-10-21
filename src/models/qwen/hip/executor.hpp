@@ -9,11 +9,13 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
 
 #include "src/core/model_config.hpp"
+#include "src/models/qwen/continuation_hooks.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/state.hpp"
@@ -32,6 +34,11 @@
 #include "src/models/qwen/vision/device_input.hpp"
 
 namespace gufo::hip {
+
+class QwenPrefillCancelled final : public std::runtime_error {
+public:
+  QwenPrefillCancelled() : std::runtime_error("Qwen prefill cancelled") {}
+};
 
 class HipblasLtGemm;
 class QwenGpuExecutor;
@@ -254,8 +261,18 @@ public:
   QwenGpuArena& operator=(QwenGpuArena&&) noexcept;
 
   void Reset();
+  /// Pins the live recurrent state for rollback. Neither save nor restore
+  /// copies anything: the state lives in one of two buffers, and the first
+  /// pass after either call reads the pinned buffer and writes the other one.
   void SaveState(std::uint32_t valid_context);
   void RestoreState();
+  /// Names the buffers one recurrent-state pass reads and writes. Call exactly
+  /// once per forward, replay or prefill pass, before its first launch; every
+  /// launch of the pass then writes `*_out`, so the pinned buffer survives
+  /// until the next SaveState.
+  [[nodiscard]] QwenRecurrentStateIo BeginRecurrentWrite();
+  /// Buffer indices of the most recent BeginRecurrentWrite, for graph keys.
+  [[nodiscard]] std::uint64_t RecurrentIoIdentity() const noexcept;
   [[nodiscard]] bool BeginSsmReplayCapture();
   void DisableSsmReplayCapture();
   void MarkSsmReplayPosition(std::uint32_t position) noexcept;
@@ -296,6 +313,9 @@ public:
   float* d_logits{nullptr};
   void* d_attention_kv_f16{nullptr};
   float* d_kv_cache{nullptr};
+  // Mirrors of the live recurrent buffers (see BeginRecurrentWrite); reassigned
+  // whenever the live buffer changes, so snapshots and resets read and write
+  // the current state without knowing about the rollback pair.
   float* d_ssm_conv_state{nullptr};
   void* d_ssm_deltanet_state{nullptr};
   std::uint32_t* d_prompt_tokens{nullptr};
@@ -327,6 +347,8 @@ public:
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
       const core::ModelConfig& config, std::uint32_t max_context,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+  [[nodiscard]] static std::size_t RecurrentStateBytes(
+      const core::ModelConfig& config, QwenExecutionPolicy policy);
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;
@@ -348,7 +370,10 @@ public:
 
 private:
   void FreeAll() noexcept;
+  friend class models::qwen::ContinuationAdapter;
+  friend class QwenGpuExecutor;
   void AllocateRecurrentSnapshot();
+  void SyncLivePointers() noexcept;
   [[nodiscard]] bool AllocateSsmReplayLog();
 
   core::ModelConfig config_;
@@ -356,8 +381,15 @@ private:
   std::uint32_t max_batch_;
   QwenExecutionPolicy policy_;
   std::vector<std::uint32_t> target_layer_ids_;
-  float* d_saved_ssm_conv_state_{nullptr};
-  void* d_saved_ssm_deltanet_state_{nullptr};
+  // Buffer 0 comes from the constructor; buffer 1 is allocated by the first
+  // SaveState. `live_recurrent_` holds the current state, `saved_recurrent_`
+  // the pinned one (meaningful while has_saved_state_), `source_recurrent_`
+  // the buffer the most recent pass read.
+  std::array<float*, 2> d_ssm_conv_buffers_{};
+  std::array<void*, 2> d_ssm_deltanet_buffers_{};
+  std::uint8_t live_recurrent_{0};
+  std::uint8_t saved_recurrent_{0};
+  std::uint8_t source_recurrent_{0};
   float* d_ssm_replay_qkv_{nullptr};
   float* d_ssm_replay_alpha_{nullptr};
   float* d_ssm_replay_beta_{nullptr};
@@ -546,6 +578,8 @@ public:
   void FinishVerification();
 
 private:
+  friend class models::qwen::ContinuationAdapter;
+  models::qwen::ContinuationHooks* continuation_hooks_{nullptr};
   void CheckPrefillCancellation() const;
   void PrefillLayerCheckpoint(std::uint32_t layer);
   std::function<bool()> cancellation_check_;
@@ -553,6 +587,8 @@ private:
   void CheckReset() const {
     if (reset_failure_)
       std::rethrow_exception(reset_failure_);
+    if (continuation_hooks_)
+      continuation_hooks_->BeforeExecution();
   }
   std::exception_ptr reset_failure_;
   void ReplaySsmState(std::uint32_t position, std::uint32_t count = 1);

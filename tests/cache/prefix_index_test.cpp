@@ -162,9 +162,50 @@ void SelectionTable() {
         assert(result.candidates.back().boundary == 2);
       assert(index.CachedPrefixTokens(Query(c.prompt, c.stable)) ==
              (c.prompt.size() >= 3 && c.prompt[1] == 2 ? 3 : 0));
+      const auto checkpoints = index.Lookup(Query(c.prompt));
+      for (Rows minimum = 0; minimum <= c.prompt.size() + 1; ++minimum) {
+        const bool expected = std::ranges::any_of(
+            checkpoints.candidates, [&](const auto& candidate) {
+              return !candidate.live && candidate.boundary >= minimum;
+            });
+        auto query = Query(c.prompt, c.stable);
+        query.reuse = false;
+        assert(index.HasCheckpoint(query, minimum) == expected);
+      }
     }
     assert(ledger.Snapshot().total_bytes == 0);
   }
+}
+void CheckpointPresence() {
+  ResourceLedger ledger{kIndexLimits};
+  PrefixIndex index{ledger};
+  index.Register({1}, kIndexComponents);
+  const Tokens tokens{1, 2, 3, 4};
+  (void)index.Insert(IndexLive(tokens));
+  assert(!index.HasCheckpoint(Query(tokens), 0));
+  const auto short_id =
+      index.Insert(IndexCheckpoint(ledger, Tokens{1, 2}), ResidentComponents());
+  const auto long_id = index.Insert(IndexCheckpoint(ledger, tokens, {1}, {9}),
+                                    ResidentComponents());
+  assert(index.HasCheckpoint(Query(tokens), 2));
+  assert(!index.HasCheckpoint(Query(tokens), 3));
+  assert(index.HasCheckpoint(Query(tokens, 0, {9}), 4));
+  assert(!index.HasCheckpoint(Query(Tokens{1, 2, 9, 4}, 0, {9}), 4));
+  index.SetAvailability(
+      long_id, {{{1}, true, false}, {{2}, true, false}, {{3}, false, false}});
+  assert(!index.HasCheckpoint(Query(tokens, 0, {9}), 4));
+  index.Erase(short_id);
+  assert(!index.HasCheckpoint(Query(tokens), 2));
+  index.SetAvailability(long_id, ResidentComponents());
+  auto invalid = Query(tokens);
+  invalid.input = InputIdentity(1);
+  Invalid([&] { (void)index.HasCheckpoint(invalid, 0); });
+  // A resident presence check needs no candidate-list reservation, even when
+  // every further metadata admission is refused.
+  const auto before = ledger.Snapshot().total_bytes;
+  ledger.FailAfter(LedgerStep::kReserve, 0);
+  assert(index.HasCheckpoint(Query(tokens, 0, {9}), 4));
+  assert(ledger.Snapshot().total_bytes == before);
 }
 void ImagesAndLearning() {
   ResourceLedger ledger{kIndexLimits};
@@ -275,6 +316,7 @@ void CheckpointPrivateBoundary() {
     assert(index.Lookup(Query(tokens)).reason ==
            SelectionReason::kMissingComponent);
     assert(index.CachedPrefixTokens(Query(tokens)) == 0);
+    assert(!index.HasCheckpoint(Query(tokens), 0));
     index.Erase(entry);
   }
   const auto deep =
@@ -529,6 +571,7 @@ void AdmissionAndValidation() {
 }  // namespace
 int main() {
   SelectionTable();
+  CheckpointPresence();
   ImagesAndLearning();
   CoherenceAndFallback();
   CheckpointPrivateBoundary();

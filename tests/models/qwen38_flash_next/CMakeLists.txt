@@ -22,6 +22,7 @@ add_qwen38_flash_next_test(rope_scaling gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(rope_scaling_oracle
   gufo_qwen38_flash_next_reference "cpu")
 add_qwen38_flash_next_test(draft_vocab gufo_core "cpu")
+add_qwen38_flash_next_test(prompt_lookup gufo_core "cpu")
 
 add_executable(qwen38_flash_next_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)
 target_link_libraries(qwen38_flash_next_reference_probe PRIVATE
@@ -70,6 +71,16 @@ if (ENGINE_ENABLE_HIP)
 
   add_executable(qwen38_flash_next_attn_bench EXCLUDE_FROM_ALL attn_bench.cpp)
   target_link_libraries(qwen38_flash_next_attn_bench PRIVATE
+    gufo_qwen38_flash_next hip::host)
+
+  add_executable(qwen38_flash_next_decode_attn_bench EXCLUDE_FROM_ALL
+    decode_attn_bench.cpp)
+  target_link_libraries(qwen38_flash_next_decode_attn_bench PRIVATE
+    gufo_qwen38_flash_next hip::host)
+
+  add_executable(qwen38_flash_next_routed_gemm_bench EXCLUDE_FROM_ALL
+    routed_gemm_bench.cpp)
+  target_link_libraries(qwen38_flash_next_routed_gemm_bench PRIVATE
     gufo_qwen38_flash_next hip::host)
 
   add_executable(qwen38_flash_next_gpu_probe EXCLUDE_FROM_ALL gpu_probe.cpp

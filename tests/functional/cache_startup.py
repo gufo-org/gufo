@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Flash-Next startup identity, RAM reuse and durable restart checks.
+"""Qwen startup identity, RAM reuse and durable restart checks.
 
 Each run owns its server, disk tier and initially empty XDG cache. Select AR or
-MTP in the production server command. No weights are downloaded or modified.
+MTP or DFlash2 in the production server command. No weights are downloaded or modified.
 """
 
 import argparse
@@ -25,6 +25,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--startup-timeout", type=float, default=240)
+    parser.add_argument("--model-kind", choices=("flash-next", "qwen27b"),
+                        default="flash-next")
     parser.add_argument("--case", action="append", choices=("ram", "disk"),
                         help="Default: RAM startup, then disk startup/restart")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -37,8 +39,9 @@ def main():
         if option(command, flag) is not None:
             parser.error(f"the runner owns {flag}; omit it")
     mode = option(command, "--speculative", "off")
-    if mode not in ("off", "mtp"):
-        parser.error("this check requires Flash-Next in AR or MTP mode")
+    modes = ("off", "mtp") if args.model_kind == "flash-next" else ("off", "dflash2")
+    if mode not in modes:
+        parser.error(f"{args.model_kind} requires one of {modes}")
     if args.startup_timeout <= 0:
         parser.error("startup timeout must be positive")
     output = args.output.resolve()
@@ -59,7 +62,8 @@ def main():
     report = {**provenance(), "command": command,
               "binary": str(Path(command[0]).resolve()),
               "test_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              "speculative": mode, "stages": {}, "status": "running"}
+              "model_kind": args.model_kind, "speculative": mode,
+              "stages": {}, "status": "running"}
     report_path = output / "report.json"
     body = {
         "model": option(command, "--served-model-name"),
@@ -93,15 +97,17 @@ def main():
                 stage_report["startup_ms"] = (time.monotonic() - started) * 1000
                 log = (stage_path / "server.log").read_text()
                 assert "schema=component-cache-v1 event=configured" in log, (
-                    "requires the loaded Flash-Next component cache")
+                    "requires the loaded Qwen component cache")
                 hashed = [line.split("phase=artifact_identity model=", 1)[1]
                           for line in log.splitlines()
                           if "phase=artifact_identity model=" in line]
                 expected_hashes = []
                 if disk:
-                    expected_hashes.append("Qwen3.8-Flash-Next")
-                    if mode == "mtp":
-                        expected_hashes.append("Qwen3.8-Flash-Next MTP")
+                    expected_hashes.append(
+                        "Qwen3.8-Flash-Next" if args.model_kind == "flash-next" else "Qwen")
+                    if mode != "off":
+                        expected_hashes.append(
+                            "Qwen3.8-Flash-Next MTP" if mode == "mtp" else "DFlash")
                 assert hashed == expected_hashes, (
                     "RAM-only startup must not read model files for a durable "
                     "identity; disk startup must validate target and draft "
@@ -141,8 +147,8 @@ def main():
         else:
             assert cached == 0, result
         assert usage["gufo"]["cache_disk_hit"] == disk, result
-        if mode == "mtp":
-            assert usage.get("draft_tokens", 0) > 0, "MTP was not exercised"
+        if mode != "off":
+            assert usage.get("draft_tokens", 0) > 0, f"{mode} was not exercised"
         return result
 
     try:

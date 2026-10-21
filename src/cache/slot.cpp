@@ -1,6 +1,7 @@
 #include "src/cache/slot.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -92,7 +93,9 @@ struct LeaseState final : MutationGuard {
     if (!id.value)
       throw std::invalid_argument("zero slot identifier");
     if (spill) {
-      if (!spill->piece_bytes || !spill->acquire_stream || !spill->device_idle)
+      if (!spill->piece_bytes || !spill->acquire_stream ||
+          !spill->device_idle || !spill->reassignment_batch_size ||
+          spill->reassignment_batch_size > 16)
         throw std::invalid_argument("invalid idle spill configuration");
       for (const auto& c : adapter.Components())
         if (c.kind == ComponentKind::kAppendRows &&
@@ -331,6 +334,12 @@ struct LeaseState final : MutationGuard {
   }
   void PrepareReassignment() {
     CheckStop();
+    if (spill && spill->reassignment_batch_size > 1) {
+      PrepareBatchedReassignment();
+      borrowed_end.clear();
+      CheckStop();
+      return;
+    }
     // Acquisition can refuse/cancel without mutating the old live frontier.
     // Actual adapter release remains nonthrowing and may retire on failure.
     for (auto it = rows.begin(); it != rows.end();) {
@@ -345,6 +354,122 @@ struct LeaseState final : MutationGuard {
     // Every registered range is now preserved; later guards need no scan.
     borrowed_end.clear();
     CheckStop();
+  }
+  void PrepareBatchedReassignment() {
+    struct Copy {
+      std::shared_ptr<RowState> rows;
+      std::unique_ptr<Stream> stream;
+      std::optional<Completion> completion;
+      Rows first, end;
+      std::span<std::byte> buffer;
+      Copy(std::shared_ptr<RowState> r, std::unique_ptr<Stream> s,
+           SlotState& source)
+          : rows(std::move(r)), stream(std::move(s)) {
+        std::lock_guard lock(rows->mutex);
+        first = rows->first + rows->copied;
+        end = rows->end;
+        buffer = rows->buffer.subspan(rows->copied * rows->row_bytes);
+        std::lock_guard source_lock(source.mutex);
+        if (source.generation.load(std::memory_order_relaxed) !=
+            rows->location.generation)
+          throw std::logic_error("spill source generation mismatch");
+        ++rows->readers;
+        rows->closing = true;
+      }
+      ~Copy() {
+        // Also on cancellation/submission failure, drain before releasing the
+        // source pin. An unpublished range can be copied again on retry.
+        if (completion)
+          (void)completion->Wait();
+        std::lock_guard lock(rows->mutex);
+        --rows->readers;
+        rows->closing = false;
+        rows->changed.notify_all();
+      }
+      void Finish() {
+        if (completion->Wait() != TransferResult::kSucceeded)
+          throw std::runtime_error("borrowed row preservation failed");
+        std::lock_guard lock(rows->mutex);
+        rows->copied += end - first;
+        rows->charge = rows->reservation.Convert();
+        rows->category = rows->charge.Info().category;
+        rows->completion.fetch_or(RowState::kMaterialized,
+                                  std::memory_order_release);
+        rows->idle_copy_failed = false;
+        rows->closing = false;
+        rows->changed.notify_all();
+      }
+    };
+    std::array<std::optional<Copy>, 16> copies;
+    std::size_t size = 0;
+    Clock::time_point started;
+    const auto finish = [&] {
+      if (!size)
+        return;
+      std::array<std::shared_ptr<RowState>, 16> completed;
+      std::size_t bytes = 0;
+      for (std::size_t i = 0; i < size; ++i) {
+        copies[i]->Finish();
+        bytes += copies[i]->buffer.size();
+        completed[i] = copies[i]->rows;
+      }
+      // Publish all rows before waiting for external readers: a reader can
+      // hold one source pin while waiting for another range in this batch.
+      for (std::size_t i = 0; i < size; ++i)
+        copies[i].reset();
+      {
+        std::lock_guard lock(metrics_mutex);
+        metrics.foreground_bytes += bytes;
+        metrics.foreground_copy_ns += Nanoseconds(started);
+      }
+      for (std::size_t i = 0; i < size; ++i)
+        Preserve(completed[i], false);
+      size = 0;
+    };
+    for (auto it = rows.begin(); it != rows.end();) {
+      CheckStop();
+      auto r = it->rows.lock();
+      if (!r) {
+        it = rows.erase(it);
+        continue;
+      }
+      ++it;
+      bool eligible;
+      {
+        std::lock_guard lock(r->mutex);
+        eligible = !r->buffer.empty() && !r->Materialized() && !r->Retired() &&
+                   (r->end - r->first - r->copied) * r->row_bytes <=
+                       spill->piece_bytes;
+      }
+      if (!eligible) {
+        finish();
+        Preserve(r, false);
+        continue;
+      }
+      if (size == spill->reassignment_batch_size)
+        finish();
+      const auto stream_start = Clock::now();
+      auto transfer = spill->acquire_stream();
+      if (!transfer && size) {
+        finish();
+        transfer = spill->acquire_stream();
+      }
+      while (!transfer) {
+        CheckStop();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        transfer = spill->acquire_stream();
+      }
+      {
+        std::lock_guard lock(metrics_mutex);
+        metrics.stream_wait_ns += Nanoseconds(stream_start);
+      }
+      if (!size)
+        started = Clock::now();
+      auto& copy = copies[size++].emplace(r, std::move(transfer), *source);
+      copy.completion.emplace(adapter.CopyRowsOut(
+          *raw, r->component, copy.first, copy.end, copy.buffer, *copy.stream));
+    }
+    finish();
   }
   void BeforeOverwrite(ComponentId c, Rows first, Rows end) override {
     Guard(c, first, end, false);
@@ -729,6 +854,11 @@ bool LeasedSlot::PreservationComplete() const {
       if (!r->completion.load(std::memory_order_acquire))
         return false;
   return true;
+}
+bool LeasedSlot::ExecutionComplete() const {
+  const std::lock_guard lock(state_->mutex);
+  return !state_->leased &&
+         (!state_->slot || state_->slot->ExecutionComplete());
 }
 SpillMetrics LeasedSlot::Metrics() const {
   std::lock_guard lock(state_->metrics_mutex);

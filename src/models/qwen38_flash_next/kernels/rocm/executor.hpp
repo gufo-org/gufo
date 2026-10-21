@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "src/core/hip/host_allocations.hpp"
 #include "src/core/session_mode.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
@@ -109,8 +110,9 @@ public:
   [[nodiscard]] std::uint32_t max_context() const noexcept {
     return max_context_;
   }
-  /// Drops every token; the next Forward starts at position 0.
-  void Reset();
+  /// Drops every token; the next Forward starts at position 0. Cache slot
+  /// reassignment may retain bounded MTP scratch and its recorded graphs.
+  void Reset(bool reuse_mtp = false);
   void SetCancellationCheck(std::function<bool()> check);
   [[nodiscard]] bool CheckCancellation(std::string* error) const;
   [[nodiscard]] bool Cancelled() const noexcept { return cancelled_; }
@@ -118,6 +120,10 @@ public:
     return mutation_epoch_;
   }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  /// PLE rows this session has gathered, including prefetches, since creation.
+  [[nodiscard]] NgramTotals NgramRowTotals() const noexcept {
+    return ngram_counters_.Load();
+  }
   [[nodiscard]] bool OwnsSnapshot(
       const SnapshotState& snapshot) const noexcept {
     return snapshots_ == snapshot.registry_;
@@ -190,6 +196,8 @@ private:
   RollbackRows ple_snapshots_;   ///< [max_spec-1][PleConvHistory()][hc_dim]
   NgramHistory ngram_;
   std::vector<NgramHistory> ngram_snapshots_;
+  // Prefetches count against the const session that will consume them.
+  mutable NgramCounters ngram_counters_;
   std::uint32_t spec_base_{0};    ///< position before the speculative batch
   std::uint32_t spec_tokens_{0};  ///< tokens of the pending speculative batch
   MtpState mtp_;
@@ -711,18 +719,23 @@ private:
   std::vector<void*> allocations_;
   /// Coherent pinned storage, read directly by the GPU through s_.ple_emb.
   /// Reused only after the preceding forward has drained its stream.
+  mutable hip::HostAllocations host_allocations_;
   float* host_emb_{nullptr};
   mutable std::vector<std::uint32_t> host_rows_;
+  mutable std::vector<NgramGatherOwner> ngram_owners_;
   mutable bool ple_pending_{false};
   /// The rows a prefill chunk reads are a pure function of its tokens and
   /// the n-gram history before them, so prefetched rows are claimed only by
-  /// a batch with exactly those tokens and that history, whichever session
-  /// it belongs to. A claim copies them into host_emb_, whose stable address
-  /// is retained by captured graphs.
+  /// a batch with that history whose tokens extend, or are extended by, the
+  /// prefetched ones, whichever session it belongs to. A claim copies them
+  /// into host_emb_, whose stable address is retained by captured graphs.
   struct PlePrefetch {
     bool pending{false};  ///< read in flight
     bool ready{false};    ///< rows complete in `rows`
-    bool claimed{false};  ///< WaitPle collects them for the current batch
+    /// Leading batch tokens whose rows WaitPle collects from `rows`.
+    std::size_t claimed{0};
+    /// The batch extends past `tokens`; the table reads its remaining rows.
+    bool tail{false};
     NgramHistory before;
     NgramHistory after;
     std::vector<std::int32_t> tokens;

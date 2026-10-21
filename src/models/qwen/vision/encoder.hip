@@ -16,6 +16,8 @@
 #include <utility>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/hip/host_allocations.hpp"
+#include "src/core/hip/managed_alloc.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/vision/encoder.hpp"
 
@@ -45,6 +47,14 @@ struct Allocation {
   void* data{nullptr};
   Allocation() = default;
   explicit Allocation(std::size_t bytes) { Check(hipMalloc(&data, bytes)); }
+  static Allocation Weight(std::size_t bytes) {
+    // Keep the copied weights in the device heap when its reserve permits.
+    // Movable managed pages can evict text inference queues even when no
+    // image request is using this sidecar.
+    Allocation allocation;
+    Check(gufo::hip::AllocateDevice(&allocation.data, bytes));
+    return allocation;
+  }
   ~Allocation() {
     if (data != nullptr)
       (void)hipFree(data);
@@ -65,6 +75,40 @@ struct Allocation {
   T* As() const {
     return static_cast<T*>(data);
   }
+};
+
+// Pageable async copies leave the source ranges registered in ROCr's SVM
+// cache. Moving those file/heap pages can then evict unrelated text queues
+// long after upload. Copy through one bounded, explicitly owned host buffer.
+class PinnedUpload {
+public:
+  explicit PinnedUpload(hipStream_t stream, std::size_t bytes = kBytes)
+      : capacity_(std::min(bytes, kBytes)), stream_(stream) {
+    Check(allocations_.Allocate(&data_, capacity_));
+  }
+  PinnedUpload(const PinnedUpload&) = delete;
+  PinnedUpload& operator=(const PinnedUpload&) = delete;
+
+  void Copy(void* destination, const void* source, std::size_t bytes) {
+    auto* out = static_cast<std::byte*>(destination);
+    const auto* in = static_cast<const std::byte*>(source);
+    for (std::size_t offset = 0; offset < bytes;) {
+      const auto count = std::min(capacity_, bytes - offset);
+      std::memcpy(data_, in + offset, count);
+      Check(hipMemcpyAsync(out + offset, data_, count, hipMemcpyHostToDevice,
+                           stream_));
+      // The next CPU copy must not overwrite a buffer still read by the GPU.
+      Check(hipStreamSynchronize(stream_));
+      offset += count;
+    }
+  }
+
+private:
+  static constexpr std::size_t kBytes = 16ULL << 20;
+  gufo::hip::HostAllocations allocations_;
+  void* data_{nullptr};
+  std::size_t capacity_;
+  hipStream_t stream_;
 };
 
 __device__ __forceinline__ float Round(float x) {
@@ -457,16 +501,16 @@ struct Encoder::Impl {
     CheckBlas(hipblasSetStream(blas, stream));
     lt = std::make_unique<gufo::hip::HipblasLtGemm>(
         gufo::hip::HipblasLtGemmOptions{.ignore_environment = true});
+    PinnedUpload upload(stream);
     for (const auto& tensor : reader->GetTensors()) {
       if (tensor.name == "v.patch_embd.weight" ||
           tensor.name == "v.patch_embd.weight.1")
         continue;
       const std::size_t bytes =
           tensor.ElementCount() * (tensor.type == core::GgmlType::kF32 ? 4 : 2);
-      Allocation buffer(bytes);
+      Allocation buffer = Allocation::Weight(bytes);
       bytes_uploaded += bytes;
-      Check(hipMemcpyAsync(buffer.data, tensor.data, bytes,
-                           hipMemcpyHostToDevice, stream));
+      upload.Copy(buffer.data, tensor.data, bytes);
       weights.emplace(tensor.name, std::move(buffer));
     }
     const auto* first = static_cast<const float*>(
@@ -484,10 +528,10 @@ struct Encoder::Impl {
         }
       }
     }
-    Allocation buffer(patch.size() * sizeof(std::uint16_t));
-    Check(hipMemcpyAsync(buffer.data, patch.data(),
-                         patch.size() * sizeof(std::uint16_t),
-                         hipMemcpyHostToDevice, stream));
+    Allocation buffer =
+        Allocation::Weight(patch.size() * sizeof(std::uint16_t));
+    upload.Copy(buffer.data, patch.data(),
+                patch.size() * sizeof(std::uint16_t));
     weights.emplace("patch", std::move(buffer));
     Check(hipStreamSynchronize(stream));
     resident_bytes.store(bytes_uploaded + patch.size() * sizeof(std::uint16_t));
@@ -597,8 +641,12 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
   Allocation scores(std::size_t{kHeads} * tile * count * sizeof(float));
   Allocation probabilities(std::size_t{kHeads} * tile * count * sizeof(Bf16));
   Allocation output_tile(std::size_t{tile} * kHidden * sizeof(float));
-  Check(hipMemcpyAsync(pixels.data, image.pixels.data(), image.pixels.size(),
-                       hipMemcpyHostToDevice, stream));
+  {
+    // The input image can outlive encoding as part of a cached prompt.
+    // Do not leave its pageable vector in ROCr's implicit SVM copy cache.
+    PinnedUpload upload(stream, image.pixels.size());
+    upload.Copy(pixels.data, image.pixels.data(), image.pixels.size());
+  }
   Patchify<<<(count * kPatchDim + kThreads - 1) / kThreads, kThreads, 0,
              stream>>>(pixels.As<std::uint8_t>(), normalized.As<Bf16>(),
                        image.width, image.width / 16, count);
