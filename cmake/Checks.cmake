@@ -28,6 +28,7 @@ set(gufo_pr_targets
   qwen38_flash_next_continuation_layout_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test
   qwen3_asr_config_test qwen3_asr_audio_api_test
+  embedding_gemma2_config_test
   qwen3_tts_config_test qwen3_tts_audio_api_test
   qwen_image_21_test
   video_api_test minimax_h3_sampling_test minimax_h3_runtime_test)

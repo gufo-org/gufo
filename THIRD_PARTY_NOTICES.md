@@ -112,6 +112,12 @@ Model checkpoints are not part of the gufo source or binary
 distribution. Operators obtain them directly from their publisher and remain
 responsible for the terms governing their location and use.
 
+### EmbeddingGemma 2
+
+- **Artifact**: [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2) at revision `914f7f89142e33e77833254d9c9b90c3cef7303b`, with BF16 safetensors, a tokenizer, and a model configuration.  Gufo reads the text backbone only.
+- **License**: Apache-2.0 as declared in the model card metadata.  Gufo neither ships nor automatically downloads these weights.
+- **Reference implementation**: Transformers and sentence-transformers, both Apache-2.0.  The Python reference dependencies are development-only.
+
 ### Qwen-Image-2.1
 
 - **Artifact**: [Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1),
