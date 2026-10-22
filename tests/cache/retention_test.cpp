@@ -411,6 +411,15 @@ void RetryCopyReplacesItsNearbySource() {
   retry.push_back(5);
   RetentionRequest request{retry, {1}, {}, RetentionPurpose::kRetry, 7};
   request.source = source;
+  // Disk-only staging must explicitly protect its source: unlike an in-RAM
+  // retry copy, it does not replace that checkpoint. The nearby-source
+  // shortcut must honor this protection, too.
+  const std::array protected_ids{source};
+  request.protected_checkpoints = protected_ids;
+  assert(!f.policy.Reclaim(request));
+  assert(f.Cached(stable) == stable.size());
+  assert(f.Cached(Conversation(1, 16)) == 16);
+  request.protected_checkpoints = {};
   assert(f.policy.Reclaim(request));
   assert(f.log.events.back().checkpoint == source);
   assert(!f.policy.Reclaim(request));

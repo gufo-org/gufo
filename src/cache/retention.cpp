@@ -352,6 +352,9 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
   const bool replaces_source =
       !record_pressure && r.purpose == RetentionPurpose::kRetry &&
       source != limit_ && !Persisting(source) &&
+      std::ranges::find(r.protected_checkpoints,
+                        records_[source].checkpoint->Id()) ==
+          r.protected_checkpoints.end() &&
       records_[source].checkpoint->Compatibility() == r.compatibility &&
       records_[source].checkpoint->Input() == r.input &&
       records_[source].checkpoint->Boundary() < r.tokens.size() &&

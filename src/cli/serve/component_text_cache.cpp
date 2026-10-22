@@ -827,6 +827,18 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
   });
   auto retain = Retain(capture_tokens, staged);
   retain.preserve_source = true;
+  // Nearby retry copies may replace their source even with preserve_source.
+  // Disk staging publishes no RAM replacement, so protect it explicitly along
+  // with this turn's edit boundaries.
+  std::array<cache::CheckpointId, cache::RetentionPolicy::kRecordLimit + 1>
+      protected_checkpoints{};
+  auto protected_count = retain.protected_checkpoints.size();
+  std::ranges::copy(retain.protected_checkpoints,
+                    protected_checkpoints.begin());
+  if (retain.source.value)
+    protected_checkpoints[protected_count++] = retain.source;
+  retain.protected_checkpoints =
+      std::span(protected_checkpoints).first(protected_count);
   while (!copies.empty()) {
     try {
       if (cache->resources->can_capture &&
