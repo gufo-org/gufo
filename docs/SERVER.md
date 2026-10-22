@@ -348,13 +348,13 @@ follows `--log-level` like the rest of the startup diagnostics; the
 | `serve llm` | 2 | 3 |
 | `serve tts` | 1 | 2 |
 | `serve asr` | 1 | 2 |
-| `serve image`, `serve video` | runtime default | up to 5 |
+| `serve image`, `serve video`, `serve embedding` | runtime default | up to 5 |
 
 Text and audio caps are measured to cost no throughput: `serve llm` is flat from
 the runtime default down to a single queue at one and at four concurrent
-requests, and both audio servers are flat within run-to-run noise. Image and
-video are unmeasured, so they keep the runtime default unless the device is too
-busy to hold it.
+requests, and both audio servers are flat within run-to-run noise. Image,
+video, and embedding are unmeasured, so they keep the runtime default
+unless the device is too busy to hold it.
 
 The cap is only ever lowered to fit the free slots, never raised to fill them,
 so a server's throughput does not depend on the order the servers started. A
@@ -470,7 +470,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 
 | Method | Path | Condition |
 | --- | --- | --- |
-| `POST` | `/v1/embeddings` | Not implemented (501) |
+| `POST` | `/v1/embeddings` | EmbeddingGemma 2 serving is configured with `gufo serve embedding`.  A text server answers 501, and other servers answer 404 |
 | `POST` | `/v1/audio/transcriptions` | An STT implementation is compiled and loaded |
 | `POST` | `/v1/audio/speech` | A TTS implementation is compiled and loaded |
 | `POST` | `/v1/images/generations` | Qwen-Image-2.1 image serving is configured |
@@ -621,6 +621,53 @@ request memory, persists only its SHA-256 digest, and wipes both source and
 active string storage after transfer and completion. Completed MP4s are probed
 for H.264/AAC codec, geometry, rates, duration, and A/V synchronization before
 atomic publication.
+
+## Embeddings
+
+EmbeddingGemma 2 (`google/embeddinggemma-2`) serves text embeddings from its own model process.  It is a 768-dimension, BF16, 8192-token-context encoder:
+
+```sh
+./result/bin/gufo serve --port 8080 embedding --model /persist/models/embeddinggemma-2
+```
+
+`--model` must name an EmbeddingGemma 2 checkpoint directory, and `--served-model-name` overrides the default model ID `embeddinggemma-2`.  The process refuses to start on any other directory and in a build without the HIP backend.  There is no `--sessions` or `--context` option, because requests share one encoder and run one at a time.  Route this process through llama-swap when one public URL should offer embeddings alongside text, speech, or images.
+
+`POST /v1/embeddings` follows the OpenAI request shape:
+
+```json
+{
+  "model": "embeddinggemma-2",
+  "input": ["task: search result | query: how do I cook rice?",
+            "title: none | text: Rinse the rice, then simmer it covered."],
+  "encoding_format": "float",
+  "dimensions": 256
+}
+```
+
+The response holds one embedding per input in request order:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"object": "embedding", "index": 0, "embedding": [0.0123, -0.0456, "..."]},
+    {"object": "embedding", "index": 1, "embedding": [0.0098, 0.0311, "..."]}
+  ],
+  "model": "embeddinggemma-2",
+  "usage": {"prompt_tokens": 41, "total_tokens": 41}
+}
+```
+
+- `input` is required.  It is a string or an array of 1 to 2048 strings.  The server rejects empty strings.  Token-array input, meaning integers or arrays of integers, is not supported and returns 400 `unsupported_input`, so send text.
+- `model` is optional.  When present it must equal the served model ID, or the request returns 404 `model_not_found`.
+- `encoding_format` is `float` by default or `base64`.  Base64 carries the little-endian float32 bytes of the vector, as OpenAI's SDKs expect.  The server writes floats with enough digits to round-trip a float32 exactly.
+- `dimensions` is optional and must be 128, 256, 512, or 768, which is the default.  Any other value returns 400 `invalid_dimensions`.  A smaller value keeps the leading components of the normalized vector, which is Matryoshka truncation, and renormalizes them to unit length.
+- `user` is accepted and ignored when it is a string, and a non-string `user` returns 400 `invalid_parameter_type`.  The server rejects other members with 400 `unsupported_field`.
+- Every vector is mean-pooled and L2-normalized, so the dot product of two vectors is their cosine similarity.
+- Each input may hold at most 8192 tokens, counting the `<bos>` and `<eos>` markers the tokenizer adds.  The server refuses longer inputs instead of truncating them, with 400 `context_length_exceeded`, and the message names the input index.  `usage.prompt_tokens` and `usage.total_tokens` count every token of every input, markers included.
+- Errors use the standard error object.  Other 400 codes are `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`.  A failed encode returns 500 `embedding_failed`.  A service that is not ready returns 503 `embedding_service_unavailable`.  The usual authentication, `--max-request-bytes`, and request logging apply.
+
+**Task prefixes.** EmbeddingGemma 2 was trained with short task prefixes, and the server does not add them, so clients must.  Queries use `task: search result | query: {text}`, and documents use `title: none | text: {text}`, or `title: {title} | text: {text}` when a title is known.  Omitting the prefixes still works but lowers retrieval quality.  Embed a query and its documents with matching conventions.
 
 ## Internal Request Model
 
@@ -963,8 +1010,8 @@ Verify with `tests/functional/openai_sdk.py --suite tools`,
 
 ## Model Discovery
 
-`GET /v1/models` lists the configured text model and ready audio/video
-services. Entries provide `id`, `object`, `created` and `owned_by`; the text
+`GET /v1/models` lists the configured text model and ready audio, video,
+image, and embedding services. Entries provide `id`, `object`, `created` and `owned_by`; the text
 entry also provides `context_length` and `architecture.input_modalities`: `["text"]`
 for text-only serving or `["text", "image"]` when a vision encoder is loaded.
 Image support reflects the loaded projector, not the model name; launching a

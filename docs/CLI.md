@@ -16,7 +16,8 @@ prompt caching.
 
 This is an exhaustive list of functionalities and features offered by the gufo cli, the mapping between features and flags is not documented here and should be discovered using the `--help` command to avoid divergences between the implementation and the documentation.
 
-The supported modalities are LLM, image, video, and audio (TTS, ASR).
+The supported model types are LLM, image, video, audio (TTS, ASR), and text embeddings.
+`gufo serve embedding` provides [EmbeddingGemma 2 text embeddings](SERVER.md#embeddings).
 `gufo serve image` provides [Qwen-Image-2.1 generation and editing](models/qwen-image-2.1/README.md).
 
 ### LLM or text
@@ -183,6 +184,19 @@ gufo serve tts \
   --voice-lang narrator_ita=italian
 ```
 
+### Embeddings
+
+Use `gufo serve embedding --model DIR` to serve the EmbeddingGemma 2 text embedding model, `google/embeddinggemma-2`, at `POST /v1/embeddings`.  The model has 768 dimensions, an 8192-token context, and BF16 weights.  The process loads one checkpoint and refuses to start when `DIR` is not an EmbeddingGemma 2 checkpoint.
+
+- `model` (`-m`) is the EmbeddingGemma 2 model directory
+- `servedModelName` is the model ID that clients send and `/v1/models` reports, `embeddinggemma-2` by default
+
+The command takes the shared server options but not `--sessions` or `--context`, because requests run one at a time on the GPU and the model fixes the context window.  The [server guide](SERVER.md#embeddings) lists the request fields, the limits, and the task prefixes the model expects.
+
+```sh
+gufo serve --port 8080 embedding --model ./models/embeddinggemma-2
+```
+
 ### Server options (all modalities)
 
 These apply to every modality, before or after the subcommand:
@@ -192,8 +206,9 @@ These apply to every modality, before or after the subcommand:
   port will not answer. Use `--host ::` to listen on IPv6 and IPv4 together.
 - `sessions` (`-j`) — preallocated GPU request sessions. In practice: more
   sessions means more requests can compute at once, at the cost of memory
-  per session. This option applies to LLM serving; image and speech servers
-  use their own bounded queues.
+  per session. This option applies to LLM serving; image and speech servers use
+  their own bounded queues. The embedding server serializes requests on a mutex
+  and is bounded by `--max-connections`.
 - `maxConnections` — maximum simultaneous HTTP connections. In practice:
   clients beyond the limit queue or are refused instead of piling up.
 - `maxRequestBytes` — maximum request body size. In practice: matters mostly

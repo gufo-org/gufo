@@ -29,6 +29,7 @@
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
+#include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
@@ -519,6 +520,15 @@ void AddSpeechOptions(ArgParser& parser, bool tts, SpeechOptions* options) {
       });
 }
 
+void AddEmbeddingOptions(ArgParser& parser, std::filesystem::path* model,
+                         std::string* served_model_name) {
+  parser.AddOption("-m", "--model", "DIR", "EmbeddingGemma 2 model directory",
+                   "Model", model);
+  parser.AddOption("", "--served-model-name", "NAME",
+                   "Public API model ID (default: embeddinggemma-2)", "Model",
+                   served_model_name);
+}
+
 }  // namespace
 
 void PrintServeHelp(std::string_view program_name,
@@ -532,6 +542,17 @@ void PrintServeHelp(std::string_view program_name,
                      "Qwen-Image-2.1 safetensors directory", "Model", &model);
     parser.AddOption("", "--served-model-name", "NAME", "Public API model ID",
                      "Model", &name);
+    ServerOptionHelpTargets server_help;
+    AddServerOptionsForHelp(parser, &server_help, false);
+    parser.PrintHelp();
+    return;
+  }
+  if (subcommand == "embedding") {
+    std::filesystem::path model;
+    std::string name = "embeddinggemma-2";
+    ArgParser parser(std::string(program_name) + " serve embedding",
+                     "Serve EmbeddingGemma 2 text embeddings.");
+    AddEmbeddingOptions(parser, &model, &name);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
     parser.PrintHelp();
@@ -766,7 +787,9 @@ void PrintServeHelp(std::string_view program_name,
          "/v1/images/edits)\n"
       << "  tts       Serve Qwen3-TTS speech synthesis (/v1/audio/speech)\n"
       << "  asr       Serve Qwen3-ASR transcription "
-         "(/v1/audio/transcriptions)\n\n"
+         "(/v1/audio/transcriptions)\n"
+      << "  embedding Serve EmbeddingGemma 2 text embeddings "
+         "(/v1/embeddings)\n\n"
       << "Server:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
       << "  -p, --port <N>         Port to listen on (default: 8080)\n"
@@ -860,14 +883,15 @@ int RunServe(std::span<const char* const> args) {
       continue;
     }
     if (arg == "llm" || arg == "video" || (arg == "tts" || arg == "asr") ||
-        arg == "image") {
+        arg == "image" || arg == "embedding") {
       subcommand = arg;
       sub_args.erase(sub_args.begin() + static_cast<std::ptrdiff_t>(i));
     } else if (arg == "--help" || arg == "-h" || arg == "help") {
       const std::string_view topic =
           arg == "help" && i + 1 < args.size() ? args[i + 1] : "";
       if (!topic.empty() && topic != "llm" && topic != "video" &&
-          topic != "tts" && topic != "asr" && topic != "image") {
+          topic != "tts" && topic != "asr" && topic != "image" &&
+          topic != "embedding") {
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
@@ -951,8 +975,51 @@ int RunServe(std::span<const char* const> args) {
   std::shared_ptr<server::TtsService> tts;
   std::shared_ptr<server::AsrService> asr;
   std::shared_ptr<server::ImageService> images;
+  std::shared_ptr<server::EmbeddingService> embeddings;
 
-  if (subcommand == "image") {
+  if (subcommand == "embedding") {
+    std::filesystem::path model;
+    std::string name = "embeddinggemma-2";
+    ArgParser parser("gufo serve embedding",
+                     "Serve EmbeddingGemma 2 text embeddings.");
+    AddEmbeddingOptions(parser, &model, &name);
+    add_server_options(parser, false);
+    if (!parser.Parse(sub_args, &parse_err)) {
+      std::cerr << "Error: " << parse_err << '\n';
+      return 2;
+    }
+    if (parser.IsHelpRequested()) {
+      PrintServeHelp("gufo", "embedding");
+      return 0;
+    }
+    if (!prepare_server_options())
+      return 2;
+    if (model.empty()) {
+      std::cerr << "Error: --model <DIR> is required for embedding server\n";
+      return 2;
+    }
+    ModelLoadLog load_log("embedding_gemma2", model);
+    try {
+      embeddings = std::make_shared<server::EmbeddingService>(
+          server::EmbeddingServiceOptions{
+              .model_root = model,
+              .validate_model = true,
+              .model_id = name,
+              .runner = {},
+          });
+    } catch (const std::exception& error) {
+      std::cerr << "Error loading EmbeddingGemma 2: " << error.what() << '\n';
+      return 1;
+    }
+    if (!embeddings->ready()) {
+      std::cerr << "Error enabling EmbeddingGemma 2 service: "
+                << embeddings->initialization_error() << '\n';
+      return 1;
+    }
+    load_log.Complete(
+        "model=" + embeddings->model_id() + " context_tokens=" +
+        std::to_string(server::EmbeddingService::kMaxInputTokens));
+  } else if (subcommand == "image") {
     std::filesystem::path model;
     std::string name = "Qwen-Image-2.1";
     ArgParser parser("gufo serve image",
@@ -1532,7 +1599,7 @@ int RunServe(std::span<const char* const> args) {
                 ShutdownAfterDeviceLoss();
               },
       },
-      images);
+      images, embeddings);
   std::string err;
   if (!server.start(&err)) {
     std::cerr << "Error starting HTTP server: " << err << "\n";

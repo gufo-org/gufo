@@ -417,6 +417,7 @@
     {
       "id": "outside-text-models",
       "paths": [
+        "src/models/embedding_gemma2/**",
         "src/models/qwen3_asr/**",
         "src/models/qwen3_tts/**",
         "src/models/qwen_image_21/**",

@@ -60,3 +60,15 @@ add_test(NAME embedding_gemma2_tokenizer_test
 set_tests_properties(embedding_gemma2_tokenizer_test PROPERTIES
   LABELS "cpu;models;embedding-gemma2;tokenizer;quality;external-model"
   SKIP_RETURN_CODE 77)
+
+# POST /v1/embeddings against a fake encoder: no weights, no device, no socket.
+add_executable(embedding_gemma2_embeddings_api_test
+  embeddings_api_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/cli/serve/embeddings_api.cpp
+  ${PROJECT_SOURCE_DIR}/src/cli/serve/embedding_service.cpp)
+target_link_libraries(embedding_gemma2_embeddings_api_test PRIVATE
+  gufo_embedding_gemma2)
+add_test(NAME embedding_gemma2_embeddings_api_test
+  COMMAND embedding_gemma2_embeddings_api_test)
+set_tests_properties(embedding_gemma2_embeddings_api_test PROPERTIES
+  LABELS "cpu;models;embedding-gemma2;server;api;quality")

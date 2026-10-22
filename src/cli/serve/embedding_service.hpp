@@ -1,0 +1,80 @@
+#ifndef GUFO_SERVER_EMBEDDING_SERVICE_HPP_
+#define GUFO_SERVER_EMBEDDING_SERVICE_HPP_
+
+#include <cstddef>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "src/models/embedding_gemma2/hip/encoder_runtime.hpp"
+
+namespace gufo::server {
+
+/// Embeddings for one request, in input order. Each vector is the model's
+/// full-width, L2-normalized output. The caller applies any Matryoshka
+/// truncation.
+struct EmbeddingBatch {
+  std::vector<std::vector<float>> embeddings;
+  /// Tokens per input including the beginning and end markers.
+  std::vector<std::size_t> token_counts;
+  /// Index of the offending input, set only with
+  /// `EmbeddingStatus::kInputTooLong`.
+  std::size_t failed_index{0};
+};
+
+enum class EmbeddingStatus {
+  kOk,
+  kCancelled,
+  kInputTooLong,
+  kFailed,
+};
+
+struct EmbeddingServiceOptions {
+  using Runner =
+      std::function<EmbeddingStatus(const std::vector<std::string>& texts,
+                                    EmbeddingBatch* batch, std::string* error)>;
+
+  std::filesystem::path model_root;
+  bool validate_model{true};
+  std::string model_id;
+  /// Replaces the HIP encoder. The service serializes calls to it.
+  Runner runner;
+};
+
+/// Synchronous native HIP EmbeddingGemma 2 text embedding service.
+class EmbeddingService {
+public:
+  /// Longest accepted input in tokens, including the surrounding markers.
+  static constexpr std::size_t kMaxInputTokens =
+      models::embedding_gemma2::hip::kMaxSequenceTokens;
+
+  explicit EmbeddingService(EmbeddingServiceOptions options);
+  ~EmbeddingService();
+
+  EmbeddingService(const EmbeddingService&) = delete;
+  EmbeddingService& operator=(const EmbeddingService&) = delete;
+  EmbeddingService(EmbeddingService&&) = delete;
+  EmbeddingService& operator=(EmbeddingService&&) = delete;
+
+  [[nodiscard]] bool ready() const noexcept;
+  [[nodiscard]] std::string initialization_error() const;
+  [[nodiscard]] std::string model_id() const;
+  [[nodiscard]] std::string backend_name() const;
+
+  /// Embeds `texts` as one request. The service serializes GPU access and
+  /// returns `kCancelled` for a request cancelled before it reaches the device.
+  [[nodiscard]] EmbeddingStatus Embed(const std::vector<std::string>& texts,
+                                      const std::function<bool()>& is_cancelled,
+                                      EmbeddingBatch* batch,
+                                      std::string* error = nullptr);
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace gufo::server
+
+#endif  // GUFO_SERVER_EMBEDDING_SERVICE_HPP_

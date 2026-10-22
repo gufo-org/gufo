@@ -23,6 +23,7 @@ class VideoJobService;
 class TtsService;
 class AsrService;
 class ImageService;
+class EmbeddingService;
 class WebSocket;
 
 struct HttpRequest {
@@ -113,7 +114,8 @@ public:
              std::shared_ptr<TtsService> tts = nullptr,
              std::shared_ptr<AsrService> asr = nullptr,
              HttpServerOptions options = {},
-             std::shared_ptr<ImageService> images = nullptr);
+             std::shared_ptr<ImageService> images = nullptr,
+             std::shared_ptr<EmbeddingService> embeddings = nullptr);
   ~HttpServer();
 
   HttpServer(const HttpServer&) = delete;
@@ -150,6 +152,7 @@ private:
   std::shared_ptr<TtsService> tts_;
   std::shared_ptr<AsrService> asr_;
   std::shared_ptr<ImageService> images_;
+  std::shared_ptr<EmbeddingService> embeddings_;
   HttpServerOptions options_;
   std::string api_key_hash_;
   int listen_fd_ = -1;
