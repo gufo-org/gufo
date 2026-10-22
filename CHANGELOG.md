@@ -4,6 +4,24 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.21.0](https://github.com/gufo-org/gufo/compare/v0.20.0...v0.21.0) (2026-10-22)
+
+
+### Features
+
+* **platform:** add the os_info leaf ([#709](https://github.com/gufo-org/gufo/issues/709)) ([3aa068b](https://github.com/gufo-org/gufo/commit/3aa068b419e6272482298c1c6daccafb122764fa))
+* **qwen-flash:** opt-in YaRN context extension ([#350](https://github.com/gufo-org/gufo/issues/350)) ([2947624](https://github.com/gufo-org/gufo/commit/2947624b9e65f52d4b4fdd96297f39e040a0ed24))
+
+
+### Bug Fixes
+
+* **bench:** stop the benchmark server when startup is interrupted ([#702](https://github.com/gufo-org/gufo/issues/702)) ([53ebb51](https://github.com/gufo-org/gufo/commit/53ebb51ed0c0b24dbe7c1e35dce6c97d82740bfe))
+
+
+### Performance
+
+* **qwen:** reduce Flash-Next sampled decoding overhead ([#699](https://github.com/gufo-org/gufo/issues/699)) ([e060aee](https://github.com/gufo-org/gufo/commit/e060aeed923730b74ea3f4116c3c39de55741370))
+
 ## [0.20.0](https://github.com/gufo-org/gufo/compare/v0.19.0...v0.20.0) (2026-10-21)
 
 
