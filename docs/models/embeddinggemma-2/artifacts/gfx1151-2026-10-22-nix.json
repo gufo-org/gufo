@@ -1,0 +1,121 @@
+{
+ "date": "2026-10-22",
+ "hardware": {
+  "name": "AMD Radeon 8060S Graphics",
+  "gfx": "gfx1151",
+  "gtt_total": 115964116992
+ },
+ "model": "google/embeddinggemma-2 @ 914f7f89142e33e77833254d9c9b90c3cef7303b (BF16 safetensors)",
+ "build": "Nix: HTTP rows and load time from the `nix build` production gufo; tests from the flake dev shell gpu-test preset (RelWithDebInfo with assertions); source commit 619123dd, which differs from this record's commit only in documentation; nixos/nix 2.35.0 container",
+ "image": "gufo-embgemma2@sha256:0b1cfdd33b3abc000c622bdf0795eb74a0b9f7a4223848ff4888230c4e196ca8",
+ "pod_log_sha256": "419b74592c208e760c71e26356482be854504c4bca93529363bddc635f60c7d8",
+ "load_ms": 469,
+ "quality": {
+  "golden_worst_cosine": 0.99998494,
+  "golden_worst_truncated_cosine": 0.99998504,
+  "long_document_cosine": 0.99999088,
+  "cpu_reference_worst_cosine": 0.99999298,
+  "batched_vs_alone_worst_cosine": 0.99998912
+ },
+ "http": [
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 16,
+   "requests": 60,
+   "tokens_per_request": 40,
+   "median_ms": 10.3,
+   "p95_ms": 11.11,
+   "requests_per_s": 95.39,
+   "tokens_per_s": 3815.8
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 404,
+   "median_ms": 39.5,
+   "p95_ms": 40.67,
+   "requests_per_s": 25.16,
+   "tokens_per_s": 10165.6
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 512,
+   "requests": 60,
+   "tokens_per_request": 1940,
+   "median_ms": 250.51,
+   "p95_ms": 252.06,
+   "requests_per_s": 4.02,
+   "tokens_per_s": 7799.9
+  },
+  {
+   "concurrency": 1,
+   "inputs": 8,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 3495,
+   "median_ms": 332.61,
+   "p95_ms": 336.58,
+   "requests_per_s": 3.0,
+   "tokens_per_s": 10490.8
+  },
+  {
+   "concurrency": 1,
+   "inputs": 32,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 15670,
+   "median_ms": 1552.19,
+   "p95_ms": 1557.52,
+   "requests_per_s": 0.64,
+   "tokens_per_s": 10090.9
+  },
+  {
+   "concurrency": 4,
+   "inputs": 1,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 404,
+   "median_ms": 160.9,
+   "p95_ms": 167.09,
+   "requests_per_s": 24.67,
+   "tokens_per_s": 9964.8
+  },
+  {
+   "concurrency": 16,
+   "inputs": 1,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 404,
+   "median_ms": 641.96,
+   "p95_ms": 643.7,
+   "requests_per_s": 24.81,
+   "tokens_per_s": 10024.0
+  },
+  {
+   "concurrency": 4,
+   "inputs": 8,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 3495,
+   "median_ms": 1320.13,
+   "p95_ms": 1323.75,
+   "requests_per_s": 3.03,
+   "tokens_per_s": 10582.9
+  },
+  {
+   "concurrency": 16,
+   "inputs": 8,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 3495,
+   "median_ms": 5286.15,
+   "p95_ms": 5296.29,
+   "requests_per_s": 3.02,
+   "tokens_per_s": 10571.6
+  }
+ ]
+}

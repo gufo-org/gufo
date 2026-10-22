@@ -109,6 +109,7 @@ Model-owned procedures and outstanding qualification gaps live with the model:
 - [MiniMax H3](models/minimax-h3/QUALITY.md)
 - [Qwen3-TTS](models/qwen3-tts/QUALITY.md)
 - [Qwen3-ASR](models/qwen3-asr/QUALITY.md)
+- [EmbeddingGemma 2](models/embeddinggemma-2/QUALITY.md)
 
 ## Independent references and artifacts
 
