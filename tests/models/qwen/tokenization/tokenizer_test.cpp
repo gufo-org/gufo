@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -163,9 +162,7 @@ void TestDirectVocabularyTokenizer() {
 }
 
 void TestOrnithTemplateDispatchFromGguf() {
-  std::ifstream input(std::filesystem::path(__FILE__).parent_path() /
-                          "ornith_chat_template.jinja",
-                      std::ios::binary);
+  std::ifstream input(GUFO_ORNITH_CHAT_TEMPLATE_REFERENCE, std::ios::binary);
   const std::string reference{std::istreambuf_iterator<char>(input),
                               std::istreambuf_iterator<char>()};
   Expect(!reference.empty(), "Official Ornith template fixture is readable");

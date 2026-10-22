@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -302,9 +301,7 @@ void TestGgufTemplateExtraction() {
 // is the official template, not derived from the compiled formatter.
 void TestOrnithReferenceGoldens() {
   using namespace gufo::tokenization;
-  const auto raw = ReadText((std::filesystem::path(__FILE__).parent_path() /
-                             "ornith_chat_template.jinja")
-                                .string());
+  const auto raw = ReadText(GUFO_ORNITH_CHAT_TEMPLATE_REFERENCE);
   Expect(Sha256(raw) == QwenChatTemplate::OrnithTemplateSha256(),
          "Ornith reference retains its pinned SHA");
   Expect(QwenChatTemplate::IsOrnithTemplate(raw + "\n"),
