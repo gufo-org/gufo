@@ -475,6 +475,163 @@ done_diff:
   HIP_CHECK(hipFree(d_cache_trans_f16));
 }
 
+// Ornith-1.5-122B groups 16 query heads on each KV head; decode attention
+// shares each FP16 KV tile across the group, for one row and for the rows
+// of a verification step. One row is checked against an FP64 oracle, and
+// every verification row must equal the same row decoded on its own.
+void TestSixteenHeadGroupDecodeAttention() {
+  constexpr std::uint32_t num_heads = 32;
+  constexpr std::uint32_t num_kv_heads = 2;
+  constexpr std::uint32_t head_dim = 256;
+  constexpr std::uint32_t group = num_heads / num_kv_heads;
+  constexpr std::uint32_t max_rows = 4;
+  constexpr std::uint32_t positions[] = {600, 4093, 16381};
+  constexpr std::uint32_t max_context = 16381 + max_rows + 1;
+  const std::size_t attention_width =
+      static_cast<std::size_t>(num_heads) * head_dim;
+  const std::size_t kv_width =
+      static_cast<std::size_t>(num_kv_heads) * head_dim;
+  const std::size_t cache_elements = kv_width * max_context;
+
+  std::vector<float> h_q(max_rows * attention_width);
+  std::vector<float> h_gate(max_rows * attention_width);
+  for (std::size_t index = 0; index < h_q.size(); ++index) {
+    h_q[index] =
+        0.1F * std::sin(static_cast<float>((index % 263) + 1) * 0.013F);
+    h_gate[index] =
+        0.4F * std::cos(static_cast<float>((index % 199) + 1) * 0.017F);
+  }
+  std::vector<float> h_k(cache_elements);
+  std::vector<float> h_v(cache_elements);
+  std::vector<__half> k_half(cache_elements);
+  std::vector<__half> v_half(cache_elements);
+  for (std::size_t index = 0; index < cache_elements; ++index) {
+    k_half[index] = __float2half_rn(
+        0.08F * std::cos(static_cast<float>((index % 509) + 1) * 0.019F));
+    v_half[index] = __float2half_rn(
+        0.2F * std::sin(static_cast<float>((index % 503) + 1) * 0.023F));
+    h_k[index] = __half2float(k_half[index]);
+    h_v[index] = __half2float(v_half[index]);
+  }
+
+  float *d_q = nullptr, *d_gate = nullptr, *d_out = nullptr;
+  float *d_single = nullptr, *d_scratch = nullptr;
+  void *d_k_cache = nullptr, *d_v_cache = nullptr;
+  const std::size_t row_scratch =
+      gufo::hip::detail::DecodeAttentionScratchElements(num_heads, head_dim);
+  HIP_CHECK(hipMalloc(&d_q, h_q.size() * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_gate, h_gate.size() * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_out, max_rows * attention_width * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_single, attention_width * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_scratch, max_rows * row_scratch * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_k_cache, cache_elements * sizeof(__half)));
+  HIP_CHECK(hipMalloc(&d_v_cache, cache_elements * sizeof(__half)));
+  HIP_CHECK(hipMemcpy(d_q, h_q.data(), h_q.size() * sizeof(float),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_gate, h_gate.data(), h_gate.size() * sizeof(float),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_k_cache, k_half.data(), cache_elements * sizeof(__half),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_v_cache, v_half.data(), cache_elements * sizeof(__half),
+                      hipMemcpyHostToDevice));
+
+  const auto decode_row = [&](std::uint32_t row, std::uint32_t position) {
+    gufo::hip::LaunchAttention(d_q + row * attention_width, nullptr, nullptr,
+                               d_gate + row * attention_width, nullptr, nullptr,
+                               d_k_cache, d_v_cache, d_single, 0, position,
+                               max_context, num_heads, num_kv_heads, head_dim,
+                               nullptr, d_scratch, /*skip_kv_write=*/true);
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> row_output(attention_width);
+    HIP_CHECK(hipMemcpy(row_output.data(), d_single,
+                        attention_width * sizeof(float),
+                        hipMemcpyDeviceToHost));
+    return row_output;
+  };
+
+  const double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
+  for (const std::uint32_t position : positions) {
+    const auto output = decode_row(0, position);
+    float max_reference_diff = 0.0F;
+    std::vector<double> scores(static_cast<std::size_t>(position) + 1);
+    for (std::uint32_t head = 0; head < num_heads; ++head) {
+      const std::size_t query_offset =
+          static_cast<std::size_t>(head) * head_dim;
+      const std::size_t kv_offset =
+          static_cast<std::size_t>(head / group) * head_dim;
+      double max_score = -std::numeric_limits<double>::infinity();
+      for (std::uint32_t token = 0; token <= position; ++token) {
+        double dot = 0.0;
+        const std::size_t key_offset = token * kv_width + kv_offset;
+        for (std::uint32_t dim = 0; dim < head_dim; ++dim)
+          dot += static_cast<double>(h_q[query_offset + dim]) *
+                 h_k[key_offset + dim];
+        scores[token] = dot * scale;
+        max_score = std::max(max_score, scores[token]);
+      }
+      double denominator = 0.0;
+      for (double& score : scores) {
+        score = std::exp(score - max_score);
+        denominator += score;
+      }
+      for (std::uint32_t dim = 0; dim < head_dim; ++dim) {
+        double weighted_value = 0.0;
+        for (std::uint32_t token = 0; token <= position; ++token)
+          weighted_value +=
+              scores[token] * h_v[token * kv_width + kv_offset + dim];
+        const double sigmoid =
+            1.0 / (1.0 + std::exp(-h_gate[query_offset + dim]));
+        const float reference =
+            static_cast<float>((weighted_value / denominator) * sigmoid);
+        const float value = output[query_offset + dim];
+        if (!std::isfinite(value)) {
+          std::cerr << "16-head group decode attention is non-finite\n";
+          std::abort();
+        }
+        max_reference_diff =
+            std::max(max_reference_diff, std::abs(value - reference));
+      }
+    }
+    std::cout << "16-head group decode attention context " << (position + 1)
+              << " max reference diff: " << max_reference_diff << "\n";
+    if (max_reference_diff >= 5e-4F) {
+      std::cerr << "16-head group decode attention mismatch\n";
+      std::abort();
+    }
+
+    for (std::uint32_t rows = 2; rows <= max_rows; ++rows) {
+      gufo::hip::LaunchCausalDecodeAttention(
+          d_q, d_gate, nullptr, nullptr, d_k_cache, d_v_cache, d_out, 0,
+          position, rows, max_context, num_heads, num_kv_heads, head_dim,
+          nullptr, std::span<float>(d_scratch, rows * row_scratch));
+      HIP_CHECK(hipGetLastError());
+      HIP_CHECK(hipDeviceSynchronize());
+      std::vector<float> batched(rows * attention_width);
+      HIP_CHECK(hipMemcpy(batched.data(), d_out, batched.size() * sizeof(float),
+                          hipMemcpyDeviceToHost));
+      for (std::uint32_t row = 0; row < rows; ++row) {
+        const auto single = decode_row(row, position + row);
+        if (std::memcmp(single.data(), batched.data() + row * attention_width,
+                        attention_width * sizeof(float)) != 0) {
+          std::cerr << "16-head group verification row " << row << " of "
+                    << rows << " at context " << (position + 1)
+                    << " differs from its single-row decode\n";
+          std::abort();
+        }
+      }
+    }
+  }
+
+  HIP_CHECK(hipFree(d_q));
+  HIP_CHECK(hipFree(d_gate));
+  HIP_CHECK(hipFree(d_out));
+  HIP_CHECK(hipFree(d_single));
+  HIP_CHECK(hipFree(d_scratch));
+  HIP_CHECK(hipFree(d_k_cache));
+  HIP_CHECK(hipFree(d_v_cache));
+}
+
 #endif  // defined(ENGINE_ENABLE_HIP)
 
 int main() {
@@ -491,6 +648,7 @@ int main() {
   TestLongContextDecodeAttention(false);
   TestLongContextDecodeAttention(true);
   TestBaselineToTiledKvCacheTransition();
+  TestSixteenHeadGroupDecodeAttention();
   std::cout << "Qwen long-context attention ops test passed on gfx1151.\n";
   return 0;
 #else
