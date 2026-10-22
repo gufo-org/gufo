@@ -1,0 +1,56 @@
+#ifndef GUFO_MODELS_EMBEDDING_GEMMA2_HIP_ENCODER_RUNTIME_HPP_
+#define GUFO_MODELS_EMBEDDING_GEMMA2_HIP_ENCODER_RUNTIME_HPP_
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "src/models/embedding_gemma2/config.hpp"
+
+namespace gufo::models::embedding_gemma2::hip {
+
+/// The model's context window. Longer sequences are refused, not truncated.
+inline constexpr std::size_t kMaxSequenceTokens = 8192;
+
+/// GPU text encoder. One instance owns the weights and the scratch buffers
+/// and runs one batch at a time. Callers serialize `Embed`.
+class EncoderRuntime {
+public:
+  ~EncoderRuntime();
+
+  EncoderRuntime(const EncoderRuntime&) = delete;
+  EncoderRuntime& operator=(const EncoderRuntime&) = delete;
+  EncoderRuntime(EncoderRuntime&&) = delete;
+  EncoderRuntime& operator=(EncoderRuntime&&) = delete;
+
+  /// Loads the checkpoint and uploads the text backbone.
+  [[nodiscard]] static std::unique_ptr<EncoderRuntime> Create(
+      const std::string& model_dir, std::string* error = nullptr);
+
+  /// Returns one mean-pooled, L2-normalized embedding of
+  /// `config().text.embedding_dim` floats for each sequence. Sequences are
+  /// packed into as few device batches of `kMaxSequenceTokens` as fit.
+  /// The call polls `is_cancelled` between device batches. A cancelled call
+  /// returns false with `kCancelledMessage` in `error`.
+  [[nodiscard]] bool Embed(
+      const std::vector<std::vector<std::uint32_t>>& sequences,
+      std::vector<std::vector<float>>* embeddings, std::string* error = nullptr,
+      const std::function<bool()>& is_cancelled = {});
+
+  static constexpr const char* kCancelledMessage =
+      "embedding_gemma2: request cancelled";
+
+  [[nodiscard]] const ModelConfig& config() const;
+
+private:
+  struct Impl;
+  explicit EncoderRuntime(std::unique_ptr<Impl> impl);
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace gufo::models::embedding_gemma2::hip
+
+#endif  // GUFO_MODELS_EMBEDDING_GEMMA2_HIP_ENCODER_RUNTIME_HPP_

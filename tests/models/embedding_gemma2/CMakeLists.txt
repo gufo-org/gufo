@@ -15,6 +15,41 @@ set_tests_properties(embedding_gemma2_loader_test PROPERTIES
   LABELS "cpu;models;embedding-gemma2;loader;safetensors;external-model"
   SKIP_RETURN_CODE 77)
 
+if (ENGINE_ENABLE_HIP)
+  add_executable(embedding_gemma2_attention_hip_test attention_hip_test.cpp)
+  target_link_libraries(embedding_gemma2_attention_hip_test PRIVATE
+    gufo_embedding_gemma2 hip::host)
+  add_test(NAME embedding_gemma2_attention_hip_test
+    COMMAND embedding_gemma2_attention_hip_test)
+  set_tests_properties(embedding_gemma2_attention_hip_test PROPERTIES
+    LABELS "gpu;models;embedding-gemma2;attention;quality"
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE)
+
+  add_executable(embedding_gemma2_encoder_hip_test encoder_hip_test.cpp)
+  target_link_libraries(embedding_gemma2_encoder_hip_test PRIVATE
+    gufo_embedding_gemma2 gufo_embedding_gemma2_reference hip::host)
+  add_test(NAME embedding_gemma2_encoder_hip_test
+    COMMAND embedding_gemma2_encoder_hip_test)
+  set_tests_properties(embedding_gemma2_encoder_hip_test PROPERTIES
+    LABELS "gpu;models;embedding-gemma2;encoder;quality;external-model"
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE)
+
+  add_executable(embedding_gemma2_embedding_golden_hip_test
+    embedding_golden_hip_test.cpp)
+  target_link_libraries(embedding_gemma2_embedding_golden_hip_test PRIVATE
+    gufo_embedding_gemma2 hip::host)
+  target_compile_definitions(embedding_gemma2_embedding_golden_hip_test PRIVATE
+    GUFO_EMBEDDING_GEMMA2_EMBEDDING_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/embedding_golden.json")
+  add_test(NAME embedding_gemma2_embedding_golden_hip_test
+    COMMAND embedding_gemma2_embedding_golden_hip_test)
+  set_tests_properties(embedding_gemma2_embedding_golden_hip_test PROPERTIES
+    LABELS "gpu;models;embedding-gemma2;embedding;quality;external-model"
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE)
+endif()
+
 add_executable(embedding_gemma2_tokenizer_test tokenizer_test.cpp)
 target_link_libraries(embedding_gemma2_tokenizer_test PRIVATE
   gufo_embedding_gemma2)
