@@ -75,9 +75,20 @@ one routed-expert GEMM that normally takes about 1 ms ran for 2 to 7 s. The
 device-memory runs had 1.1 million pages migrated during their uncached
 requests and no stall. Cache hits answered in 3 to 5 ms in both arms.
 
+## Prefill at context depth
+
+pp512 after the prompt is prepared to the given depth, MTP off, two
+alternating rounds of three repetitions each (October 22, 2026, Gufo
+with the Ornith code at `277bed2d`, measured before rebasing onto `0928f63e`).
+
+| Depth | Gufo (t/s) | llama.cpp (t/s) |
+| ---: | ---: | ---: |
+| 0 | 713.8 / 707.4 | 492.8 / 516.0 |
+| 16384 | 517.8 / 514.7 | 381.5 / 376.6 |
+| 32768 | 428.0 / 426.6 | 310.0 / 308.2 |
+
 ## Not measured
 
 - The repository benchmark driver (`tools/bench/model-bench.py`) and its
   pp2048 prose and copying workloads.
 - Concurrency above one session.
-- Prefill at depth against llama.cpp.
