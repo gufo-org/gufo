@@ -39,8 +39,11 @@ template.
 | AR | No speculative option | Target-only generation. |
 | MTP | `--speculative mtp --mtp-model PATH` | Drafts with the GGUF's own MTP layer; pass the same file as the target. Two draft tokens decoded faster than three in our runs (see [Experiments](EXPERIMENTS.md)). |
 
-In the tested stack, requests that are sampled, constrained by a grammar or
-schema, or use tools decode without drafts.
+Sampled requests draft too. Each draft token is drawn at the request's
+temperature from the full head's top 64 candidates, and that exact
+distribution goes to the verifier's rejection sampling, so replies keep the
+target's distribution. Constrained, penalized and tool requests draft greedily
+and are verified through the sampler.
 
 ## Kernel routes specific to this shape
 

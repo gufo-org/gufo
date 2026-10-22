@@ -47,6 +47,18 @@ off, 4 GiB RAM cache.
 Replies were identical across all arms. MTP-off tg128 on the same build was
 about 27.3 t/s.
 
+## Sampled requests with MTP
+
+Six prompts of 256 tokens at temperature 0.6, top-p 0.95, top-k 20, fixed
+seeds, thinking off; the 12-token first prompt is excluded. Median decode rate
+after the first token.
+
+| Build | Draft tokens | Decode (t/s) | Drafts accepted |
+| --- | ---: | ---: | ---: |
+| Without sampled proposals (no drafts) | 2 | 26.7 | none |
+| With sampled proposals | 2 | 31.4 | 637 / 1102 (58%) |
+| MTP off | | 27.8 | |
+
 ## First token after load
 
 Three fresh loads per arm, eight chat requests each (six distinct prompts of

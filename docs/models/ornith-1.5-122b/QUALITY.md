@@ -28,6 +28,13 @@ tokens at temperature 0. The per-stream scratch arenas, the 16-head shared-KV
 attention and the device-memory weights each left those reply hashes
 unchanged, with MTP off and at depth 2.
 
+Sampled drafting was checked against MTP off with 300 seeded completions at
+temperature 1.0 (six tokens each, one prompt). 298 of the MTP requests accepted
+at least one draft and only 133 of the 300 texts matched their seed's MTP-off
+text, yet the item distributions agree: chi-square 0.88 (7 df) on the first
+item and 5.99 (11 df, p = 0.87) on the second, which comes from drafted
+tokens.
+
 ## Functional suites
 
 On the tested stack, the functional suites pass at context 65536 with
