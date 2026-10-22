@@ -131,7 +131,7 @@ int qfn_mmq_dense_impl(
             y_values_per_block +
         get_mmq_x_max_host(cc) * sizeof(block_q8_1_mmq);
 
-    ggml_hip_pool_alloc<char> src1_q8_1_pool(ctx->pool(), nbytes_src1_q8_1);
+    ggml_hip_pool_alloc<char> src1_q8_1_pool(qfn_pool_for_stream(ctx->device, stream), nbytes_src1_q8_1);
     char *src1_q8_1 = src1_q8_1_pool.get();
 
         quantize_mmq_q8_1_hip(
@@ -245,9 +245,9 @@ int qfn_mmq_moe_impl(
     const int64_t s01          = (int64_t)K / blck;
     const int64_t s02          = (int64_t)M * s01;
 
-    ggml_hip_pool_alloc<int32_t> ids_src1(ctx->pool(), ne_get_rows);
-    ggml_hip_pool_alloc<int32_t> ids_dst(ctx->pool(), ne_get_rows);
-    ggml_hip_pool_alloc<int32_t> expert_bounds(ctx->pool(), n_experts + 1);
+    ggml_hip_pool_alloc<int32_t> ids_src1(qfn_pool_for_stream(ctx->device, stream), ne_get_rows);
+    ggml_hip_pool_alloc<int32_t> ids_dst(qfn_pool_for_stream(ctx->device, stream), ne_get_rows);
+    ggml_hip_pool_alloc<int32_t> expert_bounds(qfn_pool_for_stream(ctx->device, stream), n_experts + 1);
 
     hipMemsetAsync(ids_src1.get(), 0, ne_get_rows * sizeof(int32_t), stream);
     hipMemsetAsync(ids_dst.get(),  0, ne_get_rows * sizeof(int32_t), stream);
@@ -270,7 +270,7 @@ int qfn_mmq_moe_impl(
     const size_t nbytes_src1_q8_1 =
         ne_get_rows * ne10_padded * y_block_size / y_values_per_block +
         get_mmq_x_max_host(cc) * sizeof(block_q8_1_mmq);
-    ggml_hip_pool_alloc<char> src1_q8_1(ctx->pool(), nbytes_src1_q8_1);
+    ggml_hip_pool_alloc<char> src1_q8_1(qfn_pool_for_stream(ctx->device, stream), nbytes_src1_q8_1);
 
     const int64_t s11_src = (int64_t)K;
     const int64_t s12_src = (int64_t)K * ne11;
@@ -427,7 +427,7 @@ static int moe_vector_projection(int weight_type, const void* W,
   ggml_hip_pool_alloc<char> src1_q8_1_pool;
   char* src1_q8_1_ptr = nullptr;
   if (input_bytes + group_bytes > 0) {
-    src1_q8_1_pool.alloc(ctx->pool(), input_bytes + group_bytes);
+    src1_q8_1_pool.alloc(qfn_pool_for_stream(ctx->device, stream), input_bytes + group_bytes);
     src1_q8_1_ptr = src1_q8_1_pool.get();
   }
   hipError_t err = hipSuccess;

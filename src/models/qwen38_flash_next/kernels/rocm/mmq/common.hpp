@@ -1183,6 +1183,9 @@ struct ggml_backend_hip_context {
     }
 };
 
+// The scratch pool for kernels queued on `stream` (one per device and stream).
+ggml_hip_pool & qfn_pool_for_stream(int device, hipStream_t stream);
+
 struct ggml_hip_mm_fusion_args_host {
     const ggml_tensor * x_bias = nullptr;
     const ggml_tensor * gate = nullptr;

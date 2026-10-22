@@ -6,6 +6,9 @@
 extern "C" {
 int qfn_mmq_init(int device);
 
+// Frees the scratch arena of a stream about to be destroyed (waits for its queued work).
+void qfn_mmq_release_stream(hipStream_t stream);
+
 void qfn_mmq_set_routed_max_expert_rows(int rows);
 
 void qfn_mmq_set_routed_tile_cols(int cols);

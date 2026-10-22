@@ -942,6 +942,7 @@ Executor::~Executor() {
     (void)hipEventDestroy(counts_ready_);
   }
   if (stream_ != nullptr) {
+    qfn_mmq_release_stream(stream_);
     (void)hipStreamDestroy(stream_);
   }
 }
