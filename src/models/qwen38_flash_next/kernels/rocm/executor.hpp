@@ -509,9 +509,14 @@ private:
   /// Residual update by the block output plus the grouped norm for the next
   /// mixer (`gamma`); wide batches write it as F16 and tiled Q8. With that
   /// mixer's F32 `inject_w`, the fused MoE combine also leaves its inject
-  /// partials in s_.inject (inject_fused_).
+  /// partials in s_.inject (inject_fused_). A decode combine whose `next`
+  /// mixer HcMix runs immediately after, with nothing reading res or xn in
+  /// between, is left to that mixer's single launch (FusedMixer).
   void Combine(float* res, const float* gamma, std::uint32_t n_tokens,
-               const float* inject_w = nullptr) const;
+               const float* inject_w = nullptr,
+               const DeviceMixer* next = nullptr) const;
+  /// Whether HcMix runs a decode batch of `m` as one HcMixQ8Fused launch.
+  bool FusedMixer(const DeviceMixer& m, std::uint32_t n_tokens) const;
   /// Hashes the batch's n-gram rows and starts reading them from disk, so
   /// the read overlaps the layers before the PLE one.
   bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
@@ -823,6 +828,21 @@ private:
   };
   mutable ReadyRows xn_q8_ready_;
   mutable ReadyRows mixed_q8_ready_;
+  /// A decode combine left to the next mixer's one-launch HcMixQ8Fused
+  /// (see Combine): HcCombineQ8_1's operands when Combine ran.
+  struct PendingCombine {
+    const DeviceMixer* mixer{nullptr};
+    float* res{nullptr};
+    const float* gamma{nullptr};
+    const float* block_out{nullptr};
+    const float* inject{nullptr};
+    std::uint32_t inject_parts{1};
+    float* xn{nullptr};
+    void* xn_q8{nullptr};
+    std::uint32_t n{0};
+  };
+  mutable PendingCombine pending_combine_;
+  void* hc_fused_state_{nullptr};  ///< HcMixQ8Fused's counters (zeroed)
 };
 
 }  // namespace gufo::models::qwen38_flash_next::rocm

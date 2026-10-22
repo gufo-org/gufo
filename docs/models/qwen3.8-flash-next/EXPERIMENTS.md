@@ -1,5 +1,13 @@
 # Qwen3.8 Flash-Next experiments
 
+## One-launch decode HC mixer (October 29, 2026)
+
+Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.
+
+| Experiment | Outcome |
+| --- | --- |
+| `HcMixQ8Fused`: a decode batch's combine, Q8_0 down/up projections, SiLU and epilogue in one launch (1-8 rows) | Retained as a component result: outputs bit for bit the five separate kernels (`hc_mix_ops`, eager, in place and replayed). `hc_mix_bench`, graph-replayed, µs per mixer: T1 47.8 → 44.5, T2 48.2 → 44.3, T4 51.7 → 48.5, T8 59.2 → 57.2. End to end, replies byte-identical; AR 28.81/29.38 (main before/after) against 29.82 and 29.55 tok/s, MTP 50.3 → 50.7/50.8 (main, three runs); C4 MTP wall throughput (4 × 32,768, four unique 256-token prompts) 76.2/76.9 → 80.0 tok/s. Rejected (exact): warming the down weights during the combine (T8 0.92×), LDS-staged up rows (0.75-0.93×), all 16 up rows ahead at T5-T8 (1.00×). |
+
 ## Confidence-gated MTP chains (October 29, 2026)
 
 Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.
