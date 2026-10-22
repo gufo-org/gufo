@@ -4,6 +4,8 @@ add_library(gufo_embedding_gemma2 STATIC
   config.cpp
   loader.cpp
   tensor.cpp
+  tokenizer.cpp
+  tokenizer_loader.cpp
 )
 
 target_include_directories(gufo_embedding_gemma2 PUBLIC ${PROJECT_SOURCE_DIR})
