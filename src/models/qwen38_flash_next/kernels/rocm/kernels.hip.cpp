@@ -6548,8 +6548,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     for (int p = 0; p < kBPer; ++p) {
       const int kb = kb0 + (((p * 256) + tid) % BK);
       if (b_ptr[p] != nullptr && kb < num_kb) {
-        const auto* src =
-            reinterpret_cast<const uint4*>(b_ptr[p] + (kb * 32));
+        const auto* src = reinterpret_cast<const uint4*>(b_ptr[p] + (kb * 32));
 #pragma unroll
         for (int c = 0; c < 4; ++c) {
           b_data[p][c] = src[c];

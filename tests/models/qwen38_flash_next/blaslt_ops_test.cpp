@@ -100,17 +100,19 @@ int main() {
             Require(
                 warmed->Gemm(
                     a.data, static_cast<__half*>(b.data) + std::size_t(off) * k,
-                    static_cast<float*>(c.data) + std::size_t(off) * m, type,
-                    m, n, k, &error),
+                    static_cast<float*>(c.data) + std::size_t(off) * m, type, m,
+                    n, k, &error),
                 error);
           }
           Check(hipMemcpy(split.data(), c.data, split.size() * sizeof(float),
                           hipMemcpyDeviceToHost));
           Require(bulk == split,
-                  std::string(type == HIP_R_16BF ? "BF16" : "F16") + " m=" +
-                      std::to_string(m) + " projection changed across "
-                      "prefill chunks at " + std::to_string(boundary) +
-                      " of " + std::to_string(total));
+                  std::string(type == HIP_R_16BF ? "BF16" : "F16") +
+                      " m=" + std::to_string(m) +
+                      " projection changed across "
+                      "prefill chunks at " +
+                      std::to_string(boundary) + " of " +
+                      std::to_string(total));
         }
       }
       // Vary shape order and use ragged sizes between the calibrated widths.

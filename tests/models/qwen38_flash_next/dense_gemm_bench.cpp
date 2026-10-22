@@ -376,20 +376,23 @@ int main(int argc, char** argv) try {
         if (offset >= t)
           continue;
         const int n = t - offset;
-        if (!blas->Gemm(w, static_cast<std::uint16_t*>(x) + std::size_t(offset) * k,
-                        y_own, HIP_R_16BF, m, n, k, &error))
+        if (!blas->Gemm(
+                w, static_cast<std::uint16_t*>(x) + std::size_t(offset) * k,
+                y_own, HIP_R_16BF, m, n, k, &error))
           throw std::runtime_error(error);
         CheckHip(hipDeviceSynchronize(), "hipDeviceSynchronize");
-        const auto part = host(y_own, std::size_t{static_cast<unsigned>(n)} * m);
+        const auto part =
+            host(y_own, std::size_t{static_cast<unsigned>(n)} * m);
         if (std::memcmp(part.data(), whole.data() + std::size_t(offset) * m,
                         part.size() * 4) != 0) {
           ++moved;
           std::printf("%s offset %d DIFF\n", name, offset);
         }
       }
-      std::printf("%s n %d: max |own - library| %.3g; rows changed with their "
-                  "batch offset at %d of 5 offsets\n",
-                  name, t, worst, moved);
+      std::printf(
+          "%s n %d: max |own - library| %.3g; rows changed with their "
+          "batch offset at %d of 5 offsets\n",
+          name, t, worst, moved);
       for (void* p : {static_cast<void*>(w), static_cast<void*>(x),
                       static_cast<void*>(y_lib), static_cast<void*>(y_own)})
         CheckHip(hipFree(p), "hipFree");
