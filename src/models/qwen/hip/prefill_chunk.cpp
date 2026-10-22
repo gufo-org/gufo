@@ -78,9 +78,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   const auto attention_workspace =
       arena_.GetScratchView(arena_.GetMaxBatch()).ffn;
   const std::size_t target_layer_count = arena_.GetTargetLayerCapture().size();
-  const std::size_t prompt_capture_offset = h_prompt_hidden_.size();
+  const std::size_t prompt_capture_offset = h_prompt_hidden_.Size();
   if (capture_prompt_hidden_ && target_layer_count > 0) {
-    h_prompt_hidden_.resize(prompt_capture_offset +
+    h_prompt_hidden_.Resize(prompt_capture_offset +
                             batch_size * target_layer_count * hidden_size);
   }
 
@@ -625,23 +625,28 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     if (capture_prompt_hidden_) {
       if (const auto tap_index = arena_.GetTargetLayerCaptureIndex(l);
           tap_index.has_value()) {
-        float* destination = h_prompt_hidden_.data() + prompt_capture_offset +
+        float* destination = h_prompt_hidden_.Data() + prompt_capture_offset +
                              (*tap_index * hidden_size);
         HIP_CHECK(hipMemcpy2DAsync(
             destination, target_layer_count * hidden_size * sizeof(float),
             scratch.decode.hidden.data(), hidden_size * sizeof(float),
             hidden_size * sizeof(float), batch_size, hipMemcpyDeviceToHost,
             arena_.stream));
+        // Bound the work queued past a tap, as the blocking pageable copy
+        // did, so cancelling a prefill stays prompt.
+        if (cancellation_check_) {
+          HIP_CHECK(hipStreamSynchronize(arena_.stream));
+        }
       }
     }
   }
 
   if (capture_prompt_hidden_) {
     if (target_layer_count == 0) {
-      const std::size_t old_size = h_prompt_hidden_.size();
+      const std::size_t old_size = h_prompt_hidden_.Size();
       const std::size_t chunk_elements = batch_size * hidden_size;
-      h_prompt_hidden_.resize(old_size + chunk_elements);
-      HIP_CHECK(hipMemcpyAsync(h_prompt_hidden_.data() + old_size,
+      h_prompt_hidden_.Resize(old_size + chunk_elements);
+      HIP_CHECK(hipMemcpyAsync(h_prompt_hidden_.Data() + old_size,
                                scratch.decode.hidden.data(),
                                chunk_elements * sizeof(float),
                                hipMemcpyDeviceToHost, arena_.stream));

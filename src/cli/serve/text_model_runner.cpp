@@ -1,7 +1,5 @@
 #include "src/cli/serve/text_model_runner.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -16,6 +14,7 @@
 #include "src/cli/serve/continuation_disk_store.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/json.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::server {
 
@@ -168,11 +167,7 @@ namespace {
 /// Host RAM still available, after cgroup limits. Unified-memory device
 /// allocations draw from the same RAM, so HIP's device capacity is not used.
 std::uint64_t HostAvailableBytes() {
-  const long pages = sysconf(_SC_AVPHYS_PAGES);
-  const long page_size = sysconf(_SC_PAGESIZE);
-  if (pages <= 0 || page_size <= 0)
-    return 0;
-  std::uint64_t available = std::uint64_t(pages) * page_size;
+  std::uint64_t available = platform::AvailableMemoryBytes();
   std::ifstream meminfo("/proc/meminfo");
   std::ostringstream meminfo_text;
   meminfo_text << meminfo.rdbuf();
@@ -649,11 +644,13 @@ struct TextRunnerPool::Impl {
               : std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
                          automatic);
       // This is an upper bound. Providers commit backing only after their
-      // slots allocate and the cache observes remaining host capacity. The
-      // state claim includes lazy image/rollback storage, not startup usage.
+      // slots allocate and the cache observes remaining host capacity. Slots
+      // allocate under the ceiling; what they pin is charged on top of this.
+      // The state claim includes lazy image/rollback storage, not startup
+      // usage.
       component_cache = std::make_unique<ComponentTextCache>(
           validated.runner, state_count, std::min(requested, ceiling),
-          disk_cache_options, !ram_cache_options.capacity_bytes);
+          disk_cache_options, !ram_cache_options.capacity_bytes, ceiling);
       if (disk_cache_options) {
         shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
         shared_prefix_max_boundaries =

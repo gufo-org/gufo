@@ -15,6 +15,7 @@
 #include "src/models/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
+#include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace q = gufo::models::qwen38_flash_next::rocm;
 namespace {
@@ -206,8 +207,10 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
   std::cout << "fused SSM convolution, output, state and replay are exact\n";
 }
 
-void CheckAttentionProjection(const void* weights, const __half* input,
-                              const float* projected, std::uint32_t batch) {
+void CheckAttentionProjection(
+    const void* weights, const __half* input, const float* projected,
+    std::uint32_t batch,
+    const gufo::models::qwen38_flash_next::YarnRope& yarn = {}) {
   constexpr std::uint32_t start = 131069;
   const std::size_t query_bytes = (std::size_t(batch) * 6144 + 16) * 4;
   const std::size_t cache_bytes =
@@ -249,7 +252,8 @@ void CheckAttentionProjection(const void* weights, const __half* input,
                            static_cast<float*>(expected[1]) + 8,
                            static_cast<__half*>(expected[2]) + 8,
                            static_cast<__half*>(expected[3]) + 8, batch, 24, 2,
-                           256, 64, position, 1e7F, 1e-6F, nullptr))
+                           256, 64, position, 1e7F, 1e-6F, nullptr, nullptr,
+                           false, yarn))
     throw std::runtime_error("attention preparation rejected the model shape");
   hipStream_t stream = nullptr;
   hipGraph_t graph = nullptr;
@@ -268,7 +272,7 @@ void CheckAttentionProjection(const void* weights, const __half* input,
                            static_cast<float*>(actual[1]) + 8,
                            static_cast<__half*>(actual[2]) + 8,
                            static_cast<__half*>(actual[3]) + 8, batch, position,
-                           1e7F, 1e-6F, stream, vision.rope()))
+                           1e7F, 1e-6F, stream, vision.rope(), yarn))
     throw std::runtime_error("attention fusion rejected the model shape");
   CheckHip(hipStreamEndCapture(stream, &graph), "attention capture end");
   CheckHip(hipGraphInstantiate(&replay, graph, nullptr, nullptr, 0),
@@ -300,11 +304,13 @@ void CheckAttentionProjection(const void* weights, const __half* input,
                           static_cast<float*>(actual[1]) + 8,
                           static_cast<__half*>(actual[2]) + 8,
                           static_cast<__half*>(actual[3]) + 8, 0, position,
-                          1e7F, 1e-6F, nullptr))
+                          1e7F, 1e-6F, nullptr, nullptr, yarn))
     throw std::runtime_error("attention fusion accepted an empty batch");
   CheckHip(hipGraphExecDestroy(replay), "attention graph free");
   CheckHip(hipGraphDestroy(graph), "attention graph definition free");
   CheckHip(hipStreamDestroy(stream), "attention stream free");
+  std::cout << "fused attention projection yarn=" << yarn.enabled
+            << ": exact against PrepareAttention, including replay\n";
 }
 
 void CheckHcDownProjection(const void* w, const void* tiled,
@@ -666,6 +672,10 @@ double Run(std::size_t batch, std::size_t m, std::size_t k, std::uint32_t seed,
   if (m == 13312 && k == 2560 && batch > 8) {
     CheckAttentionProjection(d_w, d_x_half, d_f16,
                              static_cast<std::uint32_t>(batch));
+    CheckAttentionProjection(
+        d_w, d_x_half, d_f16, static_cast<std::uint32_t>(batch),
+        gufo::models::qwen38_flash_next::MakeYarnRope(
+            {.factor = 2.5F, .original_context = 262144}, 64, 1e7F));
   }
   (void)hipFree(d_w);
   (void)hipFree(d_x);

@@ -98,10 +98,18 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   m->weights_ = std::make_unique<ModelWeights>(std::move(*weights));
+  if (options.rope_scaling.has_value()) {
+    if (!ValidateRopeScaling(*options.rope_scaling,
+                             m->weights_->config.context_length, error_msg)) {
+      return nullptr;
+    }
+    m->weights_->config.rope_scaling = *options.rope_scaling;
+  }
   const Config& c = m->weights_->config;
-  if (options.max_context == 0 || options.max_context > c.context_length) {
+  if (options.max_context == 0 || options.max_context > c.MaxContextLength()) {
     AssignError(error_msg, "context exceeds the model's " +
-                               std::to_string(c.context_length) + " tokens");
+                               std::to_string(c.MaxContextLength()) +
+                               " tokens");
     return nullptr;
   }
   try {
@@ -167,6 +175,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                 exec.max_batch, std::uint64_t{options.max_draft_tokens} + 1))
           : 1;
   exec.max_speculative = exec.max_logit_rows;
+  exec.max_context = options.max_context;
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
   if (!m->executor_) {
@@ -689,7 +698,20 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     const auto capacity = remaining <= exec.max_batch()
                               ? exec.max_batch()
                               : model_->PrefillCapacity();
-    const std::size_t n = std::min<std::size_t>(capacity, remaining);
+    std::size_t n = std::min<std::size_t>(capacity, remaining);
+    // Extended-context attention can fall back from WMMA to the per-token
+    // kernel. Its checkpoint must end a pass: the fused in-pass path requires
+    // WMMA for both query groups. Preserve ordinary split-pass arithmetic on
+    // either side of the boundary. Use the actual launch capability rather
+    // than the model's independently configured native context length.
+    if ((checkpoint || consume) && boundary > tokens_.size() &&
+        boundary < tokens_.size() + n &&
+        tokens_.size() + n >
+            rocm::WmmaCausalAttentionContextLimit(
+                model_->config().num_heads, model_->config().num_kv_heads,
+                model_->config().head_dim, model_->config().compress_ratio)) {
+      n = boundary - tokens_.size();
+    }
     const auto chunk = tokens.subspan(off, n);
     if (MtpEnabled() && !tokens_.empty() &&
         !DraftCatchUp(chunk[0], false, error_msg)) {

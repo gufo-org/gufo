@@ -4,6 +4,7 @@ add_library(gufo_qwen38_flash_next STATIC
   config.cpp
   continuation_layout.cpp
   ngram.cpp
+  rope_scaling.cpp
   weights.cpp)
 
 target_include_directories(gufo_qwen38_flash_next PUBLIC ${PROJECT_SOURCE_DIR})

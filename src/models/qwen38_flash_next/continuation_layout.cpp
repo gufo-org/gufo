@@ -23,7 +23,7 @@ ContinuationLayout::ContinuationLayout(const Config& c, bool mtp,
                                        std::uint32_t context,
                                        std::uint32_t kept_rows)
     : context_(context), ratio_(c.compress_ratio), mtp_(mtp) {
-  if (!context || context > c.context_length || !ratio_ ||
+  if (!context || context > c.MaxContextLength() || !ratio_ ||
       !c.full_attention_interval || !c.num_layers || !c.AttentionKvDim() ||
       !c.indexer_head_dim || !c.indexer_top_k || !c.ssm_conv_kernel ||
       !c.ssm_head_dim || !c.ssm_num_v_heads || !c.HcDim() || !c.vocab_size ||

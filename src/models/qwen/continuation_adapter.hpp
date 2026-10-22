@@ -1,6 +1,8 @@
 #ifndef GUFO_MODELS_QWEN_CONTINUATION_ADAPTER_HPP_
 #define GUFO_MODELS_QWEN_CONTINUATION_ADAPTER_HPP_
 
+#include <atomic>
+
 #include "src/cache/adapter.hpp"
 #include "src/core/hip/transfer_pool.hpp"
 #include "src/models/qwen/continuation_layout.hpp"
@@ -26,7 +28,8 @@ public:
       cache::Identity,
       hip::QwenExecutionPolicy = hip::QwenExecutionPolicy::Production(),
       std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model = nullptr,
-      hip::QwenDFlashGpuDraftConfig draft_config = {});
+      hip::QwenDFlashGpuDraftConfig draft_config = {},
+      cache::ResourceLedger* ledger = nullptr);
   ~ContinuationAdapter() override;
   [[nodiscard]] hip::QwenGpuExecutor& GetExecutor(cache::Slot&);
   [[nodiscard]] hip::QwenDFlashGpuDraftBackend* GetDraftBackend(cache::Slot&);
@@ -40,6 +43,11 @@ public:
   [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
       std::size_t ram_bytes) const {
     return layout_.BackingPlan(ram_bytes);
+  }
+  // Prompt-capture bytes the live slots pinned and charged to the ledger.
+  // Read at startup; a later StopPinning leaves it overstated.
+  [[nodiscard]] std::size_t PinnedCaptureBytes() const noexcept {
+    return pinned_capture_bytes_.load(std::memory_order_relaxed);
   }
   [[nodiscard]] cache::Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
@@ -101,6 +109,9 @@ private:
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model_;
   hip::QwenDFlashGpuDraftConfig draft_config_;
+  // Charged for each slot's pinned prompt capture; outlives the slots.
+  cache::ResourceLedger* ledger_;
+  std::atomic<std::size_t> pinned_capture_bytes_{};
   hip::QwenExecutionPolicy policy_;
   std::uint32_t context_;
   ContinuationLayout layout_;

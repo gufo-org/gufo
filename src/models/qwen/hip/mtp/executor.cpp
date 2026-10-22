@@ -144,6 +144,14 @@ void QwenMtpGpuExecutor::Reset() noexcept {
   next_position_ = 0;
 }
 
+void QwenMtpGpuExecutor::Synchronize() {
+  const auto status = hipStreamSynchronize(stream_);
+  if (status != hipSuccess) {
+    throw std::runtime_error(std::string("MTP stream synchronize failed: ") +
+                             hipGetErrorString(status));
+  }
+}
+
 void QwenMtpGpuExecutor::Rewind(std::uint32_t position) {
   if (position > next_position_) {
     throw std::out_of_range("MTP rewind position exceeds executed context");

@@ -63,6 +63,8 @@ public:
         draft(std::move(draft)) {
     this->executor->continuation_hooks_ = this;
     this->executor->vision_input_.continuation_hooks_ = this;
+    pinned_capture = this->executor->PromptHiddenChargedBytes();
+    adapter.pinned_capture_bytes_ += pinned_capture;
     if (this->draft) {
       this->draft->continuation_hooks_ = this;
       this->draft->executor_->continuation_hooks_ = this;
@@ -113,6 +115,7 @@ public:
     }
     executor->continuation_hooks_ = nullptr;
     executor->vision_input_.continuation_hooks_ = nullptr;
+    adapter.pinned_capture_bytes_ -= pinned_capture;
   }
   bool IsValid() const noexcept override {
     return guarding || (!restoring && !failed && !executor->reset_failure_);
@@ -234,6 +237,7 @@ public:
   cache::MutationGuard& guard;
   std::shared_ptr<hip::QwenGpuExecutor> executor;
   std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
+  std::size_t pinned_capture{};
   std::uint32_t position{};
   std::optional<std::uint32_t> prefill_position;
   bool prefill_logits{};
@@ -256,10 +260,11 @@ ContinuationAdapter::ContinuationAdapter(
     std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t context,
     cache::Identity identity, hip::QwenExecutionPolicy policy,
     std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model,
-    hip::QwenDFlashGpuDraftConfig draft_config)
+    hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger)
     : model_(std::move(model)),
       draft_model_(std::move(draft_model)),
       draft_config_(draft_config),
+      ledger_(ledger),
       policy_(policy),
       context_(context),
       layout_(model_ ? model_->GetConfig() : core::ModelConfig{}, policy,
@@ -374,7 +379,7 @@ void ContinuationAdapter::RollbackPrefill(cache::Slot& slot) {
   // Prefill cancellation is checked before the vocabulary head and before
   // draft catch-up. Only the other recurrent buffer and suffix KV changed.
   executor.arena_.RestoreState();
-  executor.h_prompt_hidden_.clear();
+  executor.h_prompt_hidden_.Clear();
   state.position = *state.prefill_position;
   state.logits_valid = state.prefill_logits;
   state.failed = false;
@@ -404,6 +409,8 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
                                                    &error);
     if (!draft)
       throw std::runtime_error("cannot create component draft: " + error);
+    executor->ReservePromptHiddenCapture(draft->TargetHiddenLayerIds().size(),
+                                         ledger_);
   }
   return std::make_unique<State>(*this, guard, std::move(executor),
                                  std::move(draft));
@@ -972,7 +979,7 @@ bool ContinuationAdapter::Validate(
   executor.next_token_ =
       metadata.has_next ? std::optional<tokenization::TokenId>{metadata.next}
                         : std::nullopt;
-  executor.h_prompt_hidden_.clear();
+  executor.h_prompt_hidden_.Clear();
   executor.h_verification_hidden_.clear();
   executor.h_verification_logits_.clear();
   executor.h_last_hidden_.clear();

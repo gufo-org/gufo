@@ -70,6 +70,9 @@ if (ENGINE_ENABLE_HIP)
   add_qwen_hip_test(qwen_hip_device_gate_test
     tests/models/qwen/hip/device_gate_test.cpp
     "hip;qwen;test-support;device-gate")
+  add_qwen_hip_test(qwen_prompt_hidden_buffer_test
+    tests/models/qwen/hip/prompt_hidden_buffer_test.cpp
+    "hip;gpu;qwen")
 
   add_qwen_hip_test(qwen_gpu_ops_test
     tests/models/qwen/hip/basic/blas_ops_test.cpp

@@ -537,6 +537,8 @@
               };
               mtpCmd = mkServe {
                 model = "/var/models/qwen-flash.gguf";
+                context = 409600;
+                enableYarn = true;
                 speculative = "mtp";
                 mtpModel = "/var/models/mtp.gguf";
                 draftTokens = 3;
@@ -599,6 +601,10 @@
                 exit 1
               fi
               mtp_cmd="${mtpCmd}"
+              echo "$mtp_cmd" | grep -F -- "--context 409600 --enable-yarn"
+              if echo "$cmd_str" | grep -F -- "--enable-yarn"; then
+                exit 1
+              fi
               echo "$mtp_cmd" | grep -F -- "--speculative mtp"
               echo "$mtp_cmd" | grep -F -- "--mtp-model /var/models/mtp.gguf"
               echo "$mtp_cmd" | grep -F -- "--draft-tokens 3"

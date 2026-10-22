@@ -83,9 +83,27 @@ Timings report
 
 The official template defaults to thinking on, `xhigh` effort and preserving
 prior reasoning. Use the [reasoning controls](../../SERVER.md#reasoning-controls)
-for explicit effort/thinking overrides. Native context is 262144; YaRN extension
-is unsupported. Memory grows with used context and selected rollback depth;
-admission reserves the configured capacity before creating sessions.
+for explicit effort/thinking overrides. Native context is 262144. A larger
+context needs static YaRN and `--enable-yarn`: `gufo serve llm` refuses to
+start with `--context` above 262144 without it, and `gufo bench` refuses a
+workload whose depth plus prompt or generation tokens exceeds 262144. With
+the flag, the factor is context / 262144 (`--context 409600` gives 1.5625).
+The flag is an error at or below 262144, where it would have no effect.
+Static YaRN applies to every request on that server, including short ones,
+and changes the output distribution more as the factor grows; in the first
+measurements, multiple-choice accuracy moved within noise at factors 1.5625
+to 3.875. See the
+[measurements](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323981940),
+the
+[opt-in proposal](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323982386)
+and the
+[accuracy check](https://github.com/gufo-org/gufo/pull/350#issuecomment-6234093998).
+No GGUF key enables YaRN.
+Prefill chunks whose visible context exceeds 262144 tokens use the per-token
+attention kernel rather than the fused WMMA kernel. Memory grows with used
+context and selected rollback depth (about 27.5 KiB per context token with
+MTP, measured on gfx1151); admission reserves the configured capacity before
+creating sessions.
 
 ## Images
 
