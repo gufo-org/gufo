@@ -640,6 +640,22 @@ publication case waits for the scheduler's actual park before starting its
 its deadline and a disk restore. These checks stay outside hosted CI and the
 routine API suites.
 
+PR #677's staging-reclamation regression reuses this runner with `--case reclaim`
+before `--`. It defaults to a 256 MiB RAM cache, requires a retained checkpoint
+to release RAM during the deep request, then verifies publication and restoration
+of the exact held 50K+ token checkpoint. It also checks the loaded speculative
+mode, actual draft work, fewer than 64 prefill tokens and output against a cold
+control. A run that never reclaims RAM fails rather than passing on disk use
+alone. For example:
+
+```sh
+nix develop -c python3 tests/functional/publication_wait.py \
+  --case reclaim --output /tmp/publication-reclaim \
+  --fault-library build/cpu-test/libcache_disk_faults.so -- \
+  /path/to/production/gufo serve llm --model /path/to/flash-next.gguf \
+  --mtp-model /path/to/mtp.gguf --speculative mtp --sessions 1 --context 65536
+```
+
 Unchanged retries must reproduce the complete output with zero prefill. After a
 restart, disk restores may re-prefill less than one 2048-token disk step;
 greedy and zero-prefill restores must still reproduce their output. Edited
