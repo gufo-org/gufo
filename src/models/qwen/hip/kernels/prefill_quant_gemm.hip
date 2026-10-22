@@ -1637,7 +1637,9 @@ void LaunchBatchedQuantGEMM(core::GgmlType type, const void* w,
     static thread_local void* s_act_q8_scratch = nullptr;
     static thread_local std::size_t s_act_q8_scratch_bytes = 0;
 
-    const std::size_t req_bytes = Q8ActTiledBytes(batch, k);
+    // LaunchQuantizeActivationQ8_1 also writes the activation-sum sidecar
+    // after the tiled payload.
+    const std::size_t req_bytes = QuantizedActivationBytes(batch, k);
     if (s_act_q8_scratch_bytes < req_bytes) {
       if (s_act_q8_scratch != nullptr) {
         (void)hipFree(s_act_q8_scratch);
