@@ -167,8 +167,8 @@ struct EncoderRuntime::Impl {
   // Scratch, sized for kMaxSequenceTokens.
   DeviceBuffer token_ids, positions, sequence_begin, sequence_end, offsets;
   DeviceBuffer state, embeddings_bf16, normed_bf16, qkv_f32, query_bf16,
-      key_bf16, value_bf16, context_bf16, temp_f32, gate_up_f32, act_bf16,
-      ple_f32, gate_f32, projected_f32, pooled_f32;
+      key_bf16, value_bf16, value_t_bf16, context_bf16, temp_f32, gate_up_f32,
+      act_bf16, ple_f32, gate_f32, projected_f32, pooled_f32;
   // Target of the device probe that runs after a failed batch.
   DeviceBuffer probe;
   std::atomic<bool> lost{false};
@@ -431,7 +431,10 @@ void EncoderRuntime::Impl::Allocate() {
   qkv_f32 = DeviceBuffer(std::min(n, kChunkTokens) * qkv_width * sizeof(float));
   query_bf16 = DeviceBuffer(n * query_width * 2U);
   key_bf16 = DeviceBuffer(n * key_width * 2U);
+  // The transposed copy the attention kernel reads has a stride that is a
+  // multiple of 32 tokens. The transpose zero-fills the tail of each column.
   value_bf16 = DeviceBuffer(n * key_width * 2U);
+  value_t_bf16 = DeviceBuffer(ValueStride(n) * key_width * 2U);
   context_bf16 = DeviceBuffer(n * query_width * 2U);
   temp_f32 = DeviceBuffer(n * hidden * sizeof(float));
   gate_up_f32 = DeviceBuffer(std::min(n, kChunkTokens) * 2U *
@@ -532,7 +535,9 @@ void EncoderRuntime::Impl::RunBatch(
                         rope_table.cos.get<float>(),
                         rope_table.sin.get<float>(), epsilon, stream);
     }
-    if (!LaunchAttention(query_bf16.get(), key_bf16.get(), value_bf16.get(),
+    LaunchTransposeValues(value_bf16.get(), value_t_bf16.get(), tokens,
+                          static_cast<std::uint32_t>(key_width), stream);
+    if (!LaunchAttention(query_bf16.get(), key_bf16.get(), value_t_bf16.get(),
                          context_bf16.get(),
                          sequence_begin.get<std::uint32_t>(),
                          sequence_end.get<std::uint32_t>(), tokens, layout,

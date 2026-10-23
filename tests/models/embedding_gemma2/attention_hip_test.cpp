@@ -1,5 +1,6 @@
-// Checks the attention kernel against a direct float32 evaluation for both
-// head widths, packed sequences, and windowed and whole-sequence masks.
+// Checks the value transpose and the attention kernel against a direct
+// double-precision evaluation for both head widths, packed sequences, and
+// windowed and whole-sequence masks.
 
 #include <hip/hip_runtime.h>
 
@@ -53,7 +54,8 @@ T* ToDevice(const std::vector<T>& host) {
 }
 
 void RunCase(std::uint32_t head_dim, std::uint32_t kv_heads,
-             std::uint32_t window, const std::vector<std::uint32_t>& lengths) {
+             std::uint32_t window, const std::vector<std::uint32_t>& lengths,
+             float query_scale = 1.0F) {
   constexpr std::uint32_t kHeads = 4;
   std::size_t tokens = 0;
   for (const auto length : lengths) {
@@ -61,14 +63,14 @@ void RunCase(std::uint32_t head_dim, std::uint32_t kv_heads,
   }
   std::mt19937 random(head_dim + window);
   std::normal_distribution<float> normal(0.0F, 1.0F);
-  const auto fill = [&](std::size_t heads) {
+  const auto fill = [&](std::size_t heads, float scale = 1.0F) {
     std::vector<std::uint16_t> values(tokens * heads * head_dim);
     for (auto& value : values) {
-      value = ToBf16(normal(random));
+      value = ToBf16(normal(random) * scale);
     }
     return values;
   };
-  const auto query = fill(kHeads);
+  const auto query = fill(kHeads, query_scale);
   const auto key = fill(kv_heads);
   const auto value = fill(kv_heads);
 
@@ -85,7 +87,32 @@ void RunCase(std::uint32_t head_dim, std::uint32_t kv_heads,
 
   auto* d_query = ToDevice(query);
   auto* d_key = ToDevice(key);
-  auto* d_value = ToDevice(value);
+  // The kernel reads values transposed, [kv head][column][token], padded to
+  // a multiple of 32 tokens with zeros. The device transpose must match the
+  // host one, including the zero tail. The buffer starts as NaN to show that
+  // the tail is written.
+  const std::size_t stride = hip::ValueStride(tokens);
+  const std::size_t columns = std::size_t{kv_heads} * head_dim;
+  std::vector<std::uint16_t> expected_value_t(columns * stride);
+  for (std::size_t t = 0; t < tokens; ++t) {
+    for (std::size_t c = 0; c < columns; ++c) {
+      expected_value_t[c * stride + t] = value[t * columns + c];
+    }
+  }
+  auto* d_untransposed = ToDevice(value);
+  void* d_value = nullptr;
+  Check(hipMalloc(&d_value, expected_value_t.size() * 2U) == hipSuccess,
+        "hipMalloc value_t");
+  Check(hipMemset(d_value, 0xff, expected_value_t.size() * 2U) == hipSuccess,
+        "memset value_t");
+  hip::LaunchTransposeValues(d_untransposed, d_value, tokens,
+                             static_cast<std::uint32_t>(columns), nullptr);
+  std::vector<std::uint16_t> value_t(expected_value_t.size());
+  Check(hipMemcpy(value_t.data(), d_value, value_t.size() * 2U,
+                  hipMemcpyDeviceToHost) == hipSuccess,
+        "download value_t");
+  Check(value_t == expected_value_t,
+        "device transpose differs from the host transpose");
   auto* d_begin = ToDevice(begin);
   auto* d_end = ToDevice(end);
   std::uint16_t* d_context = nullptr;
@@ -144,10 +171,12 @@ void RunCase(std::uint32_t head_dim, std::uint32_t kv_heads,
   std::cout << "head " << head_dim << " window " << window << " tokens "
             << tokens << ": worst error " << worst << '\n';
   // Outputs are rounded to BF16, whose relative step is 2^-8.
-  Check(worst < 0.02, "attention differs from the float32 evaluation: " +
-                          std::to_string(worst));
+  Check(worst < 0.02,
+        "attention differs from the double-precision evaluation: " +
+            std::to_string(worst));
   (void)hipFree(d_query);
   (void)hipFree(d_key);
+  (void)hipFree(d_untransposed);
   (void)hipFree(d_value);
   (void)hipFree(d_begin);
   (void)hipFree(d_end);
@@ -169,6 +198,9 @@ int main() {
   RunCase(256, 2, 100, {700});
   RunCase(256, 2, 0, {31, 32, 33, 1});
   RunCase(512, 1, 0, {32, 16, 15});
+  RunCase(256, 2, 0, {32, 32});
+  RunCase(512, 1, 5, {64});
+  RunCase(256, 2, 0, {200}, 0.05F);
   Check(!hip::LaunchAttention(nullptr, nullptr, nullptr, nullptr, nullptr,
                               nullptr, 1, {8, 2, 128}, 0, nullptr),
         "an unsupported head dimension is rejected");

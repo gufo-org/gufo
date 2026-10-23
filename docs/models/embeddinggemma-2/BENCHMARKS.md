@@ -4,6 +4,8 @@ Measured on 2026-10-23 on Linux with a Radeon 8060S GPU of architecture gfx1151,
 
 This build's first pass stopped at the 16 × 1 × 16 row with one HTTP 503 that the server never logged.  That is a race in the HTTP server's connection limit and is unrelated to this change, so the pass left one sample for the 4 × 8 × 128 and 16 × 8 × 128 rows.  Those two rows come from a second pod on the same node after a reboot, with three passes per build.  The [record](artifacts/gfx1151-2026-10-23-gemm-ab.json) holds both builds' rows, and the [earlier #700 record](artifacts/gfx1151-2026-10-23-nix.json) holds #700's own measurement.
 
+The numbers for the matrix-core attention kernel are in the [Matrix-core attention](#matrix-core-attention) section.  The table below is main with the hipBLASLt GEMMs and the vector-unit attention kernel.
+
 Model load takes **2.2 s**, against 0.53 s for the baseline build.  The baseline's time is mostly the 540 MB upload, and the other 1.7 s is the warm-up that times each hipBLASLt algorithm for every GEMM shape and row bucket.
 
 ## HTTP
@@ -34,6 +36,27 @@ Against #700, this build is 1.5 to 2.3 times faster at the median on every row o
 | `down` | 0.46 ms, 4.69 TFLOPS | 0.08 ms, 25.60 TFLOPS |
 | `ple_512` | 0.12 ms, 4.49 TFLOPS | 0.03 ms, 20.98 TFLOPS |
 | `final` | 0.17 ms, 4.72 TFLOPS | 0.05 ms, 17.41 TFLOPS |
+
+## Matrix-core attention
+
+Measured on 2026-10-24 on the node gpuworker01 with a Radeon 8060S GPU of architecture gfx1151, using BF16 safetensors and the production `gufo` from one Nix container image that holds both builds.  Main is commit 479162ed, which has the hipBLASLt GEMMs from #751 and image inputs from #759.  This PR is commit ec21a41f, which differs from the PR head only in documentation.  The pod was the only GPU pod on the node.  The builds ran in the order main, this PR, this PR, main, with 60 requests per row in each pass, and the table shows the mean of the two passes' medians.  Speedup is main's median divided by this PR's median.  The text rows use `http_bench.py` with the labels of the HTTP table above.  The image rows send one 320 × 180 PNG followed by a newline in the typed `content` format, which is 269 tokens, at concurrency 1 and 4 after one warm-up request.
+
+| Concurrency × inputs × words | Tokens/request | Main median | This PR median | Speedup | This PR tokens/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 × 1 × 16 | 40 | 6.74 ms | 6.64 ms | 1.02 | 5,914 |
+| 1 × 1 × 128 | 404 | 19.95 ms | 12.94 ms | 1.54 | 30,391 |
+| 1 × 1 × 512 | 1,940 | 144.56 ms | 61.50 ms | 2.35 | 31,477 |
+| 1 × 1 × 2100 | 8,072 | 1,650.55 ms | 341.70 ms | 4.83 | 23,589 |
+| 1 × 8 × 128 | 3,495 | 148.01 ms | 94.27 ms | 1.57 | 36,954 |
+| 1 × 32 × 128 | 15,670 | 701.38 ms | 397.00 ms | 1.77 | 39,366 |
+| 4 × 1 × 128 | 404 | 77.88 ms | 48.45 ms | 1.61 | 32,919 |
+| 16 × 1 × 128 | 404 | 308.69 ms | 192.42 ms | 1.60 | 33,264 |
+| 4 × 8 × 128 | 3,495 | 574.09 ms | 346.99 ms | 1.65 | 40,215 |
+| 16 × 8 × 128 | 3,495 | 2,297.35 ms | 1,388.06 ms | 1.66 | 40,139 |
+| 1 × 1 image | 269 | 585.69 ms | 581.39 ms | 1.01 | 463 |
+| 4 × 1 image | 269 | 2,254.74 ms | 2,234.28 ms | 1.01 | 481 |
+
+Image requests change by about 1 percent because the vision tower, which this PR does not change, takes most of their time.  Server load took 1.98 s for this PR and 2.20 s for main.  The [record](artifacts/gfx1151-2026-10-24-attention-ab.json) holds each pass's median, the p95 values, and the quality and test results.
 
 ## Reference comparison
 
