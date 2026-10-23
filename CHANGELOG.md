@@ -4,6 +4,28 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.22.0](https://github.com/gufo-org/gufo/compare/v0.21.0...v0.22.0) (2026-10-23)
+
+
+### Features
+
+* **platform:** add the net leaf ([#711](https://github.com/gufo-org/gufo/issues/711)) ([7c81965](https://github.com/gufo-org/gufo/commit/7c8196527ad02ac4c585a32b1131fab7e70509d0))
+* **platform:** add the publish and prefault leaves ([#729](https://github.com/gufo-org/gufo/issues/729)) ([ddc31dc](https://github.com/gufo-org/gufo/commit/ddc31dc7685101b1d2336328a293b72fab0bed70))
+* **platform:** add the shutdown_signal leaf ([#713](https://github.com/gufo-org/gufo/issues/713)) ([79c2dcc](https://github.com/gufo-org/gufo/commit/79c2dcc56f00c69d4085e52bde6d290b74a99ccd))
+
+
+### Bug Fixes
+
+* **cache:** free RAM before writing oversized checkpoints to disk ([#677](https://github.com/gufo-org/gufo/issues/677)) ([8a79230](https://github.com/gufo-org/gufo/commit/8a79230617490ff374b38edc002a8e68d241cf68))
+* **qwen38-flash-next:** give each HIP stream its own qfn_mmq scratch arena ([#707](https://github.com/gufo-org/gufo/issues/707)) ([68ff41a](https://github.com/gufo-org/gufo/commit/68ff41a86f1e76bfd61ca85e47722ae78c17f05e))
+* **qwen38-flash-next:** sum BF16 indexer projections in K order for every token ([#714](https://github.com/gufo-org/gufo/issues/714)) ([6c8b2ff](https://github.com/gufo-org/gufo/commit/6c8b2ff4c7d6c7c2e00835f84e6d4b4cee1c7226))
+* **serve:** accept standard image detail values as automatic detail ([#722](https://github.com/gufo-org/gufo/issues/722)) ([9fa3645](https://github.com/gufo-org/gufo/commit/9fa36451facdf2b231d52afec72670a0fe2543b5))
+
+
+### Performance
+
+* **qwen38_flash_next:** price unseeded sampled MTP drafts at the decoding occupancy ([#703](https://github.com/gufo-org/gufo/issues/703)) ([1167a94](https://github.com/gufo-org/gufo/commit/1167a94475ad888534a99c9fb72401636cd9f7e7))
+
 ## [0.21.0](https://github.com/gufo-org/gufo/compare/v0.20.0...v0.21.0) (2026-10-22)
 
 
