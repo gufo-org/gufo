@@ -1,5 +1,31 @@
 # Qwen3.8 Flash-Next experiments
 
+## Prefill DeltaNet (October 23, 2026)
+
+Component results from the production fork (ROCm 7.2.4); end to end on main
+`34ebb5fe` with UD-Q4_K_XL, `gufo bench -p 2048,16384 -n 0 -r 2`, two
+alternated rounds, ROCm 7.2.4, no cooldown between processes, tok/s:
+
+| Build | pp2048 | pp16384 |
+| --- | ---: | ---: |
+| main | 1,591 / 1,502 | 1,590 / 1,583 |
+| fused GDN, both #758 side streams (this change) | 1,624 / 1,542 | 1,617 / 1,610 |
+| fused GDN, side streams off | 1,627 / 1,561 | 1,647 / 1,658 |
+
+pp2048 drifted with temperature between rounds; pp16384 gains 1.7%, and
+2.4% more without the Z-row and shared-expert overlap. The fused kernel
+reads z from its first token, so the Z overlap cannot hide anything, and
+both side streams contend with it (on the production fork's recipe + MTP at
+pp32768: 1,658-1,662 with either overlap, 1,693 without the shared-expert
+one, 1,741 without both). Their removal is left to a ROCm 10.1 measurement.
+
+| Experiment | Outcome |
+| --- | --- |
+| One fused prefill launch per GDN layer (`GdnPrefillKernel`): one 8-wave block per value head computes the q/k norms and gates when it commits each 4-token window to LDS, runs the row-split recurrence, and does the epilogue from LDS. That replaces `GdnPrepKq`, `GdnPrepAb`, `GdnRowSplit` and `GdnEpilogue` (the raw/qn/kn round trips). Every thread issues the same three loads per window, so the in-order vmcnt wait no longer drains later windows. Barriers are LDS-only, the row stores have no branch (the rows' FMA chains were serialized), and the decay comes from an SGPR (+29 dual issues) | Retained. Rows, state, checkpoint captures and the F32, F16-strided and Q8-tiled outputs are byte-identical to the four separate kernels (hashes from `tools/bench/qfn_gdn_prefill_bench.hip`, fixed history, 1,031 rows). Inlining reassociated the norm sums and the epilogue products, so they are spelled out. µs per row per layer for the whole GDN after the fused projection, alternating, quiet GPU, 2048/4096/8192/16384 rows: 1.30/1.28/1.27/1.29 → 1.05/1.05/1.05/1.05. Contended GPU, min of 5, 2048/4096/8192/26541 rows: 1.28/1.51/1.53/1.56 → 0.92/1.18/1.19/1.18. Counters: busiest SIMD at about 59% VALU issue. With 48 head blocks on 20 WGPs, 8 WGPs run 3 blocks (grid 40 → 48 costs 1.28×). |
+| Chunked (WY, 16-token) recurrence | Not built. The split contract rules it out: a pass that ends inside a block hands over the state at that row, and the next pass cannot reproduce the single pass's whole-block arithmetic. The single pass cannot know where later splits fall. |
+| q/k held by quad lanes, broadcast as DPP operands of the FMAs | Rejected. Byte-identical, with 4× fewer LDS loads, but the combiner left 300 `v_mov_dpp` per token (1.10 → 1.24 µs/row). Inline-asm `v_fmac_f32_dpp` lost dual issue and chained badly (1.36–1.80). |
+| 4 rows per lane (4 waves); 8 lanes × 16 keys × 4 rows; scheduling barriers interleaving the row chains; crossed-component update order for dual issue | Rejected: 1.73 / 1.19–1.24 / unchanged / unchanged against 1.10 µs/row (the last cut the instruction count 200 → 180 with no time gain). Microbenchmark: dual FMAs with six VGPR reads issue no faster than two single FMAs, so the recurrence is bound by VGPR operand reads rather than by instruction count. |
+
 ## Confidence-gated MTP chains (October 29, 2026)
 
 Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.
