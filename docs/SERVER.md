@@ -889,6 +889,21 @@ and token limits. `logprobs: false`, empty `logit_bias`,
 Actual log probabilities, token biases and audio output remain unsupported
 and return explicit errors.
 
+llama.cpp sampler fields that gufo does not implement (`mirostat`,
+`mirostat_tau`, `mirostat_eta`, `typical_p`, `tfs_z`, `dynatemp_range`,
+`dynatemp_exponent`, `top_n_sigma`, `xtc_probability`, `xtc_threshold`,
+`dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_penalty_last_n` and
+`dry_sequence_breakers`) are ignored when absent, `null` or set to a value that
+leaves llama.cpp's sampler chain unchanged: `mirostat <= 0`,
+`typical_p >= 1`, `dynatemp_range <= 0`, `top_n_sigma <= 0`, XTC with a
+clamped probability of 0 or a clamped threshold above 0.5, DRY with
+`dry_multiplier` or `dry_penalty_last_n` 0. `tfs_z` (llama.cpp no longer
+has TFS), the Mirostat rates and `dynatemp_exponent` take any number. A value
+that would activate one of these samplers returns `unsupported_sampling`; a
+non-numeric value, a `dry_allowed_length` or `dry_penalty_last_n` outside
+`[0, 2147483647]` or an empty `dry_sequence_breakers` returns
+`invalid_sampling`.
+
 ### Structured output
 
 Chat Completions accepts `response_format: {"type":"json_object"}` or

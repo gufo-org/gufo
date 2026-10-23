@@ -578,7 +578,27 @@ def check_sampling_ranges(client, model, checks):
         ("repeat_penalty", 0), ("repeat_last_n", -1), ("seed", -2),
         ("presence_penalty", 2.1), ("frequency_penalty", -2.1),
         ("presence_penalty", 2.00000001), ("frequency_penalty", -2.00000001),
-        ("draft_temperature", .7), ("typical_p", .9),
+        ("draft_temperature", .7), ("typical_p", .9), ("mirostat", 2),
+        ("dry_sequence_breakers", []),
+    )
+
+    def text_of(response):
+        if "choices" not in response:
+            return [(item.get("type"), [part.get("text") for part in
+                                        (item.get("content") or []) + (item.get("summary") or [])])
+                    for item in response["output"]]
+        choice = response["choices"][0]
+        if "message" not in choice:
+            return choice["text"]
+        return choice["message"].get("content"), choice["message"].get("reasoning_content")
+
+    # Open WebUI 0.12 always sends its Mirostat settings; neutral llama.cpp
+    # sampler fields must leave greedy output unchanged (#720).
+    neutral = (
+        {"mirostat": 0, "mirostat_eta": .1, "mirostat_tau": 5.},
+        {"mirostat": 0, "mirostat_eta": 0, "mirostat_tau": 0},
+        {"typical_p": 1., "tfs_z": .5, "top_n_sigma": -1, "dynatemp_range": 0,
+         "xtc_probability": 0, "dry_multiplier": 0},
     )
     for endpoint, (create, body) in endpoints.items():
         for streaming in (False, True):
@@ -599,6 +619,13 @@ def check_sampling_ranges(client, model, checks):
             checks[f"range_{endpoint}_valid_{top_p}"] = response.to_dict()
         response = create(**body, temperature=.7, top_p=0, extra_body={"seed": 42})
         checks[f"range_{endpoint}_sampled_zero"] = response.to_dict()
+        tokens = {"max_output_tokens" if endpoint == "responses" else
+                  "max_completion_tokens" if endpoint == "chat" else "max_tokens": 16}
+        expected = create(**{**body, **tokens}, temperature=0).to_dict()
+        for index, fields in enumerate(neutral):
+            actual = create(**{**body, **tokens}, temperature=0, extra_body=fields).to_dict()
+            assert text_of(actual) == text_of(expected), (endpoint, fields)
+            checks[f"range_{endpoint}_neutral_{index}"] = {"fields": fields, "text": text_of(actual)}
 
 
 def check_batches(client, model, checks, width, vision=False, speculative="off"):

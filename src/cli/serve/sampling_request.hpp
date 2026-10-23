@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_SAMPLING_REQUEST_HPP_
 #define GUFO_SERVER_SAMPLING_REQUEST_HPP_
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -81,6 +82,140 @@ inline std::optional<SamplingRequestError> ReadSamplingInteger(
   return std::nullopt;
 }
 
+inline constexpr std::string_view kLlamaSamplerFields[] = {
+    "mirostat",
+    "mirostat_tau",
+    "mirostat_eta",
+    "typical_p",
+    "tfs_z",
+    "dynatemp_range",
+    "dynatemp_exponent",
+    "top_n_sigma",
+    "xtc_probability",
+    "xtc_threshold",
+    "dry_multiplier",
+    "dry_base",
+    "dry_allowed_length",
+    "dry_penalty_last_n",
+    "dry_sequence_breakers",
+};
+
+inline bool IsLlamaSamplerField(std::string_view field) {
+  for (const auto known : kLlamaSamplerFields) {
+    if (field == known) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// llama.cpp sampler fields that gufo does not implement. A field that is
+/// absent, null, or set to a value that leaves llama.cpp's sampler chain
+/// unchanged is ignored, so clients that always send their sampler settings
+/// (Open WebUI 0.12 sends mirostat 0) still work. A value that would activate
+/// one of these samplers is rejected rather than sampling another
+/// distribution. Neutral values follow llama.cpp: the server's clamps and
+/// each sampler's early return.
+inline std::optional<SamplingRequestError> CheckNeutralLlamaSamplers(
+    const json::Value& body) {
+  const auto invalid = [](std::string_view field, std::string_view what) {
+    return SamplingRequestError{
+        .message = "'" + std::string(field) + "' must be " + std::string(what),
+        .code = "invalid_sampling",
+    };
+  };
+  const auto unsupported = [](std::string_view field) {
+    return SamplingRequestError{
+        .message = "request field '" + std::string(field) +
+                   "' is not supported with a value that enables it",
+        .code = "unsupported_sampling",
+    };
+  };
+  std::optional<SamplingRequestError> error;
+  // Reads a present, non-null number; null counts as absent.
+  const auto number = [&](std::string_view field) -> std::optional<double> {
+    const json::Value* value = body.find(std::string(field));
+    if (value == nullptr || value->is_null()) {
+      return std::nullopt;
+    }
+    if (!value->is_number() || !std::isfinite(value->as_double())) {
+      if (!error) {
+        error = invalid(field, "a finite number");
+      }
+      return std::nullopt;
+    }
+    return value->as_double();
+  };
+  const auto window = [&](std::string_view field) -> std::optional<double> {
+    const auto value = number(field);
+    if (value && (std::floor(*value) != *value || *value < 0.0 ||
+                  *value > std::numeric_limits<std::int32_t>::max())) {
+      if (!error) {
+        error = invalid(field, "an integer between 0 and 2147483647");
+      }
+    }
+    return value;
+  };
+  const auto mirostat = number("mirostat");
+  (void)number("mirostat_tau");
+  (void)number("mirostat_eta");
+  const auto typical_p = number("typical_p");
+  (void)number("tfs_z");
+  const auto dynatemp_range = number("dynatemp_range");
+  (void)number("dynatemp_exponent");
+  const auto top_n_sigma = number("top_n_sigma");
+  const auto xtc_probability = number("xtc_probability");
+  const auto xtc_threshold = number("xtc_threshold");
+  const auto dry_multiplier = number("dry_multiplier");
+  (void)number("dry_base");
+  (void)window("dry_allowed_length");
+  const auto dry_penalty_last_n = window("dry_penalty_last_n");
+  if (const json::Value* breakers = body.find("dry_sequence_breakers");
+      breakers != nullptr && !breakers->is_null() && !error) {
+    bool strings = breakers->is_array() && !breakers->empty();
+    if (strings) {
+      for (const auto& breaker : breakers->items()) {
+        strings = strings && breaker.is_string();
+      }
+    }
+    if (!strings) {
+      error = invalid("dry_sequence_breakers", "a nonempty array of strings");
+    }
+  }
+  if (error) {
+    return error;
+  }
+  // mirostat_tau/eta only matter with mirostat 1 or 2, dynatemp_exponent
+  // only with a positive dynatemp_range, and llama.cpp no longer has TFS.
+  if (mirostat && *mirostat > 0.0) {
+    return unsupported("mirostat");
+  }
+  if (typical_p && *typical_p < 1.0) {
+    return unsupported("typical_p");
+  }
+  if (dynatemp_range && *dynatemp_range > 0.0) {
+    return unsupported("dynatemp_range");
+  }
+  if (top_n_sigma && *top_n_sigma > 0.0) {
+    return unsupported("top_n_sigma");
+  }
+  // XTC acts only when the clamped probability is positive and the clamped
+  // threshold is at most 0.5 (llama.cpp defaults: 0.0 and 0.1).
+  if (std::clamp(xtc_probability.value_or(0.0), 0.0, 1.0) > 0.0 &&
+      std::clamp(xtc_threshold.value_or(0.1), 0.0, 1.0) <= 0.5) {
+    return unsupported(xtc_probability ? "xtc_probability" : "xtc_threshold");
+  }
+  // DRY acts only with a nonzero multiplier and a nonzero window
+  // (common.h defaults 0.0 and 64; the server limits the window to
+  // [0, INT32_MAX]). The sampler skips dry_base < 1, but the server replaces
+  // such a base with its default first, so dry_base never disables DRY.
+  if (dry_multiplier.value_or(0.0) != 0.0 &&
+      dry_penalty_last_n.value_or(64.0) != 0.0) {
+    return unsupported("dry_multiplier");
+  }
+  return std::nullopt;
+}
+
 }  // namespace detail
 
 /// Reads all shared sampling controls, using defaults for omitted fields.
@@ -104,17 +239,17 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
     const bool draft_control = field.starts_with("draft_") ||
                                field.ends_with("_draft") || field == "draft" ||
                                field == "speculative";
-    if (draft_control || field == "samplers" || field == "typical_p" ||
-        field == "tfs_z" || field == "mirostat" || field == "mirostat_eta" ||
-        field == "mirostat_tau" || field == "dynatemp_range" ||
-        field == "dynatemp_exponent" || field.starts_with("xtc_") ||
-        field.starts_with("dry_") || field == "top_n_sigma" ||
-        field == "logit_bias") {
+    if (draft_control || field == "samplers" || field == "logit_bias" ||
+        ((field.starts_with("xtc_") || field.starts_with("dry_")) &&
+         !detail::IsLlamaSamplerField(field))) {
       return SamplingRequestError{
           .message = "request field '" + field + "' is not supported",
           .code = "unsupported_sampling",
       };
     }
+  }
+  if (auto error = detail::CheckNeutralLlamaSamplers(body)) {
+    return error;
   }
 
   if (auto error = detail::ReadSamplingFloat(body, "temperature",
