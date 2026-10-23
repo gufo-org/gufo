@@ -2157,12 +2157,18 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   // backend, and the stub route below must not shadow the service when a
   // backend exists.
   if (embeddings_ != nullptr && IsEmbeddingsApiPath(req.path)) {
+    if (device_lost())
+      return DeviceLost();
     if (!embeddings_->ready()) {
       return Err(503, "Service Unavailable",
                  "EmbeddingGemma 2 service is not ready", "server_error",
                  "embedding_service_unavailable");
     }
-    return HandleEmbeddingsApiRequest(req, *embeddings_);
+    auto response = HandleEmbeddingsApiRequest(req, *embeddings_);
+    // The request that finds the device lost runs the shutdown hook.
+    if (device_lost())
+      return DeviceLost();
+    return response;
   }
   for (const auto& entry : routes_) {
     if (entry.first.first == req.method && entry.first.second == req.path) {
@@ -2176,7 +2182,9 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
 }
 
 bool HttpServer::device_lost() {
-  if (backend_ == nullptr || !backend_->device_lost())
+  const bool lost = (backend_ != nullptr && backend_->device_lost()) ||
+                    (embeddings_ != nullptr && embeddings_->device_lost());
+  if (!lost)
     return false;
   if (options_.on_device_lost &&
       !device_lost_reported_.exchange(true, std::memory_order_acq_rel)) {

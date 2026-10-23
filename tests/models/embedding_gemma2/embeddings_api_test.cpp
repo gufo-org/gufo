@@ -85,6 +85,10 @@ struct FakeRunner {
         *error = "device exploded";
         return EmbeddingStatus::kFailed;
       }
+      if (texts[i] == "LOST") {
+        *error = "device reset";
+        return EmbeddingStatus::kDeviceLost;
+      }
       batch->embeddings.push_back(FakeEmbedding(texts[i]));
       batch->token_counts.push_back(FakeTokens(texts[i]));
     }
@@ -445,6 +449,13 @@ void TestLimitsAndFailures() {
         "runtime error text is returned");
   Check(Parse(broken).find("error")->member_str("type") == "server_error",
         "runtime failures are server errors");
+  Check(!service->device_lost(), "an ordinary failure keeps the device");
+
+  const HttpResponse lost = Send(*service, R"({"input":"LOST"})");
+  ExpectError(lost, 503, "device_lost", "lost device");
+  Check(Parse(lost).find("error")->member_str("type") == "server_error",
+        "a lost device is a server error");
+  Check(service->device_lost(), "the service remembers the lost device");
 
   // A runner that returns fewer vectors than inputs is a server bug.
   EmbeddingService short_service(EmbeddingServiceOptions{

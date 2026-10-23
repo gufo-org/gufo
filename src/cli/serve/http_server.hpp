@@ -95,9 +95,10 @@ struct HttpServerOptions {
   std::size_t max_connections{16};
   std::string api_key;
   std::chrono::milliseconds sse_heartbeat_interval{std::chrono::seconds(15)};
-  /// Called once, on the listener or a request thread, when the backend reports
-  /// a lost device. Health, readiness and generation answer 503 `device_lost`
-  /// from then on; the hook decides how the process exits.
+  /// Called once, on the listener or a request thread, when the text backend or
+  /// the embedding service reports a lost device. Health, readiness and
+  /// generation answer 503 `device_lost` from then on; the hook decides how the
+  /// process exits.
   std::function<void()> on_device_lost{};
 };
 

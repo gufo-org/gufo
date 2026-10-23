@@ -3199,6 +3199,41 @@ void TestEmbeddingService() {
     assert(response.find("embedding_service_unavailable") == std::string::npos);
   }
   {
+    // A lost device answers 503, runs the shutdown hook once, and fails the
+    // health probe from then on.
+    auto service = std::make_shared<gufo::server::EmbeddingService>(
+        gufo::server::EmbeddingServiceOptions{
+            .model_root = "/nonexistent/embeddinggemma",
+            .validate_model = false,
+            .model_id = "embedding-test",
+            .runner =
+                [](const std::vector<std::string>&,
+                   gufo::server::EmbeddingBatch*, std::string*) {
+                  return gufo::server::EmbeddingStatus::kDeviceLost;
+                },
+        });
+    std::atomic<int> hook_calls{0};
+    HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, nullptr,
+                      {.on_device_lost = [&] { ++hook_calls; }}, nullptr,
+                      service);
+    std::string error;
+    assert(server.start(&error));
+    std::jthread worker([&] { server.run(false); });
+    const int port = server.port();
+    ExpectStatus(SendParts("127.0.0.1", port, {"GET /health HTTP/1.1\r\n\r\n"}),
+                 200);
+    const auto lost = EmbeddingPost(port, request);
+    ExpectStatus(lost, 503);
+    assert(lost.find("\"code\":\"device_lost\"") != std::string::npos);
+    assert(hook_calls.load() == 1);
+    ExpectStatus(SendParts("127.0.0.1", port, {"GET /health HTTP/1.1\r\n\r\n"}),
+                 503);
+    ExpectStatus(EmbeddingPost(port, request), 503);
+    assert(hook_calls.load() == 1);
+    server.stop();
+    worker.join();
+  }
+  {
     // With both configured, the service answers instead of the text stub.
     auto service = MakeEmbeddingService(true);
     auto backend = std::make_shared<FakeBackend>();

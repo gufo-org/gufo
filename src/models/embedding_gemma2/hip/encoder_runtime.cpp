@@ -4,10 +4,13 @@
 #include <hipblas/hipblas.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <exception>
 #include <map>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -153,6 +156,40 @@ struct EncoderRuntime::Impl {
   DeviceBuffer state, embeddings_bf16, normed_bf16, qkv_f32, query_bf16,
       key_bf16, value_bf16, context_bf16, temp_f32, gate_up_f32, act_bf16,
       ple_f32, gate_f32, projected_f32, pooled_f32;
+  // Target of the device probe that runs after a failed batch.
+  DeviceBuffer probe;
+  std::atomic<bool> lost{false};
+
+  // Device turns in arrival order, one batch each. A plain mutex lets the
+  // thread that just released it take it straight back, so a long request
+  // would still starve the requests queued behind it.
+  std::mutex turn_mutex;
+  std::condition_variable turn_changed;
+  std::uint64_t next_ticket{0};
+  std::uint64_t serving{0};
+
+  class Turn {
+  public:
+    explicit Turn(Impl& impl) : impl_(impl) {
+      std::unique_lock lock(impl_.turn_mutex);
+      const std::uint64_t ticket = impl_.next_ticket++;
+      impl_.turn_changed.wait(lock, [&] { return impl_.serving == ticket; });
+    }
+    ~Turn() {
+      {
+        const std::lock_guard lock(impl_.turn_mutex);
+        ++impl_.serving;
+      }
+      impl_.turn_changed.notify_all();
+    }
+    Turn(const Turn&) = delete;
+    Turn& operator=(const Turn&) = delete;
+    Turn(Turn&&) = delete;
+    Turn& operator=(Turn&&) = delete;
+
+  private:
+    Impl& impl_;
+  };
 
   ~Impl() {
     if (blas != nullptr) {
@@ -165,6 +202,9 @@ struct EncoderRuntime::Impl {
 
   void Upload();
   void Allocate();
+  // Mirrors the text server's probe: after a reset even a 4-byte memset
+  // fails, while an ordinary kernel or library failure leaves it working.
+  [[nodiscard]] bool DeviceUsable();
 
   void RunBatch(const std::vector<std::vector<std::uint32_t>>& sequences,
                 std::size_t first, std::size_t last, std::size_t tokens,
@@ -427,6 +467,12 @@ void EncoderRuntime::Impl::RunBatch(
   }
 }
 
+bool EncoderRuntime::Impl::DeviceUsable() {
+  (void)hipGetLastError();
+  return hipMemsetAsync(probe.get(), 0, probe.bytes(), stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess;
+}
+
 EncoderRuntime::EncoderRuntime(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 
@@ -451,6 +497,11 @@ std::unique_ptr<EncoderRuntime> EncoderRuntime::Create(
     HIPBLAS_CHECK(hipblasCreate(&impl->blas));
     impl->Upload();
     impl->Allocate();
+    impl->probe = DeviceBuffer(sizeof(std::uint32_t));
+    // The device now holds every weight. Unmapping the checkpoint releases
+    // its page-cache residency, about 650 MB of host memory.
+    impl->loaded.store.reset();
+    impl->loaded.mappings.clear();
     return std::unique_ptr<EncoderRuntime>(new EncoderRuntime(std::move(impl)));
   } catch (const std::exception& failure) {
     return fail(std::string("embedding_gemma2: ") + failure.what());
@@ -459,6 +510,10 @@ std::unique_ptr<EncoderRuntime> EncoderRuntime::Create(
 
 const ModelConfig& EncoderRuntime::config() const {
   return impl_->loaded.config;
+}
+
+bool EncoderRuntime::device_lost() const noexcept {
+  return impl_->lost.load(std::memory_order_acquire);
 }
 
 bool EncoderRuntime::Embed(
@@ -488,29 +543,41 @@ bool EncoderRuntime::Embed(
   }
   embeddings->clear();
   embeddings->reserve(sequences.size());
-  try {
-    std::size_t first = 0;
-    while (first < sequences.size()) {
-      if (is_cancelled && is_cancelled()) {
-        embeddings->clear();
-        return fail(kCancelledMessage);
-      }
-      std::size_t last = first;
-      std::size_t tokens = 0;
-      while (last < sequences.size() &&
-             tokens + sequences[last].size() <= kMaxSequenceTokens) {
-        tokens += sequences[last].size();
-        ++last;
-      }
-      impl_->RunBatch(sequences, first, last, tokens, embeddings);
-      first = last;
+  std::size_t first = 0;
+  while (first < sequences.size()) {
+    std::size_t last = first;
+    std::size_t tokens = 0;
+    while (last < sequences.size() &&
+           tokens + sequences[last].size() <= kMaxSequenceTokens) {
+      tokens += sequences[last].size();
+      ++last;
     }
-  } catch (const std::exception& failure) {
-    // Kernels from the failed batch may still be queued. They read the index
-    // buffers the next batch overwrites, so drain the stream first.
-    gufo::hip::LogCleanupError(hipStreamSynchronize(impl_->stream));
-    embeddings->clear();
-    return fail(std::string("embedding_gemma2: ") + failure.what());
+    // Each batch takes a new turn, so requests that arrived meanwhile run
+    // before the next batch of this one.
+    const Impl::Turn turn(*impl_);
+    if (device_lost()) {
+      embeddings->clear();
+      return fail(kDeviceLostMessage);
+    }
+    if (is_cancelled && is_cancelled()) {
+      embeddings->clear();
+      return fail(kCancelledMessage);
+    }
+    try {
+      impl_->RunBatch(sequences, first, last, tokens, embeddings);
+    } catch (const std::exception& failure) {
+      // Kernels from the failed batch may still be queued. They read the
+      // index buffers the next batch overwrites, so drain the stream before
+      // the turn passes on.
+      gufo::hip::LogCleanupError(hipStreamSynchronize(impl_->stream));
+      embeddings->clear();
+      if (!impl_->DeviceUsable()) {
+        impl_->lost.store(true, std::memory_order_release);
+        return fail(std::string(kDeviceLostMessage) + ": " + failure.what());
+      }
+      return fail(std::string("embedding_gemma2: ") + failure.what());
+    }
+    first = last;
   }
   return true;
 }

@@ -32,6 +32,8 @@ std::string_view ReasonPhrase(int status) {
       return "Method Not Allowed";
     case 499:
       return "Client Closed Request";
+    case 503:
+      return "Service Unavailable";
     default:
       return "Internal Server Error";
   }
@@ -245,6 +247,8 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
     case EmbeddingStatus::kFailed:
       return Error(500, error.empty() ? "embedding failed" : std::move(error),
                    "embedding_failed");
+    case EmbeddingStatus::kDeviceLost:
+      return Error(503, "GPU device lost; restart the server", "device_lost");
   }
   if (request.is_cancelled && request.is_cancelled()) {
     return Error(499, "embedding request cancelled", "cancelled");

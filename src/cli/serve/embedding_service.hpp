@@ -29,6 +29,8 @@ enum class EmbeddingStatus {
   kCancelled,
   kInputTooLong,
   kFailed,
+  /// The device failed a probe after an error. The service stays lost.
+  kDeviceLost,
 };
 
 struct EmbeddingServiceOptions {
@@ -59,12 +61,16 @@ public:
   EmbeddingService& operator=(EmbeddingService&&) = delete;
 
   [[nodiscard]] bool ready() const noexcept;
+  /// True once any request reported `EmbeddingStatus::kDeviceLost`.
+  [[nodiscard]] bool device_lost() const noexcept;
   [[nodiscard]] std::string initialization_error() const;
   [[nodiscard]] std::string model_id() const;
   [[nodiscard]] std::string backend_name() const;
 
-  /// Embeds `texts` as one request. The service serializes GPU access and
-  /// returns `kCancelled` for a request cancelled before it reaches the device.
+  /// Embeds `texts` as one request. Concurrent requests take device turns one
+  /// batch at a time, so a long request does not block shorter ones until it
+  /// finishes. Returns `kCancelled` for a request cancelled before one of its
+  /// batches reaches the device.
   [[nodiscard]] EmbeddingStatus Embed(const std::vector<std::string>& texts,
                                       const std::function<bool()>& is_cancelled,
                                       EmbeddingBatch* batch,

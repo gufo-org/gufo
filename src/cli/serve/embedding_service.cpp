@@ -1,11 +1,13 @@
 #include "src/cli/serve/embedding_service.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <utility>
 
+#include "src/cli/serve/logging.hpp"
 #include "src/models/embedding_gemma2/loader.hpp"
 #include "src/models/embedding_gemma2/tokenizer.hpp"
 
@@ -57,8 +59,9 @@ struct EmbeddingService::Impl {
   }
 
 #if defined(ENGINE_ENABLE_HIP)
-  // Tokenizes outside the device lock, so a large request does not block
-  // other requests that are ready to run, then encodes under the lock.
+  // Tokenizes before taking any device turn, so a large request does not
+  // block other requests that are ready to run. The encoder hands out device
+  // turns one batch at a time.
   EmbeddingStatus RunNative(const std::vector<std::string>& texts,
                             const std::function<bool()>& is_cancelled,
                             EmbeddingBatch* batch, std::string* error) {
@@ -82,14 +85,10 @@ struct EmbeddingService::Impl {
       }
       batch->token_counts.push_back(sequences.back().size());
     }
-    const std::lock_guard lock(device_mutex);
-    if (is_cancelled && is_cancelled()) {
-      if (error != nullptr) {
-        *error = "embedding request cancelled";
-      }
-      return EmbeddingStatus::kCancelled;
-    }
     if (!encoder->Embed(sequences, &batch->embeddings, error, is_cancelled)) {
+      if (encoder->device_lost()) {
+        return EmbeddingStatus::kDeviceLost;
+      }
       if (is_cancelled && is_cancelled()) {
         return EmbeddingStatus::kCancelled;
       }
@@ -108,7 +107,9 @@ struct EmbeddingService::Impl {
   std::unique_ptr<models::embedding_gemma2::hip::EncoderRuntime> encoder;
 #endif
   std::string initialization_error;
-  std::mutex device_mutex;
+  // Serializes the injected runner, which has no device turns of its own.
+  std::mutex runner_mutex;
+  std::atomic<bool> device_lost{false};
   bool ready{false};
 };
 
@@ -119,6 +120,10 @@ EmbeddingService::~EmbeddingService() = default;
 
 bool EmbeddingService::ready() const noexcept {
   return impl_->ready;
+}
+
+bool EmbeddingService::device_lost() const noexcept {
+  return impl_->device_lost.load(std::memory_order_acquire);
 }
 
 std::string EmbeddingService::initialization_error() const {
@@ -144,21 +149,28 @@ EmbeddingStatus EmbeddingService::Embed(
     }
     return EmbeddingStatus::kFailed;
   }
+  EmbeddingStatus status = EmbeddingStatus::kFailed;
   if (impl_->options.runner) {
-    const std::lock_guard lock(impl_->device_mutex);
+    const std::lock_guard lock(impl_->runner_mutex);
     if (is_cancelled && is_cancelled()) {
       if (error != nullptr) {
         *error = "embedding request cancelled";
       }
       return EmbeddingStatus::kCancelled;
     }
-    return impl_->options.runner(texts, batch, error);
-  }
+    status = impl_->options.runner(texts, batch, error);
+  } else {
 #if defined(ENGINE_ENABLE_HIP)
-  return impl_->RunNative(texts, is_cancelled, batch, error);
-#else
-  return EmbeddingStatus::kFailed;
+    status = impl_->RunNative(texts, is_cancelled, batch, error);
 #endif
+  }
+  if (status == EmbeddingStatus::kDeviceLost &&
+      !impl_->device_lost.exchange(true, std::memory_order_acq_rel)) {
+    Logger::Error("embedding",
+                  "event=device_lost remedy=restart reason=" +
+                      (error != nullptr ? *error : std::string("unknown")));
+  }
+  return status;
 }
 
 }  // namespace gufo::server
