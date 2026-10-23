@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # ROCm 10.1.0 evaluation set from nixpkgs PR 573885 (not yet merged).
+    # Only the rocm10 package and shell use it; the default stays on the
+    # nixpkgs ROCm release.
+    nixpkgs-rocm10.url = "github:randomizedcoder/nixpkgs/925eadb600eb3ee8f2d5d79f9d3796bf161893ce";
     # Reference ASR/TTS runtime for benchmark comparisons; exposes a
     # ROCm gfx1151 package tuned for Strix Halo.
     audio-cpp = {
@@ -12,7 +16,7 @@
   };
 
   outputs =
-    { self, nixpkgs, audio-cpp }:
+    { self, nixpkgs, nixpkgs-rocm10, audio-cpp }:
     let
       # Strix Halo is a Linux x86-64-only target (see README non-goals).
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" ];
@@ -31,6 +35,19 @@
       gufoPackages = forAllSystems (
         system:
         pkgs.${system}.callPackage ./.devops/nix/scope.nix { inherit revision; }
+      );
+
+      # Evaluation build against ROCm 10.1.0. The whole package set comes from
+      # the PR so glibc, stdenv and the ROCm compiler stay consistent.
+      gufoRocm10 = forAllSystems (
+        system:
+        let
+          pkgsRocm10 = import nixpkgs-rocm10 { inherit system; };
+        in
+        (pkgsRocm10.callPackage ./.devops/nix/scope.nix { inherit revision; }).gufo.override {
+          # Kernel libraries built for gfx1151 only; there is no binary cache.
+          rocmPackages = pkgsRocm10.rocmPackages.gfx1151;
+        }
       );
 
       llamaReferences = forAllSystems (
@@ -128,6 +145,8 @@
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
           release = base.override { inherit releaseVersion; };
+          # ROCm 10.1.0 evaluation build; not a release or check input.
+          rocm10 = gufoRocm10.${system};
           # Optional benchmark packages: excluded from Gufo, the default
           # development shell and hosted checks.
           ds4-reference = pkgs.${system}.callPackage ./.devops/nix/ds4-reference.nix { };
@@ -179,6 +198,30 @@
             '';
           };
 
+          # ROCm 10.1.0 evaluation shell: builds and profiles the rocm10
+          # package. It omits the ROCm torch tools, which would rebuild torch.
+          rocm10 =
+            let
+              pkgsRocm10 = import nixpkgs-rocm10 { inherit system; };
+              gufo = self.packages.${system}.rocm10;
+            in
+            pkgsRocm10.mkShell {
+              inputsFrom = [ gufo ];
+              packages = [
+                gufo.rocmPackages.rocprofiler-sdk
+                pkgsRocm10.python3
+                pkgsRocm10.gdb
+                pkgsRocm10.git
+                pkgsRocm10.ripgrep
+                pkgsRocm10.ccache
+              ];
+              env.LD_LIBRARY_PATH = pkgsRocm10.lib.makeLibraryPath [
+                gufo.rocmRuntime
+                pkgsRocm10.stdenv.cc.cc.lib
+                pkgsRocm10.zlib
+              ];
+              shellHook = self.devShells.${system}.default.shellHook;
+            };
         }
       );
 

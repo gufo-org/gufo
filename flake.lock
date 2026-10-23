@@ -36,10 +36,27 @@
         "type": "github"
       }
     },
+    "nixpkgs-rocm10": {
+      "locked": {
+        "lastModified": 1792019062,
+        "narHash": "sha256-wUYZ7CwXv29TcerPGVNTnXgyXraLGAfLJgRQEOrkGhU=",
+        "owner": "randomizedcoder",
+        "repo": "nixpkgs",
+        "rev": "925eadb600eb3ee8f2d5d79f9d3796bf161893ce",
+        "type": "github"
+      },
+      "original": {
+        "owner": "randomizedcoder",
+        "repo": "nixpkgs",
+        "rev": "925eadb600eb3ee8f2d5d79f9d3796bf161893ce",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "audio-cpp": "audio-cpp",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "nixpkgs-rocm10": "nixpkgs-rocm10"
       }
     }
   },

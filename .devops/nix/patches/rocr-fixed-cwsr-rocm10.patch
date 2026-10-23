@@ -1,0 +1,69 @@
+diff -ruN a/libhsakmt/src/queues.c b/libhsakmt/src/queues.c
+--- a/libhsakmt/src/queues.c
++++ b/libhsakmt/src/queues.c
+@@ -632,7 +632,15 @@
+ 		/* Allocate unified memory for context save restore
+ 		 * area on dGPU.
+ 		 */
+-		if (!q->use_ats && ctx->hsakmt_is_svm_api_supported) {
++		/* Strix Halo shares system DRAM with the CPU. Movable SVM CWSR
++		 * pages can evict all process queues during host compaction, even
++		 * when the application has pinned its own GPU-visible buffers.
++		 * Use the existing non-paged GTT path for these small queue areas;
++		 * retain SVM support for application-managed allocations.
++		 */
++		bool fixed_cwsr = node.EngineId.ui32.Major == 11 &&
++			node.EngineId.ui32.Minor == 5 && node.EngineId.ui32.Stepping == 1;
++		if (!q->use_ats && ctx->hsakmt_is_svm_api_supported && !fixed_cwsr) {
+ 			uint32_t size = PAGE_ALIGN_UP(q->total_mem_alloc_size);
+ 
+ 			pr_info("Allocating GTT for CWSR\n");
+@@ -669,7 +677,7 @@
+ 			q->ctx_save_restore = allocate_exec_aligned_memory(ctx,
+ 							q->total_mem_alloc_size,
+ 							q->use_ats, gpu_id, NodeId,
+-							false, false, false);
++							fixed_cwsr, false, false);
+ 
+ 			if (!q->ctx_save_restore)
+ 				return HSAKMT_STATUS_NO_MEMORY;
+diff -ruN a/runtime/hsa-runtime/core/runtime/amd_loader_context.cpp b/runtime/hsa-runtime/core/runtime/amd_loader_context.cpp
+--- a/runtime/hsa-runtime/core/runtime/amd_loader_context.cpp
++++ b/runtime/hsa-runtime/core/runtime/amd_loader_context.cpp
+@@ -311,7 +311,9 @@
+   assert(0 == ((uintptr_t)ptr_) % align);
+   if (HSA_STATUS_SUCCESS !=
+       core::Runtime::runtime_singleton_->AllocateMemory(
+-          RegionMemory::System(false), size, core::MemoryRegion::AllocateNoFlags, &host_ptr_)) {
++          // Runtime-owned code-object staging must also stay resident while
++          // a new kernel module is being loaded.
++          RegionMemory::System(false), size, core::MemoryRegion::AllocateNonPaged, &host_ptr_)) {
+     HSA::hsa_memory_free(ptr_);
+     ptr_ = nullptr;
+     host_ptr_ = nullptr;
+diff -ruN a/runtime/hsa-runtime/core/runtime/amd_memory_region.cpp b/runtime/hsa-runtime/core/runtime/amd_memory_region.cpp
+--- a/runtime/hsa-runtime/core/runtime/amd_memory_region.cpp
++++ b/runtime/hsa-runtime/core/runtime/amd_memory_region.cpp
+@@ -107,6 +107,12 @@
+     mem_flag_.ui32.HostAccess = 1;
+     mem_flag_.ui32.CachePolicy = HSA_CACHING_CACHED;
+ 
++    // HIP can obtain its kernel-argument and copy arenas from the coarse
++    // pool, bypassing ROCr's dedicated kernarg pool. Keep these runtime
++    // buffers resident too. Ordinary fine-grained allocations retain their
++    // existing policy; disabling USERPTR globally changes their performance.
++    if (kernarg || !fine_grain) mem_flag_.ui32.NonPaged = 1;
++
+     if (kernarg) mem_flag_.ui32.Uncached = 1;
+ 
+     virtual_size_ =
+@@ -589,6 +595,9 @@
+     return HSA_STATUS_SUCCESS;
+   }
+   HsaMemFlags local_mem_flag = mem_flag_;
++  // The resident policy above applies to ROCr's own allocations. Registered
++  // memory belongs to the caller, and libhsakmt rejects NonPaged for it.
++  local_mem_flag.ui32.NonPaged = 0;
+   if (flags & HSA_AMD_MEMORY_POOL_UNCACHED_FLAG) {
+     local_mem_flag.ui32.Uncached = 1;
+     local_mem_flag.ui32.CoarseGrain = 0;

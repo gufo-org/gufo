@@ -162,6 +162,13 @@ It keeps queue save/restore buffers, launch/copy arenas and code-loading
 staging resident during host memory compaction, while retaining managed-memory
 support and the ordinary fine-grained host-allocation policy.
 
+`nix build .#rocm10` and `nix develop .#rocm10` build the same source against
+ROCm 10.1.0 (HIP Clang 24) from the open
+[nixpkgs ROCm 10.1 update](https://github.com/NixOS/nixpkgs/pull/573885), with
+the [rebased queue-memory patch](.devops/nix/patches/rocr-fixed-cwsr-rocm10.patch).
+This build is under evaluation and is not qualified; it has no binary cache, so
+the first build compiles the ROCm toolchain and libraries for gfx1151.
+
 ### Without Nix
 
 Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config and the

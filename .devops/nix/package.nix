@@ -21,8 +21,16 @@ let
   # Keep SVM available for managed model/state allocations, but prevent
   # compaction of ROCr's queue save areas and HIP's runtime-owned buffers from
   # suspending inference.
+  # ROCr 1.21 (ROCm 10) moved the queue code, so it takes a rebased patch.
   rocmRuntime = rocmPackages.rocm-runtime.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ./patches/rocr-fixed-cwsr.patch ];
+    patches = (old.patches or [ ]) ++ [
+      (
+        if lib.versionAtLeast rocmPackages.rocm-runtime.version "10" then
+          ./patches/rocr-fixed-cwsr-rocm10.patch
+        else
+          ./patches/rocr-fixed-cwsr.patch
+      )
+    ];
   });
   versionLabel = if releaseVersion == null then "development" else releaseVersion;
   packageVersion =
