@@ -26,5 +26,6 @@ if (ENGINE_ENABLE_HIP)
   target_compile_definitions(gufo_embedding_gemma2 PUBLIC ENGINE_ENABLE_HIP=1)
   target_link_libraries(gufo_embedding_gemma2 PUBLIC
     hip::host
-    roc::hipblas)
+    roc::hipblas
+    roc::hipblaslt)
 endif()

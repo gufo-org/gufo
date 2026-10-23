@@ -1,0 +1,377 @@
+{
+ "date": "2026-10-23",
+ "hardware": {
+  "name": "AMD Radeon 8060S Graphics",
+  "gfx": "gfx1151",
+  "node": "gpuworker02 (Strix Halo)"
+ },
+ "model": "google/embeddinggemma-2 @ 914f7f89142e33e77833254d9c9b90c3cef7303b (BF16 safetensors)",
+ "build": "Nix container images holding production gufo builds of #700 and this change.  The PR head differs from the measured gemm commit 5215bcf9 only in documentation.",
+ "image": {
+  "embg2-ab6": "gufo-eg2@sha256:5573b564b5300205836eadae211ab814472506a27b563686d4bf57a81c617b0f",
+  "embg2-ab7": "gufo-eg2@sha256:410270314a12d10c5b263951890ad3147fd7b6301cffacd13fa5c6dd9323bfc3"
+ },
+ "commits": {
+  "base": "91558ae7 (#700 head)",
+  "gemm": "5215bcf9"
+ },
+ "log_sha256": {
+  "embg2-ab6": "05bbc830f54b79803940ad9be7806c9020b734e80c52036394438ad30efa25a6",
+  "embg2-ab7": "a8464aeeba02e035d9f5fbf40bca903e5ac11f3ee14bc303b232c944bf91b383"
+ },
+ "pod": "embg2-ab6 on gpuworker02, the only GPU pod on the node, and embg2-ab7 on the same node after a reboot for the 16 x 1 x 16, 4 x 8 x 128, and 16 x 8 x 128 rows",
+ "method": "Each build ran its EmbeddingGemma 2 test binaries, then its HTTP rows twice of 60 requests each in the order base, gemm, attn, batch, gbatch, gbatch, batch, attn, gemm, base, and each value is the mean of the two runs' medians or p95s.  The attn, batch, and gbatch builds belong to sibling changes and are not recorded here.  The first HTTP pass of gemm stopped at the 16 x 1 x 16 row with one HTTP 503 that the server never logged, a race in the HTTP server's connection limit that is unrelated to this change, so gemm has one sample for 16 x 1 x 16, 4 x 8 x 128, and 16 x 8 x 128 in that run.  The values for those three rows come from the second pod, which ran base, gemm, gemm, base, base, gemm on the same node after a reboot, three runs each with no errors, and each value is the mean of the three runs' medians or p95s.  Speedup is the base median divided by the gemm median.  load_ms lists the two servers' load_completed elapsed_ms in ab6.",
+ "load_ms": {
+  "base": [
+   477,
+   579
+  ],
+  "base_mean": 528,
+  "gemm": [
+   2243,
+   2236
+  ],
+  "gemm_mean": 2240
+ },
+ "quality": {
+  "base": {
+   "golden_worst_cosine": 0.99998494,
+   "golden_worst_truncated_cosine": 0.99998504,
+   "long_document_cosine": 0.99999088,
+   "cpu_reference_worst_cosine": 0.99999298,
+   "batched_vs_alone_worst_cosine": 0.99998912
+  },
+  "gemm": {
+   "golden_worst_cosine": 0.99998118,
+   "golden_worst_truncated_cosine": 0.9999817,
+   "long_document_cosine": 0.99999353,
+   "cpu_reference_worst_cosine": 0.99999178,
+   "batched_vs_alone_worst_cosine": 0.99999181
+  }
+ },
+ "http": [
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 16,
+   "requests_per_run": 60,
+   "tokens_per_request": 40,
+   "base": {
+    "median_ms": 10.27,
+    "p95_ms": 10.92,
+    "tokens_per_s": 3818,
+    "runs_median_ms": [
+     10.37,
+     10.18
+    ]
+   },
+   "gemm": {
+    "median_ms": 6.69,
+    "p95_ms": 7.54,
+    "tokens_per_s": 5805,
+    "runs_median_ms": [
+     6.71,
+     6.67
+    ]
+   },
+   "median_speedup": 1.54
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 404,
+   "base": {
+    "median_ms": 41.41,
+    "p95_ms": 43.12,
+    "tokens_per_s": 9736,
+    "runs_median_ms": [
+     40.35,
+     42.47
+    ]
+   },
+   "gemm": {
+    "median_ms": 20.45,
+    "p95_ms": 21.49,
+    "tokens_per_s": 19507,
+    "runs_median_ms": [
+     20.58,
+     20.31
+    ]
+   },
+   "median_speedup": 2.02
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 512,
+   "requests_per_run": 60,
+   "tokens_per_request": 1940,
+   "base": {
+    "median_ms": 256.09,
+    "p95_ms": 258.61,
+    "tokens_per_s": 7567,
+    "runs_median_ms": [
+     254.22,
+     257.96
+    ]
+   },
+   "gemm": {
+    "median_ms": 147.96,
+    "p95_ms": 151.34,
+    "tokens_per_s": 13101,
+    "runs_median_ms": [
+     147.86,
+     148.05
+    ]
+   },
+   "median_speedup": 1.73
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 2100,
+   "requests_per_run": 60,
+   "tokens_per_request": 8072,
+   "base": {
+    "median_ms": 2123.21,
+    "p95_ms": 2132.39,
+    "tokens_per_s": 3802,
+    "runs_median_ms": [
+     2122.23,
+     2124.19
+    ]
+   },
+   "gemm": {
+    "median_ms": 1675.58,
+    "p95_ms": 1683.6,
+    "tokens_per_s": 4817,
+    "runs_median_ms": [
+     1675.3,
+     1675.86
+    ]
+   },
+   "median_speedup": 1.27
+  },
+  {
+   "concurrency": 1,
+   "inputs": 8,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 3495,
+   "base": {
+    "median_ms": 337.21,
+    "p95_ms": 338.81,
+    "tokens_per_s": 10355,
+    "runs_median_ms": [
+     338.36,
+     336.05
+    ]
+   },
+   "gemm": {
+    "median_ms": 149.16,
+    "p95_ms": 150.31,
+    "tokens_per_s": 23371,
+    "runs_median_ms": [
+     149.59,
+     148.72
+    ]
+   },
+   "median_speedup": 2.26
+  },
+  {
+   "concurrency": 1,
+   "inputs": 32,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 15670,
+   "base": {
+    "median_ms": 1566.4,
+    "p95_ms": 1570.7,
+    "tokens_per_s": 10000,
+    "runs_median_ms": [
+     1572.45,
+     1560.35
+    ]
+   },
+   "gemm": {
+    "median_ms": 708.58,
+    "p95_ms": 711.57,
+    "tokens_per_s": 22088,
+    "runs_median_ms": [
+     705.91,
+     711.25
+    ]
+   },
+   "median_speedup": 2.21
+  },
+  {
+   "concurrency": 4,
+   "inputs": 1,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 404,
+   "base": {
+    "median_ms": 161.17,
+    "p95_ms": 165.75,
+    "tokens_per_s": 9971,
+    "runs_median_ms": [
+     162.43,
+     159.9
+    ]
+   },
+   "gemm": {
+    "median_ms": 78.93,
+    "p95_ms": 80.81,
+    "tokens_per_s": 20337,
+    "runs_median_ms": [
+     79.4,
+     78.46
+    ]
+   },
+   "median_speedup": 2.04
+  },
+  {
+   "concurrency": 16,
+   "inputs": 1,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 404,
+   "base": {
+    "median_ms": 644.99,
+    "p95_ms": 649.08,
+    "tokens_per_s": 9979,
+    "runs_median_ms": [
+     649.74,
+     640.23
+    ]
+   },
+   "gemm": {
+    "median_ms": 313.23,
+    "p95_ms": 317.89,
+    "tokens_per_s": 20462,
+    "runs_median_ms": [
+     315.23,
+     311.23
+    ]
+   },
+   "median_speedup": 2.06
+  },
+  {
+   "concurrency": 16,
+   "inputs": 1,
+   "words": 16,
+   "requests_per_run": 60,
+   "tokens_per_request": 40,
+   "base": {
+    "median_ms": 158.34,
+    "p95_ms": 160.02,
+    "tokens_per_s": 4008,
+    "runs_median_ms": [
+     153.58,
+     167.78,
+     153.65
+    ]
+   },
+   "gemm": {
+    "median_ms": 97.41,
+    "p95_ms": 98.21,
+    "tokens_per_s": 6489,
+    "runs_median_ms": [
+     96.97,
+     97.24,
+     98.03
+    ]
+   },
+   "median_speedup": 1.63
+  },
+  {
+   "concurrency": 4,
+   "inputs": 8,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 3495,
+   "base": {
+    "median_ms": 1329.67,
+    "p95_ms": 1358.42,
+    "tokens_per_s": 10482,
+    "runs_median_ms": [
+     1310.25,
+     1354.49,
+     1324.26
+    ]
+   },
+   "gemm": {
+    "median_ms": 584.3,
+    "p95_ms": 588.65,
+    "tokens_per_s": 23896,
+    "runs_median_ms": [
+     583.43,
+     589.67,
+     579.79
+    ]
+   },
+   "median_speedup": 2.28
+  },
+  {
+   "concurrency": 16,
+   "inputs": 8,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 3495,
+   "base": {
+    "median_ms": 5308.25,
+    "p95_ms": 5362.61,
+    "tokens_per_s": 10493,
+    "runs_median_ms": [
+     5275.27,
+     5338.35,
+     5311.12
+    ]
+   },
+   "gemm": {
+    "median_ms": 2342.86,
+    "p95_ms": 2346.7,
+    "tokens_per_s": 23840,
+    "runs_median_ms": [
+     2354.23,
+     2352.81,
+     2321.55
+    ]
+   },
+   "median_speedup": 2.27
+  }
+ ],
+ "gemm_bench_1024_rows": {
+  "source": "embedding_gemma2_gemm_bench_hip_test in the embg2-ab6 log, gemm build; rocblas is ms and TFLOPS, hipblaslt is the best rank, its ms, and its TFLOPS",
+  "gate_up": {
+   "rocblas_ms": 0.88,
+   "rocblas_tflops": 4.86,
+   "hipblaslt_rank": 4,
+   "hipblaslt_ms": 0.16,
+   "hipblaslt_tflops": 27.01
+  },
+  "down": {
+   "rocblas_ms": 0.46,
+   "rocblas_tflops": 4.69,
+   "hipblaslt_rank": 5,
+   "hipblaslt_ms": 0.08,
+   "hipblaslt_tflops": 25.6
+  },
+  "ple_512": {
+   "rocblas_ms": 0.12,
+   "rocblas_tflops": 4.49,
+   "hipblaslt_rank": 5,
+   "hipblaslt_ms": 0.03,
+   "hipblaslt_tflops": 20.98
+  },
+  "final": {
+   "rocblas_ms": 0.17,
+   "rocblas_tflops": 4.72,
+   "hipblaslt_rank": 4,
+   "hipblaslt_ms": 0.05,
+   "hipblaslt_tflops": 17.41
+  }
+ }
+}

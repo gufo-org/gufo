@@ -48,6 +48,16 @@ if (ENGINE_ENABLE_HIP)
     LABELS "gpu;models;embedding-gemma2;embedding;quality;external-model"
     SKIP_RETURN_CODE 77
     RUN_SERIAL TRUE)
+
+  add_executable(embedding_gemma2_gemm_bench_hip_test gemm_bench_hip_test.cpp)
+  target_link_libraries(embedding_gemma2_gemm_bench_hip_test PRIVATE
+    gufo_embedding_gemma2 hip::host roc::hipblaslt)
+  add_test(NAME embedding_gemma2_gemm_bench_hip_test
+    COMMAND embedding_gemma2_gemm_bench_hip_test)
+  set_tests_properties(embedding_gemma2_gemm_bench_hip_test PROPERTIES
+    LABELS "gpu;models;embedding-gemma2;benchmark;slow"
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE)
 endif()
 
 add_executable(embedding_gemma2_tokenizer_test tokenizer_test.cpp)

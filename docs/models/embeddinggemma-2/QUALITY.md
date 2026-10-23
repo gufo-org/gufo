@@ -1,16 +1,16 @@
 # EmbeddingGemma 2 quality
 
-**On ten probe texts the GPU embeddings match sentence-transformers float32 output at cosine 0.999985 or better, and every token ID matches Hugging Face.**  Qualified October 22, 2026, on gfx1151, with the original BF16 checkpoint at revision `914f7f89142e33e77833254d9c9b90c3cef7303b`.
+**On ten probe texts the GPU embeddings match sentence-transformers float32 output at cosine 0.999981 or better, and every token ID matches Hugging Face.**  Qualified October 23, 2026, on gfx1151, with the original BF16 checkpoint at revision `914f7f89142e33e77833254d9c9b90c3cef7303b`.
 
 | Check | Result |
 | --- | --- |
 | Token IDs versus Hugging Face `tokenizers` | 95/95 fixture cases identical, covering whitespace runs, byte fallback and special tokens |
-| GPU embedding versus sentence-transformers float32 | Cosine 0.999985 worst of 10 probes, 0.999999 best |
+| GPU embedding versus sentence-transformers float32 | Cosine 0.999981 worst of 10 probes, 0.999999 best |
 | Same probes, Hugging Face BF16 versus float32 | Cosine 0.999867 worst, which is the checkpoint's own precision noise |
-| Matryoshka 128 / 256 / 512 after renormalization | Worst cosine 0.999985 against the same truncation of the reference |
-| GPU versus Gufo float32 CPU reference | Cosine 0.999993 or better on four sequences |
-| Packing sequences in one batch versus alone | Cosine 0.999989 or better.  hipBLAS can choose a different kernel for a different batch size |
-| Windowed attention beyond the 512-token radius | A 2,349-token probe matches the reference at cosine 0.999991 |
+| Matryoshka 128 / 256 / 512 after renormalization | Worst cosine 0.999982 against the same truncation of the reference |
+| GPU versus Gufo float32 CPU reference | Cosine 0.999992 or better on four sequences |
+| Packing sequences in one batch versus alone | Cosine 0.999992 or better.  The tuned GEMM can choose a different algorithm for a different batch size |
+| Windowed attention beyond the 512-token radius | A 2,349-token probe matches the reference at cosine 0.999994 |
 
 The probes are English, Spanish, and Chinese queries and passages, code, emoji, whitespace runs, literal special-token text, and one long document.  They measure agreement with the reference implementation, not retrieval quality on a benchmark, and Gufo reports no MTEB score.  Activations stay float32 between BF16 matrix products, so Gufo is closer to the float32 reference than the model's BF16 execution is.
 

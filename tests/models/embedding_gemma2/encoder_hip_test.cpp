@@ -167,9 +167,9 @@ int main(int argc, char** argv) {
     const double alone = Cosine(single[0], batched[i]);
     std::cout << "sequence " << i << " cosine alone vs batched " << alone
               << '\n';
-    // hipBLAS may pick a different kernel for a different batch size, which
-    // changes float32 accumulation order but not the result by more than
-    // rounding. A leak between sequences would be far larger.
+    // The tuned GEMM may pick a different algorithm for a different batch
+    // size, which changes float32 accumulation order but not the result by
+    // more than rounding. A leak between sequences would be far larger.
     Check(alone > 0.9999, "batching must not change an embedding");
   }
 

@@ -96,6 +96,9 @@ DeviceBuffer UploadConcatenated(const TensorStore& store,
 /// bounds the float32 scratch. Unchunked, the gate/up buffer for 8,192 tokens
 /// would be 8,192 x 4,096 x 4 bytes = 134 MB and the QKV buffer about 100 MB.
 constexpr std::size_t kChunkTokens = 1024;
+// Gemm pads a chunk up to a row bucket, so the scratch behind every chunk must
+// hold a full chunk.
+static_assert(kMaxSequenceTokens % kChunkTokens == 0);
 
 /// Rotary cos/sin for every position up to the context limit, one pair of
 /// [position][head_dim / 2] tables per head width and base. The code computes
@@ -140,6 +143,7 @@ struct EncoderRuntime::Impl {
   LoadResult loaded;
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
+  GemmLt gemm_lt;
 
   // Host staging for the per-batch index uploads. Asynchronous copies read
   // these until the stream is synchronized, so they outlive RunBatch.
@@ -205,6 +209,20 @@ struct EncoderRuntime::Impl {
   // Mirrors the text server's probe: after a reset even a 4-byte memset
   // fails, while an ordinary kernel or library failure leaves it working.
   [[nodiscard]] bool DeviceUsable();
+
+  /// Runs one sequence for every GEMM row bucket, so hipBLASLt has tuned all
+  /// of them and every kernel is loaded before the first request.
+  void Warmup();
+
+  /// Y[tokens, m] = X[tokens, k] * W[m, k]^T through the tuned hipBLASLt
+  /// plan, or rocBLAS when hipBLASLt has none for the shape.
+  void Gemm(const void* weights, const void* inputs, float* output,
+            std::size_t tokens, std::size_t m, std::size_t k) {
+    if (!gemm_lt.Run(weights, inputs, output, tokens, m, k, kChunkTokens,
+                     stream)) {
+      LaunchGemmBf16(blas, weights, inputs, output, tokens, m, k, stream);
+    }
+  }
 
   void RunBatch(const std::vector<std::vector<std::uint32_t>>& sequences,
                 std::size_t first, std::size_t last, std::size_t tokens,
@@ -299,6 +317,17 @@ void EncoderRuntime::Impl::Allocate() {
   pooled_f32 = DeviceBuffer(n * text.embedding_dim * sizeof(float));
 }
 
+void EncoderRuntime::Impl::Warmup() {
+  std::vector<std::vector<float>> unused;
+  std::size_t rows = 0;
+  do {
+    rows = GemmLt::Bucket(rows + 1, kChunkTokens);
+    std::vector<std::uint32_t> filler(rows, 1000);
+    unused.clear();
+    RunBatch({filler}, 0, 1, rows, &unused);
+  } while (rows < kChunkTokens);
+}
+
 void EncoderRuntime::Impl::RunBatch(
     const std::vector<std::vector<std::uint32_t>>& sequences, std::size_t first,
     std::size_t last, std::size_t tokens,
@@ -359,10 +388,8 @@ void EncoderRuntime::Impl::RunBatch(
                         normed_bf16.get(), tokens, hidden, epsilon, stream);
     for (std::size_t row = 0; row < tokens; row += kChunkTokens) {
       const std::size_t rows = std::min(kChunkTokens, tokens - row);
-      LaunchGemmBf16(blas, layer.qkv.get(),
-                     normed_bf16.get<std::uint16_t>() + row * hidden,
-                     qkv_f32.get<float>(), rows, query_width + 2U * key_width,
-                     hidden, stream);
+      Gemm(layer.qkv.get(), normed_bf16.get<std::uint16_t>() + row * hidden,
+           qkv_f32.get<float>(), rows, query_width + 2U * key_width, hidden);
       LaunchQkvNormRope(qkv_f32.get<float>(), layer.query_norm.get(),
                         layer.key_norm.get(),
                         query_bf16.get<std::uint16_t>() + row * query_width,
@@ -381,9 +408,9 @@ void EncoderRuntime::Impl::RunBatch(
     }
     for (std::size_t row = 0; row < tokens; row += kChunkTokens) {
       const std::size_t rows = std::min(kChunkTokens, tokens - row);
-      LaunchGemmBf16(blas, layer.output.get(),
-                     context_bf16.get<std::uint16_t>() + row * query_width,
-                     temp_f32.get<float>(), rows, hidden, query_width, stream);
+      Gemm(layer.output.get(),
+           context_bf16.get<std::uint16_t>() + row * query_width,
+           temp_f32.get<float>(), rows, hidden, query_width);
       LaunchRmsNormResidual(
           temp_f32.get<float>(), layer.post_attention_norm.get(),
           state.get<float>() + row * hidden, rows, hidden, epsilon, stream);
@@ -393,20 +420,17 @@ void EncoderRuntime::Impl::RunBatch(
                         normed_bf16.get(), tokens, hidden, epsilon, stream);
     for (std::size_t row = 0; row < tokens; row += kChunkTokens) {
       const std::size_t rows = std::min(kChunkTokens, tokens - row);
-      LaunchGemmBf16(blas, layer.gate_up.get(),
-                     normed_bf16.get<std::uint16_t>() + row * hidden,
-                     gate_up_f32.get<float>(), rows,
-                     2U * text.intermediate_size, hidden, stream);
+      Gemm(layer.gate_up.get(), normed_bf16.get<std::uint16_t>() + row * hidden,
+           gate_up_f32.get<float>(), rows, 2U * text.intermediate_size, hidden);
       LaunchGeglu(gate_up_f32.get<float>(),
                   act_bf16.get<std::uint16_t>() + row * text.intermediate_size,
                   rows, text.intermediate_size, stream);
     }
     for (std::size_t row = 0; row < tokens; row += kChunkTokens) {
       const std::size_t rows = std::min(kChunkTokens, tokens - row);
-      LaunchGemmBf16(
-          blas, layer.down.get(),
-          act_bf16.get<std::uint16_t>() + row * text.intermediate_size,
-          temp_f32.get<float>(), rows, hidden, text.intermediate_size, stream);
+      Gemm(layer.down.get(),
+           act_bf16.get<std::uint16_t>() + row * text.intermediate_size,
+           temp_f32.get<float>(), rows, hidden, text.intermediate_size);
       LaunchRmsNormResidual(
           temp_f32.get<float>(), layer.post_feedforward_norm.get(),
           state.get<float>() + row * hidden, rows, hidden, epsilon, stream);
@@ -420,20 +444,18 @@ void EncoderRuntime::Impl::RunBatch(
       float* const state_rows = state.get<float>() + row * hidden;
       std::uint16_t* const normed_rows =
           normed_bf16.get<std::uint16_t>() + row * hidden;
-      LaunchGemmBf16(
-          blas,
-          ple_projection.get<std::byte>() + index * per_layer * hidden * 2U,
-          embeddings_bf16.get<std::uint16_t>() + row * hidden,
-          ple_f32.get<float>(), rows, per_layer, hidden, stream);
+      Gemm(ple_projection.get<std::byte>() + index * per_layer * hidden * 2U,
+           embeddings_bf16.get<std::uint16_t>() + row * hidden,
+           ple_f32.get<float>(), rows, per_layer, hidden);
       LaunchScaledRmsNorm(ple_f32.get<float>(), ple_norm.get(), rows, per_layer,
                           ple_scale, epsilon, stream);
       LaunchFloatToBf16(state_rows, normed_rows, rows * hidden, stream);
-      LaunchGemmBf16(blas, layer.ple_gate.get(), normed_rows,
-                     gate_f32.get<float>(), rows, per_layer, hidden, stream);
+      Gemm(layer.ple_gate.get(), normed_rows, gate_f32.get<float>(), rows,
+           per_layer, hidden);
       LaunchPleGate(gate_f32.get<float>(), ple_f32.get<float>(), act_bf16.get(),
                     rows * per_layer, stream);
-      LaunchGemmBf16(blas, layer.ple_projection.get(), act_bf16.get(),
-                     temp_f32.get<float>(), rows, hidden, per_layer, stream);
+      Gemm(layer.ple_projection.get(), act_bf16.get(), temp_f32.get<float>(),
+           rows, hidden, per_layer);
       LaunchPleResidual(temp_f32.get<float>(), layer.ple_post_norm.get(),
                         layer.layer_scalar.get(), state_rows, rows, hidden,
                         epsilon, stream);
@@ -443,9 +465,12 @@ void EncoderRuntime::Impl::RunBatch(
 
   LaunchRmsNormToBf16(state.get<float>(), final_norm.get(), normed_bf16.get(),
                       tokens, hidden, epsilon, stream);
-  LaunchGemmBf16(blas, embedding_projection.get(), normed_bf16.get(),
-                 projected_f32.get<float>(), tokens, text.embedding_dim, hidden,
-                 stream);
+  for (std::size_t row = 0; row < tokens; row += kChunkTokens) {
+    Gemm(embedding_projection.get(),
+         normed_bf16.get<std::uint16_t>() + row * hidden,
+         projected_f32.get<float>() + row * text.embedding_dim,
+         std::min(kChunkTokens, tokens - row), text.embedding_dim, hidden);
+  }
   const std::size_t count = last - first;
   if (!LaunchMeanPoolNormalize(
           projected_f32.get<float>(), offsets.get<std::uint32_t>(),
@@ -502,8 +527,14 @@ std::unique_ptr<EncoderRuntime> EncoderRuntime::Create(
     // its page-cache residency, about 650 MB of host memory.
     impl->loaded.store.reset();
     impl->loaded.mappings.clear();
+    impl->Warmup();
     return std::unique_ptr<EncoderRuntime>(new EncoderRuntime(std::move(impl)));
   } catch (const std::exception& failure) {
+    // Warm-up copies may still be queued. They read the host staging vectors
+    // that `impl` is about to destroy.
+    if (impl != nullptr && impl->stream != nullptr) {
+      gufo::hip::LogCleanupError(hipStreamSynchronize(impl->stream));
+    }
     return fail(std::string("embedding_gemma2: ") + failure.what());
   }
 }
