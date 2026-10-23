@@ -968,15 +968,12 @@ bool Session::PrepareDecode(const DecodeRequest& request,
       std::min<std::size_t>({max_tokens, room, exec.max_speculative()});
   // Head eligibility is MtpDraftSubsetAllowed. Sampled cohorts are never
   // jointly planned (DecodeBatchImpl), so a sampled request decides the same
-  // way alone and in any batch. A plain greedy request decoding alone has no
+  // way alone and in any batch. A greedy request decoding alone has no
   // peers to delay, so it drafts as on one session. Every request keeps the
   // established length controller and AR backoff.
-  const bool unmodified = !sampler.config().uses_random_sampling() &&
-                          !sampler.config().penalties_enabled() &&
-                          !sampler.config().constraint;
   const bool allow_subset = MtpDraftSubsetAllowed(
-      sampler.config().uses_random_sampling(), unmodified,
-      model_->DecodeConcurrency(), occupancy, batch_drafts.has_value());
+      sampler.config().uses_random_sampling(), model_->DecodeConcurrency(),
+      occupancy, batch_drafts.has_value());
   pending->policy_concurrency = MtpPolicyConcurrency(
       sampler.config().uses_random_sampling(), sampler.config().seed >= 0,
       batch_drafts.has_value(), occupancy);

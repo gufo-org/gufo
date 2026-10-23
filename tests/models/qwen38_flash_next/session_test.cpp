@@ -1149,8 +1149,8 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
   }
 
   // Switching to penalties preserves the target/predictor checkpoint.
-  // Greedy penalties use the full head; sampled proposals may use the table.
-  // Both must replay exactly in populated and fresh sessions.
+  // Greedy and sampled penalized proposals may both use the table. Both must
+  // replay exactly in populated and fresh sessions.
   for (const float temperature : {0.0F, 0.8F}) {
     auto fresh = create();
     Require(t->RestoreSnapshot(*thai_snapshot, &error) &&
@@ -1166,15 +1166,9 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
     const auto actual = gufo::test::DecodeMtpReplay(*t, b, 32);
     Require(expected == actual && actual.drafted > 0,
             "penalized replay differs after a populated draft table");
-    if (temperature == 0.0F) {
-      Require(t->Statistics().small_head_cycles == 0 &&
-                  fresh->Statistics().small_head_cycles == 0,
-              "greedy penalties retained the reduced draft head");
-    } else {
-      Require(t->Statistics().small_head_cycles > 0 &&
-                  fresh->Statistics().small_head_cycles > 0,
-              "sampled penalty replay did not exercise the reduced head");
-    }
+    Require(t->Statistics().small_head_cycles > 0 &&
+                fresh->Statistics().small_head_cycles > 0,
+            "penalized replay did not exercise the reduced head");
     RequireExact(fresh->Logits(), t->Logits(),
                  "penalized replay changed target logits");
   }
