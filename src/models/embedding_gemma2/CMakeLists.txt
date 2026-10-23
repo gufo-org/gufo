@@ -1,6 +1,7 @@
 # EmbeddingGemma 2 text and image embeddings: model-private BF16 safetensors runtime.
 
 add_library(gufo_embedding_gemma2 STATIC
+  batch_scheduler.cpp
   image_processor.cpp
   config.cpp
   loader.cpp

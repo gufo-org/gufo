@@ -65,14 +65,13 @@ struct EmbeddingService::Impl {
   }
 
 #if defined(ENGINE_ENABLE_HIP)
-  // Tokenizes before taking any device turn, so a large request does not
-  // block other requests that are ready to run. The encoder hands out device
-  // turns one batch at a time.
+  // Tokenizes before joining the encoder's queue, so a large request does not
+  // block other requests that are ready to run.
   EmbeddingStatus RunNative(const std::vector<EmbeddingInput>& inputs,
                             const std::function<bool()>& is_cancelled,
                             EmbeddingBatch* batch, std::string* error) {
     using namespace models::embedding_gemma2;
-    std::vector<hip::EncoderSequence> sequences;
+    std::vector<EncoderSequence> sequences;
     sequences.reserve(inputs.size());
     core::ImageReadBudget budget;
     const std::size_t byte_limit =
@@ -81,7 +80,7 @@ struct EmbeddingService::Impl {
     for (std::size_t index = 0; index < inputs.size(); ++index) {
       if (is_cancelled && is_cancelled())
         return EmbeddingStatus::kCancelled;
-      hip::EncoderSequence sequence;
+      EncoderSequence sequence;
       std::string text;
       // Use the tokenizer once for the complete input, preserving BPE merges
       // across adjacent text parts and the reference BOS/EOS framing.

@@ -126,9 +126,13 @@ def main():
         results = list(pool.map(
             lambda _: client.embeddings.create(model=args.model, input=texts),
             range(8)))
-    for result in results:
-        for item, expected in zip(result.data, response.data):
-            assert cosine(item.embedding, expected.embedding) > 0.99999
+    # Concurrent requests share device batches, and a different batch shape
+    # can pick a different GEMM kernel, so the vectors match only to rounding.
+    worst = min(cosine(item.embedding, expected.embedding)
+                for result in results
+                for item, expected in zip(result.data, response.data))
+    assert worst > MINIMUM_COSINE, worst
+    check(f"concurrent requests match a lone request, worst cosine {worst:.8f}")
 
     check("model listing names only the embedding model")
     models = client.models.list()

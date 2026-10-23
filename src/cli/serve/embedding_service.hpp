@@ -79,10 +79,10 @@ public:
   [[nodiscard]] std::string model_id() const;
   [[nodiscard]] std::string backend_name() const;
 
-  /// Embeds `texts` as one request. Concurrent requests take device turns one
-  /// batch at a time, so a long request does not block shorter ones until it
-  /// finishes. Returns `kCancelled` for a request cancelled before one of its
-  /// batches reaches the device.
+  /// Embeds `texts` as one request. Concurrent requests share device batches
+  /// in arrival order, and a long request does not block shorter ones until
+  /// it finishes. Returns `kCancelled` for a request cancelled before one of
+  /// its batches reaches the device.
   [[nodiscard]] EmbeddingStatus Embed(const std::vector<std::string>& texts,
                                       const std::function<bool()>& is_cancelled,
                                       EmbeddingBatch* batch,
