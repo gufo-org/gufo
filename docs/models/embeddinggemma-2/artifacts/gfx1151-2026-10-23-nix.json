@@ -1,0 +1,221 @@
+{
+ "date": "2026-10-23",
+ "hardware": {
+  "name": "AMD Radeon 8060S Graphics",
+  "gfx": "gfx1151",
+  "gtt_total": 133143986176
+ },
+ "model": "google/embeddinggemma-2 @ 914f7f89142e33e77833254d9c9b90c3cef7303b (BF16 safetensors)",
+ "build": "Nix 2.34.8 on the host: HTTP rows and load time from the `nix build` production gufo at commit edf711b4, which differs from 3e9a447f only by the device-loss log line; tests from the flake dev shell gpu-test preset (RelWithDebInfo with assertions)",
+ "load_ms": [
+  616,
+  629
+ ],
+ "quality": {
+  "golden_worst_cosine": 0.99998494,
+  "golden_worst_truncated_cosine": 0.99998504
+ },
+ "http": [
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 16,
+   "requests": 60,
+   "tokens_per_request": 40,
+   "median_ms": 10.04,
+   "p95_ms": 10.17,
+   "requests_per_s": 98.6,
+   "tokens_per_s": 3944.1
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 404,
+   "median_ms": 36.5,
+   "p95_ms": 37.29,
+   "requests_per_s": 27.32,
+   "tokens_per_s": 11035.4
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 512,
+   "requests": 60,
+   "tokens_per_request": 1940,
+   "median_ms": 230.29,
+   "p95_ms": 232.42,
+   "requests_per_s": 4.36,
+   "tokens_per_s": 8467.3
+  },
+  {
+   "concurrency": 1,
+   "inputs": 8,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 3495,
+   "median_ms": 311.0,
+   "p95_ms": 312.47,
+   "requests_per_s": 3.21,
+   "tokens_per_s": 11222.1
+  },
+  {
+   "concurrency": 1,
+   "inputs": 32,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 15670,
+   "median_ms": 1439.87,
+   "p95_ms": 1443.38,
+   "requests_per_s": 0.69,
+   "tokens_per_s": 10880.9
+  },
+  {
+   "concurrency": 4,
+   "inputs": 1,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 404,
+   "median_ms": 149.4,
+   "p95_ms": 154.54,
+   "requests_per_s": 26.54,
+   "tokens_per_s": 10723.5
+  },
+  {
+   "concurrency": 16,
+   "inputs": 1,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 404,
+   "median_ms": 597.34,
+   "p95_ms": 601.56,
+   "requests_per_s": 26.64,
+   "tokens_per_s": 10761.4
+  },
+  {
+   "concurrency": 4,
+   "inputs": 8,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 3495,
+   "median_ms": 1227.92,
+   "p95_ms": 1233.7,
+   "requests_per_s": 3.25,
+   "tokens_per_s": 11370.3
+  },
+  {
+   "concurrency": 16,
+   "inputs": 8,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 3495,
+   "median_ms": 4921.57,
+   "p95_ms": 5006.96,
+   "requests_per_s": 3.23,
+   "tokens_per_s": 11274.6
+  }
+ ],
+ "http_repeat": [
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 16,
+   "requests": 60,
+   "tokens_per_request": 40,
+   "median_ms": 10.09,
+   "p95_ms": 10.23,
+   "requests_per_s": 98.06,
+   "tokens_per_s": 3922.5
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 404,
+   "median_ms": 36.52,
+   "p95_ms": 37.31,
+   "requests_per_s": 27.29,
+   "tokens_per_s": 11024.9
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 512,
+   "requests": 60,
+   "tokens_per_request": 1940,
+   "median_ms": 231.66,
+   "p95_ms": 233.25,
+   "requests_per_s": 4.35,
+   "tokens_per_s": 8444.2
+  },
+  {
+   "concurrency": 1,
+   "inputs": 8,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 3495,
+   "median_ms": 312.36,
+   "p95_ms": 313.09,
+   "requests_per_s": 3.2,
+   "tokens_per_s": 11181.4
+  },
+  {
+   "concurrency": 1,
+   "inputs": 32,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 15670,
+   "median_ms": 1445.55,
+   "p95_ms": 1551.35,
+   "requests_per_s": 0.69,
+   "tokens_per_s": 10737.7
+  },
+  {
+   "concurrency": 4,
+   "inputs": 1,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 404,
+   "median_ms": 179.62,
+   "p95_ms": 186.05,
+   "requests_per_s": 22.17,
+   "tokens_per_s": 8957.0
+  },
+  {
+   "concurrency": 16,
+   "inputs": 1,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 404,
+   "median_ms": 726.75,
+   "p95_ms": 744.47,
+   "requests_per_s": 21.84,
+   "tokens_per_s": 8823.1
+  },
+  {
+   "concurrency": 4,
+   "inputs": 8,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 3495,
+   "median_ms": 1587.49,
+   "p95_ms": 1607.9,
+   "requests_per_s": 2.53,
+   "tokens_per_s": 8837.2
+  },
+  {
+   "concurrency": 16,
+   "inputs": 8,
+   "words": 128,
+   "requests": 60,
+   "tokens_per_request": 3495,
+   "median_ms": 6758.63,
+   "p95_ms": 7084.23,
+   "requests_per_s": 2.35,
+   "tokens_per_s": 8212.2
+  }
+ ],
+ "http_repeat_note": "Second run on a freshly started server right after the first. Single-client rows agree within 1 %; concurrent rows are 17-37 % slower, which follows how long the GPU has been busy rather than the server, since four concurrent 404-token requests measured 145 ms against 146 ms for four sequential ones on a cool machine."
+}

@@ -630,7 +630,7 @@ EmbeddingGemma 2 (`google/embeddinggemma-2`) serves text embeddings from its own
 ./result/bin/gufo serve --port 8080 embedding --model /persist/models/embeddinggemma-2
 ```
 
-`--model` must name an EmbeddingGemma 2 checkpoint directory, and `--served-model-name` overrides the default model ID `embeddinggemma-2`.  The process refuses to start on any other directory and in a build without the HIP backend.  There is no `--sessions` or `--context` option, because requests share one encoder and run one at a time.  Route this process through llama-swap when one public URL should offer embeddings alongside text, speech, or images.
+`--model` must name an EmbeddingGemma 2 checkpoint directory, and `--served-model-name` overrides the default model ID `embeddinggemma-2`.  The process refuses to start on any other directory and in a build without the HIP backend.  There is no `--sessions` or `--context` option, because requests share one encoder.  Concurrent requests take turns in arrival order, one device batch of up to 8,192 tokens per turn, so a short request waits for at most one batch of a long one.  Route this process through llama-swap when one public URL should offer embeddings alongside text, speech, or images.
 
 `POST /v1/embeddings` follows the OpenAI request shape:
 
@@ -665,7 +665,7 @@ The response holds one embedding per input in request order:
 - `user` is accepted and ignored when it is a string, and a non-string `user` returns 400 `invalid_parameter_type`.  The server rejects other members with 400 `unsupported_field`.
 - Every vector is mean-pooled and L2-normalized, so the dot product of two vectors is their cosine similarity.
 - Each input may hold at most 8192 tokens, counting the `<bos>` and `<eos>` markers the tokenizer adds.  The server refuses longer inputs instead of truncating them, with 400 `context_length_exceeded`, and the message names the input index.  `usage.prompt_tokens` and `usage.total_tokens` count every token of every input, markers included.
-- Errors use the standard error object.  Other 400 codes are `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`.  A failed encode returns 500 `embedding_failed`.  A service that is not ready returns 503 `embedding_service_unavailable`.  The usual authentication, `--max-request-bytes`, and request logging apply.
+- Errors use the standard error object.  Other 400 codes are `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`.  A failed encode returns 500 `embedding_failed`.  A service that is not ready returns 503 `embedding_service_unavailable`.  A GPU failure that the device probe confirms returns 503 `device_lost` and shuts the server down as described under [Lifecycle and limits](#lifecycle-and-limits).  The usual authentication, `--max-request-bytes`, and request logging apply.
 
 **Task prefixes.** EmbeddingGemma 2 was trained with short task prefixes, and the server does not add them, so clients must.  Queries use `task: search result | query: {text}`, and documents use `title: none | text: {text}`, or `title: {title} | text: {text}` when a title is known.  Omitting the prefixes still works but lowers retrieval quality.  Embed a query and its documents with matching conventions.
 
@@ -1136,6 +1136,9 @@ loss permanent for the process:
   `{"status":"device_lost","error":{...,"code":"device_lost"}}`;
 - every text-backend `POST` route, including unimplemented stubs that would
   otherwise answer 501, returns 503 `device_lost` without reaching the device;
+- `gufo serve embedding` probes the same way after a failed device batch. It
+  logs `event=device_lost` once, and its failing and later `/v1/embeddings`
+  requests return 503 `device_lost`;
 - `gufo serve` logs `event=device_lost_shutdown`, runs the `SIGTERM` shutdown
   and exits with status 75 (`EX_TEMPFAIL`), also when an external `SIGTERM`
   stops it after the loss. Teardown can block on the dead device, so the
