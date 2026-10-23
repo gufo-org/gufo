@@ -42,13 +42,12 @@ On the tested stack, the functional suites pass at context 65536 with
 
 - MTP on: discovery, messages-count-tokens, conversation, tool-native-types,
   long-context.
-- MTP off: discovery, conversation, tool-native-types.
+- MTP off: discovery, conversation, tool-native-types, long-context.
 
-**Known gap.** With MTP off, `long-context` fails its unchanged-retry check. A
-JSON-schema request writes its 7-token assistant opening without logits, so the
-full-prompt checkpoint has a pending token but no logits. The retry then
-restores the checkpoint 7 tokens earlier and prefills those again. The reply is
-unchanged. Qwen3.8 27B passes the same check.
+`long-context` used to fail its unchanged-retry check with MTP off: a small
+MoE prompt chunk on the verification forward copied its logits without
+reporting them, so the full-prompt checkpoint was rejected on the retry. The
+fix is in #299 (`8e509128`), and the check passes on Ornith with it.
 
 ## Kernel checks
 
