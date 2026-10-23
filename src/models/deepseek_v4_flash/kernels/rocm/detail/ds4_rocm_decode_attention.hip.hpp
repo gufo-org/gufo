@@ -70,6 +70,8 @@ __global__ static void attention_noncausal_raw_batch_heads_kernel(
 
   float* oh = heads + ((uint64_t)tok * n_head + h) * head_dim;
   for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+#pragma clang fp reassociate(off)
+    // Preserve the qualified row-by-row FMA order under newer LLVM.
     float acc = 0.0f;
     for (uint32_t r = 0; r < n_raw; r++) {
       const uint32_t row =
@@ -220,6 +222,8 @@ __global__ static void attention_decode_mixed_one_fast_oldhip_kernel(
   const float inv_denom = 1.0f / denom;
 
   for (uint32_t d = tid; d < head_dim; d += blockDim.x) {
+#pragma clang fp reassociate(off)
+    // Preserve the qualified row-by-row FMA order under newer LLVM.
     float acc = 0.0f;
     for (uint32_t r = 0; r < n_raw; r++) {
       const uint32_t row =
@@ -311,6 +315,8 @@ __global__ static void attention_decode_indexed_mixed_one_fast_oldhip_kernel(
   const float inv_denom = 1.0f / denom;
 
   for (uint32_t d = tid; d < head_dim; d += blockDim.x) {
+#pragma clang fp reassociate(off)
+    // Preserve the qualified row-by-row FMA order under newer LLVM.
     float acc = 0.0f;
     for (uint32_t r = 0; r < n_raw; r++) {
       const uint32_t row =

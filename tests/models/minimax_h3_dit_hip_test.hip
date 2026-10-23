@@ -671,15 +671,30 @@ void CheckNativeQkv() {
   };
   bool exact = true;
   for (std::size_t i = 0; i < elements; ++i) {
+    if (exact && (!matches(query[i], expected_q[i], 1.0e-6F, true) ||
+                  !matches(key[i], expected_k[i], 1.0e-6F, true))) {
+      std::cerr << "QKV norm/RoPE index=" << i << " query=" << ToFloat(query[i])
+                << " expected=" << ToFloat(expected_q[i])
+                << " key=" << ToFloat(key[i])
+                << " expected=" << ToFloat(expected_k[i]) << '\n';
+    }
     exact &= matches(query[i], expected_q[i], 1.0e-6F, true);
     exact &= matches(key[i], expected_k[i], 1.0e-6F, true);
   }
   for (std::size_t h = 0; h < heads; ++h)
     for (std::size_t d = 0; d < dim; ++d)
-      for (std::size_t t = 0; t < padded; ++t)
-        exact &= matches(value[(h * dim + d) * padded + t],
-                         t < rows ? expected_v[(h * rows + t) * dim + d] : 0,
-                         t < rows ? 1.0e-7F : 0.0F, false);
+      for (std::size_t t = 0; t < padded; ++t) {
+        const auto got = value[(h * dim + d) * padded + t];
+        const auto expected =
+            t < rows ? expected_v[(h * rows + t) * dim + d] : 0;
+        const bool same =
+            matches(got, expected, t < rows ? 1.0e-7F : 0.0F, false);
+        if (exact && !same)
+          std::cerr << "QKV value head=" << h << " channel=" << d
+                    << " row=" << t << " actual=" << ToFloat(got)
+                    << " expected=" << ToFloat(expected) << '\n';
+        exact &= same;
+      }
   CHECK(exact);
   for (std::size_t i = 0; i < guard; ++i) {
     CHECK(query[elements + i] == 0x7fc1U);
@@ -1303,11 +1318,22 @@ int ProfileBlock(std::size_t rows, bool row_parallel) {
       output.size() * sizeof(output.front()));
   if (const char* output_path = std::getenv("GUFO_H3_DIT_PROFILE_OUTPUT");
       output_path != nullptr && *output_path != '\0') {
-    std::ofstream output_file(output_path, std::ios::binary);
-    output_file.write(
-        reinterpret_cast<const char*>(output.data()),
-        static_cast<std::streamsize>(output.size() * sizeof(output.front())));
-    CHECK(output_file.good());
+    const auto save = [&](const std::string& path, const auto& values) {
+      std::ofstream file(path, std::ios::binary);
+      file.write(
+          reinterpret_cast<const char*>(values.data()),
+          static_cast<std::streamsize>(values.size() * sizeof(values.front())));
+      CHECK(file.good());
+    };
+    save(output_path, output);
+    // An independent block teacher needs the actual input bytes, not a
+    // second implementation of the fixture's sin/cos initialization.
+    const std::string prefix(output_path);
+    save(prefix + ".hidden", hidden);
+    save(prefix + ".modulation", modulation);
+    save(prefix + ".row_map", row_map);
+    save(prefix + ".cos", rope_cos);
+    save(prefix + ".sin", rope_sin);
   }
   std::cout << "H3 DiT production block profile rows=" << rows
             << " gpu_ms=" << telemetry.gpu_ms << " wall_ms=" << wall_ms
@@ -1316,7 +1342,7 @@ int ProfileBlock(std::size_t rows, bool row_parallel) {
             << static_cast<double>(telemetry.activation_bytes) /
                    (1024.0 * 1024.0)
             << " output_sha256=" << h3::Sha256(bytes) << '\n';
-  return 0;
+  return failures == 0 ? 0 : 1;
 }
 
 }  // namespace

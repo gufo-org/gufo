@@ -2,6 +2,7 @@
 
 | Experiment | Decision / evidence |
 | --- | --- |
+| Explicit IQ2 activation and attention/indexer accumulation order | Retained; fixes Clang 24 scalar/batch differences without relaxing numerical gates. Exact 7.2.3 continuation scores and C1/C2 sparse-boundary replay. [Migration checks](ROCM.md). |
 | Exact partial top-k | Retained for wide prefill through 32768 compressed keys; exact ties and bounded fallback. |
 | Indexer query packing and shared scratch | Retained; unchanged F16 bytes, scores and full-logit controls through 64K; no persistent KV precision change. |
 | Batched speculative projections/attention | Retained; private session state and scalar-equivalent replay. |

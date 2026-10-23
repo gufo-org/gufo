@@ -669,7 +669,7 @@ __global__ static void moe_gate_up_mid_expert_tile8_row32_kernel(
                 gate_out[off] = gate[p];
                 up_out[off] = up[p];
             }
-            mid_out[off] = (gate[p] / (1.0f + expf(-gate[p]))) * up[p] * weights[(uint64_t)tok[p] * n_expert + slot[p]];
+            mid_out[off] = dev_iq2_swiglu(gate[p], up[p], weights[(uint64_t)tok[p] * n_expert + slot[p]]);
         }
     }
 }
@@ -777,7 +777,7 @@ __global__ static void moe_gate_up_mid_expert_tile8_row2048_kernel(
                     gate_out[off] = gate[p];
                     up_out[off] = up[p];
                 }
-                mid_out[off] = (gate[p] / (1.0f + expf(-gate[p]))) * up[p] * weights[(uint64_t)tok[p] * n_expert + slot[p]];
+                mid_out[off] = dev_iq2_swiglu(gate[p], up[p], weights[(uint64_t)tok[p] * n_expert + slot[p]]);
             }
         }
     }
@@ -887,7 +887,7 @@ __global__ static void moe_gate_up_mid_expert_tile8_rowspan_kernel(
                     gate_out[off] = gate[p];
                     up_out[off] = up[p];
                 }
-                mid_out[off] = (gate[p] / (1.0f + expf(-gate[p]))) * up[p] * weights[(uint64_t)tok[p] * n_expert + slot[p]];
+                mid_out[off] = dev_iq2_swiglu(gate[p], up[p], weights[(uint64_t)tok[p] * n_expert + slot[p]]);
             }
         }
     }

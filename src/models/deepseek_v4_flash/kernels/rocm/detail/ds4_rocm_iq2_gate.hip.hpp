@@ -2,6 +2,15 @@
 #include "../iq2_tables.hip.hpp"
 #include "ds4_rocm_device.hip.hpp"
 
+__device__ __forceinline__ static float dev_iq2_swiglu(
+    float gate, float up, float weight) {
+#pragma clang fp reassociate(off) contract(off)
+  // Keep the established scalar product order when newer LLVM reassociates
+  // an unrolled expert tile differently from a single-row launch.
+  const float numerator = (gate * up) * weight;
+  return numerator * __builtin_amdgcn_rcpf(1.0f + expf(-gate));
+}
+
 __device__ static float dev_f16_to_f32(uint16_t v) {
   return __half2float(*reinterpret_cast<const __half*>(&v));
 }
@@ -288,8 +297,8 @@ __global__ static void moe_gate_up_mid_decode_lut_qwarp32_kernel(
         gate_out[off] = gate;
         up_out[off] = up;
       }
-      mid_out[off] = (gate / (1.0f + expf(-gate))) * up *
-                     weights[(uint64_t)tok * n_expert + slot];
+      mid_out[off] =
+          dev_iq2_swiglu(gate, up, weights[(uint64_t)tok * n_expert + slot]);
     }
   }
 }
@@ -374,8 +383,8 @@ __global__ static void moe_gate_up_mid_expert_tile4_row32_kernel(
         gate_out[off] = gate[p];
         up_out[off] = up[p];
       }
-      mid_out[off] = (gate[p] / (1.0f + expf(-gate[p]))) * up[p] *
-                     weights[(uint64_t)tok[p] * n_expert + slot[p]];
+      mid_out[off] = dev_iq2_swiglu(
+          gate[p], up[p], weights[(uint64_t)tok[p] * n_expert + slot[p]]);
     }
   }
 }

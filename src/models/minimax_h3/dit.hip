@@ -33,8 +33,8 @@ constexpr std::size_t kWeightStagingBytes = 16ULL << 20U;
 constexpr std::size_t kMaximumAttentionRows = 131'072;
 constexpr std::size_t kMaximumScalarAttentionRows = 16'384;
 constexpr std::size_t kShortAttentionRows = 4'096;
-// Pinned by byte-repeat validation on gfx1151 with the repository's ROCm
-// 7.2.3 toolchain. A changed rocBLAS database fails session construction.
+// Pinned by byte-repeat validation on gfx1151 with ROCm 7.2.3. If a newer
+// rocBLAS database removes an index, validate its default before using it.
 constexpr rocblas_int kGfx1151RocblasBf16Solution = -1162085109;
 
 rocblas_int PinnedBf16Solution(std::size_t batch, std::size_t rows,
@@ -412,11 +412,20 @@ public:
       return false;
     }
     const std::size_t output_elements = batch * rows;
-    if (Execute(weight, input, output, batch, rows, columns,
-                plan->solution_index) != rocblas_status_success) {
-      SetError(error,
-               "pinned gfx1151 rocBLAS BF16 DiT solution is unavailable");
-      return false;
+    auto status = Execute(weight, input, output, batch, rows, columns,
+                          plan->solution_index);
+    if (status != rocblas_status_success) {
+      // Solution indices belong to a rocBLAS database, not to a matrix
+      // shape. Validate the current library's default when that database
+      // no longer contains the previously qualified index.
+      plan->solution_index = 0;
+      status = Execute(weight, input, output, batch, rows, columns,
+                       plan->solution_index);
+      if (status != rocblas_status_success) {
+        SetError(error, "rocBLAS BF16 DiT solution is unavailable: " +
+                            std::to_string(static_cast<int>(status)));
+        return false;
+      }
     }
     hipError_t hip_status = hipMemcpyAsync(
         reference, output, output_elements * sizeof(std::uint16_t),

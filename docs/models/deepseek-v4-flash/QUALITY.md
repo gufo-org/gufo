@@ -47,3 +47,9 @@ C1/DSpark/capacity 262144; memory uses C1/AR peak global HIP allocation.
 Performance baselines and unavailable comparisons are described in
 [benchmarks](BENCHMARKS.md). Commands/counts remain in [artifacts](artifacts/bench.json) and the
 [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
+
+## ROCm 10.1 migration
+
+Focused cross-compiler checks, matched controls and remaining limits are in
+[ROCM.md](ROCM.md). The original reference fixtures and tolerances above are
+unchanged; migration measurements use separately recorded controls.
