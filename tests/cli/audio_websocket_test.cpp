@@ -6,6 +6,8 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -298,4 +300,33 @@ int main() {
   }
   server.stop();
   worker.join();
+
+  // A key limited to the ASR model cannot open a TTS stream, whatever model
+  // the upgrade names: the route's service decides.
+  assert(tts->model_id() != asr->model_id());
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("gufo-ws-keys-" + std::to_string(::getpid()));
+  std::filesystem::create_directories(directory);
+  const auto keys = directory / "keys";
+  std::ofstream(keys) << "listener sha256:" << ApiKeyDigest("listener")
+                      << " models=" << asr->model_id() << '\n';
+  HttpServer keyed("127.0.0.1", 0, nullptr, nullptr, tts, asr,
+                   {.api_key_file = keys});
+  assert(keyed.start(&error));
+  std::jthread keyed_worker([&] { keyed.run(); });
+  for (const std::string path :
+       {std::string("/v1/audio/speech/stream"),
+        "/v1/audio/speech/stream?model=" + asr->model_id()}) {
+    Client refused(keyed.port(), path, {},
+                   "dGhlIHNhbXBsZSBub25jZQ==", "Bearer listener");
+    assert(refused.headers.starts_with("HTTP/1.1 403"));
+  }
+  {
+    Client allowed(keyed.port(), "/v1/realtime?intent=transcription", {},
+                   "dGhlIHNhbXBsZSBub25jZQ==", "Bearer listener");
+    assert(allowed.headers.starts_with("HTTP/1.1 101"));
+  }
+  keyed.stop();
+  keyed_worker.join();
+  std::filesystem::remove_all(directory);
 }

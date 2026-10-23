@@ -116,6 +116,22 @@ def main():
     keyed = run(load + ["-v", "--api-key", "super-secret-value"])
     assert "api_key=set" in keyed.stderr
     assert "super-secret-value" not in keyed.stderr
+    # A key file is validated before the model loads, and cannot combine with
+    # --api-key.
+    with tempfile.TemporaryDirectory() as directory:
+        keys = os.path.join(directory, "keys")
+        with open(keys, "w") as handle:
+            handle.write("alice sha256:" + "ab" * 32 + " access=admin\n")
+        check(load + ["--api-key-file", keys], 2,
+              "--api-key-file " + keys + ": line 1: access must be")
+        check(load + ["--api-key-file", os.path.join(directory, "missing")], 2,
+              "cannot open")
+        with open(keys, "w") as handle:
+            handle.write("alice sha256:" + "ab" * 32 + "\n")
+        check(load + ["--api-key-file", keys, "--api-key", "k"], 2,
+              "--api-key and --api-key-file are mutually exclusive")
+        check(load + ["--api-key-file", keys], 1,
+              "Error loading model 'missing.gguf'")
     # Structured output is prepared automatically, without a separate option.
     assert "--prepare-structured-output" not in help_text
     check(["serve", "llm", "--model", "missing.gguf",

@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -430,6 +431,187 @@ void TestAuthorization() {
                             std::to_string(body.size()) + "\r\n\r\n" + body),
                200);
   assert(secured.backend->calls == 1);
+}
+
+void TestApiKeyFileParsing() {
+  using gufo::server::ApiKeyAccess;
+  using gufo::server::ApiKeyDigest;
+  using gufo::server::ApiKeyTable;
+  const std::string alice = ApiKeyDigest("alice-secret");
+  std::string upper_bob = ApiKeyDigest("bob-secret");
+  for (char& c : upper_bob)
+    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  std::string error;
+  const auto table = ApiKeyTable::Parse(
+      "# name credential options\n\n  alice sha256:" + alice +
+          " models=fn,fn-sub\r\nbob\tsha256:" + upper_bob + "\nwatch sha256:" +
+          ApiKeyDigest("watch-secret") + " access=monitor\n",
+      &error);
+  assert(table.has_value());
+  assert(table->size() == 3);
+  const auto* key = table->match("alice-secret");
+  assert(key != nullptr && key->name == "alice");
+  assert(key->access == ApiKeyAccess::kInference);
+  assert(key->allows_model("fn-sub") && !key->allows_model("other"));
+  // Uppercase hex matches, and a key without models allows every model.
+  key = table->match("bob-secret");
+  assert(key != nullptr && key->allows_model("anything"));
+  assert(table->match("watch-secret")->access == ApiKeyAccess::kMonitor);
+  assert(table->match("alice-secret ") == nullptr);
+  assert(table->match("") == nullptr);
+
+  const std::string good = " sha256:" + alice;
+  for (const auto& [text, message] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"", "no keys"},
+           {"# only a comment\n", "no keys"},
+           {"alice", "line 1: expected"},
+           {"al ice" + good, "line 1: credential"},
+           {"al/ice" + good, "line 1: key name"},
+           {"alice sha256:abc", "line 1: credential"},
+           {"alice plain-secret", "line 1: credential"},
+           {"alice" + good + " access=admin", "line 1: access"},
+           {"alice" + good + " colour=red", "line 1: unknown or repeated"},
+           {"alice" + good + " models=a models=b",
+            "line 1: unknown or repeated"},
+           {"alice" + good + " models=a,,b", "line 1: models"},
+           {"alice" + good + " models=", "line 1: models"},
+           {"alice" + good + " models=a,", "line 1: models"},
+           {"alice" + good + " access=monitor models=a", "line 1: a monitor"},
+           {"alice" + good + "\nalice sha256:" + ApiKeyDigest("x"),
+            "line 2: duplicate key name"},
+           {"alice" + good + "\nbob" + good, "line 2: credential of 'bob'"},
+       }) {
+    error.clear();
+    assert(!ApiKeyTable::Parse(text, &error).has_value());
+    if (!error.starts_with(message)) {
+      std::cerr << text << " -> " << error << '\n';
+      std::abort();
+    }
+  }
+}
+
+void TestApiKeyFile() {
+  using gufo::server::ApiKeyDigest;
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("gufo-keys-" + std::to_string(::getpid()));
+  std::filesystem::create_directories(directory);
+  const auto path = directory / "keys";
+  const auto write = [&](const std::string& text) {
+    // Replace atomically, as an editor or admin tool would.
+    const auto temporary = directory / "keys.tmp";
+    std::ofstream(temporary) << text;
+    std::filesystem::rename(temporary, path);
+  };
+  write("alice sha256:" + ApiKeyDigest("alice-secret") + " models=test\n" +
+        "bob sha256:" + ApiKeyDigest("bob-secret") + " models=other\n" +
+        "watch sha256:" + ApiKeyDigest("watch-secret") + " access=monitor\n");
+
+  bool rejected = false;
+  try {
+    HttpServer both("127.0.0.1", 0, nullptr, nullptr, nullptr, nullptr,
+                    {.api_key = "x", .api_key_file = path});
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  const LogLevel previous = Logger::Level();
+  Logger::SetLevel(LogLevel::kInfo);
+  std::ostringstream logs;
+  auto* previous_sink = std::clog.rdbuf(logs.rdbuf());
+  {
+    RunningServer server({.api_key_file = path});
+    const auto send = [&](const std::string& key, const std::string& method,
+                          const std::string& target,
+                          const std::string& body = "") {
+      return server.Send(method + " " + target +
+                         " HTTP/1.1\r\nAuthorization: Bearer " + key +
+                         "\r\nContent-Length: " + std::to_string(body.size()) +
+                         "\r\n\r\n" + body);
+    };
+    const std::string completion = R"({"prompt":"hi","max_tokens":1})";
+    ExpectStatus(server.Post("/v1/completions", completion), 401);
+    ExpectStatus(send("nobody", "GET", "/health"), 401);
+    assert(server.backend->calls == 0);
+
+    // The key's name is its client identity for scheduling and logs.
+    const auto peer = send("alice-secret", "GET", "/peer");
+    ExpectStatus(peer, 200);
+    assert(peer.ends_with("\r\n\r\nalice"));
+    // The text service's model is `test`, which alice may use.
+    ExpectStatus(send("alice-secret", "POST", "/v1/completions", completion),
+                 200);
+    assert(server.backend->calls == 1);
+
+    // bob may only use `other`. Naming `other` in the body or the query does
+    // not change which model the route reaches, so every text route refuses.
+    for (
+        const auto& [target, body] :
+        std::vector<std::pair<std::string, std::string>>{
+            {"/v1/completions", completion},
+            {"/v1/completions",
+             R"({"model":"other","prompt":"hi","max_tokens":1})"},
+            {"/v1/completions?model=other", completion},
+            {"/completion", R"({"model":"other","prompt":"hi"})"},
+            {"/v1/chat/completions",
+             R"({"model":"other","messages":[{"role":"user","content":"hi"}]})"},
+            {"/peer", ""}}) {
+      const auto response =
+          send("bob-secret", body.empty() ? "GET" : "POST", target, body);
+      ExpectStatus(response, 403);
+      assert(response.find("model_not_allowed") != std::string::npos);
+    }
+    assert(server.backend->calls == 1);
+    // A monitoring key reads status routes and nothing else.
+    for (const std::string target :
+         {"/health", "/ready", "/v1/models", "/props", "/slots", "/metrics"}) {
+      ExpectStatus(send("watch-secret", "GET", target), 200);
+    }
+    for (const auto& [method, target] :
+         std::vector<std::pair<std::string, std::string>>{
+             {"POST", "/v1/completions"},
+             {"POST", "/v1/chat/completions"},
+             {"GET", "/peer"},
+             {"POST", "/metrics"}}) {
+      const auto response = send("watch-secret", method, target, completion);
+      ExpectStatus(response, 403);
+      assert(response.find("permission_denied") != std::string::npos);
+    }
+    assert(server.backend->calls == 1);
+
+    // Edits apply without a restart: alice is revoked, carol added.
+    write("carol sha256:" + ApiKeyDigest("carol-secret") + "\n");
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (send("carol-secret", "GET", "/health").starts_with("HTTP/1.1 401")) {
+      assert(std::chrono::steady_clock::now() < deadline);
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ExpectStatus(send("alice-secret", "GET", "/health"), 401);
+
+    // A broken file keeps the previous keys rather than locking everyone out
+    // or opening the server.
+    write("carol not-a-digest\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(2'500));
+    ExpectStatus(send("carol-secret", "GET", "/health"), 200);
+    ExpectStatus(server.Send("GET /health HTTP/1.1\r\n\r\n"), 401);
+  }
+  std::clog.rdbuf(previous_sink);
+  Logger::SetLevel(previous);
+  const std::string log = logs.str();
+  assert(log.find("auth=key_file keys=3") != std::string::npos);
+  assert(log.find("event=received method=POST path=/v1/completions "
+                  "body_bytes=30 key=alice") != std::string::npos);
+  // The completion line names the key just before the memory fields.
+  assert(log.find("key=alice rss_mib=") != std::string::npos);
+  assert(log.find("error_code=model_not_allowed key=bob") != std::string::npos);
+  assert(log.find("event=api_keys_reloaded keys=1") != std::string::npos);
+  assert(log.find("event=api_keys_reload_failed") != std::string::npos);
+  for (const std::string secret :
+       {"alice-secret", "bob-secret", "watch-secret", "carol-secret"})
+    assert(log.find(secret) == std::string::npos);
+  std::filesystem::remove_all(directory);
 }
 
 struct CapturedLogs {
@@ -3274,6 +3456,8 @@ int main() {
   TestLoadingResponder();
   TestQueryParameters();
   TestAuthorization();
+  TestApiKeyFileParsing();
+  TestApiKeyFile();
   TestFramingAndMetrics();
   TestExpectContinue();
   TestFallbackBackendMetrics();

@@ -28,6 +28,7 @@
 
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/sampling_options.hpp"
+#include "src/cli/serve/api_keys.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/http_server.hpp"
@@ -246,7 +247,7 @@ void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                       int* port, std::size_t* session_count,
                       std::size_t* max_connections,
                       std::size_t* max_request_body_bytes, std::string* api_key,
-                      ServerLogOptions* log) {
+                      std::string* api_key_file, ServerLogOptions* log) {
   parser.AddOption("-i", "--host", "IP", "Bind address", "Server", host);
   parser.AddOption("-p", "--port", "N", "Port to listen on", "Server", port);
   if (session_count != nullptr)
@@ -260,6 +261,10 @@ void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                    "Maximum HTTP request body bytes", "Server",
                    max_request_body_bytes);
   parser.AddOption("", "--api-key", "KEY", "API key", "Server", api_key);
+  parser.AddOption("", "--api-key-file", "FILE",
+                   "Named API keys with per-key access and models; re-read "
+                   "when the file changes",
+                   "Server", api_key_file);
   parser.AddCustomOption(
       "", "--log-level", "LEVEL", kLogLevelHelp, "Logging",
       [log](std::string_view flag, std::string_view value, std::string* error) {
@@ -284,6 +289,7 @@ struct ServerOptionHelpTargets {
   std::size_t max_request_body_bytes =
       static_cast<std::size_t>(8) * 1024 * 1024;
   std::string api_key;
+  std::string api_key_file;
   ServerLogOptions log;
 };
 
@@ -293,7 +299,7 @@ void AddServerOptionsForHelp(gufo::cli::ArgParser& parser,
   AddServerOptions(parser, &targets->host, &targets->port,
                    include_sessions ? &targets->session_count : nullptr,
                    &targets->max_connections, &targets->max_request_body_bytes,
-                   &targets->api_key, &targets->log);
+                   &targets->api_key, &targets->api_key_file, &targets->log);
 }
 
 // Split a `NAME=VALUE` CLI spec. Returns false when either side is empty.
@@ -857,6 +863,7 @@ int RunServe(std::span<const char* const> args) {
   std::size_t max_request_body_bytes =
       static_cast<std::size_t>(8) * 1024 * 1024;
   std::string api_key;
+  std::string api_key_file;
   ServerLogOptions log_options;
 
   // Identify the modality only after leading server options. The selected
@@ -865,9 +872,10 @@ int RunServe(std::span<const char* const> args) {
   ArgParser server_parser("gufo serve");
   const auto add_server_options = [&](ArgParser& parser,
                                       bool include_sessions = true) {
-    AddServerOptions(
-        parser, &host, &port, include_sessions ? &session_count : nullptr,
-        &max_connections, &max_request_body_bytes, &api_key, &log_options);
+    AddServerOptions(parser, &host, &port,
+                     include_sessions ? &session_count : nullptr,
+                     &max_connections, &max_request_body_bytes, &api_key,
+                     &api_key_file, &log_options);
   };
   add_server_options(server_parser);
   std::string subcommand = "llm";
@@ -921,6 +929,19 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: server limits must be positive\n";
       return false;
     }
+    if (!api_key.empty() && !api_key_file.empty()) {
+      std::cerr << "Error: --api-key and --api-key-file are mutually "
+                   "exclusive\n";
+      return false;
+    }
+    // Checked before any model loads; the server reads the file again.
+    if (!api_key_file.empty()) {
+      std::string key_error;
+      if (!server::ApiKeyTable::Load(api_key_file, &key_error)) {
+        std::cerr << "Error: --api-key-file " << key_error << '\n';
+        return false;
+      }
+    }
     // Arm verbosity here: this runs after every server option is parsed and
     // before the first loader, cache or HTTP line is written, so one call sets
     // the level for all modalities. `-v/--verbose` is shorthand for
@@ -964,6 +985,7 @@ int RunServe(std::span<const char* const> args) {
         " max_connections=" + std::to_string(max_connections) +
         " max_request_bytes=" + std::to_string(max_request_body_bytes) +
         " api_key=" + (api_key.empty() ? "unset" : "set") +
+        " api_key_file=" + (api_key_file.empty() ? "unset" : api_key_file) +
         " log_level=" + std::string(server::LogLevelName(resolved));
     server::Logger::Debug("server", options_line);
     return true;
@@ -1593,6 +1615,7 @@ int RunServe(std::span<const char* const> args) {
           .max_request_body_bytes = max_request_body_bytes,
           .max_connections = max_connections,
           .api_key = std::move(api_key),
+          .api_key_file = api_key_file,
           .on_device_lost =
               [&device_lost] {
                 device_lost.store(true);

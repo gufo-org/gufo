@@ -6,10 +6,12 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <charconv>
@@ -34,6 +36,7 @@
 #include <thread>
 #include <utility>
 
+#include "src/cli/serve/api_keys.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
@@ -50,7 +53,6 @@
 #include "src/cli/serve/video_api.hpp"
 #include "src/cli/serve/video_jobs.hpp"
 #include "src/cli/serve/websocket.hpp"
-#include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
 #include "src/core/platform/net.hpp"
 #include "src/core/platform/shutdown_signal.hpp"
@@ -252,21 +254,15 @@ bool ExpectsContinue(const HttpRequest& request) {
   });
 }
 
-std::string CredentialHash(std::string_view value) {
-  return crypto::Sha256Hex(std::span(
-      reinterpret_cast<const std::uint8_t*>(value.data()), value.size()));
-}
-
-bool IsAuthorized(const HttpRequest& request, const std::string& key_hash) {
-  if (key_hash.empty()) {
-    return true;
-  }
+/// The credential of a single `Authorization: Bearer` header, or nullopt for
+/// none, several, or another scheme.
+std::optional<std::string_view> BearerCredential(const HttpRequest& request) {
   std::string_view credential;
   bool found = false;
   for (const auto& [name, value] : request.headers) {
     if (ToLower(name) == "authorization") {
       if (found) {
-        return false;
+        return std::nullopt;
       }
       found = true;
       credential = value;
@@ -275,14 +271,46 @@ bool IsAuthorized(const HttpRequest& request, const std::string& key_hash) {
   const auto space = credential.find(' ');
   if (space == std::string_view::npos ||
       ToLower(credential.substr(0, space)) != "bearer") {
-    return false;
+    return std::nullopt;
   }
   credential.remove_prefix(space + 1);
   while (credential.starts_with(' ')) {
     credential.remove_prefix(1);
   }
-  // Comparing digests does not disclose matching prefixes of the API key.
-  return CredentialHash(credential) == key_hash;
+  return credential;
+}
+
+/// Routes a monitoring key may read: health, readiness, models, props, slots
+/// and metrics. None of them submits work or returns generated content.
+bool IsMonitoringRoute(const HttpRequest& request) {
+  if (request.method != "GET")
+    return false;
+  static constexpr std::array<std::string_view, 13> kPaths = {
+      "/health",   "/v1/health", "/healthz",   "/ready", "/v1/ready",
+      "/readyz",   "/models",    "/v1/models", "/props", "/slots",
+      "/v1/slots", "/metrics",   "/v1/metrics"};
+  return std::ranges::find(kPaths, request.path) != kPaths.end();
+}
+
+/// Device, inode, size and modification time of `path`; zeros when missing.
+std::array<std::int64_t, 4> FileStamp(const std::filesystem::path& path) {
+  struct stat status{};
+  if (::stat(path.c_str(), &status) != 0)
+    return {};
+  return {static_cast<std::int64_t>(status.st_dev),
+          static_cast<std::int64_t>(status.st_ino),
+          static_cast<std::int64_t>(status.st_size),
+          static_cast<std::int64_t>(status.st_mtim.tv_sec) * 1'000'000'000 +
+              status.st_mtim.tv_nsec};
+}
+
+/// Appends `key=NAME` to request log details when a named key authorized it.
+std::string WithKeyField(std::string details, const HttpRequest& request) {
+  if (request.api_key == nullptr || request.api_key->name.empty())
+    return details;
+  if (!details.empty())
+    details += ' ';
+  return details + "key=" + request.api_key->name;
 }
 
 bool HasHeader(const HttpResponse& response, std::string_view name) {
@@ -1797,8 +1825,22 @@ HttpServer::HttpServer(std::string host, int port,
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
   }
+  if (!options_.api_key.empty() && !options_.api_key_file.empty()) {
+    throw std::invalid_argument(
+        "--api-key and --api-key-file are mutually exclusive");
+  }
   if (!options_.api_key.empty()) {
-    api_key_hash_ = CredentialHash(options_.api_key);
+    api_keys_ = std::make_shared<const ApiKeyTable>(
+        ApiKeyTable::FromKey(options_.api_key));
+  } else if (!options_.api_key_file.empty()) {
+    // Stamp first: a write racing this load changes the stamp, so the accept
+    // loop reads the file again.
+    api_key_file_stamp_ = FileStamp(options_.api_key_file);
+    std::string error;
+    auto table = ApiKeyTable::Load(options_.api_key_file, &error);
+    if (!table)
+      throw std::invalid_argument("--api-key-file " + error);
+    api_keys_ = std::make_shared<const ApiKeyTable>(std::move(*table));
   }
   register_routes();
 }
@@ -1937,12 +1979,16 @@ void HttpServer::run(bool handle_signals) {
       "server",
       "event=listening address=http://" +
           (host_.find(':') == std::string::npos ? host_ : "[" + host_ + "]") +
-          ":" + std::to_string(port_) +
-          " auth=" + (options_.api_key.empty() ? "off" : "bearer") +
+          ":" + std::to_string(port_) + " auth=" +
+          (!options_.api_key_file.empty()
+               ? "key_file keys=" + std::to_string(api_keys()->size())
+           : options_.api_key.empty() ? std::string("off")
+                                      : std::string("bearer")) +
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
   while (!stopped_.load(std::memory_order_acquire)) {
     (void)device_lost();
+    reload_api_key_file();
     if (handle_signals) {
       const int signal = shutdown_signal.load(std::memory_order_relaxed);
       if (signal != 0) {
@@ -2043,12 +2089,7 @@ void HttpServer::reap_workers() {
 }
 
 HttpResponse HttpServer::handle_request(const HttpRequest& req) {
-  if (!IsAuthorized(req, api_key_hash_)) {
-    auto response = Err(401, "Unauthorized", "missing or invalid API key",
-                        "authentication_error", "invalid_api_key");
-    response.headers.emplace_back("WWW-Authenticate", "Bearer");
-    return response;
-  }
+  // Authentication and key limits ran in authorize() before this point.
   // `/health` and `/ready` are the native spelling and match llama-server's
   // `/health`. `/healthz` and `/readyz` are aliases so Kubernetes-style probe
   // configuration works unmodified.
@@ -2077,19 +2118,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     }
     json::Value body = json::Value::object();
     body["status"] = "ready";
-    if (backend_ != nullptr && backend_->ready()) {
-      body["model"] = backend_->model_id();
-    } else if (asr_ != nullptr && asr_->ready()) {
-      body["model"] = asr_->model_id();
-    } else if (tts_ != nullptr && tts_->ready()) {
-      body["model"] = tts_->model_id();
-    } else if (embeddings_ != nullptr && embeddings_->ready()) {
-      body["model"] = embeddings_->model_id();
-    } else if (images_ != nullptr) {
-      body["model"] = images_->model_id();
-    } else {
-      body["model"] = "minimax-h3";
-    }
+    body["model"] = default_model_id();
     return Ok(body);
   }
   if (req.method == "GET" &&
@@ -2182,6 +2211,108 @@ bool HttpServer::device_lost() {
     }
   }
   return true;
+}
+
+std::shared_ptr<const ApiKeyTable> HttpServer::api_keys() const {
+  const std::lock_guard lock(api_keys_mutex_);
+  return api_keys_;
+}
+
+void HttpServer::reload_api_key_file() {
+  if (options_.api_key_file.empty())
+    return;
+  // The accept loop polls every 100 ms; a key change may take a second.
+  const auto now = std::chrono::steady_clock::now();
+  if (now - api_key_file_checked_ < std::chrono::seconds(1))
+    return;
+  api_key_file_checked_ = now;
+  const auto stamp = FileStamp(options_.api_key_file);
+  if (stamp == api_key_file_stamp_)
+    return;
+  api_key_file_stamp_ = stamp;
+  std::string error;
+  auto table = ApiKeyTable::Load(options_.api_key_file, &error);
+  if (!table) {
+    // Keep serving with the previous keys; a half-written or broken file must
+    // neither lock everyone out nor open the server.
+    Logger::Error("server", "event=api_keys_reload_failed reason=" + error);
+    return;
+  }
+  const std::size_t count = table->size();
+  {
+    const std::lock_guard lock(api_keys_mutex_);
+    api_keys_ = std::make_shared<const ApiKeyTable>(std::move(*table));
+  }
+  Logger::Info("server",
+               "event=api_keys_reloaded keys=" + std::to_string(count));
+}
+
+std::string HttpServer::default_model_id() const {
+  if (backend_ != nullptr && backend_->ready())
+    return backend_->model_id();
+  if (asr_ != nullptr && asr_->ready())
+    return asr_->model_id();
+  if (tts_ != nullptr && tts_->ready())
+    return tts_->model_id();
+  if (embeddings_ != nullptr && embeddings_->ready())
+    return embeddings_->model_id();
+  if (images_ != nullptr)
+    return images_->model_id();
+  return "minimax-h3";
+}
+
+std::optional<HttpResponse> HttpServer::authorize(HttpRequest& req) const {
+  auto table = api_keys();
+  if (table == nullptr)
+    return std::nullopt;
+  const auto credential = BearerCredential(req);
+  const ApiKey* key = credential ? table->match(*credential) : nullptr;
+  if (key == nullptr) {
+    auto response = Err(401, "Unauthorized", "missing or invalid API key",
+                        "authentication_error", "invalid_api_key");
+    response.headers.emplace_back("WWW-Authenticate", "Bearer");
+    return response;
+  }
+  // The request keeps the table alive while it holds the key.
+  req.api_key = std::shared_ptr<const ApiKey>(std::move(table), key);
+  if (!key->name.empty())
+    req.client_id = key->name;
+  if (key->access == ApiKeyAccess::kMonitor && !IsMonitoringRoute(req)) {
+    return Err(403, "Forbidden",
+               "this API key may only read health, models, props, slots and "
+               "metrics",
+               "permission_error", "permission_denied");
+  }
+  if (!key->models.empty() && !IsMonitoringRoute(req)) {
+    // Every other route reaches a model, WebSocket upgrades included. Each
+    // service serves one model, so check the model of the service the route
+    // dispatches to; a model a client names in its body or query cannot
+    // steer this check.
+    const std::string model = route_model_id(req);
+    if (!model.empty() && !key->allows_model(model)) {
+      const std::string message =
+          "this API key may not use model '" + model + "'";
+      return Err(403, "Forbidden", message.c_str(), "permission_error",
+                 "model_not_allowed");
+    }
+  }
+  return std::nullopt;
+}
+
+std::string HttpServer::route_model_id(const HttpRequest& req) const {
+  // Mirrors handle_request's dispatch. An unconfigured service yields "": its
+  // route answers 503 without reaching any model.
+  if (req.path == "/v1/images/generations" || req.path == "/v1/images/edits")
+    return images_ != nullptr ? images_->model_id() : "";
+  if (req.path == "/v1/audio/speech/stream" || IsAudioTtsApiPath(req.path))
+    return tts_ != nullptr ? tts_->model_id() : "";
+  if (req.path == "/v1/realtime" || IsAudioAsrApiPath(req.path))
+    return asr_ != nullptr ? asr_->model_id() : "";
+  if (IsVideoApiPath(req.path))
+    return video_jobs_ != nullptr ? "minimax-h3" : "";
+  if (embeddings_ != nullptr && IsEmbeddingsApiPath(req.path))
+    return embeddings_->model_id();
+  return backend_ != nullptr ? backend_->model_id() : "";
 }
 
 void HttpServer::handle_connection(int client_fd) {
@@ -2337,11 +2468,17 @@ void HttpServer::handle_connection(int client_fd) {
     // The tier check subsumes the method test: receipt lines are kInfo for
     // the methods above and kDebug otherwise, so a quiet tier that discards
     // the line also skips the concatenation that would build it.
+    // Authorize before the receipt line so it names the key.
+    std::optional<HttpResponse> refused;
+    if (ok && !payload_too_large && req.method != "OPTIONS")
+      refused = authorize(req);
     if (ok && Logger::Enabled(request_level)) {
-      Logger::Log(request_level, "http",
-                  "request=" + req.request_id + " event=received method=" +
-                      req.method + " path=" + req.path +
-                      " body_bytes=" + std::to_string(req.body.size()));
+      Logger::Log(
+          request_level, "http",
+          WithKeyField("request=" + req.request_id + " event=received method=" +
+                           req.method + " path=" + req.path +
+                           " body_bytes=" + std::to_string(req.body.size()),
+                       req));
     }
 
     HttpResponse resp;
@@ -2353,10 +2490,11 @@ void HttpServer::handle_connection(int client_fd) {
                  "invalid_request_error", "bad_request");
     } else if (req.method == "OPTIONS") {
       resp = {.status = 204, .reason = "No Content"};
+    } else if (refused) {
+      resp = std::move(*refused);
     } else {
-      // A client without the API key cannot write into the trace.
-      traced = Trace::Enabled() && IsTracedRoute(req) &&
-               IsAuthorized(req, api_key_hash_);
+      // Only an authorized request writes into the trace.
+      traced = Trace::Enabled() && IsTracedRoute(req);
       if (traced) {
         TraceRequest(req);
       }
@@ -2470,8 +2608,8 @@ void HttpServer::handle_connection(int client_fd) {
     }
     if (Logger::Enabled(request_level) || resp.status >= 400 || !connected) {
       Logger::LogRequest(req.request_id, req.method, req.path, resp.status,
-                         elapsed_ms(), resp.log_details, outcome,
-                         request_level);
+                         elapsed_ms(), WithKeyField(resp.log_details, req),
+                         outcome, request_level);
     }
     if (traced) {
       const bool stream = static_cast<bool>(resp.streaming_body);
@@ -2494,11 +2632,11 @@ void HttpServer::handle_connection(int client_fd) {
     if (exception.retryable()) {
       resp.headers.emplace_back("Retry-After", "1");
     }
-    Logger::LogRequest(req.request_id, req.method, req.path,
-                       response_started ? response_status : resp.status,
-                       duration_ms,
-                       std::string("error_code=") + exception.stable_code(),
-                       response_started ? "stream_error" : "failed");
+    Logger::LogRequest(
+        req.request_id, req.method, req.path,
+        response_started ? response_status : resp.status, duration_ms,
+        WithKeyField(std::string("error_code=") + exception.stable_code(), req),
+        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
@@ -2515,7 +2653,8 @@ void HttpServer::handle_connection(int client_fd) {
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,
-                       duration_ms, "error_code=server_exception",
+                       duration_ms,
+                       WithKeyField("error_code=server_exception", req),
                        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)
@@ -2530,7 +2669,8 @@ void HttpServer::handle_connection(int client_fd) {
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,
-                       duration_ms, "error_code=server_exception",
+                       duration_ms,
+                       WithKeyField("error_code=server_exception", req),
                        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)

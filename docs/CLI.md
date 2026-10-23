@@ -216,6 +216,9 @@ These apply to every modality, before or after the subcommand:
   32 MiB).
 - `apiKey` — if set, requests require `Authorization: Bearer <key>`, including
   health checks. Browser CORS preflight (`OPTIONS`) remains unauthenticated.
+- `apiKeyFile` — named keys instead of one `apiKey`, each optionally limited to
+  monitoring routes or to listed models. The server applies edits to the file
+  without a restart. Format and rules: [Named API keys](SERVER.md#named-api-keys).
 - `logLevel` (`--log-level <error|warn|info|debug>`, default `info`) — how much
   the server logs. In practice: `debug` is the level that explains a stalled
   client, because it also shows health polls, admission refusals with the limit

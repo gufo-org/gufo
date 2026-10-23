@@ -2,18 +2,23 @@
 #define GUFO_SERVER_HTTP_SERVER_HPP_
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/api_keys.hpp"
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 
@@ -34,8 +39,12 @@ struct HttpRequest {
   std::vector<std::pair<std::string, std::string>> headers;
   TextGenerationBackend::CancellationCheck is_cancelled;
   std::string request_id{};
-  /// Transport-derived peer address, never read from client headers.
+  /// Transport-derived peer address, never read from client headers; the
+  /// matched `--api-key-file` entry's name replaces it, so scheduling limits
+  /// and logs count each named key as one client.
   std::string client_id{"anonymous"};
+  /// The key that authorized this request; null when authentication is off.
+  std::shared_ptr<const ApiKey> api_key{};
 
   /// URL-decoded value of a query param, or "" if absent.
   std::string query_param(const std::string& key) const;
@@ -94,6 +103,9 @@ struct HttpServerOptions {
   std::size_t max_request_body_bytes{static_cast<std::size_t>(8) * 1024 * 1024};
   std::size_t max_connections{16};
   std::string api_key;
+  /// Named keys with per-key access and model limits; exclusive with
+  /// `api_key`. Re-read when the file changes.
+  std::filesystem::path api_key_file;
   std::chrono::milliseconds sse_heartbeat_interval{std::chrono::seconds(15)};
   /// Called once, on the listener or a request thread, when the text backend or
   /// the embedding service reports a lost device. Health, readiness and
@@ -141,6 +153,15 @@ private:
   struct ConnectionWorker;
 
   HttpResponse handle_request(const HttpRequest& req);
+  /// Authenticates `req` and applies its key's access and model limits,
+  /// recording the key on the request. Returns the refusal, if any.
+  std::optional<HttpResponse> authorize(HttpRequest& req) const;
+  [[nodiscard]] std::shared_ptr<const ApiKeyTable> api_keys() const;
+  void reload_api_key_file();
+  [[nodiscard]] std::string default_model_id() const;
+  /// The served model of the service `req`'s route dispatches to, or "" when
+  /// that service is not configured.
+  [[nodiscard]] std::string route_model_id(const HttpRequest& req) const;
   bool device_lost();
   void handle_connection(int client_fd);
   void reap_workers();
@@ -155,7 +176,12 @@ private:
   std::shared_ptr<ImageService> images_;
   std::shared_ptr<EmbeddingService> embeddings_;
   HttpServerOptions options_;
-  std::string api_key_hash_;
+  mutable std::mutex api_keys_mutex_;
+  /// Null when authentication is off.
+  std::shared_ptr<const ApiKeyTable> api_keys_;
+  /// Device, inode, size and modification time of the last loaded key file.
+  std::array<std::int64_t, 4> api_key_file_stamp_{};
+  std::chrono::steady_clock::time_point api_key_file_checked_{};
   int listen_fd_ = -1;
   std::atomic<bool> stopped_{false};
   std::atomic<bool> device_lost_reported_{false};

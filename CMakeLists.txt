@@ -262,6 +262,7 @@ add_library(gufo_http STATIC
   src/cli/serve/tts_service.cpp
   src/cli/serve/video_api.cpp
   src/cli/serve/video_jobs.cpp
+  src/cli/serve/api_keys.cpp
   src/cli/serve/http_server.cpp
   src/cli/serve/websocket.cpp
   src/cli/serve/asr_websocket.cpp

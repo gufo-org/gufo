@@ -1071,10 +1071,55 @@ Tool definitions and generated tool calls are treated as data. `gufo`
 never executes tools, shell commands, URLs, or generated code.
 
 The HTTP transport currently uses a wildcard CORS origin and the same listener
-and API key for inference and metrics.
+for inference and metrics. A single `--api-key` covers both; with
+`--api-key-file`, an `access=monitor` key reads metrics without inference
+access.
 
 `gufo eval` and `tools/serving/gufo-serving-bench.py` send `OPENAI_API_KEY`
 as the bearer credential when it is set.
+
+### Named API keys
+
+`--api-key-file FILE` replaces the single `--api-key` (the two are mutually
+exclusive) with named keys. Each key can be limited to monitoring or to some
+models. One key per line:
+
+```text
+# NAME   CREDENTIAL        OPTIONS
+alice    sha256:9f86d0...  models=qwen3.8-flash-next
+bob      sha256:2c26b4...
+monitor  sha256:fcde2b...  access=monitor
+```
+
+- **NAME** is 1–64 characters of `A-Z a-z 0-9 . _ -`.
+- **CREDENTIAL** is `sha256:` followed by the hex SHA-256 of the bearer token, so
+  the file never holds a usable token. Create one with
+  `printf %s "$TOKEN" | sha256sum`.
+- **`access=monitor`** allows only `GET` on health, readiness, `/v1/models`,
+  `/props`, `/slots` and `/metrics`. Every other route answers
+  `403 permission_denied`. The default is `access=inference`, which allows
+  every route.
+- **`models=A,B`** allows only the listed served model names, on every route
+  except the monitoring ones above, WebSocket upgrades included. The check
+  uses the model of the service the route reaches (text, speech,
+  transcription, image, embedding, or `minimax-h3` for video), not a name the
+  request supplies. An empty list is an error. Other models answer
+  `403 model_not_allowed`.
+
+Names and credentials must be unique, and a file with no keys is an error.
+
+**Reloading.** The server checks the file about once a second and applies
+edits without a restart. A file that fails to parse keeps the previous keys
+and logs `event=api_keys_reload_failed`. Startup refuses an invalid file before
+the model loads. To edit the file atomically, write a temporary file and
+rename it over the old one. If the server runs in a container, mount the
+directory rather than the single file, so the container sees the renamed file.
+
+**Identity.** A named key replaces the peer address as the request's client
+ID. Scheduling limits such as `--max-pending-per-client` then count each key
+as one client, even behind a proxy where every request comes from the same
+address. Request log lines name the key as `key=NAME`; the token itself is
+never logged.
 
 ## Lifecycle and limits
 
