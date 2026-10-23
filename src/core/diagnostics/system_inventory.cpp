@@ -61,6 +61,11 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
     inv.toolchain.kernel_release = "unknown";
   }
 
+#if defined(GUFO_ROCM_VERSION)
+  // The ROCm release Gufo was built against, from rocm-core.
+  inv.toolchain.rocm_version = GUFO_ROCM_VERSION;
+#endif
+
   // 4. GPU (Sysfs + HIP query)
   const auto gpus = sysfs.QueryDrmGpuDevices();
   if (!gpus.empty()) {
