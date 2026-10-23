@@ -1,5 +1,54 @@
 # Qwen3.8 Flash-Next quality
 
+## LLVM selector scheduling, October 23, 2026
+
+The compiler-dependent loop bound changes scheduling only. F32 queries, stored
+F16 keys, each FMA, the reduction tree, top-k ordering and cache contents retain
+their original contracts. Clang 22 compiles the original unrolled loop.
+
+On ROCm 10.1 / Clang 24, the selector test passes its independent F64 formula,
+exact F32 reduction, precision-boundary, tied-score, causal-tail and chunked
+replay checks. A 38,760-token source-code prompt followed by 75 fixed decode
+tokens produces 18,624,000 finite, byte-identical logits before and after the
+change. The independent MTP audit also passes full-width normalization,
+predictor attention, recursive carry, image positions, ragged batches and
+exact candidates after differently chunked cache rebuilding.
+
+Matched production controls against `cc5f405a` pass 533 request/phase
+measurements on each toolchain: ROCm 7.2.3 / Clang 22 and ROCm 10.1 / Clang 24.
+These cover greedy/default-sampled lookup, ordinary generation, C2, filter
+boundaries, stops, cancellation, images and exact warm replay. Outputs and
+prompt/cache work agree within each toolchain. The gate remains both 5% and
+3 ms per request/phase.
+
+After rebasing onto `ab122e44`, all 56 retained HTTP AR phase measurements
+pass on each toolchain, including calibration requests and the d32K cached
+continuation. Completion hashes and prompt/cache/draft counts agree.
+The six-request sampled screen passes all 87 phases on 7.2.3 and 86 on 10.1.
+The remaining 10.1 cold-code maximum-gap observation is 74.38 → 79.11 ms;
+its focused reverse-order control passes all 29 phases, with the same gap
+73.16 → 73.53 ms. The initial observation remains inconclusive, rather than
+being replaced with the repeat. Both compilers pass complete extraction,
+generated URI tests against correct code and three deliberate defects, and
+32K file-edit tool calls with thinking on/off and exact intended file contents.
+
+Compiler versions do not produce identical model logits or seeded text.
+Both agree with the independent F32 CPU reference at 28 of 29 positions on
+the short cache/cancellation prompt; both disagree at the same final position.
+On the fixed long-history continuation, 67 of 75 top tokens agree across
+compilers, with median/maximum KL divergence 0.01497/0.33537. Mean next-token
+negative log likelihood over 74 fixed labels is 3.8152 on 7.2.3 and 3.8009 on
+10.1. These small numerical checks and functional fixtures are regression
+evidence, not a statistical language-quality result.
+
+The 10.1 container uses `rocm/dev-ubuntu-26.04:10.1.0-full`, image digest
+`sha256:4f5ed1bf6532a4b9920400401b0ad0f706af356dae61e40afefbfd6c8073f0ce`,
+with the repository's ROCr queue-memory patch applied. The 7.2.3 controls use
+the pinned Nix toolchain and patched ROCr. Loaded runtime paths were verified;
+all model jobs run serially, without overlapping builds. Scripts, binaries,
+hashes, full request logs, numerical dumps and initial observations remain in
+`/tmp/gufo-rocm10-20261023` on the test host. No reference benchmark data change.
+
 ## Exact sampled decode, October 21, 2026
 
 The candidate retains target weights and forward arithmetic. Its compact

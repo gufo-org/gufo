@@ -1,5 +1,22 @@
 # Qwen3.8 Flash-Next experiments
 
+## Selector scheduling on newer LLVM (October 23, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| Keep one selector query head live on Clang 23 and newer | Retained: full head unrolling causes 304 scalar-register spills with ROCm 10.1's Clang 24; the bounded loop reduces this to 18 and VGPR use from 169 to 164. Neither 10.1 variant uses private scratch; the original Clang 23 build does. The F32 queries, FMA sequence, reduction tree and selected blocks stay unchanged. On Clang 24, the isolated 64-query × 8,192-block scorer falls from 109.3 to 76.3 µs, with identical output bytes. Clang 22 retains its original unrolling. |
+
+The scorer measurement is the median of five warmed calls with production
+compiler flags. Full-model and request-level qualification are recorded in
+[benchmarks](BENCHMARKS.md) and [quality](QUALITY.md); the microbenchmark
+percentage is not an end-to-end speedup.
+
+An independent `tools/prof/prof.py` capture of the final pp2048 pass at d32K
+retains all 1,574 launches, including 45 scorer calls. Scoring falls from
+41.25 to 25.86 ms; total GPU time falls from 1203.93 to 1189.16 ms and the
+pass span from 1207.74 to 1192.95 ms. These are diagnostic profiled timings;
+the HTTP table uses separate unprofiled production runs.
+
 ## Exact sampled decode (October 21, 2026)
 
 | Experiment | Outcome |

@@ -25,6 +25,45 @@ repeat against current main; both observations remain included.
 Prior mixed MTP C2 repeats show two draft-controller trajectories (about 54
 and 60 tok/s, identical text), so its gain is not entirely attributable to lookup.
 
+## LLVM selector scheduling, October 23
+
+Focused production comparison against main `ab122e44`, with the selector-loop
+change as the candidate. Each compiler uses its matching patched ROCr runtime;
+ROCm 10.1 runs in a container. HTTP AR uses the canonical ordered d0/d32K
+pp2048/tg128 history. Sampled C1 rows use model defaults, 128 output tokens and
+an exact warm replay. Values below are tok/s, one capture per cell.
+
+| Workload | 7.2.3 main | 7.2.3 candidate | 10.1 main | 10.1 candidate |
+| --- | ---: | ---: | ---: | ---: |
+| AR prefill, d0 | 1796.29 | 1794.72 | 1791.06 | 1798.38 |
+| AR prefill, d32K | 1645.17 | 1650.79 | 1622.34 | 1647.64 |
+| AR generation, d0 | 28.91 | 28.90 | 28.90 | 28.96 |
+| AR generation, d32K | 28.84 | 28.88 | 28.92 | 28.93 |
+| Default-sampled code, warm | 62.66 | 62.66 | 70.50 | 70.51 |
+| Default-sampled prose, warm | 48.66 | 48.69 | 47.88 | 47.86 |
+| Default-sampled thinking, warm | 54.02 | 54.04 | 45.72 | 45.69 |
+
+The candidate preserves output and prompt/cache/draft counts within each
+compiler. Across compilers, sampled text and draft work differ: the thinking
+screen takes 38 draft rounds on 7.2.3 and 58 on 10.1. Its slower 10.1 result is
+also present on unchanged main; this is not a claim that every sampled answer
+is equally fast across compiler versions.
+
+Fixed-history MTP diagnostics separate that variation from execution cost.
+Across C1/C2 and widths 1–8, most initial 10.1 cycles are slightly faster.
+C1 widths 7/8 initially flag at 72.04/71.52 ms for target verification versus
+61.03/65.97 ms on 7.2.3. A reverse-order repeat of unchanged binaries gives
+58.67/63.56 ms on 10.1 and 59.04/63.94 ms on 7.2.3. The initial flags remain
+unqualified; they do not establish a persistent compiler regression. These
+diagnostics replay fixed tokens and report the median of three warmed cycles,
+not completed-answer throughput.
+
+Complete default-sampled extraction, executable URI-test generation and
+32K file-edit tool calls pass on both compilers, including edits with thinking
+on/off and preservation of literal protocol tags. The full benchmark tables
+and reference data below remain unchanged.
+[Numerical and timing qualification](QUALITY.md#llvm-selector-scheduling-october-23-2026).
+
 ## Sampled decode follow-up, October 21
 
 Focused production comparison against main `0c03748a`, candidate `1d3b8c68`,
