@@ -1260,9 +1260,9 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
 // alone and in batches, and each request's head choice and table stay its
 // own: an isolated run, peers joining and leaving, and reordered pairs give
 // identical tokens (reasoning included), RNG, acceptance, head use and
-// logits. Restores into used sessions match fresh ones. Greedy eligibility
-// is unchanged: plain greedy keeps the full head alone, and uses the small
-// head in a jointly planned batch.
+// logits. Restores into used sessions match fresh ones. Plain greedy uses
+// the small head alone and in a jointly planned batch, keeps the full head
+// beside a sampled peer, and its text is the same either way.
 void CheckSampledDraftHead(const std::shared_ptr<qfn::Model>& model) {
   namespace qt = gufo::tokenization;
   if (!model->HasMtp())
@@ -1508,10 +1508,12 @@ void CheckSampledDraftHead(const std::shared_ptr<qfn::Model>& model) {
   Require(fresh[0]->Statistics().small_head_cycles > restored_small,
           "the restored English member left the small head");
 
-  // Greedy eligibility is unchanged. Alone, plain greedy keeps the full head
-  // on two sessions; a jointly planned greedy pair uses the small head.
+  // Alone, plain greedy drafts through the small head on two sessions as on
+  // one; beside a sampled peer it keeps the full head and makes the same
+  // text; a jointly planned greedy pair uses the small head.
   const auto english = chat("Count from one to thirty in words.", false);
-  std::array<std::unique_ptr<qfn::Session>, 2> greedy{create(), create()};
+  std::array<std::unique_ptr<qfn::Session>, 3> greedy{create(), create(),
+                                                      create()};
   std::vector<sampling::SamplerState> greedy_samplers;
   for (auto& session : greedy) {
     Require(session->Sync(english, &error), error);
@@ -1519,14 +1521,40 @@ void CheckSampledDraftHead(const std::shared_ptr<qfn::Model>& model) {
         sampling::SamplingConfig{},
         std::vector<sampling::TokenId>(english.begin(), english.end()));
   }
+  std::vector<std::int32_t> alone_tokens, mixed_tokens;
   for (std::size_t c = 0; c < 4; ++c) {
     qfn::Session::DecodeResult alone;
     Require(greedy[0]->DecodeStep(8, greedy_samplers[0], &alone, &error, false),
             error);
+    alone_tokens.insert(alone_tokens.end(), alone.tokens.begin(),
+                        alone.tokens.end());
   }
   const auto& alone = greedy[0]->Statistics();
-  Require(alone.drafted > alone.lookup && alone.small_head_cycles == 0,
-          "plain greedy reached the small head alone on two sessions");
+  Require(alone.drafted > alone.lookup && alone.small_head_cycles > 0,
+          "plain greedy kept the full head alone on two sessions");
+  auto sampled_peer = create();
+  Require(sampled_peer->Sync(members[0].prompt, &error), error);
+  sampling::SamplerState sampled_peer_sampler(
+      members[0].config,
+      std::vector<sampling::TokenId>(members[0].prompt.begin(),
+                                     members[0].prompt.end()));
+  while (mixed_tokens.size() < alone_tokens.size()) {
+    std::array<qfn::Session::DecodeResult, 2> results;
+    std::array<qfn::Session::DecodeRequest, 2> requests{{
+        {greedy[2].get(), 8, &greedy_samplers[2], &results[0], false},
+        {sampled_peer.get(), 8, &sampled_peer_sampler, &results[1], false},
+    }};
+    Require(qfn::Session::DecodeBatch(requests, &error), error);
+    Require(!results[0].tokens.empty(), "mixed greedy step made no progress");
+    mixed_tokens.insert(mixed_tokens.end(), results[0].tokens.begin(),
+                        results[0].tokens.end());
+  }
+  const auto& mixed = greedy[2]->Statistics();
+  Require(mixed.drafted > mixed.lookup && mixed.small_head_cycles == 0,
+          "plain greedy reached the small head beside a sampled peer");
+  Require(std::equal(alone_tokens.begin(), alone_tokens.end(),
+                     mixed_tokens.begin()),
+          "the small head changed greedy text");
   auto peer = create();
   Require(peer->Sync(english, &error), error);
   sampling::SamplerState peer_sampler(
@@ -1550,7 +1578,8 @@ void CheckSampledDraftHead(const std::shared_ptr<qfn::Model>& model) {
             << " mixed=" << overlap_use.mixed
             << " reordered all_small=" << reordered_use.all_small
             << " mixed=" << reordered_use.mixed
-            << " schedules_and_restores_exact=1 greedy_policy_unchanged=1\n"
+            << " schedules_and_restores_exact=1 greedy_alone_small_head="
+            << alone.small_head_cycles << " greedy_text_exact=1\n"
             << std::flush;
 }
 
