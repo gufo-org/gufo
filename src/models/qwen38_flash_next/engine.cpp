@@ -556,10 +556,17 @@ bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
   valid_ = false;
   rocm::Executor::SnapshotInfo info;
   const auto remaining = ContextSize() - header.token_count;
-  const auto next_drafts =
-      MtpEnabled() ? restored_policy.Choose(remaining ? remaining - 1 : 0,
-                                            header.token_count)
-                   : 0;
+  auto next_drafts = MtpEnabled()
+                         ? restored_policy.Choose(remaining ? remaining - 1 : 0,
+                                                  header.token_count)
+                         : 0;
+  if (MtpEnabled() && model_->draft_subset_) {
+    // The next request's sampler/head is not known yet. Avoid discarding
+    // existing scratch that either eligible policy can use after restore.
+    next_drafts = std::max(next_drafts,
+                           restored_policy.Choose(remaining ? remaining - 1 : 0,
+                                                  header.token_count, 0, true));
+  }
   if (!model_->executor_->RestoreSnapshot(
           *session_,
           std::span<const std::uint8_t>(
@@ -876,6 +883,7 @@ struct Session::PendingDecode {
   MtpCandidateLogits candidates;
   std::int32_t draft{0};
   bool draft_subset{false};  ///< this cycle drafts through the subset head
+  bool sampled_subset_cost{false};
   /// Trailing chain tokens copied by prompt lookup (after the MTP drafts).
   std::uint32_t lookup{0};
   /// Committed index the copied tokens were taken from.
@@ -1048,6 +1056,20 @@ bool Session::PrepareDecode(const DecodeRequest& request,
                           draft_vocab_.Fits(anchor, [&](std::int32_t token) {
                             return model_->InDraftSubset(token);
                           });
+  // Wider verification slowed short resumed replies in matched controls.
+  // Keep the established costs within two blocks of the remaining budget.
+  // Full target rows (for example, active tool constraints) also keep their
+  // original costs; the smaller-head curve does not price their transfers.
+  pending->sampled_subset_cost =
+      sampled && gpu_verification && pending->draft_subset &&
+      std::min(max_tokens, room) > 2 * exec.max_speculative();
+  if (pending->sampled_subset_cost && !batch_drafts) {
+    // Price the head actually used, after vocabulary fallback and the copy
+    // bypass. The policy depends only on committed history, not timings.
+    pending->width =
+        1 + draft_length_.Choose(static_cast<std::uint32_t>(cap - 1), base,
+                                 pending->policy_concurrency, true);
+  }
   if (!defer_head && !DraftCatchUp(anchor, true, error_msg,
                                    sampled ? &pending->candidates : nullptr,
                                    pending->draft_subset)) {
@@ -1055,7 +1077,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   }
   pending->draft = draft_token_;
   if (!defer_head) {
-    while (pending->chain.size() < width) {
+    while (pending->chain.size() < pending->width) {
       AppendDraft(*pending);
       if (stop_at_eos && model_->IsStopToken(pending->chain.back())) {
         pending->width = pending->chain.size();
@@ -1064,7 +1086,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
       if (AppendLookup(*pending, stop_at_eos)) {
         break;
       }
-      if (pending->chain.size() < width &&
+      if (pending->chain.size() < pending->width &&
           !exec.MtpForward(
               *session_, std::span<const std::int32_t>(&pending->draft, 1), -1,
               {.token = sampled ? nullptr : &pending->draft,
@@ -1232,9 +1254,9 @@ bool Session::FinishDecode(const DecodeRequest& request,
   const std::uint32_t observed = mtp_all ? keep - 1 : mtp_accepted;
   // A target stop ends the request; it does not classify the remaining
   // proposals as failed predictions.
-  draft_length_.Observe(observed,
-                        result->stop || mtp_all ? observed : mtp_drafts, base,
-                        pending.policy_concurrency);
+  draft_length_.Observe(
+      observed, result->stop || mtp_all ? observed : mtp_drafts, base,
+      pending.policy_concurrency, pending.sampled_subset_cost);
 
   // The next call knows the next sampled anchor. Defer draft catch-up until
   // then, retaining this session's target hidden rows across interleaving.

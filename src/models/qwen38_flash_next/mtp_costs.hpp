@@ -42,6 +42,18 @@ inline constexpr float kMtpCycleMilliseconds[3][5][8] = {
     },
 };
 
+// C1 sampled-prefix head, same weights, 2026-10-23. Fixed token histories at
+// depths 0/4096/32768, median of three warmed complete cycles on ROCm 7.2.3;
+// matched ROCm 10.1 cycles agree within 2%. Full-head and concurrent costs
+// above remain separate: pricing the smaller head as a full projection
+// unnecessarily shortens profitable draft chains. See the model's ROCM.md.
+// Full target-row transfers also retain the original curve in the engine.
+inline constexpr float kMtpSampledSubsetMilliseconds[3][8] = {
+    {34.4F, 42.3F, 47.1F, 53.1F, 59.3F, 64.5F, 72.0F, 78.9F},
+    {35.1F, 42.9F, 48.7F, 54.8F, 60.8F, 66.5F, 74.3F, 81.5F},
+    {35.2F, 42.9F, 48.9F, 55.1F, 60.9F, 66.5F, 74.4F, 81.5F},
+};
+
 // Seeded sampled policy uses fixed configured capacity for reproducibility;
 // greedy batch policy uses these curves to bootstrap each physical occupancy,
 // and a greedy or unseeded sampled request uses the row for the requests
@@ -49,7 +61,8 @@ inline constexpr float kMtpCycleMilliseconds[3][5][8] = {
 // Intermediate capacities use the next measured cohort. Context costs
 // interpolate, then extrapolate the measured QSA slope to the native limit.
 [[nodiscard]] inline std::array<float, 8> MtpCycleCosts(
-    std::uint32_t context, std::uint32_t concurrency) noexcept {
+    std::uint32_t context, std::uint32_t concurrency,
+    bool sampled_subset = false) noexcept {
   const auto cohort = concurrency <= 1   ? 0
                       : concurrency <= 2 ? 1
                       : concurrency <= 4 ? 2
@@ -60,16 +73,21 @@ inline constexpr float kMtpCycleMilliseconds[3][5][8] = {
       interval == 0
           ? static_cast<float>(context) / 4096.0F
           : static_cast<float>(std::min(context, 262144U) - 4096) / 28672.0F;
+  const auto* low_row = sampled_subset && cohort == 0
+                            ? kMtpSampledSubsetMilliseconds[interval]
+                            : kMtpCycleMilliseconds[interval][cohort];
+  const auto* high_row = sampled_subset && cohort == 0
+                             ? kMtpSampledSubsetMilliseconds[interval + 1]
+                             : kMtpCycleMilliseconds[interval + 1][cohort];
   std::array<float, 8> costs{};
   for (std::size_t i = 0; i < costs.size(); ++i) {
-    const auto low = kMtpCycleMilliseconds[interval][cohort][i];
-    const auto high = kMtpCycleMilliseconds[interval + 1][cohort][i];
+    const auto low = low_row[i];
+    const auto high = high_row[i];
     costs[i] = low + fraction * std::max(high - low, 0.0F);
     if (fraction > 1.0F && i != 0) {
       // Independently extrapolated noisy slopes can cross at long contexts.
       // Preserve at least the last measured marginal cost of another draft.
-      const auto marginal =
-          high - kMtpCycleMilliseconds[interval + 1][cohort][i - 1];
+      const auto marginal = high - high_row[i - 1];
       costs[i] = std::max(costs[i], costs[i - 1] + marginal);
     }
   }

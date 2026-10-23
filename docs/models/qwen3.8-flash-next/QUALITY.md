@@ -1,5 +1,115 @@
 # Qwen3.8 Flash-Next quality
 
+## Sampled draft-head costs, October 23, 2026
+
+Based on main `41d93463`, including the expanded greedy-head eligibility.
+The new C1 curve measures the smaller sampled draft head at depths
+0/4096/32768, with fixed token histories and three warmed complete cycles
+per width. Matched ROCm 7.2.3 and 10.1 cycle costs agree within 2%.
+Full-head, full target-row, greedy and concurrent cost curves retain their
+previous values.
+The policy uses committed acceptance history, not measured request timings.
+Target arithmetic, sampling filters and rejection correction are unchanged.
+
+An initial candidate widened short resumed replies too early. One identical
+12-token answer took 217 → 240 ms, with 12 rather than 10 proposals.
+The final policy keeps the initial conservative width until acceptance is
+observed, and retains the established costs within two blocks of the output
+limit. The serving adapter passes the remaining budget through; the engine
+still bounds each physical block. A focused cancellation/resume control now
+passes all 84 request/phase checks with identical output, prompt/cache work
+and draft counts. Warm 12-token decode is 211.02 → 211.41 ms; the later
+eight-token reply is 196.35 → 196.31 ms.
+
+The controller test covers head fallback, configured versus live occupancy,
+budget bounds, native-context cost extrapolation and restored acceptance
+history. Existing compact-proposal probability, rejection/residual, RNG and
+stop checks pass on both compilers. The expanded main-branch vocabulary
+eligibility test also passes.
+
+The first short-tail candidate still widened constrained tool output using
+the smaller-head estimates. In a 32K thinking/file-edit request, its longest
+pause rose from 111.18 to 119.78 ms. Full target-row verification now keeps
+the original costs. The focused final replay passes all 63 phases with
+identical output and prompt/cache work: the longest pause is 112.87 ms,
+and generation remains comparable at 68.84 tok/s. Exact seeded warm replay
+preserves function names and argument bytes; generated call IDs are
+request-specific.
+
+The short-tail candidate passes the focused `state-edges`, `long-context` and `cache`
+functional suites, with unchanged output and prompt/cache coverage. The
+1,026 measured phases per compiler include tool constraints, literal tags,
+sampled JSON, token limits, cancellation, RAM continuation and disk restart
+with text, thinking, legacy tool history and images. Actual C2 lookup,
+mixed cohorts, full-head fallback, stops and image/cancellation replay also
+pass; the concurrent cost curve remains unchanged.
+
+The six-request default-sampling screen retains 87 measured phases on each
+compiler. All requests pass correctness and exact warm replay. The initial
+short-tail candidate passes all timing phases; the final build preserves its
+outputs and draft counts but flags the first cold code request and one warm
+token gap. The focused reverse-order controls pass all 29 phases on each
+compiler. Cold prefill is 168.76 → 169.65 ms on 7.2.3 and
+167.37 → 167.27 ms on 10.1; the 10.1 warm maximum gap is
+69.17 → 69.40 ms. Initial observations remain retained and inconclusive.
+Complete extraction, executable URI tests against correct code and
+three mutants, and 32K file-edit tool calls with thinking on/off pass their
+task checks. Sampled completions may differ: on 10.1, the valid URI test
+answer grows from 407 to 478 tokens, taking 5.22 → 6.32 seconds at
+83.95 → 80.34 tok/s. This is not a claim of faster completion for every task.
+The initial 7.2.3 completed-workflow phase comparisons pass. Initial
+request-level timing flags remain in the evidence, including an unchanged
+greedy schema request's maximum pause and cold disk restores.
+
+Cloned, identical persisted records pass all focused restore phases on 7.2.3.
+The first 10.1 clone comparison still flags a branched restore at
+84.68 → 90.30 ms. Alternating controls then measure that same branch at
+99.78 ms on the unchanged binary, 97.38 ms on the candidate and 127.97 ms
+on the unchanged binary again. Another unchanged-binary restore varies
+60.74 → 82.57 ms. This establishes baseline variability; it does not prove
+the cause of the storage/copy delay. These disk timings remain inconclusive,
+with all captures retained and the 5%/3 ms gate unchanged. The eight-token
+greedy fixture does not execute the changed sampled policy.
+
+After the full target-row guard, both compilers also pass a fresh replay of
+`state-edges` and `long-context`, including constrained Chat/Responses,
+literal tool tags, images, stop/cancellation and resumed seeded output.
+All outputs and prompt/cache work match the controls across 289 measured
+phases per compiler. Isolated timing flags remain inconclusive: 10.1's quoted
+tool-argument stop has a 76.13 → 81.82 ms maximum pause; 7.2.3's short
+zero-argument tool reply takes 180.32 → 190.16 ms, and its execution-mode
+probe has a 77.59 → 88.58 ms maximum pause. These requests are greedy;
+they retain their original policy and do not establish a sampled-policy regression.
+
+Focused standard benchmark controls, one production capture per cell,
+before → candidate (tok/s):
+
+| Workload | ROCm 7.2.3 | ROCm 10.1 |
+| --- | ---: | ---: |
+| CLI AR d0 pp2048 | 1,873.03 → 1,870.44 | 1,856.39 → 1,870.11 |
+| CLI AR d0 tg128 | 29.36 → 29.37 | 29.38 → 29.39 |
+| HTTP MTP d32K mixed prefill | 1,608.77 → 1,613.37 | 1,600.39 → 1,601.93 |
+| HTTP MTP d32K repetitive prefill | 1,611.12 → 1,584.58 | 1,593.06 → 1,591.93 |
+| HTTP MTP d32K mixed generation | 40.40 → 40.49 | 42.11 → 42.11 |
+| HTTP MTP d32K repetitive generation | 115.34 → 115.37 | 115.00 → 115.06 |
+
+The HTTP rows use the canonical greedy pp2048/tg128 workload. Completion
+hashes, prompt/cache counts and draft counts agree within each compiler.
+The before binaries include main `41d93463` and the selector fix; the
+candidate adds the scoped sampled-head policy. These spot controls do not
+replace the standard benchmark tables or their reference numbers.
+Frozen binary hashes and source patches identify each arm. The benchmark
+wrapper's checkout stamp and environment fingerprint are not a replacement
+for that build provenance: 10.1 uses container GCC 15.2 and Clang 24, while
+7.2.3 uses pinned Nix GCC 15.3 and Clang 22.
+
+The [migration state](ROCM.md) records the sampled screen and qualification
+limits. Initial captures, rejected candidates, source patches,
+binary hashes and request traces are retained under
+`/tmp/gufo-rocm10-20261023` on the test host. Sampled text and completion length
+can change with draft widths; completed-task latency and token throughput
+are reported separately.
+
 ## LLVM selector scheduling, October 23, 2026
 
 The compiler-dependent loop bound changes scheduling only. F32 queries, stored

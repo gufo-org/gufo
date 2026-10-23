@@ -249,6 +249,68 @@ void CheckCalibratedCosts() {
   }
 }
 
+void CheckSampledSubsetCosts() {
+  qfn::MtpLengthController single(7), configured_8(7, 8);
+  Require(single.Choose(7, 4096, 0, true) == single.Choose(7, 4096),
+          "sampled prior widened the first cycle before any acceptance");
+  auto state = single.State();
+  state.successes.fill(4.0F);
+  state.failures.fill(1.0F);
+  state.explored_depth = 7;
+  state.failed_depths = 127;
+  Require(single.Restore(state) && configured_8.Restore(state),
+          "sampled-head controller state rejected");
+  Require(single.Choose(7, 0, 0, true) > single.Choose(7),
+          "cheaper sampled proposals did not widen a profitable chain");
+  for (unsigned context : {0, 2048, 4096, 32768, 131072, 262144}) {
+    const auto full = qfn::MtpCycleCosts(context, 1);
+    const auto subset = qfn::MtpCycleCosts(context, 1, true);
+    for (unsigned width = 1; width < subset.size(); ++width) {
+      Require(std::isfinite(subset[width]) && subset[width] > subset[width - 1],
+              "sampled-head extrapolation crosses verification widths");
+      if (context <= 32768 && width >= 2)
+        Require(subset[width] / subset[0] < full[width] / full[0],
+                "sampled-head cost lost its measured relative saving");
+    }
+    for (unsigned c = 2; c <= 8; ++c)
+      Require(qfn::MtpCycleCosts(context, c, true) ==
+                  qfn::MtpCycleCosts(context, c),
+              "C1 sampled-head calibration changed a concurrent cost");
+    for (unsigned budget = 0; budget <= 8; ++budget) {
+      Require(configured_8.Choose(budget, context, 0, true) ==
+                  configured_8.Choose(budget, context),
+              "seeded concurrency used lone-decoder costs");
+      Require(configured_8.Choose(budget, context, 1, true) ==
+                  single.Choose(budget, context, 0, true),
+              "lone unseeded decoder did not use the sampled-head curve");
+    }
+  }
+
+  // Restoring after head fallback must replay the same policy decisions.
+  // Neither switching heads nor changing the output budget adds RNG state.
+  qfn::MtpLengthController replay(7);
+  for (unsigned cycle = 0; cycle < 64; ++cycle) {
+    Require(replay.Restore(single.State()), "sampled-head restore failed");
+    const bool subset = cycle % 3 != 0;
+    const unsigned budget = cycle % 9;
+    const unsigned context = cycle * 2048;
+    const auto length = single.Choose(budget, context, 0, subset);
+    Require(length == replay.Choose(budget, context, 0, subset) &&
+                length <= budget && length <= 7,
+            "head fallback or snapshot restore changed bounded replay");
+    const auto accepted = length == 0 ? 0 : cycle % (length + 1);
+    single.Observe(accepted, length, context, 0, subset);
+    replay.Observe(accepted, length, context, 0, subset);
+    if (length == 0) {
+      single.ObserveArToken();
+      replay.ObserveArToken();
+    }
+    Require(single.Choose(7, context, 0, subset) ==
+                replay.Choose(7, context, 0, subset),
+            "restored acceptance history changed the next sampled width");
+  }
+}
+
 void CheckBatchProfitability() {
   qfn::MtpLengthController a(7), b(7);
   for (unsigned i = 0; i < 12; ++i) {
@@ -427,6 +489,7 @@ int main() {
     CheckOccupancyOverride();
     CheckPolicyConcurrency();
     CheckCalibratedCosts();
+    CheckSampledSubsetCosts();
     CheckBatchProfitability();
     CheckCompactProposals();
     CheckSampledOutputFrequencies();
