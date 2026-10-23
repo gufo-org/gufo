@@ -667,8 +667,9 @@ association and output parts; the custom call's free-form `input` is retained
 as literal tool-history data. This does not enable custom-tool generation.
 Chat Completions also accepts `image_url` parts in `role:"tool"` content.
 Existing text-string outputs keep their prompt representation. Images remain
-unsupported in assistant/system/developer messages; only `detail:"auto"` is
-accepted, and file IDs and `input_file` parts remain unsupported.
+unsupported in assistant/system/developer messages. Image resolution is
+model-owned: `detail` accepts `auto`, `low`, `high` and `original`, and all of
+them behave as `auto`. File IDs and `input_file` parts remain unsupported.
 
 Responses report `incomplete` with reason `max_output_tokens` when generation
 hits its limit. Otherwise they report `completed`. `stream: true` sends typed

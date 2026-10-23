@@ -156,7 +156,7 @@ def check_tool_images(client, model, checks, image_content, chat_result, respons
         invalid.append((role, [{"role": role, "content": [{
             "type": "input_image", "image_url": image_content("red")["image_url"]["url"]}]}]))
     for name, change in (
-        ("detail", {"detail": "high"}),
+        ("detail", {"detail": "ultra"}),
         ("bad_base64", {"image_url": "data:image/png;base64,A==="}),
         ("bad_url", {"image_url": 17}),
         ("file_id", {"file_id": "file_unknown"}),

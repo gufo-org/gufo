@@ -297,12 +297,15 @@ bool ParseContent(const json::Value* content,
         *error = "image_url requires a user or tool message and a string URL";
         return false;
       }
-      // Resolution is model-owned; accept only the automatic policy rather
-      // than silently ignoring a requested low/high preprocessing policy.
+      // Resolution is model-owned. The standard detail values are accepted
+      // and all behave as 'auto', since clients such as Codex always send
+      // one; anything else is still a malformed request.
       const auto* detail = image->find("detail");
       if (detail != nullptr &&
-          (!detail->is_string() || detail->get_str() != "auto")) {
-        *error = "image_url.detail supports only 'auto'";
+          (!detail->is_string() ||
+           (detail->get_str() != "auto" && detail->get_str() != "low" &&
+            detail->get_str() != "high" && detail->get_str() != "original"))) {
+        *error = "image_url.detail must be 'auto', 'low', 'high' or 'original'";
         return false;
       }
       try {

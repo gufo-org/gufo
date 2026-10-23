@@ -2293,10 +2293,22 @@ void TestImagePartsRetainOrderAndIdentity() {
   for (
       const auto* body :
       {R"({"messages":[{"role":"assistant","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}]}]})",
-       R"({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":"low"}}]}]})",
+       R"({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":"ultra"}}]}]})",
+       R"({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":1}}]}]})",
        R"({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"file:///tmp/image.png"}}]}]})"}) {
     Expect(gufo::server::HandleOpenAiChat(Request(body), backend).status == 400,
            "unsupported image role, policy and URL are rejected");
+  }
+  // Codex sends "high" from view_image; every standard value behaves as auto.
+  for (const std::string detail : {"auto", "low", "high", "original"}) {
+    const auto accepted = gufo::server::HandleOpenAiChat(
+        Request(
+            R"({"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":")" +
+            detail + R"("}}]}]})"),
+        backend);
+    Expect(accepted.status == 200 &&
+               backend.last_request.messages.front().images.size() == 1,
+           "standard image detail values are accepted as auto");
   }
 }
 
@@ -2451,7 +2463,7 @@ void TestToolImagesRetainOrderAndIdentity() {
   }
   for (const auto* image :
        {R"({"url":17})",
-        R"({"url":"data:image/png;base64,AQID","detail":"high"})",
+        R"({"url":"data:image/png;base64,AQID","detail":"ultra"})",
         R"({"url":"file:///tmp/image.png"})",
         R"({"url":"data:image/png;base64,A==="})"}) {
     auto part = parse(R"({"type":"image_url"})");

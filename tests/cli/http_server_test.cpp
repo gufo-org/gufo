@@ -1326,7 +1326,18 @@ void TestCompatibilityRequests() {
     assert(error.member_str("code") == "invalid_request");
     assert(error.member_str("message").find(expected) != std::string::npos);
   }
+  ExpectStatus(server.Post("/v1/responses",
+                           R"({"input":[{"role":"user","content":[
+        {"type":"input_image","image_url":"data:image/png;base64,AA==","detail":"ultra"}]}]})"),
+               400);
   assert(server.backend->calls == calls);
+
+  // Codex's view_image sends detail "high"; it is served as automatic detail.
+  response_body(server.Post("/v1/responses",
+                            R"({"input":[{"role":"user","content":[
+        {"type":"input_text","text":"describe"},
+        {"type":"input_image","image_url":"data:image/png;base64,AA==","detail":"high"}]}]})"));
+  assert(server.backend->LastCall().chat.messages.back().images.size() == 1);
 
   const auto structured =
       response_body(server.Post("/v1/responses",
