@@ -2728,6 +2728,11 @@ public:
     qfn.set_position(qfn.position() + 1);
   }
 
+  [[nodiscard]] std::span<const float> FrontierLogits(
+      TextRunnerState& state) const override {
+    return RequireQwenFlashNextState(state).session().Logits();
+  }
+
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     return SelectNext(state, sampler);
@@ -3841,6 +3846,73 @@ InferenceBackend::start_complete(
 #endif
 }
 
+TextGenerationBackend::Result InferenceBackend::score(
+    const ScoreRequest& request, const CancellationCheck& is_cancelled) {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto request_start = Clock::now();
+  const auto state = impl_->Snapshot();
+  if (state == nullptr) {
+    return TextGenerationBackend::score(request, is_cancelled);
+  }
+  if (request.start == 0 || request.start >= request.tokens.size()) {
+    throw std::invalid_argument(
+        "prompt_logprobs_start must name a position after the first token");
+  }
+  if (request.top_k > kMaxPromptLogprobs) {
+    throw std::invalid_argument("prompt_logprobs exceeds the maximum of " +
+                                std::to_string(kMaxPromptLogprobs));
+  }
+  // The last token is scored but never advanced. Checked before submission so
+  // the error names the full scored prompt.
+  if (request.tokens.size() - 1 > state->max_context) {
+    throw std::length_error(
+        "prompt has " + std::to_string(request.tokens.size()) +
+        " tokens but the context is " + std::to_string(state->max_context) +
+        "; increase --context or shorten the prompt");
+  }
+  const auto vocabulary = state->scheduler->runner().VocabularySize();
+  for (const auto token : request.tokens) {
+    if (vocabulary != 0 && token >= vocabulary) {
+      throw std::invalid_argument("prompt token " + std::to_string(token) +
+                                  " is outside the vocabulary");
+    }
+  }
+  std::vector<TextRunnerToken> prompt(
+      request.tokens.begin(),
+      request.tokens.begin() + static_cast<std::ptrdiff_t>(request.start));
+  TextScoring scoring{
+      .tokens = {request.tokens.begin() +
+                     static_cast<std::ptrdiff_t>(request.start),
+                 request.tokens.end()},
+      .top_k = request.top_k,
+  };
+  const std::size_t scored = scoring.tokens.size();
+  // Never sampled. Not greedy either: the advanced tokens are the caller's,
+  // not the model's argmax.
+  sampling::SamplingConfig sampling;
+  sampling.temperature = 1.0F;
+  const auto client_id =
+      request.client_id.empty() ? std::string("anonymous") : request.client_id;
+  auto scheduled_request = state->scheduler->Submit(
+      std::move(prompt), scored, sampling, is_cancelled, false,
+      TextRequestMetadata{
+          .client_id = client_id,
+          .deadline = std::nullopt,
+          .request_start = request_start,
+          .prompt_context = {},
+          .cache_prompt = false,
+          .cache_prefix_tokens = 0,
+          .return_progress = false,
+          .scoring = std::move(scoring),
+      });
+  const auto generation = std::make_shared<Impl::ScheduledGenerationRequest>(
+      state, std::move(scheduled_request));
+  return generation->Wait({}, {}, {});
+#else
+  return TextGenerationBackend::score(request, is_cancelled);
+#endif
+}
+
 std::shared_ptr<InferenceBackend::GenerationRequest>
 InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
                              const sampling::SamplingConfig& sampling_config,
@@ -3900,6 +3972,20 @@ InferenceBackend::Result InferenceBackend::chat(
     std::size_t max_tokens, const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled) {
   return chat(ChatRequest{messages}, max_tokens, sampling_config, is_cancelled);
+}
+
+std::optional<std::vector<tokenization::TokenId>> InferenceBackend::tokenize(
+    std::string_view text) const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  return state->scheduler->runner().Tokenize(text);
+#else
+  (void)text;
+  return std::nullopt;
+#endif
 }
 
 std::size_t InferenceBackend::count_tokens(std::string_view text) const {

@@ -32,6 +32,14 @@ inline constexpr std::size_t kDefaultMaxBufferedOutputBytes =
 inline constexpr std::size_t kDefaultMaxBufferedOutputBytesTotal =
     static_cast<std::size_t>(256) * 1024;
 
+/// Teacher-forced scoring in place of generation: after the prompt, the
+/// request reports the next-token distribution before each of `tokens` and
+/// advances it. It never samples, publishes text, or reuses a cached prefix.
+struct TextScoring {
+  std::vector<TextRunnerToken> tokens;
+  std::size_t top_k{0};
+};
+
 struct TextPrefillPolicy {
   std::size_t decode_active_tokens{kDefaultDecodeActivePrefillTokens};
 };
@@ -81,6 +89,7 @@ public:
     bool stop_at_eos{true};
     std::vector<std::string> stop_sequences;
     bool return_progress{false};
+    std::optional<TextScoring> scoring{};
   };
 
   class Request {

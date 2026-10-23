@@ -1671,6 +1671,38 @@ void TextRunnerPool::Request::Advance() {
   impl_->state_reusable = true;
 }
 
+std::span<const float> TextRunnerPool::Request::FrontierLogits() {
+  if (!*this) {
+    throw std::logic_error("text runner request is empty");
+  }
+  if (!impl_->decode_ready || impl_->pending_selection.has_value() ||
+      impl_->stopped) {
+    throw std::logic_error("text runner frontier logits are not available");
+  }
+  return impl_->runner->FrontierLogits(
+      dynamic_cast<TextRunnerState&>(impl_->lease.state()));
+}
+
+void TextRunnerPool::Request::AdvanceForced(TextRunnerToken token) {
+  if (!*this) {
+    throw std::logic_error("text runner request is empty");
+  }
+  if (!impl_->decode_ready) {
+    throw std::logic_error(
+        "text runner cannot advance before prefill completes");
+  }
+  if (impl_->pending_selection.has_value() || impl_->stopped) {
+    throw std::logic_error("text runner cannot force a token now");
+  }
+  impl_->CapturePromptSnapshot();
+  impl_->state_reusable = false;
+  impl_->runner->Advance(dynamic_cast<TextRunnerState&>(impl_->lease.state()),
+                         token);
+  impl_->sampler.Accept(token);
+  impl_->generated.push_back(token);
+  impl_->state_reusable = true;
+}
+
 TextDecodeStep TextRunnerPool::Request::DecodeStep(std::size_t max_tokens) {
   if (!*this) {
     throw std::logic_error("text runner request is empty");

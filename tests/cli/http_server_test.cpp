@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -141,6 +142,13 @@ public:
   std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
+  std::optional<std::vector<std::uint32_t>> tokenize(
+      std::string_view text) const override {
+    if (!tokenizes)
+      return std::nullopt;
+    return std::vector<std::uint32_t>(text.begin(), text.end());
+  }
+  bool tokenizes{true};
   std::optional<std::size_t> count_chat_tokens(
       const gufo::server::ChatRequest& request) const override {
     counted_messages = request.messages.size();
@@ -197,6 +205,7 @@ public:
       result.text = output_;
     }
     result.prompt_tokens = 10;
+    result.tokens = {42, 43};
     result.cached_prompt_tokens = 8;
     result.cache_hit = true;
     result.draft_accepted_tokens = 4;
@@ -238,6 +247,35 @@ public:
     }
     return result;
   }
+  Result score(const ScoreRequest& request,
+               const CancellationCheck& cancel) override {
+    ++score_calls;
+    if (!scoring)
+      return TextGenerationBackend::score(request, cancel);
+    last_score = request;
+    Result result;
+    result.prompt_tokens = request.start;
+    for (std::size_t i = request.start; i < request.tokens.size(); ++i) {
+      gufo::server::PromptTokenLogprobs position;
+      position.token = request.tokens[i];
+      position.logprob = -0.5 * static_cast<double>(i);
+      position.rank = i;
+      if (nonfinite_target && i + 1 == request.tokens.size()) {
+        position.logprob = -std::numeric_limits<double>::infinity();
+        position.nonfinite = 1;
+      }
+      for (std::size_t k = 0; k < request.top_k; ++k)
+        position.top.push_back({.token = static_cast<std::uint32_t>(100 + k),
+                                .logprob = -static_cast<double>(k)});
+      result.prompt_logprobs.push_back(std::move(position));
+    }
+    result.finish_reason = FinishReason::kLength;
+    return result;
+  }
+  std::atomic<int> score_calls{0};
+  bool scoring{true};
+  std::atomic<bool> nonfinite_target{false};
+  ScoreRequest last_score;
   std::atomic<int> calls{0};
   std::atomic<bool> last_ignore_eos{false};
   std::atomic<bool> last_cache_prompt{true};
@@ -3022,6 +3060,139 @@ void TestSignalShutdown() {
 
 }  // namespace
 
+void TestPromptLogprobs() {
+  RunningServer server;
+  using gufo::json::parse;
+  const auto ok = server.Post(
+      "/v1/completions",
+      R"({"model":"test","prompt":[7,8,9,10],"prompt_logprobs":2,)"
+      R"("prompt_logprobs_start":2,"max_tokens":0,"temperature":0})");
+  ExpectStatus(ok, 200);
+  const auto body = parse(ok.substr(ok.find("\r\n\r\n") + 4));
+  const auto& scored = server.backend->last_score;
+  assert((scored.tokens == std::vector<std::uint32_t>{7, 8, 9, 10}));
+  assert(scored.start == 2 && scored.top_k == 2);
+  const auto& choice = body.find("choices")->items().front();
+  assert(choice.member_str("text").empty());
+  assert(choice.member_str("finish_reason") == "length");
+  const auto& positions = choice.find("prompt_logprobs")->items();
+  assert(positions.size() == 4);
+  // Positions before the start are prefilled only, as vLLM reports the
+  // first prompt token.
+  assert(positions[0].is_null() && positions[1].is_null());
+  assert(positions[2].member_size("token") == 9);
+  assert(positions[2].member_double("logprob") == -1.0);
+  assert(positions[2].member_size("rank") == 2);
+  assert(positions[3].member_size("token") == 10);
+  const auto& top = positions[3].find("top_logprobs")->items();
+  assert(top.size() == 2 && top[0].member_size("token") == 100 &&
+         top[1].member_double("logprob") == -1.0);
+  assert(body.find("usage")->member_size("prompt_tokens") == 4);
+  assert(body.find("usage")->member_size("completion_tokens") == 0);
+
+  // Null optional fields are absent.
+  ExpectStatus(server.Post("/v1/completions",
+                           R"({"prompt":[1,2,3],"prompt_logprobs":0,"n":null,)"
+                           R"("max_tokens":null,"temperature":null})"),
+               200);
+
+  // A non-finite target logit scores as null instead of failing the response,
+  // which JSON cannot carry as -inf.
+  server.backend->nonfinite_target = true;
+  const auto nonfinite = server.Post(
+      "/v1/completions", R"({"prompt":[7,8,9],"prompt_logprobs":1})");
+  server.backend->nonfinite_target = false;
+  ExpectStatus(nonfinite, 200);
+  const auto nonfinite_body =
+      parse(nonfinite.substr(nonfinite.find("\r\n\r\n") + 4));
+  const auto& nonfinite_positions = nonfinite_body.find("choices")
+                                        ->items()
+                                        .front()
+                                        .find("prompt_logprobs")
+                                        ->items();
+  assert(nonfinite_positions.size() == 3);
+  assert(nonfinite_positions[1].member_double("logprob") == -0.5);
+  assert(nonfinite_positions[2].find("logprob")->is_null());
+  assert(nonfinite_positions[2].member_size("nonfinite") == 1);
+
+  // The start defaults to the second token, as in vLLM.
+  ExpectStatus(server.Post("/v1/completions",
+                           R"({"prompt":[1,2,3],"prompt_logprobs":0})"),
+               200);
+  assert(server.backend->last_score.start == 1 &&
+         server.backend->last_score.top_k == 0);
+
+  const int before = server.backend->score_calls.load();
+  for (
+      const auto* invalid : {
+          R"({"prompt":[1,2,3],"prompt_logprobs":21})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":-1})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1.5})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":"1"})",
+          R"({"prompt":"hello","prompt_logprobs":1})",
+          R"({"prompt":[1],"prompt_logprobs":1})",
+          R"({"prompt":[1,-2,3],"prompt_logprobs":1})",
+          R"({"prompt":[1,2.5,3],"prompt_logprobs":1})",
+          R"({"prompt":[1,"2",3],"prompt_logprobs":1})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1,"max_tokens":2})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1,"stream":true})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1,"echo":true})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1,"stop":"x"})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1,"logprobs":1})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1,"prompt_logprobs_start":0})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1,"prompt_logprobs_start":3})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1,"cache_prompt":0})",
+          R"({"prompt":[1,2,3],"prompt_logprobs":1,"n":2})",
+      })
+    ExpectStatus(server.Post("/v1/completions", invalid), 400);
+  ExpectStatus(
+      server.Post("/v1/completions", R"({"model":"other","prompt":[1,2],)"
+                                     R"("prompt_logprobs":1})"),
+      404);
+  // A null `prompt_logprobs` is absent: an ordinary completion.
+  ExpectStatus(
+      server.Post("/v1/completions", R"({"prompt":"ab","max_tokens":2,)"
+                                     R"("prompt_logprobs":null})"),
+      200);
+  assert(server.backend->score_calls == before);
+
+  // The teacher's history comes back as token IDs, for an exact replay.
+  const auto ids = server.Post(
+      "/v1/completions", R"({"prompt":"ab","max_tokens":2,"temperature":0,)"
+                         R"("return_token_ids":true})");
+  ExpectStatus(ids, 200);
+  const auto ids_body = parse(ids.substr(ids.find("\r\n\r\n") + 4));
+  const auto& ids_choice = ids_body.find("choices")->items().front();
+  const auto& prompt_ids = ids_choice.find("prompt_token_ids")->items();
+  assert(prompt_ids.size() == 2 && prompt_ids[0].as_size() == 'a' &&
+         prompt_ids[1].as_size() == 'b');
+  const auto& token_ids = ids_choice.find("token_ids")->items();
+  assert(token_ids.size() == 2 && token_ids[0].as_size() == 42 &&
+         token_ids[1].as_size() == 43);
+  const auto plain = server.Post("/v1/completions", R"({"prompt":"ab"})");
+  assert(plain.find("prompt_token_ids") == std::string::npos);
+  const int generations = server.backend->calls.load();
+  ExpectStatus(server.Post("/v1/completions",
+                           R"({"prompt":"ab","return_token_ids":true,)"
+                           R"("stream":true})"),
+               400);
+  ExpectStatus(
+      server.Post("/v1/completions", R"({"prompt":"ab","return_token_ids":1})"),
+      400);
+  server.backend->tokenizes = false;
+  ExpectStatus(server.Post("/v1/completions",
+                           R"({"prompt":"ab","return_token_ids":true})"),
+               400);
+  assert(server.backend->calls == generations);
+
+  // A backend that cannot score refuses the request as invalid.
+  server.backend->scoring = false;
+  const auto refused = server.Post("/v1/completions",
+                                   R"({"prompt":[1,2,3],"prompt_logprobs":1})");
+  ExpectStatus(refused, 400);
+  assert(refused.find("prompt_logprobs is not supported") != std::string::npos);
+}
+
 void TestRawCompletionCachePrompt() {
   RunningServer server;
   for (const auto* path : {"/v1/completions", "/completion"}) {
@@ -3289,6 +3460,7 @@ int main() {
   TestDeviceLossWhileWriterBlocked();
   TestRawCompletionPromptProgress();
   TestRawCompletionCachePrompt();
+  TestPromptLogprobs();
   TestCompatibilityStopSequences();
   TestCompatibilityThinkingDefaults();
   TestResponseSamplingDefaults();

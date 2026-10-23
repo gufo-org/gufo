@@ -25,6 +25,7 @@
 
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/prompt_logprobs.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
 
@@ -87,6 +88,7 @@ struct ScheduledRequest {
   bool cache_prompt{true};
   std::size_t cache_prefix_tokens{0};
   bool stop_at_eos{true};
+  std::optional<TextScoring> scoring;
   std::size_t token_limit{1};
   sampling::SamplingConfig sampling;
   TextGenerationScheduler::CancellationCheck external_cancellation;
@@ -1586,8 +1588,59 @@ struct TextGenerationScheduler::Impl {
     return PublishSelection(request, selection);
   }
 
+  /// Scores one teacher-forced position: reads the frontier's logits, then
+  /// advances the history's next token unless it is the last one.
+  void StepScore(const std::shared_ptr<ScheduledRequest>& request) {
+    consecutive_active_prefill_chunks = 0;
+    try {
+      if (CompleteIfStopped(request)) {
+        return;
+      }
+      request->phase.store(TextRequestPhase::kDecoding,
+                           std::memory_order_release);
+      const auto start = Clock::now();
+      const auto& scoring = *request->scoring;
+      auto& scored = request->result.prompt_logprobs;
+      const auto token = scoring.tokens[scored.size()];
+      const auto logits = request->runner_request.FrontierLogits();
+      if (logits.empty()) {
+        throw std::invalid_argument(
+            "the loaded model does not expose logits for prompt_logprobs");
+      }
+      scored.push_back(ScorePromptToken(logits, token, scoring.top_k));
+      if (scored.size() < scoring.tokens.size())
+        request->runner_request.AdvanceForced(token);
+      request->result.decode_ms +=
+          std::chrono::duration<double, std::milli>(Clock::now() - start)
+              .count();
+      if (scored.size() == scoring.tokens.size())
+        CompleteSuccess(request, TextGenerationBackend::FinishReason::kLength);
+    } catch (...) {
+      const auto failure = std::current_exception();
+      if (!CompleteIfStopped(request)) {
+        CompleteFailure(request, failure);
+      }
+    }
+  }
+
   void StepDecodeBatch(
       const std::vector<std::shared_ptr<ScheduledRequest>>& requests) {
+    // Scoring advances the caller's tokens one at a time and never joins a
+    // decode batch.
+    if (std::ranges::any_of(requests, [](const auto& request) {
+          return request->scoring.has_value();
+        })) {
+      std::vector<std::shared_ptr<ScheduledRequest>> decoders;
+      for (const auto& request : requests) {
+        if (request->scoring.has_value())
+          StepScore(request);
+        else
+          decoders.push_back(request);
+      }
+      if (!decoders.empty())
+        StepDecodeBatch(decoders);
+      return;
+    }
     const auto selected_plan = runner_pool->SelectDecodePlan(requests.size());
     if (batched_multi_token_decode &&
         (batched_multi_token_decode_max_width == 0 ||
@@ -2359,6 +2412,27 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->stop_at_eos = metadata.stop_at_eos;
   request->token_limit =
       max_tokens > 0 ? std::min(max_tokens, available) : available;
+  if (metadata.scoring.has_value()) {
+    const auto& scoring = *metadata.scoring;
+    if (scoring.tokens.empty())
+      throw std::invalid_argument("scoring needs at least one token");
+    if (scoring.top_k > kMaxPromptLogprobs)
+      throw std::invalid_argument("prompt_logprobs exceeds the maximum of " +
+                                  std::to_string(kMaxPromptLogprobs));
+    if (request->stop_filter.enabled())
+      throw std::invalid_argument("scoring does not support stop sequences");
+    // The last scored token is never advanced.
+    if (scoring.tokens.size() - 1 > available)
+      throw std::length_error(
+          "scored prompt has " +
+          std::to_string(request->prompt.size() + scoring.tokens.size()) +
+          " tokens but the context is " + std::to_string(context) +
+          "; increase --context or shorten the prompt");
+    request->scoring = std::move(metadata.scoring);
+    request->cache_prompt = false;
+    request->token_limit = request->scoring->tokens.size();
+    request->result.prompt_logprobs.reserve(request->token_limit);
+  }
   request->sampling = sampling;
   request->external_cancellation = is_cancelled;
   request->publish_token_pieces = publish_token_pieces;
