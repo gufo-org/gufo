@@ -4888,6 +4888,33 @@ __device__ __forceinline__ float HcScaledSilu(float value) {
   return result;
 }
 
+/// Tile order of the wide prefill GEMMs (grid.x token tiles, grid.y row
+/// tiles): token tiles go in groups of kRasterTokens rows, and each group
+/// sweeps every row tile in launch order before the next group starts. A
+/// group's activations stay in the caches while the weights stream past, as
+/// in a 4,096-row pass; one sweep over 16K rows re-read them from memory
+/// for every row tile. Grids up to one group keep their order. Only the
+/// block-to-tile assignment changes, so every output tile is computed by the
+/// same code from the same operands.
+constexpr unsigned kRasterTokens = 4096;
+struct RasterTile {
+  unsigned token_tile;  // absolute token tile
+  unsigned group_tile;  // token tile within its group
+  unsigned row_tile;
+  unsigned group_width;  // token tiles in this group
+};
+template<int BN>
+__device__ __forceinline__ RasterTile GroupedRasterTile() {
+  constexpr unsigned kGroupTiles = kRasterTokens / BN;
+  const unsigned per_group = kGroupTiles * gridDim.y;
+  const unsigned linear = (blockIdx.y * gridDim.x) + blockIdx.x;
+  const unsigned group = linear / per_group;
+  const unsigned first = group * kGroupTiles;
+  const unsigned width = min(kGroupTiles, gridDim.x - first);
+  const unsigned rem = linear - (group * per_group);
+  return {first + (rem % width), rem % width, rem / width, width};
+}
+
 /// Two-dimensionally blocked W8A8 WMMA GEMM: block = BM rows x BN tokens, BK
 /// 32-element K blocks per LDS stage, waves = WM row groups x WN token groups.
 /// Out-of-range rows and K blocks are clamped and their scale zeroed, so
@@ -4937,10 +4964,14 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
   const int wave_row = wave_id / WN;
   const int wave_tok = wave_id % WN;
 
+  // kRowsFastest launches keep their (row blocks, token blocks) grid; the
+  // others take the grouped raster order.
+  const RasterTile tile = GroupedRasterTile<BN>();
   const std::size_t r_block =
-      static_cast<std::size_t>(kRowsFastest ? blockIdx.x : blockIdx.y) * BM;
+      static_cast<std::size_t>(kRowsFastest ? blockIdx.x : tile.row_tile) * BM;
   const std::size_t t_block =
-      static_cast<std::size_t>(kRowsFastest ? blockIdx.y : blockIdx.x) * BN;
+      static_cast<std::size_t>(kRowsFastest ? blockIdx.y : tile.token_tile) *
+      BN;
   const std::size_t tt_block = t_block / kQ8ActTileTokens;
 
   float acc[kWaveRowTiles][kWaveTokTiles][8];
@@ -7090,11 +7121,14 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   const int wave_tok = wave_id % WN;
   // Group row tiles for the narrow HC up projection. The tile grid's row
   // count is divisible by kRowGroup; every dot product keeps its K order.
-  const unsigned row_group = blockIdx.y / kRowGroup;
-  const unsigned within = (blockIdx.y % kRowGroup) * gridDim.x + blockIdx.x;
+  const RasterTile tile = GroupedRasterTile<BN>();
+  const unsigned row_group = tile.row_tile / kRowGroup;
+  const unsigned within =
+      (tile.row_tile % kRowGroup) * tile.group_width + tile.group_tile;
   const int r_block =
       (first_row_tile + row_group * kRowGroup + within % kRowGroup) * BM;
-  const int t_block = (within / kRowGroup) * BN;
+  const int t_block =
+      (tile.token_tile - tile.group_tile + within / kRowGroup) * BN;
   const auto token_of = [&](int local) { return t_block + local; };
 
   // SSM thread tid owns row tid and K block p of the stage. Other paths

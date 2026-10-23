@@ -1193,7 +1193,9 @@ void CheckMtpOutputHead(float input_scale) {
 // last rows with the 64-token tile (below 96 rows), a wide pass with the
 // 128-token tiles, their tail kernel or, from 1,024 rows of the 2560 x 6144
 // output projection, the wave64 kernel. Each short pass quantizes its own
-// rows, as its combine would.
+// rows, as its combine would. The F16 route is held to the same contract;
+// a pass over 4,096 rows also changes the order in which tiles are
+// launched (GroupedRasterTile), never their arithmetic.
 void CheckW8A8PassWidths(std::size_t m, std::size_t k, std::size_t wide,
                          std::uint32_t seed) {
   const Q8Weights w = MakeWeights(m, k, seed, false);
@@ -1223,38 +1225,66 @@ void CheckW8A8PassWidths(std::size_t m, std::size_t k, std::size_t wide,
   CheckHip(hipMemcpy(reference.data(), d_wide, reference.size() * 4,
                      hipMemcpyDeviceToHost),
            "width wide download");
+  __half* d_half = nullptr;
+  CheckHip(hipMalloc(&d_half, wide * k * sizeof(__half)), "width F16 input");
+  q::NarrowActivations(d_x, d_half, false, wide * k, nullptr);
+  if (!q::DenseF16Gemm(d_w, d_half, d_wide, wide, m, k, nullptr))
+    throw std::runtime_error("F16 wide pass rejected");
+  std::vector<float> reference_f16(wide * m);
+  CheckHip(hipMemcpy(reference_f16.data(), d_wide, reference_f16.size() * 4,
+                     hipMemcpyDeviceToHost),
+           "width F16 wide download");
+  // Rows ending each 4,096-row launch group and starting the next, too.
+  const std::size_t group = 4096;
+  const std::size_t across = wide > group + 48 ? group - 48 : 0;
   std::size_t failures = 0;
-  for (const std::size_t rows : {1U, 7U, 9U, 95U, 96U}) {
-    for (const std::size_t first :
-         {std::size_t{0}, (wide - rows) / 2, wide - rows}) {
-      q::QuantizeQ8Tiled(d_x + first * k, d_tiled, rows, k, nullptr);
-      if (!q::W8A8Gemm(d_w, d_tiled, d_short, rows, m, k, nullptr))
-        throw std::runtime_error("W8A8 short pass rejected");
-      std::vector<float> actual(rows * m);
-      CheckHip(hipMemcpy(actual.data(), d_short, actual.size() * 4,
-                         hipMemcpyDeviceToHost),
-               "width short download");
-      std::size_t differ = 0;
-      for (std::size_t r = 0; r < rows; ++r)
-        differ += std::memcmp(actual.data() + r * m,
-                              reference.data() + (first + r) * m, m * 4) != 0;
-      if (differ != 0) {
-        std::cout << "W8A8 m=" << m << " k=" << k << ": " << differ << " of "
-                  << rows << " rows from " << first << " differ from the "
-                  << wide << "-row pass\n";
+  for (const bool f16 : {false, true}) {
+    const auto& expected = f16 ? reference_f16 : reference;
+    // F16 short passes keep the wide pass's tile plan (from 1,024 rows).
+    for (const std::size_t rows :
+         f16 ? std::vector<std::size_t>{1031, 4096}
+             : std::vector<std::size_t>{1, 7, 9, 95, 96, 1031, 4096}) {
+      if (rows > wide)
+        continue;
+      for (const std::size_t first :
+           {std::size_t{0}, (wide - rows) / 2, std::min(across, wide - rows),
+            wide - rows}) {
+        if (f16) {
+          if (!q::DenseF16Gemm(d_w, d_half + first * k, d_short, rows, m, k,
+                               nullptr))
+            throw std::runtime_error("F16 short pass rejected");
+        } else {
+          q::QuantizeQ8Tiled(d_x + first * k, d_tiled, rows, k, nullptr);
+          if (!q::W8A8Gemm(d_w, d_tiled, d_short, rows, m, k, nullptr))
+            throw std::runtime_error("W8A8 short pass rejected");
+        }
+        std::vector<float> actual(rows * m);
+        CheckHip(hipMemcpy(actual.data(), d_short, actual.size() * 4,
+                           hipMemcpyDeviceToHost),
+                 "width short download");
+        std::size_t differ = 0;
+        for (std::size_t r = 0; r < rows; ++r)
+          differ += std::memcmp(actual.data() + r * m,
+                                expected.data() + (first + r) * m, m * 4) != 0;
+        if (differ != 0) {
+          std::cout << (f16 ? "F16" : "W8A8") << " m=" << m << " k=" << k
+                    << ": " << differ << " of " << rows << " rows from "
+                    << first << " differ from the " << wide << "-row pass\n";
+        }
+        failures += differ;
       }
-      failures += differ;
     }
   }
   (void)hipFree(d_w);
   (void)hipFree(d_x);
+  (void)hipFree(d_half);
   (void)hipFree(d_tiled);
   (void)hipFree(d_wide);
   (void)hipFree(d_short);
   if (failures != 0)
-    throw std::runtime_error("W8A8 rows depend on the pass width");
-  std::cout << "W8A8 m=" << m << " k=" << k << " pass widths against " << wide
-            << " rows: exact\n";
+    throw std::runtime_error("projection rows depend on the pass width");
+  std::cout << "W8A8/F16 m=" << m << " k=" << k << " pass widths against "
+            << wide << " rows: exact\n";
 }
 
 }  // namespace
@@ -1298,6 +1328,10 @@ int main() {
     CheckW8A8PassWidths(2560, 6144, 1549, 0x5B6144U);
     CheckW8A8PassWidths(320, 10240, 1549, 0x5A0320U);
     CheckW8A8PassWidths(640, 2560, 1619, 0x5A0640U);
+    // Lone-prompt passes span several 4,096-row launch groups.
+    CheckW8A8PassWidths(320, 10240, 9001, 0x5C0320U);
+    CheckW8A8PassWidths(640, 2560, 9001, 0x5C0640U);
+    CheckW8A8PassWidths(2560, 6144, 9001, 0x5C6144U);
     bool ok = true;
     // Ragged batch and rows against the 128-wide macro tiles, the 64-token
     // tile below 96, and the model's ssm_out / shexp_down widths.
@@ -1321,6 +1355,11 @@ int main() {
     // HC down fusion: its first supported batch and a partial final tile.
     ok = Run(96, 320, 10240, 0x320A96U, 2) < 1e-2 && ok;
     ok = Run(2049, 320, 10240, 0x320A2049U, 2) < 1e-2 && ok;
+    // The fused projections over three launch groups and a partial tile.
+    ok = Run(9001, 16384, 2560, 0x16389001U, 2) < 1e-2 && ok;
+    ok = Run(9001, 13312, 2560, 0x13319001U, 2) < 1e-2 && ok;
+    ok = Run(9001, 10240, 320, 0x8A89001U, 2) < 1e-2 && ok;
+    ok = Run(9001, 320, 10240, 0x3209001U, 2) < 1e-2 && ok;
     return ok ? 0 : 1;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
