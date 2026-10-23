@@ -49,9 +49,11 @@ set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING "HIP architecture")
 if (ENGINE_ENABLE_HIP AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1151")
   message(FATAL_ERROR "Gufo kernels require CMAKE_HIP_ARCHITECTURES=gfx1151")
 endif()
-# Standard ROCm installations; custom prefixes use CMAKE_PREFIX_PATH.
+# Standard ROCm installations; custom prefixes use CMAKE_PREFIX_PATH. As a
+# system prefix /opt/rocm is searched after CMAKE_PREFIX_PATH in the
+# environment, so a development shell's ROCm wins over the host's.
 if (EXISTS /opt/rocm)
-  list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
+  list(APPEND CMAKE_SYSTEM_PREFIX_PATH /opt/rocm)
 endif()
 
 if (ENGINE_ENABLE_HIP)
