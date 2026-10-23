@@ -68,6 +68,22 @@ void Planning() {
   assert(plan[1].boundary == 2048 && plan[1].splits_pass);
   assert(plan[2].boundary == 4000 && !plan[2].splits_pass);
   assert(PlanCaptures(adapter, *slot, {}).empty());
+  // Grid points inside longer passes (Flash-Next prefills 4,096 rows) take a
+  // pass boundary instead of splitting the pass: 6144 -> 4096, 18432 ->
+  // 16384. The grid budget is unchanged.
+  adapter.SetPrefillPassRows(4096);
+  plan = PlanCaptures(adapter, *slot, {26541, 0, 0, 0, true, false, {}});
+  {
+    const std::vector<Rows> expected{4096, 12288, 16384, 24576, 26541};
+    assert(plan.size() == expected.size());
+    for (std::size_t i = 0; i < plan.size(); ++i)
+      assert(plan[i].boundary == expected[i] && !plan[i].splits_pass);
+  }
+  // Too close to the reused prefix, a point takes the pass end instead.
+  plan = PlanCaptures(adapter, *slot, {26541, 3000, 0, 0, true, false, {}});
+  assert(plan.size() >= 3 && plan[1].boundary == 7096 &&
+         plan[1].purpose == CheckpointPurpose::kGrid && !plan[1].splits_pass);
+  adapter.SetPrefillPassRows(2000);
   std::array<Rows, 1> retained{2048};
   plan = PlanCaptures(adapter, *slot, {4096, 0, 0, 0, true, false, retained});
   assert(plan.size() == 1 && plan[0].boundary == 4096);

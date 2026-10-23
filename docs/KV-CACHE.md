@@ -205,7 +205,10 @@ across the prompt; the final grid point is within 2,048 tokens of its end.
 Warm continuations skip grid positions less than 2,048 tokens beyond the reused
 frontier, and every request skips grid positions within 128 tokens of its end:
 such a point would split the final prefill pass for a checkpoint next to the
-complete prompt. Capture runs asynchronously while that session is frozen, so other
+complete prompt. A grid point inside a prefill pass longer than 2,176 tokens
+(Qwen3.8 Flash-Next prefills 4,096 per pass) moves to that pass's start, or
+to its end when the start is too close to the reused frontier: splitting the
+pass would read every weight once more. Capture runs asynchronously while that session is frozen, so other
 requests can continue; a single execution slot skips the extra worker. A
 request whose first token is already published decodes as soon as its capture
 finishes, before the next bounded prefill chunk of a peer.

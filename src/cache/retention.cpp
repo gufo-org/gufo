@@ -67,9 +67,16 @@ std::vector<CaptureCandidate> PlanCaptures(const Adapter& adapter,
     for (Rows i = 1; i <= count && planned < r.grid_limit; ++i) {
       Rows position = (grid / count * i + grid % count * i / count) * 2048;
       auto pass = std::ranges::upper_bound(passes, position);
-      if (pass != passes.begin() && position - *std::prev(pass) <= 128 &&
-          *std::prev(pass) > r.reused && *std::prev(pass) - r.reused >= 2048)
-        position = *std::prev(pass);
+      const Rows start = pass == passes.begin() ? r.reused : *std::prev(pass);
+      const bool start_usable = start > r.reused && start - r.reused >= 2048;
+      if (start_usable && position - start <= 128) {
+        position = start;
+      } else if (pass != passes.end() && *pass - start > 2048 + 128) {
+        // A point inside a pass longer than the grid interval would split
+        // that pass and read every weight once more; take its start, or its
+        // end when the start is too close to the reused prefix.
+        position = start_usable ? start : *pass;
+      }
       if (position > r.reused && position - r.reused >= 2048 &&
           r.prompt - position > 128) {
         add(position, CheckpointPurpose::kGrid, false);
