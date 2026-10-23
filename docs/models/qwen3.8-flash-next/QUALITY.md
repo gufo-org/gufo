@@ -49,6 +49,66 @@ all model jobs run serially, without overlapping builds. Scripts, binaries,
 hashes, full request logs, numerical dumps and initial observations remain in
 `/tmp/gufo-rocm10-20261023` on the test host. No reference benchmark data change.
 
+### Cross-compiler quantization check
+
+A matched first-layer capture locates an initial difference in Q8 activation
+rounding: embeddings, normalized inputs and stored scales agree, but 37 of
+327,680 codes differ. The 7.2.3 compiler contracts the scaled product into
+`roundf`'s fractional remainder; 10.1 materializes the product first.
+
+An independent CPU calculation follows the reference quantizer's FP32
+scale, reciprocal, product and round-away-from-zero steps. Among the 37
+differing codes, 10.1 agrees at 32 and 7.2.3 at five. Across the entire capture,
+14 codes differ from that reference on 10.1, versus 41 on 7.2.3; fast reciprocal
+arithmetic also differs from strict CPU division. Using a separate FP64
+calculation with the exact max/127 scale gives 24 versus 13 agreements among
+the differing codes. Neither compiler is an exact CPU oracle.
+
+Reproducing the old fused remainder on 10.1 restores the first mixing step
+byte for byte, but is rejected: it is less faithful to the independent
+quantizer and does not recover the sampled thinking speed. Its warm screen
+measures code/prose/thinking at 62.55/44.60/44.91 tok/s, versus unchanged 10.1's
+70.51/47.86/45.69. These free-running answers differ; the observations do not
+isolate execution cost. No rounding or sampling change is retained. This
+operator check does not establish overall language quality.
+
+### Focused performance measurements
+
+Focused production comparison against main `ab122e44`, with the selector-loop
+change as the candidate. Each compiler uses its matching patched ROCr runtime;
+ROCm 10.1 runs in a container. HTTP AR uses the canonical ordered d0/d32K
+pp2048/tg128 history. Sampled C1 rows use model defaults, 128 output tokens and
+an exact warm replay. Values below are tok/s, one capture per cell.
+
+| Workload | 7.2.3 main | 7.2.3 candidate | 10.1 main | 10.1 candidate |
+| --- | ---: | ---: | ---: | ---: |
+| AR prefill, d0 | 1796.29 | 1794.72 | 1791.06 | 1798.38 |
+| AR prefill, d32K | 1645.17 | 1650.79 | 1622.34 | 1647.64 |
+| AR generation, d0 | 28.91 | 28.90 | 28.90 | 28.96 |
+| AR generation, d32K | 28.84 | 28.88 | 28.92 | 28.93 |
+| Default-sampled code, warm | 62.66 | 62.66 | 70.50 | 70.51 |
+| Default-sampled prose, warm | 48.66 | 48.69 | 47.88 | 47.86 |
+| Default-sampled thinking, warm | 54.02 | 54.04 | 45.72 | 45.69 |
+
+The candidate preserves output and prompt/cache/draft counts within each
+compiler. Across compilers, sampled text and draft work differ: the thinking
+screen takes 38 draft rounds on 7.2.3 and 58 on 10.1. Its slower 10.1 result is
+also present on unchanged main; this is not a claim that every sampled answer
+is equally fast across compiler versions.
+
+Fixed-history MTP diagnostics separate that variation from execution cost.
+Across C1/C2 and widths 1–8, most initial 10.1 cycles are slightly faster.
+C1 widths 7/8 initially flag at 72.04/71.52 ms for target verification versus
+61.03/65.97 ms on 7.2.3. A reverse-order repeat of unchanged binaries gives
+58.67/63.56 ms on 10.1 and 59.04/63.94 ms on 7.2.3. The initial flags remain
+unqualified; they do not establish a persistent compiler regression. These
+diagnostics replay fixed tokens and report the median of three warmed cycles,
+not completed-answer throughput.
+
+Complete default-sampled extraction, executable URI-test generation and
+32K file-edit tool calls pass on both compilers, including edits with thinking
+on/off and preservation of literal protocol tags. The complete benchmark tables and reference data remain unchanged.
+
 ## Exact sampled decode, October 21, 2026
 
 The candidate retains target weights and forward arithmetic. Its compact
@@ -158,6 +218,73 @@ the focused reverse-order control is 53.30 → 55.29. Main proposes 93 versus
 Every completion still matches isolated AR. These different adaptive paths
 do not establish a branch speedup or an attributable slowdown. The raw flags,
 earlier controls and all retained observations remain available; no global
+timing pass is claimed.
+
+### Focused performance measurements
+
+Focused production comparison against main `0c03748a`, candidate `1d3b8c68`,
+with the same Nix toolchain, weights and ordered request histories. Model
+defaults are used for sampled requests; concurrency is physical, and the C>1
+rates sum the individual decode rates. These measurements qualify the decode
+changes separately from the complete October 18 benchmark tables. They do not
+refresh the reference data.
+
+| Workload | Main tok/s | Candidate tok/s |
+| --- | ---: | ---: |
+| Copy existing code, default sampling, C1 | 109.59 | 112.30 |
+| Generate new code, default sampling, C1 | 75.18 | 75.40 |
+| Generate prose, default sampling, C1 | 39.74 | 39.76 |
+| Thinking/code, default sampling, C1 | 51.93 | 52.05 |
+| Greedy code control, C1 | 70.42 | 70.51 |
+| Default-sampled copying, C2 aggregate | 132.93 | 135.45 |
+
+These 128-token screens retain identical outputs and prompt/cache counts;
+all 276 matched request/phase measurements pass the 5% and 3 ms gate. The
+screens measure speed, not complete coding-task accuracy.
+
+Earlier complete-workflow and mixed-cohort checks against main `da5d5a2b`,
+before rebasing onto the merged small-prefill changes, remain separate:
+
+| Workload | Main tok/s | Candidate tok/s |
+| --- | ---: | ---: |
+| Extraction with thinking, 726 tokens | 82.52 | 82.76 |
+| Generate and execute URI tests, 441 tokens | 78.54 | 78.79 |
+| File-edit tool call at 32K, thinking off | 76.42 | 77.01 |
+| File-edit tool call at 32K, thinking on | 72.40 | 72.47 |
+| Mixed greedy/default-sampled copying, C2 | 137.63 | 139.50 |
+| Mixed greedy/default-sampled copying, C4 | 200.22 | 202.94 |
+| Mixed greedy/default-sampled copying, C6 | 218.78 | 221.54 |
+| Mixed greedy/default-sampled copying, C8 | 237.34 | 240.87 |
+
+All outputs in these matched captures agree. The extraction, URI and file-edit
+fixtures check their actual results. A real Pi conversation also passes, with ten
+successful tool calls and executed assertions; its unseeded run is correctness
+evidence, not a matched speed claim.
+
+Canonical greedy pp2048/tg128 spots on current main and candidate use the
+original single-user context capacity and cache preparation:
+
+| Mode | Cached depth | Main PP | Candidate PP | Main TG | Candidate TG |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 0 | 1793.17 | 1792.97 | 28.87 | 28.88 |
+| AR | 32,768 | 1651.93 | 1650.85 | 28.74 | 28.77 |
+| MTP mixed | 0 | 1724.11 | 1727.57 | 36.18 | 36.31 |
+| MTP mixed | 32,768 | 1607.67 | 1605.39 | 40.56 | 40.51 |
+| MTP repetitive | 0 | 1737.22 | 1733.71 | 118.61 | 120.25 |
+| MTP repetitive | 32,768 | 1609.07 | 1609.65 | 113.61 | 115.07 |
+
+Concurrent greedy TG: repetitive C2 166.15 → 170.96, repetitive C8
+245.05 → 247.09, mixed C8 133.65 → 134.61 tok/s. All measured concurrent
+completions match isolated AR controls.
+
+Mixed C2 remains variable: the current pair is 62.17 → 55.30 tok/s and the
+focused reverse-order control is 53.30 → 55.29. The pre-rebase pair was
+62.17 → 55.36 and its reverse-order repeat was 53.30 → 64.03. Main proposes
+93 versus 39 drafts per response across its current runs; the final candidate
+proposes 56 in both. Both builds produce identical text. These observations do
+**not** establish a C2 speedup or a confirmed slowdown. Individual cache,
+queue and preparation timing flags remain visible in the
+quality record above; no blanket
 timing pass is claimed.
 
 ## Earlier qualification
