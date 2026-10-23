@@ -21,7 +21,9 @@
 #include <semaphore>
 #include <sstream>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -2639,6 +2641,100 @@ void TestQueryParameters() {
   assert(request.query_param("empty").empty());
 }
 
+// Stops the thread that writes a request's completion record, which the
+// server emits after the response is on the wire. This holds a worker in its
+// closing phase for as long as the test wants. The gate blocks while the
+// logger holds its mutex, so a probe request must log nothing at the default
+// level; GET /health qualifies.
+class CompletionGate final : public std::streambuf {
+public:
+  bool WaitUntilHeld() {
+    return held_.try_acquire_for(std::chrono::seconds(5));
+  }
+  void Release() {
+    open_.store(true);
+    released_.release();
+  }
+
+protected:
+  std::streamsize xsputn(const char* data, std::streamsize count) override {
+    if (!open_.load() &&
+        std::string_view(data, static_cast<std::size_t>(count))
+                .find("event=completed") != std::string_view::npos) {
+      held_.release();
+      released_.try_acquire_for(std::chrono::seconds(5));
+    }
+    return count;
+  }
+  int_type overflow(int_type character) override {
+    return traits_type::not_eof(character);
+  }
+
+private:
+  std::atomic<bool> open_{false};
+  std::binary_semaphore held_{0};
+  std::binary_semaphore released_{0};
+};
+
+std::string ReadFramedResponse(int fd) {
+  std::string response;
+  char buffer[4096];
+  std::size_t total = std::string::npos;
+  for (;;) {
+    const auto head = response.find("\r\n\r\n");
+    if (head != std::string::npos && total == std::string::npos) {
+      const auto length = response.find("Content-Length: ");
+      assert(length != std::string::npos && length < head);
+      total = head + 4 + std::stoul(response.substr(length + 16));
+    }
+    if (total != std::string::npos && response.size() >= total)
+      return response;
+    const auto count = ::read(fd, buffer, sizeof(buffer));
+    if (count <= 0)
+      return response;
+    response.append(buffer, static_cast<std::size_t>(count));
+  }
+}
+
+void TestConnectionLimitIgnoresClosingConnections() {
+  CompletionGate gate;
+  auto* previous_sink = std::clog.rdbuf(&gate);
+  {
+    RunningServer server({.max_connections = 2});
+    const int idle = server.Connect();
+    const int answered = server.Connect();
+
+    // Both slots hold a connection the server is still reading from.
+    const int refused = server.Connect();
+    const auto refusal = ReadFramedResponse(refused);
+    ExpectStatus(refusal, 503);
+    assert(refusal.find("connection limit reached") != std::string::npos);
+    net::CloseSocket(refused);
+
+    const std::string request =
+        "POST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nping";
+    assert(net::SendNoSignal(answered, request.data(), request.size()) ==
+           static_cast<ssize_t>(request.size()));
+    assert(ReadFramedResponse(answered).ends_with("ping"));
+    // The response is complete but the server has not closed the connection:
+    // its worker is parked writing the completion record.
+    assert(gate.WaitUntilHeld());
+
+    // A client that reads its response and reconnects at once must be served.
+    const int next = server.Connect();
+    const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+    assert(net::SendNoSignal(next, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    ExpectStatus(ReadFramedResponse(next), 200);
+
+    gate.Release();
+    net::CloseSocket(next);
+    net::CloseSocket(answered);
+    net::CloseSocket(idle);
+  }
+  std::clog.rdbuf(previous_sink);
+}
+
 void TestPeerDisconnect() {
   RunningServer server;
   server.backend->wait_for_disconnect = true;
@@ -3294,6 +3390,7 @@ int main() {
   TestResponseSamplingDefaults();
   TestCompatibilityUtf8();
   TestPeerDisconnect();
+  TestConnectionLimitIgnoresClosingConnections();
   TestStreamingFraming();
   TestSseHeartbeat();
   TestSseHeartbeatShutdown();

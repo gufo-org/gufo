@@ -210,7 +210,11 @@ These apply to every modality, before or after the subcommand:
   their own bounded queues. The embedding server serializes requests on a mutex
   and is bounded by `--max-connections`.
 - `maxConnections` — maximum simultaneous HTTP connections. In practice:
-  clients beyond the limit queue or are refused instead of piling up.
+  clients beyond the limit queue or are refused instead of piling up. A
+  connection stops counting once its response is fully written, so a client
+  that reads its reply and reconnects immediately is not refused while the
+  server is still closing the old connection. Connections that are only
+  closing can briefly add to the count of open sockets.
 - `maxRequestBytes` — maximum request body size. In practice: matters mostly
   for ASR, since requests carry whole audio files (the audio benchmark used
   32 MiB).
