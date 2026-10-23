@@ -12,6 +12,10 @@ The control uses the pinned ROCm 7.2.3 Nix toolchain, HIP Clang 22 and GCC
 and use the repository's matching ROCr queue-memory patch. Builds and
 inference run separately on the same machine with the same BF16 checkpoint.
 
+The final code is rebased onto `d4eaaad4` (Flash-Next-only changes). Both
+production binaries rebuild successfully; these models' HIP object hashes
+remain unchanged across the rebase.
+
 The optional Nix entry points are `nix build .#rocm10` and
 `nix develop .#rocm10`; the measurements here qualify the container build.
 The default Nix toolchain remains 7.2.3.
