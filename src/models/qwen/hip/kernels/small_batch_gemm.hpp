@@ -428,19 +428,25 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
   }
 }
 
+// Wave64 groups of eight, fourteen or sixteen tokens distribute their stores.
+template<std::size_t Batch, core::GgmlType WType,
+         std::uint32_t HardwareWaveSize>
+inline constexpr bool kKQuantDistributedOutput =
+    HardwareWaveSize == 64 &&
+    (Batch == 14 || Batch == 16 ||
+     (Batch == 8 &&
+      (WType == core::GgmlType::kQ4_K || WType == core::GgmlType::kQ5_K ||
+       WType == core::GgmlType::kIQ4_XS)));
+
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, core::GgmlType WType,
          std::size_t TilesPerStage = 1, std::uint32_t MinWaves = 12,
          std::size_t TokenGroups = 1, bool NarrowIndex = false,
          std::size_t TokensPerStep = Batch, std::uint32_t HardwareWaveSize = 32,
          std::uint32_t LogicalLanes = 32,
-         bool DistributedOutput = HardwareWaveSize == 64 &&
-                                  (Batch == 14 || Batch == 16 ||
-                                   (Batch == 8 &&
-                                    (WType == core::GgmlType::kQ4_K ||
-                                     WType == core::GgmlType::kQ5_K ||
-                                     WType == core::GgmlType::kIQ4_XS))),
-         bool FusedSwiGLU = false>
+         bool DistributedOutput =
+             kKQuantDistributedOutput<Batch, WType, HardwareWaveSize>,
+         bool FusedSwiGLU = false, bool Ragged = false>
 __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
                                            ? MinWaves * 32 / HardwareWaveSize
                                            : 1)) __global__
@@ -448,8 +454,13 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
                                              const float* __restrict__ x,
                                              float* __restrict__ y,
                                              std::size_t wide_m,
-                                             std::size_t wide_k) {
+                                             std::size_t wide_k,
+                                             std::size_t valid_rows = 0) {
   static_assert(TokensPerStep > 0 && Batch % TokensPerStep == 0);
+  // Ragged launches stage zeros for, and never store, tokens at or beyond
+  // valid_rows. Each token keeps its own partials, so real rows keep the bits
+  // of a full-width launch.
+  static_assert(!Ragged || (TokenGroups == 1 && !FusedSwiGLU));
   static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
   static_assert(LogicalLanes == 16 || LogicalLanes == 32);
   static_assert(LogicalLanes == 32 || TilesPerStage == 1);
@@ -507,7 +518,7 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
 #pragma unroll
         for (Index vector = 0; vector < kVectorsPerSub; ++vector) {
           float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
-          if (source_sub < num_sub) {
+          if (source_sub < num_sub && (!Ragged || token < valid_rows)) {
             value = *reinterpret_cast<const float4*>(
                 x + (token * k) + (source_sub * kSubElems) + (vector * 4));
           }
@@ -677,7 +688,8 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
       final[r] = ReduceKQuantColumns<kColumns, LogicalLanes / 2>(values);
     }
     const Index token = lane / kLanesPerToken;
-    if (lane % kLanesPerToken == 0 && token < Batch) {
+    if (lane % kLanesPerToken == 0 && token < Batch &&
+        (!Ragged || token < valid_rows)) {
       if constexpr (FusedSwiGLU) {
 #pragma unroll
         for (Index r = 0; r < RowsPerWave / 2; ++r) {
@@ -720,7 +732,8 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
         }
 #pragma unroll
         for (Index token = 0; token < Batch; ++token) {
-          y[(token * m) + row] = sums[0][r][token];
+          if (!Ragged || token < valid_rows)
+            y[(token * m) + row] = sums[0][r][token];
         }
       }
     }

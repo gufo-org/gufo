@@ -901,6 +901,33 @@ int main(int argc, char** argv) {
     TestSmallBatchExactness(format, 42, 17408, 5120);
     TestPackedProjectionSwiGLU(format);
   }
+  // Rows that would otherwise split run in one masked sixteen-row group; the
+  // guard rows check that no padded token is stored.
+  const FormatCase q5{Type::kQ5_K, "Q5_K"};
+  const FormatCase q6{Type::kQ6_K, "Q6_K"};
+  for (const auto batch : {9U, 12U, 13U, 15U, 25U})
+    TestSmallBatchExactness(q5, batch, 5120, 6144);
+  for (const auto batch : {9U, 12U, 13U})
+    TestSmallBatchExactness(q6, batch, 5120, 6144);
+  TestSmallBatchExactness(q6, 11, 5120, 17408);
+  TestSmallBatchExactness(q6, 10, 34816, 5120);
+  TestSmallBatchExactness(q6, 9, 17408, 5120);
+  // No masked Q6_K kernel covers this shape; the split route still runs.
+  TestSmallBatchExactness(q6, 13, 10240, 5120);
+  TestSmallBatchExactness(q4, 9, 10240, 5120);
+  TestSmallBatchExactness(q4, 11, 10240, 5120);
+  TestSmallBatchExactness(q4, 41, 10240, 5120);
+  TestSmallBatchExactness(q4, 14, 12288, 5120);
+  TestSmallBatchExactness(q4, 13, 5120, 6144);
+  TestSmallBatchExactness(q4, 13, 17408, 5120);
+  TestSmallBatchExactness(q5, 11, 10240, 5120);
+  TestSmallBatchExactness(q5, 9, 17408, 5120);
+  TestSmallBatchExactness(q5, 15, 17408, 5120);
+  TestSmallBatchExactness(iq4, 10, 17408, 5120);
+  TestSmallBatchExactness(iq4, 13, 17408, 5120);
+  TestSmallBatchExactness(iq4, 11, 6144, 5120);
+  TestSmallBatchExactness(iq4, 14, 6144, 5120);
+  TestSmallBatchExactness(iq4, 10, 5120, 6144);
   const std::pair<Type, Type> fused_formats[] = {
       {Type::kQ4_K, Type::kQ4_K},     {Type::kQ5_K, Type::kQ5_K},
       {Type::kIQ4_XS, Type::kIQ4_XS}, {Type::kQ4_K, Type::kQ5_K},

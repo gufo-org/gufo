@@ -12,10 +12,11 @@ namespace gufo::hip::detail {
 
 // Q4_K/Q5_K groups of sixteen rows, compiled with their qualified scheduler.
 // The caller validates the projection shape and group count (one to four).
+// A nonzero valid_rows masks one group to its first valid_rows tokens.
 void LaunchKQuantSixteenWave64(core::GgmlType type, const void* w,
                                const float* x, float* y, std::size_t m,
                                std::size_t k, hipStream_t stream,
-                               std::size_t groups);
+                               std::size_t groups, std::size_t valid_rows = 0);
 
 // Adjacent Qwen27B gate/up matrices with the activation fused into their
 // stores.

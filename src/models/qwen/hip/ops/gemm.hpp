@@ -125,10 +125,12 @@ namespace detail {
 
 /// Launches the exact wave64 kernel for measured Qwen27B verification shapes.
 /// Returns false without launching for other widths, shapes and formats.
+/// A nonzero valid_rows runs one sixteen-row group (batch 16, groups 1) masked
+/// to its first 9-15 tokens; padded tokens are neither read nor stored.
 [[nodiscard]] bool TryLaunchKQuantSmallBatchWave64(
     core::GgmlType type, const void* w, const float* x, float* y,
     std::size_t batch, std::size_t m, std::size_t k, hipStream_t stream,
-    std::size_t groups = 1);
+    std::size_t groups = 1, std::size_t valid_rows = 0);
 
 [[nodiscard]] bool TryLaunchQ8SmallBatchWave64(const void* w, const float* x,
                                                float* y, std::size_t batch,

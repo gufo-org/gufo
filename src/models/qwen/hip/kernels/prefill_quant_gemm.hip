@@ -1820,10 +1820,19 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
             launch_q8.template operator()<16>(input, output);
             break;
         }
-      } else if (width != 0 &&
+      } else if (width == remaining &&
                  detail::TryLaunchKQuantSmallBatchWave64(type, w, input, output,
                                                          width, m, k, stream)) {
         // The native dispatcher owns the qualified K-quant shapes.
+      } else if (remaining > 8 && remaining < 16 &&
+                 detail::TryLaunchKQuantSmallBatchWave64(
+                     type, w, input, output, 16, m, k, stream, 1, remaining)) {
+        // A masked sixteen-row pass reads the weights once instead of twice.
+        width = remaining;
+      } else if (width != 0 && width != remaining &&
+                 detail::TryLaunchKQuantSmallBatchWave64(type, w, input, output,
+                                                         width, m, k, stream)) {
+        // A sixteen-row group leaves a tail for the next pass.
       } else {
         width = std::min<std::size_t>(8, remaining);
         LaunchBatchedQuantGEMMFp32(type, w, input, output, width, m, k, stream);
