@@ -586,6 +586,54 @@ void CheckDenseAcrossStreams() {
     CheckHip(hipFree(p), "free");
 }
 
+// A new stream's arena starts small. A batch whose Q8 activations outgrow it
+// adds a block, a small batch after that folds the blocks back into one, and
+// every output matches the same launch on the default stream.
+void CheckArenaGrowth() {
+  constexpr std::size_t m = 2560, k = 6144, small = 8, large = 4096;
+  const Q8Weights w = MakeWeights(m, k, 0x6A0E1A11U);
+  std::vector<float> x(large * k);
+  std::uint32_t state = 0x6A0E1A12U;
+  for (float& v : x)
+    v = Uniform(&state, 2.0F);
+  void* d_w = nullptr;
+  float* d_x = nullptr;
+  float* d_y = nullptr;
+  CheckHip(hipMalloc(&d_w, w.blocks.size() + 4096), "hipMalloc");
+  CheckHip(hipMalloc(&d_x, x.size() * 4), "hipMalloc");
+  CheckHip(hipMalloc(&d_y, large * m * 4), "hipMalloc");
+  CheckHip(
+      hipMemcpy(d_w, w.blocks.data(), w.blocks.size(), hipMemcpyHostToDevice),
+      "upload");
+  CheckHip(hipMemcpy(d_x, x.data(), x.size() * 4, hipMemcpyHostToDevice),
+           "upload");
+  const auto dense = [&](std::size_t batch, hipStream_t stream) {
+    if (qfn_mmq_q8_0_dense(d_w, d_x, d_y, static_cast<int>(m),
+                           static_cast<int>(batch), static_cast<int>(k),
+                           stream) != 0)
+      throw std::runtime_error("MMQ dense failed");
+    CheckHip(hipStreamSynchronize(stream), "dense");
+    std::vector<float> y(batch * m);
+    CheckHip(hipMemcpy(y.data(), d_y, y.size() * 4, hipMemcpyDeviceToHost),
+             "download");
+    return y;
+  };
+  const std::vector<float> want_small = dense(small, nullptr);
+  const std::vector<float> want_large = dense(large, nullptr);
+  hipStream_t stream = nullptr;
+  CheckHip(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking), "stream");
+  for (int round = 0; round < 2; ++round) {
+    if (dense(small, stream) != want_small)
+      throw std::runtime_error("MMQ dense differs on a small arena");
+    if (dense(large, stream) != want_large)
+      throw std::runtime_error("MMQ dense differs after the arena grew");
+  }
+  qfn_mmq_release_stream(stream);
+  CheckHip(hipStreamDestroy(stream), "stream destroy");
+  for (void* p : {d_w, static_cast<void*>(d_x), static_cast<void*>(d_y)})
+    CheckHip(hipFree(p), "free");
+}
+
 double Run(std::size_t batch, std::size_t m, std::size_t k, std::uint32_t seed,
            std::size_t reference_tokens = 0) {
   const Q8Weights w = MakeWeights(m, k, seed);
@@ -1013,6 +1061,7 @@ int main() {
       throw std::runtime_error("prepare quantized decode projections");
     CheckRoutedQ8Placement();
     CheckDenseAcrossStreams();
+    CheckArenaGrowth();
     CheckSmallProjection(q::WeightType::kF32, 513, 2560);
     CheckSmallProjection(q::WeightType::kF32, 96, 2560);
     CheckSmallProjection(q::WeightType::kBF16, 129, 2560);

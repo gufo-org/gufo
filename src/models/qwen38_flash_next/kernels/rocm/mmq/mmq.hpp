@@ -4129,7 +4129,7 @@ static void launch_mul_mat_q(ggml_backend_hip_context & ctx, const mmq_args & ar
 
     const bool fixup_needed = ntiles_dst % block_nums_stream_k.x != 0;
 
-    ggml_hip_pool & pool = ctx.pool(id);
+    ggml_hip_pool & pool = qfn_pool_for_stream(id, stream);
     ggml_hip_pool_alloc<float> tmp_fixup(pool);
     if (fixup_needed) {
         tmp_fixup.alloc(block_nums_stream_k.x * mmq_x*mmq_y);
