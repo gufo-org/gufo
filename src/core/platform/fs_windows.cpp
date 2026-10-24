@@ -466,6 +466,45 @@ bool OwnerOnly(const FileInfo&, std::uint32_t) noexcept {
   return true;
 }
 
+PlatformFile OpenForAppend(const std::filesystem::path& path,
+                           std::error_code& ec) noexcept {
+  ec.clear();
+  // FILE_WRITE_DATA lets Truncate cut a torn record back; callers seek to
+  // the end before every write, so appends still land at the end.
+  HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA | FILE_WRITE_DATA,
+                            kDirectoryShare, nullptr, OPEN_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    ec = LastError();
+    return kInvalidFile;
+  }
+  return file;
+}
+
+std::uint64_t SeekToEnd(PlatformFile file, std::error_code& ec) noexcept {
+  ec.clear();
+  LARGE_INTEGER distance{};
+  LARGE_INTEGER end{};
+  if (!SetFilePointerEx(file, distance, &end, FILE_END)) {
+    ec = LastError();
+    return 0;
+  }
+  return static_cast<std::uint64_t>(end.QuadPart);
+}
+
+bool Truncate(PlatformFile file, std::uint64_t bytes,
+              std::error_code& ec) noexcept {
+  ec.clear();
+  LARGE_INTEGER distance{};
+  distance.QuadPart = static_cast<LONGLONG>(bytes);
+  if (!SetFilePointerEx(file, distance, nullptr, FILE_BEGIN) ||
+      !SetEndOfFile(file)) {
+    ec = LastError();
+    return false;
+  }
+  return true;
+}
+
 bool RestrictToOwner(const std::filesystem::path&) noexcept {
   // No-op: access follows the directory's inherited ACLs.
   return true;

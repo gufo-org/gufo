@@ -269,14 +269,16 @@ def find_bundler(explicit: str | None) -> str | None:
             raise SystemExit(f"offload bundler not found: {explicit}")
         return explicit
     if os.environ.get("HIP_CLANG"):
-        candidate = os.path.join(os.path.dirname(os.environ["HIP_CLANG"]), "clang-offload-bundler")
+        candidate = os.path.join(os.path.dirname(os.environ["HIP_CLANG"]),
+                                "clang-offload-bundler").replace(os.sep, "/")
         if os.path.isfile(candidate):
             return candidate
     hipconfig = shutil.which("hipconfig")
     if hipconfig:
         result = subprocess.run([hipconfig, "-l"], capture_output=True, text=True, timeout=10)
         if result.returncode == 0 and result.stdout.strip():
-            candidate = os.path.join(result.stdout.strip(), "clang-offload-bundler")
+            candidate = os.path.join(result.stdout.strip(),
+                               "clang-offload-bundler").replace(os.sep, "/")
             if os.path.isfile(candidate):
                 return candidate
     return shutil.which("clang-offload-bundler")

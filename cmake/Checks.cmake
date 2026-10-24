@@ -50,9 +50,35 @@ list(APPEND gufo_pr_tests
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test
   kernel_resources_parser_test check_docs_test check_pr_title_test)
+if (WIN32)
+  # Linux-only hosted suites: RLIMIT_FSIZE and fork()-based tests, the
+  # dup2/mmap fixture tests, the permission-fault disk-store cases, the
+  # cache tests that fork or wrap libc symbols, and the HTTP runtime with
+  # its suites until the runtime-correctness work lands.
+  list(REMOVE_ITEM gufo_pr_targets
+    gguf_reader_test gguf_identity_test platform_publish_test
+    platform_prefault_test trace_test http_server_signals_test
+    http_server_test audio_websocket_test continuation_disk_store_test
+    component_text_cache_test text_model_runner_test
+    text_generation_scheduler_test eval_http_client_test bandwidth_test
+    allocation_benchmark_test
+    cache_adapter_test cache_slot_test cache_disk_test cache_streaming_test
+    cache_tiered_test cache_disk_publication_test)
+  list(REMOVE_ITEM gufo_pr_tests
+    gguf_reader_test gguf_identity_test platform_publish_test
+    platform_prefault_test trace_test http_server_signals_test
+    http_server_test audio_websocket_test continuation_disk_store_test
+    component_text_cache_test text_model_runner_test
+    text_generation_scheduler_test eval_http_client_test bandwidth_test
+    allocation_benchmark_test cache_disk_faults_test cache_boundary_test
+    cache_adapter_test cache_slot_test cache_disk_test cache_streaming_test
+    cache_tiered_test cache_disk_publication_test)
+endif()
+
 list(JOIN gufo_pr_tests "|" gufo_pr_pattern)
 add_custom_target(check-pr
   COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --no-tests=error
     --timeout 60 -R "^(${gufo_pr_pattern})$"
-  DEPENDS gufo ${gufo_pr_targets} cache_disk_faults
+  DEPENDS $<$<NOT:$<BOOL:${WIN32}>>:gufo> ${gufo_pr_targets}
+    $<$<NOT:$<BOOL:${WIN32}>>:cache_disk_faults>
   USES_TERMINAL VERBATIM)

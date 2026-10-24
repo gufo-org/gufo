@@ -1,4 +1,3 @@
-#include <arpa/inet.h>
 #include <webp/encode.h>
 
 #include <algorithm>
@@ -11,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "src/core/platform/net.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 

@@ -107,6 +107,14 @@ private:
 PlatformFile OpenAt(const Directory& dir, std::string_view name, FileMode mode,
                     std::error_code& ec) noexcept;
 
+/// Opens `path` for appending, creating it with owner-only permissions.
+/// Unlike OpenAt it follows symlinks and accepts devices and pipes, so
+/// user-chosen sinks such as /dev/stdout work. The handle may also be
+/// truncated (Truncate) to cut back a torn record. Returns kInvalidFile and
+/// sets `ec` on failure.
+PlatformFile OpenForAppend(const std::filesystem::path& path,
+                           std::error_code& ec) noexcept;
+
 /// Opens the subdirectory `name` of `dir`; `name` may be "." or "..".
 /// Returns an invalid Directory on failure.
 Directory OpenDirectoryAt(const Directory& dir, std::string_view name,
@@ -204,6 +212,15 @@ std::size_t Read(PlatformFile file, void* output, std::size_t bytes,
 /// file position; nothing may mix Read and ReadAt on one handle.
 std::size_t ReadAt(PlatformFile file, std::uint64_t offset, void* output,
                    std::size_t bytes, std::error_code& ec) noexcept;
+
+/// Moves the read/write position to the end of the file. Returns the file
+/// size in bytes, or 0 with `ec` set on failure.
+std::uint64_t SeekToEnd(PlatformFile file, std::error_code& ec) noexcept;
+
+/// Sets the file size to `bytes`, shrinking or growing like ftruncate(2).
+/// Returns false and sets `ec` on failure.
+bool Truncate(PlatformFile file, std::uint64_t bytes,
+              std::error_code& ec) noexcept;
 
 /// Owner-consistency policy for files written by this user. POSIX requires
 /// the file to belong to the current user and to carry none of the

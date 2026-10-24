@@ -33,7 +33,34 @@ def timing_checks(model, reasons):
     return checks
 
 
+# One quick suite per selected model for the Windows PR smoke: the same models
+# as the Linux plan, but correctness only, one group each.
+SMOKE_SUITES = {'llm': 'stops', 'embedding': 'embedding-text', 'asr': 'asr-http', 'tts': 'tts-http'}
+
+
+def smoke(result, data, manifest):
+    groups = []
+    for model in result['models']:
+        model['timing_checks'] = []
+        category = data['models'][model['id']]['category']
+        if category == 'llm':
+            profile = model['id'] + '/' + data['models'][model['id']]['mode']
+            settings = dict(manifest['configurations']['standard'])
+        else:
+            profile, settings = model['id'] + '/native', {}
+        groups.append({'profile': profile, 'configuration': 'standard', 'settings': settings,
+                       'suites': [SMOKE_SUITES[category]]})
+    for field in ('deferred', 'release_only', 'out_of_scope', 'obligations'):
+        result[field] = []
+    result.update(tier='smoke', groups=groups, benchmark=False,
+                  timing_qualification='none: Windows smoke runs correctness only')
+    return result
+
+
 def select(paths, data, tier='pr', ar=False, benchmark=False):
+    if tier == 'smoke':
+        manifest = json.loads((HERE / 'impact.json').read_text())
+        return smoke(select(paths, data, 'pr'), data, manifest)
     manifest = json.loads((HERE / 'impact.json').read_text())
     impact.validate(manifest, impact.suite_names(HERE / 'run.py'))
     selected, resolutions = {}, []
@@ -89,7 +116,7 @@ def main():
     parser.add_argument('--repo', type=Path)
     parser.add_argument('--base')
     parser.add_argument('--head')
-    parser.add_argument('--tier', choices=('pr', 'full'), default='pr')
+    parser.add_argument('--tier', choices=('pr', 'full', 'smoke'), default='pr')
     parser.add_argument('--ar', action='store_true')
     parser.add_argument('--benchmark', action='store_true')
     parser.add_argument('--output', type=Path, required=True)

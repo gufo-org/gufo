@@ -159,6 +159,37 @@ class ExecutionTest(unittest.TestCase):
         self.assertEqual(len(observed['groups']), 2)
 
 
+    def test_smoke_keeps_the_selection_with_one_suite_and_no_timing(self):
+        paths = ['src/models/qwen38_flash_next/engine.cpp', 'src/cli/serve/audio_tts_api.cpp']
+        pr = devlab_plan.select(paths, devlab_models.registry())
+        plan = devlab_plan.select(paths, devlab_models.registry(), 'smoke')
+        self.assertEqual([m['id'] for m in plan['models']], [m['id'] for m in pr['models']])
+        self.assertEqual({(g['profile'], tuple(g['suites'])) for g in plan['groups']},
+                         {('flash-next-q4/mtp', ('stops',)), ('qwen3-tts-base/native', ('tts-http',))})
+        self.assertTrue(all(m['timing_checks'] == [] for m in plan['models']))
+        self.assertEqual(plan['deferred'], [])
+        plan.update(base='a'*40, head='b'*40)
+        calls = []
+        def run(args, **kwargs):
+            calls.append(args)
+            output = Path(args[args.index('--output')+1])
+            output.mkdir()
+            (output/'report.json').write_text(json.dumps({'status': 'passed'}))
+            return subprocess.CompletedProcess(args, 0)
+        tts = {**plan, 'models': [m for m in plan['models'] if m['id'] == 'qwen3-tts-base']}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = root/'assets.json'
+            assets.write_text(json.dumps({'asr': '/asr', 'tts-base': '/tts'}))
+            with patch('devlab_run.subprocess.run', side_effect=run):
+                code = devlab_run.execute(tts, Path('/head'), None, assets,
+                                          root/'results', root/'report', root/'logs', timing=False)
+            observed = json.loads((root/'report/summary.json').read_text())
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)  # No paired timing run.
+        self.assertEqual(calls[0][calls[0].index('--asr-binary')+1], '/head')
+        self.assertEqual(observed['models'][0]['timing'], 'skipped')
+
 
 class TimingTest(unittest.TestCase):
     def arms(self):

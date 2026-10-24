@@ -14,7 +14,11 @@ endfunction()
 
 add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(continuation_layout gufo_qwen38_flash_next "cpu")
+# The n-gram table opens POSIX file descriptors; the portable path lands
+# with the n-gram runtime work.
+if (NOT WIN32)
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
+endif()
 add_qwen38_flash_next_test(mtp_sampling gufo_core "cpu")
 add_qwen38_flash_next_test(rope_scaling gufo_qwen38_flash_next "cpu")
 # The HF-oracle/off-bit-identity checks link the scalar model oracle, so

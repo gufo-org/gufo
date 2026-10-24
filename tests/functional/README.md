@@ -253,6 +253,13 @@ so tests added on main never run against a PR binary that predates them. The
 merge's main parent is the diff base and the timing baseline. The GPU controller
 recreates the hosted plan from the merge commit.
 
+The Windows job (`[windows, strix-halo, devlab-dispatch]`) uses the same
+authorization and model selection. Its PRs use the `smoke` tier: one quick
+suite per selected model (`stops` for LLMs, `embedding-text`, `asr-http`,
+`tts-http`). Release-please PRs and full dispatches run the `full` correctness
+set. Windows runs correctness only (`devlab_run.py --no-timing`): no merge-base
+build and no paired timing.
+
 `devlab_plan.py` selects owners per path using reviewed priority rules in
 `devlab.json`, then uses `impact.py` for each selected LLM's affected suites.
 Selections from separate paths are combined:

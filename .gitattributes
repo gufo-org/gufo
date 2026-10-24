@@ -1,0 +1,4 @@
+# Reference templates are byte-compared; never let autocrlf re-mangle them.
+*.jinja text eol=lf
+# cmd.exe parses batch files reliably only with CRLF line endings.
+*.cmd text eol=crlf

@@ -100,7 +100,9 @@ def execute(plan, binary, weights, output, assets=None):
     rows = []
     for group in plan["groups"]:
         name = group["profile"].replace("/", "-") + "-" + group["configuration"]
-        args = command(group, binary, weights, output / name, plan.get("tier", "full"), assets)
+        # The smoke plan already picked its suites; each runs its trimmed pr matrix.
+        tier = "pr" if plan.get("tier") == "smoke" else plan.get("tier", "full")
+        args = command(group, binary, weights, output / name, tier, assets)
         print("Running", name, ":", ", ".join(group["suites"]), flush=True)
         log_path = output / (name + ".log")
         with log_path.open("w") as log:

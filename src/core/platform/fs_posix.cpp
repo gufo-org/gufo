@@ -379,6 +379,36 @@ bool OwnerOnly(const FileInfo& info, std::uint32_t forbidden) noexcept {
   return info.user_id == ::geteuid() && (info.permissions & forbidden) == 0;
 }
 
+PlatformFile OpenForAppend(const std::filesystem::path& path,
+                           std::error_code& ec) noexcept {
+  ec.clear();
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+                        S_IRUSR | S_IWUSR);
+  if (fd < 0)
+    ec = Errno();
+  return fd;
+}
+
+std::uint64_t SeekToEnd(PlatformFile file, std::error_code& ec) noexcept {
+  ec.clear();
+  const off_t end = ::lseek(file, 0, SEEK_END);
+  if (end < 0) {
+    ec = Errno();
+    return 0;
+  }
+  return static_cast<std::uint64_t>(end);
+}
+
+bool Truncate(PlatformFile file, std::uint64_t bytes,
+              std::error_code& ec) noexcept {
+  ec.clear();
+  if (::ftruncate(file, static_cast<off_t>(bytes)) != 0) {
+    ec = Errno();
+    return false;
+  }
+  return true;
+}
+
 bool RestrictToOwner(const std::filesystem::path& path) noexcept {
   return ::chmod(path.c_str(), 0700) == 0;
 }

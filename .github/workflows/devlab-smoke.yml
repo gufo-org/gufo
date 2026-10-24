@@ -535,6 +535,291 @@ jobs:
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+  windows:
+    name: Selected model checks on Windows Strix Halo
+    needs: authorize
+    if: needs.authorize.outputs.has_work == 'true'
+    runs-on: [ windows, strix-halo, devlab-dispatch ]
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Git Bash passes Windows paths to native tools unmodified.
+      MSYS_NO_PATHCONV: 1
+    steps:
+      # Same selection as the Linux job. Pull requests run one quick suite per
+      # selected model (the smoke tier); release PRs and full dispatches run
+      # the complete correctness set. Windows runs correctness only: no merge
+      # base build and no paired timing.
+      - name: Clean workspace and check disk space
+        run: |
+          set -euo pipefail
+          rm -rf -- candidate functional-results functional-report functional-plan.json functional-assets.json phase-logs
+          cache_root="${GUFO_CI_CACHE:-$RUNNER_TOOL_CACHE/gufo}"
+          mkdir -p "$cache_root"
+          printf 'GUFO_CACHE_ROOT=%s\n' "$cache_root" >> "$GITHUB_ENV"
+          tier=smoke
+          [[ "$APPROVED_TIER" == full ]] && tier=full
+          printf 'WINDOWS_TIER=%s\n' "$tier" >> "$GITHUB_ENV"
+          df -h "$GITHUB_WORKSPACE" "$cache_root"
+        env:
+          APPROVED_TIER: ${{ needs.authorize.outputs.tier }}
+
+      - name: Verify platform and gfx1151, inventory available tools
+        run: |
+          set -euo pipefail
+          printf '## Devlab Windows Strix Halo check (%s tier)\n\n' "$WINDOWS_TIER" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$RUNNER_OS" == Windows && "$RUNNER_ARCH" == X64 ]] || {
+            echo "::error::The Windows job requires Windows x86-64."
+            exit 1
+          }
+          # Strix Halo's gfx1151 ships as the Radeon 8040S/8050S/8060S. The
+          # HIP enumeration check follows once the SDK is provisioned.
+          adapters=$(powershell -NoProfile -Command \
+            "(Get-CimInstance Win32_VideoController).Name -join ';'")
+          echo "Display adapters: $adapters"
+          adapter='Radeon(\(TM\))? 80[456]0S'
+          [[ "$adapters" =~ $adapter ]] || {
+            echo "::error::No Strix Halo (gfx1151) display adapter."
+            exit 1
+          }
+          verification='display adapter name'
+          printf -- '- Windows x86-64: verified\n- gfx1151: verified (%s)\n' "$verification" >> "$GITHUB_STEP_SUMMARY"
+          for tool in cmake ninja clang-cl python git ccache vcpkg; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              printf -- '- %s: available\n' "$tool" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf -- '- %s: not on PATH\n' "$tool" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          powershell -NoProfile -Command \
+            "'Host-visible memory: {0:N1} GiB' -f ((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)"
+          powercfg /getactivescheme || true
+
+      - name: Checkout workflow and test harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: controller
+
+      - name: Recreate selection plan and candidate checkout
+        timeout-minutes: 5
+        env:
+          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
+          APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
+        run: |
+          set -euo pipefail
+          git init --initial-branch=ci candidate
+          git -C candidate -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
+            fetch --depth 1 https://github.com/gufo-org/gufo.git "$APPROVED_HEAD" "$APPROVED_BASE"
+          git -C candidate checkout --detach "$APPROVED_HEAD"
+          python controller/tests/functional/devlab_plan.py --repo candidate --base "$APPROVED_BASE" \
+            --head "$APPROVED_HEAD" --tier "$WINDOWS_TIER" --output functional-plan.json
+          python - <<'PYPLAN'
+          import json, os
+          plan = json.load(open('functional-plan.json'))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"\nTier `{plan['tier']}`:\n")
+              for group in plan['groups']:
+                  summary.write(f"- **{group['profile']}**: {', '.join(group['suites'])}\n")
+          PYPLAN
+
+      # The ephemeral runner carries no SDK or C++ package manager: the job
+      # provisions a pinned TheRock gfx1151 nightly (HIP_PATH) and vcpkg at
+      # the vcpkg.json baseline (VCPKG_ROOT). vcpkg's built packages persist
+      # in the Actions cache, keyed by the manifest.
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/vcpkg-archives
+          key: gufo-vcpkg-v1-${{ runner.os }}-${{ hashFiles('candidate/vcpkg.json') }}
+          restore-keys: |
+            gufo-vcpkg-v1-${{ runner.os }}-
+
+      # The 2.4 GiB SDK archive is cached too: the next runs skip the download.
+      - name: Restore TheRock SDK archive
+        id: therock-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/therock-archive
+          key: gufo-therock-v1-therock-dist-windows-gfx1151-7.14.0a20260612
+
+      - name: Provision the TheRock SDK and vcpkg
+        id: provision
+        env:
+          THEROCK_TARBALL: therock-dist-windows-gfx1151-7.14.0a20260612.tar.gz
+        run: |
+          set -euo pipefail
+          toolchain="$RUNNER_TEMP/gufo-toolchain"
+          archive="$RUNNER_TEMP/therock-archive/$THEROCK_TARBALL"
+          rm -rf -- "$toolchain"
+          mkdir -p "$toolchain/therock" "$RUNNER_TEMP/vcpkg-archives" "$RUNNER_TEMP/therock-archive"
+          if [[ ! -f "$archive" ]]; then
+            # The CloudFront mirror of the nightly bucket: the raw S3 endpoint
+            # crawls at tens of KB/s from this runner. Stalls below 1 MB/s for
+            # two minutes fail the job instead of running into the timeout.
+            curl -fL --retry 3 --retry-delay 10 --speed-limit 1048576 --speed-time 120 \
+              --no-progress-meter -o "$archive.part" \
+              "https://rocm.nightlies.amd.com/tarball/$THEROCK_TARBALL"
+            mv -- "$archive.part" "$archive"
+          fi
+          echo "archive=ready" >> "$GITHUB_OUTPUT"
+          # --force-local: GNU tar would read "C:..." as a remote host.
+          tar --force-local -xzf "$archive" -C "$toolchain/therock"
+          baseline=$(python -c 'import json; print(json.load(open("candidate/vcpkg.json"))["builtin-baseline"])')
+          git clone --quiet https://github.com/microsoft/vcpkg.git "$toolchain/vcpkg"
+          git -C "$toolchain/vcpkg" checkout --quiet --detach "$baseline"
+          cmd.exe /d /c "$(cygpath -w "$toolchain/vcpkg/bootstrap-vcpkg.bat") -disableMetrics"
+          {
+            printf 'HIP_PATH=%s\n' "$(cygpath -w "$toolchain/therock")"
+            printf 'VCPKG_ROOT=%s\n' "$(cygpath -w "$toolchain/vcpkg")"
+            printf 'VCPKG_DEFAULT_BINARY_CACHE=%s\n' "$(cygpath -w "$RUNNER_TEMP/vcpkg-archives")"
+          } >> "$GITHUB_ENV"
+          printf -- '- TheRock: %s\n- vcpkg baseline: %s\n' "$THEROCK_TARBALL" "$baseline" >> "$GITHUB_STEP_SUMMARY"
+          "$toolchain/therock/bin/hipInfo.exe" | tee "$RUNNER_TEMP/devlab-hipinfo.txt"
+          grep -Eq 'gfx1151' "$RUNNER_TEMP/devlab-hipinfo.txt" || {
+            echo "::error::HIP did not enumerate a gfx1151 device."
+            exit 1
+          }
+          printf -- '- gfx1151: verified (HIP device enumeration)\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure compiler cache
+        run: |
+          set -euo pipefail
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "::notice::ccache is not installed; builds start from scratch."
+            exit 0
+          fi
+          {
+            printf 'CCACHE_DIR=%s\n' "$GUFO_CACHE_ROOT/ccache"
+            printf 'CCACHE_BASEDIR=%s\n' "$GITHUB_WORKSPACE"
+            printf 'CCACHE_MAXSIZE=20G\n'
+            for language in C CXX HIP; do
+              printf 'CMAKE_%s_COMPILER_LAUNCHER=ccache\n' "$language"
+            done
+          } >> "$GITHUB_ENV"
+          CCACHE_DIR="$GUFO_CACHE_ROOT/ccache" ccache --zero-stats
+
+      # MSVC 14.40+ clashes with clang's HIP math headers; the script is
+      # idempotent and the ephemeral runner starts from a clean SDK.
+      - name: Patch the HIP SDK math headers
+        run: python candidate/tools/windows/patch_sdk_math.py "$HIP_PATH"
+
+      # A Windows step ends with its process tree, so the downloads overlap the
+      # build inside one step instead of running in the background across steps.
+      - name: Build Gufo and fetch the selected weights
+        id: build
+        run: |
+          set -euo pipefail
+          (
+            set -euo pipefail
+            python -m venv "$RUNNER_TEMP/gufo-hf-cli"
+            "$RUNNER_TEMP/gufo-hf-cli/Scripts/python.exe" -m pip install 'huggingface_hub[hf_xet]==1.26.0'
+            export HF_ENDPOINT=https://huggingface.co HF_HUB_DISABLE_XET=0 HF_XET_HIGH_PERFORMANCE=1
+            export HF_HUB_DOWNLOAD_TIMEOUT=120 HF_HUB_ETAG_TIMEOUT=60 HF_HOME="$GUFO_CACHE_ROOT/huggingface"
+            "$RUNNER_TEMP/gufo-hf-cli/Scripts/python.exe" controller/tests/functional/devlab_models.py \
+              --plan functional-plan.json --cache "$GUFO_CACHE_ROOT/models" --output functional-assets.json
+          ) > "$RUNNER_TEMP/gufo-weights.log" 2>&1 < /dev/null &
+          downloads=$!
+          build=0
+          (
+            cd candidate
+            printf 'Candidate: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+            cmd.exe /d /c "call tools\\windows\\vs-env.cmd cmake --preset windows-release && call tools\\windows\\vs-env.cmd cmake --build --preset windows-release --parallel 4"
+            [[ -f build/windows-release/gufo.exe ]] || {
+              echo "::error::build/windows-release/gufo.exe was not built."
+              exit 1
+            }
+            ./build/windows-release/gufo.exe diagnose
+          ) || build=$?
+          weights=0
+          if [[ "$build" != 0 ]]; then
+            # Nothing can use the weights: fail now. The step's process tree,
+            # downloader included, ends with it.
+            kill "$downloads" 2>/dev/null || true
+            echo "::error::The Windows build failed ($build)."
+            exit 1
+          fi
+          wait "$downloads" || weights=$?
+          tr '\r' '\n' < "$RUNNER_TEMP/gufo-weights.log" | grep -v '^\s*$' | tail -n 60
+          [[ "$weights" == 0 ]] || echo "::error::Selected-model downloads failed ($weights)."
+          [[ "$build" == 0 && "$weights" == 0 ]]
+
+      - name: Save TheRock SDK archive
+        if: always() && steps.therock-cache.outputs.cache-hit != 'true' && steps.provision.outputs.archive == 'ready'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/therock-archive
+          key: gufo-therock-v1-therock-dist-windows-gfx1151-7.14.0a20260612
+
+      # Saved even when the build fails, so the next run skips the packages
+      # that did build.
+      - name: Save vcpkg binary cache
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/vcpkg-archives
+          key: gufo-vcpkg-v1-${{ runner.os }}-${{ hashFiles('candidate/vcpkg.json') }}
+
+      - name: Install functional client dependencies
+        id: client
+        run: |
+          python -m venv "$RUNNER_TEMP/gufo-functional-client"
+          "$RUNNER_TEMP/gufo-functional-client/Scripts/python.exe" -m pip install \
+            -r controller/tests/functional/requirements.txt
+          cd controller/tests/functional
+          "$RUNNER_TEMP/gufo-functional-client/Scripts/python.exe" -c \
+            'import jsonschema, PIL, numpy, httpx, run, openai_sdk, metrics, devlab_run'
+
+      - name: Run selected model correctness checks
+        if: >-
+          !cancelled() && steps.build.outcome == 'success' && steps.client.outcome == 'success'
+        run: |
+          "$RUNNER_TEMP/gufo-functional-client/Scripts/python.exe" controller/tests/functional/devlab_run.py \
+            --plan functional-plan.json --assets functional-assets.json \
+            --binary candidate/build/windows-release/gufo.exe --no-timing \
+            --output functional-results --report functional-report --logs phase-logs
+
+      - name: Summarize results
+        if: always()
+        run: |
+          [[ -f functional-report/summary.json ]] || exit 0
+          python - <<'PYSUMMARY'
+          import json, os
+          summary = json.load(open('functional-report/summary.json'))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write(f"\n### Results: {summary['status']}\n\n| Model | Correctness |\n|---|---|\n")
+              for model in summary['models']:
+                  out.write(f"| {model['id']} | {model['correctness']} |\n")
+          PYSUMMARY
+
+      - name: Retain functional reports and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-functional-${{ github.run_attempt }}
+          path: |
+            functional-plan.json
+            functional-assets.json
+            functional-results/
+            functional-report/
+            phase-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Report disk and compiler cache, remove temporary environments
+        if: always()
+        run: |
+          rm -rf -- "$RUNNER_TEMP/gufo-hf-cli" "$RUNNER_TEMP/gufo-functional-client" \
+            "$RUNNER_TEMP/gufo-toolchain" functional-results
+          df -h "$GITHUB_WORKSPACE" "${GUFO_CACHE_ROOT:-$GITHUB_WORKSPACE}" || true
+          if [[ -n "${CCACHE_DIR:-}" ]]; then ccache --show-stats; fi
+
   report:
     name: Publish functional report
     needs: [ authorize, smoke ]

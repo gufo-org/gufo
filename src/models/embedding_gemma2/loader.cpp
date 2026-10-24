@@ -1,10 +1,5 @@
 #include "src/models/embedding_gemma2/loader.hpp"
 
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -15,57 +10,12 @@
 #include <utility>
 
 #include "src/core/json.hpp"
+#include "src/core/platform/mapped_file.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 namespace {
 
-class MappedFile {
-public:
-  MappedFile() = default;
-  ~MappedFile() { Reset(); }
-
-  MappedFile(const MappedFile&) = delete;
-  MappedFile& operator=(const MappedFile&) = delete;
-  MappedFile(MappedFile&&) = delete;
-  MappedFile& operator=(MappedFile&&) = delete;
-
-  [[nodiscard]] bool Open(const std::filesystem::path& path) {
-    struct stat status{};
-    if (stat(path.c_str(), &status) != 0 || status.st_size <= 0) {
-      return false;
-    }
-    const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (descriptor < 0) {
-      return false;
-    }
-    void* mapping = mmap(nullptr, static_cast<std::size_t>(status.st_size),
-                         PROT_READ, MAP_PRIVATE, descriptor, 0);
-    close(descriptor);
-    if (mapping == MAP_FAILED) {
-      return false;
-    }
-    data_ = mapping;
-    size_ = static_cast<std::size_t>(status.st_size);
-    return true;
-  }
-
-  [[nodiscard]] const std::byte* data() const noexcept {
-    return static_cast<const std::byte*>(data_);
-  }
-  [[nodiscard]] std::size_t size() const noexcept { return size_; }
-
-private:
-  void Reset() noexcept {
-    if (data_ != nullptr) {
-      (void)munmap(data_, size_);
-      data_ = nullptr;
-      size_ = 0;
-    }
-  }
-
-  void* data_{nullptr};
-  std::size_t size_{0};
-};
+using MappedFile = platform::RawMappedFile;
 
 DType ParseDType(std::string_view name) noexcept {
   if (name == "F32") {
@@ -94,20 +44,26 @@ std::uint64_t ReadLittleEndian64(const std::byte* bytes) noexcept {
 bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
                      std::vector<std::shared_ptr<void>>* mappings,
                      std::string* error, bool include_vision) {
-  auto mapping = std::make_shared<MappedFile>();
-  if (!mapping->Open(path) || mapping->size() < 8U) {
+  // RawMappedFile has no destructor; the owner closes the mapping.
+  std::shared_ptr<MappedFile> mapping(new MappedFile(), [](MappedFile* m) {
+    m->Close();
+    delete m;
+  });
+  if (!mapping->Open(path) || mapping->size < 8U) {
     *error = "cannot map " + path.string();
     return false;
   }
-  const std::uint64_t header_size = ReadLittleEndian64(mapping->data());
-  if (header_size == 0 || header_size > mapping->size() - 8U) {
+  const std::uint64_t header_size =
+      ReadLittleEndian64(static_cast<const std::byte*>(mapping->data));
+  if (header_size == 0 || header_size > mapping->size - 8U) {
     *error = "invalid safetensors header in " + path.string();
     return false;
   }
   json::Value header;
   try {
     header = json::parse(
-        std::string_view(reinterpret_cast<const char*>(mapping->data() + 8),
+        std::string_view(reinterpret_cast<const char*>(
+                             static_cast<const std::byte*>(mapping->data) + 8),
                          static_cast<std::size_t>(header_size)));
   } catch (const std::exception&) {
     *error = "unparsable safetensors header in " + path.string();
@@ -153,13 +109,14 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
       return false;
     }
     if (!elements.has_value() || begin >= end ||
-        end > mapping->size() - payload_offset ||
+        end > mapping->size - payload_offset ||
         *elements > std::numeric_limits<std::uint64_t>::max() / element_size ||
         end - begin != static_cast<std::uint64_t>(*elements) * element_size) {
       *error = "inconsistent tensor extent for " + name;
       return false;
     }
-    tensor.data = mapping->data() + payload_offset + begin;
+    tensor.data =
+        static_cast<const std::byte*>(mapping->data) + payload_offset + begin;
     tensor.byte_count = end - begin;
     if (!store->Add(std::move(tensor))) {
       *error = "duplicate tensor " + name;

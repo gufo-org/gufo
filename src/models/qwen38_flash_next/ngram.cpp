@@ -1,15 +1,15 @@
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <bit>
 #include <cerrno>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <system_error>
 
+#include "src/core/platform/fs.hpp"
+#include "src/core/platform/mapped_file.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::models::qwen38_flash_next {
@@ -71,13 +71,13 @@ NgramTable::~NgramTable() {
   for (auto& w : workers_) {
     w.join();
   }
-  if (fd_ >= 0) {
-    ::close(fd_);
+  if (file_ != platform::kInvalidFile) {
+    platform::CloseFile(file_);
   }
 }
 
 std::unique_ptr<NgramTable> NgramTable::Open(
-    int file_descriptor, std::uint64_t file_offset, std::uint64_t rows,
+    platform::PlatformFile file, std::uint64_t file_offset, std::uint64_t rows,
     std::uint32_t row_dim, core::GgmlType type, std::string* error_msg) {
   std::unique_ptr<NgramTable> t(new NgramTable());
   const std::size_t block = type == core::GgmlType::kIQ4_NL ? 32 : 1;
@@ -99,16 +99,16 @@ std::unique_ptr<NgramTable> NgramTable::Open(
   t->base_offset_ = file_offset;
   // Direct I/O bypasses the page cache; the mapping used for the rest of the
   // model must not be used here or every touched row would stay resident.
-  const auto path = "/proc/self/fd/" + std::to_string(file_descriptor);
-  t->fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
-  t->direct_ = t->fd_ >= 0;
-  if (t->fd_ < 0) {
-    t->fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  // When the platform cannot provide it, rows read buffered through a
+  // duplicate: the table always owns the handle it closes.
+  t->file_ = platform::ReopenUnbuffered(file);
+  t->direct_ = t->file_ != platform::kInvalidFile;
+  if (!t->direct_) {
+    t->file_ = platform::DuplicateFile(file);
   }
-  if (t->fd_ < 0) {
+  if (t->file_ == platform::kInvalidFile) {
     if (error_msg != nullptr) {
-      *error_msg = std::string("cannot open bound n-gram table: ") +
-                   std::strerror(errno);
+      *error_msg = "cannot open bound n-gram table";
     }
     return nullptr;
   }
@@ -182,15 +182,17 @@ bool NgramTable::ReadOne(std::uint32_t row, float* dst,
   std::uint8_t* cached =
       entry != nullptr ? cache_rows_.data() + slot * row_bytes_ : nullptr;
   std::size_t got = 0;
+  std::error_code ec;
   while (got < needed) {
-    const ssize_t n = ::pread(fd_, base + got, length - got, begin + got);
-    if (n <= 0) {
-      if (n < 0 && errno == EINTR) {
-        continue;
-      }
+    const std::size_t n =
+        platform::ReadAt(file_, begin + got, base + got, length - got, ec);
+    if (n == 0 && ec == std::errc::interrupted) {
+      continue;
+    }
+    if (n == 0) {
       return false;
     }
-    got += static_cast<std::size_t>(n);
+    got += n;
   }
   if (owner != nullptr)
     owner->disk_reads_.fetch_add(1, std::memory_order_relaxed);

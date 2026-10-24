@@ -136,7 +136,9 @@ Reasoning tokens count toward that response limit.
 
 ## Build from source
 
-Linux x86-64 on AMD Strix Halo (`gfx1151`) is the supported target. CMake owns
+Linux x86-64 on AMD Strix Halo (`gfx1151`) is the supported target. Windows
+x86-64 is also supported as a native build target; see
+[BUILD-WINDOWS.md](BUILD-WINDOWS.md). CMake owns
 one production configuration for both Nix and ordinary Linux builds. Tests,
 profilers, tuning executables and Python reference runners are not installed
 with the production package. No `build.sh` wrapper is needed.
