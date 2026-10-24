@@ -311,6 +311,7 @@ jobs:
           path: controller
 
       - name: Recreate selection plan and candidate checkout
+        timeout-minutes: 5
         env:
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
           APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
@@ -320,8 +321,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git init candidate
-          git -C candidate fetch https://github.com/gufo-org/gufo.git "$APPROVED_HEAD" "$APPROVED_BASE"
+          git init --initial-branch=ci candidate
+          # The hosted job already pinned the merge base. Diff/build need only
+          # these two snapshots, not their complete ancestor history.
+          git -C candidate -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
+            fetch --depth 1 https://github.com/gufo-org/gufo.git "$APPROVED_HEAD" "$APPROVED_BASE"
           git -C candidate checkout --detach "$APPROVED_HEAD"
           base="$APPROVED_BASE"
           modes=()

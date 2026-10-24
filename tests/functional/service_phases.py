@@ -117,13 +117,14 @@ def summarize(arms):
             phases.append({'group': label, 'key': label + '.' + metric, 'label': metric,
                            **values, 'verdict': verdict(list(zip(values['base'], values['head'])))
                            if comparable else 'noisy', 'comparable_work': comparable})
+    startup = []
     for metric in ('init', 'weights', 'vision', 'structured', 'listen'):
         values = {side: [arm['startup'][metric] for arm in by[side]] for side in by}
         pairs = list(zip(values['base'], values['head']))
-        phases.insert(0, {'group': 'startup', 'key': 'startup.' + metric, 'label': metric,
+        startup.append({'group': 'startup', 'key': 'startup.' + metric, 'label': metric,
                          **values, 'verdict': verdict(pairs) if all(a is not None and b is not None
                                                                 for a, b in pairs) else 'missing'})
-    return phases, diverged
+    return startup + phases, diverged
 
 
 def main():

@@ -179,6 +179,8 @@ class TimingTest(unittest.TestCase):
         arms = self.arms()
         phases, diverged = service_phases.summarize(arms)
         self.assertFalse(diverged)
+        self.assertEqual([p['key'] for p in phases if p['group'] == 'startup'],
+                         ['startup.init', 'startup.weights', 'startup.vision', 'startup.structured', 'startup.listen'])
         self.assertEqual(next(p for p in phases if p['key'] == 'short.server_ms')['verdict'], 'slower')
         arms[1]['requests']['short']['work']['tokens'] = 11
         phases, diverged = service_phases.summarize(arms)
