@@ -129,7 +129,7 @@ bool TruncateAndNormalize(std::span<const float> full, std::size_t dimensions,
 
 bool IsKnownField(std::string_view name) {
   return name == "input" || name == "model" || name == "encoding_format" ||
-         name == "dimensions" || name == "user";
+         name == "dimensions" || name == "user" || name == "truncate";
 }
 
 /// The member's value, or nullptr when it is absent or null.
@@ -278,9 +278,20 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
     return BadRequest("'user' must be a string", "invalid_parameter_type");
   }
 
+  EmbeddingRequestOptions options;
+  if (const json::Value* truncate = Optional(root, "truncate");
+      truncate != nullptr) {
+    if (!truncate->is_bool()) {
+      return BadRequest("'truncate' must be a boolean",
+                        "invalid_parameter_type");
+    }
+    options.truncate = truncate->as_bool();
+  }
+
   EmbeddingBatch batch;
   std::string error;
-  switch (service.EmbedInputs(inputs, request.is_cancelled, &batch, &error)) {
+  switch (service.EmbedInputs(inputs, request.is_cancelled, &batch, &error,
+                              options)) {
     case EmbeddingStatus::kOk:
       break;
     case EmbeddingStatus::kCancelled:

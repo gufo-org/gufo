@@ -3176,6 +3176,7 @@ std::shared_ptr<gufo::server::EmbeddingService> MakeEmbeddingService(
           .model_id = "embedding-test",
           .runner =
               [](const std::vector<gufo::server::EmbeddingInput>& texts,
+                 const gufo::server::EmbeddingRequestOptions&,
                  EmbeddingBatch* batch, std::string*) {
                 for (const auto& text : texts) {
                   batch->embeddings.push_back({1.0F, 0.0F});
@@ -3298,6 +3299,7 @@ void TestEmbeddingService() {
             .model_id = "embedding-test",
             .runner =
                 [](const std::vector<gufo::server::EmbeddingInput>&,
+                   const gufo::server::EmbeddingRequestOptions&,
                    gufo::server::EmbeddingBatch*, std::string*) {
                   return gufo::server::EmbeddingStatus::kDeviceLost;
                 },

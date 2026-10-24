@@ -69,6 +69,7 @@ struct EmbeddingService::Impl {
   // block other requests that are ready to run. The encoder hands out device
   // turns one batch at a time.
   EmbeddingStatus RunNative(const std::vector<EmbeddingInput>& inputs,
+                            const EmbeddingRequestOptions& request,
                             const std::function<bool()>& is_cancelled,
                             EmbeddingBatch* batch, std::string* error) {
     using namespace models::embedding_gemma2;
@@ -120,12 +121,17 @@ struct EmbeddingService::Impl {
             return EmbeddingStatus::kInvalidInput;
           }
         }
-        if (text.size() > byte_limit) {
+        if (!request.truncate && text.size() > byte_limit) {
           batch->failed_index = index;
           return EmbeddingStatus::kInputTooLong;
         }
       }
-      sequence.tokens = tokenizer->Encode(text);
+      // A text-only input reads just the bytes its kept tokens can span. An
+      // input with images is encoded whole so every placeholder is counted.
+      sequence.tokens = request.truncate && sequence.images.empty()
+                            ? tokenizer->EncodeTruncated(
+                                  text, EmbeddingService::kMaxInputTokens)
+                            : tokenizer->Encode(text);
       if (!sequence.images.empty()) {
         std::size_t expected = 0;
         for (const auto& image : sequence.images)
@@ -140,6 +146,26 @@ struct EmbeddingService::Impl {
                 "text must not contain image placeholders when images are "
                 "supplied";
           return EmbeddingStatus::kInvalidInput;
+        }
+      }
+      if (request.truncate &&
+          sequence.tokens.size() > EmbeddingService::kMaxInputTokens) {
+        // Keep the first tokens and the final <eos>, but never part of an
+        // image: its last placeholder and the end-of-image marker after it
+        // must both stay.
+        const std::size_t keep = EmbeddingService::kMaxInputTokens - 1;
+        const auto last_image = std::ranges::find(
+            sequence.tokens.rbegin(), sequence.tokens.rend(), kImageTokenId);
+        const std::size_t image_end =
+            last_image == sequence.tokens.rend()
+                ? 0
+                : static_cast<std::size_t>(sequence.tokens.rend() -
+                                           last_image) +
+                      1;
+        if (image_end <= keep) {
+          sequence.tokens.erase(
+              sequence.tokens.begin() + static_cast<std::ptrdiff_t>(keep),
+              sequence.tokens.end() - 1);
         }
       }
       if (sequence.tokens.size() > EmbeddingService::kMaxInputTokens) {
@@ -225,7 +251,7 @@ EmbeddingStatus EmbeddingService::Embed(
 EmbeddingStatus EmbeddingService::EmbedInputs(
     const std::vector<EmbeddingInput>& inputs,
     const std::function<bool()>& is_cancelled, EmbeddingBatch* batch,
-    std::string* error) {
+    std::string* error, const EmbeddingRequestOptions& request) {
   *batch = {};
   if (!impl_->ready) {
     if (error != nullptr) {
@@ -242,10 +268,10 @@ EmbeddingStatus EmbeddingService::EmbedInputs(
       }
       return EmbeddingStatus::kCancelled;
     }
-    status = impl_->options.runner(inputs, batch, error);
+    status = impl_->options.runner(inputs, request, batch, error);
   } else {
 #if defined(ENGINE_ENABLE_HIP)
-    status = impl_->RunNative(inputs, is_cancelled, batch, error);
+    status = impl_->RunNative(inputs, request, is_cancelled, batch, error);
 #endif
   }
   if (status == EmbeddingStatus::kDeviceLost &&
