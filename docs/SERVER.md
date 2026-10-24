@@ -407,9 +407,18 @@ answer or tool-argument data, consistent with Gufo's response framing.
 Chat and Responses also accept llama.cpp's older `thinking_budget_tokens`
 spelling for existing clients; a non-null `reasoning_budget_tokens` takes
 precedence. Request budgets must fit a signed 32-bit integer; Messages budgets
-must also be positive. The server does not automatically reserve part of
+must also be positive. By default the server does not reserve part of
 `max_tokens` for the answer: clients must set a smaller reasoning budget when
 they need that room.
+
+`--reasoning-budget-fraction F` (`0 <= F < 1`, default `0`, off) reserves that
+room for requests without a budget of their own or a `--reasoning-budget`:
+reasoning may use `floor(F * max_tokens)` tokens. When that share is spent,
+Qwen models first receive Qwen's documented early-exit instruction
+("Considering the limited time by the user, I have to give the solution based
+on the thinking directly now.") and then the forced `\n</think>`, so the answer
+starts from the reasoning so far instead of reasoning running into
+`max_tokens`. Explicit budgets keep the llama.cpp behavior above.
 
 Keep `reasoning_effort` (Chat) or `output_config.effort` (Messages) consistent
 across turns while thinking is enabled: Qwen and DeepSeek render the effort
