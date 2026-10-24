@@ -61,3 +61,9 @@ The exact route follows Diffusers' 50-point/49-forward schedule and decoder
 context. Implementation attribution remains in
 [third-party notices](../../../THIRD_PARTY_NOTICES.md); model weights retain
 their separate terms in the [model guide](README.md#model-acquisition).
+
+## ROCm 10.1 migration
+
+Focused cross-compiler checks, matched controls and remaining limits are in
+[ROCM.md](ROCM.md). The original reference fixtures and tolerances above are
+unchanged; migration measurements use separately recorded controls.

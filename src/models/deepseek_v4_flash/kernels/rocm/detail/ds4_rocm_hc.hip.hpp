@@ -4,6 +4,11 @@
 // static helper visibility and launch behavior.
 
 __device__ static void hc4_split_one(float *out, const float *mix, const float *scale, const float *base, uint32_t sinkhorn_iters, float epsv) {
+#if __clang_major__ >= 24
+#pragma clang fp reassociate(off)
+    // LLVM 24 changes the Sinkhorn reassociation. Keep its normalizations in
+    // source order without altering the qualified LLVM 22 trajectory.
+#endif
     const float pre_scale = scale[0];
     const float post_scale = scale[1];
     const float comb_scale = scale[2];

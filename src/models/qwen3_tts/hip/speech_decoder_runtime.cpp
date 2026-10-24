@@ -241,18 +241,30 @@ public:
   F32Gemm(const F32Gemm&) = delete;
   F32Gemm& operator=(const F32Gemm&) = delete;
 
+  void PrepareColumns(std::size_t columns) {
+    if (zero_beta_input_.size() < columns)
+      zero_beta_input_.Reset(columns);
+  }
+
   void Run(const float* weight, const float* input, float* output,
            std::size_t rows, std::size_t output_columns, std::size_t reduction,
            hipStream_t stream) {
     constexpr std::size_t max_int =
         static_cast<std::size_t>(std::numeric_limits<rocblas_int>::max());
     if (rows == 0 || output_columns == 0 || reduction == 0 || rows > max_int ||
-        output_columns > max_int || reduction > max_int) {
+        output_columns > max_int || reduction > max_int ||
+        (rows == 1 && output_columns > zero_beta_input_.size())) {
       throw std::length_error("invalid Qwen3-TTS speech decoder GEMM shape");
     }
     RequireRocblas(rocblas_set_stream(handle_, stream), "rocblas_set_stream");
     constexpr float alpha = 1.0F;
     constexpr float beta = 0.0F;
+    // Keep single-frame tails on the same GEMM reduction as longer chunks.
+    // ROCm 10.1 redirects an in-place one-row GEMM to a GEMV with a different
+    // sum tree, changing audio when a stream or cached reference splits here.
+    // A separate C disables that shortcut; beta=0 leaves C unread. Reserve it
+    // with the weights so a streamed tail never allocates or synchronizes.
+    const float* accumulation = rows == 1 ? zero_beta_input_.get() : output;
     RequireRocblas(
         rocblas_gemm_ex(
             handle_, rocblas_operation_transpose, rocblas_operation_none,
@@ -260,7 +272,7 @@ public:
             static_cast<rocblas_int>(rows), static_cast<rocblas_int>(reduction),
             &alpha, weight, rocblas_datatype_f32_r,
             static_cast<rocblas_int>(reduction), input, rocblas_datatype_f32_r,
-            static_cast<rocblas_int>(reduction), &beta, output,
+            static_cast<rocblas_int>(reduction), &beta, accumulation,
             rocblas_datatype_f32_r, static_cast<rocblas_int>(output_columns),
             output, rocblas_datatype_f32_r,
             static_cast<rocblas_int>(output_columns), rocblas_datatype_f32_r,
@@ -270,6 +282,7 @@ public:
 
 private:
   rocblas_handle handle_{nullptr};
+  DeviceBuffer<float> zero_beta_input_;
 };
 
 struct LinearWeights {
@@ -479,6 +492,7 @@ struct SpeechDecoderHipRuntime::Impl {
 
   LinearWeights LoadLinear(std::string_view prefix, std::size_t input_columns,
                            std::size_t output_columns, bool bias = true) {
+    gemm.PrepareColumns(output_columns);
     const TensorStore& store = *model.store;
     const std::array<std::uint64_t, 2> weight_shape{
         static_cast<std::uint64_t>(output_columns),
@@ -502,6 +516,8 @@ struct SpeechDecoderHipRuntime::Impl {
   ConvWeights LoadConv(std::string_view prefix, std::size_t input_channels,
                        std::size_t output_channels, std::size_t kernel,
                        std::size_t dilation = 1, bool depthwise = false) {
+    if (!depthwise)
+      gemm.PrepareColumns(output_channels);
     const TensorStore& store = *model.store;
     const std::array<std::uint64_t, 3> weight_shape{
         static_cast<std::uint64_t>(output_channels),
@@ -528,6 +544,7 @@ struct SpeechDecoderHipRuntime::Impl {
                                 std::size_t input_channels,
                                 std::size_t output_channels, std::size_t kernel,
                                 std::size_t stride) {
+    gemm.PrepareColumns(output_channels * kernel);
     const TensorStore& store = *model.store;
     const std::array<std::uint64_t, 3> weight_shape{
         static_cast<std::uint64_t>(input_channels),
@@ -689,6 +706,7 @@ struct SpeechDecoderHipRuntime::Impl {
   }
 
   LinearWeights LoadConvProjection(std::string_view prefix) {
+    gemm.PrepareColumns(512);
     const std::array<std::uint64_t, 3> shape{512, 256, 1};
     return {
         .weight = ResolveF32(*model.store, speech_weights,

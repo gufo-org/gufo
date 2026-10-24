@@ -284,8 +284,8 @@ __launch_bounds__(256) __global__
                            Bf16ToFloat(nw[d + 48]);
               float c = Bf16ToFloat(cosine[std::size_t(row) * 48 + d]),
                     s = Bf16ToFloat(sine[std::size_t(row) * 48 + d]);
-              out[output] = FloatToBf16(v * c - pair * s);
-              out[output + 48] = FloatToBf16(pair * c + v * s);
+              out[output] = FloatToBf16(fmaf(v, c, -__fmul_rn(pair, s)));
+              out[output + 48] = FloatToBf16(fmaf(pair, c, __fmul_rn(v, s)));
             } else if (d >= 96)
               out[output] = FloatToBf16(Bf16ToFloat(tile[tr][d]) * inverse *
                                         Bf16ToFloat(nw[d]));

@@ -160,6 +160,22 @@ void CheckGreedyAcceptance() {
              ds4_dspark_greedy_accept(tops, tokens, 1, eos) == 1,
          "greedy acceptance always keeps the anchor");
 }
+
+void CheckSerialBackoff() {
+  Expect(!ds4_dspark_serial_backoff(3, 3, 0),
+         "cold policy gathers at least four probes");
+  Expect(ds4_dspark_serial_backoff(4, 4, 0),
+         "four rejected short drafts trigger bounded backoff");
+  Expect(!ds4_dspark_serial_backoff(4, 10, 4) &&
+             !ds4_dspark_serial_backoff(8, 20, 8),
+         "target anchors keep useful short drafts above break-even");
+  Expect(!ds4_dspark_serial_backoff(4, 8, 2),
+         "one marginal four-cycle window waits for more evidence");
+  Expect(ds4_dspark_serial_backoff(8, 16, 3),
+         "sustained unprofitable drafting backs off");
+  Expect(!ds4_dspark_serial_backoff(8, 40, 40),
+         "full-width acceptance remains profitable");
+}
 }  // namespace
 
 int main() {
@@ -168,6 +184,7 @@ int main() {
   const float extreme[]{-3e35F, -2e35F, -1e35F};
   const float mixed[]{nan, inf, -inf, -3e35F, -3e35F};
   CheckGreedyAcceptance();
+  CheckSerialBackoff();
   Expect(ds4_sample_argmax(extreme, 3) == 2,
          "argmax covers finite float range");
   Expect(ds4_sample_argmax(mixed, 5) == 3,

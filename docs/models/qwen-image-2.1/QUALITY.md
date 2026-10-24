@@ -49,3 +49,9 @@ Teacher forcing checks conditioning inputs before replacing them and isolates
 block arithmetic. For complete trajectories, use 40 steps and `--trajectory`
 on the probe, then omit `--teacher-force`. `--skip-decode` gives a faster latent
 comparison while investigating. Raw tensors/images stay outside Git.
+
+## ROCm 10.1 migration
+
+Focused cross-compiler checks, matched controls and remaining limits are in
+[ROCM.md](ROCM.md). The original reference fixtures and tolerances above are
+unchanged; migration measurements use separately recorded controls.

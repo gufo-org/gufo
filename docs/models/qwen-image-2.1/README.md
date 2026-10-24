@@ -1,5 +1,7 @@
 # Qwen-Image-2.1
 
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) · [ROCm migration](ROCM.md)
+
 Native HIP image generation and editing on AMD Strix Halo (`gfx1151`). Loads
 BF16 safetensors directly; Python is not needed for inference. The checkpoint
 contains a diffusion transformer, Qwen3-VL prompt encoder and RGBA VAE.

@@ -43,10 +43,18 @@ static void dump(const char* directory, unsigned prefill_step,
 }
 
 int main(int argc, char** argv) {
-  const int prefill_only =
-      argc == 5 && strcmp(argv[4], "--prefill-only") == 0;
-  require(argc == 4 || prefill_only,
-          "usage: frontier_reference MODEL INPUT-DIR OUTPUT-DIR [--prefill-only]");
+  require(argc >= 4 && argc <= 6,
+          "usage: frontier_reference MODEL INPUT-DIR OUTPUT-DIR "
+          "[--prefill-only] [--narrow]");
+  int prefill_only = 0, narrow = 0;
+  for (int i = 4; i < argc; ++i) {
+    if (strcmp(argv[i], "--prefill-only") == 0 && !prefill_only)
+      prefill_only = 1;
+    else if (strcmp(argv[i], "--narrow") == 0 && !narrow)
+      narrow = 1;
+    else
+      require(0, "unknown or repeated frontier option");
+  }
   const int decode_tokens = prefill_only ? 0 : 128;
   ds4_engine_options options = {.model_path = argv[1],
                                 .backend = DS4_BACKEND_CUDA,
@@ -89,8 +97,12 @@ int main(int argc, char** argv) {
   int points = 0;
   while (fscanf(manifest, "%u\t%lu\t%lu\t%u\t%4095[^\n]\n", &prefill_step,
                 &depth, &prefix, &prefill_capacity, path) == 5) {
-    require(prefill_step == 2048 || prefill_step == 4096,
+    require(narrow ? prefill_step == 32
+                   : prefill_step == 2048 || prefill_step == 4096,
             "supported prefill step");
+    if (narrow)
+      require(depth == (points == 0 ? 4096UL : 12288UL) && points < 2,
+              "ordered narrow frontier matrix");
     char* text = read_text(path);
     ds4_tokens prompt = {0};
     ds4_tokenize_rendered_chat(engine, text, &prompt);
@@ -159,7 +171,7 @@ int main(int argc, char** argv) {
             prefill_step, depth, decode_tokens);
     fflush(output);
   }
-  require(points == 10, "complete frontier matrix");
+  require(points == (narrow ? 2 : 10), "complete frontier matrix");
   require(fclose(output) == 0, "close steps");
   fclose(manifest);
   free(logits);

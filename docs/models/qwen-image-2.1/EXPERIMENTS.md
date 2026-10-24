@@ -2,6 +2,7 @@
 
 | Approach | Status |
 | --- | --- |
+| Native 64-channel output projection | Retained; removes a BLAS-dependent rounding difference without narrowing precision. FP64 checks and 40-step generation/edit comparisons improve; generation is byte-identical across ROCm 7.2.3/10.1. [Migration evidence](ROCM.md). |
 | Cache timestep-zero text/reference K/V after the first step | Retained; first/cached-step blocks and full edit trajectory pass. |
 | Fused QK, online softmax and FP32 value product | Retained for 128-wide attention; 128 queries per block, bounded LDS, no quadratic allocation or probability narrowing. |
 | Separate causal prefix from fully visible image queries | Retained; avoids mask work on image rows. |

@@ -71,8 +71,15 @@ __global__ static void reference_indexer_scores(float* scores, const float* q,
     if (lane == 0)
       partial[warp] = fmaxf(dot, 0.0f) * weights[h] * scale;
     __syncthreads();
-    if (tid == 0)
-      total += partial[0] + partial[1] + partial[2] + partial[3];
+    if (tid == 0) {
+#pragma clang fp reassociate(off)
+      // Freeze the historical ROCm 7.2 arithmetic. LLVM 24 otherwise sums
+      // the four heads first, changing this oracle's rounding.
+      total += partial[0];
+      total += partial[1];
+      total += partial[2];
+      total += partial[3];
+    }
     __syncthreads();
   }
   if (tid == 0)
@@ -134,6 +141,14 @@ void check_indexer_scores(bool benchmark) {
                          "Indexer bitwise mismatch: tokens=%u rows=%u "
                          "causal=%d repeat=%d\n",
                          tokens, rows, causal, repeat);
+            for (size_t i = 0; i < ref.size(); ++i) {
+              if (std::memcmp(&ref[i], &out[i], sizeof(float)) != 0) {
+                std::fprintf(stderr,
+                             "first index=%zu expected=%.9g actual=%.9g\n", i,
+                             ref[i], out[i]);
+                break;
+              }
+            }
             std::exit(7);
           }
         }
@@ -394,6 +409,7 @@ __global__ static void reference_attention(float* heads, const float* sinks,
 
   float* oh = heads + ((uint64_t)tok * n_head + h) * head_dim;
   for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+#pragma clang fp reassociate(off)
     float acc = 0.0f;
     for (uint32_t r = 0; r < n_raw; r++) {
       const uint32_t row = (raw_start + r) % raw_cap;
@@ -461,6 +477,7 @@ __global__ static void reference_target_attention(
   const float inv_denom = 1.0f / denom;
 
   for (uint32_t d = tid; d < head_dim; d += blockDim.x) {
+#pragma clang fp reassociate(off)
     float acc = 0.0f;
     for (uint32_t r = 0; r < n_raw; r++) {
       const uint32_t row = raw_cap ? ((raw_start + r) % raw_cap) : r;
@@ -550,6 +567,7 @@ __global__ static void reference_indexed_attention(
   const float inv_denom = 1.0f / denom;
 
   for (uint32_t d = tid; d < head_dim; d += blockDim.x) {
+#pragma clang fp reassociate(off)
     float acc = 0.0f;
     for (uint32_t r = 0; r < n_raw; r++) {
       const uint32_t row = raw_cap ? ((raw_start + r) % raw_cap) : r;
@@ -567,11 +585,12 @@ void check_target_attention() {
   constexpr unsigned heads = 64, dim = 512, cap = 4352, max_comp = 1024;
   std::mt19937 gen(61);
   std::uniform_real_distribution<float> dist(-1.f, 1.f);
-  for (unsigned raw : {16u, 128u, 256u}) {
-    for (unsigned comp : {0u, 64u, 512u, 1024u}) {
+  // Exercise empty/short windows and both sides of a prefetched group.
+  for (unsigned raw : {0u, 1u, 16u, 17u, 128u, 255u, 256u}) {
+    for (unsigned comp : {0u, 17u, 64u, 127u, 512u, 513u, 1024u}) {
       const bool indexed = comp > 512;
       constexpr unsigned top_k = 512, position = 2049, ratio = 4;
-      const unsigned start = cap - raw / 2;
+      const unsigned start = cap - std::max(1u, raw / 2);
       const unsigned visible = std::min(comp, (position + 1) / ratio);
       std::vector<float> q(heads * dim), kv(cap * dim),
           compressed(max_comp * dim), sinks(heads), mask(comp),
@@ -636,6 +655,13 @@ void check_target_attention() {
         std::fprintf(stderr,
                      "target attention scalar mismatch: raw=%u comp=%u\n", raw,
                      comp);
+        for (size_t i = 0; i < actual.size(); ++i) {
+          if (std::memcmp(&actual[i], &expected[i], sizeof(float)) != 0) {
+            std::fprintf(stderr, "first index=%zu expected=%.9g actual=%.9g\n",
+                         i, expected[i], actual[i]);
+            break;
+          }
+        }
         std::exit(4);
       }
       // Independent double-precision formula, including masks, sparse index
@@ -684,7 +710,7 @@ void check_target_attention() {
     }
   }
   std::puts(
-      "Target attention: 12 exact GPU comparisons and independent "
+      "Target attention: 49 exact GPU comparisons and independent "
       "double-precision checks passed");
 }
 

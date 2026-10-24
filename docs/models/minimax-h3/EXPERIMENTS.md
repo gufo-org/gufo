@@ -2,6 +2,7 @@
 
 | Experiment | Decision / qualification |
 | --- | --- |
+| ROCm 10.1 BLAS plan fallback and explicit RoPE FMA operands | Retained; the fallback must pass the existing byte-repeat check. Preserves 7.2.3 block outputs and restores exact cross-compiler full-resolution block output. [Bounded migration checks and limits](ROCM.md). |
 | Device-resident block chaining | Retained; independent complete-forward oracle. |
 | Fused QKV RMSNorm/RoPE | Retained; original FP32 reduction/FMA order, byte-exact full-resolution block, unchanged teacher gates. AdaLN keeps its split normalization. |
 | Streamed prompt/AdaLN weights | Retained; phase releases, bounded prefetch and zero-swap checks. |
