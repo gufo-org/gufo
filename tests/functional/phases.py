@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -93,17 +94,20 @@ def cool_down(target):
 class Server:
     """One serve process whose loader lines are stamped on arrival."""
 
-    def __init__(self, binary, weights, log_path):
+    def __init__(self, binary, weights, log_path, command=None):
         with socket.socket() as reserve:
             reserve.bind(("127.0.0.1", 0))
             self.port = reserve.getsockname()[1]
-        self.command = [
-            str(binary), "serve", "--host", "127.0.0.1", "--port", str(self.port), "llm",
-            "--model", str(weights / "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"),
-            "--mmproj", str(weights / "mmproj-BF16.gguf"),
-            "--mtp-model", str(weights / "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"),
-            "--speculative", "mtp", "--context", str(CONTEXT), "--sessions", "1",
-            "--served-model-name", "phases"]
+        if command is None:
+            self.command = [
+                str(binary), "serve", "--host", "127.0.0.1", "--port", str(self.port), "llm",
+                "--model", str(weights / "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"),
+                "--mmproj", str(weights / "mmproj-BF16.gguf"),
+                "--mtp-model", str(weights / "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"),
+                "--speculative", "mtp", "--context", str(CONTEXT), "--sessions", "1",
+                "--served-model-name", "phases"]
+        if command is not None:
+            self.command = list(command) + ['--host', '127.0.0.1', '--port', str(self.port)]
         self.log_path = log_path
         self.events = []
 
@@ -188,6 +192,10 @@ class Server:
         if response.status != 200:
             raise RuntimeError(f"/v1/completions returned {response.status}: {payload}")
         timings, usage = payload["timings"], payload["usage"]
+        for key, _ in REQUEST_PHASES:
+            value = timings[key]
+            if type(value) not in (int, float) or value < 0 or not math.isfinite(value):
+                raise ValueError('Missing/invalid server phase: ' + key)
         ttft = re.search(r"ttft;dur=([0-9.]+)", server_timing)
         result = {key: timings.get(key) for key, _ in REQUEST_PHASES}
         result.update(ttft_ms=float(ttft.group(1)) if ttft else None,
@@ -201,10 +209,14 @@ class Server:
         return result
 
 
-def run_arm(revision, binary, weights, output, repeat, startup_timeout):
-    server = Server(binary, weights, output / f"{revision}-{repeat}.log")
-    server.start(startup_timeout)
+def run_arm(revision, binary, weights, output, repeat, startup_timeout, model_id=None, assets=None):
+    command = None
+    if model_id is not None:
+        from devlab_models import llm_command
+        command = llm_command(model_id, binary, assets) + ['--served-model-name', 'phases']
+    server = Server(binary, weights, output / f"{revision}-{repeat}.log", command)
     try:
+        server.start(startup_timeout)
         requests = {}
         for key, _, *parts in REQUESTS:
             requests[key] = server.complete(prompt(*parts))
@@ -259,14 +271,23 @@ def main():
     parser.add_argument("--head-binary", type=Path, required=True)
     parser.add_argument("--base-revision", required=True)
     parser.add_argument("--head-revision", required=True)
-    parser.add_argument("--weights", type=Path, required=True)
+    parser.add_argument("--weights", type=Path)
+    parser.add_argument("--model-id")
+    parser.add_argument("--assets", type=Path)
     parser.add_argument("--output", type=Path, required=True, help="phases.json path")
     parser.add_argument("--logs", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--startup-timeout", type=float, default=600)
     args = parser.parse_args()
+    if args.repeats < 2:
+        parser.error('at least two paired repeats are required')
+    if args.model_id and not args.assets:
+        parser.error('--model-id requires --assets')
+    if not args.model_id and not args.weights:
+        parser.error('provide --weights or --model-id with --assets')
     args.logs.mkdir(parents=True, exist_ok=True)
-    weights = args.weights.resolve()
+    weights = args.weights.resolve() if args.weights else None
+    assets = json.loads(args.assets.read_text()) if args.assets else None
     binaries = {"base": args.base_binary.resolve(), "head": args.head_binary.resolve()}
 
     # Let the GPU settle after the functional suites; later arms return near it.
@@ -283,15 +304,34 @@ def main():
             print(f"Arm {revision} #{repeat + 1}: GPU {temperature} °C", flush=True)
             arm_started = time.monotonic()
             arm = run_arm(revision, binaries[revision], weights, args.logs, repeat,
-                          args.startup_timeout)
+                          args.startup_timeout, args.model_id, assets)
             arms.append({"revision": revision, "repeat": repeat, "gpu_temp_c": temperature,
                          "wall_s": time.monotonic() - arm_started, **arm})
     phases, diverged = summarize(arms)
+    from devlab_models import registry
+    mode = registry()['models'][args.model_id]['mode'] if args.model_id else 'mtp'
+    for arm in arms:
+        for request in arm['requests'].values():
+            if request['completion_tokens'] != GENERATED_TOKENS or request['prompt_tokens'] <= 0:
+                raise ValueError('phase workload did not perform the expected token work')
+            if mode != 'off' and request['draft_tokens'] <= 0:
+                raise ValueError('phase workload did not execute actual drafts')
+    mismatched_work = set()
+    for label, *_ in REQUESTS:
+        work = {(arm['requests'][label]['prompt_tokens'], arm['requests'][label]['cached_tokens'],
+                 arm['requests'][label]['completion_tokens']) for arm in arms}
+        if len(work) != 1:
+            mismatched_work.add(label)
+    diverged = sorted(set(diverged) | mismatched_work)
+    for phase in phases:
+        if phase['group'] in mismatched_work or (
+                phase['group'] in diverged and phase['key'].endswith('predicted_ms')):
+            phase['verdict'] = 'noisy'
     result = {
         "schema": 1,
         "revisions": {"base": args.base_revision, "head": args.head_revision},
         "settings": {"repeats": args.repeats, "context": CONTEXT, "sessions": 1,
-                     "speculative": "mtp", "generated_tokens": GENERATED_TOKENS,
+                     "speculative": mode, "generated_tokens": GENERATED_TOKENS,
                      "slowdown": SLOWDOWN, "noise_ms": NOISE_MS,
                      "idle_temp_c": idle, "requests": {key: label for key, label, *_ in REQUESTS}},
         "wall_s": time.monotonic() - started,

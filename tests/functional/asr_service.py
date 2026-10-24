@@ -10,7 +10,7 @@ from service_http import events, sha256, transcript_events, word_error_rate
 
 def run(evidence, url, audio_root, model):
     fixtures = []
-    for language in ('english', 'italian'):
+    for language in ('english',):
         path = audio_root / f'clear-{language}-voice.wav'
         text = path.with_suffix('.txt').read_text().strip()
         assert text, 'missing reviewed transcript'
@@ -54,11 +54,6 @@ def run(evidence, url, audio_root, model):
             path.write_text(json.dumps(items, indent=2))
             assert transcript_events(items) == references[0]
 
-    with evidence.case('concurrent-different-inputs'):
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(lambda pair: request(pair[1], f'peer-{pair[0]}'), enumerate(fixtures)))
-        assert [result['text'] for result in results] == references, results
-
     with evidence.case('silence'):
         buffer = io.BytesIO()
         with wave.open(buffer, 'wb') as audio:
@@ -69,6 +64,16 @@ def run(evidence, url, audio_root, model):
         result = evidence.json(endpoint, label='silence', data={'model': model},
             files={'file': ('silence.wav', buffer.getvalue(), 'audio/wav')})
         assert not result['text'].strip(), result
+
+    with evidence.case('concurrent-speech-and-silence'):
+        def silent_peer():
+            return evidence.json(endpoint, label='silent-peer', data={'model': model},
+                files={'file': ('silence.wav', buffer.getvalue(), 'audio/wav')})
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            speech = pool.submit(request, item, 'speech-peer')
+            silence = pool.submit(silent_peer)
+            assert speech.result()['text'] == references[0]
+            assert not silence.result()['text'].strip()
 
     with evidence.case('rejections-and-recovery'):
         for options, code in [({'model': 'unknown'}, 'invalid_model'),

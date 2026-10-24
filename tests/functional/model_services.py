@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--audio-root', type=Path, default=Path('models/audio'))
+    parser.add_argument('--audio-root', type=Path, default=HERE / 'fixtures/audio')
     parser.add_argument('--variant', choices=('base', 'custom', 'design'), default='base')
     parser.add_argument('--voice', help='Defaults to narrator, ryan, or voice-design by variant')
     parser.add_argument('--asr-binary', type=Path, help='Explicit pinned evaluator for TTS intelligibility')

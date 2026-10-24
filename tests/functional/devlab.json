@@ -1,0 +1,458 @@
+{
+  "schema": 1,
+  "representatives": {
+    "llm": "flash-next-q4",
+    "embedding": "embedding-gemma2",
+    "asr": "qwen3-asr",
+    "tts": "qwen3-tts-base"
+  },
+  "assets": {
+    "flash-next": {
+      "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+      "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+      "patterns": [
+        "UD-Q4_K_XL/*.gguf",
+        "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+        "mmproj-BF16.gguf"
+      ],
+      "required": [
+        "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+        "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+        "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+        "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+        "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+        "mmproj-BF16.gguf"
+      ]
+    },
+    "qwen27": {
+      "repo": "unsloth/Qwen3.8-27B-GGUF",
+      "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+      "patterns": [
+        "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        "mmproj-BF16.gguf"
+      ],
+      "required": [
+        "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        "mmproj-BF16.gguf"
+      ]
+    },
+    "dflash2": {
+      "repo": "z-lab/Qwen3.8-27B-DFlash2-GGUF",
+      "revision": "2d9571f8ce46e151f61c6499c99dee6079e1d610",
+      "patterns": [
+        "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+      ],
+      "required": [
+        "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+      ]
+    },
+    "deepseek4": {
+      "repo": "antirez/deepseek-v4-gguf",
+      "revision": "1cd7b564460821938add0475a60b942c409295e0",
+      "patterns": [
+        "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+      ],
+      "required": [
+        "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+      ]
+    },
+    "dspark": {
+      "repo": "antirez/deepseek-v4-gguf",
+      "revision": "e7f04037032990db0346398d249baf9fb9df1ccc",
+      "patterns": [
+        "DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+      ],
+      "required": [
+        "DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+      ]
+    },
+    "embedding": {
+      "repo": "google/embeddinggemma-2",
+      "revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors"
+      ]
+    },
+    "asr": {
+      "repo": "Qwen/Qwen3-ASR-1.7B",
+      "revision": "7278e1e70fe206f11671096ffdd38061171dd6e5",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors.index.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors"
+      ]
+    },
+    "tts-base": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "revision": "fd4b254389122332181a7c3db7f27e918eec64e3",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors",
+        "speech_tokenizer/config.json",
+        "speech_tokenizer/model.safetensors"
+      ]
+    },
+    "tts-custom": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "revision": "0c0e3051f131929182e2c023b9537f8b1c68adfe",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors",
+        "speech_tokenizer/config.json",
+        "speech_tokenizer/model.safetensors"
+      ]
+    },
+    "tts-design": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "revision": "5ecdb67327fd37bb2e042aab12ff7391903235d3",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors",
+        "speech_tokenizer/config.json",
+        "speech_tokenizer/model.safetensors"
+      ]
+    }
+  },
+  "models": {
+    "flash-next-q4": {
+      "title": "Flash-Next Q4",
+      "category": "llm",
+      "asset": "flash-next",
+      "target": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      "projector": "mmproj-BF16.gguf",
+      "draft_asset": "flash-next",
+      "draft": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "draft_option": "--mtp-model",
+      "mode": "mtp",
+      "sampling": "qwen38"
+    },
+    "qwen27-q4": {
+      "title": "Qwen27 Q4",
+      "category": "llm",
+      "asset": "qwen27",
+      "target": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "projector": "mmproj-BF16.gguf",
+      "draft_asset": "dflash2",
+      "draft": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "draft_option": "--dflash-model",
+      "mode": "dflash2",
+      "sampling": "qwen38"
+    },
+    "deepseek4": {
+      "title": "DeepSeek V4 Flash",
+      "category": "llm",
+      "asset": "deepseek4",
+      "target": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+      "draft_asset": "dspark",
+      "draft": "DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "draft_option": "--dspark-model",
+      "mode": "dspark",
+      "sampling": "deepseek4"
+    },
+    "embedding-gemma2": {
+      "title": "EmbeddingGemma 2",
+      "category": "embedding",
+      "asset": "embedding",
+      "service": "embedding"
+    },
+    "qwen3-asr": {
+      "title": "Qwen3-ASR",
+      "category": "asr",
+      "asset": "asr",
+      "service": "asr"
+    },
+    "qwen3-tts-base": {
+      "title": "Qwen3-TTS base",
+      "category": "tts",
+      "asset": "tts-base",
+      "service": "tts",
+      "variant": "base"
+    },
+    "qwen3-tts-custom": {
+      "title": "Qwen3-TTS custom",
+      "category": "tts",
+      "asset": "tts-custom",
+      "service": "tts",
+      "variant": "custom"
+    },
+    "qwen3-tts-design": {
+      "title": "Qwen3-TTS design",
+      "category": "tts",
+      "asset": "tts-design",
+      "service": "tts",
+      "variant": "design"
+    }
+  },
+  "rules": [
+    {
+      "id": "documentation",
+      "priority": 5,
+      "paths": [
+        "docs/**",
+        "*.md",
+        "**/AGENTS.md",
+        "LICENSE",
+        "NOTICE",
+        "licenses/**",
+        "THIRD_PARTY_NOTICES.md"
+      ],
+      "owners": []
+    },
+    {
+      "id": "outside-current-scope",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen_image_21/**",
+        "src/models/minimax_h3/**",
+        "tests/models/qwen_image_21/**",
+        "tests/models/minimax_h3*",
+        "tools/h3/**",
+        "tools/gufo/h3*",
+        "tools/models/qwen_image_21/**",
+        "tests/cli/video*"
+      ],
+      "owners": []
+    },
+    {
+      "id": "private-qwen27",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen/**",
+        "tests/models/qwen/**",
+        "tests/models/qwen27b/**"
+      ],
+      "owners": [
+        "qwen27-q4"
+      ]
+    },
+    {
+      "id": "private-flash-next",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen38_flash_next/**",
+        "tests/models/qwen38_flash_next/**"
+      ],
+      "owners": [
+        "flash-next-q4"
+      ]
+    },
+    {
+      "id": "private-deepseek",
+      "priority": 20,
+      "paths": [
+        "src/models/deepseek_v4_flash/**",
+        "tests/models/deepseek_v4_flash/**"
+      ],
+      "owners": [
+        "deepseek4"
+      ]
+    },
+    {
+      "id": "embedding",
+      "priority": 20,
+      "paths": [
+        "src/models/embedding_gemma2/**",
+        "tests/models/embedding_gemma2/**",
+        "tests/fixtures/embedding_gemma2/**",
+        "tools/models/embedding_gemma2/**",
+        "src/cli/serve/embedding*",
+        "src/cli/embedding*",
+        "tests/functional/embedding*"
+      ],
+      "owners": [
+        "embedding"
+      ]
+    },
+    {
+      "id": "asr",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen3_asr/**",
+        "src/cli/serve/asr*",
+        "src/cli/serve/audio_asr*",
+        "src/cli/transcribe*",
+        "tests/functional/asr_service.py"
+      ],
+      "owners": [
+        "asr"
+      ]
+    },
+    {
+      "id": "tts",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen3_tts/**",
+        "tests/models/qwen3_tts/**",
+        "src/cli/serve/tts*",
+        "src/cli/serve/audio_tts*",
+        "tests/functional/tts_service.py"
+      ],
+      "owners": [
+        "tts"
+      ]
+    },
+    {
+      "id": "shared-audio",
+      "priority": 20,
+      "paths": [
+        "src/cli/serve/audio_stream*",
+        "src/cli/serve/audio_websocket*",
+        "tests/cli/audio_websocket*",
+        "tests/functional/fixtures/audio/**"
+      ],
+      "owners": [
+        "asr",
+        "tts"
+      ]
+    },
+    {
+      "id": "service-harness",
+      "priority": 20,
+      "paths": [
+        "tests/functional/model_services.py",
+        "tests/functional/service_http.py",
+        "tests/functional/test_service_http.py"
+      ],
+      "owners": [
+        "embedding",
+        "asr",
+        "tts"
+      ]
+    },
+    {
+      "id": "shared-qwen",
+      "priority": 30,
+      "paths": [
+        "src/models/qwen/chat_template.*",
+        "src/models/qwen/tokenizer.*",
+        "src/models/qwen/control_tokens.hpp",
+        "src/models/qwen/vision/**"
+      ],
+      "owners": [
+        "llm"
+      ]
+    },
+    {
+      "id": "shared-text",
+      "priority": 20,
+      "paths": [
+        "src/cache/**",
+        "src/core/sampling*",
+        "src/core/speculative/**",
+        "src/core/json_constraint*",
+        "src/core/json_schema*",
+        "src/core/text_sampling*",
+        "src/cli/serve/text*",
+        "src/cli/serve/component_text*",
+        "src/cli/serve/continuation*",
+        "src/cli/serve/openai*",
+        "src/cli/serve/messages*",
+        "src/cli/serve/response*",
+        "src/cli/serve/stop_sequences*",
+        "src/cli/serve/quote_tracker*",
+        "src/cli/sampling_options.hpp",
+        "src/cli/serve/sampling_request.hpp",
+        "src/cli/serve/chat*",
+        "src/cli/serve/token*",
+        "src/cli/serve/tool*",
+        "src/cli/serve/json*"
+      ],
+      "owners": [
+        "llm"
+      ]
+    },
+    {
+      "id": "functional-text",
+      "priority": 10,
+      "paths": [
+        "tests/functional/**"
+      ],
+      "owners": [
+        "llm"
+      ]
+    },
+    {
+      "id": "shared-infrastructure",
+      "priority": 10,
+      "paths": [
+        "src/core/**",
+        "src/runtime/**",
+        "src/cli/**",
+        "CMakeLists.txt",
+        "CMakePresets.json",
+        "cmake/**",
+        "flake.nix",
+        "flake.lock",
+        ".devops/**",
+        ".github/**",
+        "version.txt",
+        "tests/functional/devlab*",
+        "tests/functional/service_phases.py",
+        "tests/functional/requirements.txt"
+      ],
+      "owners": [
+        "llm",
+        "embedding",
+        "asr",
+        "tts"
+      ]
+    },
+    {
+      "id": "devlab-orchestration",
+      "priority": 30,
+      "paths": [
+        "tests/functional/devlab*",
+        "tests/functional/service_phases.py",
+        "tests/functional/requirements.txt"
+      ],
+      "owners": [
+        "llm",
+        "embedding",
+        "asr",
+        "tts"
+      ]
+    }
+  ]
+}

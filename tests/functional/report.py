@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 import re
 import statistics
@@ -14,7 +15,7 @@ STATUS_CONTEXT = "devlab/functional"
 ERROR_CHARS = 300
 LOG_CHARS = 3000
 ICONS = {"success": "✅", "failure": "❌", "error": "⚠️"}
-MODES = {"off": "AR", "mtp": "MTP"}
+MODES = {"off": "AR", "mtp": "MTP", "dflash2": "DFlash2", "dspark": "DSpark", "native": "Native"}
 
 
 def load_json(path):
@@ -106,8 +107,9 @@ def phases_section(data):
     head_arm = next((arm for arm in data["arms"] if arm["revision"] == "head"), None)
     titles = {"startup": "Startup"}
     for key, label in requests.items():
-        tokens = head_arm["requests"][key]["prompt_tokens"] if head_arm else None
-        titles[key] = label + (f" · {tokens:,} tok" if tokens else "")
+        tokens = head_arm["requests"][key].get("prompt_tokens",
+            head_arm["requests"][key].get("work", {}).get("prompt_tokens")) if head_arm else None
+        titles[key] = label + (f" · {tokens:,.0f} tok" if tokens else "")
     # Phases a request never exercises (no cache restore on a cold prompt) stay out.
     phases = [phase for phase in data["phases"]
               if any(value for value in phase["base"] + phase["head"])]
@@ -142,9 +144,9 @@ def phases_section(data):
                  "repeats, inconclusive; ⬜ unchanged. Observations, not qualified timing "
                  f"regressions. Measured in {data['wall_s'] / 60:.1f} min.</sub>")
     if data.get("diverged"):
-        lines += ["", "⚠️ Generated text differs between arms for "
+        lines += ["", "⚠️ Generated text differs or server work differs between arms for "
                   + ", ".join(f"`{key}`" for key in data["diverged"])
-                  + "; MTP decode times there follow different drafts."]
+                  + "; affected speed comparisons are inconclusive."]
     lines += ["", "<details><summary>Every repeat</summary>", "",
               "| Phase | Base | PR | Verdict |", "| --- | ---: | ---: | --- |"]
     for phase in phases:
@@ -196,9 +198,116 @@ def failure_details(rows):
     return lines
 
 
+def timing_state(data):
+    if not data or not data.get('phases') or len(data.get('arms', [])) < 4:
+        return 'missing'
+    repeats = data.get('settings', {}).get('repeats', 0)
+    if repeats < 2 or any(sum(arm.get('revision') == side for arm in data['arms']) != repeats
+                          for side in ('base', 'head')):
+        return 'missing'
+    for phase in data['phases']:
+        if any(len(phase[side]) != repeats for side in ('base', 'head')):
+            return 'missing'
+        if any(value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0)
+               for value in phase['base'] + phase['head']):
+            return 'missing'
+        if phase['verdict'] not in ('same', 'faster', 'slower', 'noisy', 'missing'):
+            return 'missing'
+    applicable = [phase for phase in data['phases'] if any(
+        value is not None for value in phase['base'] + phase['head'])]
+    if not applicable:
+        return 'missing'
+    applicable = [phase for phase in applicable if phase.get('checked', True)]
+    if not applicable:
+        return 'observations'
+    if any(phase['verdict'] == 'slower' for phase in applicable):
+        return 'slower'
+    if any(phase['verdict'] in ('noisy', 'missing') for phase in applicable):
+        return 'inconclusive'
+    return 'measured'
+
+
+def render_models(args, plan, summary):
+    from devlab_models import registry
+    definitions = registry()['models']
+    expected = {model['id'] for model in plan['models']}
+    items = {model['id']: model for model in (summary or {}).get('models', [])}
+    rows = (summary or {}).get('groups', [])
+    expected_groups = {(row['profile'], row['configuration']): row['suites'] for row in plan['groups']}
+    observed_groups = {(row['profile'], row['configuration']): row['suites'] for row in rows}
+    phases = {key: load_json(args.results / (key + '.phases.json')) for key in expected}
+    speeds = {key: timing_state(phases[key]) if phases[key] and phases[key].get('revisions') == {
+        'base': plan['base'], 'head': plan['head']} else 'missing' for key in expected}
+    state, description = 'success', f'{len(expected)} selected models passed correctness and speed checks'
+    if speeds and all(speed == 'observations' for speed in speeds.values()):
+        description = f'{len(expected)} selected models passed; timing observations retained'
+    if args.authorize != 'success':
+        state, description = 'error', 'Authorization or planning failed'
+    elif not expected and args.smoke == 'skipped':
+        description = 'No functional impact in supported categories'
+    elif args.smoke == 'cancelled':
+        state, description = 'error', 'Selected model checks cancelled'
+    elif not summary or set(items) != expected or len(summary.get('models', [])) != len(expected) or observed_groups != expected_groups or len(rows) != len(expected_groups):
+        state, description = 'error', 'Selected model results are missing or incomplete'
+    elif any(row['status'] != 'passed' for row in rows) or any(item['correctness'] == 'failed' for item in items.values()):
+        state, description = 'failure', 'Selected model correctness checks failed'
+    elif any(item['correctness'] != 'passed' or item['timing'] != 'passed' for item in items.values()):
+        state, description = 'error', 'Selected model correctness or timing evidence is incomplete'
+    elif any(speed == 'slower' for speed in speeds.values()):
+        state, description = 'failure', 'Server phases slower in every paired repeat (>5% and >3 ms)'
+    elif any(speed in ('missing', 'inconclusive') for speed in speeds.values()):
+        state, description = 'error', 'Correctness passed; speed comparison incomplete or inconclusive'
+    elif args.smoke != 'success':
+        state, description = 'error', f'Model checks completed; cluster job {args.smoke}'
+    tier = ' · PR tier' if plan['tier'] == 'pr' else ''
+    lines = [MARKER, f'### {ICONS[state]} Devlab functional checks{tier}: {description}', '',
+             '| Model | Correctness | Speed · merge base → PR |', '| --- | --- | --- |']
+    for selection in plan['models']:
+        key = selection['id']
+        lines.append(f"| {definitions[key]['title']} | {items.get(key, {}).get('correctness', 'incomplete')} | {speeds[key]} |")
+    for selection in plan['models']:
+        key = selection['id']
+        item = items.get(key, {})
+        lines += ['', '#### ' + definitions[key]['title'], '']
+        rules = ', '.join(f"`{rule}`" for rule in sorted({reason['rule'] for reason in selection['reasons']}))
+        representative = any(reason['representative'] for reason in selection['reasons'])
+        lines.append(('Selected category representative' if representative else 'Model-specific coverage') + ': ' + rules + '.')
+        model_rows = [row for row in rows if row['profile'].split('/')[0] == key]
+        if model_rows:
+            lines += [''] + group_table(model_rows) + failure_details(model_rows)
+        else:
+            lines += ['', '⚠️ Correctness results are missing.']
+        for limitation in item.get('known_limitations', []):
+            lines += ['', '⚠️ ' + short(limitation, 500)]
+        if item.get('error'):
+            lines += ['', 'Runner: ' + short(item['error'], ERROR_CHARS)]
+        if phases[key] and phases[key].get('phases'):
+            checks = phases[key].get('timing_checks')
+            if checks is not None:
+                lines += ['', 'Speed gates: ' + (', '.join(f'`{key}`' for key in checks) if checks else
+                          'observations only for this change; no affected production timing phase') + '.']
+            lines += [line.replace('#### ', '##### ', 1) if line.startswith('#### ') else line
+                      for line in phases_section(phases[key])]
+        else:
+            lines += ['', '⚠️ Speed comparison is incomplete.']
+        if item.get('timing_error'):
+            lines += ['', 'Timing runner: ' + short(item['timing_error'], ERROR_CHARS)]
+    if args.benchmark:
+        read = lambda name: (args.results / name).read_text() if (args.results / name).exists() else ''
+        lines += bench_section(read('bench-base.md'), read('bench-head.md'))
+    lines += ['', f"<sub>[Workflow run and evidence]({args.run_url}) · "
+              f"PR `{plan['head'][:7]}` vs merge base `{plan['base'][:7]}` · "
+              f"{len(plan['deferred'])} deferred, {len(plan['release_only'])} for the release run. "
+              f"`{STATUS_CONTEXT}` is advisory on PRs; only the automatic release merge waits for it. "
+              'Coverage is limited to the selected representatives; image/video generation and agent replay remain separate.</sub>']
+    return state, description, '\n'.join(lines) + '\n'
+
+
 def render(args):
     plan = load_json(args.plan)
     summary = load_json(args.results / "summary.json")
+    if plan is not None and plan.get('schema') == 2:
+        return render_models(args, plan, summary)
     state, description = verdict(args.authorize, args.smoke, plan, summary, args.benchmark)
     rows = summary["groups"] if summary is not None else []
     model = group_name(rows[0])[1] if rows else "flash-next-q4"

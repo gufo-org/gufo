@@ -24,6 +24,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/functional -p test_impact.py
           python3 -m unittest discover -s tests/functional -p test_report.py
+          python3 -m unittest discover -s tests/functional -p test_devlab.py
 
       - name: Compute CMake compiler cache key
         id: ccache-key
