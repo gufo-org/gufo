@@ -1,5 +1,7 @@
 #include "src/cli/serve/text_generation_scheduler.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>

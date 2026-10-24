@@ -1,5 +1,7 @@
 #include "src/cli/serve/video_api.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>

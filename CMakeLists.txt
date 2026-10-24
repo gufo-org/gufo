@@ -50,6 +50,8 @@ endif()
 if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
   message(FATAL_ERROR "Gufo requires Linux x86-64 with an AMD gfx1151 GPU")
 endif()
+add_compile_options(
+  "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_SOURCE_DIR}/src/core/hip/libstdcxx_noinline.hpp>")
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
