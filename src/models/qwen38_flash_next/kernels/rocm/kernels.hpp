@@ -248,11 +248,16 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
 /// history is read only; pass convolved=true to GatedDeltaNet to consume
 /// this result and update history. Speculative snapshots need all raw QKV
 /// rows and must use DenseF16Gemm instead. Unsupported shapes launch nothing.
+/// A non-null `z_stream` receives the Z rows' tiles (the same products)
+/// after the QKV tiles (ordered through `z_start`), so they run beside the
+/// recurrence that does not read them.
 bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0);
+                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0,
+                     hipStream_t z_stream = nullptr,
+                     hipEvent_t z_start = nullptr);
 
 /// Routed expert GEMMs. RoutedCompact sorts the (token, slot) assignments
 /// by expert into `rows_token`/`rows_slot` (RoutedCompactRows(slots,
@@ -353,7 +358,8 @@ struct GdnCheckpoint {
 /// (K = v_heads * d) instead of `out`. With null `out_q8`, a non-null
 /// `out_half` receives F16 rows instead of `out`. With both null, a non-null
 /// `out_q8_1` also receives the rows' unpadded Q8_1 rows (as
-/// qfn_mmq_quantize_q8_1 writes them; d == 128). `convolved` consumes
+/// qfn_mmq_quantize_q8_1 writes them; d == 128). The epilogue, the only
+/// reader of `z`, waits for `z_ready` when it is set. `convolved` consumes
 /// convolution rows already in conv_scratch; it requires null speculative
 /// snapshots.
 void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
@@ -367,7 +373,8 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t d, std::uint32_t kernel, bool row_split,
                    bool convolved, float eps, hipStream_t stream,
                    __half* out_half = nullptr, GdnCheckpoint checkpoint = {},
-                   std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr);
+                   std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr,
+                   hipEvent_t z_ready = nullptr);
 
 /// Private rows for one request in a decode batch. Scratch regions and all
 /// recurrent/history/rollback buffers must be disjoint between requests.
