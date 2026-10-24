@@ -265,7 +265,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                         worker.join(timeout=5)
 
     def test_image_inputs_require_a_projector_before_starting_a_server(self):
-        for suite in ("image-inputs", "image-count", "tool-images"):
+        for suite in ("image-inputs", "image-count", "tool-images", "image-detail"):
             argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
                     "--suite", suite, "--record-baseline", "--", "gufo", "serve", "llm"]
             with patch.object(sys, "argv", argv), patch.object(functional, "server") as start, \
