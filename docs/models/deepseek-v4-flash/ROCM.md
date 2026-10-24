@@ -144,7 +144,9 @@ separate, slower comparison: it reached 24.18 tok/s with 85 accepted drafts;
 the corrected target with main's backoff reached 15.33 with eight accepted.
 Restoring recent-cost backoff and adding the kernel changes reaches 20.13
 with 69 accepted drafts. The old and corrected summaries are both valid.
-No further policy tuning is included. [BENCHMARKS.md](BENCHMARKS.md) retains
+The final rebased Nix build repeats this first continuation at 20.12 tok/s
+with the same 69 accepted drafts; d0 remains 22.18 tok/s. No further policy
+tuning is included. [BENCHMARKS.md](BENCHMARKS.md) retains
 its published measurements; this was a focused repeat, not a new full sweep.
 
 The earlier corrected-build profile was 93.2% GPU-busy during this slow decode.

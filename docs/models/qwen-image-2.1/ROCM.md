@@ -71,6 +71,12 @@ inputs from the preceding table, so their scores are not a matched regression
 comparison. Both outputs preserve the requested cube and colors on review.
 No quality limit or frozen fixture changes.
 
+A final production-API control on unchanged main uses the same GCC 16 noise
+and the same reference PNGs. Generation PSNR improves from 39.50 to 39.85 dB;
+editing improves from 43.64 to 44.31 dB. These matched checks support the
+numerical improvement on both inputs; they do not establish general perceptual
+quality.
+
 ## Focused performance and serving
 
 Production HTTP generation, 1024², seed 42, two steps. Each entry is one
