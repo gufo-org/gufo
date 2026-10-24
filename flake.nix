@@ -3,10 +3,11 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    # ROCm 10.1.0 evaluation set from nixpkgs PR 573885 (not yet merged).
+    # ROCm 10.1.0 as rocmPackages_10, on nixos-unstable (gufo-org/nixpkgs
+    # rocm-10.1). Binaries for gfx1151 are on gufo.cachix.org.
     # Only the rocm10 package and shell use it; the default stays on the
     # nixpkgs ROCm release.
-    nixpkgs-rocm10.url = "github:randomizedcoder/nixpkgs/925eadb600eb3ee8f2d5d79f9d3796bf161893ce";
+    nixpkgs-rocm10.url = "github:gufo-org/nixpkgs/1a6ba8bc6f744f7a843d025e46bc9911b4b6c37d";
     # Reference ASR/TTS runtime for benchmark comparisons; exposes a
     # ROCm gfx1151 package tuned for Strix Halo.
     audio-cpp = {
@@ -47,15 +48,15 @@
       );
 
       # Evaluation build against ROCm 10.1.0. The whole package set comes from
-      # the PR so glibc, stdenv and the ROCm compiler stay consistent.
+      # nixpkgs-rocm10 so glibc, stdenv and the ROCm compiler stay consistent.
       gufoRocm10 = forAllSystems (
         system:
         let
           pkgsRocm10 = import nixpkgs-rocm10 { inherit system; };
         in
         (pkgsRocm10.callPackage ./.devops/nix/scope.nix { inherit revision; }).gufo.override {
-          # Kernel libraries built for gfx1151 only; there is no binary cache.
-          rocmPackages = pkgsRocm10.rocmPackages.gfx1151;
+          # Kernel libraries built for gfx1151 only, cached on gufo.cachix.org.
+          rocmPackages = pkgsRocm10.rocmPackages_10.gfx1151;
         }
       );
 
