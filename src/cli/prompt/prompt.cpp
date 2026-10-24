@@ -1,5 +1,9 @@
 #include "src/cli/prompt/prompt.hpp"
 
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/cli/prompt/gemma4_prompt.hpp"
+#endif
+
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -55,8 +59,13 @@ static void RegisterImageOptions(ArgParser& parser, PromptOptions& opt) {
                  "Prefix image inputs with Picture N: in the chat template",
                  "Prompt", &opt.add_vision_id);
   parser.AddOption("", "--mmproj", "PATH",
-                   "Qwen BF16 vision sidecar (auto-discovered beside model)",
+                   "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
+                   "(auto-discovered beside model)",
                    "Model", &opt.vision_model_path);
+  parser.AddOption("", "--image-tokens", "N",
+                   "Gemma 4 soft tokens per image: 70, 140, 280, 560 or 1120 "
+                   "(default: 280)",
+                   "Prompt", &opt.image_tokens);
   parser.AddCustomOption(
       "", "--image", "PATH",
       "PNG/JPEG attached before text in the first user turn; repeat for "
@@ -88,6 +97,13 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
   // Model
   parser.AddOption("-m", "--model", "PATH", "Path to GGUF model file", "Model",
                    &opt.model_path);
+  parser.AddOption(
+      "", "--prefill-weights", "MODE",
+      "Gemma 4 dense prefill weights, kept beside the GGUF ones for decode: "
+      "off, compact (K-quant codes with binary16 scales; about one more "
+      "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
+      "copies) (default: off)",
+      "Model", &opt.prefill_weights);
   RegisterImageOptions(parser, opt);
 
   // Prompt & Formatting
@@ -152,8 +168,18 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    &opt.dflash_model_path);
   parser.AddOption(
       "", "--draft-policy", "POLICY",
-      "DFlash2 block length: fixed or adaptive (default: adaptive)",
+      "Draft length: DFlash2 fixed or adaptive (default: adaptive); Gemma 4 "
+      "MTP calibrated, confidence or fixed (default: calibrated)",
       "Speculative", &opt.draft_policy);
+  parser.AddOption(
+      "", "--draft-calibration", "SCOPE",
+      "Gemma 4 calibrated drafting: shared (learned across requests) or "
+      "request (reset per request; exact seeded replay) (default: shared)",
+      "Speculative", &opt.draft_calibration);
+  parser.AddOption("", "--draft-trace", "PATH",
+                   "Gemma 4 MTP: append one JSON line per verification cycle "
+                   "(prices, estimates, outcome, stage times) to PATH",
+                   "Speculative", &opt.draft_trace_path);
   parser.AddOption("", "--dspark-model", "PATH",
                    "Path to the DeepSeek V4 Flash DSpark support GGUF file",
                    "Speculative", &opt.dspark_model_path);
@@ -162,7 +188,8 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    "Speculative", &opt.mtp_model_path);
   parser.AddCustomOption(
       "-d", "--draft-tokens", "N",
-      "Maximum speculative draft tokens evaluated per step (default: 7)",
+      "Maximum speculative draft tokens evaluated per step (default: 7; "
+      "Gemma 4: 15)",
       "Speculative",
       [&opt](std::string_view, std::string_view value,
              std::string* error) -> bool {
@@ -177,6 +204,7 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
           return false;
         }
         opt.draft_tokens = count;
+        opt.draft_tokens_given = true;
         return true;
       });
 
@@ -272,25 +300,6 @@ std::optional<ReasoningEffort> ParseReasoningEffort(std::string_view value) {
   return std::nullopt;
 }
 
-ReasoningOptions PromptReasoningOptions(const PromptOptions& options) {
-  ReasoningOptions reasoning;
-  if (options.reasoning_mode == "on") {
-    reasoning.enabled = true;
-  } else if (options.reasoning_mode == "off") {
-    reasoning.enabled = false;
-  }
-  if (options.reasoning_effort != "auto") {
-    reasoning.effort = ParseReasoningEffort(options.reasoning_effort);
-    reasoning.enabled = true;
-  }
-  if (options.preserve_thinking == "on") {
-    reasoning.preserve_thinking = true;
-  } else if (options.preserve_thinking == "off") {
-    reasoning.preserve_thinking = false;
-  }
-  return reasoning;
-}
-
 void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
   sampling::TextModelPreset preset = sampling::TextModelPreset::kUnspecified;
   const auto artifact_architecture =
@@ -299,6 +308,8 @@ void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
     preset = sampling::TextModelPreset::kDeepSeekV4Flash;
   } else if (artifact_architecture == "qwen4exp") {
     preset = sampling::TextModelPreset::kQwen38;
+  } else if (artifact_architecture == "gemma4") {
+    preset = sampling::TextModelPreset::kGemma4;
   } else if (const auto config = reader.ExtractModelConfig()) {
     preset = sampling::TextPreset(*config);
   }
@@ -654,9 +665,11 @@ std::shared_ptr<models::qwen38_flash_next::Model> LoadFlashNextModel(
   std::string error;
   if (opt.force_cpu ||
       (!opt.speculative_backend.empty() && opt.speculative_backend != "mtp") ||
-      (opt.speculative_backend == "mtp" && opt.min_draft_tokens != 1)) {
+      (opt.speculative_backend == "mtp" &&
+       (opt.min_draft_tokens != 1 || !opt.draft_policy.empty() ||
+        !opt.draft_calibration.empty() || !opt.draft_trace_path.empty()))) {
     std::cerr << "Flash-Next requires ROCm and supports MTP with "
-                 "--min-draft-tokens 1\n";
+                 "--min-draft-tokens 1 and no --draft-policy\n";
     return nullptr;
   }
   if (opt.use_chat_template &&
@@ -840,6 +853,25 @@ void GenerateQwenGpuResponse(
 
 }  // namespace
 
+ReasoningOptions PromptReasoningOptions(const PromptOptions& options) {
+  ReasoningOptions reasoning;
+  if (options.reasoning_mode == "on") {
+    reasoning.enabled = true;
+  } else if (options.reasoning_mode == "off") {
+    reasoning.enabled = false;
+  }
+  if (options.reasoning_effort != "auto") {
+    reasoning.effort = ParseReasoningEffort(options.reasoning_effort);
+    reasoning.enabled = true;
+  }
+  if (options.preserve_thinking == "on") {
+    reasoning.preserve_thinking = true;
+  } else if (options.preserve_thinking == "off") {
+    reasoning.preserve_thinking = false;
+  }
+  return reasoning;
+}
+
 static std::optional<PromptOptions> ParseTextOptions(
     std::span<const char* const> args, std::string* error_msg,
     std::string_view command) {
@@ -899,11 +931,16 @@ static std::optional<PromptOptions> ParseTextOptions(
     }
     return std::nullopt;
   }
-  if (!opt.draft_policy.empty() &&
-      ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       opt.speculative_backend != "dflash2")) {
+  // MTP models validate their own policy names.
+  if ((!opt.draft_policy.empty() && backend != "mtp" &&
+       (backend != "dflash2" ||
+        (opt.draft_policy != "fixed" && opt.draft_policy != "adaptive"))) ||
+      ((!opt.draft_calibration.empty() || !opt.draft_trace_path.empty()) &&
+       backend != "mtp")) {
     if (error_msg != nullptr)
-      *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
+      *error_msg =
+          "--draft-policy requires DFlash2 (fixed or adaptive) or MTP; "
+          "--draft-calibration and --draft-trace require MTP";
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && backend == "dflash2") {
@@ -1007,6 +1044,13 @@ int RunPrompt(std::span<const char* const> args) {
   ResolvePromptSampling(*reader, &opt);
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (IsGemma4(*reader)) {
+    return RunGemma4Prompt(opt, model_load_start);
+  }
+  if (opt.image_tokens != 0) {
+    std::cerr << "--image-tokens applies to Gemma 4 models\n";
+    return 2;
+  }
   if (IsDeepSeekV4Flash(*reader)) {
     if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {
       std::cerr << "DeepSeek does not support image input\n";
@@ -1230,6 +1274,13 @@ int RunChat(std::span<const char* const> args) {
   ResolvePromptSampling(*reader, &opt);
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (IsGemma4(*reader)) {
+    return RunGemma4Chat(opt, model_load_start);
+  }
+  if (opt.image_tokens != 0) {
+    std::cerr << "--image-tokens applies to Gemma 4 models\n";
+    return 2;
+  }
   if (IsDeepSeekV4Flash(*reader)) {
     if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {
       std::cerr << "DeepSeek does not support image input\n";

@@ -25,6 +25,8 @@ public:
 constexpr ResourceLimits kLimits{1 << 20, 1 << 20, 1 << 20, 1 << 20};
 
 struct Fixture {
+  Fixture() = default;
+  Fixture(Rows window_rows, Rows ring_rows) : adapter(window_rows, ring_rows) {}
   ResourceLedger ledger{kLimits};
   FakeAdapter adapter;
   Guard guard;
@@ -68,13 +70,15 @@ struct Fixture {
         std::find_if(positions.begin(), positions.end(), [&](const auto& p) {
           return p.id == component;
         })->valid_rows;
+    // A window component holds only the rows a continuation reads.
+    const auto first = WindowFirstRow(descriptor, rows);
     std::vector<std::byte> bytes(descriptor.kind == ComponentKind::kPrivateState
                                      ? descriptor.state_bytes
-                                     : rows * descriptor.row_bytes);
+                                     : (rows - first) * descriptor.row_bytes);
     auto transfer =
         descriptor.kind == ComponentKind::kPrivateState
             ? adapter.CapturePrivate(*slot, component, bytes, stream)
-            : adapter.CopyRowsOut(*slot, component, 0, rows, bytes, stream);
+            : adapter.CopyRowsOut(*slot, component, first, rows, bytes, stream);
     assert(transfer.Wait() == TransferResult::kSucceeded);
     return bytes;
   }
@@ -712,6 +716,65 @@ void RejectedPayloadsReleaseOwnersFirst() {
   }
   assert(ledger.Snapshot().total_bytes == 0);
 }
+// Window components keep only the chunks a continuation reads, share them
+// between checkpoints at different vector positions, and restore into an
+// empty ring. Window 6 rows, ring 16, chunks of 4.
+void WindowRows() {
+  Fixture f(6, 16);
+  {
+    auto history = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                          f.adapter.CompatibilityIdentity());
+    const auto window = [](const Checkpoint& c) -> const CheckpointComponent& {
+      return *std::ranges::find_if(c.Components(), [](const auto& x) {
+        return x.descriptor.id == kWindow;
+      });
+    };
+    f.Append(13, 1);  // Window [7, 13): chunks from row 4, tail row 12.
+    auto early = f.Capture(history);
+    assert(window(*early).chunks.size() == 2);
+    assert(window(*early).chunks[0].First() == 4);
+    assert(window(*early).tail->Bytes() == sizeof(Token));
+    f.Append(1, 2);  // Window [8, 14): only the chunk at row 8 remains.
+    // New: the target, draft and window tails [12, 14) and private state.
+    assert(history.NewPayloadBytes(f.adapter.Positions(*f.slot)) ==
+           3 * 2 * sizeof(Token) + 32);
+    auto late = f.Capture(history);
+    assert(window(*late).chunks.size() == 1);
+    assert(window(*late).chunks[0].SameChunk(window(*early).chunks[1]));
+    f.Append(6, 3);  // Rows [0, 4) leave the ring; window [14, 20).
+    // New: chunks [12, 20) of target, draft and window, and private state;
+    // never the window's chunks below row 12.
+    assert(history.NewPayloadBytes(f.adapter.Positions(*f.slot)) ==
+           3 * 8 * sizeof(Token) + 32);
+    auto deep = f.Capture(history);
+    assert(window(*deep).chunks.size() == 2);
+    assert(window(*deep).chunks[0].First() == 12 && !window(*deep).tail);
+    Fixture control(6, 16);
+    control.Append(13, 1);
+    control.Append(1, 2);
+    control.Append(6, 3);
+    Fixture other(6, 16);
+    other.Restore(*deep);
+    AssertSameState(other, control);
+    assert(other.adapter.WindowTokens(*other.slot) ==
+           control.adapter.WindowTokens(*control.slot));
+    other.Append(5, 4);
+    control.Append(5, 4);
+    AssertSameState(other, control);
+    // A restored branch inherits the window chunks and shares them.
+    auto fork = ExecutionHistory::Restored(f.ledger, *deep);
+    f.Restore(*deep);
+    f.Append(2, 5);  // Window [16, 22): chunk at row 16 inherited.
+    auto child = f.Capture(fork);
+    assert(window(*child).chunks.size() == 1);
+    assert(window(*child).chunks[0].SameChunk(window(*deep).chunks[1]));
+    f.Restore(*early);
+    Fixture early_control(6, 16);
+    early_control.Append(13, 1);
+    AssertSameState(f, early_control);
+  }
+  assert(f.ledger.Snapshot().total_bytes == 0);
+}
 void Baseline() {
   constexpr std::size_t gib = std::size_t{1} << 30;
   ResourceLedger ledger({64 * gib, 64 * gib, 0, 64 * gib});
@@ -788,6 +851,7 @@ int main() {
   RejectInvalidDescriptionsAndProvenance();
   FaultsAtEveryAdmissionAndConversion();
   PayloadValidationAndReleaseOrder();
+  WindowRows();
   Baseline();
   std::cout << "PASS: checkpoint ownership\n";
 }

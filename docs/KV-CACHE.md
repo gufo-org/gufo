@@ -602,6 +602,12 @@ Match these request-local IDs to `checkpoint_id` in publication/refusal logs:
 an earlier request's asynchronous write may finish after the current response.
 IDs belong to one server lifetime; correlate each restart separately.
 
+`usage.gufo.cache_snapshot_ms` measures checkpoint capture work. An asynchronous
+prompt capture ends when its worker completes, including a failed capture;
+time spent waiting for the scheduler to collect the completed result is excluded.
+Captures can overlap another request's prefill or decode, so this duration is
+not an extra delay to add to the request's first-token time.
+
 Reading them:
 
 - `cache_n` growing turn over turn while `prompt_n` stays flat is healthy

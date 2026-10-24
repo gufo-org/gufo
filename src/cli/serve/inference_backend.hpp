@@ -22,6 +22,13 @@ namespace gufo::models::deepseek_v4_flash {
 class Model;
 }
 
+namespace gufo::models::gemma4 {
+class Model;
+namespace vision {
+class Encoder;
+}  // namespace vision
+}  // namespace gufo::models::gemma4
+
 namespace gufo::models::qwen38_flash_next {
 class Model;
 }
@@ -43,9 +50,18 @@ struct TextSpeculativeConfig {
   TextSpeculativeBackend backend{TextSpeculativeBackend::kDisabled};
   std::string draft_model_path;
   std::uint32_t max_draft_tokens{7};
+  /// Whether --draft-tokens was given; otherwise models with their own
+  /// default (Gemma 4) use it instead of max_draft_tokens.
+  bool max_draft_tokens_given{true};
   std::uint32_t min_draft_tokens{1};
   speculative::DFlashDraftPolicy dflash_policy{
       speculative::DFlashDraftPolicy::kAdaptive};
+  /// MTP draft-length policy and calibration scope names (Gemma 4); empty
+  /// selects the model's defaults.
+  std::string mtp_draft_policy;
+  std::string mtp_draft_calibration;
+  /// Gemma 4 MTP per-cycle trace file; empty writes none.
+  std::string mtp_draft_trace_path;
 };
 
 struct TextDiskCacheConfig {
@@ -73,6 +89,11 @@ public:
   InferenceBackend(InferenceBackend&&) = delete;
   InferenceBackend& operator=(InferenceBackend&&) = delete;
 
+  /// Gemma 4 --prefill-weights mode for the next load (empty is off).
+  void set_gemma_prefill_weights(std::string mode) {
+    gemma_prefill_weights_ = std::move(mode);
+  }
+
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
   /// `enable_yarn` opts Flash-Next into static YaRN, required for (and only
   /// accepted with) a `max_context` above its native context.
@@ -83,6 +104,7 @@ public:
             const TextSpeculativeConfig& speculative_config = {},
             const TextDiskCacheConfig& disk_cache_config = {},
             const std::string& vision_model_path = {},
+            std::uint32_t image_tokens = 0,
             TextRunnerRamCacheOptions ram_cache_config = {},
             bool enable_yarn = false);
 
@@ -117,6 +139,20 @@ public:
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
+
+  /// Installs a previously loaded Gemma 4 model with request-owned sessions
+  /// and host/disk continuation snapshots.
+  /// `vision`, when set, accepts image input of `image_tokens` soft tokens
+  /// per image (0: the processor default).
+  bool load(std::shared_ptr<models::gemma4::Model> model, std::string* error,
+            std::uint32_t max_context = 0, std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {},
+            std::shared_ptr<models::gemma4::vision::Encoder> vision = {},
+            std::uint32_t image_tokens = 0,
+            TextRunnerRamCacheOptions ram_cache_config = {});
 #endif
 
   /// Stable model identifier used in API responses.
@@ -133,6 +169,7 @@ public:
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;
   [[nodiscard]] InitialOutputState initial_output_state(
       const ChatRequest& request) const override;
+  [[nodiscard]] OutputMarkup output_markup() const override;
   /// The first name is primary; the rest are additional served names.
   void set_model_ids(std::vector<std::string> model_ids);
   void set_served_artifact(const std::string& model_path,
@@ -186,6 +223,7 @@ public:
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+  std::string gemma_prefill_weights_;
 };
 
 }  // namespace gufo::server

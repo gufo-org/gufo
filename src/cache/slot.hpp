@@ -153,6 +153,11 @@ public:
   // throws.
   [[nodiscard]] SlotLease Acquire(std::optional<BorrowedLocation> live = {},
                                   std::stop_token = {});
+  // Keeps the slot's state for an in-place restore (Adapter::ResidentRows):
+  // no reassignment copies or invalidation, and the generation stays, so its
+  // borrowed rows remain valid until the restore guards what it replaces.
+  // The live frontier is abandoned.
+  [[nodiscard]] SlotLease AcquireInPlace(std::stop_token = {});
 
   // Snapshot only: another acquirer may win before Acquire. Busy slots return
   // false; successful acquisitions still enforce exclusive generation checks.
@@ -164,6 +169,8 @@ public:
   void StopIdleSpill();
 
 private:
+  [[nodiscard]] SlotLease Claim(std::optional<BorrowedLocation> live,
+                                std::stop_token, bool in_place);
   std::shared_ptr<detail::LeaseState> state_;
   std::jthread worker_;
 };

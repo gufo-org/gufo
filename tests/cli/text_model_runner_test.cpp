@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -519,6 +520,52 @@ public:
     ++stats_->snapshot_restores;
   }
 };
+
+void TestSnapshotTimingEndsWhenCaptureCompletes() {
+  class GatedRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+    mutable std::binary_semaphore entered{0}, release{0};
+    bool fail{false};
+    std::unique_ptr<TextRunnerSnapshot> Snapshot(
+        const TextRunnerState& state) const override {
+      entered.release();
+      release.acquire();
+      if (fail)
+        throw std::runtime_error("injected capture failure");
+      return SnapshotRunner::Snapshot(state);
+    }
+  };
+  for (const bool fail : {false, true}) {
+    auto runner = std::make_shared<GatedRunner>(std::make_shared<FakeStats>());
+    runner->fail = fail;
+    TextRunnerPool pool(runner, 2);
+    auto request = pool.Acquire({1, 2, 3});
+    Expect(request.Prefill(3).decode_ready, "prompt is ready for capture");
+    const auto started = std::chrono::steady_clock::now();
+    Expect(!request.PreparePromptSnapshot(), "capture runs asynchronously");
+    Expect(runner->entered.try_acquire_for(std::chrono::seconds(5)),
+           "capture worker entered");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    runner->release.release();
+    const auto deadline = started + std::chrono::seconds(5);
+    while (request.SnapshotPending() &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    Expect(!request.SnapshotPending(), "capture worker completed");
+    const auto ready_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - started)
+                              .count();
+    // Model the scheduler spending a decode step on a peer before it can
+    // collect this completed capture. That delay is not capture work.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto metrics = request.Commit();
+    Expect(metrics.snapshot_ms >= 10 && metrics.snapshot_ms <= ready_ms + 5,
+           "capture timing includes the copy but excludes delayed collection");
+    Expect((metrics.snapshot_bytes == 0) == fail,
+           "timing preserves successful and failed capture results");
+  }
+}
 
 class PartialRetentionRunner final : public SnapshotRunner {
 public:
@@ -1563,6 +1610,74 @@ void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
   old.Invalidate();
 }
 
+/// An input whose tokens must be evaluated together, as Gemma 4 images are.
+struct IndivisibleSpanContext final : gufo::server::TextPromptContext {
+  std::size_t first{0};
+  std::size_t end{0};
+  [[nodiscard]] std::size_t PrefillStop(std::size_t position,
+                                        bool up) const override {
+    return position > first && position < end ? (up ? end : first) : position;
+  }
+};
+
+void TestIndivisibleInputsAreNotSplit() {
+  class ContextRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = SnapshotRunner::Descriptor();
+      descriptor.max_context = 32768;
+      return descriptor;
+    }
+    void SetPromptContext(
+        TextRunnerState&,
+        std::shared_ptr<const gufo::server::TextPromptContext>) const override {
+    }
+  };
+  const auto stops = [](const FakeStats& stats) {
+    std::vector<std::size_t> positions;
+    std::size_t position = 0;
+    for (const auto span : stats.prefill_spans)
+      positions.push_back(position += span);
+    return positions;
+  };
+  {
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(std::make_shared<ContextRunner>(stats), 1);
+    auto span = std::make_shared<IndivisibleSpanContext>();
+    span->first = 4;
+    span->end = 14;
+    auto request =
+        pool.Acquire(std::vector<TextRunnerToken>(20, 1), {}, {}, span);
+    while (!request.prefill_complete())
+      (void)request.Prefill(3);
+    Expect(stops(*stats) == std::vector<std::size_t>{3, 4, 14, 17, 20},
+           "a budget stops before an indivisible input, and a step starting "
+           "at one takes it whole");
+    request.Cancel();
+  }
+  {
+    // The 4096-token grid checkpoint falls inside the input.
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(std::make_shared<ContextRunner>(stats, 64, 256, 4096),
+                        1);
+    auto span = std::make_shared<IndivisibleSpanContext>();
+    span->first = 4000;
+    span->end = 4200;
+    auto request = pool.Acquire(std::vector<TextRunnerToken>(5000, 1), {}, {},
+                                span, true, 4990);
+    while (!request.prefill_complete())
+      (void)request.Prefill(32768);
+    const auto positions = stops(*stats);
+    Expect(
+        std::ranges::find(positions, 4000) != positions.end() &&
+            std::ranges::none_of(
+                positions, [](std::size_t p) { return p > 4000 && p < 4200; }),
+        "checkpoints move before an indivisible input");
+    request.Cancel();
+  }
+}
+
 void TestNewImageGetsAStableCheckpoint() {
   class ContextRunner final : public SnapshotRunner {
   public:
@@ -2501,9 +2616,11 @@ int main() {
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.
   gufo::platform::SetEnv("NO_COLOR", "1");
+  TestSnapshotTimingEndsWhenCaptureCompletes();
   TestInPassStableCheckpoint();
   TestInPassFailureRetainsOnlyCompletedCheckpoints();
   TestNewImageGetsAStableCheckpoint();
+  TestIndivisibleInputsAreNotSplit();
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();
   TestCancellationRetainsOnlyCompletedWork();

@@ -201,6 +201,7 @@ public:
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
+  [[nodiscard]] OutputMarkup output_markup() const override { return markup; }
   [[nodiscard]] bool supports_images() const override { return image_support; }
   bool image_support{true};
 
@@ -236,6 +237,7 @@ public:
   float last_temperature{0.0F};
   gufo::sampling::SamplingConfig last_sampling;
   std::optional<gufo::server::TextGenerationErrorCode> reject_on_start;
+  OutputMarkup markup;
 
 private:
   std::mutex mutex;
@@ -4961,6 +4963,134 @@ void TestResponsesOutput() {
   }
 }
 
+// A model that opens reasoning itself (initial state auto): a buffered
+// result arrives whole, and its reasoning must still be separated.
+void TestGemmaNativeToolCalls() {
+  using Backend = gufo::server::TextGenerationBackend;
+  FakeBackend backend;
+  backend.markup = {
+      .reasoning_start = "<|channel>thought\n",
+      .reasoning_end = "<channel|>",
+      .tool_syntax = Backend::OutputMarkup::ToolSyntax::kGemma4,
+  };
+  const std::string body = R"({
+        "model":"test-model",
+        "messages":[{"role":"user","content":"weather in Rome"}],
+        "tools":[{
+          "type":"function",
+          "function":{
+            "name":"get_weather",
+            "parameters":{
+              "type":"object",
+              "properties":{"city":{"type":"string"}},
+              "required":["city"]
+            }
+          }
+        }]
+      })";
+  const auto expect_call = [](const gufo::server::HttpResponse& response,
+                              std::string_view message) {
+    Expect(
+        response.status == 200 &&
+            response.body.find("tool_calls") != std::string::npos &&
+            response.body.find(R"(\"city\":\"Rome\")") != std::string::npos &&
+            response.body.find("call:") == std::string::npos,
+        message);
+  };
+  backend.pieces = {"<|tool_call>call:get_weather{city:<|\"|>Rome<|\"|>}",
+                    "<tool_call|>"};
+  auto response = gufo::server::HandleOpenAiChat(Request(body), backend);
+  Expect(backend.last_request.constrained_tools,
+         "Gemma 4 calls are constrained like other models' native calls");
+  expect_call(response, "Constrained native Gemma 4 calls are parsed");
+
+  // With thinking on, the output may open the thought channel before a call.
+  backend.initial_output_state_override = Backend::InitialOutputState::kAuto;
+  backend.pieces = {"<|channel>thought\nUse the tool.<channel|>",
+                    "<|tool_call>call:get_weather{city:<|\"|>Rome<|\"|>}",
+                    "<tool_call|>"};
+  for (const bool stream : {false, true}) {
+    auto request = gufo::json::parse(body);
+    request["stream"] = stream;
+    request["tool_choice"] = "required";
+    response = gufo::server::HandleOpenAiChat(Request(request.dump()), backend);
+    const auto output = stream ? std::string() : response.body;
+    std::string streamed;
+    if (stream)
+      response.streaming_body([&](std::string_view chunk) {
+        streamed += chunk;
+        return true;
+      });
+    const auto& text = stream ? streamed : output;
+    Expect(text.find("Use the tool.") != std::string::npos &&
+               text.find(R"("reasoning_content")") != std::string::npos &&
+               text.find("<|channel>") == std::string::npos &&
+               text.find("call:") == std::string::npos &&
+               text.find(R"(\"city\":\"Rome\")") != std::string::npos,
+           "A Gemma 4 thought before a required call stays reasoning");
+  }
+
+  // An agent turn: automatic, non-parallel, streamed token by token. Gemma 4
+  // opens an empty thought channel after tool responses even without thinking.
+  backend.initial_output_state_override = Backend::InitialOutputState::kAuto;
+  const std::string call =
+      "<|channel>thought\n<channel|><|tool_call>call:get_weather{city:<|\"|>"
+      "Rome<|\"|>,note:<|\"|>a, "
+      "{b}: \"c\"\n<|\"|>}<tool_call|>";
+  backend.pieces.clear();
+  for (std::size_t i = 0; i < call.size(); i += 3)
+    backend.pieces.push_back(call.substr(i, 3));
+  auto request = gufo::json::parse(body);
+  request["stream"] = true;
+  request["parallel_tool_calls"] = false;
+  response = gufo::server::HandleOpenAiChat(Request(request.dump()), backend);
+  std::string streamed;
+  response.streaming_body([&](std::string_view chunk) {
+    streamed += chunk;
+    return true;
+  });
+  // Settled arguments and the open string stream before the call closes.
+  std::string arguments;
+  std::size_t fragments = 0;
+  for (std::size_t at = streamed.find("data: {"); at != std::string::npos;
+       at = streamed.find("data: {", at + 1)) {
+    const auto end = streamed.find("\n\n", at);
+    const auto event = gufo::json::parse(streamed.substr(at + 6, end - at - 6));
+    if (const auto* choices = event.find("choices"))
+      for (const auto& choice : choices->items())
+        if (const auto* calls = choice.find("delta")->find("tool_calls"))
+          for (const auto& call : calls->items()) {
+            arguments += call.find("function")->member_str("arguments");
+            ++fragments;
+          }
+  }
+  Expect(streamed.find("error") == std::string::npos &&
+             streamed.find("channel") == std::string::npos &&
+             arguments == R"({"city":"Rome","note":"a, {b}: \"c\"\n"})" &&
+             fragments > 2,
+         "A streamed non-parallel Gemma 4 call is parsed incrementally: " +
+             streamed);
+}
+
+void TestResponsesAutoReasoning() {
+  using Backend = gufo::server::TextGenerationBackend;
+  FakeBackend backend;
+  backend.initial_output_state_override = Backend::InitialOutputState::kAuto;
+  backend.pieces = {"<think>Check the sum.</think>", "Four."};
+  const auto buffered = gufo::server::CreateOpenAiResponse(
+      Request("{}"), backend, {}, 0, {}, false);
+  const auto body = gufo::json::parse(buffered.body);
+  std::string text, thought;
+  for (const auto& item : body.find("output")->items()) {
+    const bool reasoning = item.member_str("type") == "reasoning";
+    for (const auto& part :
+         item.find(reasoning ? "summary" : "content")->items())
+      (reasoning ? thought : text) += part.member_str("text");
+  }
+  Expect(thought == "Check the sum." && text == "Four.",
+         "A whole auto-reasoning result separates reasoning from text");
+}
+
 void TestResponsesLiveAndCancellation() {
   FakeBackend backend;
   backend.pieces = {"<tool_call>first", "second"};
@@ -6167,23 +6297,35 @@ void TestIncrementalToolArguments() {
   const std::string value =
       "first line\nliteral </parameter> is data\n"
       "<tool_call> and <|im_end|> stay literal; \"quoted\" \\ café";
-  for (const auto format : {Format::kQwen, Format::kDeepSeek})
+  for (const auto format : {Format::kQwen, Format::kDeepSeek, Format::kGemma4})
     for (const int api : {0, 1, 2})
       for (const bool reasoning : {false, true}) {
         FakeBackend backend;
         backend.tool_format = format;
         backend.block_after_first_piece = true;
         const bool qwen = format == Format::kQwen;
+        const bool gemma = format == Format::kGemma4;
+        if (gemma)
+          backend.markup = {
+              .reasoning_start = "<|channel>thought\n",
+              .reasoning_end = "<channel|>",
+              .tool_syntax = gufo::server::TextGenerationBackend::OutputMarkup::
+                  ToolSyntax::kGemma4,
+          };
         const std::string opening =
-            qwen ? "<tool_call>\n<function=record>\n<parameter=text>\n"
-                 : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
-                   "<｜DSML｜parameter name=\"text\" string=\"true\">";
+            gemma  ? "<|tool_call>call:record{text:<|\"|>"
+            : qwen ? "<tool_call>\n<function=record>\n<parameter=text>\n"
+                   : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
+                     "<｜DSML｜parameter name=\"text\" string=\"true\">";
         const std::string closing =
-            qwen ? "\n</parameter>\n</function>\n</tool_call>"
-                 : "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
-                   "</｜DSML｜tool_calls>";
-        backend.pieces = {(reasoning ? "Check briefly.</think>\n" : "") +
-                          opening + value.substr(0, 10)};
+            gemma  ? "<|\"|>}<tool_call|>"
+            : qwen ? "\n</parameter>\n</function>\n</tool_call>"
+                   : "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+                     "</｜DSML｜tool_calls>";
+        const std::string thought =
+            gemma ? "Check briefly.<channel|>" : "Check briefly.</think>\n";
+        backend.pieces = {(reasoning ? thought : "") + opening +
+                          value.substr(0, 10)};
         // Exercise every byte boundary, including UTF-8 and escaped JSON.
         for (const char byte : value.substr(10) + closing)
           backend.pieces.emplace_back(1, byte);
@@ -6431,6 +6573,8 @@ int main() {
   TestExplicitStopOutputFraming();
   TestStopInsideToolArguments();
   TestResponsesOutput();
+  TestResponsesAutoReasoning();
+  TestGemmaNativeToolCalls();
   TestNativeToolTransports();
   TestParallelCallSeparatorIsNotContent();
   TestJsonToolStringOwnership();

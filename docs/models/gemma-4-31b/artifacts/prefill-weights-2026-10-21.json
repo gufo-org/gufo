@@ -1,0 +1,571 @@
+{
+ "date": "2026-10-21",
+ "description": "Prefill weight copies (--prefill-weights): compact K-quant records and binary16 decoded weights beside the GGUF data. Standalone tables: tools/bench/gemma4_prefill_bench.hip, best of 7 event samples per layout over two alternating rounds, cold weights, 2048 rows. End to end: native gufo bench -p 2048 -n 16 -d 0 (C1, AR), alternating arms; peak_gtt_mib sampled every 0.5 s.",
+ "standalone_31b_ud_2048": {
+  "shapes": [
+   {
+    "shape": "gate|up Q4_K [43008x5376]",
+    "gguf_ms": 23.863,
+    "compact_ms": 23.146,
+    "decoded_ms": 21.958
+   },
+   {
+    "shape": "gate|up Q5_K [43008x5376]",
+    "gguf_ms": 25.633,
+    "compact_ms": 24.309,
+    "decoded_ms": 22.037
+   },
+   {
+    "shape": "down Q4_K [5376x21504]",
+    "gguf_ms": 11.851,
+    "compact_ms": 11.425,
+    "decoded_ms": 18.872
+   },
+   {
+    "shape": "down Q5_K [5376x21504]",
+    "gguf_ms": 12.5,
+    "compact_ms": 12.126,
+    "decoded_ms": 19.238
+   },
+   {
+    "shape": "down Q6_K [5376x21504]",
+    "gguf_ms": 12.779,
+    "compact_ms": 12.109,
+    "decoded_ms": 18.606
+   },
+   {
+    "shape": "q|k sliding [12288x5376]",
+    "gguf_ms": 6.856,
+    "compact_ms": 6.636,
+    "decoded_ms": 6.31
+   },
+   {
+    "shape": "q|k sliding Q5_K [12288x5376]",
+    "gguf_ms": 7.31,
+    "compact_ms": 7.085,
+    "decoded_ms": 6.327
+   },
+   {
+    "shape": "q|k global [18432x5376]",
+    "gguf_ms": 10.316,
+    "compact_ms": 9.973,
+    "decoded_ms": 9.452
+   },
+   {
+    "shape": "q|k global Q5_K [18432x5376]",
+    "gguf_ms": 10.981,
+    "compact_ms": 10.652,
+    "decoded_ms": 9.49
+   },
+   {
+    "shape": "o sliding [5376x8192]",
+    "gguf_ms": 4.605,
+    "compact_ms": 4.436,
+    "decoded_ms": 8.523
+   },
+   {
+    "shape": "o global [5376x16384]",
+    "gguf_ms": 9.341,
+    "compact_ms": 8.83,
+    "decoded_ms": 19.994
+   },
+   {
+    "shape": "v sliding Q6_K [4096x5376]",
+    "gguf_ms": 2.506,
+    "compact_ms": 2.365,
+    "decoded_ms": 2.204
+   },
+   {
+    "shape": "v sliding Q5_K [4096x5376]",
+    "gguf_ms": 2.468,
+    "compact_ms": 2.393,
+    "decoded_ms": 2.188
+   }
+  ],
+  "predicted_chunk": {
+   "gguf": {
+    "chunk_ms": 3079,
+    "tflops": 38.96
+   },
+   "compact": {
+    "chunk_ms": 2966,
+    "tflops": 40.44
+   },
+   "decoded": {
+    "chunk_ms": 3592,
+    "tflops": 33.4
+   },
+   "best": {
+    "chunk_ms": 2856,
+    "tflops": 42.01
+   }
+  }
+ },
+ "standalone_31b_qat_2048": {
+  "shapes": [
+   {
+    "shape": "gate|up Q4_0 [43008x5376]",
+    "gguf_ms": 23.436,
+    "compact_ms": 0.0,
+    "decoded_ms": 21.858
+   },
+   {
+    "shape": "down Q4_0 [5376x21504]",
+    "gguf_ms": 11.475,
+    "compact_ms": 0.0,
+    "decoded_ms": 18.025
+   },
+   {
+    "shape": "q|k|v sliding [16384x5376]",
+    "gguf_ms": 8.85,
+    "compact_ms": 0.0,
+    "decoded_ms": 8.495
+   },
+   {
+    "shape": "q|k global [18432x5376]",
+    "gguf_ms": 9.924,
+    "compact_ms": 0.0,
+    "decoded_ms": 9.377
+   },
+   {
+    "shape": "o sliding [5376x8192]",
+    "gguf_ms": 4.407,
+    "compact_ms": 0.0,
+    "decoded_ms": 7.859
+   },
+   {
+    "shape": "o global [5376x16384]",
+    "gguf_ms": 9.284,
+    "compact_ms": 0.0,
+    "decoded_ms": 24.646
+   }
+  ],
+  "predicted_chunk": {
+   "gguf": {
+    "chunk_ms": 2950,
+    "tflops": 40.67
+   },
+   "compact": {
+    "chunk_ms": 2950,
+    "tflops": 40.67
+   },
+   "decoded": {
+    "chunk_ms": 3551,
+    "tflops": 33.78
+   },
+   "best": {
+    "chunk_ms": 2832,
+    "tflops": 42.36
+   }
+  }
+ },
+ "e2e_31b_ud_q4_k_xl": [
+  {
+   "arm": "off",
+   "peak_gtt_mib": 22532,
+   "load_s": 3.42837,
+   "pp2048": 583.84,
+   "tg16": 12.35
+  },
+  {
+   "arm": "compact",
+   "peak_gtt_mib": 41896,
+   "load_s": 3.93687,
+   "pp2048": 601.55,
+   "tg16": 12.34
+  },
+  {
+   "arm": "decoded",
+   "peak_gtt_mib": 66588,
+   "load_s": 4.26679,
+   "pp2048": 619.14,
+   "tg16": 12.35
+  },
+  {
+   "arm": "decoded",
+   "peak_gtt_mib": 66588,
+   "load_s": 4.22476,
+   "pp2048": 618.6,
+   "tg16": 12.35
+  },
+  {
+   "arm": "compact",
+   "peak_gtt_mib": 41896,
+   "load_s": 3.88418,
+   "pp2048": 598.28,
+   "tg16": 12.34
+  },
+  {
+   "arm": "off",
+   "peak_gtt_mib": 22532,
+   "load_s": 3.37065,
+   "pp2048": 577.89,
+   "tg16": 12.34
+  }
+ ],
+ "e2e_31b_qat": [
+  {
+   "arm": "off",
+   "peak_gtt_mib": 21064,
+   "load_s": 3.61682,
+   "pp2048": 597.03,
+   "tg16": 13.58
+  },
+  {
+   "arm": "decoded",
+   "peak_gtt_mib": 57984,
+   "load_s": 3.94596,
+   "pp2048": 619.19,
+   "tg16": 13.59
+  },
+  {
+   "arm": "decoded",
+   "peak_gtt_mib": 57984,
+   "load_s": 3.85169,
+   "pp2048": 616.57,
+   "tg16": 13.58
+  },
+  {
+   "arm": "off",
+   "peak_gtt_mib": 21064,
+   "load_s": 3.31815,
+   "pp2048": 593.91,
+   "tg16": 13.59
+  }
+ ],
+ "e2e_26b_qat": [
+  {
+   "arm": "off",
+   "peak_gtt_mib": 15521,
+   "load_s": 2.89228,
+   "pp2048": 4153.37,
+   "tg16": 88.11
+  },
+  {
+   "arm": "decoded",
+   "peak_gtt_mib": 18241,
+   "load_s": 2.72549,
+   "pp2048": 4078.12,
+   "tg16": 88.22
+  },
+  {
+   "arm": "decoded",
+   "peak_gtt_mib": 18240,
+   "load_s": 2.67694,
+   "pp2048": 4063.36,
+   "tg16": 88.24
+  },
+  {
+   "arm": "off",
+   "peak_gtt_mib": 15520,
+   "load_s": 2.65096,
+   "pp2048": 4174.3,
+   "tg16": 88.21
+  }
+ ],
+ "e2e_26b_ud_q4_k_xl_q8_0_decoded_all_widths": [
+  {
+   "arm": "off",
+   "peak_gtt_mib": 18102,
+   "load_s": 3.13017,
+   "pp2048": 4062.79,
+   "tg16": 60.64
+  },
+  {
+   "arm": "decoded",
+   "peak_gtt_mib": 20822,
+   "load_s": 3.1658,
+   "pp2048": 4017.06,
+   "tg16": 60.84
+  },
+  {
+   "arm": "decoded",
+   "peak_gtt_mib": 20822,
+   "load_s": 3.18645,
+   "pp2048": 4021.42,
+   "tg16": 60.85
+  },
+  {
+   "arm": "off",
+   "peak_gtt_mib": 18102,
+   "load_s": 3.18736,
+   "pp2048": 4059.01,
+   "tg16": 60.8
+  },
+  {
+   "arm": "off",
+   "peak_gtt_mib": 18102,
+   "load_s": 3.19443,
+   "pp2048": 4059.67,
+   "tg16": 60.75
+  },
+  {
+   "arm": "decoded",
+   "peak_gtt_mib": 20822,
+   "load_s": 3.15662,
+   "pp2048": 4016.65,
+   "tg16": 60.83
+  }
+ ],
+ "e2e_26b_ud_q8_0_gate_up_variants": {
+  "note": "base: Flash-Next DenseF16Gemm + GeGLU pass; blk: blockwise Q8_0 GEMM with fused GeGLU (no copy); dec: binary16 copies for every Q8_0 projection",
+  "runs": [
+   {
+    "arm": "base",
+    "pp2048": 4065.93
+   },
+   {
+    "arm": "blk",
+    "pp2048": 4043.34
+   },
+   {
+    "arm": "dec",
+    "pp2048": 4043.93
+   },
+   {
+    "arm": "dec",
+    "pp2048": 4019.09
+   },
+   {
+    "arm": "blk",
+    "pp2048": 3962.19
+   },
+   {
+    "arm": "base",
+    "pp2048": 4047.83
+   },
+   {
+    "arm": "base",
+    "pp2048": 4044.06
+   },
+   {
+    "arm": "blk",
+    "pp2048": 4046.99
+   }
+  ]
+ },
+ "e2e_31b_ud_q8_k_xl": {
+  "note": "dec: decoded Q8_0 copies for k=5376",
+  "runs": [
+   {
+    "arm": "base",
+    "pp2048": 555.12
+   },
+   {
+    "arm": "dec",
+    "pp2048": 574.43
+   },
+   {
+    "arm": "dec",
+    "pp2048": 574.13
+   },
+   {
+    "arm": "base",
+    "pp2048": 551.13
+   }
+  ]
+ },
+ "e2e_31b_ud_hybrid_first_prototype": {
+  "note": "Q4_K only: decoded gate/up and q/k/v, compact down/o; base and repack binaries, d0 and d16384",
+  "runs": [
+   {
+    "arm": "base",
+    "peak_gtt_mib": 23256,
+    "load_s": 3.45332,
+    "pp2048": 577.98,
+    "pp2048 @ d16384": 474.03
+   },
+   {
+    "arm": "repack",
+    "peak_gtt_mib": 58432,
+    "load_s": 4.02063,
+    "pp2048": 602.25,
+    "pp2048 @ d16384": 472.98
+   },
+   {
+    "arm": "repack",
+    "peak_gtt_mib": 58432,
+    "load_s": 3.99699,
+    "pp2048": 602.53,
+    "pp2048 @ d16384": 472.41
+   },
+   {
+    "arm": "base",
+    "peak_gtt_mib": 23256,
+    "load_s": 3.37656,
+    "pp2048": 571.85,
+    "pp2048 @ d16384": 455.45
+   },
+   {
+    "arm": "base",
+    "peak_gtt_mib": 23256,
+    "load_s": 3.52008,
+    "pp2048": 571.64,
+    "pp2048 @ d16384": 455.53
+   },
+   {
+    "arm": "repack",
+    "peak_gtt_mib": 58432,
+    "load_s": 4.02494,
+    "pp2048": 599.16,
+    "pp2048 @ d16384": 472.67
+   }
+  ]
+ },
+ "rejected_zero_memory_variants": {
+  "direct": "lanes load their own GGUF rows into registers (no LDS staging, scales converted per lane): predicted chunk 3044 -> 3065 ms (-0.7%); 128/256/512/1024 rows +2.6/-0.1/+0.1/-0.7%",
+  "scale_sidecar": "direct codes plus a 16-byte-per-128-values binary16 scale sidecar (~3.6 GiB on 31B): 3044 -> 2999 ms (+1.5%); 128/256/512/1024 rows +6.5/+0.1/+2.3/+0.4%",
+  "sidecar_split_loads": "sidecar variant with half-wave code loads exchanged by permlanex16: +0.9%"
+ },
+ "decoded_long_k": "binary16 copies lose 29-62% wherever k >= 8192 (down, o) at every token-tile group (1, 2, 4, 8, all); best explanation: blocks sharing a weight tile drift apart along k and each reads it from DRAM",
+ "standalone_note": "predicted_chunk.decoded applies the binary16 copy to every shape that supports it, including the slow k >= 8192 ones; \"best\" takes the fastest layout per shape, which the decoded mode implements.",
+ "decoded_long_k_followup": {
+  "note": "31B UD shapes k >= 8192 (down 5376x21504, o 5376x8192 / 5376x16384), 2048 rows, decoded vs GGUF, standalone bench best of 5-7 samples",
+  "k_chunks_exact_carry": {
+   "2688": {
+    "down_q4_k": -23.8,
+    "o_sliding": -38.2,
+    "o_global": -38.1
+   },
+   "4096": {
+    "down_q4_k": -18.6,
+    "down_q6_k": -11.6,
+    "o_sliding": -22.5,
+    "o_global": -21.9
+   },
+   "5376": {
+    "down_q4_k": -14.8,
+    "down_q6_k": -7.1,
+    "o_sliding": -27.6,
+    "o_global": -51.2
+   },
+   "8192": {
+    "down_q4_k": -23.8,
+    "o_sliding": -40.5,
+    "o_global": -42.8
+   }
+  },
+  "region_raster_rows_x_token_tiles": {
+   "all_x_19": {
+    "down_q4_k": -42.5,
+    "o_global": -52.4
+   },
+   "8x10": {
+    "down_q4_k": -40.8,
+    "o_global": -54.1
+   },
+   "10x8": {
+    "down_q4_k": -31.3,
+    "o_global": -52.8
+   },
+   "16x5": {
+    "down_q4_k": -26.8,
+    "o_global": -42.1
+   },
+   "21x4": {
+    "down_q4_k": -25.4,
+    "o_global": -38.2
+   },
+   "42x2": {
+    "down_q4_k": -25.8,
+    "o_global": -37.4
+   }
+  },
+  "full_stage_register_prefetch": {
+   "vgprs": "142 -> 207, occupancy 8 -> 7",
+   "down_q4_k": -37.4,
+   "o_global": -55.1,
+   "gate_up_q4_k": "+10.2 -> +9.0"
+  },
+  "l2_counters_down_q4_k": {
+   "gguf": {
+    "l2_hit_pct": 59.9,
+    "fabric_read_gb": 1.48
+   },
+   "compact": {
+    "l2_hit_pct": 66.5,
+    "fabric_read_gb": 0.81
+   },
+   "decoded": {
+    "l2_hit_pct": 21.9,
+    "fabric_read_gb": 2.83
+   }
+  },
+  "l2_counters_gate_up_q4_k": {
+   "gguf": {
+    "l2_hit_pct": 45.8,
+    "fabric_read_gb": 4.58
+   },
+   "compact": {
+    "l2_hit_pct": 54.4,
+    "fabric_read_gb": 2.73
+   },
+   "decoded": {
+    "l2_hit_pct": 36.1,
+    "fabric_read_gb": 5.69
+   }
+  },
+  "ceiling": "the decoded kernel peaks near 43 TFLOP/s (q|k 43.4, v 41.4) and GGUF down already runs 40.4, so a perfect binary16 down/o would gain ~6-7% on those shapes, ~1-1.5% of the projections beyond decoded mode (compact already +3.6-6% there)"
+ },
+ "e2e_26b_ud_q4_k_xl_compact_experts": {
+  "note": "compact copy of the Q4_K/Q5_K expert [gate | up] weights only (dense Q8_0 projections get none); gufo bench -p 2048 -n 16 -d 0, alternating",
+  "runs": [
+   {
+    "arm": "off",
+    "peak_gtt_mib": 18102,
+    "load_s": 3.16647,
+    "pp2048": 4050.75,
+    "tg16": 60.79
+   },
+   {
+    "arm": "compact",
+    "peak_gtt_mib": 27338,
+    "load_s": 3.474,
+    "pp2048": 4106.45,
+    "tg16": 60.75
+   },
+   {
+    "arm": "compact",
+    "peak_gtt_mib": 27341,
+    "load_s": 3.41139,
+    "pp2048": 4100.71,
+    "tg16": 60.72
+   },
+   {
+    "arm": "off",
+    "peak_gtt_mib": 18102,
+    "load_s": 3.12986,
+    "pp2048": 4051.91,
+    "tg16": 60.84
+   },
+   {
+    "arm": "off",
+    "peak_gtt_mib": 18102,
+    "load_s": 3.09879,
+    "pp2048": 4045.66,
+    "tg16": 60.86
+   },
+   {
+    "arm": "compact",
+    "peak_gtt_mib": 27341,
+    "load_s": 3.4093,
+    "pp2048": 4074.3,
+    "tg16": 60.75
+   },
+   {
+    "arm": "compact",
+    "peak_gtt_mib": 27338,
+    "load_s": 3.44235,
+    "pp2048": 4077.74,
+    "tg16": 60.8
+   },
+   {
+    "arm": "off",
+    "peak_gtt_mib": 18102,
+    "load_s": 3.11948,
+    "pp2048": 4049.01,
+    "tg16": 60.81
+   }
+  ]
+ }
+}
