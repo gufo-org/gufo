@@ -330,15 +330,23 @@ public:
   /// Zero when the vocabulary cannot be enumerated.
   [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
   /// A budget for a prompt that opens reasoning, or null when the tags are not
-  /// single tokens in this vocabulary.
+  /// single tokens in this vocabulary. A non-empty `message` is forced as
+  /// content (TokenizeContent) before the reasoning end.
   [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
   BuildReasoningBudget(std::size_t tokens,
-                       std::span<const TextRunnerToken> prompt) const;
+                       std::span<const TextRunnerToken> prompt,
+                       std::string_view message = {}) const;
 
   [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const = 0;
   /// Tokenizes control text such as `</think>` as the template renders it.
   [[nodiscard]] virtual std::vector<TextRunnerToken> TokenizeControl(
+      std::string_view text) const {
+    return Tokenize(text);
+  }
+  /// Tokenizes client text as message content: control spellings such as
+  /// `</think>` stay literal text.
+  [[nodiscard]] virtual std::vector<TextRunnerToken> TokenizeContent(
       std::string_view text) const {
     return Tokenize(text);
   }

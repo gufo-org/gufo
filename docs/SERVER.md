@@ -385,6 +385,14 @@ character can require more. A Qwen `<tool_call>` also ends reasoning. The budget
 covers the initial reasoning phase. Later `<think>` spellings remain literal
 answer or tool-argument data, consistent with Gufo's response framing.
 
+`--reasoning-budget-message TEXT` (default empty) is forced as plain text
+before that reasoning end, as llama.cpp's option of the same name, so the model
+sees that its reasoning was cut short; Qwen's guidance suggests a short wrap-up
+sentence. Chat and Responses override it per request with
+`reasoning_budget_message` (`null` keeps the server default, `""` disables
+it); Messages requests use the server default. The message tokens are forced
+after the budget is spent and are not counted in it.
+
 Chat and Responses also accept llama.cpp's older `thinking_budget_tokens`
 spelling for existing clients; a non-null `reasoning_budget_tokens` takes
 precedence. Request budgets must fit a signed 32-bit integer; Messages budgets

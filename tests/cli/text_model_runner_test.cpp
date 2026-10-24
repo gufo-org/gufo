@@ -2187,6 +2187,52 @@ void TestSnapshotStartupReportsSelectedLimits() {
          "startup limits describe the claim that selected cache capacity");
 }
 
+// Single-character tags. Like Qwen's runner, Tokenize parses the end tag `>`
+// as a control token, while content keeps it a plain byte.
+constexpr gufo::tokenization::TokenId kBudgetEnd = 1000;
+
+class BudgetRunner final : public FakeRunner {
+public:
+  using FakeRunner::FakeRunner;
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"<", "\n>", {">"}};
+  }
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+      std::string_view text) const override {
+    auto tokens = FakeRunner::Tokenize(text);
+    std::ranges::replace(tokens, TextRunnerToken{'>'}, kBudgetEnd);
+    return tokens;
+  }
+  [[nodiscard]] std::vector<TextRunnerToken> TokenizeContent(
+      std::string_view text) const override {
+    return FakeRunner::Tokenize(text);
+  }
+};
+
+void TestReasoningBudgetMessagePrecedesForcedEnd() {
+  const auto stats = std::make_shared<FakeStats>();
+  BudgetRunner runner(stats);
+  const std::vector<TextRunnerToken> prompt{'a', '<', 'b'};
+  const auto plain = runner.BuildReasoningBudget(4, prompt);
+  Expect(plain != nullptr, "single-token tags build a budget");
+  Expect(plain->forced ==
+             std::vector<gufo::tokenization::TokenId>{'\n', kBudgetEnd},
+         "without a message only the reasoning end is forced");
+  Expect(plain->ends == std::vector<gufo::tokenization::TokenId>{kBudgetEnd},
+         "the end tag is the control token");
+  Expect(plain->prompt == std::vector<gufo::tokenization::TokenId>{'b'},
+         "the budget counts the prompt after the start tag");
+  // A client message that spells the end tag keeps it as text.
+  const auto wrapped = runner.BuildReasoningBudget(4, prompt, "Done>");
+  Expect(
+      wrapped != nullptr && wrapped->forced ==
+                                std::vector<gufo::tokenization::TokenId>{
+                                    'D', 'o', 'n', 'e', '>', '\n', kBudgetEnd},
+      "the message is forced as content before the reasoning end");
+  Expect(wrapped->tokens == 4 && wrapped->ends == plain->ends,
+         "the message changes neither the budget nor the early ends");
+}
+
 void TestPreparedConstraintVocabularyKeepsGrammarBehavior() {
   // Startup preparation changes when the vocabulary is built, not
   // what it allows: one build, reused by every binding, with the same masks
@@ -2498,6 +2544,7 @@ int main() {
   TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
   TestPreparedConstraintVocabularyKeepsGrammarBehavior();
+  TestReasoningBudgetMessagePrecedesForcedEnd();
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.
   gufo::platform::SetEnv("NO_COLOR", "1");

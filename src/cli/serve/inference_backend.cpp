@@ -1211,6 +1211,10 @@ public:
       std::string_view text) const override {
     return model_->GetTokenizer().Encode(text);
   }
+  [[nodiscard]] std::vector<TextRunnerToken> TokenizeContent(
+      std::string_view text) const override {
+    return model_->GetTokenizer().Encode(text, {.parse_special_tokens = false});
+  }
 
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
       const ChatRequest& request) const override {
@@ -2519,6 +2523,10 @@ public:
       std::string_view text) const override {
     return model_->tokenizer().Encode(text);
   }
+  [[nodiscard]] std::vector<TextRunnerToken> TokenizeContent(
+      std::string_view text) const override {
+    return model_->tokenizer().Encode(text, {.parse_special_tokens = false});
+  }
 
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
       const ChatRequest& request) const override {
@@ -3805,7 +3813,8 @@ InferenceBackend::Result InferenceBackend::chat(
       initial == TextGenerationBackend::InitialOutputState::kReasoning)
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
-            *request.reasoning.budget_tokens, prompt->tokens);
+            *request.reasoning.budget_tokens, prompt->tokens,
+            request.reasoning.budget_message.value_or(""));
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
       effective_sampling, is_cancelled, on_token, request.client_id,
@@ -3890,7 +3899,8 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
       initial == TextGenerationBackend::InitialOutputState::kReasoning)
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
-            *request.reasoning.budget_tokens, prompt->tokens);
+            *request.reasoning.budget_tokens, prompt->tokens,
+            request.reasoning.budget_message.value_or(""));
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   auto scheduled_request = state->scheduler->Submit(
