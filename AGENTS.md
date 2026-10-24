@@ -83,6 +83,12 @@ quality; successful optimizations become the default, without extra switches.
 - Use the shared Qwen control-token constants for framing; see
   [src/models/qwen/AGENTS.md](src/models/qwen/AGENTS.md). Inspect their definitions
   when reviewing or changing behavior, and keep reference fixtures independent.
+- Keep Windows portability in `src/core/platform/`: one leaf per OS facility
+  (files, pages, sockets), whose sources may branch on `_WIN32` or split into
+  `<leaf>_posix.cpp`/`<leaf>_windows.cpp` selected in CMake. Outside it and
+  vendored code, call the leaf, with no `windows.h` or `_WIN32`/`_MSC_VER`
+  checks. Never emulate POSIX with macros or copy a file per OS; when the logic
+  itself differs, add `<file>_windows.cpp` beside it. Move Linux code verbatim.
 - Use one canonical long option and backend name per behavior; avoid aliases.
 - Use `gh` for GitHub operations after checking `gh auth status`.
 - Follow Conventional Commits with a single-line message. Title pull requests
