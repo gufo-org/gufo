@@ -6495,7 +6495,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const __half* xn = nullptr, __half* mixed_half = nullptr,
     void* mixed_q8 = nullptr, const float* conv_w = nullptr,
     float* conv_out = nullptr, AttentionProjectionOutput attention = {},
-    std::uint32_t checkpoint_tokens = 0, std::size_t input_stride = 0) {
+    std::uint32_t checkpoint_tokens = 0, std::size_t input_stride = 0,
+    std::uint32_t first_row_tile = 0) {
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
   static_assert(!(kBf16 && kHalfWeights));
@@ -6546,7 +6547,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   // count is divisible by kRowGroup; every dot product keeps its K order.
   const unsigned row_group = blockIdx.y / kRowGroup;
   const unsigned within = (blockIdx.y % kRowGroup) * gridDim.x + blockIdx.x;
-  const int r_block = (row_group * kRowGroup + within % kRowGroup) * BM;
+  const int r_block =
+      (first_row_tile + row_group * kRowGroup + within % kRowGroup) * BM;
   const int t_block = (within / kRowGroup) * BN;
   const auto token_of = [&](int local) { return t_block + local; };
 
@@ -7257,17 +7259,30 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens) {
+                     hipStream_t stream, std::uint32_t checkpoint_tokens,
+                     hipStream_t z_stream, hipEvent_t z_start) {
   if (n_tokens == 0 || m != 16384 || k != 2560 || channels != 10240 ||
       kernel != kSsmConvTaps) {
     return false;
   }
   // Row-tile pairs per token tile in launch order (-0.9 %).
+  const unsigned token_tiles = (n_tokens + 127) / 128;
+  const unsigned qkv_tiles = z_stream != nullptr ? channels / 256 : m / 256;
   hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
-                     dim3((n_tokens + 127) / 128, m / 256), dim3(kThreads), 0,
-                     stream, w, x, qkvz, n_tokens, m, k, nullptr, nullptr,
-                     nullptr, conv_w, convolved, AttentionProjectionOutput{},
-                     checkpoint_tokens);
+                     dim3(token_tiles, qkv_tiles), dim3(kThreads), 0, stream, w,
+                     x, qkvz, n_tokens, m, k, nullptr, nullptr, nullptr, conv_w,
+                     convolved, AttentionProjectionOutput{}, checkpoint_tokens);
+  if (z_stream != nullptr) {
+    // Start after the QKV tiles: both GEMMs are compute bound, the
+    // recurrence that follows them is not.
+    (void)hipEventRecord(z_start, stream);
+    (void)hipStreamWaitEvent(z_stream, z_start, 0);
+    hipLaunchKernelGGL(
+        (DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
+        dim3(token_tiles, m / 256 - qkv_tiles), dim3(kThreads), 0, z_stream, w,
+        x, qkvz, n_tokens, m, k, nullptr, nullptr, nullptr, conv_w, convolved,
+        AttentionProjectionOutput{}, checkpoint_tokens, 0, qkv_tiles);
+  }
   hipLaunchKernelGGL(
       SsmConvBoundaryKernel,
       dim3(Blocks(channels / 4), (n_tokens + kSsmProjectionTileTokens - 1) /
@@ -7423,7 +7438,8 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t d, std::uint32_t kernel, bool row_split,
                    bool convolved, float eps, hipStream_t stream,
                    __half* out_half, GdnCheckpoint checkpoint,
-                   std::uint32_t out_half_stride, void* out_q8_1) {
+                   std::uint32_t out_half_stride, void* out_q8_1,
+                   hipEvent_t z_ready) {
   const std::uint32_t channels = 2 * k_heads * d + v_heads * d;
   const std::size_t count = static_cast<std::size_t>(n_tokens) * channels;
   const bool saved_history = !convolved && kernel == kSsmConvTaps &&
@@ -7493,6 +7509,8 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
         alpha_beta, a, dt, state, raw, state_snapshots, n_tokens, k_heads,
         v_heads, nullptr, 0, checkpoint);
   }
+  if (z_ready != nullptr)
+    (void)hipStreamWaitEvent(stream, z_ready, 0);
   hipLaunchKernelGGL(
       GdnEpilogueKernel<false>, dim3((n_tokens * v_heads + waves - 1) / waves),
       dim3(kThreads), 0, stream, raw, z, z_stride, norm_w, out, out_q8,
