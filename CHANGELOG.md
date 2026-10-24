@@ -4,6 +4,28 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.23.0](https://github.com/gufo-org/gufo/compare/v0.22.0...v0.23.0) (2026-10-24)
+
+
+### Features
+
+* **embedding:** serve EmbeddingGemma 2 on /v1/embeddings ([#700](https://github.com/gufo-org/gufo/issues/700)) ([de365fe](https://github.com/gufo-org/gufo/commit/de365fe5050944479db85afb8434ea19b2480e2d))
+* **models:** read model weights through the mapped_file leaf ([#738](https://github.com/gufo-org/gufo/issues/738)) ([de43b8a](https://github.com/gufo-org/gufo/commit/de43b8a047735fb296a5d4f1218f1f628cbff5ac))
+* **platform:** map GGUF shards through the mapped_file leaf ([#734](https://github.com/gufo-org/gufo/issues/734)) ([5c8bb39](https://github.com/gufo-org/gufo/commit/5c8bb390a40ef7d4482a1112d7b1e3c903003215))
+
+
+### Performance
+
+* **embedding:** tune GEMMs per shape with hipBLASLt ([#751](https://github.com/gufo-org/gufo/issues/751)) ([6fab9a2](https://github.com/gufo-org/gufo/commit/6fab9a24611b9551f7fa6a0e89bbffe7dd4d678f))
+* **qwen-flash:** reduce selector spills and improve sampled drafting ([#742](https://github.com/gufo-org/gufo/issues/742)) ([d4eaaad](https://github.com/gufo-org/gufo/commit/d4eaaad438a498bf9ba541afe3d655f70dd4196d))
+* **qwen38_flash_next:** let a lone greedy MTP request use the small draft head ([#733](https://github.com/gufo-org/gufo/issues/733)) ([cc5f405](https://github.com/gufo-org/gufo/commit/cc5f405a7322a5503f19c7d677c49b4e2ebc8351))
+* **qwen38_flash_next:** let greedy requests with penalties or constraints use the small draft head ([#739](https://github.com/gufo-org/gufo/issues/739)) ([41d9346](https://github.com/gufo-org/gufo/commit/41d93463f829fdbef2eb1bb5d21658e080d00489))
+
+
+### Documentation
+
+* **agents:** describe where Windows portability code lives ([#754](https://github.com/gufo-org/gufo/issues/754)) ([f66dff9](https://github.com/gufo-org/gufo/commit/f66dff9ee18d06998c959cd5a0d547eb6cfcb26a))
+
 ## [0.22.0](https://github.com/gufo-org/gufo/compare/v0.21.0...v0.22.0) (2026-10-23)
 
 
