@@ -564,6 +564,73 @@ void RunFusedNormQuantizeCase(std::size_t batch, std::size_t dim,
   HIP_CHECK(hipFree(d_got));
 }
 
+// LaunchBatchedQuantGEMM quantizes the BF16 activation into its own scratch and
+// runs the same pre-quantized kernel, so it must be bit-identical to the
+// explicit quantize + LaunchBatchedQuantGEMMPreQuantized chain. The quantizer
+// also writes the activation-sum sidecar after the tiled payload, so the
+// scratch has to hold QuantizedActivationBytes, not just the payload.
+void RunQuantizingGemmCase(std::size_t batch, std::size_t m, std::size_t k) {
+  std::cout << "quantizing Q8_0 GEMM: batch=" << batch << " m=" << m
+            << " k=" << k << "\n";
+  const std::size_t num_blocks = k / 32;
+  Rng rng(0x85EBCA6BU ^
+          static_cast<std::uint32_t>((batch * 131) + (m * 17) + k));
+
+  std::vector<HostQ8_0Block> h_w(m * num_blocks);
+  for (auto& blk : h_w) {
+    blk.d = FloatToFp16(rng.Uniform(-0.05F, 0.05F));
+    for (auto& q : blk.qs) {
+      q = rng.Int8();
+    }
+  }
+  std::vector<std::uint16_t> h_x_bf16(batch * k);
+  for (auto& v : h_x_bf16) {
+    v = gufo::test::FloatToBf16Bits(rng.Uniform(-1.5F, 1.5F));
+  }
+
+  const std::size_t q8_bytes =
+      gufo::hip::QuantizedActivationBytes(batch, k) + 4096;
+  void* d_w = nullptr;
+  void* d_x_bf16 = nullptr;
+  void* d_q8 = nullptr;
+  float* d_ref = nullptr;
+  float* d_got = nullptr;
+  HIP_CHECK(hipMalloc(&d_w, h_w.size() * sizeof(HostQ8_0Block)));
+  HIP_CHECK(hipMalloc(&d_x_bf16, h_x_bf16.size() * sizeof(std::uint16_t)));
+  HIP_CHECK(hipMalloc(&d_q8, q8_bytes));
+  HIP_CHECK(hipMalloc(&d_ref, batch * m * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_got, batch * m * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_w, h_w.data(), h_w.size() * sizeof(HostQ8_0Block),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_x_bf16, h_x_bf16.data(),
+                      h_x_bf16.size() * sizeof(std::uint16_t),
+                      hipMemcpyHostToDevice));
+
+  gufo::hip::LaunchQuantizeActivationQ8_1(d_x_bf16, d_q8, batch, k);
+  gufo::hip::LaunchBatchedQuantGEMMPreQuantized(gufo::core::GgmlType::kQ8_0,
+                                                d_w, d_q8, d_ref, batch, m, k);
+  gufo::hip::LaunchBatchedQuantGEMM(gufo::core::GgmlType::kQ8_0, d_w, d_x_bf16,
+                                    d_got, batch, m, k);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  std::vector<float> ref(batch * m);
+  std::vector<float> got(batch * m);
+  HIP_CHECK(hipMemcpy(ref.data(), d_ref, ref.size() * sizeof(float),
+                      hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(got.data(), d_got, got.size() * sizeof(float),
+                      hipMemcpyDeviceToHost));
+  if (std::memcmp(ref.data(), got.data(), ref.size() * sizeof(float)) != 0) {
+    std::cerr << "LaunchBatchedQuantGEMM differs from pre-quantized chain\n";
+    std::abort();
+  }
+
+  HIP_CHECK(hipFree(d_w));
+  HIP_CHECK(hipFree(d_x_bf16));
+  HIP_CHECK(hipFree(d_q8));
+  HIP_CHECK(hipFree(d_ref));
+  HIP_CHECK(hipFree(d_got));
+}
+
 }  // namespace
 
 #endif  // defined(ENGINE_ENABLE_HIP)
@@ -603,6 +670,12 @@ int main() {
   // With the residual add folded in.
   RunFusedNormQuantizeCase(128, 5120, true);
   RunFusedNormQuantizeCase(100, 5120, true);
+
+  // The quantizing entry point: a batch that is not a multiple of the 16-token
+  // tile, and a 1024 x 16384 activation whose tiled payload is exactly 18 MiB,
+  // a multiple of 2 MiB (64 tiles x 512 blocks x 576 bytes).
+  RunQuantizingGemmCase(100, 200, 160);
+  RunQuantizingGemmCase(1024, 64, 16384);
 
   std::cout << "Qwen prefill quant GEMM ops test passed on gfx1151.\n";
   return 0;
