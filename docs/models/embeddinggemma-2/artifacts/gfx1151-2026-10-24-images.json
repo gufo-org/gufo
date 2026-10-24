@@ -598,7 +598,8 @@
         "flags": []
       }
     ],
-    "assessment": "One unexplained candidate 404-token outlier (152.801 ms); this initial comparison is inconclusive. Other histories have no flags."
+    "assessment": "One unexplained candidate 404-token outlier (152.801 ms); this initial comparison is inconclusive. Other histories have no flags.",
+    "baseline_label": "The main-labeled samples below are from unchanged worktree base 8e7979cc, not origin/main."
   },
   "text_controls_alternating": {
     "results": [
@@ -903,7 +904,8 @@
       [],
       []
     ],
-    "assessment": "Repeated only the affected 404-token history in main/candidate/main/candidate order, 60 requests each. No per-request threshold failures. The initial outlier did not recur; no speedup claim."
+    "assessment": "Repeated only the affected 404-token history in main/candidate/main/candidate order, 60 requests each. No per-request threshold failures. The initial outlier did not recur; no speedup claim.",
+    "baseline_label": "The main-labeled samples below are from unchanged worktree base 8e7979cc, not origin/main."
   },
   "image_http_benchmark": {
     "case": "image_6",
@@ -1981,5 +1983,6 @@
     "gpu-qualified.log": "warning: Git tree '/home/mixer/.codex/worktrees/6bd3/gufo' is dirty\nwarning: ignoring untrusted flake configuration setting 'extra-substituters'.\nPass '--accept-flake-config' to trust it\nwarning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.\nPass '--accept-flake-config' to trust it\nerror (ignored): SQLite database '/home/mixer/.cache/nix/eval-cache-v6/cbb4b2b86e376a49da8db4a9d6e569a0ea6185c31707bb3a3d3490dc8ef5be34.sqlite' is busy\nTest project /home/mixer/.codex/worktrees/6bd3/gufo/build/gpu-test\n    Start 187: embedding_gemma2_embedding_golden_hip_test\n1/2 Test #187: embedding_gemma2_embedding_golden_hip_test ...   Passed    1.23 sec\n    Start 191: embedding_gemma2_image_golden_hip_test\n2/2 Test #191: embedding_gemma2_image_golden_hip_test .......   Passed    5.12 sec\n\n100% tests passed, 0 tests failed out of 2\n\nLabel Time Summary:\nembedding           =   1.23 sec*proc (1 test)\nembedding-gemma2    =   6.35 sec*proc (2 tests)\nexternal-model      =   6.35 sec*proc (2 tests)\ngpu                 =   6.35 sec*proc (2 tests)\nimage               =   5.12 sec*proc (1 test)\nmodels              =   6.35 sec*proc (2 tests)\nquality             =   6.35 sec*proc (2 tests)\n\nTotal Test time (real) =   6.35 sec\n",
     "text-sdk-qualified.log": "warning: Git tree '/home/mixer/.codex/worktrees/6bd3/gufo' is dirty\nwarning: ignoring untrusted flake configuration setting 'extra-substituters'.\nPass '--accept-flake-config' to trust it\nwarning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.\nPass '--accept-flake-config' to trust it\nCHECK batched request matches the reference in input order\nCHECK single string input equals the batched result\nCHECK float encoding equals base64 encoding\nCHECK raw base64 payload is little-endian float32\nCHECK dimensions=128 truncates and renormalizes\nCHECK dimensions=256 truncates and renormalizes\nCHECK dimensions=512 truncates and renormalizes\nCHECK concurrent identical requests agree\nCHECK model listing names only the embedding model\nCHECK error: empty input\nCHECK error: token-array input\nCHECK error: bad dimensions\nCHECK error: unknown model\nPASS embeddings\n"
   },
-  "limits": "Reference parity on procedural RGB fixtures; no retrieval benchmark, full Frigate installation, or legacy /embeddings support."
+  "limits": "Reference parity on procedural RGB fixtures; no retrieval benchmark, full Frigate installation, or legacy /embeddings support.",
+  "qualification": "Historical pre-rebase evidence against worktree revision 8e7979cc, which was not origin/main. The final PR is rebased on 1fafd5ad and separately requalified in gfx1151-pr759-review.json. Preserve the original samples; do not use them as current-main performance evidence."
 }

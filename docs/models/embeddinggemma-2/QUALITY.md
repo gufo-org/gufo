@@ -22,7 +22,8 @@ The [reference model](https://huggingface.co/google/embeddinggemma-2/tree/914f7f
 
 ## Image and mixed-input parity
 
-Qualified October 24, 2026, on gfx1151 with the same pinned BF16 checkpoint.
+Requalified October 24, 2026, on gfx1151 after rebasing onto main `1fafd5ad`,
+with the same pinned BF16 checkpoint and main's hipBLASLt text GEMMs.
 Seven independent probes (eight images) cover upsampling, downsampling,
 unchanged size, landscape/portrait/extreme aspect ratios, image plus text,
 two images in one input, and Frigate's trailing newline.
@@ -30,7 +31,7 @@ two images in one input, and Frigate's trailing newline.
 | Check | Result |
 | --- | --- |
 | Resized patch RGB bytes versus official processor | SHA256 identical for every image, including the entire patch order |
-| GPU / HTTP embeddings versus official float32 model | Worst cosine **0.999958**, best **0.999996**; all exceed the retained 0.9999 bound |
+| GPU / HTTP embeddings versus official float32 model | Worst cosine **0.999961**, best **0.999996**; all exceed the retained 0.9999 bound |
 | Mixed text/image batches and concurrent requests | Correct order, finite unit vectors and reference agreement |
 | Image Matryoshka 128 / 256 / 512, base64 | All exceed 0.9999 cosine against the same reference prefix |
 | Expanded context, image count, invalid destinations and malformed images | Rejected with 400; a subsequent text request succeeds |
@@ -67,4 +68,4 @@ python3 tools/models/embedding_gemma2/reference_images.py \
 or weights. `embedding_gemma2_image_golden_hip_test` additionally runs the native
 vision/text encoders. [`embedding_images.py`](../../../tests/functional/embedding_images.py)
 checks the HTTP path. Raw request evidence is retained with the
-[image-support record](artifacts/gfx1151-2026-10-24-images.json).
+[review qualification record](artifacts/gfx1151-pr759-review.json).
