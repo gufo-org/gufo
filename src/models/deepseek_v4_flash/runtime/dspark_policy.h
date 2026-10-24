@@ -7,6 +7,20 @@
 #include <cstddef>
 #include <cstdint>
 
+// C1 draft + verification + commit in hundredths of one target step.
+// Measured costs at d0/d16K are about 145/165/185/210/230 for tails 1..5.
+// The linear estimate stays within three units of those measurements.
+// Use eight cycles to avoid suspending a productive request after one poor
+// four-cycle window. Clearly unprofitable cold starts can still stop at four.
+inline bool ds4_dspark_serial_backoff(uint64_t steps, uint64_t drafted,
+                                      uint64_t accepted) {
+  if (steps < 4u || drafted == 0u)
+    return false;
+  const uint64_t cost = 125u * steps + 21u * drafted;
+  const uint64_t emitted = steps + accepted;
+  return cost > emitted * (steps < 8u ? 125u : 110u);
+}
+
 // Hundredths of an ordinary batch decode step, measured on gfx1151.
 // See docs/models/deepseek-v4-flash/artifacts/cost-calibration.json.
 inline uint32_t ds4_dspark_cycle_cost(uint32_t depth, uint32_t tail,

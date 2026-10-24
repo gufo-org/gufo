@@ -3,6 +3,10 @@
 | Experiment | Decision / evidence |
 | --- | --- |
 | Explicit IQ2/Q8 rounding, HC/router and attention/indexer arithmetic | Retained for ROCm 10.1; original 4K/12K narrow-prefill limits pass, 7.2.3 reference vectors remain exact, and C1/C2 sparse-boundary replay passes. [Migration checks](ROCM.md). |
+| Bounded compressor stores for resumed prefill | Retained locally: group only up to the next pool/shift boundary, preserving per-row counts and speculative rollback. Exact operator state/output checks pass on 7.2.3/10.1; 16K HTTP prefill improves about 5–6%. |
+| C1 draft head cap and recent completed-token cost | Retained locally: keep the full support transformer, omit unused vocabulary rows and reset the backoff window on retries. Shallow 7.2.3 prose improves 18.25→22.92 tok/s; the flagged 10.1 continuation improves 15.33→19.52 tok/s with identical corrected output, but still trails its older 24.18 tok/s trajectory. |
+| Four-cycle C1 cost window without hysteresis | Rejected: shallow prose fell 21.55→20.30 tok/s. Eight cycles retain useful drafting through short poor runs; sustained unprofitable requests still back off. |
+| Smaller Q8 launch groups on ROCm 10.1 | Rejected: rotating 16 weight matrices preserves exact outputs, but most gains are only 0–3%; four-row groups slow the 8192-wide scalar/HC kernels by 8–10%. Existing loads already compile to vector memory operations. |
 | Exact partial top-k | Retained for wide prefill through 32768 compressed keys; exact ties and bounded fallback. |
 | Indexer query packing and shared scratch | Retained; unchanged F16 bytes, scores and full-logit controls through 64K; no persistent KV precision change. |
 | Batched speculative projections/attention | Retained; private session state and scalar-equivalent replay. |

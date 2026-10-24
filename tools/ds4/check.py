@@ -11,8 +11,8 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 SUITES = {
     "fast": ("^ds4\\.(template|cli|dataset|eval|sampling)$", ["ds4_chat_template_test", "ds4_cli_test", "ds4_eval_test", "ds4_sampling_test"]),
-    "kernels": ("^ds4\\.(router|quantization|projections|attention)$",
-                ["ds4_router_test", "ds4_quantize_test", "ds4_projection_test",
+    "kernels": ("^ds4\\.(compressor|router|quantization|projections|attention)$",
+                ["ds4_compressor_test", "ds4_router_test", "ds4_quantize_test", "ds4_projection_test",
                  "ds4_attention_test"]),
     "model": ("^ds4\\.(target|dspark|serving|chat)$", ["ds4_quality_test", "ds4_serving_test", "ds4_cli_test"]),
 }
