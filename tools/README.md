@@ -75,6 +75,10 @@ compares separate and fused draft normalization/RoPE.
 `qwen27b/prefill_gemm_bench.hip` compares production Q8_0 gate/up GEMM
 with separate or fused SwiGLU, including every activation byte and scale.
 It replaces the old standalone W8A8 kernel copies.
+`qwen27b/verify_sweep/` measures the 2–8 row launch shapes of
+`verify_gemm_27b.hip` on a GGUF's real projections against the production
+dispatch (exact outputs, weights rotated beyond the MALL cache); build the
+`qwen27b_verify_sweep` target and run `sweep.py`, see its README.
 `qwen27b/dflash_reference.py` checks a GPU trace against
 pinned upstream PyTorch operators using the same GGUF weights. See
 `docs/models/qwen3.8-27b/BENCHMARKS.md` and its quality report for commands and evidence.
