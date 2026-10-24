@@ -42,6 +42,12 @@ public:
   /// fails, and the offending bytes fall back to byte tokens.
   [[nodiscard]] std::vector<std::uint32_t> Encode(
       std::string_view text, bool add_special_tokens = true) const;
+  /// Encodes like `Encode(text)`, then drops the content tokens past
+  /// `max_tokens`, keeping the `<bos>` and `<eos>` markers. A result that
+  /// already fits, or a limit too small for the markers, is returned whole.
+  /// Only the leading bytes the kept tokens can need are encoded.
+  [[nodiscard]] std::vector<std::uint32_t> EncodeTruncated(
+      std::string_view text, std::size_t max_tokens) const;
 
   [[nodiscard]] std::size_t vocab_size() const { return tokens_.size(); }
   /// Longest vocabulary entry in bytes of normalized text. No token covers

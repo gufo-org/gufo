@@ -17,7 +17,8 @@ namespace gufo::server {
 /// truncation.
 struct EmbeddingBatch {
   std::vector<std::vector<float>> embeddings;
-  /// Tokens per input including the beginning and end markers.
+  /// Tokens per input including the beginning and end markers, after any
+  /// truncation.
   std::vector<std::size_t> token_counts;
   /// Index of the offending input, set only with
   /// `EmbeddingStatus::kInputTooLong`.
@@ -43,9 +44,18 @@ enum class EmbeddingStatus {
   kDeviceLost,
 };
 
+/// Per-request choices that change how inputs are encoded.
+struct EmbeddingRequestOptions {
+  /// Cut an input longer than `EmbeddingService::kMaxInputTokens` to its
+  /// first tokens, keeping the end marker, instead of refusing it. An input
+  /// whose images would not fit whole is still refused.
+  bool truncate{false};
+};
+
 struct EmbeddingServiceOptions {
   using Runner =
       std::function<EmbeddingStatus(const std::vector<EmbeddingInput>& inputs,
+                                    const EmbeddingRequestOptions& request,
                                     EmbeddingBatch* batch, std::string* error)>;
 
   std::filesystem::path model_root;
@@ -91,7 +101,8 @@ public:
   [[nodiscard]] EmbeddingStatus EmbedInputs(
       const std::vector<EmbeddingInput>& inputs,
       const std::function<bool()>& is_cancelled, EmbeddingBatch* batch,
-      std::string* error = nullptr);
+      std::string* error = nullptr,
+      const EmbeddingRequestOptions& request = {});
 
 private:
   struct Impl;
