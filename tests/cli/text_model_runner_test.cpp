@@ -1313,6 +1313,36 @@ void TestWarmChatCheckpointsStopAtTheStableBoundary() {
   dropped.Cancel();
 }
 
+void TestIntermediateCheckpointsFollowThePrefillStep() {
+  class StepSnapshotRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = SnapshotRunner::Descriptor();
+      descriptor.max_context = 32768;
+      descriptor.prefill_step_tokens = 4096;
+      return descriptor;
+    }
+  };
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<StepSnapshotRunner>(stats, 64, 256, 4096);
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(10000, 1);
+  auto request = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  while (!request.prefill_complete())
+    (void)request.Prefill(4096);
+  request.Commit();
+  Expect(
+      stats->prefill_spans == std::vector<std::size_t>{4096, 4096, 1708, 100},
+      "grid checkpoints sit on the runner's prefill step, not inside it");
+
+  prompt[9000] = 2;
+  auto late_edit = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  Expect(late_edit.cache_hit() && late_edit.cached_prompt_tokens() == 8192,
+         "a late edit resumes from the last step-aligned checkpoint");
+  late_edit.Invalidate();
+}
+
 void TestHistoryEditsRestoreIntermediateCheckpoints() {
   class LongSnapshotRunner final : public SnapshotRunner {
   public:
@@ -2538,6 +2568,7 @@ int main() {
   TestWarmChatCheckpointsStopAtTheStableBoundary();
   TestWarmHitAdvancesTheStableCheckpoint();
   TestHistoryEditsRestoreIntermediateCheckpoints();
+  TestIntermediateCheckpointsFollowThePrefillStep();
   TestChatFallbackSurvivesSnapshotBudgetPressure();
   TestFullChatCheckpointRestoresWithoutSuffixPrefill();
   TestDiskOnlyCaptureReservesBudgetBeforeCommit();

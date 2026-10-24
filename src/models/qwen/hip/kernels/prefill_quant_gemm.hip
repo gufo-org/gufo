@@ -126,6 +126,108 @@ __global__ void BatchedFusedRMSNormQuantizeQ8_1Kernel(
   }
 }
 
+// Residual add, RMSNorm and the tiled Q8_1 quantization of one token row in
+// one 256-thread block. Each thread keeps its Items elements in registers, as
+// BatchedRMSNormKernel<CachedDim> does, so the row crosses global memory once;
+// a wave's j-th register is one whole 32-element quantization block. The
+// accumulation, the descending reduction tree, the normalization and the BF16
+// rounding the quantizer reads are those of LaunchBatchedResidualAdd,
+// LaunchBatchedRMSNorm and LaunchQuantizeActivationQ8_1 in sequence, so every
+// output byte is identical.
+template<int Items>
+__launch_bounds__(256) __global__
+    void BatchedFusedResidualRMSNormQuantizeQ8_1Kernel(
+        const float* x, const float* __restrict__ residual,
+        const float* __restrict__ weight, float* sum_out,
+        float* __restrict__ out, hip_bfloat16* __restrict__ out_bf16,
+        void* __restrict__ q8_out, std::size_t batch_size, float eps,
+        hip_bfloat16* __restrict__ out_bf16_tiled) {
+  constexpr std::size_t kDim = static_cast<std::size_t>(Items) * 256;
+  const std::size_t b = blockIdx.x;
+  if (b >= batch_size) {
+    return;
+  }
+  const std::size_t tid = threadIdx.x;
+  const std::size_t row = b * kDim;
+
+  float values[Items];
+  float sum_sq = 0.0F;
+#pragma unroll
+  for (int j = 0; j < Items; ++j) {
+    const std::size_t i = tid + (256 * j);
+    float val = x[row + i];
+    if (residual != nullptr) {
+      val = val + residual[row + i];
+    }
+    values[j] = val;
+    // Unrolling must retain the generic loop's fused accumulation.
+    sum_sq = __fmaf_rn(val, val, sum_sq);
+  }
+  if (residual != nullptr) {
+#pragma unroll
+    for (int j = 0; j < Items; ++j) {
+      sum_out[row + tid + (256 * j)] = values[j];
+    }
+  }
+
+  __shared__ float s_sum[256];
+  s_sum[tid] = sum_sq;
+  __syncthreads();
+  for (std::size_t stride = 128; stride > 16; stride /= 2) {
+    if (tid < stride) {
+      s_sum[tid] += s_sum[tid + stride];
+    }
+    __syncthreads();
+  }
+  // Finish the same descending tree in its first wave.
+  if (tid < 32) {
+    float sum = s_sum[tid];
+#pragma unroll
+    for (unsigned offset = 16; offset > 0; offset /= 2) {
+      sum += __shfl_down(sum, offset);
+    }
+    if (tid == 0) {
+      s_sum[0] = sum;
+    }
+  }
+  __syncthreads();
+  const float mean_sq = s_sum[0] / static_cast<float>(kDim);
+  const float inv_rms = rsqrtf(mean_sq + eps);
+
+  constexpr std::size_t kNumBlocks = kDim / 32;
+  const std::size_t lane_id = tid & 31U;
+  const std::size_t wave_id = tid >> 5U;
+#pragma unroll
+  for (int j = 0; j < Items; ++j) {
+    const std::size_t i = tid + (256 * j);
+    const float w = (weight != nullptr) ? weight[i] : 1.0F;
+    const float normed = (values[j] * inv_rms) * w;
+    if (out != nullptr) {
+      out[row + i] = normed;
+    }
+    const hip_bfloat16 rounded = hip_bfloat16(normed);
+    if (out_bf16 != nullptr) {
+      out_bf16[row + i] = rounded;
+    }
+    if (out_bf16_tiled != nullptr) {
+      out_bf16_tiled[((((i / 64) * batch_size) + b) * 64) + (i % 64)] = rounded;
+    }
+    if (q8_out != nullptr) {
+      const float val = static_cast<float>(rounded);
+      float max_abs = fabsf(val);
+      for (int off = 16; off > 0; off >>= 1) {
+        max_abs = fmaxf(max_abs, __shfl_xor(max_abs, off));
+      }
+      const float d = max_abs / 127.0F;
+      const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
+      const std::int8_t q = static_cast<std::int8_t>(roundf(val * id));
+      StoreQ8ActLane<true>(q8_out, batch_size, kNumBlocks, b,
+                           (static_cast<std::size_t>(j) * 8) + wave_id, lane_id,
+                           d, q);
+    }
+  }
+}
+
 // opt-c174-ssm-epilogue-quant: the SSM per-head post-RMSNorm + SiLU gate
 // writing the tiled Q8_1 activation directly.
 //
@@ -203,6 +305,74 @@ __global__ void BatchedFusedSSMPostNormGateQuantizeQ8_1Kernel(
   const std::int8_t q = static_cast<std::int8_t>(roundf(val * id));
   StoreQ8ActLane<StoreActivationSum>(q8_out, batch_size, num_blocks, t, blk,
                                      lane_id, d, q);
+}
+
+// One wave per (head, token) for the 128-wide value dimension: lane l holds
+// elements l, 32 + l, 64 + l and 96 + l, so each register is one of the four
+// 32-element groups the 128-thread kernel gave to a wave. The per-group
+// butterflies, the four-way sum, the epsilon and every per-element expression
+// are the ones in BatchedFusedSSMPostNormGateQuantizeQ8_1Kernel, so the bytes
+// are identical; the block needs no LDS and no barrier.
+template<bool StoreActivationSum>
+__launch_bounds__(32) __global__
+    void BatchedFusedSSMPostNormGateQuantizeQ8_1WaveKernel(
+        const float* __restrict__ raw_out, const float* __restrict__ ssm_norm,
+        const float* __restrict__ gate, void* __restrict__ q8_out,
+        std::size_t batch_size, std::size_t inner_size,
+        std::uint32_t num_heads) {
+  constexpr int kGroups = 4;
+  constexpr std::size_t kValDim = 128;
+  const std::size_t h = blockIdx.x;
+  const std::size_t t = blockIdx.y;
+  if (h >= num_heads || t >= batch_size) {
+    return;
+  }
+  const std::size_t lane_id = threadIdx.x;
+  const float* in_h = raw_out + (t * inner_size) + (h * kValDim);
+
+  float in_val[kGroups];
+  float group_sq[kGroups];
+#pragma unroll
+  for (int g = 0; g < kGroups; ++g) {
+    in_val[g] = in_h[(g * 32) + lane_id];
+    float o_sq = in_val[g] * in_val[g];
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      o_sq += __shfl_xor(o_sq, offset);
+    }
+    group_sq[g] = o_sq;
+  }
+  const float total_o_sq =
+      group_sq[0] + group_sq[1] + group_sq[2] + group_sq[3];
+  const float mean_sq = total_o_sq / static_cast<float>(kValDim);
+  // The 128-thread kernel reduces from lane 0 of each wave. The lanes of a
+  // butterfly agree only while the compiler keeps the square separate from
+  // the first add; once it fuses them each lane rounds differently, so take
+  // lane 0 here as well.
+  const float inv_rms = __shfl(rsqrtf(mean_sq + 1e-6F), 0);
+
+  const std::size_t num_blocks = inner_size / 32;
+#pragma unroll
+  for (int g = 0; g < kGroups; ++g) {
+    const std::size_t tid = (g * 32) + lane_id;
+    const float normed = in_val[g] * inv_rms;
+    const float w = (ssm_norm != nullptr) ? ssm_norm[tid] : 1.0F;
+    float val = normed * w;
+    if (gate != nullptr) {
+      const float gv = (gate + (t * inner_size))[(h * kValDim) + tid];
+      const float sig = 1.0F / (1.0F + expf(-gv));
+      val *= (gv * sig);
+    }
+    const std::size_t blk = ((h * kValDim) + tid) / 32;
+    float max_abs = fabsf(val);
+    for (int off = 16; off > 0; off >>= 1) {
+      max_abs = fmaxf(max_abs, __shfl_xor(max_abs, off));
+    }
+    const float d = max_abs / 127.0F;
+    const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
+    const std::int8_t q = static_cast<std::int8_t>(roundf(val * id));
+    StoreQ8ActLane<StoreActivationSum>(q8_out, batch_size, num_blocks, t, blk,
+                                       lane_id, d, q);
+  }
 }
 
 /// Zeroes the tail of the last token tile so a batch that is not a multiple of
@@ -981,10 +1151,37 @@ void LaunchBatchedFusedSSMPostNormGateQuantizeQ8_1(
     return;
   }
   const dim3 grid(num_heads, static_cast<unsigned int>(batch_size));
-  BatchedFusedSSMPostNormGateQuantizeQ8_1Kernel<true>
-      <<<grid, 128, 0, stream>>>(raw_out, ssm_norm, gate, q8_1_out, batch_size,
-                                 inner_size, num_heads, val_dim);
+  if (val_dim == 128) {
+    BatchedFusedSSMPostNormGateQuantizeQ8_1WaveKernel<true>
+        <<<grid, 32, 0, stream>>>(raw_out, ssm_norm, gate, q8_1_out, batch_size,
+                                  inner_size, num_heads);
+  } else {
+    BatchedFusedSSMPostNormGateQuantizeQ8_1Kernel<true>
+        <<<grid, 128, 0, stream>>>(raw_out, ssm_norm, gate, q8_1_out,
+                                   batch_size, inner_size, num_heads, val_dim);
+  }
   LaunchZeroQ8ActTail<true>(q8_1_out, batch_size, inner_size, stream);
+}
+
+bool IsFusedResidualRMSNormQuantizeQ8_1Supported(std::size_t dim) noexcept {
+  // The kernel keeps a thread's elements in registers; 2048 is the measured
+  // width.
+  return dim == 2048;
+}
+
+void LaunchBatchedFusedResidualRMSNormQuantizeQ8_1(
+    const float* x, const float* residual, const float* weight, float* sum_out,
+    float* out, void* out_bf16, void* q8_1_out, std::size_t batch_size,
+    std::size_t dim, float eps, hipStream_t stream, void* out_bf16_tiled) {
+  if (batch_size == 0 || !IsFusedResidualRMSNormQuantizeQ8_1Supported(dim)) {
+    return;
+  }
+  BatchedFusedResidualRMSNormQuantizeQ8_1Kernel<8>
+      <<<static_cast<unsigned int>(batch_size), 256, 0, stream>>>(
+          x, residual, weight, sum_out, out,
+          static_cast<hip_bfloat16*>(out_bf16), q8_1_out, batch_size, eps,
+          static_cast<hip_bfloat16*>(out_bf16_tiled));
+  LaunchZeroQ8ActTail<true>(q8_1_out, batch_size, dim, stream);
 }
 
 bool IsFusedRMSNormQuantizeQ8_1Supported(std::size_t dim) noexcept {
@@ -1561,6 +1758,16 @@ void LaunchBatchedQuantGEMMPreQuantized(core::GgmlType type, const void* w,
     W8A8BlockedWmmaGEMMKernel<kBM, kBN, 4, 8, 1>
         <<<grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
   }
+}
+
+bool TryLaunchBatchedQuantGEMMSsmConv(core::GgmlType type, const void* w,
+                                      const void* q8_1_x, float* y,
+                                      const float* conv_weights,
+                                      float* conv_out, std::size_t batch,
+                                      std::size_t m, std::size_t k,
+                                      hipStream_t stream) {
+  return detail::TryLaunchQuantPrefillSsmConvWave64(
+      type, w, q8_1_x, y, conv_weights, conv_out, batch, m, k, stream);
 }
 
 void LaunchBatchedDualQuantGEMMPreQuantized(

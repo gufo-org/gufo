@@ -15,6 +15,7 @@
 #include "src/models/qwen/modules/attention.hpp"
 #include "src/models/qwen/modules/embed.hpp"
 #include "src/models/qwen/modules/ffn.hpp"
+#include "src/models/qwen/modules/moe.hpp"
 #include "src/models/qwen/modules/norm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "src/models/qwen/modules/rope.hpp"
@@ -291,10 +292,15 @@ void ForwardLayer(std::span<float> hidden, const QwenLayerWeights& layer,
   // 4. FFN Pre-RMSNorm
   ForwardRMSNorm(hidden, layer.ffn_norm, 1e-6F, arena.normed);
 
-  // 5. SwiGLU FFN
-  ForwardFFN(arena.normed, layer.ffn_gate, layer.ffn_up, layer.ffn_down,
-             hidden_size, config.intermediate_size, arena.mlp_gate,
-             arena.mlp_up, arena.mlp_act, arena.mlp_out);
+  // 5. SwiGLU FFN (dense or routed MoE)
+  if (config.IsMoE()) {
+    qwen::MoeForward(ctx, qwen::MakeMoeView(layer, config), arena.normed, arena,
+                     arena.mlp_out);
+  } else {
+    ForwardFFN(arena.normed, layer.ffn_gate, layer.ffn_up, layer.ffn_down,
+               hidden_size, config.intermediate_size, arena.mlp_gate,
+               arena.mlp_up, arena.mlp_act, arena.mlp_out);
+  }
 
   // 6. Residual Add
   qwen::ResidualAdd(ctx, hidden, arena.mlp_out);

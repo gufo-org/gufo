@@ -63,6 +63,10 @@ void TestBackendSupportPredicates() {
   Check(!IsTiledAttentionSupported(params), "cached prefix exceeds capacity");
   params = valid;
   params.num_heads = 16;
+  params.num_kv_heads = 2;
+  Check(IsTiledAttentionSupported(params), "35B-A3B attention geometry");
+  params = valid;
+  params.num_heads = 16;
   Check(!IsTiledAttentionSupported(params), "unsupported query-head count");
   params = valid;
   params.num_kv_heads = 8;

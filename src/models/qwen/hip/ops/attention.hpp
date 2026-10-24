@@ -39,6 +39,25 @@ void LaunchAttention(const float* q, const float* k, const float* v,
                      float* split_k_scratch = nullptr,
                      bool skip_kv_write = false);
 
+/// Merges split-K partials (running max, sum and unnormalized output per
+/// partition) into the gated attention context of `rows` positions.
+void LaunchSplitKAttentionReduce(const float* gate, const float* scratch,
+                                 float* out_context, std::uint32_t num_heads,
+                                 std::uint32_t rows, std::uint32_t splits,
+                                 hipStream_t stream = nullptr);
+
+/// Decode and verification attention on the WMMA matrix cores for eight
+/// query heads per 256-wide KV head over the FP16 cache. `positions`
+/// consecutive rows start at `start_pos`; each row's result does not depend
+/// on the others. Returns false when the shape, the scratch or the rows'
+/// partitioning does not fit, so the caller can use the scalar route.
+[[nodiscard]] bool LaunchQwenWmmaDecodeAttention(
+    const float* q, const float* gate, const void* k_cache_f16,
+    const void* v_cache_f16, float* out_context, std::uint32_t layer_idx,
+    std::uint32_t start_pos, std::size_t positions, std::uint32_t max_context,
+    std::uint32_t num_heads, std::uint32_t num_kv_heads, std::uint32_t head_dim,
+    hipStream_t stream, std::span<float> scratch);
+
 /// Runs consecutive verification queries with scalar decode arithmetic.
 /// The selected KV cache must already contain all rows. Each row sees only
 /// its causal prefix. Scratch for batch_size rows batches split-K too; a

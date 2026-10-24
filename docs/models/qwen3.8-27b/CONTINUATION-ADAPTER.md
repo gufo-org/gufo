@@ -1,7 +1,7 @@
 # Qwen 27B AR and DFlash2 continuation state
 
-The adapter owns each target `hip::QwenGpuExecutor` and, in DFlash2 mode, its
-draft backend. `QwenTextRunnerState` binds those component-cache slots and its
+The adapter owns each target `hip::QwenGpuExecutor` and, in DFlash2 or MTP
+mode, its draft backend. `QwenTextRunnerState` binds those component-cache slots and its
 verifier borrows the slot's draft backend. AR and DFlash2 HTTP serving use this
 path. The adapter adds no alternative model evaluator.
 
@@ -19,6 +19,9 @@ Each checkpoint contains the exact stable target frontier:
 | DFlash2 K and V, separately per draft layer | private | FP32 physical ring bounded by context and sliding window; unused storage is zero |
 | DFlash2 frontier and controller | private metadata | injected draft position, priming, pending feature count and adaptive controller state |
 | DFlash2 pending target features | private | up to eight target feature rows in their original order, with zero padding |
+| MTP K and V | append rows | FP32 token/head/channel rows gathered from the MTP layer's head-major cache; they count their own rows, one behind the target position once primed |
+| MTP frontier | private metadata | priming flag and row count |
+| MTP target hidden row | private | the last committed target hidden row, which the next proposal starts from |
 
 For the retained 27B geometry, 16 attention layers contribute 64 KiB per token
 with FP16 KV or 128 KiB with FP32 KV. Forty-eight recurrent layers contribute
@@ -109,11 +112,14 @@ nix develop -c cmake --build --preset gpu-test \
 nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test "$MODEL"
 ```
 
-`--guard-only`, `--image-only`, `--prefill-cancel` and `--draft "$DRAFT"` select
-focused follow-ups. The cancellation check compares full component bytes and
+`--guard-only`, `--image-only`, `--prefill-cancel`, `--draft "$DRAFT"` and
+`--mtp` (the MTP head embedded in `$MODEL`) select focused follow-ups. The cancellation check compares full component bytes and
 resumed logits against an uninterrupted pass in both KV layouts.
 The draft check restores into another slot and checks component bytes, injected
-position, sampled proposals/RNG and feedback/controller state. The portable
+position, sampled proposals/RNG and feedback/controller state. The MTP check
+does the same for its rows, hidden row and greedy proposals, refuses a capture
+while a proposal is pending, and checks that rewriting MTP rows preserves a
+borrowed checkpoint first. The portable
 `qwen27b_continuation_layout_test` covers checked geometry and policy identity;
 it does not load model weights or establish numerical quality.
 

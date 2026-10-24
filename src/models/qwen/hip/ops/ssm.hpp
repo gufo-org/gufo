@@ -158,7 +158,7 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
     std::size_t qkv_size, std::uint32_t num_key_heads, std::uint32_t num_heads,
     std::uint32_t key_dim, std::uint32_t val_dim, hipStream_t stream = nullptr,
     QwenRecurrentStateStorage state_storage = QwenRecurrentStateStorage::kFp32,
-    void* fp16_out = nullptr);
+    void* fp16_out = nullptr, bool conv_fused = false);
 
 }  // namespace gufo::hip
 

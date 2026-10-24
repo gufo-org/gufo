@@ -49,19 +49,37 @@ if (ENGINE_ENABLE_HIP)
   target_include_directories(gufo_qwen38_flash_next_mmq SYSTEM PUBLIC ${QFN_MMQ_DIR})
   target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC hip::host roc::hipblas)
 
+  # The device kernels depend only on the HIP runtime, so they build as their
+  # own library: the Qwen runner reuses the routed-expert kernels for
+  # qwen35moe without depending on this model package.
+  add_library(gufo_qwen38_flash_next_kernels STATIC
+    ${QFN_ROCM_DIR}/kernels.hip.cpp
+    ${QFN_ROCM_DIR}/w8a8_wave64.hip)
+  set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
+    PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
+  # ENGINE_ENABLE_HIP is what these sources saw through gufo_core before; the
+  # shared Qwen kernel headers they include depend on it.
+  target_compile_definitions(gufo_qwen38_flash_next_kernels PRIVATE
+    QFN_ROCM_BUILD=1 ENGINE_ENABLE_HIP=1)
+  target_compile_options(gufo_qwen38_flash_next_kernels PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+  target_include_directories(gufo_qwen38_flash_next_kernels PUBLIC
+    ${PROJECT_SOURCE_DIR})
+  target_include_directories(gufo_qwen38_flash_next_kernels SYSTEM PUBLIC
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR}
+    ${ROCWMMA_INCLUDE_DIR})
+  target_link_libraries(gufo_qwen38_flash_next_kernels PUBLIC hip::host roc::hipblas)
+
   set(QFN_HIP_SOURCES
     continuation_adapter.cpp
-    ${QFN_ROCM_DIR}/kernels.hip.cpp
-    ${QFN_ROCM_DIR}/w8a8_wave64.hip
     ${QFN_ROCM_DIR}/blaslt.cpp
     ${QFN_ROCM_DIR}/device_model.cpp
     ${QFN_ROCM_DIR}/executor.cpp
     ${QFN_ROCM_DIR}/batch.cpp
     engine.cpp)
   target_sources(gufo_qwen38_flash_next PRIVATE ${QFN_HIP_SOURCES})
-  set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
-  set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
-    PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
   target_compile_definitions(gufo_qwen38_flash_next PRIVATE QFN_ROCM_BUILD=1)
   target_compile_options(gufo_qwen38_flash_next PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O2>
@@ -71,8 +89,8 @@ if (ENGINE_ENABLE_HIP)
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
   target_link_libraries(gufo_qwen38_flash_next PUBLIC
-    gufo_cache_hip
-    gufo_qwen38_flash_next_mmq hip::host roc::hipblas roc::hipblaslt)
+    gufo_cache_hip gufo_qwen38_flash_next_kernels gufo_qwen38_flash_next_mmq
+    hip::host roc::hipblas roc::hipblaslt)
 
   if (GUFO_BUILD_TOOLS AND NOT BUILD_TESTING)
     add_executable(qwen38_flash_next_continuation_probe EXCLUDE_FROM_ALL

@@ -865,18 +865,133 @@ void CheckDraftComponents(std::shared_ptr<const hip::QwenGpuModel> model,
   std::cout << "draft_components_lookup,PASS\n";
   std::cout << "draft_components,PASS\n";
 }
+void CheckMtpComponents(std::shared_ptr<const hip::QwenGpuModel> model,
+                        const char* mtp_path) {
+  std::string error;
+  auto reader = gufo::core::GgufReader::OpenFile(mtp_path, &error);
+  Require(bool(reader), error.c_str());
+  auto mtp_model = hip::QwenMtpGpuModel::Create(
+      std::shared_ptr<const gufo::core::GgufReader>(std::move(reader)), model,
+      &error);
+  Require(bool(mtp_model), error.c_str());
+  qwen::ContinuationAdapter adapter(
+      model, 256, {'m', 't', 'p'}, hip::QwenExecutionPolicy::Production(),
+      nullptr, {}, nullptr, mtp_model,
+      {.max_context = 256, .max_draft_tokens = 2});
+  Guard ga, gb;
+  hip::TransferPool pool(2);
+  auto source = adapter.CreateSlot(ga), destination = adapter.CreateSlot(gb);
+  auto& a = adapter.GetExecutor(*source);
+  auto& b = adapter.GetExecutor(*destination);
+  auto& ma = *adapter.GetMtpBackend(*source);
+  auto& mb = *adapter.GetMtpBackend(*destination);
+  a.SetPromptHiddenCapture(true);
+  b.SetPromptHiddenCapture(true);
+  const auto fixture = model->GetTokenizer().Encode(
+      "The quick brown fox jumps over the lazy dog. ");
+  Require(!fixture.empty(), "empty MTP fixture");
+  std::vector<Token> tokens(64);
+  for (std::size_t i = 0; i < tokens.size(); ++i)
+    tokens[i] = fixture[i % fixture.size()];
+  auto next = a.ForwardPromptBatch(tokens);
+  const auto captured = a.GetPromptHiddenStates();
+  const std::vector<float> hidden(captured.begin(), captured.end());
+  const auto width = hidden.size() / tokens.size();
+  Require(ma.PrimeTargetContext({.prompt_tokens = tokens,
+                                 .prompt_hidden_states = hidden,
+                                 .hidden_size = width,
+                                 .first_token = next}),
+          "MTP prime failed");
+  for (std::uint32_t i = 0; i < 3; ++i) {
+    const Token token = next;
+    tokens.push_back(token);
+    next = a.ForwardToken(token, 64 + i);
+    const auto last = a.CopyLastHidden();
+    const std::vector<float> row(last.begin(), last.end());
+    Require(ma.AppendTargetContext({.prompt_tokens = std::span(&token, 1),
+                                    .prompt_hidden_states = row,
+                                    .hidden_size = width},
+                                   64 + i),
+            "MTP append failed");
+  }
+  const auto checkpoint = Capture(adapter, *source, pool);
+  Require(Capture(adapter, *source, pool, std::byte{0xa5}).bytes ==
+              checkpoint.bytes,
+          "MTP checkpoint depends on recycled destination bytes");
+  std::vector<std::size_t> mtp_rows;
+  for (std::size_t i = 0; i < adapter.Components().size(); ++i) {
+    const auto& descriptor = adapter.Components()[i];
+    if (descriptor.kind == cache::ComponentKind::kAppendRows &&
+        checkpoint.positions[i].valid_rows == 66)
+      mtp_rows.push_back(i);
+    if (descriptor.kind != cache::ComponentKind::kPrivateState)
+      continue;
+    std::vector<std::byte> pieces(descriptor.state_bytes, std::byte{0x5a});
+    const auto cut = std::min<std::size_t>(37, pieces.size());
+    for (const auto [first, count] : {std::pair{cut, pieces.size() - cut},
+                                      std::pair{std::size_t{0}, cut}}) {
+      auto stream = pool.TryAcquire();
+      Require(bool(stream), "private-piece stream unavailable");
+      Wait(adapter.CapturePrivatePiece(*source, descriptor.id, first,
+                                       std::span(pieces).subspan(first, count),
+                                       *stream));
+    }
+    Require(pieces == checkpoint.bytes[i],
+            "partial MTP capture differs from the canonical checkpoint");
+  }
+  Require(checkpoint.positions.front().valid_rows == 67 && mtp_rows.size() == 2,
+          "MTP rows do not trail the target frontier by one");
+  Load(adapter, *destination, checkpoint, pool);
+  Require(adapter.Validate(*destination, checkpoint.positions),
+          "MTP restore failed");
+  Require(Capture(adapter, *destination, pool).bytes == checkpoint.bytes,
+          "restored MTP components differ");
+  SameLogits(a, b);
+  const auto proposal_a = ma.Propose(tokens, 67, 2);
+  const auto proposal_b = mb.Propose(tokens, 67, 2);
+  Require(!proposal_a.tokens.empty(), "MTP fixture produced no proposal");
+  Require(proposal_a.tokens == proposal_b.tokens,
+          "MTP proposals changed after component restore");
+  Reject([&] { (void)Capture(adapter, *source, pool); });
+  const auto last = a.CopyLastHidden();
+  ma.UpdateTargetHidden(last);
+  mb.UpdateTargetHidden(last);
+  ma.AcceptFeedback({}, next);
+  mb.AcceptFeedback({}, next);
+  Require(Capture(adapter, *source, pool).bytes ==
+              Capture(adapter, *destination, pool).bytes,
+          "MTP state diverged after feedback");
+  // Re-priming rewrites MTP rows the cache may still borrow from this slot.
+  const auto borrowed = Capture(adapter, *source, pool);
+  ga.adapter = &adapter;
+  ga.slot = source.get();
+  ga.pool = &pool;
+  ga.Borrow(borrowed);
+  Require(ma.PrimeTargetContext({.prompt_tokens = std::span(tokens).first(64),
+                                 .prompt_hidden_states = hidden,
+                                 .hidden_size = width,
+                                 .first_token = tokens[64]}),
+          "MTP re-prime failed");
+  for (const auto i : mtp_rows)
+    Require(ga.detached[i], "MTP row overwrite was not guarded");
+  ga.borrowed = nullptr;
+  std::cout << "mtp_components,PASS\n";
+}
 }  // namespace
 int main(int argc, const char* const* argv) {
   try {
     const bool guard_only = argc == 3 && std::string(argv[2]) == "--guard-only";
     const bool image_only = argc == 3 && std::string(argv[2]) == "--image-only";
     const bool draft_only = argc == 4 && std::string(argv[2]) == "--draft";
+    const bool mtp_only = argc == 3 && std::string(argv[2]) == "--mtp";
     const bool cancel_only =
         argc == 3 && std::string(argv[2]) == "--prefill-cancel";
-    if (argc != 2 && !guard_only && !image_only && !draft_only && !cancel_only)
+    if (argc != 2 && !guard_only && !image_only && !draft_only &&
+        !cancel_only && !mtp_only)
       throw std::invalid_argument(
           "Usage: continuation_adapter_test MODEL.gguf "
-          "[--guard-only|--image-only|--prefill-cancel|--draft DRAFT.gguf]");
+          "[--guard-only|--image-only|--prefill-cancel|--draft DRAFT.gguf|"
+          "--mtp]");
     std::string error;
     auto reader = gufo::core::GgufReader::OpenFile(argv[1], &error);
     Require(bool(reader), error.c_str());
@@ -888,6 +1003,11 @@ int main(int argc, const char* const* argv) {
     if (cancel_only) {
       CheckPrefillCancellation(model, true);
       CheckPrefillCancellation(model, false);
+      return 0;
+    }
+    if (mtp_only) {
+      CheckMtpComponents(model, argv[1]);
+      std::cout << "Qwen continuation MTP adapter: PASS\n";
       return 0;
     }
     if (draft_only) {

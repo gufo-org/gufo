@@ -586,6 +586,61 @@ void TestExactNucleusBoundaryAndGreedyTies() {
   Expect(batched_token == 1, "batched verification uses the same greedy tie");
 }
 
+// The MTP small head scores `prefix` vocabulary rows, then table rows; the
+// argmax index of a winning table row maps back to that row's token ID.
+void TestRemapDraftToken() {
+  constexpr std::uint32_t kPrefix = 8;
+  const std::vector<std::int32_t> table{500, 900, 7};
+  std::vector<float> logits(kPrefix + table.size(), -1.0F);
+  logits[kPrefix + 1] = 2.0F;
+  float* device_logits = nullptr;
+  std::int32_t* device_table = nullptr;
+  std::uint32_t* device_token = nullptr;
+  CheckHip(hipMalloc(&device_logits, logits.size() * sizeof(float)),
+           "allocate draft logits");
+  CheckHip(hipMalloc(&device_table, table.size() * sizeof(std::int32_t)),
+           "allocate draft table");
+  CheckHip(hipMalloc(&device_token, sizeof(std::uint32_t)),
+           "allocate draft token");
+  CheckHip(hipMemcpy(device_logits, logits.data(),
+                     logits.size() * sizeof(float), hipMemcpyHostToDevice),
+           "upload draft logits");
+  CheckHip(hipMemcpy(device_table, table.data(),
+                     table.size() * sizeof(std::int32_t),
+                     hipMemcpyHostToDevice),
+           "upload draft table");
+  const auto rows = static_cast<std::uint32_t>(table.size());
+  const auto remap = [&](std::uint32_t index) {
+    CheckHip(hipMemcpy(device_token, &index, sizeof(index),
+                       hipMemcpyHostToDevice),
+             "upload draft index");
+    gufo::hip::LaunchRemapDraftToken(device_token, kPrefix, device_table, rows);
+    std::uint32_t token = 0;
+    CheckHip(hipMemcpy(&token, device_token, sizeof(token),
+                       hipMemcpyDeviceToHost),
+             "download draft token");
+    return token;
+  };
+  Expect(remap(3) == 3, "a prefix index is its own token");
+  Expect(remap(kPrefix) == 500 && remap(kPrefix + 2) == 7,
+         "a table index maps to its row's token");
+  Expect(remap(kPrefix + rows) == kPrefix + rows,
+         "an index past the rows in use is left unchanged");
+  Expect(remap(gufo::hip::kInvalidSampleToken) ==
+             gufo::hip::kInvalidSampleToken,
+         "an invalid argmax stays invalid");
+  gufo::hip::LaunchGPUArgmax(device_logits, device_token, logits.size());
+  gufo::hip::LaunchRemapDraftToken(device_token, kPrefix, device_table, rows);
+  std::uint32_t token = 0;
+  CheckHip(hipMemcpy(&token, device_token, sizeof(token),
+                     hipMemcpyDeviceToHost),
+           "download draft argmax");
+  Expect(token == 900, "a winning table row proposes its token");
+  CheckHip(hipFree(device_token), "free draft token");
+  CheckHip(hipFree(device_table), "free draft table");
+  CheckHip(hipFree(device_logits), "free draft logits");
+}
+
 void TestFullVocabularyQuantiles() {
   // Exercise the parallel verifier's dispatch boundary, real Qwen vocabulary
   // and ragged segments, with substantial mass outside the draft support.
@@ -962,6 +1017,7 @@ int main() {
   TestFilteredSpeculativeResidualSampling();
   TestSamplingBoundaryValues();
   TestExactNucleusBoundaryAndGreedyTies();
+  TestRemapDraftToken();
   TestFullVocabularyQuantiles();
   TestBatchedArgmaxTiles();
   TestExactCandidatePrefix();

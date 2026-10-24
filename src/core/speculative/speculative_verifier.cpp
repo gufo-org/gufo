@@ -421,15 +421,16 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
     std::span<const tokenization::TokenId> current_sequence,
     std::uint32_t cur_pos, tokenization::TokenId current_token,
     tokenization::TokenId eos_id, std::uint32_t max_emitted_tokens,
-    sampling::SamplerState& sampler) {
+    sampling::SamplerState& sampler, std::uint32_t max_draft_tokens) {
   sampler.config().Validate();
   if (!use_batched_verification_ &&
       sampler.config().can_use_unmodified_argmax()) {
     return VerifySequentialStep(current_sequence, cur_pos, current_token,
                                 eos_id, max_emitted_tokens);
   }
-  auto prepared = PrepareStep({*this, current_sequence, cur_pos, current_token,
-                               eos_id, max_emitted_tokens, sampler});
+  auto prepared =
+      PrepareStep({*this, current_sequence, cur_pos, current_token, eos_id,
+                   max_emitted_tokens, sampler, max_draft_tokens});
   if (prepared.immediate.has_value())
     return std::move(*prepared.immediate);
   auto verification = target_executor_->ForwardVerificationChunk(
@@ -464,7 +465,8 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
   prepared.max_draft_tokens =
       request.max_emitted_tokens > 1 && draft_backend_ != nullptr &&
               (!prepared.sampled || draft_backend_->SupportsSampledProposals())
-          ? std::min(current_draft_length_, request.max_emitted_tokens - 1)
+          ? std::min({current_draft_length_, request.max_emitted_tokens - 1,
+                      request.max_draft_tokens})
           : 0;
   if (prepared.max_draft_tokens == 0) {
     PrepareTargetOnlyStep(prepared, request, defer_target_only);
@@ -830,7 +832,8 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
     const auto& request = requests.front();
     return {request.verifier.VerifyStep(
         request.sequence, request.position, request.current_token,
-        request.eos_id, request.max_emitted_tokens, request.sampler)};
+        request.eos_id, request.max_emitted_tokens, request.sampler,
+        request.max_draft_tokens)};
   }
   std::vector<StepResult> result(requests.size());
   for (std::size_t index = 0; index < requests.size(); ++index) {
@@ -1440,18 +1443,29 @@ std::vector<tokenization::TokenId> SpeculativeVerifier::Generate(
 
 tokenization::TokenId SpeculativeVerifier::ExtendPrompt(
     std::span<const tokenization::TokenId> tokens, std::uint32_t position,
-    bool compute_logits) {
+    bool compute_logits, std::uint32_t keep_context_from) {
   if (tokens.empty() || position == 0) {
     throw std::invalid_argument(
         "prompt extension needs a nonempty retained prefix");
   }
-  const bool capture =
+  const bool needs_hidden =
       draft_backend_ != nullptr && draft_backend_->RequiresTargetHiddenStates();
+  // The draft's window will have moved past this whole span before it is
+  // used again: advance it without the span's features.
+  const bool skip_context = needs_hidden &&
+                            draft_backend_->TargetContextWindow() != 0 &&
+                            position + tokens.size() <= keep_context_from;
+  const bool capture = needs_hidden && !skip_context;
   target_executor_->SetPromptHiddenCapture(
       capture, capture ? draft_backend_->TargetHiddenLayerIds()
                        : std::span<const std::uint32_t>{});
   const auto next =
       target_executor_->ForwardPromptSuffix(tokens, position, compute_logits);
+  if (skip_context &&
+      !draft_backend_->SkipTargetContext(
+          position, static_cast<std::uint32_t>(tokens.size()), false)) {
+    throw std::runtime_error("draft failed to skip target prompt features");
+  }
   if (capture) {
     const auto hidden = target_executor_->GetPromptHiddenStates();
     if (hidden.empty() || hidden.size() % tokens.size() != 0 ||
@@ -1468,21 +1482,31 @@ tokenization::TokenId SpeculativeVerifier::ExtendPrompt(
 }
 
 tokenization::TokenId SpeculativeVerifier::Prime(
-    std::span<const tokenization::TokenId> prompt_tokens, bool compute_logits) {
+    std::span<const tokenization::TokenId> prompt_tokens, bool compute_logits,
+    std::uint32_t keep_context_from) {
   if (prompt_tokens.empty()) {
     throw std::invalid_argument("speculative prompt must not be empty");
   }
   Reset();
   target_executor_->Reset();
 
-  const bool capture_hidden =
+  const bool needs_hidden =
       draft_backend_ != nullptr && draft_backend_->RequiresTargetHiddenStates();
+  const bool skip_context = needs_hidden &&
+                            draft_backend_->TargetContextWindow() != 0 &&
+                            prompt_tokens.size() <= keep_context_from;
+  const bool capture_hidden = needs_hidden && !skip_context;
   const auto target_layer_ids = capture_hidden
                                     ? draft_backend_->TargetHiddenLayerIds()
                                     : std::span<const std::uint32_t>{};
   target_executor_->SetPromptHiddenCapture(capture_hidden, target_layer_ids);
   const tokenization::TokenId first_token =
       target_executor_->ForwardPromptSuffix(prompt_tokens, 0, compute_logits);
+  if (skip_context &&
+      !draft_backend_->SkipTargetContext(
+          0, static_cast<std::uint32_t>(prompt_tokens.size()), true)) {
+    throw std::runtime_error("draft backend failed to skip target context");
+  }
   if (capture_hidden) {
     const auto prompt_hidden = target_executor_->GetPromptHiddenStates();
     if (prompt_hidden.empty() ||

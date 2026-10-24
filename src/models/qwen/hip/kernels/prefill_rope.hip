@@ -179,6 +179,140 @@ __launch_bounds__(256, 4) __global__ void BatchedFusedQKNormRoPEKvWriteKernel(
   }
 }
 
+// One wave per (head, token) for 256-wide heads with a 64-wide rotary span.
+// Lane l holds elements l + 32 * v: register v is what the threads of wave v
+// held in BatchedFusedQKNormRoPEKvWriteKernel, the rotary pair (p, p + 32) is
+// lane p of registers 0 and 1, and the reduction is the same descending tree.
+// Every expression is unchanged, so the outputs are bit-identical; the block
+// needs no LDS and no barrier. The inputs may alias the outputs: a wave reads
+// its whole head before writing it.
+__launch_bounds__(32) __global__ void BatchedFusedQKNormRoPEKvWriteWaveKernel(
+    const float* q, const float* k, const float* __restrict__ v,
+    const float* __restrict__ q_weight, const float* __restrict__ k_weight,
+    float* q_out, float* k_out, float* __restrict__ k_cache,
+    float* __restrict__ v_cache, __half* __restrict__ k_cache_f16,
+    __half* __restrict__ v_cache_f16, std::uint32_t layer_idx,
+    std::uint32_t start_pos, std::size_t batch_size, std::uint32_t max_context,
+    std::uint32_t num_heads, std::uint32_t num_kv_heads, float rope_theta,
+    float eps, const models::qwen::vision::DeviceRope* rope) {
+  constexpr int kWaves = 8;
+  constexpr std::uint32_t kHeadDim = 256;
+  constexpr std::uint32_t kRotaryDim = 64;
+  constexpr std::uint32_t kHalfRot = kRotaryDim / 2;
+  const std::size_t b = blockIdx.y;
+  const std::uint32_t block = blockIdx.x;
+  const std::size_t lane = threadIdx.x;
+  if (b >= batch_size) {
+    return;
+  }
+  const std::uint32_t cur_pos = start_pos + static_cast<std::uint32_t>(b);
+  const bool is_q = block < num_heads;
+  const std::uint32_t kv_h = block - num_heads;
+  if (!is_q && kv_h >= num_kv_heads) {
+    return;
+  }
+  const std::size_t head_total = static_cast<std::size_t>(num_heads) * kHeadDim;
+  const std::size_t kv_total =
+      static_cast<std::size_t>(num_kv_heads) * kHeadDim;
+  const std::size_t head_base =
+      is_q ? (b * head_total) + (static_cast<std::size_t>(block) * kHeadDim)
+           : (b * kv_total) + (static_cast<std::size_t>(kv_h) * kHeadDim);
+  const float* x_head = (is_q ? q : k) + head_base;
+  const float* weight = is_q ? q_weight : k_weight;
+
+  float values[kWaves];
+  float sums[kWaves];
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+    const float val = x_head[(32 * w) + lane];
+    values[w] = val;
+    float square = val * val;
+    // The 256-thread kernel stores each square before the tree adds them;
+    // keep the product rounded on its own instead of fused into the add.
+    asm volatile("" : "+v"(square));
+    sums[w] = square;
+  }
+  // Strides 128, 64 and 32 of the 256-thread tree pair whole waves; the
+  // remaining strides run inside the first wave.
+  sums[0] += sums[4];
+  sums[1] += sums[5];
+  sums[2] += sums[6];
+  sums[3] += sums[7];
+  sums[0] += sums[2];
+  sums[1] += sums[3];
+  float total = sums[0] + sums[1];
+#pragma unroll
+  for (unsigned offset = 16; offset > 0; offset /= 2) {
+    total += __shfl_down(total, offset);
+  }
+  total = __shfl(total, 0);
+  const float inv_rms = rsqrtf(total / static_cast<float>(kHeadDim) + eps);
+
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+    const std::size_t i = (32 * w) + lane;
+    const float wt = (weight != nullptr) ? weight[i] : 1.0F;
+    float normed = (values[w] * inv_rms) * wt;
+    // Likewise the normed value is a stored operand of the rotation.
+    asm volatile("" : "+v"(normed));
+    values[w] = normed;
+  }
+
+  const std::size_t p = lane;
+  const float x0 = values[0];
+  const float x1 = values[1];
+  const float exponent =
+      static_cast<float>(2 * p) / static_cast<float>(kRotaryDim);
+  const float inv_freq = 1.0F / powf(rope_theta, exponent);
+  const float angle =
+      models::qwen::vision::RopePosition(rope, cur_pos, p) * inv_freq;
+  const float cos_val = cosf(angle);
+  const float sin_val = sinf(angle);
+  values[0] = (x0 * cos_val) - (x1 * sin_val);
+  values[1] = (x0 * sin_val) + (x1 * cos_val);
+
+  if (is_q) {
+#pragma unroll
+    for (int w = 0; w < kWaves; ++w) {
+      q_out[head_base + (32 * w) + lane] = values[w];
+    }
+    return;
+  }
+
+  const std::size_t cache_offset =
+      (((static_cast<std::size_t>(layer_idx) * num_kv_heads + kv_h) *
+            max_context +
+        cur_pos) *
+       kHeadDim);
+  const std::size_t f16_offset =
+      ((static_cast<std::size_t>(layer_idx) * max_context + cur_pos) *
+       kv_total) +
+      (static_cast<std::size_t>(kv_h) * kHeadDim);
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+    const std::size_t i = (32 * w) + lane;
+    const float key = values[w];
+    k_out[head_base + i] = key;
+    if (k_cache != nullptr) {
+      k_cache[cache_offset + i] = key;
+    }
+    if (k_cache_f16 != nullptr) {
+      k_cache_f16[f16_offset + i] = __float2half_rn(key);
+    }
+  }
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+    const std::size_t i = (32 * w) + lane;
+    const float val = v[head_base + i];
+    if (v_cache != nullptr) {
+      v_cache[cache_offset + i] = val;
+    }
+    if (v_cache_f16 != nullptr) {
+      v_cache_f16[f16_offset + i] = __float2half_rn(val);
+    }
+  }
+}
+
 void LaunchBatchedFusedQKNormRoPEKvWrite(
     const float* q, const float* k, const float* v, const float* q_weight,
     const float* k_weight, float* q_out, float* k_out, float* k_cache,
@@ -190,6 +324,14 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
     const models::qwen::vision::DeviceRope* rope) {
   const dim3 grid(num_heads + num_kv_heads,
                   static_cast<unsigned int>(batch_size));
+  if (head_dim == 256 && rotary_dim == 64) {
+    BatchedFusedQKNormRoPEKvWriteWaveKernel<<<grid, 32, 0, stream>>>(
+        q, k, v, q_weight, k_weight, q_out, k_out, k_cache, v_cache,
+        static_cast<__half*>(k_cache_f16), static_cast<__half*>(v_cache_f16),
+        layer_idx, start_pos, batch_size, max_context, num_heads, num_kv_heads,
+        rope_theta, eps, rope);
+    return;
+  }
   BatchedFusedQKNormRoPEKvWriteKernel<<<grid, 256, 0, stream>>>(
       q, k, v, q_weight, k_weight, q_out, k_out, k_cache, v_cache,
       static_cast<__half*>(k_cache_f16), static_cast<__half*>(v_cache_f16),

@@ -561,14 +561,19 @@ int main(int argc, const char* const* argv) {
     Expect(!backend.load(
                model, &error, context, state_count, {}, {},
                {.backend = gufo::server::TextSpeculativeBackend::kMtp}) &&
-               error.find("Flash-Next") != std::string::npos,
-           "Qwen27B must reject MTP instead of silently running AR");
+               error.find("--mtp-model") != std::string::npos,
+           "Qwen MTP must require an explicit draft model");
     Expect(
         !backend.load(model, &error, context, state_count, {}, {},
                       {.backend = gufo::server::TextSpeculativeBackend::kDFlash,
                        .min_draft_tokens = 2}) &&
             error.find("min-draft-tokens") != std::string::npos,
         "DFlash must reject an unused adaptive draft floor");
+    Expect(!backend.load(model, &error, context, state_count, {}, {},
+                         {.backend = gufo::server::TextSpeculativeBackend::kMtp,
+                          .min_draft_tokens = 2}) &&
+               error.find("min-draft-tokens") != std::string::npos,
+           "MTP must reject an adaptive draft floor");
     Expect(backend.load(model, &error, context, state_count, {},
                         {.max_pending_requests_per_client = 8}),
            error);

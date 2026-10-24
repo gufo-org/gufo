@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -32,6 +33,10 @@ struct SpeculativeOptions {
   bool use_batched_verification{false};
   bool retain_frontier_logits{false};
   DFlashDraftPolicy dflash_policy{DFlashDraftPolicy::kAdaptive};
+  /// MTP prompt-prime slice width: rows per batched prime. `0` selects the
+  /// legacy per-token serial prime. Reachable from `serve llm
+  /// --mtp-prime-chunk`; the other draft backends ignore it.
+  std::uint32_t mtp_prime_chunk{1024};
 };
 
 struct SpeculativeStats {
@@ -286,12 +291,16 @@ public:
 
   /// Resets target and draft state, prefills the prompt, and returns the first
   /// target token. This setup is outside benchmarked decode regions.
+  /// `keep_context_from` is the first position whose target features the
+  /// draft still needs: a prompt span that ends at or before it is prefilled
+  /// without capturing or injecting draft context, when the draft supports
+  /// skipping. Zero keeps every position.
   [[nodiscard]] tokenization::TokenId Prime(
       std::span<const tokenization::TokenId> prompt_tokens,
-      bool compute_logits = true);
+      bool compute_logits = true, std::uint32_t keep_context_from = 0);
   [[nodiscard]] tokenization::TokenId ExtendPrompt(
       std::span<const tokenization::TokenId> tokens, std::uint32_t position,
-      bool compute_logits = true);
+      bool compute_logits = true, std::uint32_t keep_context_from = 0);
 
   /// Commits one externally supplied continuation token through the target
   /// model and updates draft-provider state with the matching target features.
@@ -319,6 +328,10 @@ public:
     tokenization::TokenId eos_id;
     std::uint32_t max_emitted_tokens;
     sampling::SamplerState& sampler;
+    /// Upper bound on this step's draft length, on top of the verifier's own
+    /// (possibly adaptive) length. Concurrent callers lower it so stacked
+    /// verification rows stay near one request's width.
+    std::uint32_t max_draft_tokens{std::numeric_limits<std::uint32_t>::max()};
   };
 
   [[nodiscard]] static std::vector<StepResult> VerifyBatch(
@@ -343,12 +356,15 @@ public:
                         tokenization::TokenId eos_id,
                         std::uint32_t max_emitted_tokens, float temperature,
                         std::uint64_t* rng_state);
+  /// `max_draft_tokens` bounds the draft like StepRequest::max_draft_tokens.
   StepResult VerifyStep(std::span<const tokenization::TokenId> current_sequence,
                         std::uint32_t cur_pos,
                         tokenization::TokenId current_token,
                         tokenization::TokenId eos_id,
                         std::uint32_t max_emitted_tokens,
-                        sampling::SamplerState& sampler);
+                        sampling::SamplerState& sampler,
+                        std::uint32_t max_draft_tokens =
+                            std::numeric_limits<std::uint32_t>::max());
 
   [[nodiscard]] std::unique_ptr<SpeculativeVerifierSnapshot> Snapshot() const;
   void RestoreSnapshot(const SpeculativeVerifierSnapshot& snapshot);

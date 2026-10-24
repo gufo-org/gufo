@@ -36,6 +36,8 @@ using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
 // multiple of 16 this is exactly the same total size as the previous row-major
 // block_q8_1 payload (36 bytes per 32 elements), followed by the sum sidecar.
 constexpr std::size_t kQ8ActTileTokens = 16;
+/// Tokens one wave of the fused GDN-convolution GEMM epilogue owns.
+constexpr std::size_t kSsmConvSpanTokens = 64;
 constexpr std::size_t kQ8ActTileBytes = 576;
 constexpr std::size_t kQ8ActScaleOffset = 512;
 constexpr std::size_t kQ8ActSumTileBytes = kQ8ActTileTokens * sizeof(float);
@@ -134,14 +136,26 @@ __device__ __forceinline__ WmmaQuantAccumulator<WaveSize> WmmaQuant(
 // Both wave sizes preserve every K32 accumulator update, including the affine
 // minimum correction and the separate Q6/Q3 half-block scales. Activation
 // staging uses 32-thread groups; the native WMMA wave determines C ownership.
+//
+// SsmConv != 0 applies the GDN causal convolution and SiLU in the epilogue: a
+// wave owns kWaveTokTiles consecutive 16-token subtiles (a span), so the three
+// earlier tokens of an output are in its LDS scratch or in the three rows it
+// carried over from the previous subtile. Tokens 3.. of a span go to
+// `conv_out` with the expression of BatchedSSMConvKernel on the same FP32
+// operands. The first three tokens of a span, whose history belongs to
+// another wave, and its last four, which the next span reads, are written
+// raw to `y`, as are the last four tokens of the batch for the convolution
+// history; the caller convolves the span heads afterwards. Mode 1 requires
+// whole spans (batch % 64 == 0) and has no per-token bounds; mode 2 takes any
+// batch and is a little slower.
 template<int BM, int BN, int BK, int WM, int WN, core::GgmlType WType,
-         int WaveSize = 32>
+         int WaveSize = 32, int SsmConv = 0>
 __launch_bounds__(WM * WN * WaveSize, 1) __global__
-    void WKQuantA8BlockedWmmaGEMMKernel(const void* __restrict__ w,
-                                        const void* __restrict__ x_blocks,
-                                        float* __restrict__ y,
-                                        std::size_t batch, std::size_t m,
-                                        std::size_t k) {
+    void WKQuantA8BlockedWmmaGEMMKernel(
+        const void* __restrict__ w, const void* __restrict__ x_blocks,
+        float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
+        const float* __restrict__ conv_weights = nullptr,
+        float* __restrict__ conv_out = nullptr) {
   constexpr bool PerHalfScale =
       WType == core::GgmlType::kQ6_K || WType == core::GgmlType::kQ3_K;
   constexpr bool HasOffset =
@@ -206,7 +220,13 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
 
   unsigned row_tile = blockIdx.y;
   unsigned token_tile = blockIdx.x;
-  if constexpr (kAffineWave64) {
+  // Q8_0 too: with the token tiles fastest, every row tile reads the whole
+  // activation from the cache again. Grouping eight row tiles is 10-17%
+  // faster for the Qwen3.6-35B-A3B projections at 4096 tokens (2048 x 8192:
+  // 4.93 -> 4.19 ms) and changes no output, which is per tile.
+  constexpr bool kGroupRowTiles =
+      kAffineWave64 || (WaveSize == 64 && WType == core::GgmlType::kQ8_0);
+  if constexpr (kGroupRowTiles) {
     // Reuse each activation panel across up to eight neighboring row tiles.
     // The final group may contain fewer rows; every output tile still has
     // exactly one owner.
@@ -528,6 +548,63 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
         const std::size_t t0 =
             t_block +
             static_cast<std::size_t>((((wave_tok * kWaveTokTiles) + j) * 16));
+        if constexpr (SsmConv != 0) {
+          static_assert(WaveSize == 64 && kEpiloguePasses == 1 &&
+                        kWavesPerPass >= 2 * kWaves);
+          // Rows 13..15 of the previous subtile, behind every wave's scratch.
+          float* const carry = scratch_base + (kWaves * 256) + (wave_id * 64);
+          const int row = lane_id & 15;
+          if ((SsmConv == 1 ? t0 + 16 <= batch : t0 < batch) && r0 + 16 <= m) {
+            const float4 cw = *reinterpret_cast<const float4*>(
+                conv_weights + ((r0 + static_cast<std::size_t>(row)) * 4));
+            const float w0 = cw.x;
+            const float w1 = cw.y;
+            const float w2 = cw.z;
+            const float w3 = cw.w;
+#pragma unroll
+            for (int st = 0; st < kAccumulatorElements; ++st) {
+              const int flat = (st * WaveSize) + lane_id;
+              const int tl = flat >> 4;
+              const float s3 = tile_scratch[flat];
+              const float s2 = (tl >= 1) ? tile_scratch[flat - 16]
+                                         : carry[((2 + tl) * 16) + row];
+              const float s1 = (tl >= 2) ? tile_scratch[flat - 32]
+                                         : carry[((1 + tl) * 16) + row];
+              const float s0 =
+                  (tl >= 3) ? tile_scratch[flat - 48] : carry[(tl * 16) + row];
+              const float dot = (s0 * w0) + (s1 * w1) + (s2 * w2) + (s3 * w3);
+              const float sig = 1.0F / (1.0F + expf(-dot));
+              const std::size_t token = t0 + static_cast<std::size_t>(tl);
+              const std::size_t out_index =
+                  (token * m) + r0 + static_cast<std::size_t>(row);
+              if constexpr (SsmConv == 1) {
+                if (j == 0 && tl < 3) {
+                  y[out_index] = s3;
+                } else {
+                  conv_out[out_index] = dot * sig;
+                  if (j == kWaveTokTiles - 1 && tl >= 12) {
+                    y[out_index] = s3;
+                  }
+                }
+              } else if (token < batch) {
+                const bool span_head = j == 0 && tl < 3;
+                if (!span_head) {
+                  conv_out[out_index] = dot * sig;
+                }
+                if (span_head || (j == kWaveTokTiles - 1 && tl >= 12) ||
+                    token + 4 >= batch) {
+                  y[out_index] = s3;
+                }
+              }
+            }
+          }
+          __builtin_amdgcn_wave_barrier();
+          if (lane_id < 48) {
+            carry[lane_id] = tile_scratch[208 + lane_id];
+          }
+          __builtin_amdgcn_wave_barrier();
+          continue;
+        }
         if (t0 + 16 <= batch && r0 + 16 <= m) {
           const std::size_t out_base = (t0 * m) + r0;
 #pragma unroll
@@ -559,6 +636,12 @@ namespace detail {
                                                float* y, std::size_t batch,
                                                std::size_t m, std::size_t k,
                                                hipStream_t stream);
+/// The Q8_0 wave64 GEMM with the GDN convolution in its epilogue (see
+/// SsmConv). Returns false, launching nothing, for any other shape.
+[[nodiscard]] bool TryLaunchQuantPrefillSsmConvWave64(
+    core::GgmlType type, const void* w, const void* x, float* y,
+    const float* conv_weights, float* conv_out, std::size_t batch,
+    std::size_t m, std::size_t k, hipStream_t stream);
 }  // namespace detail
 
 }  // namespace gufo::hip

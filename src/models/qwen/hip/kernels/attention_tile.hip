@@ -43,16 +43,10 @@ __global__ void SyncTiledAttentionKvPrefixKernel(
 }
 
 constexpr std::uint32_t kTileAttentionHeadDim = detail::kTiledAttentionHeadDim;
-constexpr std::uint32_t kTileAttentionQueryHeads =
-    detail::kTiledAttentionQueryHeads;
-constexpr std::uint32_t kTileAttentionKvHeads = detail::kTiledAttentionKvHeads;
-constexpr std::uint32_t kTileAttentionGqa = 6;
 constexpr std::uint32_t kTileAttentionQueryRows = 16;
 constexpr std::uint32_t kTileAttentionHeadsPerBlock = 2;
 constexpr std::uint32_t kTileAttentionColumns =
     kTileAttentionQueryRows * kTileAttentionHeadsPerBlock;
-static_assert((kTileAttentionGqa % kTileAttentionHeadsPerBlock) == 0,
-              "GQA heads must divide evenly across tiled blocks");
 constexpr std::uint32_t kTileAttentionKeyRows = 64;
 constexpr std::uint32_t kTileAttentionHalf2Dim = kTileAttentionHeadDim / 2;
 constexpr std::uint32_t kTileAttentionKeyHalf2Dim = kTileAttentionHalf2Dim / 2;
@@ -91,11 +85,11 @@ __global__ void PackTiledAttentionKvKernel(
     __half* __restrict__ k_cache_f16, __half* __restrict__ v_cache_f16,
     float* __restrict__ k_cache, float* __restrict__ v_cache,
     std::uint32_t layer_idx, std::uint32_t start_pos, std::size_t batch_size,
-    std::uint32_t max_context) {
+    std::uint32_t max_context, std::uint32_t num_kv_heads) {
   const std::size_t token = blockIdx.y;
   const std::size_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
-  constexpr std::size_t kv_width =
-      kTileAttentionKvHeads * kTileAttentionHeadDim;
+  const std::size_t kv_width =
+      static_cast<std::size_t>(num_kv_heads) * kTileAttentionHeadDim;
   if (token >= batch_size || index >= kv_width) {
     return;
   }
@@ -109,8 +103,7 @@ __global__ void PackTiledAttentionKvKernel(
        kv_width) +
       index;
   const std::size_t f32_cache_offset =
-      (((static_cast<std::size_t>(layer_idx) * kTileAttentionKvHeads +
-         kv_head) *
+      (((static_cast<std::size_t>(layer_idx) * num_kv_heads + kv_head) *
             max_context +
         position) *
        kTileAttentionHeadDim) +
@@ -127,25 +120,30 @@ __global__ void PackTiledAttentionKvKernel(
   }
 }
 
+template<std::uint32_t kQueryHeads, std::uint32_t kKvHeads>
 __launch_bounds__(256, 3) __global__ void QwenTiledAttentionKernel(
     const float* __restrict__ q, const float* __restrict__ gate,
     const __half* __restrict__ k_cache_f16,
     const __half* __restrict__ v_cache_f16, float* __restrict__ out_context,
     std::uint32_t start_pos, std::size_t batch_size,
     float* __restrict__ lse_out, std::uint32_t key_begin) {
+  constexpr std::uint32_t kTileAttentionGqa = kQueryHeads / kKvHeads;
+  static_assert(kQueryHeads % kKvHeads == 0, "query heads group evenly");
+  static_assert((kTileAttentionGqa % kTileAttentionHeadsPerBlock) == 0,
+                "GQA heads must divide evenly across tiled blocks");
   const std::uint32_t lane = threadIdx.x;
   const std::uint32_t wave = threadIdx.y;
   const std::uint32_t query_start = blockIdx.x * kTileAttentionQueryRows;
   const std::uint32_t head_pair = blockIdx.y;
-  const std::uint32_t kv_head = head_pair / (kTileAttentionGqa / 2);
-  const std::uint32_t pair_in_group = head_pair % (kTileAttentionGqa / 2);
+  const std::uint32_t kv_head =
+      head_pair / (kTileAttentionGqa / kTileAttentionHeadsPerBlock);
+  const std::uint32_t pair_in_group =
+      head_pair % (kTileAttentionGqa / kTileAttentionHeadsPerBlock);
   const std::uint32_t first_query_head =
       (kv_head * kTileAttentionGqa) +
       (pair_in_group * kTileAttentionHeadsPerBlock);
-  constexpr std::size_t attention_width =
-      kTileAttentionQueryHeads * kTileAttentionHeadDim;
-  constexpr std::size_t kv_width =
-      kTileAttentionKvHeads * kTileAttentionHeadDim;
+  constexpr std::size_t attention_width = kQueryHeads * kTileAttentionHeadDim;
+  constexpr std::size_t kv_width = kKvHeads * kTileAttentionHeadDim;
   constexpr std::size_t kv_half2_stride = kv_width / 2;
   constexpr float attention_scale = 1.0F / 16.0F;
 
@@ -427,8 +425,8 @@ bool LaunchBatchedAttentionTile(
   }
 
   constexpr std::size_t block_size = 256;
-  constexpr std::size_t kv_width =
-      kTileAttentionKvHeads * kTileAttentionHeadDim;
+  const std::size_t kv_width =
+      static_cast<std::size_t>(num_kv_heads) * kTileAttentionHeadDim;
   const std::size_t layer_cache_offset =
       static_cast<std::size_t>(layer_idx) * max_context * kv_width;
   auto* layer_k = static_cast<__half*>(k_cache_f16) + layer_cache_offset;
@@ -450,18 +448,29 @@ bool LaunchBatchedAttentionTile(
     PackTiledAttentionKvKernel<<<pack_grid, block_size, 0, stream>>>(
         k, v, static_cast<__half*>(k_cache_f16),
         static_cast<__half*>(v_cache_f16), k_cache, v_cache, layer_idx,
-        start_pos, batch_size, max_context);
+        start_pos, batch_size, max_context, num_kv_heads);
   }
 
+  // One block per pair of query heads: num_heads / 2 across every KV group.
   const dim3 attention_grid(
       static_cast<unsigned int>((batch_size + kTileAttentionQueryRows - 1) /
                                 kTileAttentionQueryRows),
-      kTileAttentionKvHeads *
-          (kTileAttentionGqa / kTileAttentionHeadsPerBlock));
+      num_heads / kTileAttentionHeadsPerBlock);
   const dim3 attention_block(32, 8);
-  QwenTiledAttentionKernel<<<attention_grid, attention_block, 0, stream>>>(
-      q, gate, layer_k, layer_v, out_context, start_pos, batch_size, lse_out,
-      key_begin);
+  const auto launch = [&]<std::uint32_t kQueryHeads, std::uint32_t kKvHeads>() {
+    QwenTiledAttentionKernel<kQueryHeads, kKvHeads>
+        <<<attention_grid, attention_block, 0, stream>>>(
+            q, gate, layer_k, layer_v, out_context, start_pos, batch_size,
+            lse_out, key_begin);
+  };
+  // IsTiledAttentionSupported admitted exactly one instantiated shape.
+  if (num_heads == detail::kTiledAttentionShape27B.query_heads) {
+    launch.template operator()<detail::kTiledAttentionShape27B.query_heads,
+                               detail::kTiledAttentionShape27B.kv_heads>();
+  } else {
+    launch.template operator()<detail::kTiledAttentionShape35BA3B.query_heads,
+                               detail::kTiledAttentionShape35BA3B.kv_heads>();
+  }
   return true;
 }
 

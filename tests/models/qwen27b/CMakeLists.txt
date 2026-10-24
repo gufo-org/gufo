@@ -17,6 +17,8 @@ add_qwen27b_test(qwen27b_continuation_layout_test continuation_layout_test.cpp
 
 add_qwen27b_test(qwen_mtp_reference_test mtp_reference_test.cpp
   "cpu;mtp;external-model")
+add_qwen27b_test(qwen_mtp_draft_vocab_test mtp_draft_vocab_test.cpp
+  "cpu;mtp;correctness")
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen27b_continuation_adapter_test EXCLUDE_FROM_ALL
     continuation_adapter_test.cpp continuation_fault.cpp)

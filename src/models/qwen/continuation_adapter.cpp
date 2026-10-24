@@ -43,6 +43,16 @@ struct DraftMetadata {
   speculative::PromptLookup<tokenization::TokenId>::State lookup;
 };
 static_assert(sizeof(DraftMetadata) <= kContinuationMetadataBytes);
+// MTP's cache holds a row for every committed token but the last, so its rows
+// trail the target position by one once primed; an unprimed draft has none.
+struct MtpMetadata {
+  std::uint32_t version{1}, primed{}, rows{};
+};
+static_assert(sizeof(MtpMetadata) <= kContinuationMetadataBytes);
+bool IsMtpRows(ContinuationPart part) {
+  return part == ContinuationPart::kMtpKey ||
+         part == ContinuationPart::kMtpValue;
+}
 struct FrontierMetadata {
   std::uint32_t version{1}, has_token{}, token{}, published{}, logits{},
       pending{};
@@ -57,11 +67,13 @@ class ContinuationAdapter::State final : public cache::Slot,
 public:
   State(ContinuationAdapter& adapter, cache::MutationGuard& guard,
         std::unique_ptr<hip::QwenGpuExecutor> executor,
-        std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft)
+        std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft,
+        std::unique_ptr<hip::QwenMtpGpuDraftBackend> mtp)
       : adapter(adapter),
         guard(guard),
         executor(std::move(executor)),
-        draft(std::move(draft)) {
+        draft(std::move(draft)),
+        mtp(std::move(mtp)) {
     this->executor->continuation_hooks_ = this;
     this->executor->vision_input_.continuation_hooks_ = this;
     pinned_capture = this->executor->PromptHiddenChargedBytes();
@@ -70,6 +82,8 @@ public:
       this->draft->continuation_hooks_ = this;
       this->draft->executor_->continuation_hooks_ = this;
     }
+    if (this->mtp)
+      this->mtp->executor_->continuation_hooks_ = this;
   }
   struct Job {
     State* owner;
@@ -114,6 +128,8 @@ public:
       draft->continuation_hooks_ = nullptr;
       draft->executor_->continuation_hooks_ = nullptr;
     }
+    if (mtp)
+      mtp->executor_->continuation_hooks_ = nullptr;
     executor->continuation_hooks_ = nullptr;
     executor->vision_input_.continuation_hooks_ = nullptr;
     adapter.pinned_capture_bytes_ -= pinned_capture;
@@ -123,7 +139,9 @@ public:
   }
   bool ExecutionComplete() const noexcept override {
     return hipStreamQuery(executor->arena_.stream) == hipSuccess &&
-           (!draft || hipStreamQuery(draft->executor_->stream_) == hipSuccess);
+           (!draft ||
+            hipStreamQuery(draft->executor_->stream_) == hipSuccess) &&
+           (!mtp || hipStreamQuery(mtp->executor_->stream_) == hipSuccess);
   }
   void BeforeExecution() override {
     if (invalidating)
@@ -141,6 +159,15 @@ public:
           first < end)
         guard.BeforeOverwrite(component.descriptor.id, first, end);
   }
+  void BeforeDraftWrite(std::uint32_t first, std::uint32_t end) override {
+    BeforeExecution();
+    if (first > end || end > adapter.context_)
+      throw std::invalid_argument("Qwen draft mutation exceeds context");
+    Readable readable(*this);
+    for (const auto& component : adapter.components_)
+      if (IsMtpRows(component.part) && first < end)
+        guard.BeforeOverwrite(component.descriptor.id, first, end);
+  }
   void AfterWrite(std::uint32_t end, bool logits) noexcept override {
     position = end;
     logits_valid = logits;
@@ -151,7 +178,7 @@ public:
   }
   void GuardAll() {
     Readable readable(*this);
-    for (const auto& component : adapter.layout_.Components())
+    for (const auto& component : adapter.components_)
       if (component.descriptor.kind == cache::ComponentKind::kAppendRows)
         guard.BeforeOverwrite(component.descriptor.id, 0, adapter.context_);
   }
@@ -218,7 +245,7 @@ public:
   }
   void BeforeRelease() noexcept override {
     Readable readable(*this);
-    for (const auto& component : adapter.layout_.Components())
+    for (const auto& component : adapter.components_)
       if (component.descriptor.kind == cache::ComponentKind::kAppendRows)
         guard.BeforeRelease(component.descriptor.id, 0, adapter.context_);
   }
@@ -231,7 +258,7 @@ public:
   };
   void Stable() const {
     if (!IsValid() || verification || prefill_position ||
-        (draft && draft->proposal_active_))
+        (draft && draft->proposal_active_) || (mtp && mtp->proposal_active_))
       throw std::logic_error("Qwen capture requires a stable frontier");
   }
   ContinuationAdapter& adapter;
@@ -239,6 +266,7 @@ public:
   std::shared_ptr<hip::QwenGpuExecutor> executor;
   std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
   std::size_t pinned_capture{};
+  std::unique_ptr<hip::QwenMtpGpuDraftBackend> mtp;
   std::uint32_t position{};
   std::optional<std::uint32_t> prefill_position;
   bool prefill_logits{};
@@ -253,6 +281,8 @@ public:
   std::array<std::byte, kContinuationMetadataBytes> metadata{};
   std::array<std::byte, kContinuationMetadataBytes> draft_metadata{};
   std::vector<std::byte> draft_features;
+  std::array<std::byte, kContinuationMetadataBytes> mtp_metadata{};
+  std::vector<std::byte> mtp_hidden;
   ContinuationFrontier frontier;
   std::vector<std::byte> frontier_bytes;
 };
@@ -261,11 +291,15 @@ ContinuationAdapter::ContinuationAdapter(
     std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t context,
     cache::Identity identity, hip::QwenExecutionPolicy policy,
     std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model,
-    hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger)
+    hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger,
+    std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model,
+    hip::QwenMtpGpuDraftConfig mtp_config)
     : model_(std::move(model)),
       draft_model_(std::move(draft_model)),
       draft_config_(draft_config),
       ledger_(ledger),
+      mtp_model_(std::move(mtp_model)),
+      mtp_config_(mtp_config),
       policy_(policy),
       context_(context),
       layout_(model_ ? model_->GetConfig() : core::ModelConfig{}, policy,
@@ -324,6 +358,39 @@ ContinuationAdapter::ContinuationAdapter(
     for (auto layer : d.target_layer_ids)
       put(layer);
   }
+  if (mtp_model_) {
+    if (draft_model_ || mtp_config_.max_context != context_ ||
+        mtp_config_.vision_input)
+      throw std::invalid_argument("invalid Qwen MTP adapter configuration");
+    const auto& m = mtp_model_->GetConfig();
+    const auto add = [&](ContinuationPart part, std::size_t row,
+                         std::size_t state) {
+      components_.push_back(
+          {{{static_cast<std::uint32_t>(components_.size() + 1)},
+            1,
+            row ? cache::ComponentKind::kAppendRows
+                : cache::ComponentKind::kPrivateState,
+            row,
+            row ? Rows{256} : 0,
+            state},
+           part,
+           0});
+    };
+    // The FP32 cache planes are authoritative; rows are token/head/channel.
+    const auto row =
+        std::size_t{m.num_key_value_heads} * m.head_dim * sizeof(float);
+    add(ContinuationPart::kMtpMetadata, 0, kContinuationMetadataBytes);
+    add(ContinuationPart::kMtpHidden, 0,
+        std::size_t{m.hidden_size} * sizeof(float));
+    add(ContinuationPart::kMtpKey, row, 0);
+    add(ContinuationPart::kMtpValue, row, 0);
+    put(0x4d5450);
+    put(mtp_config_.max_draft_tokens);
+    put(mtp_config_.prime_chunk);
+    put(m.num_key_value_heads);
+    put(m.head_dim);
+    put(m.hidden_size);
+  }
   for (const auto& component : components_)
     descriptors_.push_back(component.descriptor);
 }
@@ -348,6 +415,12 @@ hip::QwenDFlashGpuDraftBackend* ContinuationAdapter::GetDraftBackend(
   auto& state = As(slot);
   state.BeforeExecution();
   return state.draft.get();
+}
+hip::QwenMtpGpuDraftBackend* ContinuationAdapter::GetMtpBackend(
+    cache::Slot& slot) {
+  auto& state = As(slot);
+  state.BeforeExecution();
+  return state.mtp.get();
 }
 ContinuationFrontier& ContinuationAdapter::GetFrontier(cache::Slot& slot) {
   auto& state = As(slot);
@@ -413,8 +486,15 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
     executor->ReservePromptHiddenCapture(draft->TargetHiddenLayerIds().size(),
                                          ledger_);
   }
+  std::unique_ptr<hip::QwenMtpGpuDraftBackend> mtp;
+  if (mtp_model_) {
+    std::string error;
+    mtp = hip::QwenMtpGpuDraftBackend::Create(mtp_model_, mtp_config_, &error);
+    if (!mtp)
+      throw std::runtime_error("cannot create component MTP draft: " + error);
+  }
   return std::make_unique<State>(*this, guard, std::move(executor),
-                                 std::move(draft));
+                                 std::move(draft), std::move(mtp));
 }
 std::vector<cache::ComponentPosition> ContinuationAdapter::Positions(
     const cache::Slot& slot) const {
@@ -427,7 +507,11 @@ std::vector<cache::ComponentPosition> ContinuationAdapter::Positions(
     // Private components describe one coherent target checkpoint. Their
     // independent injected frontier is encoded in DraftMetadata, together
     // with pending features, rather than treated as an append-row position.
-    positions.push_back({component.descriptor.id, state.position});
+    // MTP rows count their own positions.
+    positions.push_back(
+        {component.descriptor.id, IsMtpRows(component.part)
+                                      ? state.mtp->executor_->GetNextPosition()
+                                      : state.position});
   }
   return positions;
 }
@@ -468,7 +552,9 @@ void ContinuationAdapter::BeginRestore(
                   ordered.begin()))
     throw std::invalid_argument("inconsistent Qwen frontiers");
   for (std::size_t i = target_positions.size(); i < ordered.size(); ++i) {
-    if (ordered[i].valid_rows != ordered.front().valid_rows) {
+    if (IsMtpRows(components_[i].part)
+            ? ordered[i].valid_rows > ordered.front().valid_rows
+            : ordered[i].valid_rows != ordered.front().valid_rows) {
       throw std::invalid_argument("inconsistent Qwen draft metadata frontier");
     }
   }
@@ -477,6 +563,8 @@ void ContinuationAdapter::BeginRestore(
   Check(hipStreamSynchronize(state.executor->arena_.stream));
   if (state.draft)
     Check(hipStreamSynchronize(state.draft->executor_->stream_));
+  if (state.mtp)
+    Check(hipStreamSynchronize(state.mtp->executor_->stream_));
   state.expected = std::move(ordered);
   state.coverage = std::move(coverage);
   state.metadata.fill(std::byte{});
@@ -487,6 +575,11 @@ void ContinuationAdapter::BeginRestore(
   if (state.draft)
     state.draft_features.assign(components_.back().descriptor.state_bytes,
                                 std::byte{});
+  state.mtp_metadata.fill(std::byte{});
+  if (state.mtp)
+    state.mtp_hidden.assign(
+        std::size_t{mtp_model_->GetConfig().hidden_size} * sizeof(float),
+        std::byte{});
   state.restoring = true;
 }
 cache::Completion ContinuationAdapter::Transfer(
@@ -629,6 +722,22 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
                     reinterpret_cast<const std::byte*>(pending.data()) + offset,
                     std::min(bytes.size(), valid - offset));
     });
+  } else if (component.part == ContinuationPart::kMtpMetadata) {
+    MtpMetadata metadata{};
+    metadata.primed = state.mtp->primed_;
+    metadata.rows = state.mtp->executor_->GetNextPosition();
+    std::memcpy(host.data(), &metadata, sizeof(metadata));
+    source = host.data();
+    is_host = true;
+  } else if (component.part == ContinuationPart::kMtpHidden) {
+    const auto& hidden = state.mtp->target_hidden_;
+    if (hidden.size() * sizeof(float) != total)
+      throw std::logic_error("Qwen MTP hidden row has an invalid width");
+    return Transfer(state, false, stream, [&](hip::TransferStream&) {
+      std::memcpy(bytes.data(),
+                  reinterpret_cast<const std::byte*>(hidden.data()) + offset,
+                  bytes.size());
+    });
   } else if (component.part == ContinuationPart::kDraftKey ||
              component.part == ContinuationPart::kDraftValue) {
     auto& draft = *state.draft->executor_;
@@ -717,6 +826,12 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
     } else if (component.part == ContinuationPart::kDraftFeatures) {
       target = state.draft_features.data();
       is_host = true;
+    } else if (component.part == ContinuationPart::kMtpMetadata) {
+      target = state.mtp_metadata.data();
+      is_host = true;
+    } else if (component.part == ContinuationPart::kMtpHidden) {
+      target = state.mtp_hidden.data();
+      is_host = true;
     } else if (component.part == ContinuationPart::kDraftKey ||
                component.part == ContinuationPart::kDraftValue) {
       auto& draft = *state.draft->executor_;
@@ -755,10 +870,16 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
     throw std::logic_error("cannot read an invalid Qwen slot");
   const auto& component = Component(id);
   const auto row = component.descriptor.row_bytes;
-  if (!row || first > end || end > state.position ||
-      bytes.size() != (end - first) * row)
+  const bool mtp = IsMtpRows(component.part);
+  // A reset or rewind lowers the MTP cursor before the rows above it are
+  // rewritten, and each rewrite is guarded first. Preservation may therefore
+  // read any allocated row; capture positions still come from Positions().
+  const Rows valid =
+      mtp ? Rows{state.mtp->executor_->max_context_} : Rows{state.position};
+  if (!row || first > end || end > valid || bytes.size() != (end - first) * row)
     throw std::invalid_argument("invalid Qwen row capture");
-  Check(hipStreamSynchronize(state.executor->arena_.stream));
+  Check(hipStreamSynchronize(mtp ? state.mtp->executor_->stream_
+                                 : state.executor->arena_.stream));
   return TransferRows(state, component, false, first, end, bytes.data(),
                       stream);
 }
@@ -793,6 +914,9 @@ std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
   if (!state.IsValid() ||
       component.descriptor.kind != cache::ComponentKind::kAppendRows)
     throw std::logic_error("cannot borrow invalid Qwen rows");
+  // The MTP planes are head-major FP32, so a token range is not contiguous.
+  if (IsMtpRows(component.part))
+    return {};
   if (first >= end || end > state.position)
     throw std::invalid_argument("invalid Qwen borrowed range");
   // FP32 planes are head-major, so a token range is not contiguous. Its
@@ -814,6 +938,33 @@ std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
 cache::Completion ContinuationAdapter::TransferRows(
     State& state, const ContinuationComponent& component, bool load, Rows first,
     Rows end, std::byte* bytes, cache::Stream& stream) {
+  if (IsMtpRows(component.part)) {
+    // Same per-head gather as the target's FP32 planes: each head owns a run
+    // of max_context rows, keys first and values after every key head.
+    auto& mtp = *state.mtp->executor_;
+    const auto& m = mtp_model_->GetConfig();
+    const auto row = component.descriptor.row_bytes;
+    const auto head_bytes = std::size_t{m.head_dim} * sizeof(float);
+    const auto plane =
+        std::size_t{m.num_key_value_heads} * mtp.max_context_ * m.head_dim;
+    auto* native = reinterpret_cast<std::byte*>(
+        mtp.d_kv_cache_ +
+        (component.part == ContinuationPart::kMtpValue ? plane : 0));
+    return Transfer(state, load, stream, [&](hip::TransferStream& transfer) {
+      if (first == end)
+        return;
+      const auto direction = load ? hipMemcpyDefault : hipMemcpyDeviceToHost;
+      for (std::uint32_t head = 0; head < m.num_key_value_heads; ++head) {
+        auto* device = native + (head * std::size_t{mtp.max_context_} + first) *
+                                    head_bytes;
+        auto* host = bytes + head * head_bytes;
+        Check(hipMemcpy2DAsync(load ? device : host, load ? head_bytes : row,
+                               load ? host : device, load ? row : head_bytes,
+                               head_bytes, end - first, direction,
+                               transfer.Native()));
+      }
+    });
+  }
   const auto& c = model_->GetConfig();
   auto& arena = state.executor->arena_;
   const auto row = component.descriptor.row_bytes;
@@ -954,6 +1105,34 @@ bool ContinuationAdapter::Validate(
       draft.proposal_active_ = false;
       draft.proposed_tokens_.clear();
     }
+    if (state.mtp) {
+      MtpMetadata mtp_metadata{};
+      std::memcpy(&mtp_metadata, state.mtp_metadata.data(),
+                  sizeof(mtp_metadata));
+      for (std::size_t i = layout_.Components().size(); i < components_.size();
+           ++i)
+        if (IsMtpRows(components_[i].part) &&
+            state.expected[i].valid_rows != mtp_metadata.rows)
+          return refuse();
+      auto& mtp = *state.mtp;
+      if (mtp_metadata.version != 1 || mtp_metadata.primed > 1 ||
+          mtp_metadata.rows > metadata.position ||
+          (!mtp_metadata.primed && mtp_metadata.rows) ||
+          state.mtp_hidden.size() != mtp.target_hidden_.size() * sizeof(float))
+        return refuse();
+      std::memcpy(mtp.target_hidden_.data(), state.mtp_hidden.data(),
+                  state.mtp_hidden.size());
+      mtp.executor_->next_position_ = mtp_metadata.rows;
+      mtp.primed_ = mtp_metadata.primed;
+      mtp.proposal_active_ = false;
+      mtp.proposed_tokens_.clear();
+      mtp.proposal_target_hidden_.clear();
+      mtp.committed_target_hidden_.clear();
+      // The draft table is not a component; it rebuilds from the next
+      // proposal's sequence.
+      if (mtp.draft_table_)
+        mtp.draft_table_->Forget();
+    }
     struct Scope {
       bool& flag;
       ~Scope() { flag = false; }
@@ -1022,11 +1201,14 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
       return false;
     if (state.draft)
       state.draft->Reset();
+    if (state.mtp)
+      state.mtp->Reset();
     state.restoring = false;
     state.failed = false;
     state.expected.clear();
     state.coverage.clear();
     state.draft_features.clear();
+    state.mtp_hidden.clear();
     state.frontier = {};
     state.frontier_bytes.clear();
     state.guard.AfterReset();

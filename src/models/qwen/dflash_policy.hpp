@@ -39,10 +39,11 @@ public:
   static constexpr std::uint32_t kMaxDraftTokens = 7;
 
   DFlashLengthController(DFlashDraftPolicy policy, std::uint32_t limit,
-                         bool q8_target = false)
+                         bool q8_target = false, bool moe_target = false)
       : policy_(policy),
         limit_(std::clamp(limit, 1U, kMaxDraftTokens)),
-        q8_target_(q8_target) {
+        q8_target_(q8_target),
+        moe_target_(moe_target) {
     Reset();
   }
 
@@ -103,11 +104,16 @@ public:
       context_multiplier = 4.0F * 100.0F / 170.66F;
     }
     const float attention_cost_scale = context_scale * context_multiplier;
+    // A lone request on an MoE target pays for every verified row: the routed
+    // experts are not shared between rows as dense projections are.
+    const bool moe_single = moe_target_ && greedy_batch_size <= 1;
     for (std::uint32_t length = 1; length <= cap; ++length) {
       survival *= probability;
       expected_tokens += survival;
       const float cost =
-          q8_target_ && greedy_batch_size != 4
+          moe_single ? kMoeRelativeCost[length - 1] +
+                           attention_cost_scale * kMoeContextCost[length - 1]
+          : q8_target_ && greedy_batch_size != 4
               ? 1.0F + 0.02F * static_cast<float>(length)
               : (*relative_costs)[length - 1] +
                     attention_cost_scale * kQ4ContextCost[length - 1];
@@ -228,10 +234,16 @@ public:
     // preserves E[accepted - m * rejected] == 0. Weight a completed block by
     // its accepted tokens too; a fixed increment biases short blocks upward
     // and long blocks downward.
-    mean_ = accepted == drafted
-                ? std::min(mean_ + 0.25F * static_cast<float>(accepted),
-                           static_cast<float>(limit_))
-                : 0.75F * mean_ + 0.25F * static_cast<float>(accepted);
+    // An MoE target pays for every row of a block, so a noisy estimate costs
+    // more there: on recorded Qwen3.6-35B acceptance traces a weight of 0.10
+    // decodes about 1% faster than 0.25, within 1% of the best fixed length
+    // for each prompt.
+    const float weight = moe_target_ ? 0.10F : 0.25F;
+    mean_ =
+        accepted == drafted
+            ? std::min(mean_ + weight * static_cast<float>(accepted),
+                       static_cast<float>(limit_))
+            : (1.0F - weight) * mean_ + weight * static_cast<float>(accepted);
   }
 
   void Reset() noexcept {
@@ -276,6 +288,11 @@ private:
                                   2.183F, 2.850F, 2.813F};
   static constexpr std::array<float, kMaxDraftTokens> kQ4RelativeCost{
       1.0F, 1.02F, 1.045F, 1.08F, 1.14F, 1.20F, 1.29F};
+  // Qwen3.6-35B-A3B UD-Q6_K_XL, one request: complete fixed-width cycles cost
+  // 29.4/33.1/36.8/40.1/43.4/47.2/50.8 ms for 1-7 drafts, about 3.6 ms per
+  // extra row, on four prompt kinds whose cycle cost agreed within 1 ms.
+  static constexpr std::array<float, kMaxDraftTokens> kMoeRelativeCost{
+      1.0F, 1.126F, 1.252F, 1.364F, 1.476F, 1.605F, 1.728F};
   // Two greedy requests verify 4–16 rows together. Crossing eight rows has a
   // large projection cost that the C1 estimate misses. Complete-cycle release
   // controls normalize to 104 ms at one draft; the paired context multiplier
@@ -302,11 +319,18 @@ private:
   // cold-KV measurements include the anchor plus 1–7 proposals and preserve
   // the actual row-tile boundaries. Position is deterministic on replay;
   // request timings and sampled proposals never enter the decision.
+  // The same target with fixed 1-7 drafts at 3.4k, 26k, 53k and 104k prompt
+  // tokens: the cycle grows linearly with context, by 4.2/5.4/6.9/8.5/11.8/
+  // 13.0/14.3 ms per 30,720 tokens past 2,048, in units of its 30.1 ms
+  // one-draft cycle. Verification rows each read the whole attention cache.
+  static constexpr std::array<float, kMaxDraftTokens> kMoeContextCost{
+      0.138F, 0.181F, 0.231F, 0.283F, 0.392F, 0.432F, 0.473F};
   static constexpr std::array<float, kMaxDraftTokens> kQ4ContextCost{
       0.11F, 0.14F, 0.21F, 0.23F, 0.25F, 0.31F, 0.35F};
   DFlashDraftPolicy policy_;
   std::uint32_t limit_;
   bool q8_target_;
+  bool moe_target_;
   float mean_{0.0F};
   std::uint32_t last_full_width_{0};
 };

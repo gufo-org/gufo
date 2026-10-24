@@ -185,7 +185,11 @@ and [Qwen3.8 Flash-Next](models/qwen3.8-flash-next/README.md) for the memory
 cost.
 
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
-between active decode rounds without changing a lone request's kernel policy.
+between active decode rounds without changing a lone request's kernel policy. `--prefill-decode-rounds` sets how many decode rounds every
+running request gets after each of those chunks (default 1). With one round a
+running generation is nearly idle while another prompt is processed; more
+rounds keep it flowing at the cost of the new prompt, since both share the
+GPU. The longest pause a running generation sees is one chunk.
 
 Qwen image requests reuse decoded and resized RGB pixels using a fast lookup
 hash and exact encoded-byte comparison under the preprocessing version. Each
