@@ -1,7 +1,89 @@
-# Text API functional tests
+# Model API functional tests
 
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
+
+## Embedding, ASR and TTS service checks
+
+`model_services.py` starts an isolated loopback production server, checks readiness
+and advertised model identity, runs real HTTP inference, and shuts down its owned
+process. These suites are explicit and separate from the text runner's `--suite all`.
+They do not download weights or voice recordings. Missing inputs fail the run.
+Use `nix develop`, or install `tests/functional/requirements.txt` in a virtualenv.
+Build the production binary with `cmake --preset release` and
+`cmake --build --preset release --parallel 4` inside the pinned development shell.
+
+```sh
+nix develop -c python3 tests/functional/model_services.py embedding \
+  --binary build/release/gufo --model models/embeddinggemma-2 \
+  --output artifacts/model-services/embedding-1
+
+nix develop -c python3 tests/functional/model_services.py asr \
+  --binary build/release/gufo --model models/audio/Qwen3-ASR-1.7B \
+  --audio-root models/audio --output artifacts/model-services/asr-1
+
+nix develop -c python3 tests/functional/model_services.py tts \
+  --binary build/release/gufo --model models/audio/Qwen3-TTS-12Hz-1.7B-Base \
+  --audio-root models/audio --variant base \
+  --asr-binary /path/to/pinned/gufo --asr-model models/audio/Qwen3-ASR-1.7B \
+  --output artifacts/model-services/tts-base-1
+```
+
+The audio root must contain `clear-english-voice.wav` and its reviewed sibling
+`.txt` transcript. ASR additionally requires `clear-italian-voice.wav` and `.txt`.
+These recordings remain external; each report retains their hashes and expected
+transcripts. Base TTS registers the English recording as the `narrator` ICL clone.
+For the other checkpoints, select `--variant custom` with the CustomVoice model
+(default speaker `ryan`, override with `--voice`) or `--variant design` with the
+VoiceDesign model (fixed English voice instructions). Neither requires a clone.
+
+| Suite | Required checks |
+| --- | --- |
+| Embedding | Existing text and image HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image formats, invalid inputs and recovery |
+| ASR | English/Italian transcript WER ≤ 0.15, exact greedy replay, JSON/text/verbose formats, complete SSE matching buffered output, different concurrent inputs, silence, rejected options, malformed WAV recovery, stream cancellation and subsequent valid inference |
+| TTS | Voice discovery, valid non-silent 24-kHz mono PCM16 audio, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, rejected inputs, stream cancellation and subsequent valid inference |
+
+Audio cancellation must appear against the cancelled request's ID in the server
+log; a client closing a response alone does not satisfy the assertion. SSE must
+include its terminal event and a complete payload. Tests never retry requests.
+The audio checks bound output duration to 0.3–20 seconds and require RMS > 0.001;
+TTS requests use checkpoint sampling, fixed seeds and a 180-codec-step cap.
+
+TTS intelligibility requires an explicitly selected ASR evaluator binary. Pin its
+revision and checkpoint independently when changing ASR or TTS runtime behavior;
+using the same candidate as its own evaluator does not qualify those changes.
+The current ASR malformed-WAV path returns `500 transcription_failed` rather than
+400. The suite records this known limitation and checks its exact error and
+subsequent recovery; it does not claim correct client-error classification.
+
+Every invocation requires a new output directory. `report.json` retains status,
+per-case results, request timings and headers (including available server phase
+measurements), binary/harness hashes, source revision, weight file metadata and
+available download revision metadata. Response bodies, generated WAVs, evaluator
+transcripts and server logs stay beside it. Embedding subreports retain individual
+requests. Exceptions leave a failed report and return a nonzero exit code.
+Timings are observations; this runner does not perform matched baseline timing
+qualification. WebSocket streaming, long recordings, broad language/voice quality
+and speaker-similarity scoring remain separate coverage.
+
+The follow-up Devlab integration must also compare speed against a pinned `main`
+revision, using the same runner, toolchain, weights, settings and request/cache
+histories for both binaries. Follow `phases.py`: pair main/candidate arms, retain
+every repeat and compare each request and phase at the existing 5% and 3-ms
+thresholds. Use server-emitted measurements where available: ASR `Server-Timing`
+phases, TTS synthesis time and codec/audio work counters, and embedding request
+logs and token/input counts. Retain client latency and first-output observations
+separately, verify equivalent work, and keep noisy or missing evidence explicit.
+Include correctness and speed results in the common per-model PR report. The
+current Flash-Next workflow uses the merge base; the follow-up must distinguish
+that revision from the pinned `main` control requested here.
+
+Repeat with fresh output directories to check stability. Preserve failed attempts
+alongside successful runs. CPU checks for metric and incomplete-stream refusal:
+
+```sh
+nix develop -c python3 -m unittest discover -s tests/functional -p test_service_http.py
+```
 
 Qwen 27B deep-history recovery uses separate, explicitly selected workloads:
 

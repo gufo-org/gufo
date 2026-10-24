@@ -20,6 +20,8 @@ import json
 import math
 import struct
 import sys
+import threading
+import time
 from pathlib import Path
 
 FIXTURE = (Path(__file__).resolve().parents[1] / "fixtures" /
@@ -47,11 +49,34 @@ def main():
     parser.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
     parser.add_argument("--model", default="embeddinggemma-2")
     parser.add_argument("--api-key", default="unused")
+    parser.add_argument("--output", type=Path, help="Retain every response and request timing")
     args = parser.parse_args()
 
     import openai
 
-    client = openai.OpenAI(base_url=args.base_url, api_key=args.api_key)
+    import httpx
+
+    requests = []
+    lock = threading.Lock()
+
+    def started(request):
+        request.extensions["functional_started"] = time.perf_counter()
+
+    def completed(response):
+        response.read()
+        record = {"status": response.status_code,
+                  "elapsed_ms": (time.perf_counter() - response.request.extensions[
+                      "functional_started"]) * 1000,
+                  "request": json.loads(response.request.content) if response.request.content else None,
+                  "response": response.json()}
+        with lock:
+            requests.append(record)
+            if args.output:
+                args.output.write_text(json.dumps({"requests": requests}, indent=2) + "\n")
+
+    client = openai.OpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0,
+                          http_client=httpx.Client(timeout=120, trust_env=False,
+                              event_hooks={"request": [started], "response": [completed]}))
     cases = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
     texts = [case["text"] for case in cases]
     reference = [case["embedding"] for case in cases]
