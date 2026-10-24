@@ -357,6 +357,16 @@ captured; RAM-retained snapshots and their captures in progress share the RAM bu
 | Disk bytes | 8 GiB | `--cache-disk-bytes` |
 | Disk staging bytes | smaller of `MemAvailable / 8` and the disk budget | `--cache-disk-staging-bytes` |
 
+`--cache-ram-bytes off` turns the RAM cache off. The server then keeps no
+checkpoint in RAM, commits no cache backing, and computes no budget. Without
+`--cache-disk` it also grows no backing before prefill. Each session still reuses its own live state, `--cache-disk`
+still works, and the per-response `gufo.component_cache` block stays present
+with zero captures. Off drops every RAM checkpoint, so there is no restore from
+RAM, no shared-prefix or branch checkpoint, and no retained history. With
+`--cache-disk`, Qwen and Flash-Next still copy each disk capture through a
+bounded 512 MiB backing, so `backing_prepared` appears in that case only. The
+startup line reports `ram_cache=off capacity_bytes=0`.
+
 `--cache-ram-bytes 0` selects automatic sizing. Zero does not disable reuse.
 A positive value replaces the automatic budget and may exceed it: it trades the
 free half of host RAM for retention, but always leaves 4 GiB to the OS and other
@@ -567,8 +577,8 @@ result can still populate the cache. `null` keeps the default, `true`.
 
 | Log line | Meaning |
 | --- | --- |
-| `event=snapshot_cache_configured` | retained capacity at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
-| `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
+| `event=snapshot_cache_configured` | retained capacity at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim; `ram_cache=on` or `ram_cache=off` at the end of the line |
+| `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim; `ram_cache=on` or `ram_cache=off` at the end of the line, and `disk_backing_bytes` for the backing an off cache keeps for disk captures |
 | `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 1 GiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
 | `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
 | `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because its pinned pages would leave the device heap less than its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory (#460) |

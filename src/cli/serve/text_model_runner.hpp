@@ -54,7 +54,15 @@ struct TextRunnerRamCacheOptions {
   /// Explicit limits may exceed that budget up to the model's ceiling, which
   /// keeps kHostSnapshotHeadroomBytes of host RAM free.
   std::size_t capacity_bytes{0};
+  /// False keeps no RAM checkpoints and reserves no RAM-cache backing, and
+  /// capacity_bytes is ignored. Sessions still reuse their own live state.
+  bool enabled{true};
 };
+
+/// Parses a --cache-ram-bytes value: "off", or a byte count where 0 selects
+/// the automatic budget. Returns nullopt and sets `error` for anything else.
+[[nodiscard]] std::optional<TextRunnerRamCacheOptions> ParseRamCacheOption(
+    std::string_view text, std::string* error);
 
 struct TextRunnerDiskCacheOptions {
   static constexpr std::size_t kDefaultCapacityBytes =

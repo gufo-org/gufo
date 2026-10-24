@@ -199,6 +199,25 @@ constexpr std::string_view kTraceHelp =
     "Append text request bodies, rendered prompts, generated text and replies "
     "to PATH as JSON Lines; the file holds client content";
 
+void AddCacheRamOption(gufo::cli::ArgParser& parser,
+                       server::TextRunnerRamCacheOptions* target) {
+  parser.AddCustomOption(
+      "", "--cache-ram-bytes", "N|off",
+      "Retained RAM-cache byte budget (default: 0 = auto: half of free "
+      "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
+      "off keeps no RAM checkpoints and commits no cache memory; "
+      "sessions still reuse their own live state, and --cache-disk still "
+      "works (Qwen and Flash-Next then pin a 512 MiB copy buffer for it). "
+      "Flash-Next pins it about 1 GiB at a time as captures need it",
+      "Cache",
+      [target](std::string_view, std::string_view value, std::string* error) {
+        const auto parsed = server::ParseRamCacheOption(value, error);
+        if (parsed)
+          *target = *parsed;
+        return parsed.has_value();
+      });
+}
+
 void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                       int* port, std::size_t* session_count,
                       std::size_t* max_connections,
@@ -585,7 +604,7 @@ void PrintServeHelp(std::string_view program_name,
         server::kDefaultMaxBufferedOutputBytes;
     std::size_t max_buffered_output_bytes_total =
         server::kDefaultMaxBufferedOutputBytesTotal;
-    std::size_t cache_ram_bytes = 0;
+    server::TextRunnerRamCacheOptions cache_ram;
     std::filesystem::path cache_disk_directory;
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
@@ -699,12 +718,7 @@ void PrintServeHelp(std::string_view program_name,
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
-    parser.AddOption(
-        "", "--cache-ram-bytes", "N",
-        "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
-        "Flash-Next pins it about 1 GiB at a time as captures need it",
-        "Cache", &cache_ram_bytes);
+    AddCacheRamOption(parser, &cache_ram);
     parser.AddOption("", "--cache-disk", "DIR",
                      "Opt-in restart-safe continuation cache directory "
                      "(Flash-Next: owned by one process)",
@@ -1190,7 +1204,7 @@ int RunServe(std::span<const char* const> args) {
         server::kDefaultMaxBufferedOutputBytes;
     std::size_t max_buffered_output_bytes_total =
         server::kDefaultMaxBufferedOutputBytesTotal;
-    std::size_t cache_ram_bytes = 0;
+    server::TextRunnerRamCacheOptions cache_ram;
     std::filesystem::path cache_disk_directory;
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
@@ -1312,12 +1326,7 @@ int RunServe(std::span<const char* const> args) {
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
-    llm_parser.AddOption(
-        "", "--cache-ram-bytes", "N",
-        "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
-        "Flash-Next pins it about 1 GiB at a time as captures need it",
-        "Cache", &cache_ram_bytes);
+    AddCacheRamOption(llm_parser, &cache_ram);
     llm_parser.AddOption("", "--cache-disk", "DIR",
                          "Opt-in restart-safe continuation cache directory "
                          "(Flash-Next: owned by one process)",
@@ -1498,9 +1507,7 @@ int RunServe(std::span<const char* const> args) {
             .staging_capacity_bytes = cache_disk_staging_bytes,
             .model_artifact_fingerprint = {},
         },
-        vision_model_path,
-        server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes},
-        enable_yarn);
+        vision_model_path, cache_ram, enable_yarn);
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";

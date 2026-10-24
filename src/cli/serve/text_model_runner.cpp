@@ -1,6 +1,7 @@
 #include "src/cli/serve/text_model_runner.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <fstream>
 #include <future>
@@ -196,6 +197,24 @@ std::size_t HostSnapshotCeilingBytes() {
   return ClampToSize(available > kHostSnapshotHeadroomBytes
                          ? available - kHostSnapshotHeadroomBytes
                          : 0);
+}
+
+std::optional<TextRunnerRamCacheOptions> ParseRamCacheOption(
+    std::string_view text, std::string* error) {
+  if (text == "off")
+    return TextRunnerRamCacheOptions{.enabled = false};
+  std::size_t bytes = 0;
+  const auto end = text.data() + text.size();
+  const auto parsed = std::from_chars(text.data(), end, bytes);
+  if (text.empty() || parsed.ec != std::errc{} || parsed.ptr != end) {
+    if (error)
+      *error =
+          "--cache-ram-bytes must be off or a byte count (0 = auto), "
+          "not '" +
+          std::string(text) + "'";
+    return std::nullopt;
+  }
+  return TextRunnerRamCacheOptions{.capacity_bytes = bytes};
 }
 
 namespace {
@@ -484,7 +503,9 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
 
 ContinuationCache::SnapshotSupport MakeSnapshotSupport(
     ValidatedRunner* validated, TextRunnerRamCacheOptions options) {
-  if (validated == nullptr || !validated->descriptor.capabilities.snapshot ||
+  // Off holds live session state only, as for a runner that cannot snapshot.
+  if (validated == nullptr || !options.enabled ||
+      !validated->descriptor.capabilities.snapshot ||
       !validated->descriptor.capabilities.fork) {
     return {};
   }
@@ -650,7 +671,8 @@ struct TextRunnerPool::Impl {
       // usage.
       component_cache = std::make_unique<ComponentTextCache>(
           validated.runner, state_count, std::min(requested, ceiling),
-          disk_cache_options, !ram_cache_options.capacity_bytes, ceiling);
+          disk_cache_options, !ram_cache_options.capacity_bytes, ceiling,
+          ram_cache_options.enabled);
       if (disk_cache_options) {
         shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
         shared_prefix_max_boundaries =
@@ -676,11 +698,14 @@ struct TextRunnerPool::Impl {
           "cache",
           "event=snapshot_cache_configured sessions=" +
               std::to_string(state_count) + " snapshot_entries=" +
-              std::to_string(cache->entry_capacity()) + " capacity_bytes=" +
+              std::to_string(ram_cache_options.enabled ? cache->entry_capacity()
+                                                       : 0) +
+              " capacity_bytes=" +
               std::to_string(cache->snapshot_capacity_bytes()) +
               " automatic_bytes=" +
               std::to_string(validated.snapshot_automatic_bytes) +
-              " max_bytes=" + std::to_string(validated.snapshot_max_bytes));
+              " max_bytes=" + std::to_string(validated.snapshot_max_bytes) +
+              " ram_cache=" + (ram_cache_options.enabled ? "on" : "off"));
     }
     if (disk_cache_options.has_value()) {
       if (!validated.descriptor.persistence.has_value()) {

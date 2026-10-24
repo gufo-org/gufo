@@ -227,6 +227,12 @@ tails and idle-session spill; there is no separate spill option.
 Other models allocate payloads only when captured. Under pressure, optional
 copies give way before another conversation's last useful checkpoint.
 
+`--cache-ram-bytes off` keeps no RAM cache. The server retains and captures no
+checkpoint in RAM and pins no cache memory, except a 512 MiB copy buffer that
+Qwen and Flash-Next use when `--cache-disk` is set. Each session still reuses
+its own live state, and `--cache-disk` keeps working. See
+[KV-CACHE.md](KV-CACHE.md#limits) for what off keeps and drops.
+
 Qwen27B uses component-cache slots in both AR and DFlash2 modes. A checkpoint
 includes target KV and recurrent state, image-prefix identity, sampled frontier
 and pending output tokens. DFlash2 also retains its independently positioned
