@@ -2,6 +2,7 @@
 
 | Experiment | Decision / evidence |
 | --- | --- |
+| Stable single-frame decoder GEMMs on ROCm 10.1 | Retained: avoid the one-row GEMV shortcut's different sum tree. Exact incremental/reference suffixes return across frame 300, with unchanged waveform limits. [Migration checks](ROCM.md). |
 | Model-private GEMV and shared input columns | Retained; fixed FP32 reduction, independent FP64 controls and model gates. |
 | Aligned device weight copies | Retained; better resident throughput than mapped execution. |
 | QKV/gate-up, norm/RoPE/cache and codec-embedding fusion | Retained; same group order and boundary checks, fewer dispatches. |
