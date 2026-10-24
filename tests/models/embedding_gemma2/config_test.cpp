@@ -17,7 +17,7 @@ void Check(bool condition, std::string_view message) {
 }
 
 // config.json of google/embeddinggemma-2 revision 914f7f89 without the vision
-// and audio towers, which this implementation does not read.
+// and audio towers, for the text-only configuration contract.
 constexpr const char* kConfig = R"json(
 {
  "architectures": [
@@ -130,6 +130,37 @@ int main() {
   Check(config.has_value(), "the released configuration must parse");
   Check(embedding_gemma2::IsSupportedModelConfig(*config),
         "the released configuration must be supported");
+
+  const std::string vision_config =
+      Replace(kConfig, "\"vision_soft_tokens_per_image\": 280",
+              R"("vision_soft_tokens_per_image": 280,
+         "vision_config": {
+           "model_type": "gemma4_vision", "dtype": "bfloat16",
+           "hidden_activation": "gelu_pytorch_tanh", "hidden_size": 768,
+           "intermediate_size": 3072, "num_hidden_layers": 16,
+           "num_attention_heads": 12, "num_key_value_heads": 12,
+           "head_dim": 64, "patch_size": 16, "pooling_kernel_size": 3,
+           "position_embedding_size": 10240, "standardize": false,
+           "use_clipped_linears": false, "attention_bias": false,
+           "rms_norm_eps": 1e-6,
+           "rope_parameters": {"rope_type": "axial", "rope_theta": 100.0}
+         })");
+  const auto vision = embedding_gemma2::ParseModelConfig(vision_config);
+  Check(vision && vision->supported_vision,
+        "released vision geometry is supported");
+  for (const auto& changed :
+       {Replace(vision_config, "\"head_dim\": 64", "\"head_dim\": 128"),
+        Replace(vision_config, "\"pooling_kernel_size\": 3",
+                "\"pooling_kernel_size\": 2"),
+        Replace(vision_config, "\"standardize\": false",
+                "\"standardize\": true"),
+        Replace(vision_config, "\"image_token_id\": 258880",
+                "\"image_token_id\": 42")}) {
+    const auto unsupported = embedding_gemma2::ParseModelConfig(changed);
+    Check(unsupported && !unsupported->supported_vision &&
+              embedding_gemma2::IsSupportedModelConfig(*unsupported),
+          "unsupported vision refuses images while retaining text support");
+  }
 
   const embedding_gemma2::TextConfig& text = config->text;
   Check(text.layers.size() == 24, "24 layers");

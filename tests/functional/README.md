@@ -730,3 +730,14 @@ benchmark and numerical quality tests; they do not establish upstream model
 parity. Sampled DSpark may differ across concurrency levels; fixed-path replay
 and greedy equality remain checked. API behavior and references are in
 [SERVER.md](../../docs/SERVER.md).
+
+`embedding_images.py` checks typed text/image `/v1/embeddings` requests against
+the official float32 image fixtures, including mixed batches, multiple images,
+the Frigate trailing newline, base64 dimensions, concurrency, PNG/WebP decoding,
+invalid image destinations and recovery. It requires Pillow and numpy and stays
+outside `--suite all`:
+
+```sh
+nix develop -c python3 tests/functional/embedding_images.py \
+  --base-url http://127.0.0.1:8080/v1 --output /tmp/image-embeddings.json
+```

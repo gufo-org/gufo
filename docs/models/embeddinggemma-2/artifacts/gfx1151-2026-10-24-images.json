@@ -1,0 +1,1985 @@
+{
+  "schema": "gufo.embeddinggemma2.image-support.v1",
+  "date": "2026-10-24",
+  "issue": "https://github.com/gufo-org/gufo/issues/728",
+  "base_revision": "8e7979cc5cb7a4228473f22d74f23c4ca7337f91",
+  "candidate": "working tree image support",
+  "platform": {
+    "os": "Linux x86-64",
+    "gpu": "AMD Strix Halo gfx1151",
+    "cxx": "GCC 15.3.0",
+    "hip": "Clang 22.0.0 / ROCm 7.2.3",
+    "build": "CMake release preset through pinned nix develop; production optimization"
+  },
+  "model": {
+    "id": "google/embeddinggemma-2",
+    "revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+    "dtype": "BF16 safetensors",
+    "vision_weight_bytes": 335515648
+  },
+  "teacher": {
+    "transformers": "5.21.0.dev0",
+    "transformers_revision": "50e35cc0ca18ec19b80653690de553e6decf74f5",
+    "torch": "2.12.0",
+    "dtype": "float32"
+  },
+  "timing_gate": {
+    "relative": 0.05,
+    "absolute_ms": 3,
+    "scope": "each complete HTTP request; flag only when both thresholds are exceeded"
+  },
+  "text_initial_exploratory": {
+    "results": [
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 16,
+        "requests": 6,
+        "tokens_per_request": 40,
+        "median_ms": 10.15,
+        "p95_ms": 11.22,
+        "requests_per_s": 94.75,
+        "tokens_per_s": 3789.9
+      },
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 128,
+        "requests": 6,
+        "tokens_per_request": 404,
+        "median_ms": 36.18,
+        "p95_ms": 37.25,
+        "requests_per_s": 27.37,
+        "tokens_per_s": 11059.4
+      },
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 512,
+        "requests": 6,
+        "tokens_per_request": 1940,
+        "median_ms": 224.1,
+        "p95_ms": 228.15,
+        "requests_per_s": 4.45,
+        "tokens_per_s": 8629.0
+      },
+      {
+        "concurrency": 1,
+        "inputs": 8,
+        "words": 128,
+        "requests": 6,
+        "tokens_per_request": 3495,
+        "median_ms": 300.57,
+        "p95_ms": 310.49,
+        "requests_per_s": 3.31,
+        "tokens_per_s": 11556.1
+      },
+      {
+        "concurrency": 1,
+        "inputs": 32,
+        "words": 128,
+        "requests": 6,
+        "tokens_per_request": 15670,
+        "median_ms": 1416.96,
+        "p95_ms": 1432.77,
+        "requests_per_s": 0.7,
+        "tokens_per_s": 11037.9
+      },
+      {
+        "concurrency": 4,
+        "inputs": 1,
+        "words": 128,
+        "requests": 6,
+        "tokens_per_request": 404,
+        "median_ms": 132.4,
+        "p95_ms": 151.83,
+        "requests_per_s": 26.14,
+        "tokens_per_s": 10560.3
+      },
+      {
+        "concurrency": 16,
+        "inputs": 1,
+        "words": 128,
+        "requests": 6,
+        "tokens_per_request": 404,
+        "median_ms": 134.83,
+        "p95_ms": 228.75,
+        "requests_per_s": 25.79,
+        "tokens_per_s": 10420.5
+      },
+      {
+        "concurrency": 4,
+        "inputs": 8,
+        "words": 128,
+        "requests": 6,
+        "tokens_per_request": 3495,
+        "median_ms": 1070.58,
+        "p95_ms": 1230.88,
+        "requests_per_s": 3.26,
+        "tokens_per_s": 11397.9
+      },
+      {
+        "concurrency": 16,
+        "inputs": 8,
+        "words": 128,
+        "requests": 6,
+        "tokens_per_request": 3495,
+        "median_ms": 1074.5,
+        "p95_ms": 1831.33,
+        "requests_per_s": 3.27,
+        "tokens_per_s": 11421.6
+      }
+    ],
+    "qualification": "Exploratory unchanged-main run only, six requests per workload. The C16 rows do not fill concurrency and are not headline benchmarks."
+  },
+  "text_controls_initial": {
+    "main": [
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 16,
+        "requests": 60,
+        "request_ms": [
+          11.01,
+          9.798,
+          9.849,
+          9.857,
+          9.8,
+          9.841,
+          9.844,
+          9.798,
+          9.745,
+          9.885,
+          9.937,
+          9.916,
+          9.822,
+          9.852,
+          9.763,
+          9.866,
+          10.15,
+          9.936,
+          9.799,
+          9.79,
+          10.078,
+          9.916,
+          9.761,
+          9.888,
+          9.752,
+          9.893,
+          9.769,
+          9.745,
+          9.819,
+          9.784,
+          9.799,
+          9.769,
+          9.884,
+          9.915,
+          9.858,
+          9.787,
+          9.775,
+          9.719,
+          9.666,
+          9.717,
+          9.663,
+          9.66,
+          9.669,
+          9.668,
+          9.639,
+          9.577,
+          9.654,
+          9.617,
+          9.636,
+          9.605,
+          9.64,
+          9.679,
+          9.604,
+          10.042,
+          9.927,
+          9.73,
+          10.018,
+          9.719,
+          10.273,
+          9.923
+        ],
+        "tokens_per_request": 40,
+        "median_ms": 9.8,
+        "p95_ms": 10.08,
+        "requests_per_s": 101.13,
+        "tokens_per_s": 4045.4
+      },
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 128,
+        "requests": 60,
+        "request_ms": [
+          40.018,
+          40.671,
+          40.438,
+          40.681,
+          40.505,
+          40.825,
+          40.932,
+          40.495,
+          40.014,
+          40.572,
+          40.765,
+          41.3,
+          40.989,
+          40.292,
+          40.542,
+          40.593,
+          40.049,
+          40.922,
+          40.85,
+          40.663,
+          40.584,
+          40.874,
+          41.167,
+          40.892,
+          40.806,
+          40.466,
+          40.583,
+          40.823,
+          40.617,
+          40.821,
+          41.033,
+          40.864,
+          40.471,
+          40.706,
+          40.847,
+          40.785,
+          40.594,
+          40.658,
+          40.821,
+          40.409,
+          40.698,
+          40.625,
+          40.538,
+          40.402,
+          40.317,
+          40.737,
+          40.839,
+          41.031,
+          40.383,
+          40.658,
+          40.51,
+          40.394,
+          41.39,
+          41.282,
+          40.901,
+          40.773,
+          40.91,
+          40.698,
+          40.848,
+          40.538
+        ],
+        "tokens_per_request": 404,
+        "median_ms": 40.69,
+        "p95_ms": 41.17,
+        "requests_per_s": 24.53,
+        "tokens_per_s": 9910.4
+      },
+      {
+        "concurrency": 1,
+        "inputs": 8,
+        "words": 128,
+        "requests": 60,
+        "request_ms": [
+          336.111,
+          334.001,
+          335.156,
+          336.055,
+          338.604,
+          335.5,
+          335.411,
+          336.202,
+          335.366,
+          334.13,
+          328.293,
+          333.992,
+          336.941,
+          320.817,
+          305.589,
+          309.867,
+          313.148,
+          313.07,
+          312.565,
+          312.493,
+          311.11,
+          313.166,
+          312.64,
+          312.358,
+          311.553,
+          312.787,
+          315.336,
+          314.491,
+          313.456,
+          314.156,
+          313.678,
+          313.965,
+          313.022,
+          314.594,
+          312.213,
+          312.676,
+          313.737,
+          313.919,
+          312.641,
+          313.336,
+          314.73,
+          313.626,
+          314.469,
+          313.539,
+          313.198,
+          313.579,
+          313.858,
+          313.166,
+          312.476,
+          313.751,
+          312.699,
+          313.626,
+          312.994,
+          312.305,
+          312.955,
+          313.145,
+          313.057,
+          313.203,
+          313.624,
+          312.382
+        ],
+        "tokens_per_request": 3495,
+        "median_ms": 313.56,
+        "p95_ms": 336.11,
+        "requests_per_s": 3.14,
+        "tokens_per_s": 10984.0
+      }
+    ],
+    "candidate": [
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 16,
+        "requests": 60,
+        "request_ms": [
+          11.768,
+          10.202,
+          10.087,
+          10.311,
+          10.191,
+          10.198,
+          10.11,
+          10.12,
+          10.092,
+          10.012,
+          10.135,
+          10.112,
+          10.021,
+          10.091,
+          9.99,
+          9.872,
+          10.257,
+          10.098,
+          9.81,
+          9.8,
+          9.862,
+          10.481,
+          10.013,
+          10.031,
+          10.016,
+          10.028,
+          10.1,
+          10.059,
+          10.015,
+          10.019,
+          10.083,
+          10.008,
+          9.976,
+          10.036,
+          10.088,
+          10.034,
+          10.056,
+          10.025,
+          9.999,
+          10.074,
+          10.141,
+          10.045,
+          10.043,
+          10.141,
+          10.218,
+          9.983,
+          9.962,
+          10.123,
+          10.078,
+          10.015,
+          10.012,
+          9.954,
+          10.039,
+          10.117,
+          9.978,
+          9.989,
+          10.136,
+          10.108,
+          10.086,
+          10.125
+        ],
+        "tokens_per_request": 40,
+        "median_ms": 10.06,
+        "p95_ms": 10.26,
+        "requests_per_s": 98.27,
+        "tokens_per_s": 3930.8
+      },
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 128,
+        "requests": 60,
+        "request_ms": [
+          39.615,
+          40.46,
+          39.177,
+          38.402,
+          37.836,
+          38.556,
+          38.568,
+          38.153,
+          38.359,
+          38.289,
+          38.401,
+          39.412,
+          152.801,
+          39.977,
+          39.858,
+          39.123,
+          38.657,
+          37.225,
+          37.997,
+          37.437,
+          38.005,
+          39.423,
+          39.985,
+          39.267,
+          39.133,
+          40.027,
+          39.843,
+          40.021,
+          39.789,
+          39.213,
+          39.05,
+          39.015,
+          39.001,
+          38.703,
+          38.976,
+          38.821,
+          39.082,
+          38.714,
+          38.803,
+          38.475,
+          38.683,
+          38.518,
+          38.735,
+          38.927,
+          38.698,
+          38.768,
+          38.45,
+          38.653,
+          38.529,
+          38.848,
+          38.199,
+          37.39,
+          37.789,
+          37.78,
+          38.736,
+          38.501,
+          38.586,
+          38.577,
+          38.524,
+          38.777
+        ],
+        "tokens_per_request": 404,
+        "median_ms": 38.72,
+        "p95_ms": 40.02,
+        "requests_per_s": 24.53,
+        "tokens_per_s": 9908.9
+      },
+      {
+        "concurrency": 1,
+        "inputs": 8,
+        "words": 128,
+        "requests": 60,
+        "request_ms": [
+          319.221,
+          319.892,
+          324.345,
+          323.667,
+          322.467,
+          321.574,
+          320.759,
+          312.038,
+          315.567,
+          313.792,
+          315.624,
+          307.132,
+          304.011,
+          310.224,
+          304.483,
+          303.919,
+          308.876,
+          303.631,
+          300.873,
+          308.641,
+          300.8,
+          296.382,
+          303.694,
+          309.776,
+          308.713,
+          308.563,
+          308.327,
+          309.151,
+          309.63,
+          308.522,
+          308.218,
+          309.27,
+          308.621,
+          308.144,
+          309.046,
+          309.454,
+          308.841,
+          309.329,
+          308.911,
+          308.366,
+          308.887,
+          309.09,
+          311.147,
+          310.203,
+          310.689,
+          308.785,
+          310.687,
+          311.368,
+          310.38,
+          310.764,
+          310.015,
+          310.653,
+          311.124,
+          311.388,
+          311.609,
+          310.775,
+          310.526,
+          310.443,
+          310.878,
+          310.288
+        ],
+        "tokens_per_request": 3495,
+        "median_ms": 309.7,
+        "p95_ms": 321.57,
+        "requests_per_s": 3.22,
+        "tokens_per_s": 11252.0
+      }
+    ],
+    "flags": [
+      {
+        "words": 16,
+        "inputs": 1,
+        "flags": []
+      },
+      {
+        "words": 128,
+        "inputs": 1,
+        "flags": [
+          {
+            "request": 12,
+            "main_ms": 40.989,
+            "candidate_ms": 152.801
+          }
+        ]
+      },
+      {
+        "words": 128,
+        "inputs": 8,
+        "flags": []
+      }
+    ],
+    "assessment": "One unexplained candidate 404-token outlier (152.801 ms); this initial comparison is inconclusive. Other histories have no flags."
+  },
+  "text_controls_alternating": {
+    "results": [
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 128,
+        "requests": 60,
+        "request_ms": [
+          37.609,
+          36.004,
+          35.936,
+          36.933,
+          37.139,
+          36.784,
+          36.802,
+          36.876,
+          35.966,
+          36.734,
+          35.808,
+          36.824,
+          35.853,
+          36.644,
+          36.072,
+          37.18,
+          36.207,
+          36.04,
+          36.192,
+          36.056,
+          36.739,
+          36.192,
+          36.372,
+          36.941,
+          36.127,
+          37.003,
+          35.971,
+          36.805,
+          36.755,
+          36.209,
+          37.292,
+          36.882,
+          37.44,
+          36.759,
+          36.916,
+          37.083,
+          36.616,
+          36.36,
+          36.087,
+          36.513,
+          36.111,
+          36.551,
+          37.317,
+          36.041,
+          36.984,
+          35.991,
+          36.945,
+          36.741,
+          36.265,
+          36.833,
+          35.991,
+          36.445,
+          35.789,
+          36.113,
+          36.383,
+          38.236,
+          37.195,
+          36.685,
+          36.609,
+          36.961
+        ],
+        "tokens_per_request": 404,
+        "median_ms": 36.63,
+        "p95_ms": 37.32,
+        "requests_per_s": 27.27,
+        "tokens_per_s": 11018.7,
+        "revision": "main"
+      },
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 128,
+        "requests": 60,
+        "request_ms": [
+          36.982,
+          36.492,
+          36.133,
+          35.969,
+          36.169,
+          36.311,
+          35.823,
+          36.598,
+          36.786,
+          36.45,
+          36.906,
+          36.12,
+          35.864,
+          35.727,
+          35.722,
+          35.917,
+          35.812,
+          36.011,
+          35.913,
+          36.172,
+          36.695,
+          36.026,
+          35.942,
+          36.098,
+          36.872,
+          36.306,
+          36.931,
+          37.199,
+          36.807,
+          36.586,
+          35.893,
+          36.366,
+          36.422,
+          36.322,
+          36.013,
+          35.556,
+          35.865,
+          36.349,
+          35.976,
+          36.092,
+          35.796,
+          35.918,
+          35.893,
+          36.017,
+          35.806,
+          35.76,
+          35.878,
+          35.987,
+          35.947,
+          35.825,
+          36.7,
+          35.834,
+          36.25,
+          36.638,
+          37.146,
+          36.402,
+          36.596,
+          36.467,
+          36.489,
+          35.886
+        ],
+        "tokens_per_request": 404,
+        "median_ms": 36.11,
+        "p95_ms": 36.93,
+        "requests_per_s": 27.56,
+        "tokens_per_s": 11133.5,
+        "revision": "candidate"
+      },
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 128,
+        "requests": 60,
+        "request_ms": [
+          37.23,
+          36.386,
+          36.114,
+          36.293,
+          36.233,
+          35.94,
+          36.039,
+          35.918,
+          36.635,
+          36.102,
+          36.465,
+          36.31,
+          36.069,
+          35.948,
+          36.505,
+          35.767,
+          36.6,
+          36.112,
+          36.531,
+          36.386,
+          36.552,
+          37.155,
+          37.309,
+          36.844,
+          36.542,
+          35.79,
+          36.575,
+          36.196,
+          36.58,
+          36.03,
+          35.937,
+          36.226,
+          36.385,
+          36.138,
+          36.164,
+          36.135,
+          36.432,
+          36.429,
+          36.192,
+          36.302,
+          36.116,
+          36.017,
+          36.296,
+          36.646,
+          36.497,
+          35.855,
+          37.275,
+          36.154,
+          36.699,
+          37.612,
+          38.363,
+          36.09,
+          36.159,
+          36.516,
+          36.129,
+          36.489,
+          36.042,
+          36.262,
+          36.0,
+          36.447
+        ],
+        "tokens_per_request": 404,
+        "median_ms": 36.29,
+        "p95_ms": 37.28,
+        "requests_per_s": 27.43,
+        "tokens_per_s": 11082.4,
+        "revision": "main"
+      },
+      {
+        "concurrency": 1,
+        "inputs": 1,
+        "words": 128,
+        "requests": 60,
+        "request_ms": [
+          36.266,
+          36.471,
+          36.153,
+          36.322,
+          36.098,
+          36.162,
+          36.198,
+          36.07,
+          36.346,
+          35.712,
+          36.201,
+          36.371,
+          36.093,
+          36.835,
+          36.708,
+          36.257,
+          36.453,
+          36.055,
+          36.028,
+          36.093,
+          35.91,
+          35.94,
+          36.407,
+          36.071,
+          37.48,
+          36.328,
+          36.317,
+          35.923,
+          36.462,
+          36.813,
+          36.291,
+          35.979,
+          36.374,
+          36.016,
+          36.111,
+          36.002,
+          36.243,
+          36.035,
+          36.161,
+          36.097,
+          36.326,
+          36.294,
+          36.253,
+          36.957,
+          36.635,
+          36.132,
+          38.09,
+          37.577,
+          37.88,
+          37.307,
+          37.064,
+          36.573,
+          36.436,
+          36.169,
+          36.495,
+          36.935,
+          36.452,
+          36.043,
+          36.25,
+          35.773
+        ],
+        "tokens_per_request": 404,
+        "median_ms": 36.26,
+        "p95_ms": 37.48,
+        "requests_per_s": 27.42,
+        "tokens_per_s": 11079.4,
+        "revision": "candidate"
+      }
+    ],
+    "flags": [
+      [],
+      []
+    ],
+    "assessment": "Repeated only the affected 404-token history in main/candidate/main/candidate order, 60 requests each. No per-request threshold failures. The initial outlier did not recur; no speedup claim."
+  },
+  "image_http_benchmark": {
+    "case": "image_6",
+    "width": 320,
+    "height": 180,
+    "encoding": "PNG",
+    "trailing_newline": true,
+    "requests": 60,
+    "concurrency": 1,
+    "request_ms": [
+      539.7463439949206,
+      532.3989059979795,
+      527.0534540031804,
+      530.9339340019505,
+      530.4885119985556,
+      534.1307830021833,
+      527.1640129940351,
+      531.1364990047878,
+      543.3214599979692,
+      529.5071669970639,
+      532.3337230001925,
+      525.895605002006,
+      534.719226998277,
+      545.6178539971006,
+      534.4887300016126,
+      520.0642340059858,
+      545.5060539970873,
+      552.1967699969537,
+      552.0365880001918,
+      549.9091629972099,
+      548.1858639977872,
+      547.6565420030965,
+      550.304561998928,
+      547.5687559955986,
+      548.1131969936541,
+      552.5169980028295,
+      548.4500240054331,
+      552.3087440014933,
+      551.962438999908,
+      551.6572420019656,
+      551.7062750004698,
+      552.0036480011186,
+      548.595710999507,
+      550.4938419981045,
+      548.290184000507,
+      550.9983960000682,
+      551.0843790034414,
+      548.6511669951142,
+      549.1224080033135,
+      552.7776230010204,
+      553.1411109986948,
+      548.8763929970446,
+      549.7941790017649,
+      552.1063139967737,
+      551.5840759981074,
+      549.7397170038312,
+      550.7681419985602,
+      549.6009749986115,
+      548.4134790021926,
+      552.300652001577,
+      552.8706100012641,
+      550.2309069997864,
+      549.9256000039168,
+      551.6299139999319,
+      550.5879929987714,
+      549.591397997574,
+      552.6328220003052,
+      549.3148949972237,
+      552.2997220032266,
+      551.3048600041657
+    ],
+    "tokens_per_request": 269,
+    "median_ms": 549.5961864980927,
+    "p95_ms": 552.6328220003052,
+    "requests_per_s": 1.8302611246376044
+  },
+  "image_http_checks": {
+    "model_revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+    "requests": [
+      {
+        "status": 200,
+        "elapsed_ms": 497.64411700016353,
+        "usage": {
+          "prompt_tokens": 256,
+          "total_tokens": 256
+        },
+        "error": null,
+        "case": "image_0",
+        "cosine": 0.999966081320297
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 566.0055309999734,
+        "usage": {
+          "prompt_tokens": 270,
+          "total_tokens": 270
+        },
+        "error": null,
+        "case": "image_1",
+        "cosine": 0.9999945335851453
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 509.8635340036708,
+        "usage": {
+          "prompt_tokens": 260,
+          "total_tokens": 260
+        },
+        "error": null,
+        "case": "image_2",
+        "cosine": 0.9999958246363571
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 576.7009249975672,
+        "usage": {
+          "prompt_tokens": 290,
+          "total_tokens": 290
+        },
+        "error": null,
+        "case": "image_3",
+        "cosine": 0.9999778968562668
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 965.6412780022947,
+        "usage": {
+          "prompt_tokens": 506,
+          "total_tokens": 506
+        },
+        "error": null,
+        "case": "image_4",
+        "cosine": 0.9999851001440531
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 582.9154930033837,
+        "usage": {
+          "prompt_tokens": 284,
+          "total_tokens": 284
+        },
+        "error": null,
+        "case": "image_5",
+        "cosine": 0.9999580359107586
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 528.1203619961161,
+        "usage": {
+          "prompt_tokens": 269,
+          "total_tokens": 269
+        },
+        "error": null,
+        "case": "image_6",
+        "cosine": 0.9999943091169182
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 1045.974001994182,
+        "usage": {
+          "prompt_tokens": 532,
+          "total_tokens": 532
+        },
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 492.1014620049391,
+        "usage": {
+          "prompt_tokens": 256,
+          "total_tokens": 256
+        },
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 490.3727019991493,
+        "usage": {
+          "prompt_tokens": 256,
+          "total_tokens": 256
+        },
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 496.28862400277285,
+        "usage": {
+          "prompt_tokens": 256,
+          "total_tokens": 256
+        },
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 10.423820000141859,
+        "usage": {
+          "prompt_tokens": 3,
+          "total_tokens": 3
+        },
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 489.5265519953682,
+        "usage": {
+          "prompt_tokens": 256,
+          "total_tokens": 256
+        },
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 1055.704671998683,
+        "usage": {
+          "prompt_tokens": 290,
+          "total_tokens": 290
+        },
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 501.3234590005595,
+        "usage": {
+          "prompt_tokens": 256,
+          "total_tokens": 256
+        },
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 506.51929800369544,
+        "usage": {
+          "prompt_tokens": 256,
+          "total_tokens": 256
+        },
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 985.9023109966074,
+        "usage": {
+          "prompt_tokens": 512,
+          "total_tokens": 512
+        },
+        "error": null
+      },
+      {
+        "status": 400,
+        "elapsed_ms": 0.9536239958833903,
+        "usage": null,
+        "error": {
+          "message": "image URL must use HTTPS or a base64 data URL",
+          "type": "invalid_request_error",
+          "code": "invalid_image_input",
+          "param": null
+        }
+      },
+      {
+        "status": 400,
+        "elapsed_ms": 0.6529549937113188,
+        "usage": null,
+        "error": {
+          "message": "image URL must use HTTPS or a base64 data URL",
+          "type": "invalid_request_error",
+          "code": "invalid_image_input",
+          "param": null
+        }
+      },
+      {
+        "status": 400,
+        "elapsed_ms": 0.6401110003935173,
+        "usage": null,
+        "error": {
+          "message": "cannot download image within size/time limits",
+          "type": "invalid_request_error",
+          "code": "invalid_image_input",
+          "param": null
+        }
+      },
+      {
+        "status": 400,
+        "elapsed_ms": 0.5428570002550259,
+        "usage": null,
+        "error": {
+          "message": "image must be PNG, JPEG or WebP",
+          "type": "invalid_request_error",
+          "code": "invalid_image_input",
+          "param": null
+        }
+      },
+      {
+        "status": 400,
+        "elapsed_ms": 165.01848099869676,
+        "usage": null,
+        "error": {
+          "message": "input at index 0 exceeds the 8192-token context window",
+          "type": "invalid_request_error",
+          "code": "context_length_exceeded",
+          "param": null
+        }
+      },
+      {
+        "status": 400,
+        "elapsed_ms": 0.8156530020642094,
+        "usage": null,
+        "error": {
+          "message": "embedding requests accept at most 32 images",
+          "type": "invalid_request_error",
+          "code": "too_many_images",
+          "param": null
+        }
+      },
+      {
+        "status": 400,
+        "elapsed_ms": 4.490535000513773,
+        "usage": null,
+        "error": {
+          "message": "text must not contain image placeholders when images are supplied",
+          "type": "invalid_request_error",
+          "code": "invalid_image_input",
+          "param": null
+        }
+      },
+      {
+        "status": 400,
+        "elapsed_ms": 4.863942005613353,
+        "usage": null,
+        "error": {
+          "message": "text must not contain image placeholders when images are supplied",
+          "type": "invalid_request_error",
+          "code": "invalid_image_input",
+          "param": null
+        }
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 9.440970003197435,
+        "usage": {
+          "prompt_tokens": 3,
+          "total_tokens": 3
+        },
+        "error": null
+      }
+    ]
+  },
+  "earlier_image_http_checks": [
+    {
+      "name": "image-http.json",
+      "result": {
+        "model_revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+        "requests": [
+          {
+            "status": 200,
+            "elapsed_ms": 560.581646997889,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null,
+            "case": "image_0",
+            "cosine": 0.999966081320297
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 560.5060660018353,
+            "usage": {
+              "prompt_tokens": 270,
+              "total_tokens": 270
+            },
+            "error": null,
+            "case": "image_1",
+            "cosine": 0.9999945335851453
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 519.0143220024765,
+            "usage": {
+              "prompt_tokens": 260,
+              "total_tokens": 260
+            },
+            "error": null,
+            "case": "image_2",
+            "cosine": 0.9999958246363571
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 562.2135150042595,
+            "usage": {
+              "prompt_tokens": 290,
+              "total_tokens": 290
+            },
+            "error": null,
+            "case": "image_3",
+            "cosine": 0.9999778968562668
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 964.3798910037731,
+            "usage": {
+              "prompt_tokens": 506,
+              "total_tokens": 506
+            },
+            "error": null,
+            "case": "image_4",
+            "cosine": 0.9999851001440531
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 581.5775099981693,
+            "usage": {
+              "prompt_tokens": 284,
+              "total_tokens": 284
+            },
+            "error": null,
+            "case": "image_5",
+            "cosine": 0.9999580359107586
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 1051.9647859982797,
+            "usage": {
+              "prompt_tokens": 532,
+              "total_tokens": 532
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 512.0483989958302,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 505.6407810043311,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 522.8530449967366,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 10.205601996858604,
+            "usage": {
+              "prompt_tokens": 3,
+              "total_tokens": 3
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 532.7814240008593,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 1158.3789229989634,
+            "usage": {
+              "prompt_tokens": 290,
+              "total_tokens": 290
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 516.937599000812,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 512.3206460048095,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.95484600024065,
+            "usage": null,
+            "error": {
+              "message": "image URL must use HTTPS or a base64 data URL",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.6507409998448566,
+            "usage": null,
+            "error": {
+              "message": "image URL must use HTTPS or a base64 data URL",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 2.1482929951162077,
+            "usage": null,
+            "error": {
+              "message": "cannot download image within size/time limits",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.4498810012592003,
+            "usage": null,
+            "error": {
+              "message": "image must be PNG, JPEG or WebP",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 9.852805000264198,
+            "usage": {
+              "prompt_tokens": 3,
+              "total_tokens": 3
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "images-qualified.json",
+      "result": {
+        "model_revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+        "requests": [
+          {
+            "status": 200,
+            "elapsed_ms": 568.4757499984698,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null,
+            "case": "image_0",
+            "cosine": 0.999966081320297
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 589.4488319972879,
+            "usage": {
+              "prompt_tokens": 270,
+              "total_tokens": 270
+            },
+            "error": null,
+            "case": "image_1",
+            "cosine": 0.9999945335851453
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 530.4289330015308,
+            "usage": {
+              "prompt_tokens": 260,
+              "total_tokens": 260
+            },
+            "error": null,
+            "case": "image_2",
+            "cosine": 0.9999958246363571
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 582.7145550065325,
+            "usage": {
+              "prompt_tokens": 290,
+              "total_tokens": 290
+            },
+            "error": null,
+            "case": "image_3",
+            "cosine": 0.9999778968562668
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 970.8140659931814,
+            "usage": {
+              "prompt_tokens": 506,
+              "total_tokens": 506
+            },
+            "error": null,
+            "case": "image_4",
+            "cosine": 0.9999851001440531
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 571.1002259995439,
+            "usage": {
+              "prompt_tokens": 284,
+              "total_tokens": 284
+            },
+            "error": null,
+            "case": "image_5",
+            "cosine": 0.9999580359107586
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 531.0810980008682,
+            "usage": {
+              "prompt_tokens": 269,
+              "total_tokens": 269
+            },
+            "error": null,
+            "case": "image_6",
+            "cosine": 0.9999943091169182
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 1046.1076799983857,
+            "usage": {
+              "prompt_tokens": 532,
+              "total_tokens": 532
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 483.26189599902136,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 491.77349700039485,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 485.6393139998545,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 10.812432003149297,
+            "usage": {
+              "prompt_tokens": 3,
+              "total_tokens": 3
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 496.4378200020292,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 1052.9820049996488,
+            "usage": {
+              "prompt_tokens": 290,
+              "total_tokens": 290
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 493.43823700473877,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 486.76669700216735,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.8516310044797137,
+            "usage": null,
+            "error": {
+              "message": "image URL must use HTTPS or a base64 data URL",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.5769920026068576,
+            "usage": null,
+            "error": {
+              "message": "image URL must use HTTPS or a base64 data URL",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 1.8754570046439767,
+            "usage": null,
+            "error": {
+              "message": "cannot download image within size/time limits",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.37578100454993546,
+            "usage": null,
+            "error": {
+              "message": "image must be PNG, JPEG or WebP",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 165.86978299892507,
+            "usage": null,
+            "error": {
+              "message": "input at index 0 exceeds the 8192-token context window",
+              "type": "invalid_request_error",
+              "code": "context_length_exceeded",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.7896030001575127,
+            "usage": null,
+            "error": {
+              "message": "embedding requests accept at most 32 images",
+              "type": "invalid_request_error",
+              "code": "too_many_images",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 4.508207995968405,
+            "usage": null,
+            "error": {
+              "message": "text must not contain image placeholders when images are supplied",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 10.073204000946134,
+            "usage": {
+              "prompt_tokens": 3,
+              "total_tokens": 3
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "http-images-final.json",
+      "result": {
+        "model_revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+        "requests": [
+          {
+            "status": 200,
+            "elapsed_ms": 551.2169639987405,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null,
+            "case": "image_0",
+            "cosine": 0.999966081320297
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 582.526099999086,
+            "usage": {
+              "prompt_tokens": 270,
+              "total_tokens": 270
+            },
+            "error": null,
+            "case": "image_1",
+            "cosine": 0.9999945335851453
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 526.3907920016209,
+            "usage": {
+              "prompt_tokens": 260,
+              "total_tokens": 260
+            },
+            "error": null,
+            "case": "image_2",
+            "cosine": 0.9999958246363571
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 587.6355159998639,
+            "usage": {
+              "prompt_tokens": 290,
+              "total_tokens": 290
+            },
+            "error": null,
+            "case": "image_3",
+            "cosine": 0.9999778968562668
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 1023.4854459995404,
+            "usage": {
+              "prompt_tokens": 506,
+              "total_tokens": 506
+            },
+            "error": null,
+            "case": "image_4",
+            "cosine": 0.9999851001440531
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 621.2278829989373,
+            "usage": {
+              "prompt_tokens": 284,
+              "total_tokens": 284
+            },
+            "error": null,
+            "case": "image_5",
+            "cosine": 0.9999580359107586
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 574.4258089980576,
+            "usage": {
+              "prompt_tokens": 269,
+              "total_tokens": 269
+            },
+            "error": null,
+            "case": "image_6",
+            "cosine": 0.9999943091169182
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 1108.040578001237,
+            "usage": {
+              "prompt_tokens": 532,
+              "total_tokens": 532
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 513.0978579982184,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 507.9678740003146,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 496.5677689979202,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 9.99785299791256,
+            "usage": {
+              "prompt_tokens": 3,
+              "total_tokens": 3
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 509.7791110019898,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 1074.7249080013717,
+            "usage": {
+              "prompt_tokens": 290,
+              "total_tokens": 290
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 492.51372100115987,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 493.66015900159255,
+            "usage": {
+              "prompt_tokens": 256,
+              "total_tokens": 256
+            },
+            "error": null
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.9249200011254288,
+            "usage": null,
+            "error": {
+              "message": "image URL must use HTTPS or a base64 data URL",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.556192004296463,
+            "usage": null,
+            "error": {
+              "message": "image URL must use HTTPS or a base64 data URL",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 1.6687759998603724,
+            "usage": null,
+            "error": {
+              "message": "cannot download image within size/time limits",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.4661410057451576,
+            "usage": null,
+            "error": {
+              "message": "image must be PNG, JPEG or WebP",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 155.67985399684403,
+            "usage": null,
+            "error": {
+              "message": "input at index 0 exceeds the 8192-token context window",
+              "type": "invalid_request_error",
+              "code": "context_length_exceeded",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 0.6796559973736294,
+            "usage": null,
+            "error": {
+              "message": "embedding requests accept at most 32 images",
+              "type": "invalid_request_error",
+              "code": "too_many_images",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 14.431318995775655,
+            "usage": null,
+            "error": {
+              "message": "text must not contain image placeholders when images are supplied",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 400,
+            "elapsed_ms": 5.183795998163987,
+            "usage": null,
+            "error": {
+              "message": "text must not contain image placeholders when images are supplied",
+              "type": "invalid_request_error",
+              "code": "invalid_image_input",
+              "param": null
+            }
+          },
+          {
+            "status": 200,
+            "elapsed_ms": 9.326642997621093,
+            "usage": {
+              "prompt_tokens": 3,
+              "total_tokens": 3
+            },
+            "error": null
+          }
+        ]
+      }
+    }
+  ],
+  "checks": {
+    "hosted-tests.log": "warning: Git tree '/home/mixer/.codex/worktrees/6bd3/gufo' is dirty\nwarning: ignoring untrusted flake configuration setting 'extra-substituters'.\nPass '--accept-flake-config' to trust it\nwarning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.\nPass '--accept-flake-config' to trust it\nTest project /home/mixer/.codex/worktrees/6bd3/gufo/build/cpu-test\n    Start 118: embedding_gemma2_config_test\n1/3 Test #118: embedding_gemma2_config_test ............   Passed    0.00 sec\n    Start 121: embedding_gemma2_embeddings_api_test\n2/3 Test #121: embedding_gemma2_embeddings_api_test ....   Passed    0.19 sec\n    Start 122: embedding_gemma2_image_processor_test\n3/3 Test #122: embedding_gemma2_image_processor_test ...   Passed    0.11 sec\n\n100% tests passed, 0 tests failed out of 3\n\nLabel Time Summary:\napi                 =   0.19 sec*proc (1 test)\nconfig              =   0.00 sec*proc (1 test)\ncpu                 =   0.29 sec*proc (3 tests)\nembedding-gemma2    =   0.29 sec*proc (3 tests)\nimage               =   0.11 sec*proc (1 test)\nmodels              =   0.29 sec*proc (3 tests)\nquality             =   0.29 sec*proc (3 tests)\nserver              =   0.19 sec*proc (1 test)\n\nTotal Test time (real) =   0.30 sec\n",
+    "http-server-tests.log": "warning: Git tree '/home/mixer/.codex/worktrees/6bd3/gufo' is dirty\nwarning: ignoring untrusted flake configuration setting 'extra-substituters'.\nPass '--accept-flake-config' to trust it\nwarning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.\nPass '--accept-flake-config' to trust it\nTest project /home/mixer/.codex/worktrees/6bd3/gufo/build/cpu-test\n    Start 28: http_server_test\n1/1 Test #28: http_server_test .................   Passed    1.75 sec\n\n100% tests passed, 0 tests failed out of 1\n\nLabel Time Summary:\ncpu       =   1.75 sec*proc (1 test)\nhttp      =   1.75 sec*proc (1 test)\nserver    =   1.75 sec*proc (1 test)\n\nTotal Test time (real) =   1.75 sec\n",
+    "cpu-qualified.log": "warning: Git tree '/home/mixer/.codex/worktrees/6bd3/gufo' is dirty\nwarning: ignoring untrusted flake configuration setting 'extra-substituters'.\nPass '--accept-flake-config' to trust it\nwarning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.\nPass '--accept-flake-config' to trust it\nerror (ignored): SQLite database '/home/mixer/.cache/nix/eval-cache-v6/aa6c9362a98c199de8caaadc685e72932b9bcf1da7fc32be9c56a1fc9da1f95b.sqlite' is busy\nTest project /home/mixer/.codex/worktrees/6bd3/gufo/build/gpu-test\n    Start 183: embedding_gemma2_config_test\n1/4 Test #183: embedding_gemma2_config_test ............   Passed    0.03 sec\n    Start 184: embedding_gemma2_loader_test\n2/4 Test #184: embedding_gemma2_loader_test ............   Passed    0.03 sec\n    Start 189: embedding_gemma2_embeddings_api_test\n3/4 Test #189: embedding_gemma2_embeddings_api_test ....   Passed    0.22 sec\n    Start 190: embedding_gemma2_image_processor_test\n4/4 Test #190: embedding_gemma2_image_processor_test ...   Passed    0.14 sec\n\n100% tests passed, 0 tests failed out of 4\n\nLabel Time Summary:\napi                 =   0.22 sec*proc (1 test)\nconfig              =   0.03 sec*proc (1 test)\ncpu                 =   0.42 sec*proc (4 tests)\nembedding-gemma2    =   0.42 sec*proc (4 tests)\nexternal-model      =   0.03 sec*proc (1 test)\nimage               =   0.14 sec*proc (1 test)\nloader              =   0.03 sec*proc (1 test)\nmodels              =   0.42 sec*proc (4 tests)\nquality             =   0.39 sec*proc (3 tests)\nsafetensors         =   0.03 sec*proc (1 test)\nserver              =   0.22 sec*proc (1 test)\n\nTotal Test time (real) =   0.43 sec\n",
+    "gpu-qualified.log": "warning: Git tree '/home/mixer/.codex/worktrees/6bd3/gufo' is dirty\nwarning: ignoring untrusted flake configuration setting 'extra-substituters'.\nPass '--accept-flake-config' to trust it\nwarning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.\nPass '--accept-flake-config' to trust it\nerror (ignored): SQLite database '/home/mixer/.cache/nix/eval-cache-v6/cbb4b2b86e376a49da8db4a9d6e569a0ea6185c31707bb3a3d3490dc8ef5be34.sqlite' is busy\nTest project /home/mixer/.codex/worktrees/6bd3/gufo/build/gpu-test\n    Start 187: embedding_gemma2_embedding_golden_hip_test\n1/2 Test #187: embedding_gemma2_embedding_golden_hip_test ...   Passed    1.23 sec\n    Start 191: embedding_gemma2_image_golden_hip_test\n2/2 Test #191: embedding_gemma2_image_golden_hip_test .......   Passed    5.12 sec\n\n100% tests passed, 0 tests failed out of 2\n\nLabel Time Summary:\nembedding           =   1.23 sec*proc (1 test)\nembedding-gemma2    =   6.35 sec*proc (2 tests)\nexternal-model      =   6.35 sec*proc (2 tests)\ngpu                 =   6.35 sec*proc (2 tests)\nimage               =   5.12 sec*proc (1 test)\nmodels              =   6.35 sec*proc (2 tests)\nquality             =   6.35 sec*proc (2 tests)\n\nTotal Test time (real) =   6.35 sec\n",
+    "text-sdk-qualified.log": "warning: Git tree '/home/mixer/.codex/worktrees/6bd3/gufo' is dirty\nwarning: ignoring untrusted flake configuration setting 'extra-substituters'.\nPass '--accept-flake-config' to trust it\nwarning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.\nPass '--accept-flake-config' to trust it\nCHECK batched request matches the reference in input order\nCHECK single string input equals the batched result\nCHECK float encoding equals base64 encoding\nCHECK raw base64 payload is little-endian float32\nCHECK dimensions=128 truncates and renormalizes\nCHECK dimensions=256 truncates and renormalizes\nCHECK dimensions=512 truncates and renormalizes\nCHECK concurrent identical requests agree\nCHECK model listing names only the embedding model\nCHECK error: empty input\nCHECK error: token-array input\nCHECK error: bad dimensions\nCHECK error: unknown model\nPASS embeddings\n"
+  },
+  "limits": "Reference parity on procedural RGB fixtures; no retrieval benchmark, full Frigate installation, or legacy /embeddings support."
+}

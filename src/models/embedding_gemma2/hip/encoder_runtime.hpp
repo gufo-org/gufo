@@ -9,16 +9,26 @@
 #include <vector>
 
 #include "src/models/embedding_gemma2/config.hpp"
+#include "src/models/embedding_gemma2/image_processor.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
 
 /// The model's context window. Longer sequences are refused, not truncated.
 inline constexpr std::size_t kMaxSequenceTokens = 8192;
 
-/// GPU text encoder. One instance owns the weights and the scratch buffers
-/// and runs one device batch at a time. `Embed` is thread-safe: concurrent
-/// calls take turns in arrival order, one device batch per turn, so a long
-/// request does not hold the device until it finishes.
+struct SequenceImage {
+  std::size_t offset{0};
+  ImagePatches patches;
+};
+struct EncoderSequence {
+  std::vector<std::uint32_t> tokens;
+  std::vector<SequenceImage> images;
+};
+
+/// GPU text and image encoder. One instance owns the weights and the scratch
+/// buffers and runs one device batch at a time. `Embed` is thread-safe:
+/// concurrent calls take turns in arrival order, one device batch per turn, so
+/// a long request does not hold the device until it finishes.
 class EncoderRuntime {
 public:
   ~EncoderRuntime();
@@ -28,7 +38,7 @@ public:
   EncoderRuntime(EncoderRuntime&&) = delete;
   EncoderRuntime& operator=(EncoderRuntime&&) = delete;
 
-  /// Loads the checkpoint and uploads the text backbone.
+  /// Uploads the text backbone. Vision weights load on the first image.
   [[nodiscard]] static std::unique_ptr<EncoderRuntime> Create(
       const std::string& model_dir, std::string* error = nullptr);
 
@@ -41,6 +51,11 @@ public:
   /// call fails with `kDeviceLostMessage`.
   [[nodiscard]] bool Embed(
       const std::vector<std::vector<std::uint32_t>>& sequences,
+      std::vector<std::vector<float>>* embeddings, std::string* error = nullptr,
+      const std::function<bool()>& is_cancelled = {});
+
+  [[nodiscard]] bool EmbedMultimodal(
+      const std::vector<EncoderSequence>& sequences,
       std::vector<std::vector<float>>* embeddings, std::string* error = nullptr,
       const std::function<bool()>& is_cancelled = {});
 

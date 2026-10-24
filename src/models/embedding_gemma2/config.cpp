@@ -150,6 +150,36 @@ std::optional<ModelConfig> ParseModelConfig(const std::string& json_contents) {
   if (!ParseTextConfig(*text, &config.text)) {
     return std::nullopt;
   }
+  if (const auto* vision = root.find("vision_config");
+      vision && vision->is_object()) {
+    const auto* rope = vision->find("rope_parameters");
+    config.supported_vision =
+        vision->member_str("model_type") == "gemma4_vision" &&
+        vision->member_str("dtype") == "bfloat16" &&
+        vision->member_str("hidden_activation") == "gelu_pytorch_tanh" &&
+        vision->member_size("hidden_size") == 768 &&
+        vision->member_size("intermediate_size") == 3072 &&
+        vision->member_size("num_hidden_layers") == 16 &&
+        vision->member_size("num_attention_heads") == 12 &&
+        vision->member_size("num_key_value_heads") == 12 &&
+        vision->member_size("head_dim") == 64 &&
+        vision->member_size("patch_size") == 16 &&
+        vision->member_size("pooling_kernel_size") == 3 &&
+        vision->member_size("position_embedding_size") == 10240 &&
+        (vision->find("standardize") &&
+         !vision->find("standardize")->as_bool(true)) &&
+        (vision->find("use_clipped_linears") &&
+         !vision->find("use_clipped_linears")->as_bool(true)) &&
+        (vision->find("attention_bias") &&
+         !vision->find("attention_bias")->as_bool(true)) &&
+        vision->member_double("rms_norm_eps") == 1e-6 && rope &&
+        rope->member_str("rope_type") == "axial" &&
+        rope->member_double("rope_theta") == 100.0 &&
+        root.member_size("vision_soft_tokens_per_image") == 280 &&
+        root.member_size("boi_token_id") == 255999 &&
+        root.member_size("image_token_id") == 258880 &&
+        root.member_size("eoi_token_id") == 258882;
+  }
   return config;
 }
 

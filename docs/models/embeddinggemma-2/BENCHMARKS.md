@@ -38,3 +38,31 @@ Against #700, this build is 1.5 to 2.3 times faster at the median on every row o
 ## Reference comparison
 
 The llama.cpp comparison is TODO.  It requires a llama.cpp build with EmbeddingGemma 2 support and the matching GGUF.  Measure both over HTTP with the same texts and report the ratio per row.
+
+## Image support qualification (2026-10-24)
+
+The production release CMake preset, using the same pinned Nix compiler and
+libraries as the unchanged main control, serves a 320×180 RGB PNG followed by
+one newline in the typed `content` format. The request produces 264 image soft
+tokens and **269 total tokens** including markers and text. One resident
+warm-up precedes 60 sequential HTTP requests; timing includes upload, PNG
+reading, preprocessing, vision/text inference and response transport.
+
+| Input | Requests | Median | p95 | Requests/s |
+| --- | ---: | ---: | ---: | ---: |
+| One 320×180 PNG + newline | 60 | **549.60 ms** | **552.63 ms** | **1.83** |
+
+This is a new workload with no supported main image path to compare. The first
+image request additionally loads **335.5 MB** of vision/projector weights; text
+startup still loads only the text backbone. Audio weights are never uploaded.
+
+Text controls retain every request at the 5% and 3 ms thresholds. The initial
+40-token and eight-input histories had no flags. One initial 404-token request
+on the candidate took 152.8 ms against 41.0 ms on main, so that initial timing
+comparison is **inconclusive**. Repeating only this history in alternating
+main/candidate/main/candidate order (60 requests per run) produced no per-request
+flags, with medians 36.63 / 36.11 / 36.29 / 36.26 ms. The outlier did not recur;
+no speedup is claimed. The [record](artifacts/gfx1151-2026-10-24-images.json)
+retains the initial evidence, alternating controls, image timings and quality
+checks. Earlier published text benchmark rows above remain their original
+measurements.

@@ -90,11 +90,10 @@ std::uint64_t ReadLittleEndian64(const std::byte* bytes) noexcept {
   return value;
 }
 
-/// Indexes the text-backbone tensors of one safetensors file. Tensors that
-/// belong to the other towers are skipped without validation.
+/// Indexes the requested backbones. Unused towers are skipped.
 bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
                      std::vector<std::shared_ptr<void>>* mappings,
-                     std::string* error) {
+                     std::string* error, bool include_vision) {
   auto mapping = std::make_shared<MappedFile>();
   if (!mapping->Open(path) || mapping->size() < 8U) {
     *error = "cannot map " + path.string();
@@ -121,7 +120,10 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
 
   const std::uint64_t payload_offset = 8U + header_size;
   for (const auto& [name, specification] : header.members()) {
-    if (name == "__metadata__" || !name.starts_with(kTextTensorPrefix)) {
+    if (name == "__metadata__" ||
+        !(name.starts_with(kTextTensorPrefix) ||
+          (include_vision && (name.starts_with("vision_tower.") ||
+                              name.starts_with("embed_vision."))))) {
       continue;
     }
     if (!specification.is_object()) {
@@ -221,7 +223,38 @@ std::vector<ExpectedTensor> ExpectedTextTensors(const TextConfig& config) {
   return tensors;
 }
 
-LoadResult LoadModelDirectory(const std::string& model_dir) {
+std::vector<ExpectedTensor> ExpectedVisionTensors() {
+  std::vector<ExpectedTensor> tensors = {
+      {"vision_tower.patch_embedder.input_proj.weight", {768, 768}},
+      {"vision_tower.patch_embedder.position_embedding_table", {2, 10240, 768}},
+      {"embed_vision.embedding_projection.weight", {512, 768}},
+  };
+  for (unsigned i = 0; i < 16; ++i) {
+    const std::string p =
+        "vision_tower.encoder.layers." + std::to_string(i) + ".";
+    for (const auto* name :
+         {"input_layernorm.weight", "post_attention_layernorm.weight",
+          "pre_feedforward_layernorm.weight",
+          "post_feedforward_layernorm.weight"}) {
+      tensors.push_back({p + name, {768}});
+    }
+    for (const auto* name : {"q_proj", "k_proj", "v_proj", "o_proj"}) {
+      tensors.push_back(
+          {p + "self_attn." + name + ".linear.weight", {768, 768}});
+    }
+    for (const auto* name : {"q_norm.weight", "k_norm.weight"}) {
+      tensors.push_back({p + "self_attn." + name, {64}});
+    }
+    for (const auto* name : {"gate_proj", "up_proj"}) {
+      tensors.push_back({p + "mlp." + name + ".linear.weight", {3072, 768}});
+    }
+    tensors.push_back({p + "mlp.down_proj.linear.weight", {768, 3072}});
+  }
+  return tensors;
+}
+
+LoadResult LoadModelDirectory(const std::string& model_dir,
+                              bool include_vision) {
   LoadResult result;
   result.store = std::make_unique<TensorStore>();
   const auto config = LoadModelConfigFromPath(model_dir);
@@ -241,12 +274,22 @@ LoadResult LoadModelDirectory(const std::string& model_dir) {
   const std::filesystem::path path =
       std::filesystem::path(model_dir) / "model.safetensors";
   std::string error;
-  if (!LoadSafetensors(path, result.store.get(), &result.mappings, &error)) {
+  if (!LoadSafetensors(path, result.store.get(), &result.mappings, &error,
+                       include_vision)) {
     result.error = "embedding_gemma2: " + error;
     return result;
   }
-  for (const ExpectedTensor& expected :
-       ExpectedTextTensors(result.config.text)) {
+  auto expected_tensors = ExpectedTextTensors(result.config.text);
+  if (include_vision) {
+    if (!result.config.supported_vision) {
+      result.error = "embedding_gemma2: unsupported vision configuration";
+      return result;
+    }
+    auto vision = ExpectedVisionTensors();
+    expected_tensors.insert(expected_tensors.end(), vision.begin(),
+                            vision.end());
+  }
+  for (const ExpectedTensor& expected : expected_tensors) {
     const Tensor* tensor = result.store->Find(expected.name);
     if (tensor == nullptr) {
       result.error = "embedding_gemma2: missing tensor " + expected.name;

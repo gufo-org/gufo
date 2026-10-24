@@ -26,6 +26,8 @@
 namespace {
 
 using gufo::server::EmbeddingBatch;
+using gufo::server::EmbeddingInput;
+using gufo::server::EmbeddingPart;
 using gufo::server::EmbeddingService;
 using gufo::server::EmbeddingServiceOptions;
 using gufo::server::EmbeddingStatus;
@@ -105,8 +107,15 @@ std::unique_ptr<EmbeddingService> MakeService(FakeRunner* runner) {
       .validate_model = false,
       .model_id = "embeddinggemma-2",
       .runner =
-          [runner](const std::vector<std::string>& texts, EmbeddingBatch* batch,
-                   std::string* error) {
+          [runner](const std::vector<EmbeddingInput>& inputs,
+                   EmbeddingBatch* batch, std::string* error) {
+            std::vector<std::string> texts;
+            for (const auto& input : inputs) {
+              std::string text;
+              for (const auto& part : input.content)
+                text += part.value;
+              texts.push_back(std::move(text));
+            }
             return runner->Run(texts, batch, error);
           },
   });
@@ -463,7 +472,7 @@ void TestLimitsAndFailures() {
       .validate_model = false,
       .model_id = "embeddinggemma-2",
       .runner =
-          [](const std::vector<std::string>&, EmbeddingBatch* batch,
+          [](const std::vector<EmbeddingInput>&, EmbeddingBatch* batch,
              std::string*) {
             batch->embeddings = {FakeEmbedding("only")};
             batch->token_counts = {3};
@@ -472,6 +481,64 @@ void TestLimitsAndFailures() {
   });
   ExpectError(Send(short_service, R"({"input":["a","b"]})"), 500,
               "embedding_failed", "inconsistent batch");
+}
+
+void TestTypedInput() {
+  std::vector<EmbeddingInput> captured;
+  EmbeddingService service(EmbeddingServiceOptions{
+      .model_root = {},
+      .validate_model = false,
+      .model_id = "embeddinggemma-2",
+      .runner = [&](const std::vector<EmbeddingInput>& inputs,
+                    EmbeddingBatch* batch, std::string*) {
+        captured = inputs;
+        for (std::size_t i = 0; i < inputs.size(); ++i) {
+          batch->embeddings.push_back(FakeEmbedding(std::to_string(i)));
+          batch->token_counts.push_back(i + 2);
+        }
+        return EmbeddingStatus::kOk;
+      }});
+  const auto response = Send(
+      service,
+      R"({"input":["plain",{"content":[{"type":"text","text":"before"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},{"type":"text","text":"after"}]},{"content":[{"type":"text","text":"typed"}]}]})");
+  Check(response.status == 200, "typed input succeeds");
+  Check(captured.size() == 3 && captured[1].content.size() == 3,
+        "typed inputs preserve item and part counts");
+  Check(captured[0].content[0].value == "plain" &&
+            captured[1].content[0].value == "before" &&
+            captured[1].content[1].type == EmbeddingPart::Type::kImage &&
+            captured[1].content[1].value == "data:image/png;base64,AAAA" &&
+            captured[1].content[2].value == "after" &&
+            captured[2].content[0].value == "typed",
+        "typed inputs preserve order and image URL");
+  for (const auto* body :
+       {R"({"input":[{"content":[]}]})",
+        R"({"input":[{"content":[{"type":"text","text":""}]}]})"})
+    ExpectError(Send(service, body), 400, "empty_input", "empty typed input");
+  for (
+      const auto* body :
+      {R"({"input":[{"content":"x"}]})", R"({"input":[{"content":[true]}]})",
+       R"({"input":[{"content":[{"type":"text","text":3}]}]})",
+       R"({"input":[{"content":[{"type":"image_url","image_url":"x"}]}]})",
+       R"({"input":[{"content":[{"type":"image_url","image_url":{"url":""}}]}]})",
+       R"({"input":[{"content":[{"type":"image_url","image_url":{"url":"x","detail":"low"}}]}]})"})
+    ExpectError(Send(service, body), 400, "invalid_parameter_type",
+                "malformed typed input");
+  ExpectError(
+      Send(
+          service,
+          R"({"input":[{"content":[{"type":"input_audio","input_audio":{}}]}]})"),
+      400, "unsupported_input", "unsupported modality");
+  std::string many = R"({"input":[{"content":[)";
+  for (unsigned i = 0; i < 33; ++i) {
+    if (i)
+      many += ',';
+    many +=
+        R"({"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}})";
+  }
+  many += "]}]}";
+  ExpectError(Send(service, many), 400, "too_many_images",
+              "image count bounded before reading");
 }
 
 void TestCancellation() {
@@ -488,10 +555,10 @@ void TestCancellation() {
       .validate_model = false,
       .model_id = "embeddinggemma-2",
       .runner =
-          [&cancelled](const std::vector<std::string>& texts,
+          [&cancelled](const std::vector<EmbeddingInput>& texts,
                        EmbeddingBatch* batch, std::string*) {
             cancelled = true;
-            batch->embeddings = {FakeEmbedding(texts[0])};
+            batch->embeddings = {FakeEmbedding(texts[0].content[0].value)};
             batch->token_counts = {3};
             return EmbeddingStatus::kOk;
           },
@@ -512,7 +579,7 @@ void TestServiceLifecycle() {
       .model_root = {},
       .validate_model = false,
       .model_id = {},
-      .runner = [](const std::vector<std::string>&, EmbeddingBatch*,
+      .runner = [](const std::vector<EmbeddingInput>&, EmbeddingBatch*,
                    std::string*) { return EmbeddingStatus::kOk; },
   });
   Check(defaulted.model_id() == "embeddinggemma-2", "default model id");
@@ -522,7 +589,7 @@ void TestServiceLifecycle() {
       .model_root = "/nonexistent/embeddinggemma",
       .validate_model = true,
       .model_id = {},
-      .runner = [](const std::vector<std::string>&, EmbeddingBatch*,
+      .runner = [](const std::vector<EmbeddingInput>&, EmbeddingBatch*,
                    std::string*) { return EmbeddingStatus::kOk; },
   });
   Check(!invalid.ready() && !invalid.initialization_error().empty(),
@@ -552,13 +619,13 @@ void TestServiceLifecycle() {
       .validate_model = false,
       .model_id = {},
       .runner =
-          [&](const std::vector<std::string>& texts, EmbeddingBatch* out,
+          [&](const std::vector<EmbeddingInput>& texts, EmbeddingBatch* out,
               std::string*) {
             if (active.fetch_add(1) != 0) {
               overlapped.fetch_add(1);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            out->embeddings = {FakeEmbedding(texts[0])};
+            out->embeddings = {FakeEmbedding(texts[0].content[0].value)};
             out->token_counts = {3};
             active.fetch_sub(1);
             return EmbeddingStatus::kOk;
@@ -586,6 +653,7 @@ int main() {
   TestInputValidation();
   TestModelAndJson();
   TestLimitsAndFailures();
+  TestTypedInput();
   TestCancellation();
   TestServiceLifecycle();
   std::cout << "PASS embedding_gemma2_embeddings_api_test\n";

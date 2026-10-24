@@ -77,8 +77,33 @@ add_executable(embedding_gemma2_embeddings_api_test
   ${PROJECT_SOURCE_DIR}/src/cli/serve/embeddings_api.cpp
   ${PROJECT_SOURCE_DIR}/src/cli/serve/embedding_service.cpp)
 target_link_libraries(embedding_gemma2_embeddings_api_test PRIVATE
-  gufo_embedding_gemma2 gufo_logging)
+  gufo_embedding_gemma2 gufo_logging gufo_core)
 add_test(NAME embedding_gemma2_embeddings_api_test
   COMMAND embedding_gemma2_embeddings_api_test)
 set_tests_properties(embedding_gemma2_embeddings_api_test PROPERTIES
   LABELS "cpu;models;embedding-gemma2;server;api;quality")
+
+add_executable(embedding_gemma2_image_processor_test image_golden_test.cpp)
+target_link_libraries(embedding_gemma2_image_processor_test PRIVATE
+  gufo_embedding_gemma2 gufo_core)
+target_compile_definitions(embedding_gemma2_image_processor_test PRIVATE
+  GUFO_EMBEDDING_GEMMA2_IMAGE_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/image_golden.json")
+add_test(NAME embedding_gemma2_image_processor_test
+  COMMAND embedding_gemma2_image_processor_test)
+set_tests_properties(embedding_gemma2_image_processor_test PROPERTIES
+  LABELS "cpu;models;embedding-gemma2;image;quality")
+
+if (ENGINE_ENABLE_HIP)
+  add_executable(embedding_gemma2_image_golden_hip_test image_golden_test.cpp)
+  target_link_libraries(embedding_gemma2_image_golden_hip_test PRIVATE
+    gufo_embedding_gemma2 gufo_core hip::host)
+  target_compile_definitions(embedding_gemma2_image_golden_hip_test PRIVATE
+    GUFO_IMAGE_TEST_GPU=1
+    GUFO_EMBEDDING_GEMMA2_IMAGE_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/image_golden.json")
+  add_test(NAME embedding_gemma2_image_golden_hip_test
+    COMMAND embedding_gemma2_image_golden_hip_test)
+  set_tests_properties(embedding_gemma2_image_golden_hip_test PROPERTIES
+    LABELS "gpu;models;embedding-gemma2;image;quality;external-model"
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE)
+endif()

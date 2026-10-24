@@ -13,6 +13,10 @@ namespace gufo::models::embedding_gemma2 {
 /// also round the scaled embedding to BF16 as that execution does; the CPU
 /// reference applies the same constant but keeps the product in float32.
 inline constexpr float kEmbedScale = 22.625F;
+inline constexpr std::uint32_t kImageTokenId = 258880;
+inline constexpr const char* kImageToken = "<|image|>";
+inline constexpr const char* kBeginImageToken = "<|image>";
+inline constexpr const char* kEndImageToken = "<image|>";
 
 enum class LayerType : std::uint8_t {
   kSlidingAttention,
@@ -28,8 +32,7 @@ struct LayerGeometry {
   float rope_theta{10000.0F};
 };
 
-/// The text backbone. The released checkpoint also carries vision and audio
-/// towers. This implementation reads none of their tensors.
+/// The text backbone shared by text and image inputs.
 struct TextConfig {
   std::uint32_t vocab_size{262144};
   std::uint32_t hidden_size{512};
@@ -54,6 +57,7 @@ struct ModelConfig {
   std::string text_model_type;
   std::string hidden_activation;
   TextConfig text;
+  bool supported_vision{false};
 };
 
 [[nodiscard]] std::optional<ModelConfig> ParseModelConfig(

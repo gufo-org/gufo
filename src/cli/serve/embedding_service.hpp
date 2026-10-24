@@ -24,10 +24,20 @@ struct EmbeddingBatch {
   std::size_t failed_index{0};
 };
 
+struct EmbeddingPart {
+  enum class Type { kText, kImage };
+  Type type{Type::kText};
+  std::string value;
+};
+struct EmbeddingInput {
+  std::vector<EmbeddingPart> content;
+};
+
 enum class EmbeddingStatus {
   kOk,
   kCancelled,
   kInputTooLong,
+  kInvalidInput,
   kFailed,
   /// The device failed a probe after an error. The service stays lost.
   kDeviceLost,
@@ -35,7 +45,7 @@ enum class EmbeddingStatus {
 
 struct EmbeddingServiceOptions {
   using Runner =
-      std::function<EmbeddingStatus(const std::vector<std::string>& texts,
+      std::function<EmbeddingStatus(const std::vector<EmbeddingInput>& inputs,
                                     EmbeddingBatch* batch, std::string* error)>;
 
   std::filesystem::path model_root;
@@ -45,12 +55,14 @@ struct EmbeddingServiceOptions {
   Runner runner;
 };
 
-/// Synchronous native HIP EmbeddingGemma 2 text embedding service.
+/// Native HIP EmbeddingGemma 2 text and image embedding service.
 class EmbeddingService {
 public:
   /// Longest accepted input in tokens, including the surrounding markers.
   static constexpr std::size_t kMaxInputTokens =
       models::embedding_gemma2::hip::kMaxSequenceTokens;
+
+  static constexpr std::size_t kMaxImages = 32;
 
   explicit EmbeddingService(EmbeddingServiceOptions options);
   ~EmbeddingService();
@@ -75,6 +87,11 @@ public:
                                       const std::function<bool()>& is_cancelled,
                                       EmbeddingBatch* batch,
                                       std::string* error = nullptr);
+
+  [[nodiscard]] EmbeddingStatus EmbedInputs(
+      const std::vector<EmbeddingInput>& inputs,
+      const std::function<bool()>& is_cancelled, EmbeddingBatch* batch,
+      std::string* error = nullptr);
 
 private:
   struct Impl;

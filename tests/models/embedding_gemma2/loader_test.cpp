@@ -50,6 +50,17 @@ int main(int argc, char** argv) {
             nullptr,
         "vision tensors must not be indexed");
 
+  const auto multimodal =
+      embedding_gemma2::LoadModelDirectory(model_root.string(), true);
+  Check(multimodal.ok, multimodal.error);
+  Check(multimodal.config.supported_vision,
+        "released vision configuration is supported");
+  Check(multimodal.store->size() ==
+            expected.size() + embedding_gemma2::ExpectedVisionTensors().size(),
+        "multimodal store holds text and vision only");
+  Check(multimodal.store->Find(
+            "vision_tower.patch_embedder.input_proj.weight") != nullptr,
+        "vision weights are indexed on demand");
   std::cout << "PASS embedding_gemma2_loader_test\n";
   return 0;
 }

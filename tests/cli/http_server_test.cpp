@@ -3099,11 +3099,14 @@ std::shared_ptr<gufo::server::EmbeddingService> MakeEmbeddingService(
           .validate_model = !ready,  // Validation fails without a checkpoint.
           .model_id = "embedding-test",
           .runner =
-              [](const std::vector<std::string>& texts, EmbeddingBatch* batch,
-                 std::string*) {
+              [](const std::vector<gufo::server::EmbeddingInput>& texts,
+                 EmbeddingBatch* batch, std::string*) {
                 for (const auto& text : texts) {
                   batch->embeddings.push_back({1.0F, 0.0F});
-                  batch->token_counts.push_back(text.size() + 2U);
+                  std::size_t count = 2;
+                  for (const auto& part : text.content)
+                    count += part.value.size();
+                  batch->token_counts.push_back(count);
                 }
                 return EmbeddingStatus::kOk;
               },
@@ -3218,7 +3221,7 @@ void TestEmbeddingService() {
             .validate_model = false,
             .model_id = "embedding-test",
             .runner =
-                [](const std::vector<std::string>&,
+                [](const std::vector<gufo::server::EmbeddingInput>&,
                    gufo::server::EmbeddingBatch*, std::string*) {
                   return gufo::server::EmbeddingStatus::kDeviceLost;
                 },

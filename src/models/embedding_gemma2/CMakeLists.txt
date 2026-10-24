@@ -1,6 +1,7 @@
-# EmbeddingGemma 2 text embeddings: model-private BF16 safetensors runtime.
+# EmbeddingGemma 2 text and image embeddings: model-private BF16 safetensors runtime.
 
 add_library(gufo_embedding_gemma2 STATIC
+  image_processor.cpp
   config.cpp
   loader.cpp
   tensor.cpp
@@ -22,7 +23,8 @@ if (ENGINE_ENABLE_HIP)
   target_sources(gufo_embedding_gemma2 PRIVATE
     hip/blas.cpp
     hip/encoder_runtime.cpp
-    hip/ops.hip)
+    hip/ops.hip
+    hip/vision_ops.hip)
   target_compile_definitions(gufo_embedding_gemma2 PUBLIC ENGINE_ENABLE_HIP=1)
   target_link_libraries(gufo_embedding_gemma2 PUBLIC
     hip::host

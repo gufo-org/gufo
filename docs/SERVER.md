@@ -624,7 +624,7 @@ atomic publication.
 
 ## Embeddings
 
-EmbeddingGemma 2 (`google/embeddinggemma-2`) serves text embeddings from its own model process.  It is a 768-dimension, BF16, 8192-token-context encoder:
+EmbeddingGemma 2 (`google/embeddinggemma-2`) serves text and image embeddings from its own model process.  It is a 768-dimension, BF16, 8192-token-context encoder:
 
 ```sh
 ./result/bin/gufo serve --port 8080 embedding --model /persist/models/embeddinggemma-2
@@ -658,14 +658,16 @@ The response holds one embedding per input in request order:
 }
 ```
 
-- `input` is required.  It is a string or an array of 1 to 2048 strings.  The server rejects empty strings.  Token-array input, meaning integers or arrays of integers, is not supported and returns 400 `unsupported_input`, so send text.
+- `input` is required.  It is a string or an array of 1 to 2048 strings or typed content objects.  The server rejects empty strings.  Token-array input, meaning integers or arrays of integers, is not supported and returns 400 `unsupported_input`, so send text.
 - `model` is optional.  When present it must equal the served model ID, or the request returns 404 `model_not_found`.
 - `encoding_format` is `float` by default or `base64`.  Base64 carries the little-endian float32 bytes of the vector, as OpenAI's SDKs expect.  The server writes floats with enough digits to round-trip a float32 exactly.
 - `dimensions` is optional and must be 128, 256, 512, or 768, which is the default.  Any other value returns 400 `invalid_dimensions`.  A smaller value keeps the leading components of the normalized vector, which is Matryoshka truncation, and renormalizes them to unit length.
 - `user` is accepted and ignored when it is a string, and a non-string `user` returns 400 `invalid_parameter_type`.  The server rejects other members with 400 `unsupported_field`.
 - Every vector is mean-pooled and L2-normalized, so the dot product of two vectors is their cosine similarity.
 - Each input may hold at most 8192 tokens, counting the `<bos>` and `<eos>` markers the tokenizer adds.  The server refuses longer inputs instead of truncating them, with 400 `context_length_exceeded`, and the message names the input index.  `usage.prompt_tokens` and `usage.total_tokens` count every token of every input, markers included.
-- Errors use the standard error object.  Other 400 codes are `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`.  A failed encode returns 500 `embedding_failed`.  A service that is not ready returns 503 `embedding_service_unavailable`.  A GPU failure that the device probe confirms returns 503 `device_lost` and shuts the server down as described under [Lifecycle and limits](#lifecycle-and-limits).  The usual authentication, `--max-request-bytes`, and request logging apply.
+- Errors use the standard error object.  Other 400 codes are `too_many_images`, `invalid_image_input`, `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`.  A failed encode returns 500 `embedding_failed`.  A service that is not ready returns 503 `embedding_service_unavailable`.  A GPU failure that the device probe confirms returns 503 `device_lost` and shuts the server down as described under [Lifecycle and limits](#lifecycle-and-limits).  The usual authentication, `--max-request-bytes`, and request logging apply.
+
+Typed items follow llama.cpp's form: `{"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}},{"type":"text","text":"\n"}]}`. Each item produces one vector in the same space as text. Text parts retain their order and whitespace. PNG, JPEG and WebP use the existing image reader, including public-HTTPS checks and the shared 20 MiB / 15-second budget. Embeddings accept at most 32 images per request, 32 megapixels per image, and 32,768 pixels on either side. Image soft tokens and their markers count toward context and usage. The first image request loads the vision weights. See [image embeddings](models/embeddinggemma-2/README.md#images) for exact preprocessing and index migration. Audio/video content parts and the legacy `/embeddings` route are unsupported.
 
 **Task prefixes.** EmbeddingGemma 2 was trained with short task prefixes, and the server does not add them, so clients must.  Queries use `task: search result | query: {text}`, and documents use `title: none | text: {text}`, or `title: {title} | text: {text}` when a title is known.  Omitting the prefixes still works but lowers retrieval quality.  Embed a query and its documents with matching conventions.
 

@@ -171,39 +171,86 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
   if (input == nullptr) {
     return BadRequest("'input' is required", "missing_input");
   }
-  std::vector<std::string> texts;
-  if (input->is_string()) {
-    texts.push_back(input->str());
-  } else if (input->is_array()) {
-    if (input->items().empty()) {
-      return BadRequest("'input' must not be an empty array", "empty_input");
+  std::vector<EmbeddingInput> inputs;
+  std::size_t image_count = 0;
+  const auto parse_item = [&](const json::Value& item) -> HttpResponse {
+    EmbeddingInput parsed;
+    if (item.is_string()) {
+      if (item.str().empty())
+        return BadRequest("'input' must not contain empty strings",
+                          "empty_input");
+      parsed.content.push_back({EmbeddingPart::Type::kText, item.str()});
+    } else if (item.is_object()) {
+      const auto* content = item.find("content");
+      if (item.size() != 1 || !content || !content->is_array())
+        return BadRequest("typed input requires a 'content' array",
+                          "invalid_parameter_type");
+      if (content->items().empty())
+        return BadRequest("'content' must not be empty", "empty_input");
+      for (const auto& part : content->items()) {
+        if (!part.is_object())
+          return BadRequest("content parts must be objects",
+                            "invalid_parameter_type");
+        const auto type = part.member_str("type");
+        if (type == "text") {
+          const auto* text = part.find("text");
+          if (part.size() != 2 || !text || !text->is_string())
+            return BadRequest("text parts require a 'text' string",
+                              "invalid_parameter_type");
+          parsed.content.push_back({EmbeddingPart::Type::kText, text->str()});
+        } else if (type == "image_url") {
+          const auto* image = part.find("image_url");
+          const auto* url =
+              image && image->is_object() ? image->find("url") : nullptr;
+          if (part.size() != 2 || !url || !url->is_string() ||
+              url->str().empty() || image->size() != 1)
+            return BadRequest("image parts require 'image_url': {'url': '...'}",
+                              "invalid_parameter_type");
+          if (++image_count > EmbeddingService::kMaxImages)
+            return BadRequest("embedding requests accept at most 32 images",
+                              "too_many_images");
+          parsed.content.push_back({EmbeddingPart::Type::kImage, url->str()});
+        } else {
+          return BadRequest("unsupported embedding content type: " + type,
+                            "unsupported_input");
+        }
+      }
+      if (std::ranges::none_of(parsed.content,
+                               [](const auto& p) { return !p.value.empty(); }))
+        return BadRequest("'content' must contain text or an image",
+                          "empty_input");
+    } else if (item.is_number() || item.is_array()) {
+      return BadRequest("token-array input is not supported; send strings",
+                        "unsupported_input");
+    } else {
+      return BadRequest("'input' items must be strings or content objects",
+                        "invalid_parameter_type");
     }
-    if (input->items().size() > kMaximumInputs) {
+    inputs.push_back(std::move(parsed));
+    HttpResponse ok;
+    ok.status = 200;
+    return ok;
+  };
+  if (input->is_string()) {
+    auto result = parse_item(*input);
+    if (result.status != 200)
+      return result;
+  } else if (input->is_array()) {
+    if (input->items().empty())
+      return BadRequest("'input' must not be an empty array", "empty_input");
+    if (input->size() > kMaximumInputs)
       return BadRequest("'input' accepts at most " +
                             std::to_string(kMaximumInputs) + " items",
                         "too_many_inputs");
-    }
-    for (const json::Value& item : input->items()) {
-      if (item.is_number() || item.is_array()) {
-        return BadRequest("token-array input is not supported; send strings",
-                          "unsupported_input");
-      }
-      if (!item.is_string()) {
-        return BadRequest("'input' items must be strings",
-                          "invalid_parameter_type");
-      }
-      texts.push_back(item.str());
+    for (const auto& item : input->items()) {
+      auto result = parse_item(item);
+      if (result.status != 200)
+        return result;
     }
   } else {
-    return BadRequest("'input' must be a string or an array of strings",
-                      "invalid_parameter_type");
-  }
-  for (std::size_t index = 0; index < texts.size(); ++index) {
-    if (texts[index].empty()) {
-      return BadRequest("'input' must not contain empty strings (index " +
-                            std::to_string(index) + ")",
-                        "empty_input");
-    }
+    return BadRequest(
+        "'input' must be a string or an array of strings or content objects",
+        "invalid_parameter_type");
   }
 
   bool base64 = false;
@@ -233,7 +280,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
 
   EmbeddingBatch batch;
   std::string error;
-  switch (service.Embed(texts, request.is_cancelled, &batch, &error)) {
+  switch (service.EmbedInputs(inputs, request.is_cancelled, &batch, &error)) {
     case EmbeddingStatus::kOk:
       break;
     case EmbeddingStatus::kCancelled:
@@ -244,6 +291,10 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
                             std::to_string(EmbeddingService::kMaxInputTokens) +
                             "-token context window",
                         "context_length_exceeded");
+    case EmbeddingStatus::kInvalidInput:
+      return BadRequest(
+          error.empty() ? "invalid embedding input" : std::move(error),
+          "invalid_image_input");
     case EmbeddingStatus::kFailed:
       return Error(500, error.empty() ? "embedding failed" : std::move(error),
                    "embedding_failed");
@@ -254,8 +305,8 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
     return Error(499, "embedding request cancelled", "cancelled");
   }
 
-  if (batch.embeddings.size() != texts.size() ||
-      batch.token_counts.size() != texts.size()) {
+  if (batch.embeddings.size() != inputs.size() ||
+      batch.token_counts.size() != inputs.size()) {
     return Error(500, "embedding runtime returned an inconsistent batch",
                  "embedding_failed");
   }
@@ -312,7 +363,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
   };
   response.log_details =
       "model=" + service.model_id() +
-      " inputs=" + std::to_string(texts.size()) +
+      " inputs=" + std::to_string(inputs.size()) +
       " prompt_tokens=" + std::to_string(prompt_tokens) + " dimensions=" +
       std::to_string(dimensions != 0 ? dimensions
                                      : batch.embeddings.front().size()) +

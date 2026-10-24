@@ -1,13 +1,17 @@
 #include "src/cli/serve/embedding_service.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 
 #include "src/cli/serve/logging.hpp"
+#include "src/core/image.hpp"
+#include "src/models/embedding_gemma2/image_processor.hpp"
 #include "src/models/embedding_gemma2/loader.hpp"
 #include "src/models/embedding_gemma2/tokenizer.hpp"
 
@@ -46,6 +50,8 @@ struct EmbeddingService::Impl {
       return;
     }
     tokenizer.emplace(std::move(*loaded));
+    (void)models::embedding_gemma2::ValidateImageProcessor(
+        options.model_root.string(), &image_processor_error);
     encoder = models::embedding_gemma2::hip::EncoderRuntime::Create(
         options.model_root.string(), &error);
     if (encoder == nullptr) {
@@ -62,30 +68,97 @@ struct EmbeddingService::Impl {
   // Tokenizes before taking any device turn, so a large request does not
   // block other requests that are ready to run. The encoder hands out device
   // turns one batch at a time.
-  EmbeddingStatus RunNative(const std::vector<std::string>& texts,
+  EmbeddingStatus RunNative(const std::vector<EmbeddingInput>& inputs,
                             const std::function<bool()>& is_cancelled,
                             EmbeddingBatch* batch, std::string* error) {
-    std::vector<std::vector<std::uint32_t>> sequences;
-    sequences.reserve(texts.size());
-    batch->token_counts.clear();
-    // Normalization never shortens the text and no token covers more than
-    // max_token_bytes() of it, so a longer input cannot fit. Rejecting it here
-    // bounds the tokenizing work an oversized input can cause.
+    using namespace models::embedding_gemma2;
+    std::vector<hip::EncoderSequence> sequences;
+    sequences.reserve(inputs.size());
+    core::ImageReadBudget budget;
     const std::size_t byte_limit =
         EmbeddingService::kMaxInputTokens * tokenizer->max_token_bytes();
-    for (std::size_t index = 0; index < texts.size(); ++index) {
-      if (texts[index].size() > byte_limit) {
+    std::size_t image_count = 0;
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+      if (is_cancelled && is_cancelled())
+        return EmbeddingStatus::kCancelled;
+      hip::EncoderSequence sequence;
+      std::string text;
+      // Use the tokenizer once for the complete input, preserving BPE merges
+      // across adjacent text parts and the reference BOS/EOS framing.
+      for (const auto& part : inputs[index].content) {
+        if (is_cancelled && is_cancelled())
+          return EmbeddingStatus::kCancelled;
+        if (part.type == EmbeddingPart::Type::kText) {
+          text += part.value;
+        } else {
+          if (!encoder->config().supported_vision) {
+            if (error)
+              *error = "unsupported embedding vision configuration";
+            return EmbeddingStatus::kInvalidInput;
+          }
+          if (!image_processor_error.empty()) {
+            if (error)
+              *error = image_processor_error;
+            return EmbeddingStatus::kInvalidInput;
+          }
+          if (++image_count > EmbeddingService::kMaxImages) {
+            if (error)
+              *error = "embedding requests accept at most 32 images";
+            return EmbeddingStatus::kInvalidInput;
+          }
+          try {
+            const auto bytes = core::ReadImageUrl(part.value, budget);
+            auto patches = ProcessImage(core::DecodeImage(bytes));
+            text += kBeginImageToken;
+            for (std::size_t j = 0; j < patches.soft_tokens(); ++j)
+              text += kImageToken;
+            text += kEndImageToken;
+            sequence.images.push_back({0, std::move(patches)});
+          } catch (const std::exception& failure) {
+            if (error)
+              *error = failure.what();
+            return EmbeddingStatus::kInvalidInput;
+          }
+        }
+        if (text.size() > byte_limit) {
+          batch->failed_index = index;
+          return EmbeddingStatus::kInputTooLong;
+        }
+      }
+      sequence.tokens = tokenizer->Encode(text);
+      if (!sequence.images.empty()) {
+        std::size_t expected = 0;
+        for (const auto& image : sequence.images)
+          expected += image.patches.soft_tokens();
+        // Validate after joining and tokenizing: a literal placeholder may
+        // straddle adjacent text parts. It must never capture another image's
+        // features or leave an unfilled image token in the text backbone.
+        if (static_cast<std::size_t>(std::ranges::count(
+                sequence.tokens, kImageTokenId)) != expected) {
+          if (error)
+            *error =
+                "text must not contain image placeholders when images are "
+                "supplied";
+          return EmbeddingStatus::kInvalidInput;
+        }
+      }
+      if (sequence.tokens.size() > EmbeddingService::kMaxInputTokens) {
         batch->failed_index = index;
         return EmbeddingStatus::kInputTooLong;
       }
-      sequences.push_back(tokenizer->Encode(texts[index]));
-      if (sequences.back().size() > EmbeddingService::kMaxInputTokens) {
-        batch->failed_index = index;
-        return EmbeddingStatus::kInputTooLong;
+      std::size_t cursor = 0;
+      for (auto& image : sequence.images) {
+        while (cursor < sequence.tokens.size() &&
+               sequence.tokens[cursor] != kImageTokenId)
+          ++cursor;
+        image.offset = cursor;
+        cursor += image.patches.soft_tokens();
       }
-      batch->token_counts.push_back(sequences.back().size());
+      batch->token_counts.push_back(sequence.tokens.size());
+      sequences.push_back(std::move(sequence));
     }
-    if (!encoder->Embed(sequences, &batch->embeddings, error, is_cancelled)) {
+    if (!encoder->EmbedMultimodal(sequences, &batch->embeddings, error,
+                                  is_cancelled)) {
       if (encoder->device_lost()) {
         return EmbeddingStatus::kDeviceLost;
       }
@@ -107,6 +180,7 @@ struct EmbeddingService::Impl {
   std::unique_ptr<models::embedding_gemma2::hip::EncoderRuntime> encoder;
 #endif
   std::string initialization_error;
+  std::string image_processor_error;
   // Serializes the injected runner, which has no device turns of its own.
   std::mutex runner_mutex;
   std::atomic<bool> device_lost{false};
@@ -142,6 +216,16 @@ EmbeddingStatus EmbeddingService::Embed(
     const std::vector<std::string>& texts,
     const std::function<bool()>& is_cancelled, EmbeddingBatch* batch,
     std::string* error) {
+  std::vector<EmbeddingInput> inputs;
+  for (const auto& text : texts)
+    inputs.push_back({{{EmbeddingPart::Type::kText, text}}});
+  return EmbedInputs(inputs, is_cancelled, batch, error);
+}
+
+EmbeddingStatus EmbeddingService::EmbedInputs(
+    const std::vector<EmbeddingInput>& inputs,
+    const std::function<bool()>& is_cancelled, EmbeddingBatch* batch,
+    std::string* error) {
   *batch = {};
   if (!impl_->ready) {
     if (error != nullptr) {
@@ -158,10 +242,10 @@ EmbeddingStatus EmbeddingService::Embed(
       }
       return EmbeddingStatus::kCancelled;
     }
-    status = impl_->options.runner(texts, batch, error);
+    status = impl_->options.runner(inputs, batch, error);
   } else {
 #if defined(ENGINE_ENABLE_HIP)
-    status = impl_->RunNative(texts, is_cancelled, batch, error);
+    status = impl_->RunNative(inputs, is_cancelled, batch, error);
 #endif
   }
   if (status == EmbeddingStatus::kDeviceLost &&

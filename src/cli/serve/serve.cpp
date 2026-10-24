@@ -551,7 +551,7 @@ void PrintServeHelp(std::string_view program_name,
     std::filesystem::path model;
     std::string name = "embeddinggemma-2";
     ArgParser parser(std::string(program_name) + " serve embedding",
-                     "Serve EmbeddingGemma 2 text embeddings.");
+                     "Serve EmbeddingGemma 2 text and image embeddings.");
     AddEmbeddingOptions(parser, &model, &name);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
@@ -788,7 +788,7 @@ void PrintServeHelp(std::string_view program_name,
       << "  tts       Serve Qwen3-TTS speech synthesis (/v1/audio/speech)\n"
       << "  asr       Serve Qwen3-ASR transcription "
          "(/v1/audio/transcriptions)\n"
-      << "  embedding Serve EmbeddingGemma 2 text embeddings "
+      << "  embedding Serve EmbeddingGemma 2 text and image embeddings "
          "(/v1/embeddings)\n\n"
       << "Server:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
@@ -981,7 +981,7 @@ int RunServe(std::span<const char* const> args) {
     std::filesystem::path model;
     std::string name = "embeddinggemma-2";
     ArgParser parser("gufo serve embedding",
-                     "Serve EmbeddingGemma 2 text embeddings.");
+                     "Serve EmbeddingGemma 2 text and image embeddings.");
     AddEmbeddingOptions(parser, &model, &name);
     add_server_options(parser, false);
     if (!parser.Parse(sub_args, &parse_err)) {

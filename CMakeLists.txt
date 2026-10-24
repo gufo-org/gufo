@@ -102,7 +102,7 @@ add_subdirectory(src/models/qwen3_tts)
 # Qwen3-ASR — model-private 1.7B speech recognition runtime.
 add_subdirectory(src/models/qwen3_asr)
 
-# EmbeddingGemma 2 is a model-private BF16 text embedding runtime.
+# EmbeddingGemma 2 is a model-private BF16 text/image embedding runtime.
 add_subdirectory(src/models/embedding_gemma2)
 
 # Compiler warnings and sanitizers

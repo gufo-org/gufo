@@ -17,6 +17,7 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/embedding_gemma2/hip/blas.hpp"
 #include "src/models/embedding_gemma2/hip/ops.hpp"
+#include "src/models/embedding_gemma2/hip/vision_ops.hpp"
 #include "src/models/embedding_gemma2/loader.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
@@ -141,6 +142,14 @@ struct LayerWeights {
 
 struct EncoderRuntime::Impl {
   LoadResult loaded;
+  std::string model_dir;
+  struct Vision {
+    DeviceBuffer input, position_table, projection;
+    std::vector<LayerWeights> layers;
+    DeviceBuffer pixels, pixels_bf16, state, normed, qkv, query, key, value,
+        context, temp, gate_up, act, pooled, features;
+  };
+  std::unique_ptr<Vision> vision;
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
   GemmLt gemm_lt;
@@ -205,6 +214,8 @@ struct EncoderRuntime::Impl {
   }
 
   void Upload();
+  void LoadVision();
+  void RunVision(const ImagePatches& image, std::size_t offset);
   void Allocate();
   // Mirrors the text server's probe: after a reset even a 4-byte memset
   // fails, while an ordinary kernel or library failure leaves it working.
@@ -224,7 +235,7 @@ struct EncoderRuntime::Impl {
     }
   }
 
-  void RunBatch(const std::vector<std::vector<std::uint32_t>>& sequences,
+  void RunBatch(const std::vector<EncoderSequence>& sequences,
                 std::size_t first, std::size_t last, std::size_t tokens,
                 std::vector<std::vector<float>>* embeddings);
 };
@@ -278,6 +289,121 @@ void EncoderRuntime::Impl::Upload() {
   }
 }
 
+void EncoderRuntime::Impl::LoadVision() {
+  if (vision)
+    return;
+  std::string processor_error;
+  if (!ValidateImageProcessor(model_dir, &processor_error))
+    throw std::runtime_error(processor_error);
+  auto weights = LoadModelDirectory(model_dir, true);
+  if (!weights.ok)
+    throw std::runtime_error(weights.error);
+  auto candidate = std::make_unique<Vision>();
+  const auto upload = [&](const std::string& name) {
+    const auto* tensor = weights.store->Find(name);
+    DeviceBuffer buffer(tensor->byte_count);
+    buffer.Upload(0, tensor->data, tensor->byte_count);
+    return buffer;
+  };
+  candidate->input = upload("vision_tower.patch_embedder.input_proj.weight");
+  candidate->position_table =
+      upload("vision_tower.patch_embedder.position_embedding_table");
+  candidate->projection = upload("embed_vision.embedding_projection.weight");
+  candidate->layers.resize(16);
+  for (unsigned i = 0; i < 16; ++i) {
+    auto& layer = candidate->layers[i];
+    const std::string p =
+        "vision_tower.encoder.layers." + std::to_string(i) + ".";
+    layer.input_norm = upload(p + "input_layernorm.weight");
+    layer.post_attention_norm = upload(p + "post_attention_layernorm.weight");
+    layer.pre_feedforward_norm = upload(p + "pre_feedforward_layernorm.weight");
+    layer.post_feedforward_norm =
+        upload(p + "post_feedforward_layernorm.weight");
+    layer.qkv = UploadConcatenated(*weights.store,
+                                   {p + "self_attn.q_proj.linear.weight",
+                                    p + "self_attn.k_proj.linear.weight",
+                                    p + "self_attn.v_proj.linear.weight"});
+    layer.output = upload(p + "self_attn.o_proj.linear.weight");
+    layer.query_norm = upload(p + "self_attn.q_norm.weight");
+    layer.key_norm = upload(p + "self_attn.k_norm.weight");
+    layer.gate_up = UploadConcatenated(
+        *weights.store,
+        {p + "mlp.gate_proj.linear.weight", p + "mlp.up_proj.linear.weight"});
+    layer.down = upload(p + "mlp.down_proj.linear.weight");
+  }
+  constexpr std::size_t n = 2520, h = 768;
+  candidate->pixels = DeviceBuffer(n * h * sizeof(float));
+  candidate->pixels_bf16 = DeviceBuffer(n * h * 2);
+  candidate->state = DeviceBuffer(n * h * sizeof(float));
+  candidate->normed = DeviceBuffer(n * h * 2);
+  candidate->qkv = DeviceBuffer(n * h * 3 * sizeof(float));
+  candidate->query = DeviceBuffer(n * h * 2);
+  candidate->key = DeviceBuffer(n * h * 2);
+  candidate->value = DeviceBuffer(n * h * 2);
+  candidate->context = DeviceBuffer(n * h * 2);
+  candidate->temp = DeviceBuffer(n * h * sizeof(float));
+  candidate->gate_up =
+      DeviceBuffer(std::min(n, kChunkTokens) * 6144 * sizeof(float));
+  candidate->act = DeviceBuffer(n * 3072 * 2);
+  candidate->pooled = DeviceBuffer(280 * h * 2);
+  candidate->features = DeviceBuffer(280 * 512 * sizeof(float));
+  vision = std::move(candidate);
+}
+
+void EncoderRuntime::Impl::RunVision(const ImagePatches& image,
+                                     std::size_t offset) {
+  LoadVision();
+  auto& v = *vision;
+  const std::size_t n = std::size_t{image.rows} * image.columns;
+  v.pixels.UploadAsync(0, image.pixels.data(),
+                       image.pixels.size() * sizeof(float), stream);
+  LaunchVisionPixels(v.pixels.get<float>(), v.pixels_bf16.get(), n * 768,
+                     stream);
+  LaunchGemmBf16(blas, v.input.get(), v.pixels_bf16.get(), v.temp.get<float>(),
+                 n, 768, 768, stream);
+  LaunchVisionPositions(v.temp.get<float>(), v.position_table.get(),
+                        v.state.get<float>(), n, image.columns, stream);
+  for (const auto& layer : v.layers) {
+    LaunchRmsNormToBf16(v.state.get<float>(), layer.input_norm.get(),
+                        v.normed.get(), n, 768, 1e-6F, stream);
+    LaunchGemmBf16(blas, layer.qkv.get(), v.normed.get(), v.qkv.get<float>(), n,
+                   2304, 768, stream);
+    LaunchVisionQkv(v.qkv.get<float>(), layer.query_norm.get(),
+                    layer.key_norm.get(), v.query.get(), v.key.get(),
+                    v.value.get(), n, image.columns, stream);
+    LaunchVisionAttention(v.query.get(), v.key.get(), v.value.get(),
+                          v.context.get(), n, stream);
+    LaunchGemmBf16(blas, layer.output.get(), v.context.get(),
+                   v.temp.get<float>(), n, 768, 768, stream);
+    LaunchRmsNormResidual(v.temp.get<float>(), layer.post_attention_norm.get(),
+                          v.state.get<float>(), n, 768, 1e-6F, stream);
+    LaunchRmsNormToBf16(v.state.get<float>(), layer.pre_feedforward_norm.get(),
+                        v.normed.get(), n, 768, 1e-6F, stream);
+    for (std::size_t row = 0; row < n; row += kChunkTokens) {
+      const std::size_t count = std::min(kChunkTokens, n - row);
+      LaunchGemmBf16(blas, layer.gate_up.get(),
+                     v.normed.get<std::uint16_t>() + row * 768,
+                     v.gate_up.get<float>(), count, 6144, 768, stream);
+      LaunchGeglu(v.gate_up.get<float>(),
+                  v.act.get<std::uint16_t>() + row * 3072, count, 3072, stream);
+    }
+    LaunchGemmBf16(blas, layer.down.get(), v.act.get(), v.temp.get<float>(), n,
+                   768, 3072, stream);
+    LaunchRmsNormResidual(v.temp.get<float>(),
+                          layer.post_feedforward_norm.get(),
+                          v.state.get<float>(), n, 768, 1e-6F, stream);
+  }
+  LaunchVisionPool(v.state.get<float>(), v.pooled.get(), image.rows,
+                   image.columns, stream);
+  LaunchGemmBf16(blas, v.projection.get(), v.pooled.get(),
+                 v.features.get<float>(), image.soft_tokens(), 512, 768,
+                 stream);
+  LaunchVisionInsert(v.features.get<float>(), state.get<float>() + offset * 512,
+                     embeddings_bf16.get<std::uint16_t>() + offset * 512,
+                     image.soft_tokens(), stream);
+  HIP_CHECK(hipGetLastError());
+}
+
 void EncoderRuntime::Impl::Allocate() {
   const TextConfig& text = loaded.config.text;
   std::size_t qkv_width = 0;
@@ -324,12 +450,12 @@ void EncoderRuntime::Impl::Warmup() {
     rows = GemmLt::Bucket(rows + 1, kChunkTokens);
     std::vector<std::uint32_t> filler(rows, 1000);
     unused.clear();
-    RunBatch({filler}, 0, 1, rows, &unused);
+    RunBatch({{std::move(filler), {}}}, 0, 1, rows, &unused);
   } while (rows < kChunkTokens);
 }
 
 void EncoderRuntime::Impl::RunBatch(
-    const std::vector<std::vector<std::uint32_t>>& sequences, std::size_t first,
+    const std::vector<EncoderSequence>& sequences, std::size_t first,
     std::size_t last, std::size_t tokens,
     std::vector<std::vector<float>>* embeddings) {
   const TextConfig& text = loaded.config.text;
@@ -346,9 +472,10 @@ void EncoderRuntime::Impl::RunBatch(
   host_ids.reserve(tokens);
   for (std::size_t s = first; s < last; ++s) {
     const auto begin = static_cast<std::uint32_t>(host_ids.size());
-    const auto end = begin + static_cast<std::uint32_t>(sequences[s].size());
-    for (std::size_t t = 0; t < sequences[s].size(); ++t) {
-      host_ids.push_back(sequences[s][t]);
+    const auto end =
+        begin + static_cast<std::uint32_t>(sequences[s].tokens.size());
+    for (std::size_t t = 0; t < sequences[s].tokens.size(); ++t) {
+      host_ids.push_back(sequences[s].tokens[t]);
       host_positions.push_back(static_cast<std::uint32_t>(t));
       host_begin.push_back(begin);
       host_end.push_back(end);
@@ -369,6 +496,12 @@ void EncoderRuntime::Impl::RunBatch(
   LaunchEmbeddingLookup(embed_table.get(), token_ids.get<std::uint32_t>(),
                         state.get<float>(), embeddings_bf16.get(), tokens,
                         hidden, kEmbedScale, stream);
+
+  for (std::size_t s = first; s < last; ++s) {
+    for (const auto& image : sequences[s].images) {
+      RunVision(image.patches, host_offsets[s - first] + image.offset);
+    }
+  }
 
   const float ple_scale = 1.0F / std::sqrt(static_cast<float>(hidden));
   for (std::size_t index = 0; index < layers.size(); ++index) {
@@ -514,6 +647,7 @@ std::unique_ptr<EncoderRuntime> EncoderRuntime::Create(
   };
   auto impl = std::make_unique<Impl>();
   try {
+    impl->model_dir = model_dir;
     impl->loaded = LoadModelDirectory(model_dir);
     if (!impl->loaded.ok) {
       return fail(impl->loaded.error);
@@ -551,6 +685,17 @@ bool EncoderRuntime::Embed(
     const std::vector<std::vector<std::uint32_t>>& sequences,
     std::vector<std::vector<float>>* embeddings, std::string* error,
     const std::function<bool()>& is_cancelled) {
+  std::vector<EncoderSequence> inputs;
+  inputs.reserve(sequences.size());
+  for (const auto& tokens : sequences)
+    inputs.push_back({tokens, {}});
+  return EmbedMultimodal(inputs, embeddings, error, is_cancelled);
+}
+
+bool EncoderRuntime::EmbedMultimodal(
+    const std::vector<EncoderSequence>& sequences,
+    std::vector<std::vector<float>>* embeddings, std::string* error,
+    const std::function<bool()>& is_cancelled) {
   const auto fail = [&](const std::string& message) {
     if (error != nullptr) {
       *error = message;
@@ -559,14 +704,32 @@ bool EncoderRuntime::Embed(
   };
   const TextConfig& text = impl_->loaded.config.text;
   for (const auto& sequence : sequences) {
-    if (sequence.empty()) {
+    if (sequence.tokens.empty()) {
       return fail("embedding_gemma2: empty token sequence");
     }
-    if (sequence.size() > kMaxSequenceTokens) {
+    if (sequence.tokens.size() > kMaxSequenceTokens) {
       return fail("embedding_gemma2: sequence exceeds " +
                   std::to_string(kMaxSequenceTokens) + " tokens");
     }
-    for (const std::uint32_t id : sequence) {
+    std::size_t previous_end = 0;
+    for (const auto& image : sequence.images) {
+      const auto& patches = image.patches;
+      const std::size_t n = patches.soft_tokens();
+      if (patches.rows == 0 || patches.columns == 0 || patches.rows % 3 ||
+          patches.columns % 3 || n > 280 ||
+          patches.pixels.size() != n * 9 * 768 || image.offset < previous_end ||
+          image.offset > sequence.tokens.size() ||
+          n > sequence.tokens.size() - image.offset) {
+        return fail("embedding_gemma2: invalid image patches or token offset");
+      }
+      for (std::size_t j = 0; j < n; ++j) {
+        if (sequence.tokens[image.offset + j] != kImageTokenId) {
+          return fail("embedding_gemma2: image placeholder mismatch");
+        }
+      }
+      previous_end = image.offset + n;
+    }
+    for (const std::uint32_t id : sequence.tokens) {
       if (id >= text.vocab_size) {
         return fail("embedding_gemma2: token id out of range");
       }
@@ -579,8 +742,8 @@ bool EncoderRuntime::Embed(
     std::size_t last = first;
     std::size_t tokens = 0;
     while (last < sequences.size() &&
-           tokens + sequences[last].size() <= kMaxSequenceTokens) {
-      tokens += sequences[last].size();
+           tokens + sequences[last].tokens.size() <= kMaxSequenceTokens) {
+      tokens += sequences[last].tokens.size();
       ++last;
     }
     // Each batch takes a new turn, so requests that arrived meanwhile run
