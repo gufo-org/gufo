@@ -18,7 +18,7 @@ curl -sS http://127.0.0.1:8080/v1/embeddings \
   -d '{"model":"embeddinggemma-2","input":["task: search result | query: What causes the northern lights?"]}'
 ```
 
-The server returns L2-normalized mean-pooled vectors, so cosine similarity and dot product agree.  `input` is a string or an array of up to 2,048 strings or typed content objects, each at most 8,192 tokens including the `<bos>` and `<eos>` the tokenizer adds.  The server rejects token-array input because the vocabulary is the model's own.  `encoding_format` is `float` by default or `base64`.
+The server returns L2-normalized mean-pooled vectors, so cosine similarity and dot product agree.  `input` is a string or an array of up to 2,048 strings or typed content objects, each at most 8,192 tokens including the `<bos>` and `<eos>` the tokenizer adds.  Longer inputs return 400 `context_length_exceeded` unless the request sets `"truncate": true`, which keeps each input's first tokens.  The server rejects token-array input because the vocabulary is the model's own.  `encoding_format` is `float` by default or `base64`.
 
 ## Images
 
