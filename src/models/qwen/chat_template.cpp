@@ -750,11 +750,23 @@ std::optional<std::string> QwenChatTemplate::Render(
   // Such context follows a tool result or another user message, not an
   // assistant reply, so only then keep the checkpoint before the final
   // text-only user turn. A client that keeps the message prefills it again.
+  //
+  // A long system or developer prompt (instructions, a document, a schema)
+  // followed by a single user message is the same shape: the next request
+  // keeps the instructions and replaces the question. Without a checkpoint
+  // at that boundary a hybrid model resumes only from its coarse grid, so a
+  // new question over a 17.5K-token system prompt reused 8,192 tokens.
+  const ChatRole before_final =
+      messages.size() >= 2 ? messages[messages.size() - 2].role
+                           : ChatRole::kUser;
+  const bool after_instructions = messages.size() >= 2 &&
+                                  (before_final == ChatRole::kSystem ||
+                                   before_final == ChatRole::kDeveloper);
   const bool final_user_turn =
       last_user_index + 1 == messages.size() &&
       messages.back().images.empty() && messages.size() >= 2 &&
-      (messages[messages.size() - 2].role == ChatRole::kTool ||
-       messages[messages.size() - 2].role == ChatRole::kUser);
+      (before_final == ChatRole::kTool || before_final == ChatRole::kUser ||
+       after_instructions);
   bool seen_assistant = false;
   std::optional<std::size_t> final_user_start;
   for (; message_index < messages.size(); ++message_index) {
@@ -787,7 +799,7 @@ std::optional<std::string> QwenChatTemplate::Render(
       mutable_reasoning = output.size();
     if (msg.role == ChatRole::kAssistant)
       seen_assistant = true;
-    else if (final_user_turn && seen_assistant &&
+    else if (final_user_turn && (seen_assistant || after_instructions) &&
              message_index == last_user_index)
       final_user_start = output.size();
     const auto role_name = ToString(msg.role);

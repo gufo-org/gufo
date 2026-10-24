@@ -1193,6 +1193,40 @@ void TestStableBoundaryPrecedesReplacedFinalUserTurn() {
          "opening turn keeps the boundary before the generation prompt");
 }
 
+void TestStableBoundaryFollowsInstructions() {
+  using gufo::tokenization::ChatMessage;
+  using gufo::tokenization::ChatRole;
+  using gufo::tokenization::QwenChatTemplate;
+
+  gufo::tokenization::ChatTemplateOptions options;
+  options.add_generation_prompt = true;
+  const auto render = [&](const std::vector<ChatMessage>& messages) {
+    std::size_t stable = 0;
+    auto text = QwenChatTemplate::Render(messages, {}, options, nullptr,
+                                         nullptr, &stable);
+    Expect(text.has_value(), "instructions render");
+    return std::pair{*text, stable};
+  };
+  // Long instructions with one question that the next request replaces: the
+  // boundary sits after the instructions, so a hybrid model can resume there.
+  for (const auto role : {ChatRole::kSystem, ChatRole::kDeveloper}) {
+    const ChatMessage instructions{role, "Classify mails. Schema: ..."};
+    const auto [first_text, first_stable] =
+        render({instructions, {ChatRole::kUser, "Mail one."}});
+    const auto [second_text, second_stable] =
+        render({instructions, {ChatRole::kUser, "Another mail."}});
+    Expect(first_text.compare(first_stable, 12, kImStart) == 0 &&
+               first_text.substr(first_stable).find("Mail one.") !=
+                   std::string::npos &&
+               first_text.substr(0, first_stable).find("Schema") !=
+                   std::string::npos,
+           "boundary follows the instructions");
+    Expect(second_stable == first_stable &&
+               second_text.starts_with(first_text.substr(0, first_stable)),
+           "a new question reuses the instructions");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1217,6 +1251,7 @@ int main() {
   TestToolReplayPreservesGeneratedPrefix();
   TestEmptyReasoningReplayChangesThinkingSuffixTokens();
   TestStableBoundaryPrecedesReplacedFinalUserTurn();
+  TestStableBoundaryFollowsInstructions();
   std::cout << "All QwenChatTemplate tests passed successfully!\n";
   return 0;
 }
