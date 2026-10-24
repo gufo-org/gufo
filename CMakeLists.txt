@@ -1,8 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
 project(gufo LANGUAGES C CXX)
-if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
-  message(FATAL_ERROR "Gufo requires Linux x86-64 with an AMD gfx1151 GPU")
-endif()
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
@@ -29,6 +26,29 @@ if (GUFO_CCACHE_PROGRAM)
   message(STATUS "gufo: compiling C and CXX through ${GUFO_CCACHE_PROGRAM}")
 else()
   message(STATUS "gufo: ccache not found, compiling without a launcher")
+endif()
+
+# Windows host checks build only the OS leaves, the CPU cache library and
+# their portable tests. The rest of the tree targets Linux only.
+option(GUFO_PLATFORM_ONLY
+  "Build only the platform leaves, the CPU cache and their portable tests" OFF)
+if (GUFO_PLATFORM_ONLY)
+  find_package(Threads REQUIRED)
+  add_compile_options(-Wall -Wextra -Wpedantic -UNDEBUG)
+  add_subdirectory(src/core/platform)
+  add_subdirectory(src/cache)
+  include(CTest)
+  if (BUILD_TESTING)
+    if (NOT WIN32)
+      find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    endif()
+    include(cmake/PlatformTests.cmake)
+    add_subdirectory(tests/cache)
+  endif()
+  return()
+endif()
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+  message(FATAL_ERROR "Gufo requires Linux x86-64 with an AMD gfx1151 GPU")
 endif()
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
@@ -152,22 +172,7 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_diagnostics PRIVATE hip::host roc::hipblas roc::rocblas)
 endif()
 
-add_library(gufo_platform STATIC
-  src/core/platform/mapped_file.cpp
-  src/core/platform/net.cpp
-  src/core/platform/shutdown_signal.cpp
-  src/core/platform/publish.cpp
-  src/core/platform/os_info.cpp
-  "$<$<NOT:$<PLATFORM_ID:Windows>>:src/core/platform/fs_posix.cpp>"
-  "$<$<NOT:$<PLATFORM_ID:Windows>>:src/core/platform/pages_posix.cpp>"
-  "$<$<NOT:$<PLATFORM_ID:Windows>>:src/core/platform/page_pin_linux.cpp>"
-  "$<$<PLATFORM_ID:Windows>:src/core/platform/fs_windows.cpp>"
-  "$<$<PLATFORM_ID:Windows>:src/core/platform/pages_windows.cpp>"
-  "$<$<PLATFORM_ID:Windows>:src/core/platform/page_pin_windows.cpp>")
-target_link_libraries(gufo_platform PUBLIC Threads::Threads)
-if (WIN32)
-  target_link_libraries(gufo_platform PUBLIC ${GUFO_PLATFORM_LIBS})
-endif()
+add_subdirectory(src/core/platform)
 
 add_library(gufo_core STATIC
   src/core/image.cpp
@@ -910,18 +915,7 @@ if (BUILD_TESTING)
   add_test(NAME platform_prefault_test COMMAND platform_prefault_test)
   set_tests_properties(platform_prefault_test PROPERTIES LABELS "cpu;platform")
 
-  add_executable(platform_mapped_file_test
-    tests/core/platform_mapped_file_test.cpp src/core/platform/mapped_file.cpp)
-  add_test(NAME platform_mapped_file_test COMMAND platform_mapped_file_test)
-  set_tests_properties(platform_mapped_file_test PROPERTIES
-    LABELS "cpu;platform")
-  add_executable(platform_fs_test
-    tests/core/platform_fs_test.cpp
-    "$<$<NOT:$<PLATFORM_ID:Windows>>:src/core/platform/fs_posix.cpp>"
-    "$<$<PLATFORM_ID:Windows>:src/core/platform/fs_windows.cpp>"
-    src/core/platform/mapped_file.cpp)
-  add_test(NAME platform_fs_test COMMAND platform_fs_test)
-  set_tests_properties(platform_fs_test PROPERTIES LABELS "cpu;platform")
+  include(cmake/PlatformTests.cmake)
 
   add_executable(hipblaslt_plan_cache_test
     tests/core/hipblaslt_plan_cache_test.cpp)
