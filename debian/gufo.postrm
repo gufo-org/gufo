@@ -1,0 +1,40 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "purge" ]; then
+  # Drop the "was running" markers if the package never reached postinst.
+  # One marker per unit name (classic plus every instance) lives under /run/gufo;
+  # the single-file name is from before instance support and is removed too.
+  rm -rf /run/gufo
+  rm -f /run/gufo.service.was-active
+  # Remove the dedicated system user; the home directory
+  # (/var/lib/gufo) is kept in case it holds model weights.
+  if getent passwd gufo > /dev/null 2>&1; then
+    deluser --system gufo || true
+  fi
+  # Remove the shared group only if no other member remains; the
+  # shared cache directory itself is kept (shared data).
+  if getent group llm-servers > /dev/null 2>&1; then
+    delgroup --system llm-servers || true
+  fi
+  # State we deliberately keep must not stay owned by an id we just deleted: uids get
+  # recycled, and the next system user created on this host would inherit our cache,
+  # checkpoints and instance directories. Only OUR directory: /var/lib/huggingface/hub is
+  # shared with other services and re-owning 150 GB of it on purge would break them -- the
+  # very mistake queue 081 exists to remove from postinst. Leave the shared cache alone.
+  if [ -d /var/lib/gufo ]; then
+    chown -R root:root /var/lib/gufo 2>/dev/null || true
+    printf 'gufo: kept /var/lib/gufo (re-owned to root:root); shared model cache left untouched\n' >&2
+  fi
+fi
+
+# The loader cache still lists the ROCm paths this package registered via
+# /etc/ld.so.conf.d/rocm.conf until something regenerates it. dpkg removes the conffile but
+# runs nothing afterwards, so refresh it here on both remove and purge.
+if command -v ldconfig > /dev/null 2>&1; then
+  ldconfig 2>/dev/null || true
+fi
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,42 @@
+Source: gufo
+Section: utils
+Priority: optional
+Maintainer: Gufo Maintainers <maintainers@gufo.dev>
+Build-Depends: debhelper-compat (= 13), cmake (>= 3.21), ninja-build,
+ pkg-config, python3, libicu-dev, libcurl4-openssl-dev, libssl-dev,
+ libpng-dev, libjpeg-dev, libwebp-dev,
+ hip-dev (>= 6.2), rocm-llvm,
+ hipblas-dev, hipblaslt-dev, rocblas-dev, hipcub-dev, rocprim-dev, rocwmma-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/gufo-org/gufo
+Rules-Requires-Root: no
+# Without these two fields the autopkgtest in debian/tests/ is invisible: autopkgtest and
+# upstream CI discover tests through the source stanza's Testsuite field, so a correct
+# debian/tests/control alone runs nothing outside a human terminal. The lifecycle matrix
+# existing and the lifecycle matrix running are different facts.
+Testsuite: autopkgtest
+Testsuite-Triggers: dpkg-dev, systemd
+
+Package: gufo
+Architecture: amd64
+Depends: gufo-rocm-repo (>= 0.3.0),
+ hipblas (>= 3.2.0.70204), hipblaslt (>= 1.2.2.70204),
+ rocblas (>= 5.2.0.70204), hip-runtime-amd (>= 7.2.53211.70203),
+ adduser, ffmpeg, ${shlibs:Depends}, ${misc:Depends}
+Description: Strix Halo inference engine
+ Gufo is a vertical local inference engine built specifically for AMD
+ Strix Halo hardware (Ryzen AI MAX+ 395, gfx1151), serving text, audio,
+ image and video models through an OpenAI-compatible API.
+ .
+ The ROCm runtime libraries are provided by the gufo-rocm-repo package,
+ which registers the AMD ROCm apt repository.
+
+Package: gufo-rocm-repo
+Architecture: all
+Depends: ca-certificates, ${misc:Depends}
+Description: AMD ROCm apt repository for Gufo
+ Registers the AMD ROCm 7.2.x apt repository and its signing key so that
+ the ROCm runtime libraries required by Gufo can be installed with apt.
+ .
+ The ROCm libraries are not available in the Debian and Ubuntu
+ repositories, so this package configures the upstream AMD repository.

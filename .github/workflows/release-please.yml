@@ -63,6 +63,41 @@ jobs:
             '{event_type: "gufo-release", client_payload: {tag: $tag}}' \
             | gh api --method POST repos/gufo-org/toolboxes/dispatches --input -
 
+      - name: Check out the release pull request
+        if: >-
+          ${{ steps.release-please.outputs.prs_created == 'true' &&
+              steps.release-please.outputs.release_created != 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PRS: ${{ steps.release-please.outputs.prs }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="$(jq -er '.[0].number' <<<"$RELEASE_PRS")"
+          gh pr checkout "$pr_number" --repo "$GITHUB_REPOSITORY"
+
+      - name: Sync the Debian changelog with the release version
+        if: >-
+          ${{ steps.release-please.outputs.prs_created == 'true' &&
+              steps.release-please.outputs.release_created != 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PRS: ${{ steps.release-please.outputs.prs }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="$(jq -er '.[0].number' <<<"$RELEASE_PRS")"
+          debian/gen-changelog.sh
+          if git diff --quiet -- debian/changelog; then
+            echo "debian/changelog is already current."
+            exit 0
+          fi
+          git config user.name "gufo-release[bot]"
+          git config user.email "gufo-release[bot]@users.noreply.github.com"
+          git commit -m "build: sync the Debian changelog with the release version" \
+            -- debian/changelog
+          git push origin "HEAD:$(git rev-parse --abbrev-ref HEAD)"
+
       - name: Wait for release pull request checks
         if: >-
           ${{ steps.release-please.outputs.prs_created == 'true' &&

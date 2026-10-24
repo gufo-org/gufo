@@ -1,0 +1,192 @@
+gufo (0.21.0-1) unstable; urgency=medium
+
+  * **platform:** add the os_info leaf (#709)
+  * **qwen-flash:** opt-in YaRN context extension (#350)
+  * **bench:** stop the benchmark server when startup is interrupted (#702)
+  * **qwen:** reduce Flash-Next sampled decoding overhead (#699)
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Fri, 23 Oct 2026 06:33:59 +0000
+
+gufo (0.20.0-1) unstable; urgency=medium
+
+  * **cache:** add Qwen 27B AR and DFlash2 cache continuation (#540)
+  * **rocm:** let DeepSeek V4 Flash load when weights exceed the device pool (#609)
+  * **serve:** answer Expect: 100-continue before reading the body (#686)
+  * **serve:** report no content for whitespace between parallel tool calls (#676)
+  * **cache:** avoid repeated resets and full checkpoint lookups (#680)
+  * **qwen-flash:** prefetch n-gram rows across cache checkpoints (#683)
+  * **qwen38_flash_next:** take the vector-load small projection path for F16 and BF16 weights (#681)
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Thu, 22 Oct 2026 09:42:05 +0000
+
+gufo (0.19.0-1) unstable; urgency=medium
+
+  * Rebuilt against upstream v0.19.0 (tagged at 7b278451; main two commits further at f020bd3a).
+    This is the first packaging of that release, so the upstream version in the version string moves
+    for the first time since 0.18.0-1 rather than the revision: version.txt is 0.19.0 and the top
+    entry is authored to match, the same alignment check in debian/rules that refuses a build whose
+    changelog is behind version.txt.
+  * Upstream content this build carries: serve answers Expect: 100-continue before reading the body
+    (#686); component cache avoids repeated resets and full checkpoint lookups (#680); the vector-load
+    small projection path for F16 and BF16 in the Flash-Next path; n-gram rows prefetched across cache
+    checkpoints (#683); DeepSeek V4 Flash loads when weights exceed the device pool (#609); no content
+    reported for whitespace between parallel tool calls (#676).
+  * Packaging unchanged from 0.18.0-3: same maintainer scripts, same units including the filesystem
+    hardening (ProtectSystem=full, ProtectHome=yes, PrivateTmp=yes, ReadWritePaths=/var/lib/gufo),
+    same conffiles, same upgrade-path scripts (prerm marks, postinst decides).
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Wed, 21 Oct 2026 08:15:00 +0000
+
+gufo (0.18.0-3) unstable; urgency=medium
+
+  * Filesystem hardening on both units: ProtectSystem=full, ProtectHome=yes, PrivateTmp=yes and one
+    explicit ReadWritePaths=/var/lib/gufo. The set was derived by measuring what the running instance
+    actually holds open -- file descriptors under /var/lib/huggingface (read-only mmaps of the weights)
+    and /var/lib/gufo/cache/instances/<instance> (the disk cache the launcher mkdirs) -- plus a grep of
+    the shipped env files (zero /home references) and of the launcher (no /tmp, no writes under /usr).
+  * Not set, on purpose: ProtectSystem=strict, ProtectKernelTunables, NoNewPrivileges. Three source
+    files read /sys for device information and the ROCm kfd/dri access path has not been proven under a
+    read-only /sys or a no-new-privileges domain. The failure mode of those three is a unit that will
+    not start, which costs a full model reload -- a larger outage than the exposure they remove. Widen
+    only with a cold start and a real completion measured under each one, on real hardware.
+  * /run/gufo is deliberately absent from ReadWritePaths: ProtectSystem=full does not make /run
+    read-only, so granting it would be decoration. The markers there are written by root during dpkg,
+    not by the service process.
+  * systemd-analyze verify: no findings on either unit.
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Mon, 20 Oct 2026 10:20:00 +0000
+
+gufo (0.18.0-2) unstable; urgency=medium
+
+  * Rebased onto upstream main at 2caf2a82. Upstream did NOT tag a new release for this:
+    version.txt is still 0.18.0 and v0.18.0 remains the newest tag, so the seven commits it
+    published ride under the same upstream version. The revision exists precisely to keep the
+    mapping honest -- one version string, one set of bytes -- because 0.18.0-1 was built from a
+    different commit (d1830de7) and is still on disk next to this one.
+  * Upstream content picked up by this rebuild: greedy MTP drafts priced at the decoding
+    occupancy (#664), sampled requests using the small MTP draft head on multi-session
+    (#673), q8_1 block sum stored as d*sum(q) (#667), /props reporting model, build, context,
+    sessions and vision (#669), batched greedy DSpark frontier stopping before an accepted EOS
+    (#668), plus docs and functional-suite adjustments.
+  * Packaging is unchanged from 0.18.0-1 apart from this entry: same maintainer scripts, same
+    units, same conffiles.
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Mon, 19 Oct 2026 20:20:00 +0000
+
+gufo (0.18.0-1) unstable; urgency=medium
+
+  * **serve:** honor the Messages thinking budget (#524)
+  * **serve:** prepare the structured-output vocabulary before serving (#638)
+  * **cache:** keep disk-cache snapshots out of the page cache (#477)
+  * **ci:** keep the devlab report when later jobs start (#659)
+  * **qwen-flash:** pin square-accumulation order in all HcCombineMoeF16Kernel instantiations (#624)
+  * **qwen:** reuse historical image preprocessing (#645)
+  * **serve:** reclaimable page cache is available in cgroup space (#637)
+  * **tools:** preserve optional arguments in native calls (#643)
+  * **flash-next:** reduce prompt and decode stalls (#653)
+  * **qwen:** fork the recurrent state across two buffers instead of copying it (#650)
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Mon, 19 Oct 2026 18:34:20 +0000
+
+gufo (0.17.1-4) unstable; urgency=medium
+
+  * prerm wording: it said "no running gufo unit found, nothing to restart after this upgrade".
+    With an instance configured, enabled and stopped by the operator that sentence was a claim
+    about the whole transaction made by the half of it that enumerates nothing - and the postinst,
+    one step later, reported units found and deliberately left down. It now states only what
+    prerm itself did: nothing was active, so nothing was stopped.
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Mon, 19 Oct 2026 14:25:00 +0000
+
+gufo (0.17.1-3) unstable; urgency=medium
+
+  * Rebuild after the packaging branch moved: tools/deploy/install-gufo-deb.sh gained a
+    here-string rewrite of its "0 upgraded" guard (a `cmd | grep -q` under `set -o pipefail`
+    reports the writer's SIGPIPE status, so a rule can silently not run). That file is not
+    part of this package, so the code in it is unchanged - but the revision stamp is taken
+    from the branch tip, and two artifacts must not share one version string while naming
+    different commits. Package content apart from the stamp: identical to 0.17.1-2.
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Mon, 19 Oct 2026 12:35:00 +0000
+
+gufo (0.17.1-2) unstable; urgency=medium
+
+  * Lifecycle correctness, found in production and then audited end to end:
+    - An upgrade from a package whose prerm marked with an empty file now restores the
+      instance. The marker format is versioned: releases before this one wrote a zero-byte
+      marker, which proved nothing to the read side, so a running service was left down after
+      the upgrade and the message said no unit existed. Proven by scenarios 18 and 19 of the
+      shipped autopkgtest, which now generate legacy-shaped input instead of only current-shaped.
+    - daemon-reload runs BEFORE units are restarted, so a restart uses the new unit definition
+      rather than the manager's cached copy of the old one.
+    - A unit that fails to restore now exits the maintainer script non-zero: a failed restart is
+      reported to dpkg and to the caller, not printed as a warning on a green run.
+    - The shared model cache is no longer chowned by this package. If it already exists, the
+      service joins the group that owns it instead of taking the directory.
+  * Units: the classic unit and its instances now conflict (same launcher, same default port);
+    a crash loop can no longer reload the resident model without bound (StartLimit*), and the
+    start timeout is pinned above the measured cold-load time instead of systemd's 90 s default.
+  * Prerm: stops units with systemctl when deb-systemd-invoke is absent, instead of doing
+    nothing and replacing the binary underneath a running process.
+  * Provenance: get-revision.sh ignores non-release tags, so a backup tag can no longer become
+    a shipped version string; gen-changelog.sh refuses to write a downgrade without an explicit
+    opt-in; postrm refreshes the loader cache and hands kept state to root rather than leaving
+    it owned by a deleted uid.
+  * Packaging: the lifecycle autopkgtest is now discoverable (Testsuite: autopkgtest in the
+    source stanza) and the ROCm apt pin is scoped to ROCm package families rather than
+    `Package: *'.
+  * Deploy tools: installation is non-interactive with confold, detects a silently-skipped
+    install ("0 upgraded"), and verifies the running process and its binary inode rather than
+    the package database. The model cache sync checks free space and a live server on the target
+    before touching anything, and repairs ownership only on the paths it moved.
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Mon, 19 Oct 2026 14:00:00 +0000
+
+gufo (0.17.1-1) unstable; urgency=medium
+
+  * **cache:** reject capacity retries before reading payloads (#636)
+  * **inference:** reduce Flash-Next cache and cold-prompt stalls (#633)
+  * **qwen-flash:** copy repeated context into MTP drafts (#613)
+  * **qwen-flash:** cut prefill and decode attention cost at depth (#626)
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Mon, 19 Oct 2026 08:11:53 +0000
+
+gufo (0.15.1-3) unstable; urgency=medium
+
+  * Build self-containment: add hip-dev and rocm-llvm to Build-Depends. The build runs
+    find_package(hip), whose hip-config.cmake is shipped by hip-dev, and compiles .hip
+    device code with ROCm's clang from rocm-llvm; without them dpkg-buildpackage fails on
+    a machine that does not already happen to have them. python3 added for the same reason.
+  * Build portability: the ROCm prefix is discovered with hipconfig --hip_path and can be
+    overridden with DEB_ROCM_PREFIX, instead of assuming /opt/rocm.
+  * Packaging: a marker written by prerm belongs to its own boot. Each marker records the
+    boot id and postinst honours it only when it matches the running kernel's boot id;
+    prerm clears markers before writing its own. A transaction that died between prerm and
+    configure therefore cannot resurrect a unit an operator later stopped.
+  * Tests: debian/tests/upgrade-units ships the 17-scenario lifecycle matrix as an
+    autopkgtest. Runs against stubs - no real unit is touched, no root, no network - so
+    the upgrade behaviour can be verified by anyone building this package.
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Thu, 15 Oct 2026 14:24:10 +0100
+
+gufo (0.15.1-2) unstable; urgency=medium
+
+  * Packaging: an upgrade no longer starts an instance an operator stopped.
+    Enablement describes boot, not now: "inactive but enabled" was read as intent
+    to run, so upgrading a host whose service was deliberately stopped brought it
+    back up - binding its port, loading its weights, re-entering the balancer's
+    path. `start' now requires a boot id recorded by prerm outside /run
+    (/var/lib/gufo/upgrade-boot.id) that differs from the current one; the record
+    is consumed once, so a reboot that predates the upgrade cannot start anything.
+
+  * **cache:** avoid artifact hashing for RAM-only Flash-Next (#602)
+  * **cache:** repair flash-next functional cache regressions (#596)
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Thu, 15 Oct 2026 13:31:09 +0100
+
+gufo (0.15.1-1) unstable; urgency=medium
+
+  * **cache:** avoid artifact hashing for RAM-only Flash-Next (#602)
+  * **cache:** repair flash-next functional cache regressions (#596)
+
+ -- Gufo Maintainers <maintainers@gufo.dev>  Thu, 15 Oct 2026 10:41:54 +0000

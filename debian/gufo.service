@@ -1,0 +1,53 @@
+[Unit]
+Description=Gufo Strix Halo inference server
+Documentation=https://github.com/gufo-org/gufo
+After=network.target
+# The classic unit and the instantiated ones share one launcher, one env file and one
+# default port (0.0.0.0:8080); nothing stopped both being active at once, so two servers
+# contended for one port and the loser crash-looped. The guarantee that actually bites is
+# the one declared in gufo@.service (`Conflicts=gufo.service`): systemd states that a
+# conflict stops the other unit "and vice versa", so once an instance exists neither can be
+# active while the other is. This line documents the same intent from the classic side;
+# systemd is not documented to expand a bare template name in Conflicts= from a non-instance
+# unit, so do not rely on it -- the template side is what enforces it.
+Conflicts=gufo@.service
+# A crash loop must not become an infinite reload of a ~100 GiB model. These are [Unit]
+# keys: in [Service] systemd ignores them. Without them the unit inherits the defaults
+# (IntervalSec=10s, Burst=5), and with RestartSec=5 only ~2 restarts fit in that window,
+# so the burst counter never trips and the reloads are unbounded.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=gufo
+Group=llm-servers
+WorkingDirectory=/var/lib/gufo
+EnvironmentFile=-/etc/gufo/gufo.env
+# The launcher assembles the command line from /etc/gufo/gufo.env, so tuning
+# the model, the speculative backend, the draft length, the context, the
+# session count or the row cache never touches this file: edit the env file and
+# run `systemctl restart gufo`.
+ExecStart=/usr/lib/gufo/gufo-launch.sh
+LimitMEMLOCK=infinity
+# A cold load of the resident model on this hardware measured 25 s (page cache warm) to
+# 74 s. systemd's default start timeout is 90 s, so a cold cache, a contended disk or a
+# second instance gets the process SIGTERM'd mid-load. Pin it far above the worst case.
+TimeoutStartSec=900
+Restart=on-failure
+RestartSec=30
+
+# Filesystem hardening, derived from what this service actually touches (measured 2026-10-20, not
+# copied from a template): the process holds fds only under /var/lib/huggingface (read-only mmaps of
+# the weights) and /var/lib/gufo/cache/instances/... (the disk cache the launcher mkdirs). No /home
+# path appears in any shipped env file, no /tmp use in the launcher, nothing writes under /usr.
+# Deliberately NOT set: ProtectSystem=strict, ProtectKernelTunables, NoNewPrivileges -- three source
+# files read /sys for device info and the ROCm kfd/dri path is unproven under a read-only /sys. See
+# gufo@.service for the full note; keep the two units identical.
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/gufo
+
+[Install]
+WantedBy=multi-user.target

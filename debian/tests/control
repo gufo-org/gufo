@@ -1,0 +1,8 @@
+Tests: upgrade-units
+Test-Command: debian/tests/upgrade-units
+Depends: ${misc:Depends}, dpkg-dev
+Restrictions: allow-stderr
+Comment: >
+ systemd lifecycle matrix for the upgrade path: 17 scenarios, all of them run
+ against stubs, so no real unit is started, stopped or restarted and no host is
+ contacted. Needs no root and no network.

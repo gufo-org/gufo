@@ -1,0 +1,4 @@
+debian/gufo.env etc/gufo/
+debian/rocm.conf etc/ld.so.conf.d/
+debian/gufo-launch.sh usr/lib/gufo/
+debian/gufo-upgrade-units.sh usr/lib/gufo/
