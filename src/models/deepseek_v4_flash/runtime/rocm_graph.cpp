@@ -6278,35 +6278,17 @@ static bool rocm_graph_dspark_select_block(ds4_gpu_graph* g,
     return false;
   const ds4_model* sm = d->model;
   const ds4_dspark_stage_weights* last = &d->stage[d->n_stages - 1u];
-  int previous = target_next_token;
-  for (uint32_t row = 0; row < n_rows; row++) {
-    if (previous < 0 || (uint32_t)previous >= DS4_N_VOCAB)
-      return false;
-
-    ds4_gpu_tensor* logits_row = ds4_gpu_tensor_view(
-        logits_rows, (uint64_t)row * DS4_N_VOCAB * sizeof(float),
-        (uint64_t)DS4_N_VOCAB * sizeof(float));
-    if (!logits_row)
-      return false;
-    const bool ok =
-        ds4_gpu_dspark_markov_argmax_tensor(
-            g->dspark_markov_index, g->dspark_markov_key, logits_row, sm->map,
-            sm->size, last->markov_w1->abs_offset, last->markov_w2->abs_offset,
-            DS4_N_VOCAB, d->markov_rank, (uint32_t)previous) != 0;
-    ds4_gpu_tensor_free(logits_row);
-    if (!ok)
-      return false;
-    int32_t selected = -1;
-    if (ds4_gpu_tensor_read(g->dspark_markov_index, 0, &selected,
-                            sizeof(selected)) == 0) {
-      return false;
-    }
-    if (selected < 0 || (uint32_t)selected >= DS4_N_VOCAB)
-      return false;
-    tokens_out[row] = selected;
-    previous = selected;
-  }
-  return true;
+  if (target_next_token < 0 || (uint32_t)target_next_token >= DS4_N_VOCAB ||
+      !ds4_gpu_dspark_markov_chain_tensor(
+          g->dspark_markov_index, g->dspark_markov_key, logits_rows, sm->map,
+          sm->size, last->markov_w1->abs_offset, last->markov_w2->abs_offset,
+          DS4_N_VOCAB, d->markov_rank, (uint32_t)target_next_token, n_rows) ||
+      !ds4_gpu_tensor_read(g->dspark_markov_index, 0, tokens_out,
+                           (uint64_t)n_rows * sizeof(tokens_out[0])))
+    return false;
+  return std::all_of(tokens_out, tokens_out + n_rows, [](int32_t token) {
+    return token >= 0 && (uint32_t)token < DS4_N_VOCAB;
+  });
 }
 
 static bool rocm_graph_dspark_select_block_batch(

@@ -215,17 +215,24 @@ __device__ __forceinline__ static void dev_dot_iq2_xxs_q8_K_block4(
     const uint32_t aux1 = (uint32_t)q2[2] | ((uint32_t)q2[3] << 16);
     q2 += 4;
     const uint32_t ls = 2u * (aux1 >> 28) + 1u;
-    const uint8_t a0 = (uint8_t)(aux0 & 0xffu);
-    const uint8_t a1 = (uint8_t)((aux0 >> 8) & 0xffu);
-    const uint8_t a2 = (uint8_t)((aux0 >> 16) & 0xffu);
-    const uint8_t a3 = (uint8_t)((aux0 >> 24) & 0xffu);
+    // Decode each packed weight group once, then reuse its exact signed
+    // bytes across the token rows. Integer dot sums and final FP32 FMA
+    // keep the established scalar result.
+    int32_t w[8];
+    dev_iq2_i8x8_lut(hip_iq2xxs_grid, (uint8_t)aux0, aux1 & 127u, &w[0], &w[1]);
+    dev_iq2_i8x8_lut(hip_iq2xxs_grid, (uint8_t)(aux0 >> 8), (aux1 >> 7) & 127u,
+                     &w[2], &w[3]);
+    dev_iq2_i8x8_lut(hip_iq2xxs_grid, (uint8_t)(aux0 >> 16),
+                     (aux1 >> 14) & 127u, &w[4], &w[5]);
+    dev_iq2_i8x8_lut(hip_iq2xxs_grid, (uint8_t)(aux0 >> 24),
+                     (aux1 >> 21) & 127u, &w[6], &w[7]);
 #pragma unroll
     for (uint32_t p = 0; p < N; p++) {
+      const int8_t* q = q8[p] + ib32 * 32;
       int32_t sumi = 0;
-      sumi += dev_dot_iq2_pair_16(a0, (aux1 >> 0) & 127u, a1,
-                                  (aux1 >> 7) & 127u, q8[p] + ib32 * 32);
-      sumi += dev_dot_iq2_pair_16(a2, (aux1 >> 14) & 127u, a3,
-                                  (aux1 >> 21) & 127u, q8[p] + ib32 * 32 + 16);
+#pragma unroll
+      for (uint32_t i = 0; i < 8u; ++i)
+        sumi = __dp4a(w[i], *(const int32_t*)(q + 4u * i), sumi);
       bsum[p] += sumi * (int32_t)ls;
     }
   }

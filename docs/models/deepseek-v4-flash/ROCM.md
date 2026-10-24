@@ -1,103 +1,61 @@
 # ROCm 10.1 migration
 
-October 23–24, 2026. Flash 0731 mixed IQ2/Q2/Q8 target with its DSpark sidecar
-on Strix Halo `gfx1151`. The measured candidate passes the original independent
-long-context limits and preserves the 7.2.3 reference vectors. Cross-compiler
-logits and generated text are not identical. A subsequently confirmed
-same-compiler timing regression remains under investigation before publication.
-The latest local changes improve resumed prefill and recover useful DSpark
-drafting, but do not yet close that timing exception.
+October 24, 2026. Flash 0731 mixed IQ2/Q2/Q8 target and DSpark on Strix Halo
+`gfx1151`. Independent numerical checks pass their original limits, but the
+migration is **not ready to claim no performance regression**: one ROCm 10.1
+continuation still trails its original 24.18 tok/s result. Both versions produce
+valid, different summaries.
 
 ## Configuration
 
-The control uses the pinned ROCm 7.2.3 Nix toolchain, HIP Clang 22 and GCC
-15.3. The candidate uses ROCm 10.1.0, HIP Clang 24 and GCC 15.2 inside
-`rocm/dev-ubuntu-26.04:10.1.0-full`. Both start from main `ade4f4d7`
-and use the repository's matching ROCr queue-memory patch. Builds and
-inference run separately on the same machine with identical target/sidecar
-weights, prompts, sampling settings and cache history.
+The control uses pinned ROCm 7.2.3, HIP Clang 22 and GCC 15.3 through Nix.
+ROCm 10.1.0 uses HIP Clang 24 and GCC 15.2 inside
+`rocm/dev-ubuntu-26.04:10.1.0-full`, with the repository's matching ROCr
+queue-memory patch. Builds and inference run separately. Model revisions,
+prompts, sampling, cache history and hardware stay matched.
 
-The matched measurements use source based on `d4eaaad4` (Flash-Next-only
-changes); both production builds succeeded with unchanged model HIP objects
-across that rebase. Main `8b52b42c` subsequently changes the optional Nix ROCm
-10 input and development instructions, with no inference-source or default
-7.2.3 toolchain changes. The container results do not qualify that new Nix
-package independently.
-
-The optional Nix entry points are `nix build .#rocm10` and
-`nix develop .#rocm10`; the measurements here qualify the container build.
-The default Nix toolchain remains 7.2.3.
+The branch is based on main `8b52b42c`. Changes since the initial `ade4f4d7`
+control affect Flash-Next or toolchain documentation, without changing these
+models' inference sources. Container results do not independently qualify the
+new optional Nix `rocm10` package. Default Nix still uses 7.2.3.
 
 ## Migration steps
 
 | Step | Status |
 | --- | --- |
-| Production builds on 7.2.3 and 10.1 | Complete |
-| Independent quantization/router/projection/attention/indexer checks | Pass on both toolchains; existing tolerances retained |
-| Compiler register and spill comparison | IQ2 tile uses fewer VGPRs; one existing MMQ specialization spills more |
-| AR/DSpark sparse-indexer boundary checks | Pass on both toolchains: DSpark C1 and AR C2, exact full logits |
-| Default sampling, replay and request state | Pass: `sampling-defaults` and `state-edges`, including actual C2 execution |
-| Matched prefill/decode performance and numerical quality | Six pp2048/tg128 cells and official continuation scores recorded below |
-| Independent long-context logits with narrow prefill calls | Original RMSE/cosine/maximum-error limits pass at 4K and 12K on both toolchains |
+| Production builds on 7.2.3 and 10.1 | Restored policy and final kernels pass both |
+| Quantization/router/projection/attention/indexer checks | Original limits pass on both toolchains |
+| 4K/12K narrow-prefill logits against an independent teacher | Pass on both toolchains; values below |
+| Sparse-indexer boundary replay | DSpark C1 and AR C2: zero token/full-logit differences |
+| Default sampling, cache, cancellation and restart | Final 142-request check passes correctness; timing limitations below |
+| Same-compiler performance | Flagged continuation remains slower than original 10.1 main |
 
-Compiler regression checks do not resolve the existing target-model parity
-limits in [QUALITY.md](QUALITY.md). [BENCHMARKS.md](BENCHMARKS.md) retains its
-published toolchain and reference measurements.
+## Numerical corrections
 
-## Required changes
+ROCm 7.2.3 output is a regression control, not the accuracy oracle for 10.1.
+Cross-compiler byte or token differences alone do not fail qualification.
+Accuracy uses the independent FP64 operators and pinned target teacher below.
+Exact replay checks instead protect same-runtime batching, speculation and
+cache consistency. They cannot establish target-model accuracy.
 
-LLVM 24 reassociated the IQ2 SwiGLU products differently in scalar and tiled
-expert kernels. A shared arithmetic helper preserves the existing rounded
-product/reciprocal sequence. The indexer head sum and decode attention's
-row-by-row PV accumulation also make their established order explicit.
-The MMQ Q8 quantizer now makes the established fused rounding decision
-explicit. Clang 24 rounded the product first, turning values just below a
-half-integer into ties: two captured activations changed from 33/-38 to 34/-39.
-An independent FP64 test covers all three MMQ scale layouts, zero rows and
-nearby floating-point values.
+LLVM 24 reassociated scalar and tiled IQ2 SwiGLU products differently. The
+shared helper preserves their established rounded product/reciprocal sequence.
+Indexer head sums and attention PV accumulation likewise retain their original
+order. The MMQ Q8 quantizer explicitly preserves the fused rounding decision:
+captured values changed from 33/-38 to 34/-39 when the compiler rounded the
+product before deciding a tie. Independent FP64 checks cover all three scale
+layouts, zero rows and nearby floating-point values.
 
-On Clang 24 and later, HC/Sinkhorn normalizations retain source order, and
-router scores evaluate the existing scalar transcendental formula in FP64
-before the final FP32 rounding. Applying these changes to Clang 22 too worsened
-its long-context result, so its established arithmetic is preserved.
-No global fast-math flags, tensor precision or quality tolerances change.
+HC/Sinkhorn order and FP64 router transcendental evaluation are restricted to
+Clang 24 and later. Applying those corrections to Clang 22 worsened its
+long-context result, so its arithmetic remains unchanged. Global fast-math,
+tensor precision and quality tolerances do not change. Historical GPU references
+freeze their accumulation order; separate FP64 formulas remain independent.
 
-Resumed prefill now groups compressor stores up to the next pool/shift
-boundary. Pooling, normalization, RoPE, quantization and emitted row counts
-retain their original order; speculative verification still captures every
-intermediate rollback state. A new operator test checks ratios 4/128,
-unaligned starts, ragged tails, exact state contents and byte-identical
-compressed outputs. Spans crossing a pool boundary are rejected.
-
-C1 drafting projects only the requested vocabulary rows, while retaining the
-complete noncausal support transformer. Its backoff policy now counts the
-guaranteed target token and evaluates recent completed-token cost. An
-eight-cycle window avoids repeatedly penalizing a request for its first poor
-drafts; clearly unprofitable probes can stop after four cycles. Retries reset
-the cost window. Decisions use token counts, not runtime clocks; acceptance,
-sampling, the 64-token retry interval and the concurrent policy are unchanged.
-Measured draft/verify/commit costs for tails 1–5 were approximately
-145/165/185/210/230 hundredths of an AR step at d0/d16K.
-
-The test references freeze the historical accumulation order too; otherwise
-the new compiler changes both the implementation and its exact-match oracle.
-Separate FP64 operator formulas remain independent and pass unchanged.
-
-The initial compiler comparison found no general spill increase. The IQ2
-tile-eight kernel drops from 148 to 105 VGPRs and the direct indexer from 21
-to 17. One MMQ specialization grows from 312 to 348 scratch bytes; complete
-request timings, rather than register counts alone, determine performance.
-The final router remains at 52 VGPRs with no scratch or spills on either
-compiler; the three MMQ quantizers use fewer VGPRs.
-
-## Numerical and state checks
-
-The earlier #483 review exposed quality failures with 32-token prefill calls
-that short official continuations missed. This branch does not import its
-rolled MMQ K-loop change. The new `reference --prefill-only --narrow` check
-covers the same two points using identical token IDs and independent
-`antirez/ds4` revision `6289c516273979173abbc062209a81dd3706b804`.
-Final results, with the original limits unchanged:
+The original 4K/12K narrow-prefill failure from #483 is covered without importing
+its rolled MMQ K-loop. The teacher is independent `antirez/ds4` revision
+`6289c516273979173abbc062209a81dd3706b804`, using identical token IDs and
+32-token prefill calls. The corrected build records:
 
 | Prefix / metric, 32-token calls | Candidate / 7.2.3 | Candidate / 10.1 | Limit |
 | --- | ---: | ---: | ---: |
@@ -108,16 +66,20 @@ Final results, with the original limits unchanged:
 | 12K / cosine similarity | 0.984899 | 0.996594 | ≥0.979 |
 | 12K / maximum absolute logit error | 3.619398 | 2.072149 | ≤5.0 |
 
-Both final 7.2.3 vectors are byte-identical to the original control. The final
-10.1 vectors also reproduce the preceding corrected build's results. The latest
-compressor optimization repeats all four vectors byte-for-byte, in one run per
-compiler; the independent teacher vectors are reused. Intermediate failures
-are retained outside Git: the initial
-10.1 candidate exceeded the 4K maximum-error limit at 5.184738; Q8 rounding
-alone still failed at both depths. HC/router corrections were required too.
+The initial 10.1 candidate exceeded the independent 4K maximum-error limit
+(5.184738 versus 5.0); its 12K RMSE was 0.619958. The retained corrections
+reduce those errors to 4.286486 and 0.393417 respectively. They do not improve
+every metric: 4K RMSE increases from 0.977081 to 1.023443, still within its
+original limit. The final 10.1 result is substantially closer to the teacher
+than 7.2.3 at 12K, without reproducing 7.2.3's values.
 
-The official continuation set uses the same 100 prompts and 2,313 scored
-tokens. The final 10.1 binary is compared with the recorded 7.2.3 main control:
+All four vectors repeated byte-for-byte after compressor-store batching. Both
+7.2.3 vectors also match the original 7.2.3 control. Intermediate failures are
+retained outside Git: Q8 rounding alone was insufficient; HC/router corrections
+were required too. These checks do not resolve the pre-existing target-model
+parity limits in [QUALITY.md](QUALITY.md).
+
+The official continuation set contains 100 prompts and 2,313 scored tokens:
 
 | Metric | Main / 7.2.3 | Candidate / 10.1 |
 | --- | ---: | ---: |
@@ -127,113 +89,79 @@ tokens. The final 10.1 binary is compared with the recorded 7.2.3 main control:
 | Mean matching greedy prefix | 5.28 | 5.45 |
 | Additional smoke token matches | 14/14 | 14/14 |
 
-NLL increases by 0.002025. A paired per-prompt bootstrap gives a 95% interval
-of [-0.006285, 0.010277] for this token-weighted difference (20,000 resamples,
-seed 20261024). This sample does not establish general quality equivalence.
-The initial 7.2.3 candidate repeated the control scores exactly; the final
-7.2.3 checks above qualify the subsequently changed MMQ path.
+The token-weighted NLL delta is +0.002025, with paired 95% bootstrap interval
+[-0.006285, 0.010277] (20,000 resamples, seed 20261024). This sample does not
+establish general quality equivalence. Cross-compiler logits and text differ.
 
-At the ratio-four sparse-indexer boundary, both toolchains pass DSpark C1
-and AR C2 with **0/128 token mismatches and zero maximum full-logit error**.
-The 2,035-token prompt crosses the 512-entry compressed-cache boundary during
-generation; the sidecar is loaded and actual drafts are exercised.
+## Execution optimizations
 
-The preceding numerical build passed `sampling-defaults` and `state-edges`,
-including tool-call stops and failed-request recovery. The latest production
-binary passes `sampling-defaults`, `long-context` and `cache`: 142 recorded
-requests, thinking on/off, seeded replay, cached sampler isolation, Chat
-Completions/Responses, cancellation, continuation and restoration after a
-server restart. Actual C2 execution is observed, with 1,175 proposed and 785
-accepted drafts across the run. The latest 10.1 native boundary replay also
-passes both DSpark C1 and AR C2 with zero token/logit differences.
-These are candidate correctness checks; matched benchmark controls provide
-the timing comparison.
+The earlier completed-token-cost backoff policy is restored at the user's
+request. It counts the guaranteed target anchor, uses an eight-cycle recent
+window and resets that window after retries. Clearly unprofitable starts can
+still back off after four cycles. Acceptance rules, sampling and the 64-token
+retry interval stay unchanged. The later confidence/width experiments remain
+discarded.
 
-With a fresh fixture-owned disk cache, startup takes 65.2 seconds, including
-50.3 seconds to fingerprint target/sidecar artifacts. Restart takes 15.9
-seconds and reuses those identities. This existing cold identity work runs
-before readiness and is separate from request-time prefill/decode.
+- Group resumed compressor stores only up to the next pool/shift boundary.
+  Pooling, normalization, RoPE, quantization and speculative rollback stay in
+  their original order. Independent state tests cover ratios 4/128 and tails.
+- Project only requested C1 vocabulary rows, preserving the complete noncausal
+  support transformer and all selected logits.
+- Decode IQ2 signed weight bytes once and reuse them across up to four token
+  rows. Integer sums and the final FP32 FMA remain identical.
+- Keep sequential greedy Markov choices on the GPU and read the completed
+  chain once. A new bounded operator test checks the independent FP64 formula,
+  scalar replay, tie ordering and invalid ranges.
+- Prefetch 16 attention value rows before consuming them in the original
+  FP32 FMA order. Existing independent attention tests now cover 49 empty,
+  short, wrapped, masked and indexed cases, including partial groups.
+
+The kernel/operator checks pass exactly on both 7.2.3 and 10.1. Focused attention measurements
+use rotating KV buffers; gains vary by shape, so they do not substitute for
+complete-request timing. Coarse support allocations and asynchronous tensor
+copies produced no measurable request gain and were discarded.
 
 ## Focused performance
 
-Canonical HTTP benchmark, greedy/thinking off, pp2048/tg128, one warmed
-sample per cell. Depth is the cached prefix. Each cell is **prefill / decode
-tok/s**, with identical checkpoint, prompts and server capacity:
+Canonical HTTP history: thinking off, greedy, C1, 128 output tokens; the short
+warmup has 16. The 16K continuation restores 16,297 cached tokens and processes
+2,045 more. The restored recent-cost policy is held constant in this final
+ROCm 10.1 comparison against `6ff84eee`. Messages, output bytes, draft counts
+and cache work match:
 
-| Mode / depth | Main / 7.2.3 | Candidate / 7.2.3 | Candidate / 10.1 |
-| --- | ---: | ---: | ---: |
-| AR / 0 | 485.02 / 16.31 | 484.27 / 16.30 | 487.79 / 16.08 |
-| AR / 16K | 356.92 / 15.52 | 377.89 / 15.52 | 378.69 / 15.32 |
-| DSpark prose / 0 | 477.16 / 18.25 | 482.55 / 22.92 | 486.05 / 21.56 |
-| DSpark prose / 16K | 356.90 / 15.66 | 377.61 / 15.31 | 379.65 / 16.05 |
-| DSpark repetition / 0 | 483.33 / 26.64 | 483.06 / 26.69 | 487.04 / 26.38 |
-| DSpark repetition / 16K | 353.74 / 24.04 | 373.62 / 24.06 | 376.50 / 23.46 |
+| Request / phase | Before kernel changes | Final candidate |
+| --- | ---: | ---: |
+| Warmup prefill | 4,438.7 ms | 4,459.4 ms |
+| Warmup generation | 19.60 tok/s | 19.99 tok/s |
+| d0 prefill | 4,208.3 ms | 4,185.5 ms |
+| d0 generation | 21.55 tok/s | 22.18 tok/s |
+| First 16K continuation prefill | 5,561.9 ms | 5,562.4 ms |
+| First 16K continuation generation | 19.52 tok/s | 20.13 tok/s |
 
-The latest resumed-prefill change improves 16K prefill by about 5–6% relative
-to the preceding candidate on each compiler. AR decode remains within the
-5% timing margin. Recent-cost backoff improves 7.2.3 d0 prose generation from
-18.25 to 22.92 tok/s, with identical output; draft counts intentionally change.
-Repetitive output matches across compilers. Ordinary prose and draft
-acceptance differ, so these cross-compiler decode rates do not isolate kernel
-speed. The calibration requests and first-request checks below remain part of
-qualification; passing the six table cells alone is insufficient.
-The 7.2.3 phase screen covers all 20 benchmark/setup requests with unchanged
-prompt/prefill/output token counts. Its only flag is the short first-request
-decode sample discussed below; the matched repeat does not reproduce it.
+Both production builds pass. The original ROCm 10.1 continuation remains a
+separate, slower comparison: it reached 24.18 tok/s with 85 accepted drafts;
+the corrected target with main's backoff reached 15.33 with eight accepted.
+Restoring recent-cost backoff and adding the kernel changes reaches 20.13
+with 69 accepted drafts. The old and corrected summaries are both valid.
+No further policy tuning is included. [BENCHMARKS.md](BENCHMARKS.md) retains
+its published measurements; this was a focused repeat, not a new full sweep.
 
-The first candidate regressed a short synthetic request from 8 to 1 accepted
-drafts on 10.1, increasing decode time from 811 to 1,072 ms. The final
-corrections restore 8 accepted drafts. A matched fresh-process control uses
-the exact 2,051-token prompt and 16 output tokens:
+The earlier corrected-build profile was 93.2% GPU-busy during this slow decode.
+Large totals inside blocking HIP calls overlap GPU execution and must not be
+added to kernel time as separate waiting overhead. Prefill contained 126,790
+compressor-store launches, motivating bounded grouping. These traces do not
+prove every possible scheduling pause is eliminated.
 
-| Build | Prefill | Decode | Total request | Accepted drafts |
-| --- | ---: | ---: | ---: | ---: |
-| Main / 7.2.3 | 4,540.7 ms | 641.1 ms | 5.223 s | 10 |
-| Candidate / 7.2.3 | 4,489.6 ms | 638.3 ms | 5.169 s | 10 |
-| Main / 10.1 | 4,404.0 ms | 812.8 ms | 5.254 s | 8 |
-| Candidate / 10.1 | 4,410.6 ms | 815.3 ms | 5.263 s | 8 |
+The final build passes 142 functional requests: default sampling, seed replay,
+thinking, Chat/Responses, cancellation, continuation and disk restart, including
+actual C2 execution and 1,175 proposed/785 accepted drafts. Startup/restart take
+14.8/15.4 s with the fixture fingerprint cache warm.
 
-No phase in this matched repeat crosses the gate. Worst token intervals are
-128.6→127.4 ms on 7.2.3 and 224.6→223.9 ms on 10.1; snapshot time also
-does not regress. The first final-candidate
-screen was slower on both toolchains: 995/984 ms decode on 7.2.3/10.1.
-The latest benchmark also contains short-request samples of 725/865 ms.
-Those samples remain retained and inconclusive; the matched repeat does not
-reproduce them, and their cause is unproven.
-The pre-existing cross-compiler difference in wording and acceptance also
-remains. These short requests are separate from the tg128 table.
-
-The eight-token 16K prefix setup likewise accepts one draft on both unchanged
-10.1 main and the candidate, taking about 602/606 ms respectively, versus
-559 ms and two accepted drafts on 7.2.3.
-
-However, the unchanged-10.1 control exposed a separate regression on the
-first 16K calibration continuation. A capture replay confirms identical
-request messages and two valid, different summaries. Accepted drafts drop
-from 85 to 8; decode rises from 5,293.9 to 8,350.5 ms (24.18 to 15.33 tok/s),
-while prefill changes from 5,843.4 to 5,862.8 ms. This is a real same-compiler
-timing increase, even though the candidate remains close to the qualified
-7.2.3 control on that prompt. It is not a kernel stall or an invalid-output
-speedup. A compiler-specific scalar-order trial passed the same numerical
-limits but did not fix this case (15.47 tok/s) and slowed d0 prose to
-16.99 tok/s; it was rejected. The measured candidate remains the retained
-implementation, with this timing exception unresolved.
-
-The store batching and recent-cost policy recover the same corrected summary
-at **19.52 tok/s**: 69 accepted drafts from 141 proposals, 6,556.3 ms decode
-and 5,669.5 ms prefill. The preceding numerical candidate needed 8,350.5 ms
-decode and 5,862.8 ms prefill. The latest worst token interval is 173.4 ms.
-The remaining difference from unchanged 10.1 main is 1,262.5 ms decode
-(19.3% fewer tok/s), so this is not a no-regression result.
-
-A separate unchanged-main AR control uses identical messages and generates
-a different summary from unchanged-main DSpark, already at the first token.
-AR also restores one fewer cached token. This establishes that the divergence
-precedes draft verification; it does not establish a verifier defect or make
-the faster DSpark result invalid.
-
-The retained profiler trace shows 93.2% GPU-busy time after the first token of
-the slow corrected continuation. Most of the delay is additional target
-decoding after premature backoff. Before the first token it records 126,790
-compressor-store launches, motivating the bounded grouping above. That trace
-does not prove that every individual scheduling pause has been eliminated.
+Timing qualification remains limited. The automatic comparison rejects changed
+parent loader-path and lockfile metadata. A separate audit verifies that both
+server wrappers set the same loader path and that only the unused optional
+Nix ROCm10 input changed; both binaries use the retained container toolchain.
+That audited comparison passes 2,002 measurements, with 26 flags around cache
+snapshots/restores, concurrent admission and token gaps. Outputs and cache work
+match. Raw reports and flags remain unchanged; this is not a blanket latency
+pass.

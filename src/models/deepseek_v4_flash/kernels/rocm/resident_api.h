@@ -152,7 +152,12 @@ int ds4_gpu_attention_noncausal_raw_batch_heads_tensor(
     uint64_t sinks_offset, const ds4_gpu_tensor* q,
     const ds4_gpu_tensor* raw_kv, uint32_t n_tokens, uint32_t n_raw,
     uint32_t raw_cap, uint32_t raw_start, uint32_t n_head, uint32_t head_dim);
-int ds4_gpu_dspark_markov_argmax_tensor(ds4_gpu_tensor *out_index, ds4_gpu_tensor *scratch_key, const ds4_gpu_tensor *logits_row, const void *model_map, uint64_t model_size, uint64_t w1_offset, uint64_t w2_offset, uint32_t vocab, uint32_t markov_rank, uint32_t previous_token);
+// Sequential Markov choices stay device-side until the complete chain is read.
+int ds4_gpu_dspark_markov_chain_tensor(
+    ds4_gpu_tensor* out_index, ds4_gpu_tensor* scratch_key,
+    const ds4_gpu_tensor* logits_rows, const void* model_map,
+    uint64_t model_size, uint64_t w1_offset, uint64_t w2_offset, uint32_t vocab,
+    uint32_t markov_rank, uint32_t previous_token, uint32_t rows);
 int ds4_gpu_dspark_candidates_tensor(
     ds4_gpu_tensor* out, ds4_gpu_tensor* scratch, const ds4_gpu_tensor* logits,
     uint64_t logits_stride, const ds4_gpu_tensor* hidden,

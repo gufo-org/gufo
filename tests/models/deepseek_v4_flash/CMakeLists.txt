@@ -22,6 +22,14 @@ add_test(NAME ds4.cli COMMAND ds4_cli_test)
 set_tests_properties(ds4.cli PROPERTIES LABELS "cpu;ds4;cli")
 
 if(ENGINE_ENABLE_HIP)
+  add_executable(ds4_markov_test markov_test.cpp)
+  target_link_libraries(ds4_markov_test PRIVATE gufo_deepseek_v4_flash)
+  add_test(NAME ds4.markov COMMAND ds4_markov_test)
+  set_tests_properties(ds4.markov PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds4;quality"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds4_compressor_test compressor_test.cpp)
   target_link_libraries(ds4_compressor_test PRIVATE gufo_deepseek_v4_flash)
   add_test(NAME ds4.compressor COMMAND ds4_compressor_test)

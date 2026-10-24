@@ -585,11 +585,12 @@ void check_target_attention() {
   constexpr unsigned heads = 64, dim = 512, cap = 4352, max_comp = 1024;
   std::mt19937 gen(61);
   std::uniform_real_distribution<float> dist(-1.f, 1.f);
-  for (unsigned raw : {16u, 128u, 256u}) {
-    for (unsigned comp : {0u, 64u, 512u, 1024u}) {
+  // Exercise empty/short windows and both sides of a prefetched group.
+  for (unsigned raw : {0u, 1u, 16u, 17u, 128u, 255u, 256u}) {
+    for (unsigned comp : {0u, 17u, 64u, 127u, 512u, 513u, 1024u}) {
       const bool indexed = comp > 512;
       constexpr unsigned top_k = 512, position = 2049, ratio = 4;
-      const unsigned start = cap - raw / 2;
+      const unsigned start = cap - std::max(1u, raw / 2);
       const unsigned visible = std::min(comp, (position + 1) / ratio);
       std::vector<float> q(heads * dim), kv(cap * dim),
           compressed(max_comp * dim), sinks(heads), mask(comp),
@@ -709,7 +710,7 @@ void check_target_attention() {
     }
   }
   std::puts(
-      "Target attention: 12 exact GPU comparisons and independent "
+      "Target attention: 49 exact GPU comparisons and independent "
       "double-precision checks passed");
 }
 
