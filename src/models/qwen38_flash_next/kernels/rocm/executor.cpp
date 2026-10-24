@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -2000,16 +2001,22 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
     moe_pending_ = false;
     const auto* down = reinterpret_cast<const __half*>(s_.down_e);
     const float* fused_w = deferred ? fused_inject : nullptr;
+    // Between two normed wide layers the residual streams stay BF16: only
+    // these combines read them there.
+    const bool out_bf16 = res_bf16_allowed_ && xn_half_ && c.hc_count == 4;
     if (wide_mixer_ && MatrixRows(n_tokens) &&
         HcCombineMoeF16(
             res, down, s_.weights, s_.shexp_out, s_.router + c.num_experts,
             c.num_experts + 1, c.num_experts_used, s_.inject, inject_parts_,
             gamma, s_.xn_half, s_.xn_q8t, n_tokens, c.hidden_size, c.hc_count,
             c.rms_eps, stream_, deferred ? s_.block_out : nullptr,
-            deferred ? s_.hc_defer_w : nullptr, s_.inject, fused_w)) {
+            deferred ? s_.hc_defer_w : nullptr, s_.inject, fused_w, res_bf16_,
+            out_bf16)) {
       inject_fused_ = fused_w;
+      res_bf16_ = out_bf16;
       return;
     }
+    assert(!res_bf16_);
     if (deferred) {
       HcApplyDeferred(res, s_.block_out, s_.hc_defer_w, n_tokens, c.hidden_size,
                       stream_);
@@ -2034,7 +2041,7 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
         HcCombineF16(res, s_.block_out, s_.inject, inject_parts_, gamma,
                      s_.xn_half, s_.xn_q8t, n_tokens, c.hidden_size, c.hc_count,
                      c.rms_eps, stream_, defer_now ? s_.hc_defer_w : nullptr,
-                     s_.inject, defer_now ? fused_inject : nullptr);
+                     s_.inject, defer_now ? fused_inject : nullptr, res_bf16_);
     if (res_deferred_)
       inject_fused_ = fused_inject;
     return;
@@ -3288,6 +3295,9 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                                  il + 1 == c.num_layers && n > needed
                              ? (n - needed) / 128 * 128
                              : 0U;
+    // The next layer reads the residual only through its combines.
+    res_bf16_allowed_ = WidePrefill(n) && n <= options_.max_batch &&
+                        next_norm != nullptr && il + 1 < end_layer;
     const auto finish = [&](std::uint32_t rows) {
       defer_residual_ = WmmaExperts(l, rows);
       // The wide FFN reads the mix only through its F16 rows (router, routed
@@ -3322,6 +3332,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     }
     normed = next_norm != nullptr;
   }
+  res_bf16_allowed_ = false;
+  assert(!res_bf16_);
   if (end_layer < c.num_layers) {
     return true;
   }

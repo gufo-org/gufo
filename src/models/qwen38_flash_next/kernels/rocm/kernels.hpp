@@ -115,13 +115,15 @@ bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
 /// the stream weights land in defer_w, and true is returned. The update is
 /// then owed by HcCombineMoeF16 (prior_out, prior_w) or HcApplyDeferred.
 /// A deferring combine given `inject_w` also writes the next mixer's
-/// inject partials to `inject_out` (see HcCombineMoeF16).
+/// inject partials to `inject_out` (see HcCombineMoeF16). `res_bf16` reads
+/// (and, without defer_w, rewrites) the residual in the BF16 layout:
+/// element e at half-word e of its token's F32 row, rounded to nearest even.
 bool HcCombineF16(float* res, const float* block_out, const float* inject,
                   std::uint32_t inject_parts, const float* gamma, __half* xn,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
                   std::uint32_t streams, float eps, hipStream_t stream,
                   float* defer_w = nullptr, float* inject_out = nullptr,
-                  const float* inject_w = nullptr);
+                  const float* inject_w = nullptr, bool res_bf16 = false);
 /// Applies the residual update a deferring HcCombineF16 left out (four
 /// streams), with the same arithmetic.
 void HcApplyDeferred(float* res, const float* block_out, const float* w,
@@ -137,7 +139,8 @@ void HcApplyDeferred(float* res, const float* block_out, const float* w,
 /// (its block output and `prior_w` stream weights). A non-null `inject_w`
 /// (with gamma and `prior_out`) also writes the next mixer's inject partials
 /// to `inject_out`, as HcMixF16Gemm would from the F16 norm; they may
-/// replace this combine's own `inject` logits.
+/// replace this combine's own `inject` logits. `in_bf16` / `out_bf16`
+/// select the residual layout read and written (see HcCombineF16).
 bool HcCombineMoeF16(
     float* res, const __half* expert_out, const float* weights,
     const float* shared_out, const float* gate, std::uint32_t gate_stride,
@@ -145,7 +148,8 @@ bool HcCombineMoeF16(
     const float* gamma, __half* xn, void* xn_q8, std::uint32_t n_tokens,
     std::uint32_t hidden, std::uint32_t streams, float eps, hipStream_t stream,
     const float* prior_out = nullptr, const float* prior_w = nullptr,
-    float* inject_out = nullptr, const float* inject_w = nullptr);
+    float* inject_out = nullptr, const float* inject_w = nullptr,
+    bool in_bf16 = false, bool out_bf16 = false);
 
 /// x[i] = silu(x[i] * scale), in place over `count` floats.
 void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream);

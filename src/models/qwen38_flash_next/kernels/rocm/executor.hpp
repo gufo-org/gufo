@@ -604,6 +604,10 @@ private:
   hipEvent_t side_start_{nullptr};
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
+  /// The residual rows hold the BF16 layout (HcCombineF16); only the wide
+  /// combines between two normed layers of one pass may leave them so.
+  mutable bool res_bf16_{false};
+  mutable bool res_bf16_allowed_{false};
   hipEvent_t counts_ready_{nullptr};
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;

@@ -806,7 +806,47 @@ __device__ __forceinline__ void HcInjectPart(
 /// between the two passes, reduces the four stream norms in one block
 /// reduction, and quantizes each 32-wide block over its eight lanes with a
 /// four-code store. Rows of four streams up to 2,560 wide.
-template<typename XnT, bool kDefer = false, bool kInject = false>
+/// Wide prefill may hold the residual streams as BF16 (RNE), packed at the
+/// front of each token's F32 row: element e at half-word e of the row.
+__device__ __forceinline__ float4 RoundBf16(float4 v) {
+  const auto round = [](float f) {
+    std::uint32_t u = __float_as_uint(f);
+    u += 0x7FFFU + ((u >> 16U) & 1U);
+    return __uint_as_float(u & 0xFFFF0000U);
+  };
+  return float4{round(v.x), round(v.y), round(v.z), round(v.w)};
+}
+
+template<bool kBf16>
+__device__ __forceinline__ float4 LoadResidual(const float* row,
+                                               std::size_t e) {
+  if constexpr (kBf16) {
+    const uint2 w = *reinterpret_cast<const uint2*>(
+        reinterpret_cast<const std::uint16_t*>(row) + e);
+    return float4{
+        __uint_as_float(w.x << 16U), __uint_as_float(w.x & 0xFFFF0000U),
+        __uint_as_float(w.y << 16U), __uint_as_float(w.y & 0xFFFF0000U)};
+  } else {
+    return *reinterpret_cast<const float4*>(row + e);
+  }
+}
+
+/// Stores already rounded values when kBf16.
+template<bool kBf16>
+__device__ __forceinline__ void StoreResidual(float* row, std::size_t e,
+                                              float4 v) {
+  if constexpr (kBf16) {
+    *reinterpret_cast<uint2*>(reinterpret_cast<std::uint16_t*>(row) +
+                              e) = uint2{
+        (__float_as_uint(v.x) >> 16U) | (__float_as_uint(v.y) & 0xFFFF0000U),
+        (__float_as_uint(v.z) >> 16U) | (__float_as_uint(v.w) & 0xFFFF0000U)};
+  } else {
+    *reinterpret_cast<float4*>(row + e) = v;
+  }
+}
+
+template<typename XnT, bool kDefer = false, bool kInject = false,
+         bool kResBf16 = false>
 __global__ void HcCombineVec4Kernel(
     float* res, const float* block_out, const float* inject,
     std::uint32_t inject_parts, const float* gamma, XnT* xn, void* xn_q8,
@@ -851,12 +891,15 @@ __global__ void HcCombineVec4Kernel(
       const std::uint32_t s = e / hidden;
       const std::uint32_t i = e - (s * hidden);
       const float ws = w[s];
-      const float4 r = *reinterpret_cast<const float4*>(dst + e);
+      const float4 r = LoadResidual<kResBf16>(dst, e);
       const float4 b = *reinterpret_cast<const float4*>(src + i);
       v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
                     r.w + b.w * ws};
       if constexpr (!kDefer) {
-        *reinterpret_cast<float4*>(dst + e) = v[c];
+        // In place, each thread rewriting the elements it read.
+        if constexpr (kResBf16)
+          v[c] = RoundBf16(v[c]);
+        StoreResidual<kResBf16>(dst, e, v[c]);
       }
       const float sq =
           v[c].x * v[c].x + v[c].y * v[c].y + v[c].z * v[c].z + v[c].w * v[c].w;
@@ -977,7 +1020,10 @@ __global__ void HcCombineVec4Kernel(
 /// their weights and the gated shared expert (MoeEpilogueVec4Kernel), so the
 /// block output never round-trips memory. Threads own hidden lanes (up to
 /// three float4 each) across the four streams.
-template<bool kNormalize, bool kPrior = false, bool kInject = false>
+/// kInBf16 / kOutBf16 select the residual layout read and written (see
+/// LoadResidual); a layout change stores after the whole row is read.
+template<bool kNormalize, bool kPrior = false, bool kInject = false,
+         bool kInBf16 = false, bool kOutBf16 = false>
 __global__ void HcCombineMoeF16Kernel(
     float* res, const __half* expert_out, const float* weights,
     const float* shared_out, const float* gate, std::uint32_t gate_stride,
@@ -1039,7 +1085,7 @@ __global__ void HcCombineMoeF16Kernel(
       v[s][c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
       if (i < hidden) {
         const std::size_t e = (static_cast<std::size_t>(s) * hidden) + i;
-        float4 r = *reinterpret_cast<const float4*>(dst + e);
+        float4 r = LoadResidual<kInBf16>(dst, e);
         if constexpr (kPrior) {
           const float pw = prior_w[static_cast<std::size_t>(t) * kStreams + s];
           r = float4{__fmaf_rn(prior.x, pw, r.x), __fmaf_rn(prior.y, pw, r.y),
@@ -1050,7 +1096,12 @@ __global__ void HcCombineMoeF16Kernel(
         }
         v[s][c] = float4{r.x + b.x * w[s], r.y + b.y * w[s], r.z + b.z * w[s],
                          r.w + b.w * w[s]};
-        *reinterpret_cast<float4*>(dst + e) = v[s][c];
+        if constexpr (kOutBf16) {
+          v[s][c] = RoundBf16(v[s][c]);
+        }
+        if constexpr (kInBf16 == kOutBf16) {
+          StoreResidual<kOutBf16>(dst, e, v[s][c]);
+        }
         {
           // One square-accumulation order for every instantiation. The
           // deferred path must stay bit-identical to the separate-store
@@ -1077,6 +1128,21 @@ __global__ void HcCombineMoeF16Kernel(
             ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
           }
         }
+      }
+    }
+  }
+  if constexpr (kInBf16 != kOutBf16) {
+    // The two layouts overlap within the row: every thread has read its
+    // elements before any is rewritten.
+    __syncthreads();
+#pragma unroll
+    for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
+      const std::uint32_t i = (c * kThreads + threadIdx.x) * 4;
+#pragma unroll
+      for (std::uint32_t s = 0; s < kStreams; ++s) {
+        if (i < hidden)
+          StoreResidual<kOutBf16>(
+              dst, (static_cast<std::size_t>(s) * hidden) + i, v[s][c]);
       }
     }
   }
@@ -6480,6 +6546,28 @@ bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
   return true;
 }
 
+template<bool kIn, bool kOut>
+auto HcCombineMoeF16Variant(bool gamma, bool prior, bool inject) {
+  return inject ? HcCombineMoeF16Kernel<true, true, true, kIn, kOut>
+         : prior
+             ? (gamma ? HcCombineMoeF16Kernel<true, true, false, kIn, kOut>
+                      : HcCombineMoeF16Kernel<false, true, false, kIn, kOut>)
+             : (gamma ? HcCombineMoeF16Kernel<true, false, false, kIn, kOut>
+                      : HcCombineMoeF16Kernel<false, false, false, kIn, kOut>);
+}
+
+auto HcCombineMoeF16Pick(bool gamma, bool prior, bool inject, bool in_bf16,
+                         bool out_bf16) {
+  return in_bf16
+             ? (out_bf16
+                    ? HcCombineMoeF16Variant<true, true>(gamma, prior, inject)
+                    : HcCombineMoeF16Variant<true, false>(gamma, prior, inject))
+             : (out_bf16
+                    ? HcCombineMoeF16Variant<false, true>(gamma, prior, inject)
+                    : HcCombineMoeF16Variant<false, false>(gamma, prior,
+                                                           inject));
+}
+
 bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
                      const float* shared_out, const float* gate,
                      std::uint32_t gate_stride, std::uint32_t used,
@@ -6488,18 +6576,16 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
                      std::uint32_t n_tokens, std::uint32_t hidden,
                      std::uint32_t streams, float eps, hipStream_t stream,
                      const float* prior_out, const float* prior_w,
-                     float* inject_out, const float* inject_w) {
+                     float* inject_out, const float* inject_w, bool in_bf16,
+                     bool out_bf16) {
   if (streams != 4 || hidden % 128 != 0 || hidden > 3 * 4 * kThreads ||
       (gamma != nullptr && xn_q8 == nullptr) ||
       (inject_w != nullptr && (gamma == nullptr || prior_out == nullptr))) {
     return false;
   }
   const auto combine =
-      inject_w != nullptr    ? HcCombineMoeF16Kernel<true, true, true>
-      : prior_out != nullptr ? (gamma ? HcCombineMoeF16Kernel<true, true>
-                                      : HcCombineMoeF16Kernel<false, true>)
-                             : (gamma ? HcCombineMoeF16Kernel<true>
-                                      : HcCombineMoeF16Kernel<false>);
+      HcCombineMoeF16Pick(gamma != nullptr, prior_out != nullptr,
+                          inject_w != nullptr, in_bf16, out_bf16);
   hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
                      expert_out, weights, shared_out, gate, gate_stride, used,
                      inject, inject_parts, gamma, xn, xn_q8, hidden, eps,
@@ -6539,25 +6625,34 @@ bool HcCombineF16(float* res, const float* block_out, const float* inject,
                   std::uint32_t inject_parts, const float* gamma, __half* xn,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
                   std::uint32_t streams, float eps, hipStream_t stream,
-                  float* defer_w, float* inject_out, const float* inject_w) {
+                  float* defer_w, float* inject_out, const float* inject_w,
+                  bool res_bf16) {
   // F16 prefill keeps the same reduction even for a one-token tail.
   if (streams == 4 && hidden % 128 == 0 && hidden <= 2560) {
     if (inject_w != nullptr && defer_w != nullptr && gamma != nullptr) {
       // The inject partials may replace the logits this combine reads;
       // every thread reads them before its first barrier.
-      hipLaunchKernelGGL((HcCombineVec4Kernel<__half, true, true>),
-                         dim3(n_tokens), dim3(kThreads), 0, stream, res,
-                         block_out, inject, inject_parts, gamma, xn, xn_q8,
+      const auto combine = res_bf16
+                               ? HcCombineVec4Kernel<__half, true, true, true>
+                               : HcCombineVec4Kernel<__half, true, true>;
+      hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream,
+                         res, block_out, inject, inject_parts, gamma, xn, xn_q8,
                          hidden, eps, defer_w, inject_w, inject_out);
       return true;
     }
-    const auto combine = defer_w != nullptr ? HcCombineVec4Kernel<__half, true>
-                                            : HcCombineVec4Kernel<__half>;
+    const auto combine =
+        defer_w != nullptr
+            ? (res_bf16 ? HcCombineVec4Kernel<__half, true, false, true>
+                        : HcCombineVec4Kernel<__half, true>)
+            : (res_bf16 ? HcCombineVec4Kernel<__half, false, false, true>
+                        : HcCombineVec4Kernel<__half>);
     hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
                        block_out, inject, inject_parts, gamma, xn, xn_q8,
                        hidden, eps, defer_w, nullptr, nullptr);
     return defer_w != nullptr;
   }
+  if (res_bf16)
+    return false;
   hipLaunchKernelGGL(HcCombineKernel<__half>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
                      inject_parts, gamma, xn, xn_q8, hidden, streams, eps,
