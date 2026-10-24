@@ -115,13 +115,15 @@ bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
 /// the stream weights land in defer_w, and true is returned. The update is
 /// then owed by HcCombineMoeF16 (prior_out, prior_w) or HcApplyDeferred.
 /// A deferring combine given `inject_w` also writes the next mixer's
-/// inject partials to `inject_out` (see HcCombineMoeF16).
+/// inject partials to `inject_out` (see HcCombineMoeF16). `res_bf16` reads
+/// (and, without defer_w, rewrites) the residual in the BF16 layout:
+/// element e at half-word e of its token's F32 row, rounded to nearest even.
 bool HcCombineF16(float* res, const float* block_out, const float* inject,
                   std::uint32_t inject_parts, const float* gamma, __half* xn,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
                   std::uint32_t streams, float eps, hipStream_t stream,
                   float* defer_w = nullptr, float* inject_out = nullptr,
-                  const float* inject_w = nullptr);
+                  const float* inject_w = nullptr, bool res_bf16 = false);
 /// Applies the residual update a deferring HcCombineF16 left out (four
 /// streams), with the same arithmetic.
 void HcApplyDeferred(float* res, const float* block_out, const float* w,
@@ -137,7 +139,8 @@ void HcApplyDeferred(float* res, const float* block_out, const float* w,
 /// (its block output and `prior_w` stream weights). A non-null `inject_w`
 /// (with gamma and `prior_out`) also writes the next mixer's inject partials
 /// to `inject_out`, as HcMixF16Gemm would from the F16 norm; they may
-/// replace this combine's own `inject` logits.
+/// replace this combine's own `inject` logits. `in_bf16` / `out_bf16`
+/// select the residual layout read and written (see HcCombineF16).
 bool HcCombineMoeF16(
     float* res, const __half* expert_out, const float* weights,
     const float* shared_out, const float* gate, std::uint32_t gate_stride,
@@ -145,7 +148,8 @@ bool HcCombineMoeF16(
     const float* gamma, __half* xn, void* xn_q8, std::uint32_t n_tokens,
     std::uint32_t hidden, std::uint32_t streams, float eps, hipStream_t stream,
     const float* prior_out = nullptr, const float* prior_w = nullptr,
-    float* inject_out = nullptr, const float* inject_w = nullptr);
+    float* inject_out = nullptr, const float* inject_w = nullptr,
+    bool in_bf16 = false, bool out_bf16 = false);
 
 /// x[i] = silu(x[i] * scale), in place over `count` floats.
 void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream);
@@ -248,11 +252,16 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
 /// history is read only; pass convolved=true to GatedDeltaNet to consume
 /// this result and update history. Speculative snapshots need all raw QKV
 /// rows and must use DenseF16Gemm instead. Unsupported shapes launch nothing.
+/// A non-null `z_stream` receives the Z rows' tiles (the same products)
+/// after the QKV tiles (ordered through `z_start`), so they run beside the
+/// recurrence that does not read them.
 bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0);
+                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0,
+                     hipStream_t z_stream = nullptr,
+                     hipEvent_t z_start = nullptr);
 
 /// Routed expert GEMMs. RoutedCompact sorts the (token, slot) assignments
 /// by expert into `rows_token`/`rows_slot` (RoutedCompactRows(slots,
@@ -353,7 +362,8 @@ struct GdnCheckpoint {
 /// (K = v_heads * d) instead of `out`. With null `out_q8`, a non-null
 /// `out_half` receives F16 rows instead of `out`. With both null, a non-null
 /// `out_q8_1` also receives the rows' unpadded Q8_1 rows (as
-/// qfn_mmq_quantize_q8_1 writes them; d == 128). `convolved` consumes
+/// qfn_mmq_quantize_q8_1 writes them; d == 128). The epilogue, the only
+/// reader of `z`, waits for `z_ready` when it is set. `convolved` consumes
 /// convolution rows already in conv_scratch; it requires null speculative
 /// snapshots.
 void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
@@ -367,7 +377,8 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t d, std::uint32_t kernel, bool row_split,
                    bool convolved, float eps, hipStream_t stream,
                    __half* out_half = nullptr, GdnCheckpoint checkpoint = {},
-                   std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr);
+                   std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr,
+                   hipEvent_t z_ready = nullptr);
 
 /// Private rows for one request in a decode batch. Scratch regions and all
 /// recurrent/history/rollback buffers must be disjoint between requests.

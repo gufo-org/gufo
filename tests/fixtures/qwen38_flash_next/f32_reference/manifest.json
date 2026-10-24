@@ -1,0 +1,76 @@
+{
+  "description": "F32 CPU reference (qwen38_flash_next_reference_probe) top-K logits for gpu_probe --logit-rows dumps; see tests/models/qwen38_flash_next/f32_reference.py",
+  "model": {
+    "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "quantization": "UD-Q4_K_XL",
+    "shards": [
+      {
+        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+        "bytes": 10946624,
+        "sha256": "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082"
+      },
+      {
+        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+        "bytes": 49859583136,
+        "sha256": "3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9"
+      },
+      {
+        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+        "bytes": 49376141504,
+        "sha256": "56758f40269cad5cd9b0d3d6fbae0f40f6d5be6de49e4ab392dbe83157d9cbd3"
+      },
+      {
+        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+        "bytes": 12087983520,
+        "sha256": "753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a"
+      }
+    ],
+    "revision": "38bb39ee97821de2c9009abb7e93950eec396e66"
+  },
+  "reference": {
+    "probe": "qwen38_flash_next_reference_probe",
+    "revision": "8b52b42cb031",
+    "command": "qwen38_flash_next_reference_probe --model SHARD1 --tokens IDS --dump REF.bin; f32_reference.py write --reference REF.bin --tokens N --batch B --rows 256"
+  },
+  "top_k": 256,
+  "rows_per_pass": 256,
+  "prompts": [
+    {
+      "name": "docs",
+      "scenario": "repository documentation prose and markdown",
+      "batch": 2048,
+      "text": "prompts/docs.txt",
+      "tokens": "prompts/docs.tokens.json",
+      "fixture": "docs.npz",
+      "token_count": 2228
+    },
+    {
+      "name": "code",
+      "scenario": "C++ source",
+      "batch": 512,
+      "text": "prompts/code.txt",
+      "tokens": "prompts/code.tokens.json",
+      "fixture": "code.npz",
+      "token_count": 1275
+    },
+    {
+      "name": "chat",
+      "scenario": "multi-turn Qwen chat with empty thinking blocks",
+      "batch": 512,
+      "text": "prompts/chat.txt",
+      "tokens": "prompts/chat.tokens.json",
+      "fixture": "chat.npz",
+      "token_count": 889
+    },
+    {
+      "name": "tools",
+      "scenario": "tool definitions, calls and responses",
+      "batch": 512,
+      "text": "prompts/tools.txt",
+      "tokens": "prompts/tools.tokens.json",
+      "fixture": "tools.npz",
+      "token_count": 1307
+    }
+  ],
+  "gpu_dump": "qwen38_flash_next_gpu_probe --model SHARD1 --prompt-file prompts/NAME.txt --batch B --context 4096 --logit-rows 256 --dump DIR/NAME.bin"
+}

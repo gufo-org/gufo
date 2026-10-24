@@ -1,0 +1,55 @@
+<|im_start|>system
+You are a careful assistant helping a small team plan the migration of a self-hosted service from one machine to another. Answer concisely, state assumptions, and ask before doing anything irreversible.<|im_end|>
+<|im_start|>user
+We run a photo library service on an old desktop under the stairs. It has a 4 TB disk that is about 70% full, a PostgreSQL database for the metadata and a small Redis cache. We bought a new mini PC with two 4 TB NVMe drives and want to move everything there this weekend without losing anything. Where do we start?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+Start by making the move reversible, then copy, then switch over.
+
+1. Inventory what the service actually needs: the photo files, the PostgreSQL database, the Redis cache (usually disposable), the configuration files and any scheduled jobs such as thumbnail generation or backups.
+2. Take a verified backup on the old machine before touching anything: a `pg_dump` of the database and a checksum list of the photo directory.
+3. Prepare the new machine: install the same major PostgreSQL version, decide how to use the two drives (a mirror is the safer default for a single-copy photo library), and create the same users and directory layout.
+4. Copy the photos while the old service keeps running, then do a short final sync during a planned pause.
+5. Restore the database dump on the new machine, start the service there and compare file counts and a sample of checksums.
+6. Only after a few days of normal use, retire the old disk.
+
+Two assumptions: nobody needs to upload photos during the final pause, and the database is small enough to dump in a few minutes. Is that right?<|im_end|>
+<|im_start|>user
+The database is about 9 GB. People upload maybe twenty photos a day, mostly on Sunday evening. Should the two drives be a mirror or should we use one for photos and one for backups?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+With a single copy of irreplaceable photos, I would mirror the drives and keep backups on a different device.
+
+- A mirror protects against one drive failing, which is the most likely hardware failure. It does not protect against deletion, corruption copied to both sides, ransomware or the whole box being lost.
+- Using the second drive as a backup target protects against deletion if the backups are versioned, but a single drive failure then takes the live library down until you restore 2.8 TB.
+- The usual compromise is the mirror for the live data plus a versioned backup to an external drive or another machine, ideally one copy off site.
+
+A 9 GB database dumps quickly, so you can schedule the final pause for Saturday morning, well away from the Sunday uploads. Plan for an hour: stop the service, run the final file sync, dump and restore the database, start the service on the new machine and check it.<|im_end|>
+<|im_start|>user
+Okay, mirror it is. What could go wrong during the final sync, and how do we know the copy is complete?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+The common failure modes are quiet ones, so check them explicitly.
+
+- Files that change during the copy: stop the service and any background jobs first, so nothing writes to the library while the last pass runs.
+- Permissions and ownership: copy with a tool that preserves them, and run it as a user that can read every file. A file the copy could not read is easy to miss in a long log.
+- Hard links, sparse files and extended attributes: decide whether the library uses them and choose options that keep them.
+- Character encoding in file names: very old uploads sometimes have names that only one machine's locale handles.
+
+To know the copy is complete, compare three things: the number of files, the total size, and checksums. The first two are fast and catch most mistakes; checksums on a random sample of a few thousand files catch corruption. For the database, compare row counts of the main tables before and after the restore, and open a few albums in the application.<|im_end|>
+<|im_start|>user
+Last question: how long should we keep the old desktop around after the move, and what should we do with its disk?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
