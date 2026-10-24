@@ -2796,16 +2796,20 @@ __launch_bounds__(256) __global__ void GdnChunkPrepKernel(
 /// [16 w, 16 w + 16) (value rows of the [v][k] state) as eight F32 WMMA
 /// accumulators. Each chunk's q/k/T/P are staged once in LDS (K^T
 /// transposed on the way in) while the next chunk loads into registers.
-/// Writes the raw attention rows [token][head][128] for GdnEpilogueKernel;
-/// the state at checkpoint.tokens (a chunk boundary or the end) when
-/// requested.
+/// Writes the raw attention rows [token][head][128] for GdnEpilogueKernel,
+/// or with kNorm the epilogue's gated RMS norm as F16 rows of `out_half`
+/// (row stride `out_stride` halves); the state at checkpoint.tokens (a
+/// chunk boundary or the end) when requested.
+template<bool kNorm>
 __launch_bounds__(256, 6) __global__ void GdnChunkScanKernel(
     const _Float16* __restrict__ qh, const _Float16* __restrict__ kh,
     const float* __restrict__ conv_out, float* __restrict__ state,
     float* __restrict__ raw, const _Float16* __restrict__ t_in,
     const _Float16* __restrict__ p_in, const float2* __restrict__ gates,
     std::uint32_t n_tokens, std::uint32_t k_heads, std::uint32_t v_heads,
-    std::uint32_t chunks, GdnCheckpoint checkpoint) {
+    std::uint32_t chunks, GdnCheckpoint checkpoint, const float* __restrict__ z,
+    std::uint32_t z_stride, const float* __restrict__ norm_w, float eps,
+    __half* __restrict__ out_half, std::uint32_t out_stride) {
   constexpr int CL = kGdnChunk;
   constexpr int kTiles = CL / 16;
   constexpr int SQ = kGdnChunkHeadStride;
@@ -2819,6 +2823,8 @@ __launch_bounds__(256, 6) __global__ void GdnChunkScanKernel(
   __shared__ __attribute__((aligned(16))) _Float16 s_t[CL * ST];
   __shared__ __attribute__((aligned(16))) _Float16 s_p[CL * ST];
   __shared__ float2 s_gate[CL];
+  // Per-row partial sums of squares of the eight waves (kNorm).
+  __shared__ float s_square[kNorm ? CL : 1][9];
   const int h = static_cast<int>(blockIdx.x);
   const int tid = static_cast<int>(threadIdx.x);
   const int lane = tid & 31;
@@ -2850,6 +2856,8 @@ __launch_bounds__(256, 6) __global__ void GdnChunkScanKernel(
   uint4 ptp[kTpLoads];
   float2 pg{0.0F, 0.0F};
   float pv[kTiles][8];
+  float pz[kTiles][8];  ///< kNorm: this lane's gate values, loaded with v
+  const float* z_rows = kNorm ? z + h * kGdnDim + col : nullptr;
   const auto prefetch = [&](int ch) {
     const int t0 = ch * CL;
 #pragma unroll
@@ -2885,8 +2893,21 @@ __launch_bounds__(256, 6) __global__ void GdnChunkScanKernel(
                                min(t0 + rt * 16 + 2 * e + rh, last)) *
                            channels];
   };
+  const auto prefetch_z = [&](int ch) {
+    const int t0 = ch * CL;
+#pragma unroll
+    for (int rt = 0; rt < kTiles; ++rt)
+#pragma unroll
+      for (int e = 0; e < 8; ++e)
+        pz[rt][e] = z_rows[static_cast<std::size_t>(
+                               min(t0 + rt * 16 + 2 * e + rh, last)) *
+                           z_stride];
+  };
   prefetch(0);
   prefetch_v(0);
+  if constexpr (kNorm)
+    prefetch_z(0);
+  const float norm_col = kNorm ? norm_w[col] : 0.0F;
 
   for (int ch = 0; ch < static_cast<int>(chunks); ++ch) {
     const int t0 = ch * CL;
@@ -2982,22 +3003,61 @@ __launch_bounds__(256, 6) __global__ void GdnChunkScanKernel(
       s[it] = acc;
     }
     // O = scale diag(e^G) Q S0 + P U.
+    v8f o[kTiles];
 #pragma unroll
     for (int rt = 0; rt < kTiles; ++rt) {
-      v8f o;
 #pragma unroll
       for (int e = 0; e < 8; ++e)
-        o[e] = qs[rt][e] * (s_gate[rt * 16 + 2 * e + rh].x * scale);
+        o[rt][e] = qs[rt][e] * (s_gate[rt * 16 + 2 * e + rh].x * scale);
 #pragma unroll
       for (int st = 0; st <= rt; ++st)
-        o = Wmma(GdnFragment(s_p, ST, rt * 16, st * 16, lane), ub[st], o);
+        o[rt] =
+            Wmma(GdnFragment(s_p, ST, rt * 16, st * 16, lane), ub[st], o[rt]);
+    }
+    if constexpr (kNorm) {
+      // GdnEpilogueKernel's expression: o * rsqrt(mean(o^2) + eps) * w *
+      // sigmoid(z); the row sum runs over the waves' 16-column partials.
 #pragma unroll
-      for (int e = 0; e < 8; ++e) {
-        const int t = t0 + rt * 16 + 2 * e + rh;
-        if (t < static_cast<int>(n_tokens))
-          raw[(static_cast<std::size_t>(t) * v_heads + h) * kGdnDim + col] =
-              o[e];
-      }
+      for (int rt = 0; rt < kTiles; ++rt)
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          float p = o[rt][e] * o[rt][e];
+          p += XorLane(p, 1);
+          p += XorLane(p, 2);
+          p += XorLane(p, 4);
+          p += XorLane(p, 8);
+          if (cl == 0)
+            s_square[rt * 16 + 2 * e + rh][wave] = p;
+        }
+      __syncthreads();
+#pragma unroll
+      for (int rt = 0; rt < kTiles; ++rt)
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          const int r = rt * 16 + 2 * e + rh;
+          const int t = t0 + r;
+          float sum = 0.0F;
+#pragma unroll
+          for (int w = 0; w < 8; ++w)
+            sum += s_square[r][w];
+          if (t < static_cast<int>(n_tokens)) {
+            const float norm = rsqrtf(sum / static_cast<float>(kGdnDim) + eps);
+            out_half[static_cast<std::size_t>(t) * out_stride + h * kGdnDim +
+                     col] = __float2half_rn(o[rt][e] * norm * norm_col *
+                                            SigmoidF(pz[rt][e]));
+          }
+        }
+      prefetch_z(min(ch + 1, static_cast<int>(chunks) - 1));
+    } else {
+#pragma unroll
+      for (int rt = 0; rt < kTiles; ++rt)
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          const int t = t0 + rt * 16 + 2 * e + rh;
+          if (t < static_cast<int>(n_tokens))
+            raw[(static_cast<std::size_t>(t) * v_heads + h) * kGdnDim + col] =
+                o[rt][e];
+        }
     }
     if (checkpoint.state != nullptr &&
         min(t0 + CL, static_cast<int>(n_tokens)) ==
@@ -7974,9 +8034,22 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                        stream, conv_scratch, alpha_beta, a, dt, t_tiles,
                        p_tiles, gates, qh, kh, n_tokens, k_heads, v_heads,
                        chunks, eps);
-    hipLaunchKernelGGL(GdnChunkScanKernel, dim3(v_heads), dim3(256), 0, stream,
-                       qh, kh, conv_scratch, state, raw, t_tiles, p_tiles,
-                       gates, n_tokens, k_heads, v_heads, chunks, checkpoint);
+    // The F16 output rows take the gated norm in the scan itself.
+    const bool fused_norm = out_q8 == nullptr && out_half != nullptr;
+    if (fused_norm) {
+      if (z_ready != nullptr)
+        (void)hipStreamWaitEvent(stream, z_ready, 0);
+      hipLaunchKernelGGL(GdnChunkScanKernel<true>, dim3(v_heads), dim3(256), 0,
+                         stream, qh, kh, conv_scratch, state, raw, t_tiles,
+                         p_tiles, gates, n_tokens, k_heads, v_heads, chunks,
+                         checkpoint, z, z_stride, norm_w, eps, out_half,
+                         out_half_stride != 0 ? out_half_stride : v_heads * d);
+      return;
+    }
+    hipLaunchKernelGGL(GdnChunkScanKernel<false>, dim3(v_heads), dim3(256), 0,
+                       stream, qh, kh, conv_scratch, state, raw, t_tiles,
+                       p_tiles, gates, n_tokens, k_heads, v_heads, chunks,
+                       checkpoint, nullptr, 0U, nullptr, 0.0F, nullptr, 0U);
   } else if (row_split && d == kGdnDim && state_snapshots.rows[0] == nullptr) {
     hipLaunchKernelGGL(GdnPrepKqKernel, dim3(k_heads, n_tokens), dim3(32), 0,
                        stream, conv_scratch, qn, n_tokens, k_heads, channels,
