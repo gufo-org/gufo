@@ -1,5 +1,113 @@
 # Qwen3.8 Flash-Next experiments
 
+## Sparse attention and routed repacks from the updated source branch (October 27, 2026)
+
+Ideas from the October 25–27 revision of halo-box/strix-llama.cpp's
+Flash-Next prefill work, after rebasing onto main `c0e0be58`. All runs use
+the `rocm10` shell, whose library path loads the CWSR-patched ROCr; the
+binaries' own RPATH points at the unpatched runtime. Every process waits for
+the GPU to cool to 55 °C, and builds alternate round-robin. Both experiments
+are lossless (bit-identical by construction or by output hash). Neither is
+retained.
+
+| Experiment | Outcome |
+| --- | --- |
+| Depth profile before porting | Diagnostic: a pp2048 pass takes 1,056 ms at d0 and 1,153 ms at d50K (`prof.py`, timed pass only). Of the +97 ms, attention adds 63 and block scoring 39. The source branch's own d0 → d50K cost is +162 ms, so Gufo already degrades less with depth; its d50K pp2048 is 1,766–1,772 tok/s. |
+| Sparse-window attention with K and V read into WMMA registers (8 waves split the head dimension, S partials summed through LDS, no K/V staging) | Rejected. The operator test passes with the same error as the current kernel. Synthetic `attn_bench` at 16K/50K/100K: 6.98/8.06/9.46 ms now, 7.22/7.78/8.92 ms reading V rows directly. A per-call block-packed V copy was slower again, about 1 ms at 100K. Deriving each step's key mask from the union membership bits was required, without it the kernel ran 2.6 ms slower. End to end at d50K pp2048: 1,772/1,763 now against 1,766/1,740 tok/s. The kernel stays at 210 VGPRs, and `amdgpu_waves_per_eu(8)` does not reduce them. |
+| Expert gate/up rows interleaved per 8-row tile (one 128-byte line per 16-byte piece of the eight rows) | Not retained. Bit-identical in `routed_gemm_bench`: 5.45 → 5.26 ms at 2,048 tokens, 8.55 → 8.06 ms at 4,096. It needs the decode, MMQ and unpaired readers rewritten for the new layout. |
+| High-nibble Q4_K codes decoded as F16 subnormals (one `pk_fma` with the scale × 2^20) | Not retained: within noise, 0 to −2 %. Low nibbles cannot use the trick without a shift: at mantissa bits 8–11 they overlap the exponent. The scale must be widened in F32, because fast-math folds the two F16 doublings into one overflowing constant. The largest sampled F16(d × sc) is 0.054, under the 0.0625 limit. |
+| Q5_1 down experts read into registers from 16-row tiles, then re-encoded so a 5-bit code is an F16 subnormal (one `pk_fma` per two weights) | Not retained. Bit-identical in `routed_gemm_bench`: 3.08/3.89/5.47 → 2.87/3.66/5.06 ms at 512/2,048/4,096 tokens. Prefill-only end to end, with the layout applied at load: pp512 1,356/1,373 → 1,393/1,389, pp2048 1,983/1,976 → 1,988/1,995, pp4096 2,051/2,035 → 2,065/2,066 tok/s (+0.5 to +1.8 %). The repack would replace the only copy of the weights, so decode, MTP verification and the MMQ tier would each need a reader for it. Probes that run short passes fail until those readers exist. |
+
+### Lossy changes in combination
+
+Builds on main `c0e0be58`, each with the fixture probe commit: lossless
+(L: side streams and mixer down tiles), + chunked DeltaNet and fused norm
+(G), + BF16 residual streams (B), and both (A, the head before the BF16
+residual streams were removed). G is now the branch head.
+`gufo bench -n 0 -r 3`, two round-robin rounds (pp512 from two dedicated
+rounds), tok/s as the mean of the rounds.
+
+| Build | pp512 | pp2048 | pp4096 | pp2048 at d10K | Next-token NLL vs main (95 %) | Largest per-prompt NLL change |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| main | 1,286 | 1,854 | 1,909 | 1,732 | — | — |
+| L | 1,332 (+3.6 %) | 1,858 (+0.2 %) | 1,909 (0.0 %) | 1,740 (+0.5 %) | byte-identical | — |
+| G | 1,349 (+4.9 %) | 1,930 (+4.1 %) | 1,992 (+4.3 %) | 1,801 (+4.0 %) | +0.0021 (−0.0128 to +0.0164) | chat +0.0145 (+0.0050 to +0.0238) |
+| B | 1,349 (+4.9 %) | 1,879 (+1.4 %) | 1,948 (+2.0 %) | 1,764 (+1.8 %) | +0.0104 (−0.0047 to +0.0244) | tools +0.0192 (−0.0248 to +0.0653) |
+| A | 1,369 (+6.4 %) | 1,961 (+5.8 %) | 2,029 (+6.3 %) | 1,824 (+5.3 %) | +0.0175 (+0.0036 to +0.0321) | tools +0.0444 (+0.0004 to +0.0891) |
+
+## Prefill overlap and chunked DeltaNet on ROCm 10.1 (October 24, 2026)
+
+Ideas adapted from halo-box/strix-llama.cpp's Flash-Next prefill work.
+`gufo bench -n 0 -r 3` on the `rocm10` toolchain, main `8b52b42c` as
+the control; every run waits for the GPU to cool to 55 °C. Main measures
+pp512/2048/4096 1,265–1,284 / 1,811–1,860 / 1,880–1,924 tok/s across
+these sessions. Native pp2048 at d0 spends about 1,116 ms per pass: routed
+experts 388 (DRAM floor about 305), dense F16 GEMMs about 350, HC combines
+133, DeltaNet 97, W8A8 62, attention 34. At pp512 the routed experts
+(200 ms of 404) already stream their weights at the measured DRAM peak.
+
+| Experiment | Outcome |
+| --- | --- |
+| Shared expert on a side stream beside the routed experts | Retained: byte-identical logits. The two streams' kernels slow each other (routed gate/up 223 → 251 ms per pass), but the pass shortens: with chunked DeltaNet, disabling only this overlap gives 1,309/1,896/1,965 against 1,335/1,907/1,976 tok/s. |
+| GDN Z rows on a side stream after the QKV tiles | Retained: byte-identical. Beside the row-split recurrence (96 blocks) it was neutral at pp2048: the recurrence slowed 62 → 115 ms per pass. Starting Z together with QKV was also neutral. With chunked DeltaNet, disabling only this overlap gives 1,320/1,898/1,964 tok/s. |
+| Chunked WMMA DeltaNet for row-split prefills of 256+ tokens | Retained. 32-token chunks: parallel prep (L2 norms, log-decay prefix sums, `(I + A)^-1` by forward substitution, F16 Q/K/T/P), then one block per value head scanning the chunks with an F32 state in WMMA accumulators. V is read in F32 from the convolution output. The gates are computed in prep. Checkpoints fall back to the row split unless they land on a chunk boundary. With both overlaps, against main: 1,281/1,850/1,906 → 1,333/1,888/1,964 tok/s. `--validate-prefill 2048` against the sequential path: rmse 0.252 → 0.266, cosine 0.99694 → 0.99662. |
+| Gated norm inside the chunked scan | Retained: removes the epilogue pass and the raw F32 rows (22 ms per pp2048 pass). 1,335/1,907/1,976 → 1,344/1,928/1,993 tok/s. Last 64 rows of a 2,228-token prompt against main: KL 0.0098 → 0.0079 mean. |
+| 32-row, rows-first W8A8 tiles for the mixer down up to 1,024 tokens | Retained: byte-identical. At pp512 the call falls from 187 to 165 µs (20 → 40 blocks); end to end it is within noise. At 2,048 tokens it is slower (649 vs 444 µs), so wider batches keep 64-row tiles. |
+| Residual streams kept as BF16 between two normed wide layers | Rejected (lossy), removed on October 27: on top of chunked DeltaNet it adds only 1.5–2 % (combination table above) for a measurable NLL cost, worst on tool text. On the F32 fixtures it raises the next-token NLL by 0.0175 nats (interval +0.003 to +0.033), mostly on chat and tool text. Only the two fused combines read the residual there. They hold BF16 (round to nearest even) at the front of each F32 row, convert at the PLE layer, the last layer and pass boundaries, and save 126 MB per layer at pp2048. Same-session A/B: 1,335/1,925/1,989 → 1,367/1,945/2,014 tok/s (repeat 1,286/1,933/1,983 → 1,367/1,954/2,026). F32 oracle in the table below. |
+| The same 32-row tiles for the shared expert | Rejected: the copies on the side stream only stretch beside the routed experts; the pass span is unchanged (393 → 394 ms at pp512). |
+| 128 × 64 dense F16 tiles for wide-tile grids under 160 blocks | Rejected: byte-identical, but at pp512 1,302–1,307 against 1,333 tok/s (same binary, toggled); pp1024 flat. |
+| F16 Z rows stored by the SSM projection for the chunked norm | Rejected: +0.9 % at pp512 only, flat at pp2048/4096; rmse rises to 0.274. |
+| Benchmark tokens drawn like llama-bench (seeded random vocabulary) | Diagnostic: 1,335/1,925/1,997 against 1,345/1,934/2,008 tok/s for Gufo's sequential ids, so expert coverage does not explain the gap to the reference numbers. |
+
+Accuracy against the F32 CPU reference (`reference_probe --dump`, run alone),
+on a 661-token prompt prefilled as 512 + 149 rows. The last 64 positions are
+compared. These are single-prompt figures: differences near 0.001 KL are
+within this sample's spread.
+
+| Build | KL mean | KL median | KL max | Top-1 agreement | Logit RMSE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| main `8b52b42c` | 0.00637 | 0.00190 | 0.0947 | 59/64 | 0.217 |
+| + overlap, chunked DeltaNet, fused norm, mixer down tiles | 0.00796 | 0.00379 | 0.1148 | 60/64 | 0.249 |
+| + BF16 residual streams | 0.00627 | 0.00246 | 0.0853 | 58/64 | 0.242 |
+
+The reference took 858 s for 661 tokens on an otherwise idle host (3.8 s
+for the first token). Running it inside `gpu_probe --reference` while the
+GPU model is resident starves the page cache and costs 46 s per token.
+
+F32 reference fixtures (`tests/fixtures/qwen38_flash_next/f32_reference`,
+2,479 positions: the last 256 rows of every prefill pass over documentation,
+C++ source, a four-turn chat and a tool-calling session). Paired
+differences against main, 95 % bootstrap intervals:
+
+| Build | KL to F32, all prompts | NLL of the next prompt token | Largest per-prompt NLL change |
+| --- | ---: | ---: | --- |
+| main | 0.0341 | 1.1112 | — |
+| without BF16 residual streams | 0.0301 (−0.0040, −0.0107 to +0.0029) | +0.0021 (−0.0132 to +0.0165) | chat +0.0145 (+0.0049 to +0.0241) |
+| with BF16 residual streams | 0.0358 (+0.0017, −0.0039 to +0.0071) | +0.0175 (+0.0030 to +0.0325) | tools +0.0444 (−0.0002 to +0.0894) |
+
+The F32 reference's own NLL on these positions is 1.1079. Main is already far
+from it on the tool-calling prompt (KL 0.0997, p99 2.02); the other prompts
+stay below 0.011.
+
+Final alternated A/B (main → head with the BF16 residual streams, two
+rounds, 55 °C cooldown before each process): pp512 1,260/1,280 → 1,362/1,374 (+7.6 %), pp2048 1,845/1,861 →
+1,965/1,970 (+6.3 %), pp4096 1,918/1,913 → 2,038/2,034 (+6.3 %), pp2048 at
+d10K 1,736/1,719 → 1,794/1,819 (+4.2 %). At d100K the untimed 100K-token
+preparation heats the GPU to 100 °C, so multi-rep runs varied by up to
+±276 tok/s on both builds. With one rep per process from 50 °C, the three
+alternated rounds give 1,125/1,168/1,195 → 1,210/1,257/1,417 tok/s.
+
+Perplexity over 116,213 positions of repository documentation and Flash-Next
+sources (`gpu_probe --nll`, 2,048-token passes): main 4.5669, without the
+BF16 residual streams 4.5643, with them 4.5685. Paired block bootstrap (512-token
+blocks) of the per-token NLL difference against main: −0.055 % (95 %
+interval −0.16 to +0.06 %) and +0.037 % (−0.064 to +0.16 %). Neither change
+is distinguishable from main at this resolution. Individual positions do
+move: about 23 % differ by more than 0.1 nats in either direction.
+
+Batching several sequences into one prefill pass is not ported: Gufo
+prefills sessions one at a time.
+
 ## Selector scheduling on newer LLVM (October 23, 2026)
 
 | Experiment | Outcome |
