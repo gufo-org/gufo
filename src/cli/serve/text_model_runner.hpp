@@ -137,6 +137,9 @@ struct TextRunnerCapabilities {
   /// Interrupted prefill rolls back to its entry frontier without consuming
   /// input, so cancellation need not wait for the whole pass.
   bool prefill_rollback{false};
+  /// Prompt tokens between active decode rounds when `--prefill-chunk` is
+  /// not given. Zero keeps the server default.
+  std::size_t active_prefill_tokens{0};
 };
 
 /// Model-owned compatibility identity for restart-safe snapshots.

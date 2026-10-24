@@ -530,9 +530,12 @@ struct TextGenerationScheduler::Impl {
           "text generation scheduler runner pool must not be null");
     }
     sessions = std::make_shared<SessionTable>(runner_pool->capacity());
+    // Zero asks the model; a model without a preference keeps the default.
     if (prefill_policy.decode_active_tokens == 0) {
-      throw std::invalid_argument(
-          "active-decode prefill budget must be at least one token");
+      const auto preferred =
+          runner_pool->runner().Descriptor().capabilities.active_prefill_tokens;
+      prefill_policy.decode_active_tokens =
+          preferred != 0 ? preferred : kDefaultDecodeActivePrefillTokens;
     }
     if (scheduler_policy.max_pending_requests == 0 ||
         scheduler_policy.max_pending_requests_per_client == 0 ||
