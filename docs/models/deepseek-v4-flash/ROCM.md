@@ -9,15 +9,13 @@ valid, different summaries.
 ## Configuration
 
 The control uses pinned ROCm 7.2.3, HIP Clang 22 and GCC 15.3 through Nix.
-ROCm 10.1.0 uses HIP Clang 24 and GCC 15.2 inside
-`rocm/dev-ubuntu-26.04:10.1.0-full`, with the repository's matching ROCr
-queue-memory patch. Builds and inference run separately. Model revisions,
-prompts, sampling, cache history and hardware stay matched.
-
-The branch is based on main `8b52b42c`. Changes since the initial `ade4f4d7`
-control affect Flash-Next or toolchain documentation, without changing these
-models' inference sources. Container results do not independently qualify the
-new optional Nix `rocm10` package. Default Nix still uses 7.2.3.
+ROCm 10.1.0 was first checked with HIP Clang 24/GCC 15.2 inside
+`rocm/dev-ubuntu-26.04:10.1.0-full`, then built through `nix build .#rocm10`
+with cached Clang 24/GCC 16.2 and the matching repository ROCr patch.
+Source `65bf6798` includes main `67d1f6ac`; this model's kernels are unchanged
+from the independently checked `6d43e786`. Builds and inference run separately.
+Model revisions, prompts, sampling, cache history and hardware stay matched.
+Default Nix still uses 7.2.3.
 
 ## Migration steps
 
@@ -93,14 +91,17 @@ The token-weighted NLL delta is +0.002025, with paired 95% bootstrap interval
 [-0.006285, 0.010277] (20,000 resamples, seed 20261024). This sample does not
 establish general quality equivalence. Cross-compiler logits and text differ.
 
+The cached Nix 10.1 rerun reproduces both narrow-prefill vectors and every
+score in the official continuation/smoke report from the corrected container
+build. Its focused functional run also preserves all 1,175 proposed and 785
+accepted drafts.
+
 ## Execution optimizations
 
-The earlier completed-token-cost backoff policy is restored at the user's
-request. It counts the guaranteed target anchor, uses an eight-cycle recent
+The completed-token-cost backoff counts the guaranteed target anchor, uses an eight-cycle recent
 window and resets that window after retries. Clearly unprofitable starts can
 still back off after four cycles. Acceptance rules, sampling and the 64-token
-retry interval stay unchanged. The later confidence/width experiments remain
-discarded.
+retry interval stay unchanged.
 
 - Group resumed compressor stores only up to the next pool/shift boundary.
   Pooling, normalization, RoPE, quantization and speculative rollback stay in

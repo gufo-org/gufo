@@ -1,26 +1,18 @@
 # ROCm 10.1 migration
 
-October 23, 2026. BF16 Qwen-Image-2.1 on Strix Halo `gfx1151`.
+October 24, 2026. BF16 Qwen-Image-2.1 on Strix Halo `gfx1151`.
 Focused numerical, production timing and image API checks are complete.
 
 ## Configuration
 
 The control uses the pinned ROCm 7.2.3 Nix toolchain, HIP Clang 22 and GCC
-15.3. The candidate uses ROCm 10.1.0, HIP Clang 24 and GCC 15.2 inside
-`rocm/dev-ubuntu-26.04:10.1.0-full`. Both start from main `ade4f4d7`
-and use the repository's matching ROCr queue-memory patch. Builds and
-inference run separately on the same machine with the same BF16 checkpoint.
-
-The matched measurements use source based on `d4eaaad4` (Flash-Next-only
-changes); both production builds succeeded with unchanged model HIP objects
-across that rebase. Main `8b52b42c` subsequently changes the optional Nix ROCm
-10 input and development instructions, with no inference-source or default
-7.2.3 toolchain changes. The container results do not qualify that new Nix
-package independently.
-
-The optional Nix entry points are `nix build .#rocm10` and
-`nix develop .#rocm10`; the measurements here qualify the container build.
-The default Nix toolchain remains 7.2.3.
+15.3. ROCm 10.1.0 was first checked with HIP Clang 24/GCC 15.2 inside
+`rocm/dev-ubuntu-26.04:10.1.0-full`, then built through `nix build .#rocm10`
+with cached Clang 24/GCC 16.2 and the matching repository ROCr patch.
+Source `65bf6798` includes main `67d1f6ac`; this model's kernels are unchanged
+from the independently checked `6d43e786`. Builds and inference run separately
+on the same machine with the same BF16 checkpoint. Default Nix remains 7.2.3;
+`nix develop .#rocm10` supplies the optional development toolchain.
 
 ## Migration steps
 
@@ -57,8 +49,8 @@ image. Lower decoded-image relative L2 means closer numerical agreement:
 | Generate red cube | 0.013058 | 0.019063 | 0.010939 | 0.010939 |
 | Edit cube to blue | 0.004091 | 0.003909 | 0.003762 | 0.003858 |
 
-Generation's entire trajectory and PNG now match byte for byte across the two
-compilers. Editing retains small cross-compiler differences; both candidates
+The container comparison's entire generation trajectory and PNG match byte for
+byte across the two compilers. Editing retains small cross-compiler differences; both candidates
 improve against the independent reference. Tokenization, schedule and shared
 noise agree, and the requested colors/object are preserved on visual review.
 These two images do not establish broad perceptual or typography quality.
@@ -66,6 +58,18 @@ These two images do not establish broad perceptual or typography quality.
 The independent reference is Diffusers `80c7ed262aeffbeb43ef13ae04baeb9b84515a69`
 with PyTorch 2.12.0 and Transformers 5.17.0. These are fresh matched controls,
 not replacements for the historical reference measurements in `QUALITY.md`.
+
+## Cached Nix qualification
+
+The Nix Clang 24/GCC 16.2 build passes the same operator checks. GCC 16's
+`std::normal_distribution<float>` changes the seeded noise sequence; a
+standalone CPU reproduction confirms this independently of HIP. The complete
+40-step reference replays therefore use the Nix build's captured noise.
+Decoded-image relative L2 is 0.025231 for generation and 0.014601 for editing;
+tokenization and all 41 schedule values match exactly. These are different
+inputs from the preceding table, so their scores are not a matched regression
+comparison. Both outputs preserve the requested cube and colors on review.
+No quality limit or frozen fixture changes.
 
 ## Focused performance and serving
 
@@ -86,7 +90,20 @@ been used took 8.046 s, with a 1.789 s prompt phase, matching the original
 cached-file control. The earlier sample is retained; different file-cache
 history must not be treated as a kernel comparison.
 
-Seeded 1024² output repeats exactly within and across both candidates.
+In the container comparison, seeded 1024² output repeats exactly within and
+across both candidates.
 The 10.1 API check also passes independent seeds with `n=2`, concurrent
 requests, a size change and disconnect recovery (0.304 s). These bounded
 two-step requests measure execution and isolation, not final image quality.
+
+The rebased cached Nix build also passes all request/phase timing comparisons:
+
+| Request | Candidate / 7.2.3 | Candidate / Nix 10.1 |
+| --- | ---: | ---: |
+| First request, model files cached | 8.050 s | 8.118 s |
+| Warm request 1 | 5.233 s | 5.261 s |
+| Warm request 2 | 5.243 s | 5.302 s |
+
+Nix seeded replay, `n=2`, concurrent seeds, resizing and disconnect recovery
+(0.302 s) pass. Cross-toolchain PNGs differ because of the noise sequence
+described above; each build repeats its own output exactly.

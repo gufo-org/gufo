@@ -1,27 +1,19 @@
 # ROCm 10.1 migration
 
-October 23, 2026. BF16 FL2VA on Strix Halo `gfx1151`.
+October 24, 2026. BF16 FL2VA on Strix Halo `gfx1151`.
 Operator and single-block migration checks complete; full-video quality remains
 unqualified.
 
 ## Configuration
 
 The control uses the pinned ROCm 7.2.3 Nix toolchain, HIP Clang 22 and GCC
-15.3. The candidate uses ROCm 10.1.0, HIP Clang 24 and GCC 15.2 inside
-`rocm/dev-ubuntu-26.04:10.1.0-full`. Both start from main `ade4f4d7`
-and use the repository's matching ROCr queue-memory patch. Builds and
-inference run separately on the same machine with the same BF16 checkpoint.
-
-The matched measurements use source based on `d4eaaad4` (Flash-Next-only
-changes); both production builds succeeded with unchanged model HIP objects
-across that rebase. Main `8b52b42c` subsequently changes the optional Nix ROCm
-10 input and development instructions, with no inference-source or default
-7.2.3 toolchain changes. The container results do not qualify that new Nix
-package independently.
-
-The optional Nix entry points are `nix build .#rocm10` and
-`nix develop .#rocm10`; the measurements here qualify the container build.
-The default Nix toolchain remains 7.2.3.
+15.3. ROCm 10.1.0 was first checked with HIP Clang 24/GCC 15.2 inside
+`rocm/dev-ubuntu-26.04:10.1.0-full`, then built through `nix build .#rocm10`
+with cached Clang 24/GCC 16.2 and the matching repository ROCr patch.
+Source `65bf6798` includes main `67d1f6ac`; this model's kernels are unchanged
+from the independently checked `6d43e786`. Builds and inference run separately
+on the same machine with the same BF16 checkpoint. Default Nix remains 7.2.3;
+`nix develop .#rocm10` supplies the optional development toolchain.
 
 ## Migration steps
 
@@ -62,6 +54,12 @@ loading. These are component measurements, not video-generation timings.
 | ---: | ---: | ---: | ---: |
 | 1,872 | 60.36 ms | 57.50 ms | 56.13 ms |
 | 37,716 | 1,748.56 ms | 1,744.36 ms | 1,740.72 ms |
+
+The cached Nix build takes 60.64 ms for the short block and 1,768.55 ms for
+the large block. A matched short-block repeat gives 62.44 ms on 7.2.3 and
+58.78 ms on Nix 10.1, resolving the initial borderline timing flag. Every
+large-block output still matches the qualified 7.2.3 bytes exactly. The Nix
+short block reproduces the container's independent-reference score below.
 
 The short block changes BF16 outputs when its BLAS algorithm changes. Against
 one independent Diffusers block with identical input bytes, relative L2 is

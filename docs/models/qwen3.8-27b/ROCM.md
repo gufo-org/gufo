@@ -2,13 +2,16 @@
 
 October 24, 2026, Strix Halo `gfx1151`. Q4_K_XL/Q8_K_XL targets and the Q4_K_M
 DFlash2 draft use the pinned [model identities](artifacts/model-identities.json).
-ROCm 7.2.3 uses Nix with Clang 22/GCC 15.3; 10.1.0 uses Clang 24/GCC 15.2 in
-`rocm/dev-ubuntu-26.04:10.1.0-full` with the matching repository ROCr patch.
-Builds and inference run separately. These results qualify the container
-toolchain, not the optional Nix ROCm10 package.
+ROCm 7.2.3 uses Nix with Clang 22/GCC 15.3. ROCm 10.1.0 was first checked with
+Clang 24/GCC 15.2 in `rocm/dev-ubuntu-26.04:10.1.0-full`, then built through
+`nix build .#rocm10` with the cached Clang 24/GCC 16.2 toolchain and the matching
+repository ROCr patch. Source `65bf6798` includes main `67d1f6ac`; this model's kernels are unchanged
+from the independently checked `6d43e786`.
+Builds and inference run separately.
 
-Migration qualification is in progress. Long-context prefill is slower in the
-initial 10.1 control; final performance and sampled serving checks are pending.
+The cached Nix build passes the affected numerical and serving contracts.
+Canonical timing results are below; a separate calibration prefill remains
+slower across toolchains and is retained explicitly.
 
 ## Accuracy and state
 
@@ -18,7 +21,7 @@ Same-runtime comparisons separately check batching, speculation and cache
 consistency. Original-target parity remains limited as described in
 [QUALITY.md](QUALITY.md).
 
-| Check | Initial result |
+| Check | Result |
 | --- | --- |
 | Q4/Q8 target prefill and selected final-row execution | Pass on 10.1, including 2,048 rows and a d8K continuation |
 | Target full-logit fingerprints, short histories | 54/54 rows identical across compilers for each quantization |
@@ -35,23 +38,36 @@ the separate calculation for that value. The fix makes the fused calculation's
 first square/add explicit, retaining the existing reduction and state formats.
 Original exact checks remain; the test also evaluates the independent formula.
 
-## Initial production timing
+## Production timing
 
 Canonical HTTP recipe, greedy, thinking off, C1, pp2048/tg128, context capacity
 32K. Depth is the cached prefix. Each cell is prefill / decode tok/s.
 
 | Mode / depth | ROCm 7.2.3 | ROCm 10.1 |
 | --- | ---: | ---: |
-| AR / 0 | 641.66 / 12.37 | 616.58 / 11.99 |
-| AR / 16K | 558.83 / 11.71 | 523.85 / 11.38 |
-| DFlash2 / 0 | 596.39 / 27.04 | 570.98 / 25.92 |
-| DFlash2 / 16K | 516.08 / 22.97 | 477.30 / 22.15 |
+| AR / 0 | 638.56 / 12.38 | 620.04 / 11.99 |
+| AR / 16K | 559.00 / 11.72 | 537.14 / 11.38 |
+| DFlash2 / 0 | 596.40 / 27.04 | 570.19 / 25.92 |
+| DFlash2 / 16K | 512.95 / 22.97 | 490.24 / 23.44 |
 
-The 16K prefill differences exceed the 5% and 3 ms gate. They remain unresolved
-in this initial control; no unconditional performance-parity claim is made.
-Compiler resource reports identify additional register pressure and spills;
-profiles must establish which specializations affect the measured requests.
-Profiled runs are diagnostic, not replacement benchmark numbers.
+Every canonical cell stays within the 5% and 3 ms timing gate. The earlier
+10.1 16K prefill samples were 523.85 tok/s AR and 477.30 tok/s DFlash2.
+The retained WMMA specialization bounds register pressure under Clang 24;
+packed attention avoids additional spills, and ragged tails retain their
+arithmetic. Q4/Q8 attention and complete DFlash2 checks pass.
+
+A separate 2,055-token calibration prefill took 3,077.94/3,236.59 ms in AR and
+3,319.59/3,521.53 ms in DFlash2 (7.2.3/Nix 10.1), exceeding that gate. Profiles
+attribute most of this difference to quantized target GEMMs, with an additional
+BF16 draft feature-projection cost. GPU work accounts for the delay. Diagnostic
+profiles and rejected scheduling/tile experiments are retained separately;
+none substitutes for the unprofiled timing samples.
+
+The Nix functional run passes default sampling, thinking, image input,
+continuation, cancellation and RAM/disk restart, with 1,620 proposed and 869
+accepted drafts, matching the prior corrected 10.1 run. Its separate timing
+audit still has flags around first requests, concurrent admission and cache
+operations; this is not an unconditional latency-parity claim.
 
 Raw results and profiles remain under
 `gufo-models-rocm101-20261023/port-models` on the development host.
