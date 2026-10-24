@@ -60,7 +60,7 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
     result = {'schema': 2, 'tier': tier, 'paths': resolutions, 'models': [], 'groups': [],
               'deferred': [], 'release_only': [], 'out_of_scope': [], 'obligations': [],
               'scope': sorted(selected), 'benchmark': benchmark,
-              'timing_qualification': 'paired merge-base/candidate server phases; no averaging across requests'}
+              'timing_qualification': 'paired main/candidate server phases; no averaging across requests'}
     for key, reasons in sorted(selected.items()):
         model = data['models'][key]
         result['models'].append({'id': key, 'category': model['category'], 'reasons': reasons,

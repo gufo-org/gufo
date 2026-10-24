@@ -35,7 +35,7 @@ def asset_keys(plan, data):
         if 'draft_asset' in model:
             keys.add(model['draft_asset'])
         if model['category'] == 'tts':
-            keys.add('asr')  # The merge-base binary is the fixed intelligibility evaluator.
+            keys.add('asr')  # The main binary is the fixed intelligibility evaluator.
     return sorted(keys)
 
 

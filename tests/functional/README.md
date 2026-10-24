@@ -68,7 +68,7 @@ Timings are observations; this runner does not perform matched baseline timing
 qualification. WebSocket streaming, long recordings, broad language/voice quality
 and speaker-similarity scoring remain separate coverage.
 
-Devlab speed comparisons use a pinned PR merge base and candidate, matching the
+Devlab speed comparisons use a pinned main revision and candidate, matching the
 runner, toolchain, weights, settings and request histories. `service_phases.py`
 uses server-emitted request timings and work counters: ASR `Server-Timing`
 phases, TTS synthesis time and codec/audio work, and embedding request duration
@@ -247,8 +247,11 @@ keeps every suite and combination.
 (`pull_request`), with the repository's fork approval policy. A newer push cancels
 the PR's earlier run. PRs use the `pr` tier; release-please PRs and dispatches
 (unless they choose `tier: pr`) use `full`. Maintain/Admin users can dispatch a
-PR number. Authorization pins its head and merge base; the hosted planner and
-GPU controller use the same workflow/harness revision and recreate the same plan.
+PR number. Authorization pins its head and GitHub's merge of it into main. Like
+`CI`, the GPU job builds and tests that merge commit with the suites it contains,
+so tests added on main never run against a PR binary that predates them. The
+merge's main parent is the diff base and the timing baseline. The GPU controller
+recreates the hosted plan from the merge commit.
 
 `devlab_plan.py` selects owners per path using reviewed priority rules in
 `devlab.json`, then uses `impact.py` for each selected LLM's affected suites.
@@ -267,7 +270,7 @@ Selections from separate paths are combined:
 The embedding and ASR representatives are EmbeddingGemma 2 and Qwen3-ASR. TTS
 uses Base cloning in the PR tier; the full tier exercises Base, CustomVoice and
 VoiceDesign. Manual `ar` adds the selected LLMs' AR profiles. The existing manual
-`benchmark` option adds Flash-Next and its merge-base/candidate AR depth sweep.
+`benchmark` option adds Flash-Next and its main/candidate AR depth sweep.
 Qwen27 Q8 remains an explicit manual functional qualification outside this bounded
 CI selection. Numerical and agent-replay obligations outside the selected suites
 remain separate; representative coverage is not all-model qualification.
@@ -279,7 +282,7 @@ assets and necessary drafts/projectors/evaluator weights from fixed Hugging Face
 revisions while both production binaries build. Optional `$GUFO_CI_CACHE`
 (default `$RUNNER_TOOL_CACHE/gufo`) reuse is an optimization, not a prerequisite.
 The authorized controller checkout contains the English voice fixture. TTS uses
-the merge-base Gufo binary and a pinned ASR checkpoint as its intelligibility
+the main Gufo binary and a pinned ASR checkpoint as its intelligibility
 evaluator. Missing downloads or fixtures fail visibly.
 
 `devlab_run.py` executes models sequentially on the same GPU. LLM configuration
@@ -287,7 +290,7 @@ groups use fresh server/cache histories; service suites use `model_services.py`.
 Correctness runs on the candidate only. A model failure does not hide other
 models or their speed observations. Each LLM's `phases.py` arms exercise startup,
 short, long and follow-up requests; `service_phases.py` measures bounded service
-histories. Both alternate merge-base/candidate servers for two paired repeats,
+histories. Both alternate main/candidate servers for two paired repeats,
 with GPU cool-down. Every request and phase retains all measurements; a slowdown
 requires both >5% and >3 ms in every repeat. Different output/work counters mark
 relevant comparisons inconclusive. The plan selects timing gates from production

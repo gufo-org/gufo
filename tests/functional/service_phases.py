@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired merge-base/PR server timings for embedding, ASR and TTS workloads."""
+"""Paired main/PR server timings for embedding, ASR and TTS workloads."""
 
 import argparse
 import hashlib

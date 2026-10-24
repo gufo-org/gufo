@@ -75,7 +75,7 @@ def bench_section(base_text, head_text):
     base, head = parse_bench(base_text), parse_bench(head_text)
     if not head:
         return ["", "#### Benchmark", "", "No benchmark results were produced."]
-    lines = ["", "#### Benchmark · AR, merge base → PR", "",
+    lines = ["", "#### Benchmark · AR, main → PR", "",
              "| Test | Base t/s | PR t/s | Δ |", "| --- | ---: | ---: | ---: |"]
     for test, rate in head.items():
         if test in base and base[test]:
@@ -113,7 +113,7 @@ def phases_section(data):
     # Phases a request never exercises (no cache restore on a cold prompt) stay out.
     phases = [phase for phase in data["phases"]
               if any(value for value in phase["base"] + phase["head"])]
-    lines = ["", "#### Inference phases · merge base → PR", "", "```mermaid", "flowchart LR"]
+    lines = ["", "#### Inference phases · main → PR", "", "```mermaid", "flowchart LR"]
     groups = [group for group in titles if any(p["group"] == group for p in phases)]
     for index, group in enumerate(groups):
         lines += [f'  subgraph g{index}["{titles[group]}"]', "    direction TB"]
@@ -261,7 +261,7 @@ def render_models(args, plan, summary):
         state, description = 'error', f'Model checks completed; cluster job {args.smoke}'
     tier = ' · PR tier' if plan['tier'] == 'pr' else ''
     lines = [MARKER, f'### {ICONS[state]} Devlab functional checks{tier}: {description}', '',
-             '| Model | Correctness | Speed · merge base → PR |', '| --- | --- | --- |']
+             '| Model | Correctness | Speed · main → PR |', '| --- | --- | --- |']
     for selection in plan['models']:
         key = selection['id']
         lines.append(f"| {definitions[key]['title']} | {items.get(key, {}).get('correctness', 'incomplete')} | {speeds[key]} |")
@@ -296,7 +296,7 @@ def render_models(args, plan, summary):
         read = lambda name: (args.results / name).read_text() if (args.results / name).exists() else ''
         lines += bench_section(read('bench-base.md'), read('bench-head.md'))
     lines += ['', f"<sub>[Workflow run and evidence]({args.run_url}) · "
-              f"PR `{plan['head'][:7]}` vs merge base `{plan['base'][:7]}` · "
+              f"merge `{plan['head'][:7]}` vs main `{plan['base'][:7]}` · "
               f"{len(plan['deferred'])} deferred, {len(plan['release_only'])} for the release run. "
               f"`{STATUS_CONTEXT}` is advisory on PRs; only the automatic release merge waits for it. "
               'Coverage is limited to the selected representatives; image/video generation and agent replay remain separate.</sub>']

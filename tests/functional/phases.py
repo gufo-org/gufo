@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Time Flash-Next startup and request phases on the merge base and the PR.
+"""Time Flash-Next startup and request phases on main and the PR merged into it.
 
 Each arm starts one server, records its startup phases, sends a fixed three
 request history and stops it. Arms alternate base/PR on the same runner after

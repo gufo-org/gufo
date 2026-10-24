@@ -21,7 +21,7 @@ on:
         default: false
         type: boolean
       benchmark:
-        description: Also benchmark native AR through 128K on the PR and its merge base
+        description: Also benchmark native AR through 128K on the PR merged into main and on main
         default: false
         type: boolean
 
@@ -42,6 +42,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       head: ${{ steps.revision.outputs.head }}
+      merge: ${{ steps.revision.outputs.merge }}
       pr: ${{ steps.revision.outputs.pr }}
       has_work: ${{ steps.plan.outputs.has_work }}
       base: ${{ steps.plan.outputs.base }}
@@ -76,14 +77,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_MERGE: ${{ github.event_name == 'pull_request' && github.sha || '' }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::Invalid PR number"; exit 1; }
           # Test the revision that triggered the event; a later push starts its own run.
           head=${EVENT_HEAD:-$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)}
-          echo "head=$head" >> "$GITHUB_OUTPUT"
-          echo "pr=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          # Like CI, test the PR merged into main: suites from main then always
+          # run against a binary that contains the server changes they expect.
+          merge=${EVENT_MERGE:-$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.merge_commit_sha // empty')}
+          [[ -n "$merge" ]] || { echo "::error::PR does not merge cleanly into main; rebase it."; exit 1; }
+          {
+            echo "head=$head"
+            echo "merge=$merge"
+            echo "pr=$PR_NUMBER"
+          } >> "$GITHUB_OUTPUT"
 
       # Advisory only: devlab/functional is not a required check, so cluster
       # problems never block merging.
@@ -117,6 +126,7 @@ jobs:
         env:
           PR_NUMBER: ${{ steps.revision.outputs.pr }}
           APPROVED_HEAD: ${{ steps.revision.outputs.head }}
+          APPROVED_MERGE: ${{ steps.revision.outputs.merge }}
           RUN_BENCHMARK: ${{ inputs.benchmark || false }}
           RUN_AR: ${{ inputs.ar || false }}
           DISPATCH_TIER: ${{ inputs.tier }}
@@ -132,14 +142,19 @@ jobs:
           modes=()
           [[ "$RUN_AR" == true ]] && modes+=(--ar)
           [[ "$RUN_BENCHMARK" == true ]] && modes+=(--benchmark)
-          git fetch https://github.com/gufo-org/gufo.git "refs/pull/$PR_NUMBER/head:refs/ci/pr" main:refs/ci/main
+          git fetch https://github.com/gufo-org/gufo.git "refs/pull/$PR_NUMBER/head:refs/ci/pr" "$APPROVED_MERGE"
           [[ "$(git rev-parse refs/ci/pr)" == "$APPROVED_HEAD" ]] || {
             echo "::error::PR changed after this run started; the new push starts its own run."
             exit 1
           }
-          base=$(git merge-base refs/ci/main "$APPROVED_HEAD")
+          [[ "$(git rev-parse "$APPROVED_MERGE^2")" == "$APPROVED_HEAD" ]] || {
+            echo "::error::Merge commit $APPROVED_MERGE does not merge the pinned PR head."
+            exit 1
+          }
+          # The merge's main parent is both the timing baseline and the diff base.
+          base=$(git rev-parse "$APPROVED_MERGE^1")
           echo "base=$base" >> "$GITHUB_OUTPUT"
-          python3 tests/functional/devlab_plan.py --repo . --base "$base" --head "$APPROVED_HEAD" \
+          python3 tests/functional/devlab_plan.py --repo . --base "$base" --head "$APPROVED_MERGE" \
             "${modes[@]}" --tier "$tier" --output functional-plan.json
           python3 - <<'PYPLAN'
           import json, os
@@ -157,7 +172,7 @@ jobs:
               for group in plan['groups']:
                   summary.write(f"\n**{group['profile']} / {group['configuration']}**: " + ', '.join(group['suites']) + '\n')
               summary.write(f"\nDeferred: {len(plan['deferred'])}; release run only: {len(plan['release_only'])}; outside scope {', '.join(plan['scope'])}: {len(plan['out_of_scope'])}.\n")
-              summary.write('Selected candidate correctness and paired server-phase timings against the merge base. Other-model and agent replay obligations remain separate.\n')
+              summary.write('Selected candidate correctness and paired server-phase timings against main. Other-model and agent replay obligations remain separate.\n')
           PYPLAN
 
       - name: Retain selection plan
@@ -303,10 +318,11 @@ jobs:
           awk '/^MemTotal:/ { printf "Host-visible memory: %.1f GiB\n", $2 / 1048576 }' /proc/meminfo
           printf '\nThis probe verifies runner placement and GPU device access. It does not execute a model or qualify performance.\n' >> "$GITHUB_STEP_SUMMARY"
 
+      # Suites come from the same merge commit as the candidate binary.
       - name: Checkout workflow and test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.authorize.outputs.merge }}
           persist-credentials: false
           path: controller
 
@@ -314,7 +330,7 @@ jobs:
         timeout-minutes: 5
         env:
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
-          APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
+          APPROVED_MERGE: ${{ needs.authorize.outputs.merge }}
           RUN_AR: ${{ inputs.ar || false }}
           RUN_BENCHMARK: ${{ inputs.benchmark || false }}
           APPROVED_TIER: ${{ needs.authorize.outputs.tier }}
@@ -322,16 +338,16 @@ jobs:
         run: |
           set -euo pipefail
           git init --initial-branch=ci candidate
-          # The hosted job already pinned the merge base. Diff/build need only
-          # these two snapshots, not their complete ancestor history.
+          # The hosted job already pinned the merge and its main parent. Diff/build
+          # need only these two snapshots, not their complete ancestor history.
           git -C candidate -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
-            fetch --depth 1 https://github.com/gufo-org/gufo.git "$APPROVED_HEAD" "$APPROVED_BASE"
-          git -C candidate checkout --detach "$APPROVED_HEAD"
+            fetch --depth 1 https://github.com/gufo-org/gufo.git "$APPROVED_MERGE" "$APPROVED_BASE"
+          git -C candidate checkout --detach "$APPROVED_MERGE"
           base="$APPROVED_BASE"
           modes=()
           [[ "$RUN_AR" == true ]] && modes+=(--ar)
           [[ "$RUN_BENCHMARK" == true ]] && modes+=(--benchmark)
-          python3 controller/tests/functional/devlab_plan.py --repo candidate --base "$base" --head "$APPROVED_HEAD" \
+          python3 controller/tests/functional/devlab_plan.py --repo candidate --base "$base" --head "$APPROVED_MERGE" \
             "${modes[@]}" --tier "$APPROVED_TIER" --output functional-plan.json
 
       # Fetch assets while the two production binaries compile. No mounted weights
@@ -393,7 +409,7 @@ jobs:
           cmake --build --preset release --parallel 4
           ./build/release/gufo diagnose
 
-      - name: Build merge base for the phase and benchmark baselines
+      - name: Build main for the phase and benchmark baselines
         id: build_base
         env:
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
@@ -457,7 +473,7 @@ jobs:
           set -euo pipefail
           mkdir -p functional-report
           model_dir=$(python3 -c 'import json; print(json.load(open("functional-assets.json"))["flash-next"])')
-          # Same runner and weights; the merge base runs first.
+          # Same runner and weights; main runs first.
           for revision in base head; do
             checkout=candidate
             [[ "$revision" == base ]] && checkout=baseline
