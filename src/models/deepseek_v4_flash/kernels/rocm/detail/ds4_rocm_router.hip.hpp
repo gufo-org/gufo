@@ -1,8 +1,24 @@
+#if __clang_major__ >= 24
+extern "C" __device__ __attribute__((pure)) double __ocml_exp_f64(double);
+extern "C" __device__ __attribute__((pure)) double __ocml_log1p_f64(double);
+extern "C" __device__ __attribute__((const)) double __ocml_sqrt_f64(double);
+
+__device__ static float router_probability(float input) {
+    // Round only the final score. Intermediate F32 transcendental rounding
+    // varies across ROCm libraries and can change routing/quantization later.
+    const double x = input;
+    const double softplus = x > 20.0 ? x :
+        x < -10.0 ? __ocml_exp_f64(x) :
+                    __ocml_log1p_f64(__ocml_exp_f64(x));
+    return static_cast<float>(__ocml_sqrt_f64(softplus));
+}
+#else
 __device__ static float softplus_dev(float x) {
     if (x > 20.0f) return x;
     if (x < -10.0f) return ds4_precise_expf(x);
     return ds4_precise_log1pf(ds4_precise_expf(x));
 }
+#endif
 
 __device__ __forceinline__ static bool router_score_better(float av, uint32_t ai, float bv, uint32_t bi) {
     return av > bv || (av == bv && ai < bi);
@@ -21,6 +37,9 @@ __global__ static void router_select_warp_topk_kernel(
         uint32_t n_tokens,
         int has_bias,
         int hash_mode) {
+#if __clang_major__ >= 24
+#pragma clang fp reassociate(off)
+#endif
     const uint32_t lane = threadIdx.x;
     const uint32_t row_in_block = threadIdx.y;
     const uint32_t t = blockIdx.x * blockDim.y + row_in_block;
@@ -37,7 +56,11 @@ __global__ static void router_select_warp_topk_kernel(
     #pragma unroll
     for (uint32_t j = 0; j < DS4_ROCM_N_EXPERT / 32u; j++) {
         const uint32_t e = lane + j * 32u;
+#if __clang_major__ >= 24
+        const float p = router_probability(log[e]);
+#else
         const float p = ds4_precise_sqrtf(softplus_dev(log[e]));
+#endif
         local_prob[j] = p;
         local_score[j] = p + (has_bias ? bias[e] : 0.0f);
         sprob[row_in_block][e] = p;

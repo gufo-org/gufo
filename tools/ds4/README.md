@@ -9,6 +9,7 @@ are in [the DS4 benchmark README](../../docs/models/deepseek-v4-flash/BENCHMARKS
 | `tools/ds4/check.py kernels` | Q8/IQ2/F16 and attention oracles, plus complete official HC formulas; no model required |
 | `tools/ds4/check.py reference --model "$MODEL" --upstream "$UPSTREAM" --output /tmp/ds4-reference` | Repeated AR scoring against 105 official continuations; independent full logits and 128 forced tokens at 0/4K/8K/12K/16K, with matched 2K/4K prefill calls |
 | `tools/ds4/check.py reference --prefill-only --model "$MODEL" --upstream "$UPSTREAM" --output /tmp/ds4-prefill` | Same matched prefill grid and exact repeat check; skip continuation scoring and decode replay |
+| `tools/ds4/check.py reference --prefill-only --narrow --model "$MODEL" --upstream "$UPSTREAM" --output /tmp/ds4-narrow` | Two historical quality regression points: 32-token prefill calls at 4K/12K, with the same independent logit limits and exact repeat check |
 | `tools/ds4/check.py all --model "$MODEL" --dspark-model "$DSPARK"` | All maintained DS4 CTest checks, including changing concurrency, snapshots through 16K, mixed sampling, and prefix/disk reuse |
 | `build/gpu-test/tests/models/deepseek_v4_flash/ds4_quality_test --indexer-boundary` | Focused DSpark C1 / AR C2 full-logit replay across the first sparse-indexer boundary; set `GUFO_DEEPSEEK_V4_FLASH_MODEL` and `GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL` |
 | `tools/ds4/import-eval.py` | Rebuild pinned fixtures from an upstream checkout; default capability subset, `--suite official` for the 0731 continuations |

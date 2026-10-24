@@ -1,6 +1,19 @@
 #include "quantize.hip.hpp"
 #include <cstdint>
 
+// Clang 22 contracted roundf(value * scale)'s fractional-part subtraction
+// into an FMA. Clang 24 first rounds the product, turning values just below
+// a half-integer into ties and changing Q8 bytes. Retain the established
+// fused decision explicitly; activation scales are nonnegative.
+static __device__ __forceinline__ int8_t round_scaled_q8(float value, float scale) {
+#pragma clang fp reassociate(off)
+    if (value == 0.0f) return 0;
+    const float whole = truncf(value * scale);
+    const float fraction = fmaf(value, scale, -whole);
+    const float correction = copysignf(fabsf(fraction) >= 0.5f ? 1.0f : 0.0f, value);
+    return static_cast<int8_t>(whole + correction);
+}
+
 __launch_bounds__(CUDA_QUANTIZE_BLOCK_SIZE, 1)
 static __global__ void quantize_q8_1(
         const float * __restrict__ x, void * __restrict__ vy,
@@ -224,10 +237,10 @@ static __global__ void quantize_mmq_q8_1(
 
     const float d_inv = 127.0f / amax;
     char4 q;
-    q.x = roundf(xi.x*d_inv);
-    q.y = roundf(xi.y*d_inv);
-    q.z = roundf(xi.z*d_inv);
-    q.w = roundf(xi.w*d_inv);
+    q.x = round_scaled_q8(xi.x, d_inv);
+    q.y = round_scaled_q8(xi.y, d_inv);
+    q.z = round_scaled_q8(xi.z, d_inv);
+    q.w = round_scaled_q8(xi.w, d_inv);
 
     // Write back 4 int8 values as a single 32 bit value for better memory bandwidth:
     char4 * yqs4 = (char4 *) y[ib].qs;
