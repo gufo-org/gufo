@@ -1,0 +1,153 @@
+#include "src/core/gguf_reader.hpp"
+
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstddef>
+#include <cstring>
+#include <filesystem>
+#include <iomanip>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <regex>
+#include <span>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "src/core/platform/mapped_file.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
+
+namespace gufo::core {
+
+namespace {
+
+constexpr std::array<char, 4> kGgufMagic = {'G', 'G', 'U', 'F'};
+
+template<typename T>
+bool ReadPod(const std::uint8_t* data, std::size_t size, std::size_t& offset,
+             T& out) {
+  if (offset > size || sizeof(T) > size - offset) {
+    return false;
+  }
+  std::memcpy(&out, data + offset, sizeof(T));
+  offset += sizeof(T);
+  return true;
+}
+
+bool ReadString(const std::uint8_t* data, std::size_t size, std::size_t& offset,
+                std::string_view& out) {
+  std::uint64_t len = 0;
+  if (!ReadPod(data, size, offset, len)) {
+    return false;
+  }
+  if (offset > size || len > size - offset) {
+    return false;
+  }
+  out = std::string_view(reinterpret_cast<const char*>(data + offset), len);
+  offset += len;
+  return true;
+}
+
+}  // namespace
+
+GgufReader::~GgufReader() = default;
+
+GgufReader::GgufReader(GgufReader&& other) noexcept
+    : data_(other.data_),
+      size_(other.size_),
+      source_path_(std::move(other.source_path_)),
+      mapping_(std::move(other.mapping_)),
+      version_(other.version_),
+      alignment_(other.alignment_),
+      metadata_(std::move(other.metadata_)),
+      tensors_(std::move(other.tensors_)),
+      tensor_index_(std::move(other.tensor_index_)),
+      mapped_regions_(std::move(other.mapped_regions_)),
+      shards_(std::move(other.shards_)) {
+  other.data_ = nullptr;
+  other.size_ = 0;
+}
+
+GgufReader& GgufReader::operator=(GgufReader&& other) noexcept {
+  if (this != &other) {
+    mapping_.Close();
+    shards_.clear();
+    mapped_regions_.clear();
+
+    data_ = other.data_;
+    size_ = other.size_;
+    source_path_ = std::move(other.source_path_);
+    mapping_ = std::move(other.mapping_);
+    version_ = other.version_;
+    alignment_ = other.alignment_;
+    metadata_ = std::move(other.metadata_);
+    tensors_ = std::move(other.tensors_);
+    tensor_index_ = std::move(other.tensor_index_);
+    mapped_regions_ = std::move(other.mapped_regions_);
+    shards_ = std::move(other.shards_);
+
+    other.data_ = nullptr;
+    other.size_ = 0;
+  }
+  return *this;
+}
+
+std::unique_ptr<GgufReader> GgufReader::OpenFile(
+    const std::filesystem::path& path, std::string* error_msg) {
+  auto first = OpenSingleFile(path, error_msg);
+  if (!first) {
+    return nullptr;
+  }
+
+  const auto split_count = first->GetMetadataUint32("split.count").value_or(1U);
+  if (first->FindMetadata("split.count") &&
+      (!first->GetMetadataUint32("split.count") || split_count == 0 ||
+       split_count > 65535)) {
+    if (error_msg)
+      *error_msg = "Invalid GGUF split count";
+    return nullptr;
+  }
+  if (split_count <= 1) {
+    return first;
+  }
+  return OpenSplitFileSet(path, std::move(first), error_msg);
+}
+
+std::unique_ptr<GgufReader> GgufReader::OpenSingleFile(
+    const std::filesystem::path& path, std::string* error_msg) {
+  std::string open_error;
+  auto mapping = platform::ReadOnlyMappedFile::Open(path, &open_error);
+  if (!mapping.valid()) {
+    if (error_msg != nullptr) {
+      *error_msg =
+          "Failed to open or map file: " + path.string() + ": " + open_error;
+    }
+    return nullptr;
+  }
+
+  auto reader = std::unique_ptr<GgufReader>(new GgufReader());
+  reader->data_ = mapping.data();
+  reader->size_ = mapping.size();
+  reader->source_path_ = path;
+  reader->mapping_ = std::move(mapping);
+
+  try {
+    if (!reader->ParseHeaders(error_msg)) {
+      if (error_msg && error_msg->empty())
+        *error_msg = "Malformed or truncated GGUF";
+      return nullptr;
+    }
+  } catch (const std::bad_alloc&) {
+    if (error_msg)
+      *error_msg = "Insufficient memory for GGUF descriptors";
+    return nullptr;
+  }
+  reader->mapped_regions_.push_back({reader->data_, reader->size_,
+                                     reader->mapping_.PlatformDescriptor(),
+                                     reader->
