@@ -2,6 +2,7 @@
 #define GUFO_SERVER_EMBEDDING_SERVICE_HPP_
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -64,6 +65,14 @@ struct EmbeddingServiceOptions {
   /// Replaces the HIP encoder. The service serializes calls to it.
   Runner runner;
 };
+
+/// Cuts `tokens` (an encoding that ends in one `<eos>`) to `max_tokens` by
+/// dropping content tokens before the `<eos>`. Returns false, leaving `tokens`
+/// unchanged, when the cut would drop an `image_token` or the end-of-image
+/// marker right after the last one.
+[[nodiscard]] bool TruncateKeepingImages(std::vector<std::uint32_t>* tokens,
+                                         std::size_t max_tokens,
+                                         std::uint32_t image_token);
 
 /// Native HIP EmbeddingGemma 2 text and image embedding service.
 class EmbeddingService {

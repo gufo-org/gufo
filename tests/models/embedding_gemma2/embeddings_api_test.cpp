@@ -36,6 +36,7 @@ using gufo::server::HandleEmbeddingsApiRequest;
 using gufo::server::HttpRequest;
 using gufo::server::HttpResponse;
 using gufo::server::IsEmbeddingsApiPath;
+using gufo::server::TruncateKeepingImages;
 
 constexpr std::size_t kWidth = 768;
 
@@ -587,6 +588,28 @@ void TestTruncate() {
         "a null truncate is absent");
 }
 
+// The native path's cut for inputs with images: 2 = <bos>, 1 = <eos>,
+// 9 = image placeholder, 8 = end-of-image marker, 5 = text.
+void TestTruncateKeepingImages() {
+  using Tokens = std::vector<std::uint32_t>;
+  Tokens text{2, 5, 5, 5, 5, 5, 1};
+  Check(TruncateKeepingImages(&text, 4, 9) && text == Tokens{2, 5, 5, 1},
+        "a text-only encoding keeps its first tokens and <eos>");
+  Tokens image{2, 5, 9, 9, 8, 5, 5, 5, 1};
+  Check(
+      TruncateKeepingImages(&image, 6, 9) && image == Tokens{2, 5, 9, 9, 8, 1},
+      "a cut right after the end-of-image marker keeps the image");
+  Tokens marker{2, 5, 9, 9, 8, 5, 5, 5, 1};
+  Check(!TruncateKeepingImages(&marker, 5, 9) &&
+            marker == Tokens{2, 5, 9, 9, 8, 5, 5, 5, 1},
+        "a cut that would drop the end-of-image marker refuses unchanged");
+  Tokens inside{2, 9, 9, 9, 8, 5, 1};
+  Check(!TruncateKeepingImages(&inside, 3, 9), "a cut inside an image refuses");
+  Tokens fits{2, 9, 8, 1};
+  Check(TruncateKeepingImages(&fits, 4, 9) && fits == Tokens{2, 9, 8, 1},
+        "an encoding within the limit is unchanged");
+}
+
 void TestCancellation() {
   FakeRunner runner;
   auto service = MakeService(&runner);
@@ -707,6 +730,7 @@ int main() {
   TestLimitsAndFailures();
   TestTypedInput();
   TestTruncate();
+  TestTruncateKeepingImages();
   TestCancellation();
   TestServiceLifecycle();
   std::cout << "PASS embedding_gemma2_embeddings_api_test\n";

@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 #include "src/cli/serve/logging.hpp"
@@ -126,7 +127,19 @@ struct EmbeddingService::Impl {
         }
       }
       // A text-only input reads just the bytes its kept tokens can span. An
-      // input with images is encoded whole so every placeholder is counted.
+      // input with images keeps every placeholder: one ending past the bytes
+      // the kept tokens can span cannot fit, and text after the last image
+      // is bounded like a text-only input.
+      if (request.truncate && !sequence.images.empty() &&
+          text.size() / 2 > byte_limit) {
+        const std::size_t end = text.rfind(kEndImageToken);
+        if (end == std::string::npos ||
+            end + std::string_view(kEndImageToken).size() > byte_limit) {
+          batch->failed_index = index;
+          return EmbeddingStatus::kInputTooLong;
+        }
+        text.resize(2 * byte_limit);
+      }
       sequence.tokens = request.truncate && sequence.images.empty()
                             ? tokenizer->EncodeTruncated(
                                   text, EmbeddingService::kMaxInputTokens)
@@ -149,23 +162,8 @@ struct EmbeddingService::Impl {
       }
       if (request.truncate &&
           sequence.tokens.size() > EmbeddingService::kMaxInputTokens) {
-        // Keep the first tokens and the final <eos>, but never part of an
-        // image: its last placeholder and the end-of-image marker after it
-        // must both stay.
-        const std::size_t keep = EmbeddingService::kMaxInputTokens - 1;
-        const auto last_image = std::ranges::find(
-            sequence.tokens.rbegin(), sequence.tokens.rend(), kImageTokenId);
-        const std::size_t image_end =
-            last_image == sequence.tokens.rend()
-                ? 0
-                : static_cast<std::size_t>(sequence.tokens.rend() -
-                                           last_image) +
-                      1;
-        if (image_end <= keep) {
-          sequence.tokens.erase(
-              sequence.tokens.begin() + static_cast<std::ptrdiff_t>(keep),
-              sequence.tokens.end() - 1);
-        }
+        (void)TruncateKeepingImages(
+            &sequence.tokens, EmbeddingService::kMaxInputTokens, kImageTokenId);
       }
       if (sequence.tokens.size() > EmbeddingService::kMaxInputTokens) {
         batch->failed_index = index;
@@ -211,6 +209,31 @@ struct EmbeddingService::Impl {
   std::atomic<bool> device_lost{false};
   bool ready{false};
 };
+
+bool TruncateKeepingImages(std::vector<std::uint32_t>* tokens,
+                           std::size_t max_tokens, std::uint32_t image_token) {
+  if (tokens->size() <= max_tokens) {
+    return true;
+  }
+  if (max_tokens < 2) {
+    return false;
+  }
+  // Keep the first tokens and the final <eos>. The last image placeholder and
+  // the end-of-image marker after it must both stay.
+  const std::size_t keep = max_tokens - 1;
+  const auto last_image =
+      std::ranges::find(tokens->rbegin(), tokens->rend(), image_token);
+  const std::size_t image_end =
+      last_image == tokens->rend()
+          ? 0
+          : static_cast<std::size_t>(tokens->rend() - last_image) + 1;
+  if (image_end > keep) {
+    return false;
+  }
+  tokens->erase(tokens->begin() + static_cast<std::ptrdiff_t>(keep),
+                tokens->end() - 1);
+  return true;
+}
 
 EmbeddingService::EmbeddingService(EmbeddingServiceOptions options)
     : impl_(std::make_unique<Impl>(std::move(options))) {}
