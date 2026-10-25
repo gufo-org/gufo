@@ -247,6 +247,12 @@ final parse a buffered reply uses, and `tool-native-schemas` rotates endpoint,
 stream and tool choice across cases. `--tier full` (the default for manual runs)
 keeps every suite and combination.
 
+The literal-closer cases from #786 (a lone `</invoke>` and a closer before or
+between calls) use the deterministic HTTP fixtures in
+`tests/cli/openai_chat_test.cpp`, with buffered/streamed and whole/bytewise output.
+Qwen27 Q4/Q8 can omit the requested line or call a tool instead, so these parser
+checks must not depend on a model following a request to copy tool markup.
+
 `Devlab functional checks` runs on every push to a non-draft PR, like `CI`
 (`pull_request`), with the repository's fork approval policy. A newer push cancels
 the PR's earlier run. PRs use the `pr` tier; release-please PRs and dispatches

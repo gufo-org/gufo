@@ -5140,6 +5140,11 @@ void TestToolClosingFraming() {
       {call + "\n</invoke>\n<|im_end|>", 1, R"({"text":"42"})",
        std::string(kImEnd)},
       {"</invoke>\n" + call, 1, R"({"text":"42"})", "</invoke>\n"},
+      // #786: these are parser fixtures, independent of whether a model obeys
+      // a request to copy a literal closer. Qwen27 Q4 omits it before a call;
+      // Q8 can emit a call when asked for the closer alone.
+      {call, 1, R"({"text":"42"})", ""},
+      {"</invoke>\n\n" + call, 1, R"({"text":"42"})", "</invoke>\n\n"},
       {"</invoke>", 0, "", "</invoke>"},
       {"Text </parameter>", 0, "", "Text </parameter>"},
       {"The token is <|im_end|>", 0, "", "The token is <|im_end|>"},

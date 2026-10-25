@@ -4,7 +4,7 @@
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
 
-Gufo is a vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:
+Gufo is a vertical local inference engine for Linux and Windows, specifically built and optimized for AMD Strix Halo hardware:
 Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
 
 **Contributions are welcome!**
@@ -13,7 +13,7 @@ See the [changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/gufo-
 for user-facing changes and release history.
 
 > [!TIP]
-> There are two Gufo variants that haven't been merged yet: A **[Windows port](https://github.com/pixmaate/gufo)** and **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)**. Check them out!
+> Check out **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)**, a Gufo variant that has not been merged yet!
 
 ## Models and benchmarks
 
