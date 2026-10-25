@@ -70,6 +70,12 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(self.models('cmake/Checks.cmake', 'src/models/embedding_gemma2/hip/ops.hip'),
                          {'embedding-gemma2'})
         self.assertEqual(self.models('cmake/toolchains/windows-therock.cmake'), self.models('CMakeLists.txt'))
+        # Its CPU test sources need no model either; the code they test still selects.
+        self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'tests/cli/http_server_test.cpp'), set())
+        self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'src/cli/serve/openai_chat.cpp'),
+                         {'flash-next-q4'})
+        self.assertEqual(self.models('tests/cli/audio_websocket_test.cpp'), {'qwen3-asr', 'qwen3-tts-base'})
+        self.assertEqual(self.models('tests/cli/continuation_cache_test.cpp'), self.models('CMakeLists.txt'))
 
     def test_category_and_fixture_ownership(self):
         for path, expected in [
