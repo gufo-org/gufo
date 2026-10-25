@@ -396,6 +396,13 @@ public:
       const ChatRequest&) const {
     return std::nullopt;
   }
+
+  /// The prompt text a chat request renders to through the model's chat
+  /// template, before tokenization. Empty when the backend cannot tell.
+  [[nodiscard]] virtual std::optional<std::string> render_chat_prompt(
+      const ChatRequest&) const {
+    return std::nullopt;
+  }
 };
 
 inline std::shared_ptr<TextGenerationBackend::GenerationRequest>

@@ -803,7 +803,8 @@ std::optional<HttpResponse> ParseToolControls(const json::Value& body,
 
 std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                                          TextGenerationBackend& backend,
-                                         ParsedChatRequest* output) {
+                                         ParsedChatRequest* output,
+                                         bool require_model = true) {
   json::Value body;
   try {
     body = json::parse(request.body);
@@ -821,6 +822,9 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                  "invalid_model");
   }
   output->model = body.member_str("model");
+  if (output->model.empty() && !require_model) {
+    output->model = backend.model_id();
+  }
   if (output->model.empty()) {
     return Error(400, "Bad Request", "'model' is required", "missing_model");
   }
@@ -3918,6 +3922,46 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
                                 initial_output_state);
   } catch (const TextGenerationError& exception) {
     return GenerationError(exception);
+  } catch (const std::invalid_argument& exception) {
+    return Error(400, "Bad Request", exception.what(), "invalid_prompt");
+  } catch (const std::length_error& exception) {
+    return Error(400, "Bad Request", exception.what(),
+                 "context_length_exceeded");
+  }
+}
+
+HttpResponse HandleApplyTemplate(const HttpRequest& request,
+                                 TextGenerationBackend& backend) {
+  ParsedChatRequest parsed;
+  if (auto error = ParseRequest(request, backend, &parsed,
+                                /*require_model=*/false);
+      error.has_value()) {
+    return std::move(*error);
+  }
+  if (parsed.stream) {
+    return Error(400, "Bad Request", "'stream' must be false",
+                 "invalid_stream");
+  }
+  try {
+    auto prompt = backend.render_chat_prompt(parsed.chat);
+    if (!prompt) {
+      json::Value response = json::Value::object();
+      json::Value error = json::Value::object();
+      error["message"] = "endpoint not implemented on this text model";
+      error["type"] = "server_error";
+      error["code"] = "not_implemented";
+      response["error"] = std::move(error);
+      HttpResponse unavailable;
+      unavailable.status = 501;
+      unavailable.reason = "Not Implemented";
+      unavailable.body = response.dump();
+      return unavailable;
+    }
+    json::Value response = json::Value::object();
+    response["prompt"] = std::move(*prompt);
+    HttpResponse rendered;
+    rendered.body = response.dump();
+    return rendered;
   } catch (const std::invalid_argument& exception) {
     return Error(400, "Bad Request", exception.what(), "invalid_prompt");
   } catch (const std::length_error& exception) {

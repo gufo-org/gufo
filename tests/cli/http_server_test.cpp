@@ -572,6 +572,57 @@ void TestLlamaProps() {
   assert(named.member_str("build_info") == "0.2.0 (abc1234)");
 }
 
+void TestApplyTemplate() {
+  RunningServer server;
+  const std::string chat = R"({"messages":[{"role":"system","content":"sys"},
+      {"role":"user","content":"ping"}],
+      "tools":[{"type":"function","function":{"name":"t","parameters":
+        {"type":"object","properties":{"a":{"type":"string"}}}}}]})";
+  const int calls = server.backend->calls;
+
+  // A backend that cannot render its template as text says so.
+  ExpectStatus(server.Post("/apply-template", chat), 501);
+
+  // The prompt is the backend's render of the parsed Chat request; no model
+  // field is needed, as outside llama-server router mode.
+  server.backend->rendered_prompt = "<rendered>";
+  server.backend->reasoning.enabled = true;
+  server.backend->reasoning.effort = gufo::ReasoningEffort::kMedium;
+  const auto response = server.Post("/apply-template", chat);
+  ExpectStatus(response, 200);
+  const auto body =
+      gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+  assert(body.member_str("prompt") == "<rendered>");
+  assert(body.find("model") == nullptr);
+  const auto rendered = server.backend->rendered_chat;
+  assert(rendered.messages.size() == 2 && rendered.tools.size() == 1);
+  // A request that sets no reasoning renders at the server's defaults, which
+  // is what makes them observable; a request's own effort wins.
+  assert(rendered.reasoning.enabled == true &&
+         rendered.reasoning.effort == gufo::ReasoningEffort::kMedium);
+  ExpectStatus(server.Post("/apply-template",
+                           R"({"reasoning_effort":"low",
+                               "messages":[{"role":"user","content":"hi"}]})"),
+               200);
+  assert(server.backend->rendered_chat.reasoning.effort ==
+         gufo::ReasoningEffort::kLow);
+
+  ExpectStatus(server.Post("/apply-template", R"({"messages":[]})"), 400);
+  ExpectStatus(
+      server.Post(
+          "/apply-template",
+          R"({"stream":true,"messages":[{"role":"user","content":"hi"}]})"),
+      400);
+  ExpectStatus(server.Post("/apply-template",
+                           R"({"model":"other",
+                               "messages":[{"role":"user","content":"hi"}]})"),
+               404);
+  // Rendering never generates.
+  assert(server.backend->calls == calls);
+  server.backend->rendered_prompt.reset();
+  server.backend->reasoning = {};
+}
+
 void TestLlamaSlotsAndMetrics() {
   RunningServer server;
   const auto get = [&](const std::string& path) {
@@ -1780,9 +1831,12 @@ void TestServedModelNames() {
       {"/v1/messages", R"("messages":[{"role":"user","content":"hi"}])"},
       {"/v1/messages/count_tokens",
        R"("messages":[{"role":"user","content":"hi"}])", false},
+      {"/apply-template", R"("messages":[{"role":"user","content":"hi"}])",
+       false},
       {"/completion", R"("prompt":"hi")", false},
   };
   server.backend->chat_token_count = 1;
+  server.backend->rendered_prompt = "p";
   const auto post = [&](const Endpoint& endpoint, const std::string& model) {
     return server.Post(endpoint.path, R"({"model":")" + model + R"(",)" +
                                           endpoint.fields + "}");
@@ -1823,6 +1877,7 @@ void TestServedModelNames() {
              .member_str("model") == "test");
   server.backend->names = {"test"};
   server.backend->chat_token_count.reset();
+  server.backend->rendered_prompt.reset();
 }
 
 void TestRawCompletionStreaming() {
@@ -3046,6 +3101,7 @@ int main() {
   TestExpectContinue();
   TestFallbackBackendMetrics();
   TestLlamaProps();
+  TestApplyTemplate();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
   TestTextOnlyBackendRefusesImagesBeforeReading();

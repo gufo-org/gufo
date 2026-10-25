@@ -1857,6 +1857,7 @@ void HttpServer::register_routes() {
   add("POST", "/rerank", NotImplemented);
   add("POST", "/infill", NotImplemented);
   add("POST", "/completion", LlamaCompletion);
+  add("POST", "/apply-template", HandleApplyTemplate);
   add("GET", "/props", LlamaProps);
   add("GET", "/slots", LlamaSlots);
   add("GET", "/v1/slots", LlamaSlots);

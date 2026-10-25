@@ -1264,6 +1264,17 @@ sampling fields gets, with `n_predict` and `max_tokens` -1 when no default
 limit is set. `modalities.vision` is true only when a vision encoder
 loaded. Fields the server cannot report are omitted rather than sent as zero.
 
+`POST /apply-template` takes a Chat Completions body and returns
+`{"prompt": "..."}`, the text the model's compiled chat template renders it
+to, as llama-server's route does, so tooling can inspect, count or fingerprint
+what a request becomes. `model` is optional. The server's `--think` and
+`--reasoning-effort` defaults apply as in Chat, so a body that sets neither
+shows what such requests run at; tool and response-format constraints add the
+same text they add before generation. Nothing is tokenized, prefilled or
+cached. An image renders as its single placeholder, not its expanded visual
+tokens. `stream: true` is rejected; backends that cannot render a template as
+text return 501.
+
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed
 tokens; `cache_n` counts reused tokens. llama-swap uses these fields on every
