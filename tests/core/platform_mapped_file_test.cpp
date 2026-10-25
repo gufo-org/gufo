@@ -1,12 +1,16 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -128,6 +132,44 @@ int main() {
     // A failing read reports 0, never a wrapped negative count.
     CHECK(platform::ReadFileAt(platform::kInvalidFile, out.data(), out.size(),
                                0) == 0);
+  }
+
+  {
+    auto mapped = platform::ReadOnlyMappedFile::Open(file);
+    CHECK(mapped.valid());
+    bool direct = false;
+    auto handle =
+        platform::ReopenRandomReadFile(mapped.PlatformHandle(), direct);
+    // A platform without direct I/O keeps the existing buffered fallback.
+    if (!platform::FileValid(handle))
+      handle = platform::DuplicateFile(mapped.PlatformHandle());
+    CHECK(platform::FileValid(handle));
+    const std::size_t stride = direct ? page : 1;
+    std::atomic<bool> correct{true};
+    std::vector<std::thread> readers;
+    for (std::size_t worker = 0; worker < 8; ++worker) {
+      readers.emplace_back([&, worker] {
+        std::vector<std::uint8_t> storage(2 * page);
+        void* buffer = storage.data();
+        std::size_t space = storage.size();
+        buffer = std::align(page, page, buffer, space);
+        if (buffer == nullptr) {
+          correct = false;
+          return;
+        }
+        for (std::size_t i = 0; i < 64; ++i) {
+          const auto offset =
+              ((worker * 37 + i * 19) % (2 * page / stride)) * stride;
+          if (platform::ReadFileAt(handle, buffer, page, offset) != page ||
+              std::memcmp(buffer, bytes.data() + offset, page) != 0)
+            correct = false;
+        }
+      });
+    }
+    for (auto& reader : readers)
+      reader.join();
+    CHECK(correct);
+    platform::CloseFile(handle);
   }
 
   fs::remove_all(dir);

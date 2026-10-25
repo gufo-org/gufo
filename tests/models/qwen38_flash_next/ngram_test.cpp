@@ -110,7 +110,7 @@ void TestHash() {
 }
 
 // A BF16 table where row r holds r + i/1000 in column i; reads through the
-// direct-I/O path must return exactly those values, duplicates included.
+// platform read path must return exactly those values, duplicates included.
 void TestTable() {
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() / "qwen38_ngram_test.bin";
@@ -132,8 +132,10 @@ void TestTable() {
     }
   }
   std::string error;
-  auto table =
-      OpenTable(path, offset, rows, dim, gufo::core::GgmlType::kBF16, &error);
+  auto mapped = gufo::platform::ReadOnlyMappedFile::Open(path, &error);
+  Check(mapped.valid(), "table file remains mapped during row reads");
+  auto table = q::NgramTable::Open(mapped.PlatformHandle(), offset, rows, dim,
+                                   gufo::core::GgmlType::kBF16, &error);
   Check(table != nullptr, error.c_str());
   if (table) {
     table->ReserveGather(32769);
@@ -247,6 +249,7 @@ void TestTable() {
       Check(out == expected, "batched failure preserves subsequent reads");
     }
   }
+  mapped.Close();
   std::filesystem::remove(path);
 }
 
