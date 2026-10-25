@@ -114,10 +114,10 @@ namespace {
  * in-flight kernels on this ROCm and made prefill logits nondeterministic.
  *
  * The stack spans a list of blocks. An allocation that doesn't fit the current
- * block goes to the next one (added if needed, at least twice the last), so
- * live pointers never move and an arena can start small: the MTP and DFlash2
- * streams only quantize a few rows. Once nothing is live, a pool with several
- * blocks replaces them with one block of their combined size. */
+ * block goes to the next one that fits (added if needed, at least twice the
+ * last), so an arena can start small: the MTP and DFlash2 streams only quantize
+ * a few rows. Blocks live as long as the pool: captured graphs bake in their
+ * addresses and replay them after the arena has grown. */
 struct qfn_stack_pool : public ggml_hip_pool {
     static constexpr size_t kFirstBlockBytes = (size_t) 16 << 20;
 
@@ -150,44 +150,24 @@ struct qfn_stack_pool : public ggml_hip_pool {
         blocks.push_back({base, bytes, 0});
     }
 
-    // Only while nothing is live: queued kernels may still read the old blocks,
-    // so wait for them before freeing.
-    void coalesce() {
-        size_t total = 0;
-        for (const block &b : blocks) total += b.capacity;
-        (void)hipDeviceSynchronize();
-        for (const block &b : blocks) (void)hipFree(b.base);
-        blocks.clear();
-        current = 0;
-        add_block(total);
-    }
-
     void * alloc(size_t size, size_t * actual_size) override {
         ggml_hip_set_device(device);
         const size_t aligned = (size + 255) & ~(size_t) 255;
-        if (live.empty() && blocks.size() > 1) coalesce();
         if (blocks.empty()) {
             size_t first = kFirstBlockBytes;
             while (first < aligned) first *= 2;
             add_block(first);
         }
-        while (blocks[current].top + aligned > blocks[current].capacity) {
+        if (blocks[current].top + aligned > blocks[current].capacity) {
             // Blocks after `current` are empty: the stack only reaches them through it.
-            if (current + 1 < blocks.size() && blocks[current + 1].capacity >= aligned) {
-                ++current;
-                continue;
+            size_t next = current + 1;
+            while (next < blocks.size() && blocks[next].capacity < aligned) ++next;
+            if (next == blocks.size()) {
+                size_t bytes = blocks.back().capacity * 2;
+                while (bytes < aligned) bytes *= 2;
+                add_block(bytes);
             }
-            if (current + 1 < blocks.size()) {
-                // Too small for this request; nothing in it or after it is live,
-                // but queued kernels may still read them.
-                (void)hipDeviceSynchronize();
-                for (size_t i = current + 1; i < blocks.size(); ++i) (void)hipFree(blocks[i].base);
-                blocks.resize(current + 1);
-            }
-            size_t next = blocks.back().capacity * 2;
-            while (next < aligned) next *= 2;
-            add_block(next);
-            current = blocks.size() - 1;
+            current = next;
         }
         block &b = blocks[current];
         char *ptr = b.base + b.top;
