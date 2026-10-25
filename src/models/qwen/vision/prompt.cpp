@@ -220,11 +220,20 @@ core::Image ResizeImage(const core::Image& image,
           std::uint64_t{side} * kLowDetailMaxSide / longest);
       return std::max(kResizeFactor, scaled / kResizeFactor * kResizeFactor);
     };
+    const auto automatic_height = height;
+    const auto automatic_width = width;
     height = bound(image.height);
     width = bound(image.width);
-    // For extreme aspect ratios the model's minimum overrides the bound.
-    if (std::uint64_t{height} * width < kMinPixels)
+    // For extreme aspect ratios the model's minimum overrides the bound, but
+    // rounding that minimum up must not make 'low' larger than 'auto'.
+    if (std::uint64_t{height} * width < kMinPixels) {
       raise_to_minimum();
+      if (std::uint64_t{height} * width >
+          std::uint64_t{automatic_height} * automatic_width) {
+        height = automatic_height;
+        width = automatic_width;
+      }
+    }
   }
   if (width == image.width && height == image.height)
     return image;

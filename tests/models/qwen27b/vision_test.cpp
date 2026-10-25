@@ -125,6 +125,20 @@ void TestPreprocessing() {
       10000, 1000, std::vector<std::uint8_t>(10000 * 1000 * 3, 1)};
   const auto extreme_low = ResizeImage(extreme, Detail::kLow);
   assert(extreme_low.width == 832 && extreme_low.height == 96);
+  // Raising to the minimum would give 576 x 128 and 2048 x 64; 'low' keeps
+  // the smaller 'auto' size instead.
+  for (const auto [width, height, expected_width, expected_height] :
+       {std::array<std::uint32_t, 4>{551, 122, 544, 128},
+        std::array<std::uint32_t, 4>{2032, 32, 2048, 32}}) {
+    const gufo::core::Image banner{
+        width, height, std::vector<std::uint8_t>(width * height * 3, 2)};
+    const auto banner_auto = ResizeImage(banner, Detail::kAuto);
+    const auto banner_low = ResizeImage(banner, Detail::kLow);
+    assert(banner_auto.width == expected_width &&
+           banner_auto.height == expected_height);
+    assert(banner_low.width == expected_width &&
+           banner_low.height == expected_height);
+  }
   const gufo::core::Image small{320, 240,
                                 std::vector<std::uint8_t>(320 * 240 * 3, 5)};
   const auto small_auto = ResizeImage(small, Detail::kAuto);
