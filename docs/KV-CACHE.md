@@ -200,12 +200,14 @@ gain was about 1 s of 9 s, which is why short prefixes do not wait.
 The unit of retention is a **checkpoint**, not a conversation. A single request
 can retain up to four intermediate checkpoints in addition to its branching
 fallback and complete prompt. Prefill stops at those positions and captures the
-whole model state before advancing. Positions lie on a 2,048-token grid spread
-across the prompt; the final grid point is within 2,048 tokens of its end.
-Warm continuations skip grid positions less than 2,048 tokens beyond the reused
-frontier, and every request skips grid positions within 128 tokens of its end:
-such a point would split the final prefill pass for a checkpoint next to the
-complete prompt. Capture runs asynchronously while that session is frozen, so other
+whole model state before advancing. Positions lie on a grid spread across the
+prompt whose interval is the model's largest prefill step, at least 2,048
+tokens (4,096 on Qwen3.6-35B-A3B), so a checkpoint never shortens a step; the
+final grid point is within one interval of the prompt's end. Warm continuations
+skip grid positions less than one interval beyond the reused frontier, and
+every request skips grid positions within 128 tokens of its end: such a point
+would split the final prefill pass for a checkpoint next to the complete
+prompt. Capture runs asynchronously while that session is frozen, so other
 requests can continue; a single execution slot skips the extra worker. A
 request whose first token is already published decodes as soon as its capture
 finishes, before the next bounded prefill chunk of a peer.

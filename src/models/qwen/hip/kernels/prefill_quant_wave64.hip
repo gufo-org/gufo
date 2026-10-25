@@ -43,5 +43,33 @@ bool TryLaunchQuantPrefillWave64(core::GgmlType type, const void* w,
   }
 }
 
+bool TryLaunchQuantPrefillSsmConvWave64(core::GgmlType type, const void* w,
+                                        const void* x, float* y,
+                                        const float* conv_weights,
+                                        float* conv_out, std::size_t batch,
+                                        std::size_t m, std::size_t k,
+                                        hipStream_t stream) {
+  // The same bounds as TryLaunchQuantPrefillWave64, so the projection is the
+  // one that route computes.
+  if (type != core::GgmlType::kQ8_0 || conv_weights == nullptr || batch < 96 ||
+      m < 1024 || m % 16 != 0 || k < 1024 || k % 256 != 0) {
+    return false;
+  }
+  const dim3 grid(static_cast<unsigned>((batch + 127) / 128),
+                  static_cast<unsigned>((m + 127) / 128));
+  if (batch % kSsmConvSpanTokens == 0) {
+    WKQuantA8BlockedWmmaGEMMKernel<128, 128, 2, 2, 2, core::GgmlType::kQ8_0,
+                                   64, 1>
+        <<<grid, 256, 0, stream>>>(w, x, y, batch, m, k, conv_weights,
+                                   conv_out);
+  } else {
+    WKQuantA8BlockedWmmaGEMMKernel<128, 128, 2, 2, 2, core::GgmlType::kQ8_0,
+                                   64, 2>
+        <<<grid, 256, 0, stream>>>(w, x, y, batch, m, k, conv_weights,
+                                   conv_out);
+  }
+  return true;
+}
+
 }  // namespace gufo::hip::detail
 #endif

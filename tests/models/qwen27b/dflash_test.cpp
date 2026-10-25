@@ -48,6 +48,28 @@ void TestLengthController() {
   for (const auto users : {2U, 3U, 4U, 5U, 6U, 7U, 8U})
     Expect(fixed.Choose(3, 131072, users) == 3,
            "batched verification cannot change a fixed block");
+  {
+    // An MoE target pays per verified row, so middling acceptance settles on
+    // a short block where the dense estimate would stay wide.
+    DFlashLengthController dense(DFlashDraftPolicy::kAdaptive, 7);
+    DFlashLengthController moe(DFlashDraftPolicy::kAdaptive, 7, false, true);
+    for (int round = 0; round < 32; ++round) {
+      dense.Observe(1, 7);
+      moe.Observe(1, 7);
+    }
+    Expect(dense.Choose(7) > moe.Choose(7) && moe.Choose(7) <= 3,
+           "MoE verification cost shortens a poorly accepted block");
+    for (int round = 0; round < 96; ++round) {
+      const auto drafted = moe.Choose(7);
+      moe.Observe(drafted, drafted);
+    }
+    Expect(moe.Choose(7) == 7,
+           "an MoE target still probes the full block under full acceptance");
+    for (const auto users : {2U, 4U, 8U})
+      Expect(moe.Choose(7, 2048, users) == dense.Choose(7, 2048, users) ||
+                 moe.Choose(7, 2048, users) == 7,
+             "batched MoE requests keep the cohort cost tables");
+  }
   for (const bool q8_target : {false, true}) {
     DFlashLengthController adaptive(DFlashDraftPolicy::kAdaptive, 7, q8_target);
     for (int round = 0; round < 32; ++round)

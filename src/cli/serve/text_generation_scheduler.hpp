@@ -34,6 +34,10 @@ inline constexpr std::size_t kDefaultMaxBufferedOutputBytesTotal =
 
 struct TextPrefillPolicy {
   std::size_t decode_active_tokens{kDefaultDecodeActivePrefillTokens};
+  /// Decode rounds every running request gets after each bounded prompt
+  /// chunk. One round per chunk leaves a decoding request almost idle while
+  /// another prompt is processed; more rounds trade prompt throughput for it.
+  std::size_t decode_rounds_per_chunk{1};
 };
 
 struct TextSchedulerPolicy {

@@ -882,7 +882,8 @@ struct TextRunnerPool::Request::Impl {
       // Cold long prompts still retain the last grid point for late edits.
       // A grid point just before the prompt end saves little on an edit but
       // would split the final prefill pass and store another snapshot.
-      constexpr std::size_t interval = 2048;
+      const std::size_t interval =
+          std::max<std::size_t>(2048, runner->Descriptor().prefill_step_tokens);
       constexpr std::size_t tail = 128;
       const auto grid_points = (prompt.size() - 1) / interval;
       const auto count =
@@ -1518,6 +1519,17 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     frontier = std::min(frontier, impl_->boundaries.front());
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
+  // The draft's context window must be complete where the state is next
+  // used: the cache snapshot, a shared-prefix boundary or the prompt end.
+  // Grid checkpoints are optional copies for late edits; they keep whatever
+  // context the draft has, and a restore from one drafts less until the
+  // window refills.
+  auto horizon = impl_->prefill_offset < snapshot_position
+                     ? snapshot_position
+                     : impl_->prompt.size();
+  if (!impl_->boundaries.empty())
+    horizon = std::min(horizon, impl_->boundaries.front());
+  impl_->runner->SetDraftContextHorizon(state, horizon);
   std::unique_ptr<TextRunnerSnapshot> captured;
   const std::function<std::unique_ptr<TextRunnerSnapshot>()> capture =
       in_pass && impl_->lease.component()

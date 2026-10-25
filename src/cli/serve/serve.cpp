@@ -617,8 +617,10 @@ void PrintServeHelp(std::string_view program_name,
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
+    std::size_t mtp_prime_chunk = 1024;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
+    std::size_t prefill_decode_rounds = 1;
     std::size_t max_pending_requests = 16;
     std::size_t max_pending_requests_per_client = 0;
     std::uint64_t request_timeout_ms = 0;
@@ -713,9 +715,19 @@ void PrintServeHelp(std::string_view program_name,
                      "Adaptive draft floor (default: 1)", "Speculative",
                      &min_draft_tokens);
     parser.AddOption(
+        "", "--mtp-prime-chunk", "N",
+        "Rows per batched MTP prompt-prime slice; 0 restores the legacy "
+        "per-token prime (default: 1024)",
+        "Speculative", &mtp_prime_chunk);
+    parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
         "Scheduling", &prefill_chunk_tokens);
+    parser.AddOption(
+        "", "--prefill-decode-rounds", "N",
+        "Decode rounds between prompt chunks while a prompt is processed "
+        "(default: 1)",
+        "Scheduling", &prefill_decode_rounds);
     parser.AddOption("", "--max-pending", "N",
                      "Maximum queued generation requests (default: 16)",
                      "Scheduling", &max_pending_requests);
@@ -1221,8 +1233,10 @@ int RunServe(std::span<const char* const> args) {
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
+    std::size_t mtp_prime_chunk = 1024;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
+    std::size_t prefill_decode_rounds = 1;
     std::size_t max_pending_requests = 16;
     // Defaults to --max-pending after parsing unless supplied.
     std::size_t max_pending_requests_per_client = 0;
@@ -1324,9 +1338,19 @@ int RunServe(std::span<const char* const> args) {
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
     llm_parser.AddOption(
+        "", "--mtp-prime-chunk", "N",
+        "Rows per batched MTP prompt-prime slice; 0 restores the legacy "
+        "per-token prime (default: 1024)",
+        "Speculative", &mtp_prime_chunk);
+    llm_parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
         "Scheduling", &prefill_chunk_tokens);
+    llm_parser.AddOption(
+        "", "--prefill-decode-rounds", "N",
+        "Decode rounds between prompt chunks while a prompt is processed "
+        "(default: 1)",
+        "Scheduling", &prefill_decode_rounds);
     llm_parser.AddOption("", "--max-pending", "N",
                          "Maximum queued generation requests (default: 16)",
                          "Scheduling", &max_pending_requests);
@@ -1424,8 +1448,8 @@ int RunServe(std::span<const char* const> args) {
         json::Value::object(), sampling_config, &validated_sampling);
     if (max_tokens < -1 || max_tokens == 0 ||
         max_tokens > std::numeric_limits<std::uint32_t>::max() ||
-        prefill_chunk_tokens == 0 || max_pending_requests == 0 ||
-        max_pending_requests_per_client == 0 ||
+        prefill_chunk_tokens == 0 || prefill_decode_rounds == 0 ||
+        max_pending_requests == 0 || max_pending_requests_per_client == 0 ||
         max_pending_requests_per_client > max_pending_requests ||
         max_output_bytes == 0 || max_buffered_output_bytes == 0 ||
         max_buffered_output_bytes_total == 0 ||
@@ -1441,7 +1465,8 @@ int RunServe(std::span<const char* const> args) {
     }
     if (draft_tokens == 0 || min_draft_tokens == 0 ||
         min_draft_tokens > draft_tokens ||
-        draft_tokens > std::numeric_limits<std::uint32_t>::max()) {
+        draft_tokens > std::numeric_limits<std::uint32_t>::max() ||
+        mtp_prime_chunk > std::numeric_limits<std::uint32_t>::max()) {
       std::cerr << "Error: speculative draft limits are invalid\n";
       return 2;
     }
@@ -1502,6 +1527,8 @@ int RunServe(std::span<const char* const> args) {
         static_cast<std::uint32_t>(draft_tokens);
     speculative_config.min_draft_tokens =
         static_cast<std::uint32_t>(min_draft_tokens);
+    speculative_config.mtp_prime_chunk =
+        static_cast<std::uint32_t>(mtp_prime_chunk);
     if (model.empty()) {
       std::cerr << "Error: --model <PATH> is required\n";
       return 2;
@@ -1517,6 +1544,7 @@ int RunServe(std::span<const char* const> args) {
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{
             .decode_active_tokens = prefill_chunk_tokens,
+            .decode_rounds_per_chunk = prefill_decode_rounds,
         },
         server::TextSchedulerPolicy{
             .max_pending_requests = max_pending_requests,

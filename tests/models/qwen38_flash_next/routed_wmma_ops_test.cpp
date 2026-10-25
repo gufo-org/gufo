@@ -492,8 +492,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       auto launch_pair = [&] {
         if (!q::RoutedGatedF16Gemm(
                 d_w, d_up, type, d_x_half, d_gate_tiles,
-                static_cast<std::uint32_t>(gate_tiles.size()), d_bounds,
-                d_rows_token, d_rows_slot, d_pair, m, k, nullptr)) {
+                static_cast<std::uint32_t>(gate_tiles.size()), pair_rows,
+                d_bounds, d_rows_token, d_rows_slot, d_pair, m, k, nullptr)) {
           throw std::runtime_error("paired routed SwiGLU launch failed");
         }
       };

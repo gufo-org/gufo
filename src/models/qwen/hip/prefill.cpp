@@ -37,6 +37,36 @@ void QwenGpuExecutor::PrefillLayerCheckpoint(std::uint32_t layer) {
   HIP_CHECK(status);
 }
 
+tokenization::TokenId QwenGpuExecutor::ForwardSmallPromptChunk(
+    std::span<const tokenization::TokenId> prompt_tokens,
+    std::uint32_t start_pos, bool compute_logits) {
+  // A few rows cost about as much as one prefill pass over every weight; the
+  // verification forward reads each weight once per row group instead.
+  const auto predictions =
+      ForwardDecodeEquivalentVerificationChunk(prompt_tokens, start_pos, false);
+  if (capture_prompt_hidden_) {
+    const std::size_t old_size = h_prompt_hidden_.Size();
+    h_prompt_hidden_.Resize(old_size + h_verification_hidden_.size());
+    std::copy(h_verification_hidden_.begin(), h_verification_hidden_.end(),
+              h_prompt_hidden_.Data() + old_size);
+  }
+  h_verification_hidden_.clear();
+  last_verification_rows_ = 0;
+  if (!compute_logits)
+    return 0;
+  const std::size_t vocab_size = weights_.config.vocab_size;
+  auto scratch = arena_.GetScratchView();
+  HIP_CHECK(hipMemcpyAsync(
+      scratch.decode.logits.data(),
+      d_verification_logits_ + (prompt_tokens.size() - 1) * vocab_size,
+      vocab_size * sizeof(float), hipMemcpyDeviceToDevice, arena_.stream));
+  // The verification forward commits without logits; the prompt frontier has
+  // them now, so a checkpoint captured here can decode its next token.
+  if (continuation_hooks_)
+    continuation_hooks_->AfterLogits();
+  return predictions.back();
+}
+
 tokenization::TokenId QwenGpuExecutor::ForwardPromptBatch(
     std::span<const tokenization::TokenId> prompt_tokens,
     std::uint32_t start_pos, bool compute_logits) {
@@ -71,10 +101,13 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptBatch(
     const std::size_t chunk_size = std::min<std::size_t>(
         arena_.GetMaxBatch(), prompt_tokens.size() - offset);
     const bool is_last = offset + chunk_size == prompt_tokens.size();
+    const auto chunk = prompt_tokens.subspan(offset, chunk_size);
+    const auto chunk_pos = start_pos + static_cast<std::uint32_t>(offset);
     next_token =
-        ForwardPromptChunk(prompt_tokens.subspan(offset, chunk_size),
-                           start_pos + static_cast<std::uint32_t>(offset),
-                           compute_logits && is_last);
+        chunk_size <= kSmallPromptChunkRows && weights_.config.IsMoE()
+            ? ForwardSmallPromptChunk(chunk, chunk_pos,
+                                      compute_logits && is_last)
+            : ForwardPromptChunk(chunk, chunk_pos, compute_logits && is_last);
   }
   return next_token;
 }

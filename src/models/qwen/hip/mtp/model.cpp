@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -67,6 +68,9 @@ void ReadMatrixRow(const models::QwenTensorRef& tensor, std::size_t row,
       return;
     case core::GgmlType::kQ6_K:
       quant::DequantizeQ6_K(source, output, columns);
+      return;
+    case core::GgmlType::kQ8_0:
+      quant::DequantizeQ8_0(source, output, columns);
       return;
     default:
       throw std::runtime_error("unsupported MTP matrix type");
@@ -137,6 +141,25 @@ models::QwenTensorRef PackMatrixBf16(const models::QwenTensorRef& source,
   };
 }
 
+/// Copies a tensor to device memory in its stored format. MoE tensors keep
+/// their quantized encoding so the MTP layer reuses the target's decode MoE
+/// kernels (and expert matrices are too large to widen to BF16).
+models::QwenTensorRef CopyRawToDevice(const models::QwenTensorRef& source,
+                                      std::vector<void*>& allocations,
+                                      std::size_t& packed_bytes) {
+  const std::size_t bytes = source.EncodedSizeBytes();
+  if (bytes == 0) {
+    throw std::runtime_error("unsupported MTP MoE tensor type");
+  }
+  void* device = detail::AllocateDevice(bytes);
+  allocations.push_back(device);
+  CopyToDevice(device, source.data, bytes);
+  packed_bytes += bytes;
+  models::QwenTensorRef copy = source;
+  copy.data = device;
+  return copy;
+}
+
 void ReleaseAllocations(std::vector<void*>& allocations) noexcept {
   for (void* allocation : allocations) {
     if (allocation != nullptr) {
@@ -182,6 +205,15 @@ void PackPrivateWeights(speculative::QwenMtpWeights& weights,
                                     allocations, packed_bytes);
   layer.ffn_norm =
       CopyVectorF32(layer.ffn_norm, hidden, allocations, packed_bytes);
+  if (weights.config.IsMoE()) {
+    for (auto* tensor :
+         {&layer.ffn_gate_inp, &layer.ffn_gate_inp_shexp, &layer.ffn_gate_exps,
+          &layer.ffn_up_exps, &layer.ffn_down_exps, &layer.ffn_gate_shexp,
+          &layer.ffn_up_shexp, &layer.ffn_down_shexp}) {
+      *tensor = CopyRawToDevice(*tensor, allocations, packed_bytes);
+    }
+    return;
+  }
   layer.ffn_gate = PackMatrixBf16(layer.ffn_gate, intermediate, hidden,
                                   allocations, packed_bytes);
   layer.ffn_up = PackMatrixBf16(layer.ffn_up, intermediate, hidden, allocations,
@@ -196,13 +228,17 @@ QwenMtpGpuModel::QwenMtpGpuModel(
     std::shared_ptr<const core::GgufReader> mtp_reader,
     std::shared_ptr<const QwenGpuModel> target_model,
     speculative::QwenMtpWeights weights, std::vector<void*> allocations,
-    std::size_t packed_weight_bytes, double pack_time_seconds)
+    std::size_t packed_weight_bytes, double pack_time_seconds,
+    std::optional<std::vector<std::int32_t>> draft_specials,
+    std::size_t output_row_bytes)
     : mtp_reader_(std::move(mtp_reader)),
       target_model_(std::move(target_model)),
       weights_(std::move(weights)),
       allocations_(std::move(allocations)),
       packed_weight_bytes_(packed_weight_bytes),
-      pack_time_seconds_(pack_time_seconds) {}
+      pack_time_seconds_(pack_time_seconds),
+      draft_specials_(std::move(draft_specials)),
+      output_row_bytes_(output_row_bytes) {}
 
 QwenMtpGpuModel::~QwenMtpGpuModel() {
   ReleaseAllocations(allocations_);
@@ -250,9 +286,27 @@ std::shared_ptr<const QwenMtpGpuModel> QwenMtpGpuModel::Create(
       std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
           .count();
 
+  // The draft table copies whole output rows, so the head must be
+  // row-addressable; the table's IDs come from the target's tokenizer.
+  const auto& output = weights->output;
+  const std::size_t vocab = weights->config.vocab_size;
+  const std::size_t output_bytes = output.EncodedSizeBytes();
+  auto draft_specials = speculative::QwenMtpDraftSpecials(
+      target_weights.config.architecture, weights->config.vocab_size,
+      target_model->GetTokenizer().SpecialTokens());
+  std::size_t output_row_bytes = 0;
+  if (draft_specials &&
+      output.num_elements == vocab * weights->config.hidden_size &&
+      output_bytes != 0 && output_bytes % vocab == 0) {
+    output_row_bytes = output_bytes / vocab;
+  } else {
+    draft_specials.reset();
+  }
+
   return std::shared_ptr<const QwenMtpGpuModel>(new QwenMtpGpuModel(
       std::move(mtp_reader), std::move(target_model), std::move(*weights),
-      std::move(allocations), packed_bytes, pack_seconds));
+      std::move(allocations), packed_bytes, pack_seconds,
+      std::move(draft_specials), output_row_bytes));
 }
 
 }  // namespace gufo::hip

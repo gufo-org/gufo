@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 #include "src/models/qwen/hip/ops/norm_residual.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
@@ -118,6 +119,115 @@ void LaunchBatchedRMSNorm(const float* x, const float* weight, float* out,
   BatchedRMSNormKernel<><<<batch_size, 256, 0, stream>>>(
       x, weight, out, static_cast<hip_bfloat16*>(out_bf16), batch_size, dim,
       eps);
+}
+
+/// Sibling of `BatchedRMSNormKernel` whose output rows are written at
+/// `out_row_stride` instead of `dim`; the input rows stay packed at `dim`.
+/// Structurally identical to the kernel above, including the cached-dimension
+/// variant and the fused `__fmaf_rn` accumulation, so at
+/// `out_row_stride == dim` it is bit-identical to `LaunchBatchedRMSNorm`.
+/// MTP priming uses it to land the two normed halves of a 2h-wide fusion row
+/// in a single buffer.
+template<std::size_t CachedDim = 0>
+__global__ void BatchedRMSNormStridedKernel(const float* __restrict__ x,
+                                            const float* __restrict__ weight,
+                                            float* __restrict__ out,
+                                            std::size_t batch_size,
+                                            std::size_t dim,
+                                            std::size_t out_row_stride,
+                                            float eps) {
+  const std::size_t b = blockIdx.x;
+  if (b >= batch_size) {
+    return;
+  }
+
+  const std::size_t tid = threadIdx.x;
+  const std::size_t block_size = blockDim.x;
+  const float* in_row = x + (b * dim);
+  float* out_row = (out != nullptr) ? out + (b * out_row_stride) : nullptr;
+
+  static_assert(CachedDim % 256 == 0);
+  constexpr std::size_t cached_items = CachedDim == 0 ? 1 : CachedDim / 256;
+  float values[cached_items];
+  float weights[cached_items];
+  float sum_sq = 0.0F;
+  if constexpr (CachedDim != 0) {
+#pragma unroll
+    for (std::size_t item = 0; item < cached_items; ++item) {
+      const std::size_t i = tid + item * 256;
+      const float val = in_row[i];
+      values[item] = val;
+      weights[item] = weight != nullptr ? weight[i] : 1.0F;
+      // Unrolling must retain the generic loop's fused accumulation.
+      sum_sq = __fmaf_rn(val, val, sum_sq);
+    }
+  } else {
+    for (std::size_t i = tid; i < dim; i += block_size) {
+      const float val = in_row[i];
+      sum_sq += val * val;
+    }
+  }
+
+  __shared__ float s_sum[256];
+  s_sum[tid] = sum_sq;
+  __syncthreads();
+
+  for (std::size_t stride = block_size / 2;
+       stride > (CachedDim != 0 ? 16U : 0U); stride /= 2) {
+    if (tid < stride) {
+      s_sum[tid] += s_sum[tid + stride];
+    }
+    __syncthreads();
+  }
+  if constexpr (CachedDim != 0) {
+    // Finish the same descending tree in its first wave.
+    if (tid < 32) {
+      float sum = s_sum[tid];
+#pragma unroll
+      for (unsigned offset = 16; offset > 0; offset /= 2) {
+        sum += __shfl_down(sum, offset);
+      }
+      if (tid == 0)
+        s_sum[0] = sum;
+    }
+    __syncthreads();
+  }
+
+  const float mean_sq = s_sum[0] / static_cast<float>(dim);
+  const float inv_rms = rsqrtf(mean_sq + eps);
+
+  if constexpr (CachedDim != 0) {
+#pragma unroll
+    for (std::size_t item = 0; item < cached_items; ++item) {
+      const std::size_t i = tid + item * 256;
+      if (out_row != nullptr)
+        out_row[i] = (values[item] * inv_rms) * weights[item];
+    }
+  } else {
+    for (std::size_t i = tid; i < dim; i += block_size) {
+      const float w = (weight != nullptr) ? weight[i] : 1.0F;
+      if (out_row != nullptr)
+        out_row[i] = (in_row[i] * inv_rms) * w;
+    }
+  }
+}
+
+void LaunchBatchedRMSNormStrided(const float* x, const float* weight, float* out,
+                                 std::size_t out_row_stride,
+                                 std::size_t batch_size, std::size_t dim,
+                                 float eps, hipStream_t stream) {
+  if (out_row_stride == 0) {
+    throw std::invalid_argument("batched RMSNorm output stride is zero");
+  }
+  // Mirrors LaunchBatchedRMSNorm's cached-dimension specialisation so the two
+  // agree bitwise when out_row_stride == dim.
+  if (dim == 5120 && batch_size <= 64) {
+    BatchedRMSNormStridedKernel<5120><<<batch_size, 256, 0, stream>>>(
+        x, weight, out, batch_size, dim, out_row_stride, eps);
+    return;
+  }
+  BatchedRMSNormStridedKernel<><<<batch_size, 256, 0, stream>>>(
+      x, weight, out, batch_size, dim, out_row_stride, eps);
 }
 
 __global__ void BatchedPerHeadRMSNormKernel(const float* __restrict__ x,

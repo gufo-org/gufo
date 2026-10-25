@@ -158,6 +158,25 @@ public:
     return {};
   }
 
+  /// Number of most recent target positions whose features the draft reads.
+  /// Zero means every position, which also disables SkipTargetContext.
+  [[nodiscard]] virtual std::uint32_t TargetContextWindow() const noexcept {
+    return 0;
+  }
+
+  /// Advances the draft over `count` target positions starting at `position`
+  /// without their features; `prime` resets the draft first. The caller must
+  /// supply the features of the last TargetContextWindow() positions before
+  /// the draft proposes or is snapshotted.
+  [[nodiscard]] virtual bool SkipTargetContext(std::uint32_t position,
+                                               std::uint32_t count,
+                                               bool prime) {
+    (void)position;
+    (void)count;
+    (void)prime;
+    return false;
+  }
+
   /// Primes provider-specific state after target prompt prefill.
   [[nodiscard]] virtual bool PrimeTargetContext(
       const DraftTargetContext& context) {

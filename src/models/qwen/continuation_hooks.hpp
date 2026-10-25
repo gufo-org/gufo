@@ -17,6 +17,12 @@ public:
   virtual ~ContinuationHooks() = default;
   virtual void BeforeExecution() = 0;
   virtual void BeforeWrite(std::uint32_t first, std::uint32_t end) = 0;
+  // Draft rows that count their own positions, such as the MTP attention
+  // cache, which trails the target by one row.
+  virtual void BeforeDraftWrite(std::uint32_t first, std::uint32_t end) {
+    (void)first;
+    (void)end;
+  }
   virtual void AfterWrite(std::uint32_t end, bool logits) noexcept = 0;
   virtual void WriteFailed() noexcept = 0;
   virtual void BeforeReset() = 0;

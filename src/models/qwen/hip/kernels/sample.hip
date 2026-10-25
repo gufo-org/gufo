@@ -1055,6 +1055,21 @@ void LaunchGPUArgmax(const float* logits, std::uint32_t* out_token,
   ArgmaxKernel<<<1, 256, 0, stream>>>(logits, out_token, vocab_size);
 }
 
+__global__ void RemapDraftTokenKernel(std::uint32_t* __restrict__ token,
+                                      std::uint32_t prefix,
+                                      const std::int32_t* __restrict__ table,
+                                      std::uint32_t rows) {
+  const std::uint32_t index = *token;
+  if (index >= prefix && index - prefix < rows)
+    *token = static_cast<std::uint32_t>(table[index - prefix]);
+}
+
+void LaunchRemapDraftToken(std::uint32_t* token, std::uint32_t prefix,
+                           const std::int32_t* table, std::uint32_t rows,
+                           hipStream_t stream) {
+  RemapDraftTokenKernel<<<1, 1, 0, stream>>>(token, prefix, table, rows);
+}
+
 template<bool Partial = false, bool MapIndices = false>
 __global__ void BatchedArgmaxKernel(const float* __restrict__ logits,
                                     std::uint32_t* __restrict__ out_tokens,

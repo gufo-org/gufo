@@ -8,6 +8,7 @@ are downloaded separately and are not part of the runtime package.
 | --- | --- | --- |
 | DeepSeek V4 Flash | Flash 0731 mixed IQ2/Q2/Q8 GGUF; text | [Usage and modes](deepseek-v4-flash/README.md) |
 | Qwen3.8 27B | Q4/Q8 GGUF; text/images | [Usage and modes](qwen3.8-27b/README.md) |
+| Qwen3.6 35B-A3B | UD-Q8_K_XL / UD-Q6_K_XL GGUF; text (MoE) | [Usage and modes](qwen3.6-35b-a3b/README.md) |
 | Qwen3.8 Flash-Next | Sharded Q4 GGUF; text/images | [Usage and modes](qwen3.8-flash-next/README.md) |
 | Qwen3-ASR 1.7B | BF16 safetensors; audio to text | [Usage](qwen3-asr/README.md) |
 | EmbeddingGemma 2 | BF16 safetensors; text/image to embeddings | [Usage](embeddinggemma-2/README.md) |

@@ -25,6 +25,7 @@
 #include "src/models/qwen/hip/ops.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
+#include "tests/models/qwen/hip/support/device_buffer.hpp"
 
 namespace {
 
@@ -564,6 +565,80 @@ void RunFusedNormQuantizeCase(std::size_t batch, std::size_t dim,
   HIP_CHECK(hipFree(d_got));
 }
 
+// The residual RMSNorm + Q8_1 kernel's optional tiled BF16 output must hold
+// exactly its row-major BF16 values at [dim / 64][batch][64], and writing it
+// must leave the other outputs unchanged.
+void RunFusedResidualNormTiledCase(std::size_t batch, bool with_residual) {
+  constexpr std::size_t kDim = 2048;
+  std::cout << "fused residual RMSNorm tiled BF16: batch=" << batch
+            << " residual=" << (with_residual ? "yes" : "no") << "\n";
+  std::vector<float> h_x(batch * kDim);
+  std::vector<float> h_r(batch * kDim);
+  std::vector<float> h_w(kDim);
+  for (std::size_t i = 0; i < h_x.size(); ++i) {
+    h_x[i] = 0.7F * std::sin(0.013F * static_cast<float>(i % 691)) +
+             0.3F * std::cos(0.0037F * static_cast<float>(i % 47));
+    h_r[i] = 0.4F * std::cos(0.019F * static_cast<float>(i % 523));
+  }
+  for (std::size_t i = 0; i < kDim; ++i) {
+    h_w[i] = 0.85F + 0.06F * static_cast<float>(i % 19);
+  }
+  const std::size_t q8_bytes =
+      gufo::hip::QuantizedActivationBytes(batch, kDim) + 4096;
+  const std::size_t n = batch * kDim;
+  gufo::test::DeviceBuffer<float> d_w(h_w);
+  gufo::test::DeviceBuffer<float> d_r(h_r);
+  struct Run {
+    std::vector<float> hidden;
+    std::vector<float> normed;
+    std::vector<std::uint16_t> bf16;
+    std::vector<std::uint16_t> tiled;
+    std::vector<std::uint8_t> q8;
+  };
+  const auto run = [&](bool tiled) {
+    gufo::test::DeviceBuffer<float> d_x(h_x);
+    gufo::test::DeviceBuffer<float> d_normed(std::vector<float>(n, -1.0F));
+    gufo::test::DeviceBuffer<std::uint16_t> d_bf16(
+        std::vector<std::uint16_t>(n, 0xFFFFU));
+    gufo::test::DeviceBuffer<std::uint16_t> d_tiled(
+        std::vector<std::uint16_t>(n, 0xFFFFU));
+    gufo::test::DeviceBuffer<std::uint8_t> d_q8(
+        std::vector<std::uint8_t>(q8_bytes, 0xA5U));
+    gufo::hip::LaunchBatchedFusedResidualRMSNormQuantizeQ8_1(
+        d_x.data(), with_residual ? d_r.data() : nullptr, d_w.data(),
+        with_residual ? d_x.data() : nullptr, d_normed.data(), d_bf16.data(),
+        d_q8.data(), batch, kDim, 1e-6F, nullptr,
+        tiled ? d_tiled.data() : nullptr);
+    HIP_CHECK(hipDeviceSynchronize());
+    return Run{d_x.CopyToHost(), d_normed.CopyToHost(), d_bf16.CopyToHost(),
+               d_tiled.CopyToHost(), d_q8.CopyToHost()};
+  };
+  const Run plain = run(false);
+  const Run tiled = run(true);
+  if (plain.hidden != tiled.hidden || plain.bf16 != tiled.bf16 ||
+      plain.q8 != tiled.q8 ||
+      std::memcmp(plain.normed.data(), tiled.normed.data(),
+                  n * sizeof(float)) != 0) {
+    std::cerr << "the tiled BF16 output changed another output\n";
+    std::abort();
+  }
+  std::size_t mismatches = 0;
+  for (std::size_t b = 0; b < batch; ++b) {
+    for (std::size_t i = 0; i < kDim; ++i) {
+      const std::uint16_t want = tiled.bf16[(b * kDim) + i];
+      if (tiled.tiled[((((i / 64) * batch) + b) * 64) + (i % 64)] != want) {
+        ++mismatches;
+      }
+    }
+  }
+  std::cout << "  mismatching tiled values: " << mismatches << " of " << n
+            << "\n";
+  if (mismatches != 0) {
+    std::cerr << "tiled BF16 output differs from the row-major BF16 output\n";
+    std::abort();
+  }
+}
+
 }  // namespace
 
 #endif  // defined(ENGINE_ENABLE_HIP)
@@ -597,6 +672,12 @@ int main() {
 
   // Fused RMSNorm + Q8_1 quantize: the production hidden size, a batch that is
   // not a multiple of the 16-token tile, and a short row.
+  // Tiled BF16 output of the residual variant (hidden 2048 only), with a
+  // batch that is not a multiple of anything and a single row.
+  RunFusedResidualNormTiledCase(129, true);
+  RunFusedResidualNormTiledCase(1, false);
+  RunFusedResidualNormTiledCase(512, false);
+
   RunFusedNormQuantizeCase(128, 5120, false);
   RunFusedNormQuantizeCase(100, 5120, false);
   RunFusedNormQuantizeCase(48, 256, false);

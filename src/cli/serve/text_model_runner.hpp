@@ -150,6 +150,9 @@ struct TextRunnerDescriptor {
   std::uint32_t max_context{0};
   TextRunnerCapabilities capabilities;
   std::optional<TextRunnerPersistenceDescriptor> persistence;
+  /// Largest prompt step a lone request runs. Intermediate checkpoints sit on
+  /// its multiples so they never shorten a step; zero means unknown.
+  std::size_t prefill_step_tokens{0};
 };
 
 /// Optional byte claims made before state allocation.
@@ -424,6 +427,15 @@ public:
   /// the batched path cannot consume.
   virtual void PrepareBatchExecution(TextRunnerState& state) const {
     (void)state;
+  }
+  /// The next position at which the state will be decoded from, snapshotted
+  /// or shared. A runner whose draft reads a bounded window of target context
+  /// may omit that context for prompt positions the window will have left by
+  /// then. Applies to the next Prefill only.
+  virtual void SetDraftContextHorizon(TextRunnerState& state,
+                                      std::size_t position) const {
+    (void)state;
+    (void)position;
   }
   /// Processes at most max_input_tokens, yielding after one model-owned
   /// chunk even when the scheduler grants the whole remaining prompt.

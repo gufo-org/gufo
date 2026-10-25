@@ -64,14 +64,19 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 }
 
+// Grid row `blockIdx.y` is one input vector: the block reads x + row * K and
+// writes y + row * M with the arithmetic of a single-vector launch, so a
+// batch of vectors costs one launch instead of one per vector.
 __global__ void FastGEMVBlockKernel(const void* __restrict__ A,
                                     core::GgmlType a_type,
-                                    const float* __restrict__ x,
-                                    float* __restrict__ y, std::size_t M,
+                                    const float* __restrict__ x_rows,
+                                    float* __restrict__ y_rows, std::size_t M,
                                     std::size_t K) {
   const std::size_t m = blockIdx.x;
   if (m >= M)
     return;
+  const float* x = x_rows + (static_cast<std::size_t>(blockIdx.y) * K);
+  float* y = y_rows + (static_cast<std::size_t>(blockIdx.y) * M);
 
   const std::size_t tid = threadIdx.x;
   const std::size_t lane_id = tid & 31u;
@@ -172,6 +177,42 @@ void ExecuteDenseGemv(models::qwen::QwenGemmRoute route, const void* A,
 }
 
 }  // namespace
+
+void LaunchGEMVRows(const void* A, core::GgmlType a_type, const float* x,
+                    float* y, std::size_t rows, std::size_t M, std::size_t K,
+                    hipStream_t stream, models::qwen::QwenGemmMode mode) {
+  if (rows == 0) {
+    return;
+  }
+  const auto resolution = models::qwen::ResolveQwenGemmRoute(
+      {.type = a_type, .batch_size = 1, .m = M, .k = K, .mode = mode});
+  switch (resolution.route) {
+    case models::qwen::QwenGemmRoute::kHipF32Baseline256:
+    case models::qwen::QwenGemmRoute::kHipF32Baseline512:
+    case models::qwen::QwenGemmRoute::kHipBf16Baseline256:
+    case models::qwen::QwenGemmRoute::kHipBf16Baseline512: {
+      detail::EmitGemvDispatch(
+          M, K, a_type == core::GgmlType::kBF16,
+          models::qwen::QwenGemmRouteName(resolution.route));
+      const unsigned int block_size =
+          resolution.route == models::qwen::QwenGemmRoute::kHipF32Baseline512 ||
+                  resolution.route ==
+                      models::qwen::QwenGemmRoute::kHipBf16Baseline512
+              ? 512
+              : 256;
+      const dim3 grid(static_cast<unsigned int>(M),
+                      static_cast<unsigned int>(rows));
+      FastGEMVBlockKernel<<<grid, block_size, 0, stream>>>(A, a_type, x, y, M,
+                                                           K);
+      return;
+    }
+    default:
+      for (std::size_t row = 0; row < rows; ++row) {
+        LaunchGEMV(A, a_type, x + (row * K), y + (row * M), M, K, stream, mode);
+      }
+      return;
+  }
+}
 
 void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
                 std::size_t M, std::size_t K, hipStream_t stream,

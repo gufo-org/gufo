@@ -29,6 +29,17 @@ void LaunchBatchedRMSNorm(const float* x, const float* weight, float* out,
                           std::size_t dim, float eps = 1e-6F,
                           hipStream_t stream = nullptr);
 
+/// Batched RMSNorm across B tokens with a strided output row pitch. The
+/// arithmetic is identical to `LaunchBatchedRMSNorm`: row `row` is written at
+/// `out + row * out_row_stride` and the input rows stay packed at `dim`.
+/// The MTP prompt-prime path uses it to land the two normed halves of a
+/// 2h-wide fusion row inside one buffer (MTP priming plan, stage A).
+void LaunchBatchedRMSNormStrided(const float* x, const float* weight,
+                                 float* out, std::size_t out_row_stride,
+                                 std::size_t batch_size, std::size_t dim,
+                                 float eps = 1e-6F,
+                                 hipStream_t stream = nullptr);
+
 /// Batched Per-Head RMSNorm across B tokens
 void LaunchBatchedPerHeadRMSNorm(const float* x, const float* weight,
                                  float* out, std::size_t batch_size,

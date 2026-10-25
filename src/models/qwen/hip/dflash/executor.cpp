@@ -19,6 +19,7 @@
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/moe.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -77,6 +78,9 @@ void AllocateBuffer(T*& pointer, std::size_t elements) {
 
 /// Widest proposal block; BF16 context injection also uses sixteen rows.
 constexpr std::size_t kDFlashMaxSharedBatch = 8;
+/// Prompt-sized context injections for MoE targets take the BF16 WMMA GEMM
+/// from this width, matching the target's own BF16 prefill threshold.
+constexpr std::size_t kDFlashInjectWmmaMinRows = 128;
 
 void NormalizeAndRotateQK(float* query, float* key, const float* query_weight,
                           const float* key_weight,
@@ -454,6 +458,16 @@ void QwenDFlashGpuExecutor::RunInjectGemm(const models::QwenTensorRef& weight,
   const bool is_bf16 = weight.type == core::GgmlType::kBF16;
   const bool is_packed_quant = weight.type == core::GgmlType::kQ8_0 ||
                                detail::IsNativeWmmaQuant(weight.type);
+  // Sixteen-row exact groups re-read the whole matrix once per group, which
+  // cost ~300 ms per prompt window. BF16-rounded activations change only the
+  // draft's context KV; the target still verifies every proposed token.
+  if (is_bf16 && model_->TargetIsMoE() &&
+      num_tokens >= kDFlashInjectWmmaMinRows &&
+      IsMoeGroupedBf16GemmSupported(output_size, input_size, 1)) {
+    LaunchBf16WmmaGemm(weight.data, input, output, num_tokens, output_size,
+                       input_size, stream_);
+    return;
+  }
   if (!is_bf16 && !is_packed_quant) {
     LaunchBatchedGEMM(weight.data, is_bf16, input, output, num_tokens,
                       output_size, input_size, stream_);
@@ -696,6 +710,7 @@ void QwenDFlashGpuExecutor::RestoreSnapshot(
   }
   HIP_CHECK(hipStreamSynchronize(stream_));
   injected_context_len_ = snapshot.valid_context_;
+  context_floor_ = 0;
 }
 
 void QwenDFlashGpuExecutor::RestorePersistentSnapshot(
@@ -775,6 +790,7 @@ void QwenDFlashGpuExecutor::RestorePersistentSnapshot(
   }
   HIP_CHECK(hipStreamSynchronize(stream_));
   injected_context_len_ = valid_context;
+  context_floor_ = 0;
 }
 
 void QwenDFlashGpuExecutor::Reset() noexcept {
@@ -787,6 +803,17 @@ void QwenDFlashGpuExecutor::Reset() noexcept {
   }
   // Attention only reads the valid prefix; new rows overwrite stale KV.
   injected_context_len_ = 0;
+  context_floor_ = 0;
+}
+
+void QwenDFlashGpuExecutor::SkipTargetContextTo(std::uint32_t position) {
+  if (position < injected_context_len_ || position > max_context_) {
+    throw std::invalid_argument("DFlash context skip position is invalid");
+  }
+  if (position != injected_context_len_) {
+    injected_context_len_ = position;
+    context_floor_ = position;
+  }
 }
 
 bool QwenDFlashGpuExecutor::InjectTargetContext(

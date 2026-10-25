@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "qfn_mmq.h"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
@@ -18,8 +19,9 @@
 namespace gufo::hip {
 namespace {
 
-constexpr std::uint32_t kMaxPromptBatch = 4096;
-constexpr std::size_t kMaxTargetLayerTaps = 5;
+/// Target hidden-layer taps a DFlash2 draft may request: the Qwen3.8 27B draft
+/// uses 5, the Qwen3.6 35B-A3B draft 8. Each tap costs one hidden row.
+constexpr std::size_t kMaxTargetLayerTaps = 16;
 constexpr std::array<std::uint8_t, 8> kCompactSnapshotMagic = {
     'G', 'Q', 'K', 'V', 'S', 'N', 'P', '1'};
 constexpr std::uint32_t kCompactSnapshotVersion = 1;
@@ -38,6 +40,107 @@ std::size_t CheckedSum(std::size_t left, std::size_t right) {
   }
   return left + right;
 }
+
+}  // namespace
+
+/// Total bytes of the single MoE scratch block. Keep in sync with the carving
+/// in GetScratchView; every section is 256-byte aligned.
+std::size_t MoeScratchBytes(const core::ModelConfig& config,
+                            std::size_t batch) {
+  const std::size_t slots = CheckedMultiply(batch, config.expert_used_count);
+  const std::size_t hidden = config.hidden_size;
+  const std::size_t expert_ff = config.expert_ff_length;
+  const std::size_t shared_ff = config.expert_shared_ff_length;
+  const auto floats = [&](std::size_t n) {
+    return ((CheckedMultiply(n, sizeof(float)) + 255) / 256) * 256;
+  };
+  const auto ints = [&](std::size_t n) {
+    return ((CheckedMultiply(n, sizeof(std::int32_t)) + 255) / 256) * 256;
+  };
+  std::size_t total = 0;
+  total =
+      CheckedSum(total, floats(CheckedMultiply(batch, config.expert_count)));
+  total = CheckedSum(total, floats(batch));
+  total = CheckedSum(total, ints(slots));
+  total = CheckedSum(total, floats(slots));
+  total = CheckedSum(total, floats(CheckedMultiply(slots, expert_ff)));
+  total = CheckedSum(total, floats(CheckedMultiply(slots, expert_ff)));
+  total = CheckedSum(total, floats(CheckedMultiply(slots, hidden)));
+  total = CheckedSum(total, floats(CheckedMultiply(batch, hidden)));
+  total = CheckedSum(total, floats(CheckedMultiply(batch, shared_ff)));
+  total = CheckedSum(total, ints(slots));
+  total = CheckedSum(total, ints(slots));
+  total = CheckedSum(total, ints(config.expert_count + 1));
+  const std::size_t experts = config.expert_count;
+  total = CheckedSum(total, ints(experts));
+  total = CheckedSum(total, ints(experts + 1));
+  total = CheckedSum(total, ints(experts));
+  total = CheckedSum(total, ints(RoutedRows(slots, experts)));
+  total = CheckedSum(total, ints(RoutedRows(slots, experts)));
+  total = CheckedSum(total, ints(RoutedTiles(slots, experts)));
+  // x_half and x_bf16_tiled.
+  for (int i = 0; i < 2; ++i) {
+    total = CheckedSum(total, ((CheckedMultiply(CheckedMultiply(batch, hidden),
+                                                sizeof(std::uint16_t)) +
+                                255) /
+                               256) *
+                                  256);
+  }
+  return total;
+}
+
+/// Carves QwenMoeScratch spans out of the block sized by MoeScratchBytes.
+QwenMoeScratch CarveMoeScratch(std::uint8_t* block,
+                               const core::ModelConfig& config,
+                               std::size_t batch) {
+  QwenMoeScratch scratch;
+  if (block == nullptr) {
+    return scratch;
+  }
+  const std::size_t slots = batch * config.expert_used_count;
+  const std::size_t hidden = config.hidden_size;
+  const std::size_t expert_ff = config.expert_ff_length;
+  const std::size_t shared_ff = config.expert_shared_ff_length;
+  std::size_t offset = 0;
+  const auto take_floats = [&](std::size_t n) {
+    float* p = reinterpret_cast<float*>(block + offset);
+    offset += ((n * sizeof(float) + 255) / 256) * 256;
+    return std::span<float>(p, n);
+  };
+  const auto take_ints = [&](std::size_t n) {
+    auto* p = reinterpret_cast<std::int32_t*>(block + offset);
+    offset += ((n * sizeof(std::int32_t) + 255) / 256) * 256;
+    return std::span<std::int32_t>(p, n);
+  };
+  scratch.router_logits = take_floats(batch * config.expert_count);
+  scratch.shexp_gate = take_floats(batch);
+  scratch.ids = take_ints(slots);
+  scratch.weights = take_floats(slots);
+  scratch.gate_e = take_floats(slots * expert_ff);
+  scratch.up_e = take_floats(slots * expert_ff);
+  scratch.down_e = take_floats(slots * hidden);
+  scratch.shexp_out = take_floats(batch * hidden);
+  scratch.shexp_act = take_floats(batch * shared_ff);
+  scratch.ids_src1 = take_ints(slots);
+  scratch.ids_dst = take_ints(slots);
+  scratch.expert_bounds = take_ints(config.expert_count + 1);
+  const std::size_t experts = config.expert_count;
+  scratch.routed_counts = take_ints(experts);
+  scratch.routed_bounds = take_ints(experts + 1);
+  scratch.routed_cursors = take_ints(experts);
+  scratch.rows_token = take_ints(RoutedRows(slots, experts));
+  scratch.rows_slot = take_ints(RoutedRows(slots, experts));
+  scratch.routed_tiles = take_ints(RoutedTiles(slots, experts));
+  scratch.x_half = std::span<std::uint16_t>(
+      reinterpret_cast<std::uint16_t*>(block + offset), batch * hidden);
+  offset += ((batch * hidden * sizeof(std::uint16_t) + 255) / 256) * 256;
+  scratch.x_bf16_tiled = std::span<std::uint16_t>(
+      reinterpret_cast<std::uint16_t*>(block + offset), batch * hidden);
+  offset += ((batch * hidden * sizeof(std::uint16_t) + 255) / 256) * 256;
+  return scratch;
+}
+
+namespace {
 
 void CheckedAdd(std::size_t value, std::size_t* total) {
   *total = CheckedSum(*total, value);
@@ -338,7 +441,8 @@ QwenGpuMemoryUsage QwenGpuArena::EstimateMemoryUsage(
     const core::ModelConfig& config, std::uint32_t max_context,
     QwenExecutionPolicy policy) {
   const std::size_t context = std::max(max_context, 1U);
-  const std::size_t batch = std::min<std::size_t>(context, kMaxPromptBatch);
+  const std::size_t batch =
+      std::min<std::size_t>(context, QwenGpuArena::kMaxPromptBatch);
   const std::size_t hidden = config.hidden_size;
   const std::size_t intermediate = config.intermediate_size;
   const std::size_t attention = config.AttentionSize();
@@ -379,6 +483,9 @@ QwenGpuMemoryUsage QwenGpuArena::EstimateMemoryUsage(
                 &scratch);
   AddAllocation(CheckedMultiply(kMaxTargetLayerTaps, hidden), sizeof(float),
                 &scratch);
+  if (config.IsMoE()) {
+    CheckedAdd(MoeScratchBytes(config, batch), &scratch);
+  }
 
   const std::size_t maximum_scratch_width = std::max<std::size_t>(
       {intermediate, hidden, projection,
@@ -754,8 +861,8 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
     HIP_CHECK(hipMalloc(&d_logits, vocab_size * sizeof(float)));
     HIP_CHECK(hipMalloc(&d_prompt_tokens, std::max<std::size_t>(batch, 2) *
                                               sizeof(std::uint32_t)));
-    HIP_CHECK(
-        hipMalloc(&d_target_layer_features, 5 * hidden_size * sizeof(float)));
+    HIP_CHECK(hipMalloc(&d_target_layer_features,
+                        kMaxTargetLayerTaps * hidden_size * sizeof(float)));
 
     const std::size_t scratch_elements =
         batch * std::max<std::size_t>(
@@ -807,6 +914,10 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
     HIP_CHECK(hipMalloc(&d_ssm_deltanet_buffers_[0],
                         total_deltanet * QwenRecurrentStateElementBytes(
                                              policy_.recurrent_state_storage)));
+
+    if (config_.IsMoE()) {
+      HIP_CHECK(hipMalloc(&d_moe_scratch, MoeScratchBytes(config_, batch)));
+    }
 
     Reset();
   } catch (...) {
@@ -884,6 +995,7 @@ QwenGpuScratchView QwenGpuArena::GetScratchView(
               .activation = {d_ffn_act, batch * config_.intermediate_size},
               .out = {d_ffn_out, batch * hidden},
           },
+      .moe = CarveMoeScratch(d_moe_scratch, config_, batch),
   };
 }
 
@@ -953,6 +1065,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   live_recurrent_ = other.live_recurrent_;
   saved_recurrent_ = other.saved_recurrent_;
   source_recurrent_ = other.source_recurrent_;
+  d_moe_scratch = other.d_moe_scratch;
   d_ssm_replay_qkv_ = other.d_ssm_replay_qkv_;
   d_ssm_replay_alpha_ = other.d_ssm_replay_alpha_;
   d_ssm_replay_beta_ = other.d_ssm_replay_beta_;
@@ -999,6 +1112,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   other.live_recurrent_ = 0;
   other.saved_recurrent_ = 0;
   other.source_recurrent_ = 0;
+  other.d_moe_scratch = nullptr;
   other.d_ssm_replay_qkv_ = nullptr;
   other.d_ssm_replay_alpha_ = nullptr;
   other.d_ssm_replay_beta_ = nullptr;
@@ -1055,6 +1169,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     live_recurrent_ = other.live_recurrent_;
     saved_recurrent_ = other.saved_recurrent_;
     source_recurrent_ = other.source_recurrent_;
+    d_moe_scratch = other.d_moe_scratch;
     d_ssm_replay_qkv_ = other.d_ssm_replay_qkv_;
     d_ssm_replay_alpha_ = other.d_ssm_replay_alpha_;
     d_ssm_replay_beta_ = other.d_ssm_replay_beta_;
@@ -1101,6 +1216,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     other.live_recurrent_ = 0;
     other.saved_recurrent_ = 0;
     other.source_recurrent_ = 0;
+    other.d_moe_scratch = nullptr;
     other.d_ssm_replay_qkv_ = nullptr;
     other.d_ssm_replay_alpha_ = nullptr;
     other.d_ssm_replay_beta_ = nullptr;
@@ -1213,6 +1329,8 @@ void QwenGpuArena::FreeAll() noexcept {
     LogCleanupError(hipFree(d_split_k_attention));
   if (d_weights_bf16 != nullptr)
     LogCleanupError(hipFree(d_weights_bf16));
+  if (d_moe_scratch != nullptr)
+    LogCleanupError(hipFree(d_moe_scratch));
   if (d_ssm_replay_qkv_ != nullptr)
     LogCleanupError(hipFree(d_ssm_replay_qkv_));
   if (d_ssm_replay_alpha_ != nullptr)
@@ -1224,8 +1342,10 @@ void QwenGpuArena::FreeAll() noexcept {
   if (hipblas_handle != nullptr)
     LogCleanupError(hipblasDestroy(hipblas_handle));
   hipblaslt_gemm.reset();
-  if (stream != nullptr)
+  if (stream != nullptr) {
+    qfn_mmq_release_stream(stream);
     LogCleanupError(hipStreamDestroy(stream));
+  }
 
   d_hidden = nullptr;
   d_normed = nullptr;
@@ -1260,6 +1380,7 @@ void QwenGpuArena::FreeAll() noexcept {
   live_recurrent_ = 0;
   saved_recurrent_ = 0;
   source_recurrent_ = 0;
+  d_moe_scratch = nullptr;
   d_ssm_replay_qkv_ = nullptr;
   d_ssm_replay_alpha_ = nullptr;
   d_ssm_replay_beta_ = nullptr;

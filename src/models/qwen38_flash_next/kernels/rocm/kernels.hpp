@@ -44,6 +44,7 @@ enum class WeightType : std::uint32_t {
   kQ8_0 = 8,
   kQ4_K = 12,
   kQ5_K = 13,
+  kQ6_K = 14,
   kBF16 = 30,
 };
 
@@ -274,9 +275,9 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
 /// projection's F32 output over the same rows) turns it into
 /// silu(gate) * result.
 /// `tile_rows` is the token rows per tile the map was built with: 16 or 48,
-/// or 64 for Q5_1/Q8_0.
-/// Q4_K and Q5_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other types
-/// and tile widths return false.
+/// or 64 for Q5_1/Q6_K/Q8_0.
+/// Q4_K, Q5_K and Q6_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other
+/// types and tile widths return false.
 bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const std::int32_t* tiles, std::uint32_t n_tiles,
                    std::uint32_t tile_rows, const std::int32_t* pad_bounds,
@@ -284,12 +285,17 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
-/// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
-/// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two
-/// projections share one launch and never materialize the gate output.
+/// Whether RoutedGatedF16Gemm decodes `type`.
+bool RoutedGatedF16Supported(WeightType type);
+
+/// Paired Q4_K/Q5_K/Q6_K/Q8_0 gate/up GEMM with SwiGLU and F16 output. Uses
+/// the same routing layout as RoutedF16Gemm, with 64 or 128 token rows per
+/// tile. The two projections share one launch and never materialize the gate
+/// output.
 bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const __half* x, const std::int32_t* tiles,
-                        std::uint32_t n_tiles, const std::int32_t* pad_bounds,
+                        std::uint32_t n_tiles, std::uint32_t tile_rows,
+                        const std::int32_t* pad_bounds,
                         const std::int32_t* rows_in,
                         const std::int32_t* rows_out, __half* out,
                         std::size_t m, std::size_t k, hipStream_t stream);

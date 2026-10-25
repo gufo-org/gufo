@@ -44,6 +44,8 @@ struct TextSpeculativeConfig {
   std::string draft_model_path;
   std::uint32_t max_draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
+  /// Rows per batched MTP prime slice; `0` selects the legacy serial prime.
+  std::uint32_t mtp_prime_chunk{1024};
   speculative::DFlashDraftPolicy dflash_policy{
       speculative::DFlashDraftPolicy::kAdaptive};
 };

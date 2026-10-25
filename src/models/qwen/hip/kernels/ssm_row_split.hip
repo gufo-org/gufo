@@ -34,6 +34,49 @@ __global__ void BatchedSSMPostNormGateKernel(
     std::size_t batch_size, std::size_t inner_size, std::uint32_t num_heads,
     std::uint32_t val_dim);
 
+// The convolution of BatchedSSMConvKernel for the first three tokens of each
+// 64-token span, which the fused GEMM epilogue leaves raw in `qkv_in` together
+// with the last four tokens of every span. Block row y is token
+// (y / 3) * 64 + y % 3; the arithmetic is unchanged.
+__global__ void BatchedSSMConvSpanHeadKernel(
+    const float* __restrict__ qkv_in, const float* __restrict__ conv_weights,
+    const float* __restrict__ conv_state, float* __restrict__ conv_out,
+    std::size_t batch_size, std::size_t qkv_dim) {
+  const std::size_t c = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const std::size_t t = (static_cast<std::size_t>(blockIdx.y / 3) * 64) +
+                        (blockIdx.y % 3);
+  if (c >= qkv_dim || t >= batch_size) {
+    return;
+  }
+
+  const std::size_t c_off = c * 4;
+  const float w0 = (conv_weights != nullptr) ? conv_weights[c * 4 + 0] : 0.0F;
+  const float w1 = (conv_weights != nullptr) ? conv_weights[c * 4 + 1] : 0.0F;
+  const float w2 = (conv_weights != nullptr) ? conv_weights[c * 4 + 2] : 0.0F;
+  const float w3 = (conv_weights != nullptr) ? conv_weights[c * 4 + 3] : 1.0F;
+
+  const float s3 = qkv_in[(t * qkv_dim) + c];
+  const float s2 =
+      (t >= 1) ? qkv_in[((t - 1) * qkv_dim) + c] : conv_state[c_off + 3];
+  const float s1 = (t >= 2)   ? qkv_in[((t - 2) * qkv_dim) + c]
+                   : (t == 1) ? conv_state[c_off + 3]
+                              : conv_state[c_off + 2];
+  const float s0 = (t >= 3)   ? qkv_in[((t - 3) * qkv_dim) + c]
+                   : (t == 2) ? conv_state[c_off + 3]
+                   : (t == 1) ? conv_state[c_off + 2]
+                              : conv_state[c_off + 1];
+
+  float dot = 0.0F;
+  if (conv_weights != nullptr) {
+    dot = (s0 * w0) + (s1 * w1) + (s2 * w2) + (s3 * w3);
+  } else {
+    dot = s3;
+  }
+
+  const float sig = 1.0F / (1.0F + expf(-dot));
+  conv_out[(t * qkv_dim) + c] = dot * sig;
+}
+
 // The row-split tile geometry is fixed at key_dim == val_dim == 128, which is
 // what every shipped Qwen3-Next linear-attention configuration uses. Other
 // shapes fall back to the previous kernel.
@@ -382,7 +425,7 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
     float* alpha_beta, std::uint32_t layer_idx, std::size_t batch_size,
     std::size_t qkv_size, std::uint32_t num_key_heads, std::uint32_t num_heads,
     std::uint32_t key_dim, std::uint32_t val_dim, hipStream_t stream,
-    QwenRecurrentStateStorage state_storage, void* fp16_out) {
+    QwenRecurrentStateStorage state_storage, void* fp16_out, bool conv_fused) {
   if (!IsDeltaNetRowSplitSupported(key_dim, val_dim)) {
     throw std::invalid_argument(
         "row-split Qwen recurrent state requires 128x128 matrices");
@@ -396,9 +439,20 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
   const float* conv_layer_in = state.conv_in + conv_layer_offset;
   float* conv_layer_state = state.conv_out + conv_layer_offset;
 
-  BatchedSSMConvKernel<<<conv_grid, static_cast<unsigned int>(block_size), 0,
-                         stream>>>(qkv_in, conv_weights, conv_layer_in,
-                                   conv_out, batch_size, qkv_size);
+  if (conv_fused) {
+    // The GEMM epilogue convolved every token but the span heads.
+    const dim3 head_grid(static_cast<unsigned int>(grid_x),
+                         static_cast<unsigned int>(((batch_size + 63) / 64) * 3));
+    BatchedSSMConvSpanHeadKernel<<<head_grid,
+                                   static_cast<unsigned int>(block_size), 0,
+                                   stream>>>(qkv_in, conv_weights,
+                                             conv_layer_in, conv_out,
+                                             batch_size, qkv_size);
+  } else {
+    BatchedSSMConvKernel<<<conv_grid, static_cast<unsigned int>(block_size), 0,
+                           stream>>>(qkv_in, conv_weights, conv_layer_in,
+                                     conv_out, batch_size, qkv_size);
+  }
 
   const dim3 kq_grid(num_key_heads, static_cast<unsigned int>(batch_size));
   BatchedDeltaNetPrepKqKernel<<<kq_grid, 32, 0, stream>>>(
