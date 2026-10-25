@@ -53,6 +53,7 @@ jobs:
       SDK_SHA256: 1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38
       # Forward slashes: CMake reads backslashes in -D values as escapes.
       SDK_ROOT: C:/TheRock/build
+      GUFO_PACKAGING_ROOT: ${{ github.workspace }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,6 +62,25 @@ jobs:
           # A reusable workflow otherwise checks out its caller (Toolboxes).
           repository: ${{ inputs.release-tag && 'gufo-org/gufo' || github.repository }}
           ref: ${{ inputs.release-tag && format('refs/tags/{0}', inputs.release-tag) || github.ref }}
+
+      # The executable stays at the release tag. Packaging tools may be newer
+      # (for example, repairing a missing runtime in an already released ZIP).
+      - name: Checkout current release packaging tools
+        if: inputs.release-tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gufo-org/gufo
+          ref: main
+          path: build/gufo-packaging
+          sparse-checkout: |
+            tools/windows
+            tests/tools
+            licenses
+          persist-credentials: false
+
+      - name: Select release packaging tools
+        if: inputs.release-tag
+        run: '"GUFO_PACKAGING_ROOT=$env:GITHUB_WORKSPACE/build/gufo-packaging" >> $env:GITHUB_ENV'
 
       - name: Identify release source
         if: inputs.release-tag
@@ -170,6 +190,39 @@ jobs:
           "VCPKG_ROOT=C:\vcpkg-gufo" >> $env:GITHUB_ENV
           "VCPKG_DEFAULT_BINARY_CACHE=$env:RUNNER_TEMP\vcpkg-archives" >> $env:GITHUB_ENV
 
+      # Visual Studio's LLVM OpenMP DLL is under debug_nonredist and cannot
+      # be shipped. Build the upstream runtime with the ABI filename imported
+      # by TheRock (including rocalution), rather than renaming another DLL.
+      - name: Checkout LLVM OpenMP 18.1.8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llvm/llvm-project
+          ref: 3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff # llvmorg-18.1.8
+          path: build/llvm-project
+          sparse-checkout: |
+            cmake
+            llvm/cmake
+            openmp
+          persist-credentials: false
+
+      - name: Build redistributable LLVM OpenMP
+        id: openmp
+        run: |
+          $clang = Get-ChildItem "$env:SDK_ROOT/lib/llvm/bin" -Filter '*clang-cl.exe' | Select-Object -First 1
+          if (-not $clang) { throw 'SDK clang-cl not found' }
+          cmake -S build/llvm-project/openmp -B build/openmp -G Ninja `
+            "-DCMAKE_C_COMPILER=$($clang.FullName)" "-DCMAKE_CXX_COMPILER=$($clang.FullName)" `
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_BUILD_TYPE=Release -DOPENMP_MSVC_NAME_SCHEME=ON `
+            -DOPENMP_ENABLE_LIBOMPTARGET=OFF -DLIBOMP_OMPT_SUPPORT=OFF
+          if ($LASTEXITCODE -ne 0) { throw 'OpenMP configure failed' }
+          cmake --build build/openmp --parallel $env:NUMBER_OF_PROCESSORS --target omp ompimp
+          if ($LASTEXITCODE -ne 0) { throw 'OpenMP build failed' }
+          $runtime = 'build/openmp/runtime/src/libomp140.x86_64.dll'
+          if (-not (Test-Path $runtime)) { throw "OpenMP runtime missing: $runtime" }
+          New-Item -ItemType Directory -Force build/windows-release | Out-Null
+          Copy-Item $runtime build/windows-release
+
       - name: Configure
         id: configure
         run: |
@@ -180,7 +233,9 @@ jobs:
           # ccache cannot cache objects that write a shared /Zi PDB: embed
           # the debug info in each object instead (/Z7).
           cmake --preset windows-release -DBUILD_TESTING=ON "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$env:SDK_ROOT" `
-            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded @identity
+            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
+            -DOpenMP_CXX_LIB_NAMES=libomp "-DOpenMP_libomp_LIBRARY=$PWD/build/openmp/runtime/src/libomp.lib" `
+            "-DOpenMP_CXX_INCLUDE_DIR=$PWD/build/openmp/runtime/src" @identity
           if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
           "$PWD\build\windows-release\vcpkg_installed\x64-windows-release\bin" >> $env:GITHUB_PATH
           "$PWD\build\windows-release" >> $env:GITHUB_PATH
@@ -221,8 +276,11 @@ jobs:
             if (Test-Path "$build\$dir") { Copy-Item "$build\$dir" $dist -Recurse }
           }
           Copy-Item "$build\vcpkg_installed\x64-windows-release\bin\*.dll" $dist -Force
+          Copy-Item "$env:GUFO_PACKAGING_ROOT/licenses/llvm-openmp.txt" "$dist/llvm-openmp-LICENSE.txt"
+          'LLVM OpenMP 18.1.8, source: https://github.com/llvm/llvm-project/tree/3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff/openmp; Apache-2.0 WITH LLVM-exception; built with OPENMP_MSVC_NAME_SCHEME=ON.' |
+            Set-Content "$dist/llvm-openmp-version.txt" -Encoding ascii
           $redist = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory |
-            Where-Object { $_.Name -like 'Microsoft.VC*.CRT' -or $_.Name -like 'Microsoft.VC*.OpenMP.LLVM' }
+            Where-Object { $_.Name -like 'Microsoft.VC*.CRT' }
           foreach ($dir in $redist) { Copy-Item "$($dir.FullName)\*.dll" $dist -Force }
           foreach ($test in 'gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test') {
             $exe = Get-ChildItem $build -Recurse -Filter "$test.exe" | Select-Object -First 1
@@ -239,6 +297,34 @@ jobs:
             Set-Content "$dist\bundle-manifest.txt" -Encoding utf8
           "Bundle: {0} files, {1:N0} MiB" -f $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB) |
             Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      # Inspect imports rather than trusting PATH: the hosted builder may
+      # already have a dependency in System32. Run this on PR bundles too.
+      - name: Check extracted Windows bundle
+        run: |
+          python -m pip install pefile==2024.8.26
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install PE inspection tool' }
+          python -m unittest discover -s "$env:GUFO_PACKAGING_ROOT/tests/tools" -p windows_bundle_test.py
+          if ($LASTEXITCODE -ne 0) { throw 'bundle checker tests failed' }
+          $archive = "$env:RUNNER_TEMP/windows-bundle-test.zip"
+          $extracted = "$env:RUNNER_TEMP/windows-bundle-test"
+          tar -a -cf $archive -C "$env:RUNNER_TEMP/windows-gufo" .
+          if ($LASTEXITCODE -ne 0) { throw 'cannot archive test bundle' }
+          New-Item -ItemType Directory -Force $extracted | Out-Null
+          tar -xf $archive -C $extracted
+          if ($LASTEXITCODE -ne 0) { throw 'cannot extract test bundle' }
+          python "$env:GUFO_PACKAGING_ROOT/tools/windows/check_bundle.py" $extracted
+          if ($LASTEXITCODE -ne 0) { throw 'bundle has unshipped DLL dependencies' }
+          $env:PATH = "$extracted;$env:SystemRoot/System32;$env:SystemRoot"
+          Push-Location $extracted
+          try {
+            foreach ($argument in '--version', '--help') {
+              $output = & ./gufo.exe $argument
+              if ($LASTEXITCODE -ne 0 -or -not $output) { throw "bundled gufo $argument failed" }
+            }
+            & ./gufo.exe diagnose --section platform
+            if ($LASTEXITCODE -ne 0) { throw 'extracted bundle platform diagnosis failed' }
+          } finally { Pop-Location }
 
       - name: Upload gufo for the Devlab runner
         if: ${{ !inputs.release-tag }}
@@ -260,24 +346,36 @@ jobs:
           $bundle = "$env:RUNNER_TEMP\windows-gufo"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item "$bundle\gufo.exe", "$bundle\*.dll", LICENSE, NOTICE, THIRD_PARTY_NOTICES.md $dist
+          Copy-Item "$bundle/llvm-openmp-LICENSE.txt", "$bundle/llvm-openmp-version.txt" $dist
           Copy-Item licenses "$dist\third-party" -Recurse
           Copy-Item src\models\deepseek_v4_flash\LICENSE.ds4 "$dist\third-party"
           foreach ($dir in 'rocblas', 'hipblaslt') {
             if (Test-Path "$bundle\$dir") { Copy-Item "$bundle\$dir" $dist -Recurse }
           }
-          # Exercise the distribution with only its bundled DLLs on PATH.
-          $env:PATH = "$dist;$env:SystemRoot\System32;$env:SystemRoot"
-          $expected = "gufo version $env:GUFO_RELEASE_VERSION ($env:GUFO_REVISION)"
-          $actual = & "$dist\gufo.exe" --version
-          if ($LASTEXITCODE -ne 0 -or ($actual -join "`n") -cne $expected) {
-            throw "release reports '$actual', expected '$expected'"
-          }
-          & "$dist\gufo.exe" diagnose --section platform
-          if ($LASTEXITCODE -ne 0) { throw 'bundled platform diagnosis failed' }
           $archive = "$env:RUNNER_TEMP\gufo-$env:RELEASE_TAG-windows-x86_64.zip"
           # Windows' libarchive tar supports ZIP64 for the HIP runtime.
           tar -a -cf $archive -C $dist .
           if ($LASTEXITCODE -ne 0) { throw 'cannot pack Windows release' }
+          # Validate the exact release ZIP, not only its staging directory.
+          $extracted = "$env:RUNNER_TEMP/gufo-release-verify"
+          New-Item -ItemType Directory -Force $extracted | Out-Null
+          tar -xf $archive -C $extracted
+          if ($LASTEXITCODE -ne 0) { throw 'cannot extract Windows release' }
+          python "$env:GUFO_PACKAGING_ROOT/tools/windows/check_bundle.py" $extracted
+          if ($LASTEXITCODE -ne 0) { throw 'release ZIP has unshipped DLL dependencies' }
+          $env:PATH = "$extracted;$env:SystemRoot/System32;$env:SystemRoot"
+          Push-Location $extracted
+          try {
+            $expected = "gufo version $env:GUFO_RELEASE_VERSION ($env:GUFO_REVISION)"
+            $actual = & ./gufo.exe --version
+            if ($LASTEXITCODE -ne 0 -or ($actual -join "`n") -cne $expected) {
+              throw "release reports '$actual', expected '$expected'"
+            }
+            $help = & ./gufo.exe --help
+            if ($LASTEXITCODE -ne 0 -or -not $help) { throw 'release help failed' }
+            & ./gufo.exe diagnose --section platform
+            if ($LASTEXITCODE -ne 0) { throw 'release platform diagnosis failed' }
+          } finally { Pop-Location }
           $sha = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$sha  $(Split-Path $archive -Leaf)" | Set-Content "$archive.sha256" -Encoding ascii
           "artifact-name=windows-release-$env:RELEASE_TAG-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
@@ -313,10 +411,10 @@ jobs:
           path: ${{ runner.temp }}\therock-archive
           key: gufo-therock-v2-${{ env.SDK_TARBALL }}
 
-      # Under a fresh key per run, as soon as configure ran: a restored set
-      # plus this run's new entries is saved whole.
+      # Save both OpenMP and Gufo objects, even if a later stage fails. A fresh
+      # key preserves this run's new entries alongside the restored set.
       - name: Save compiler cache
-        if: always() && steps.configure.outcome == 'success'
+        if: always() && (steps.openmp.outcome == 'success' || steps.configure.outcome == 'success')
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\ccache

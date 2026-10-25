@@ -6,6 +6,27 @@ from the Linux build. The device toolchain differs: `clang-cl` and the HIP
 runtime come from a TheRock SDK, MSVC supplies the C++ standard library and
 the linker, and vcpkg supplies the libraries.
 
+## Downloaded Windows releases
+
+Extract the entire release ZIP before running `gufo.exe`, keeping its DLLs and
+kernel directories beside it. Bundles include an LLVM OpenMP runtime built
+from upstream LLVM 18.1.8 source under Apache-2.0 with LLVM exceptions, using
+`libomp140.x86_64.dll` as required by the SDK. The license is included under
+`llvm-openmp-LICENSE.txt`, with source provenance in `llvm-openmp-version.txt`.
+
+The v0.24.0 ZIP omitted this DLL ([#801](https://github.com/gufo-org/gufo/issues/801)).
+If it exits silently, including for `--help`, with status `0xC0000135`, the
+Windows loader could not find a DLL. Use a subsequent fixed Gufo release when
+available. For a local development workaround, install Microsoft's Visual
+Studio Build Tools with the C++ workload and run Gufo from its x64 Native
+Tools command prompt. Microsoft documents the LLVM OpenMP DLL under
+`VC\Redist\MSVC\<version>\debug_nonredist\x64\Microsoft.VC*.OpenMP.LLVM`;
+if necessary, copy that installed x64 DLL beside `gufo.exe` for local use.
+Do not obtain DLLs from third-party download sites or replace system DLLs.
+The ordinary VC++ Redistributable does not supply this LLVM runtime.
+Microsoft's DLL is [not redistributable](https://learn.microsoft.com/en-us/cpp/build/reference/openmp-enable-openmp-2-0-support?view=msvc-170);
+release packaging builds the upstream runtime instead.
+
 ## 1. Prerequisites
 
 - **Hardware/driver:** AMD Strix Halo (gfx1151) with a current AMD graphics
@@ -107,7 +128,12 @@ Then `curl http://127.0.0.1:8080/ready` and POST to `/v1/chat/completions`.
 [`.github/workflows/windows.yml`](.github/workflows/windows.yml) builds this
 recipe on a hosted `windows-latest` runner, with the SDK archive, the vcpkg
 packages and the compiler cache restored from the Actions cache, and runs
-`check-pr`. On a manual dispatch, the Windows Strix Halo Devlab runner then
+`check-pr`. It also builds the upstream OpenMP runtime, extracts the packaged
+bundle, checks every EXE/DLL's normal and delay imports against the bundle and
+an explicit Windows system DLL list, and runs `--help`, `--version` and platform
+diagnosis with a restricted `PATH`. The import check does not use the builder's
+installed DLLs, so developer tools cannot conceal an omitted dependency.
+On a manual dispatch, the Windows Strix Halo Devlab runner then
 downloads the resulting bundle and runs `gufo diagnose`, the weight-free GPU
 tests, and one small model per family through
 [`tests/functional/family_smoke.py`](tests/functional/family_smoke.py):
