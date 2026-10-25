@@ -140,8 +140,8 @@ def phases_section(data):
     settings = data["settings"]
     lines.append(f"<sub>Medians of {settings['repeats']} alternating base/PR arms after GPU "
                  f"cool-down. 🟥 slower and 🟩 faster in every repeat (>"
-                 f"{settings['slowdown'] * 100:.0f}% and >{settings['noise_ms']} ms); 🟨 mixed "
-                 "repeats, inconclusive; ⬜ unchanged. Observations, not qualified timing "
+                 f"{settings['slowdown'] * 100:.0f}% and >{settings['noise_ms']} ms); 🟨 slower in "
+                 "some repeats, inconclusive; ⬜ never slower. Observations, not qualified timing "
                  f"regressions. Measured in {data['wall_s'] / 60:.1f} min.</sub>")
     if data.get("diverged"):
         lines += ["", "⚠️ Generated text differs or server work differs between arms for "

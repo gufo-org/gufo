@@ -226,7 +226,11 @@ def run_arm(revision, binary, weights, output, repeat, startup_timeout, model_id
 
 
 def verdict(pairs):
-    """Paired 5% and 3 ms rule; a direction must hold in every repeat."""
+    """Paired 5% and 3 ms rule; a direction must hold in every repeat.
+
+    Only a slower repeat makes the comparison noisy: a repeat that is faster on
+    one side and unchanged on the other is no evidence of a regression.
+    """
     flags = []
     for base, head in pairs:
         delta = head - base
@@ -238,7 +242,7 @@ def verdict(pairs):
         return "slower"
     if all(flag == -1 for flag in flags):
         return "faster"
-    return "noisy" if any(flags) else "same"
+    return "noisy" if any(flag == 1 for flag in flags) else "same"
 
 
 def summarize(arms):

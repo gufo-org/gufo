@@ -307,7 +307,9 @@ models or their speed observations. Each LLM's `phases.py` arms exercise startup
 short, long and follow-up requests; `service_phases.py` measures bounded service
 histories. Both alternate main/candidate servers for two paired repeats,
 with GPU cool-down. Every request and phase retains all measurements; a slowdown
-requires both >5% and >3 ms in every repeat. Different output/work counters mark
+requires both >5% and >3 ms in every repeat. A phase that is slower in only
+some repeats is inconclusive; one that is faster in some repeats and never
+slower counts as unchanged. Different output/work counters mark
 relevant comparisons inconclusive. The plan selects timing gates from production
 changes; harness-only changes retain timing observations without gating unrelated
 noise. Startup phases gate only loader/configuration/build changes. Missing timing
