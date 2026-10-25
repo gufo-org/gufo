@@ -1308,6 +1308,19 @@ __global__ void NarrowKernel(const float* x, T* out, std::size_t count) {
   }
 }
 
+__global__ void ExpandQ8_0Kernel(const std::uint8_t* q8, float* out,
+                                 std::size_t count) {
+  const std::size_t i =
+      blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+  if (i < count) {
+    const std::uint8_t* blk = q8 + (i / 32) * 34;
+    const __half d = *reinterpret_cast<const __half*>(blk);
+    const auto q = static_cast<const std::int8_t*>(
+        static_cast<const void*>(blk + 2))[i % 32];
+    out[i] = __half2float(d) * static_cast<float>(q);
+  }
+}
+
 /// One wave per weight row, kSmallGemmRows rows per block: the row is read
 /// once (four consecutive elements per lane per step) while up to eight
 /// tokens accumulate in registers, then a wave reduction per token.
@@ -6097,6 +6110,12 @@ bool SigmoidMulQ8_1(float* x, const float* g, std::size_t count, void* x_q8,
   hipLaunchKernelGGL(SigmoidMulQ8Kernel, dim3(Blocks(count)), dim3(kThreads), 0,
                      stream, x, g, count, x_q8);
   return true;
+}
+
+void ExpandQ8_0(const void* q8, float* out, std::size_t count,
+                hipStream_t stream) {
+  hipLaunchKernelGGL(ExpandQ8_0Kernel, dim3(Blocks(count)), dim3(kThreads), 0,
+                     stream, static_cast<const std::uint8_t*>(q8), out, count);
 }
 
 void NarrowActivations(const float* x, void* out, bool bf16, std::size_t count,

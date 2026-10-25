@@ -180,6 +180,9 @@ bool SigmoidMulQ8_1(float* x, const float* g, std::size_t count, void* x_q8,
 /// Converts `count` floats to BF16 (or F16) for a 16-bit hipBLAS GEMM.
 void NarrowActivations(const float* x, void* out, bool bf16, std::size_t count,
                        hipStream_t stream);
+/// Expands `count` Q8_0 weights (whole 32-element blocks) to F32.
+void ExpandQ8_0(const void* q8, float* out, std::size_t count,
+                hipStream_t stream);
 
 /// W8A8 route for wide batches over Q8_0 weights: activations quantized per
 /// 32-wide block into the tiled fragment layout (`Q8TiledBytes(batch, k)`
