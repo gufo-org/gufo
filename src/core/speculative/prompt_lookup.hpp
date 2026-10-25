@@ -154,23 +154,32 @@ public:
   /// Best match for the context `committed` + `tail` among the indexed
   /// committed tokens, or a zero-length match. `tail` holds the uncommitted
   /// chain (anchor and drafts); `committed` must extend the indexed prefix.
+  /// With `agreed`, also reports how many tokens of the best match's
+  /// continuation every competing occurrence (any other candidate matching
+  /// at least half as long, gated or not) proposes too; without competitors
+  /// that is the rest of the indexed source. Repeated syntax (a log line's
+  /// timestamp, a declaration's type) matches several occurrences about as
+  /// well, and their continuations show how much of the copy is ambiguous.
   [[nodiscard]] Match Find(std::span<const TokenId> committed,
                            std::span<const TokenId> tail,
                            std::size_t minimum = kMinMatch,
-                           bool require_resume = false) const {
+                           bool require_resume = false,
+                           std::size_t* agreed = nullptr) const {
     return Find(
         committed, tail, minimum, [](std::size_t) { return true; },
-        require_resume);
+        require_resume, agreed);
   }
 
   /// A backend may reject a source whose continuation crosses message framing.
   /// Keep searching earlier matches instead of repeatedly proposing the same
   /// rejected boundary. The ordinary Flash-Next policy accepts every source.
+  /// Rejected occurrences still compete for `agreed`.
   template<std::predicate<std::size_t> AcceptSource>
   [[nodiscard]] Match Find(std::span<const TokenId> committed,
                            std::span<const TokenId> tail, std::size_t minimum,
                            AcceptSource accept_source,
-                           bool require_resume = false) const {
+                           bool require_resume = false,
+                           std::size_t* agreed = nullptr) const {
     const std::size_t context = committed.size() + tail.size();
     const std::size_t available =
         request_start_ == kNoResume
@@ -189,6 +198,8 @@ public:
       key_tokens[i] = at(context - kKeyTokens + i);
     }
     Match best{};
+    Match candidates[kMaxCandidates];
+    std::size_t candidate_count = 0;
     std::uint32_t end = head_.Find(Key(std::span<const TokenId>(key_tokens)));
     for (std::size_t n = 0; n < kMaxCandidates && end != kNone; ++n) {
       // An occurrence ending at `end` proposes committed[end...]. The key
@@ -208,11 +219,29 @@ public:
           require_resume
               ? resumes && length >= minimum
               : length >= minimum || (resumes && length >= kResumeMinMatch);
-      if (end < prev_.size() && length > best.length && allowed &&
-          accept_source(end)) {
-        best = {end, length};
+      if (end < prev_.size()) {
+        candidates[candidate_count++] = {end, length};
+        if (length > best.length && allowed && accept_source(end)) {
+          best = {end, length};
+        }
       }
       end = prev_[end];
+    }
+    if (agreed != nullptr && best.length != 0) {
+      std::size_t same = prev_.size() - best.start;
+      for (std::size_t i = 0; i < candidate_count; ++i) {
+        const Match& other = candidates[i];
+        if (other.start == best.start || 2 * other.length < best.length) {
+          continue;
+        }
+        std::size_t k = 0;
+        while (k < same && other.start + k < prev_.size() &&
+               committed[other.start + k] == committed[best.start + k]) {
+          ++k;
+        }
+        same = k;
+      }
+      *agreed = same;
     }
     return best;
   }

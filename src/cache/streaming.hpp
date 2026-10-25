@@ -22,7 +22,7 @@ inline constexpr std::chrono::milliseconds kPersistenceYieldLimit{500};
     std::span<const ComponentDescriptor> components) {
   std::size_t bytes = 1;
   for (const auto& d : components)
-    if (d.kind == ComponentKind::kAppendRows)
+    if (HasRows(d.kind))
       bytes = std::max(bytes, d.row_bytes);
   return bytes;
 }

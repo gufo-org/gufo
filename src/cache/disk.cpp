@@ -95,9 +95,12 @@ void Validate(const DiskManifest& m) {
     references += c.chunks.size() + bool(tail) + bool(private_state);
     if (references > kMaxReferences)
       Invalid();
-    if (d.kind == ComponentKind::kAppendRows) {
+    if (HasRows(d.kind)) {
       if (!d.row_bytes || !d.rows_per_chunk || d.state_bytes || private_state ||
-          c.chunks.size() != c.position.valid_rows / d.rows_per_chunk)
+          (d.kind == ComponentKind::kWindowRows) != (d.window_rows != 0) ||
+          c.chunks.size() != (c.position.valid_rows -
+                              FirstChunkRow(d, c.position.valid_rows)) /
+                                 d.rows_per_chunk)
         Invalid();
       (void)Multiply(d.row_bytes, c.position.valid_rows);
       auto full_bytes = Multiply(d.row_bytes, d.rows_per_chunk);
@@ -111,7 +114,7 @@ void Validate(const DiskManifest& m) {
            tail.value().bytes != Multiply(d.row_bytes, remaining)))
         Invalid();
     } else if (d.kind == ComponentKind::kPrivateState) {
-      if (d.row_bytes || d.rows_per_chunk || !d.state_bytes ||
+      if (d.row_bytes || d.rows_per_chunk || !d.state_bytes || d.window_rows ||
           !c.chunks.empty() || tail || !private_state ||
           private_state->bytes != d.state_bytes ||
           c.position.valid_rows != m.tokens.size())
@@ -193,7 +196,10 @@ MetadataPlan PlanMetadata(std::span<const std::uint8_t> bytes) {
   auto components = r.Count(kMaxComponents, 47);
   plan.retained = Add(plan.retained, components * sizeof(DiskComponent));
   for (std::size_t i = 0; i < components; ++i) {
-    r.Blob(41);
+    // The kind byte follows the ID and layout version; a window component
+    // also carries its window size.
+    if (r.Blob(41)[8] == static_cast<std::uint8_t>(ComponentKind::kWindowRows))
+      r.Blob(8);
     auto chunks = r.Count(kMaxReferences - plan.references, 32);
     plan.references += chunks;
     r.Blob(chunks * 32);
@@ -392,9 +398,12 @@ std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
 }
 std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
   Validate(m);
+  const bool windowed = std::ranges::any_of(m.components, [](const auto& c) {
+    return c.descriptor.kind == ComponentKind::kWindowRows;
+  });
   Writer w;
   w.Blob(kMagic);
-  w.Number(kDiskFormatVersion, 4);
+  w.Number(windowed ? kDiskWindowFormatVersion : kDiskFormatVersion, 4);
   w.Number(m.checkpoint.value, 8);
   w.Number(m.lineage.value, 8);
   w.Blob(m.compatibility);
@@ -416,6 +425,8 @@ std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
     w.Number(d.rows_per_chunk, 8);
     w.Number(d.state_bytes, 8);
     w.Number(c.position.valid_rows, 8);
+    if (d.kind == ComponentKind::kWindowRows)
+      w.Number(d.window_rows, 8);
     w.Number(c.chunks.size(), 4);
     for (const auto& p : c.chunks)
       w.Payload(p);
@@ -440,8 +451,10 @@ DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
     Invalid();
   Reader r{bytes.first(bytes.size() - 8)};
   auto magic = r.Blob(kMagic.size());
-  if (!std::equal(magic.begin(), magic.end(), kMagic.begin()) ||
-      r.Number(4) != kDiskFormatVersion)
+  if (!std::equal(magic.begin(), magic.end(), kMagic.begin()))
+    Invalid();
+  const auto version = r.Number(4);
+  if (version != kDiskFormatVersion && version != kDiskWindowFormatVersion)
     Invalid();
   DiskManifest m;
   m.checkpoint.value = r.Number(8);
@@ -469,6 +482,11 @@ DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
     d.rows_per_chunk = r.Number(8);
     d.state_bytes = r.Number(8);
     c.position = {d.id, r.Number(8)};
+    if (d.kind == ComponentKind::kWindowRows) {
+      if (version != kDiskWindowFormatVersion)
+        Invalid();
+      d.window_rows = r.Number(8);
+    }
     auto chunks = r.Count(kMaxReferences - references, 32);
     c.chunks.reserve(chunks);
     references += chunks;
@@ -488,7 +506,13 @@ DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
     c.private_state = optional_payload();
     m.components.push_back(std::move(c));
   }
-  if (!r.bytes.empty())
+  // Only manifests with window components use the window format version, so
+  // every manifest has one canonical encoding.
+  if (!r.bytes.empty() ||
+      (version == kDiskWindowFormatVersion &&
+       std::ranges::none_of(m.components, [](const auto& c) {
+         return c.descriptor.kind == ComponentKind::kWindowRows;
+       })))
     Invalid();
   Validate(m);
   return m;
@@ -707,8 +731,9 @@ struct DiskStore::Impl {
       auto claim = [&](bool is_private, const DiskPayload& p,
                        const ComponentDescriptor& d, std::uint64_t first) {
         const std::vector<std::uint64_t> geometry{
-            m.lineage.value,  d.id.value, d.layout_version, d.row_bytes,
-            d.rows_per_chunk, first,      p.bytes,          p.checksum};
+            m.lineage.value, d.id.value,       d.layout_version,
+            d.row_bytes,     d.rows_per_chunk, first,
+            p.bytes,         p.checksum,       d.window_rows};
         auto [it, inserted] = claims.try_emplace(
             {is_private, p.file}, Claim{m.compatibility, geometry, {}, false});
         auto& value = it->second;
@@ -719,7 +744,7 @@ struct DiskStore::Impl {
         value.entries.push_back(i);
       };
       for (const auto& c : m.components) {
-        Rows first{};
+        Rows first = FirstChunkRow(c.descriptor, c.position.valid_rows);
         for (const auto& p : c.chunks) {
           claim(false, p, c.descriptor, first);
           first = Add(first, c.descriptor.rows_per_chunk);

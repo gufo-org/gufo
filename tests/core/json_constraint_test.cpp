@@ -916,6 +916,12 @@ void TestReasoningConstraint() {
   assert(Accepts(*grammar, "</think>{\"x\":\"</think>\"}"));
   assert(!Accepts(*grammar, "thinking only"));
   assert(!Accepts(*grammar, "</think>not JSON"));
+  // Another model's close marker (Gemma 4's thought channel).
+  const auto channel = JsonConstraint::WithReasoning(plain, "<channel|>");
+  assert(channel != grammar &&
+         channel == JsonConstraint::WithReasoning(plain, "<channel|>"));
+  assert(Accepts(*channel, "thought </think> <channel|>{\"x\":1}"));
+  assert(!Accepts(*channel, "</think>{\"x\":1}"));
   const std::vector<std::string> pieces{
       "thinking", "</thi", "nk>{\"x\":", "true}", "nk>INVALID", ""};
   auto binding = std::make_shared<TokenConstraint>();
@@ -1707,6 +1713,24 @@ void TestUntypedNonStrictTools() {
       assert(!Accepts(*json, R"({"value":42})"));
     }
   }
+  // Best effort reads an array without items as any values, so the rest of
+  // the tool's schema still holds instead of falling back to any object.
+  const auto untyped_array = parse(R"({"type":"object","properties":{
+    "text":{"type":"string","const":"alpha"},"values":{"type":"array"}},
+    "required":["text","values"],"additionalProperties":false})");
+  const auto json =
+      JsonConstraint::ToolParameters(untyped_array, false, Format::kJson);
+  assert(Accepts(*json, R"({"text":"alpha","values":[1,"x",null,{"k":[]}]})"));
+  assert(!Accepts(*json, R"({"text":"beta","values":[]})"));
+  assert(!Accepts(*json, R"({"values":[]})"));
+  assert(!Accepts(*json, R"({"text":"alpha","values":[],"other":1})"));
+  bool rejected = false;
+  try {
+    (void)JsonConstraint::ToolParameters(untyped_array, true, Format::kJson);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
 }
 
 void TestMixedBestEffortToolRoutes() {

@@ -500,6 +500,12 @@ SamplerState SamplerState::WithoutConstraint() const {
   return copy;
 }
 
+SamplerState SamplerState::WithoutTopP() const {
+  auto copy = *this;
+  copy.config_.top_p = 1.0F;
+  return copy;
+}
+
 bool SamplerState::NeedsConstraintMask() const {
   // Executors that sample on the GPU fall back to Sample/Distribution here,
   // which return the forced reasoning end.

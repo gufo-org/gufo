@@ -119,6 +119,9 @@ public:
   /// Draft q may remain unconstrained; target p always uses this request's
   /// grammar.
   [[nodiscard]] SamplerState WithoutConstraint() const;
+  /// The same sampler with top-p disabled (speculative proposals: any
+  /// proposal distribution keeps rejection sampling exact).
+  [[nodiscard]] SamplerState WithoutTopP() const;
   /// A finite argmax can bypass downloading logits if it satisfies the grammar.
   /// Set penalties_applied only for a winner computed with this state's exact
   /// penalty arithmetic and history; raw model argmaxes leave it false.

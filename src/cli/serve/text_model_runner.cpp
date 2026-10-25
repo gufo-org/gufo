@@ -81,9 +81,15 @@ std::optional<ChatRequest> ConstrainChatRequest(
     constrained.messages.insert(constrained.messages.begin(),
                                 std::move(message));
   }
-  if (runner.InitialOutputState(request) ==
-      TextGenerationBackend::InitialOutputState::kReasoning)
-    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  const auto initial = runner.InitialOutputState(request);
+  if (initial == TextGenerationBackend::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end);
+  else if (initial == TextGenerationBackend::InitialOutputState::kAuto)
+    // Output that may open reasoning itself keeps that choice.
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end,
+        runner.Markup().reasoning_start);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }
@@ -824,6 +830,12 @@ struct TextRunnerPool::Request::Impl {
         context(std::move(prompt_context)),
         retain_fallback(cache_prefix_tokens != 0),
         overlap_snapshots(overlap_snapshots) {
+    if (context) {
+      for (auto& boundary : boundaries)
+        boundary = context->PrefillStop(boundary, false);
+      boundaries.erase(std::ranges::unique(boundaries).begin(),
+                       boundaries.end());
+    }
     // On a warm continuation the reused frontier is already a safe fallback.
     // Freeze it before prefill, then retain this turn's own stable boundary
     // before mutable assistant framing.
@@ -888,8 +900,11 @@ struct TextRunnerPool::Request::Impl {
       const auto count =
           std::min(grid_points, TextRunnerPool::Impl::kIntermediateCheckpoints);
       for (std::size_t point = 1; point <= count; ++point) {
-        const auto position = grid_points * point / count * interval;
+        auto position = grid_points * point / count * interval;
+        if (context)
+          position = context->PrefillStop(position, false);
         if (position > prefill_offset &&
+            (checkpoints.empty() || position > checkpoints.back()) &&
             position - prefill_offset >= interval &&
             prompt.size() - position > tail &&
             position != snapshot_tokens.size() &&
@@ -899,8 +914,17 @@ struct TextRunnerPool::Request::Impl {
           checkpoints.push_back(position);
       }
     }
-    if (lease.component())
-      checkpoints = lease.PlannedCaptures(cache_prefix_tokens);
+    if (lease.component()) {
+      // Planned passes cannot see indivisible inputs such as images: move
+      // each point before the input it would split.
+      for (auto position : lease.PlannedCaptures(cache_prefix_tokens)) {
+        if (context)
+          position = context->PrefillStop(position, false);
+        if (position > prefill_offset &&
+            (checkpoints.empty() || position > checkpoints.back()))
+          checkpoints.push_back(position);
+      }
+    }
   }
 
   ~Impl() {
@@ -1046,6 +1070,12 @@ struct TextRunnerPool::Request::Impl {
       snapshot_future =
           std::async(wait ? std::launch::deferred : std::launch::async,
                      [this, owner = runner, state, persist = bool(disk_store)] {
+                       struct RecordCompletion {
+                         std::chrono::steady_clock::time_point& finished;
+                         ~RecordCompletion() {
+                           finished = std::chrono::steady_clock::now();
+                         }
+                       } timing{snapshot_finished};
                        if (lease.component())
                          return lease.Capture();
                        return persist ? owner->SnapshotForPersistence(*state)
@@ -1065,10 +1095,9 @@ struct TextRunnerPool::Request::Impl {
     } catch (...) {
       prompt_snapshot.reset();
     }
-    snapshot_metrics.snapshot_ms +=
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - snapshot_start)
-            .count();
+    snapshot_metrics.snapshot_ms += std::chrono::duration<double, std::milli>(
+                                        snapshot_finished - snapshot_start)
+                                        .count();
     if (prompt_snapshot == nullptr) {
       disk_capture.reset();
       if (retain_snapshot) {
@@ -1261,6 +1290,9 @@ struct TextRunnerPool::Request::Impl {
   std::size_t snapshot_bytes{0};
   bool retain_snapshot{false};
   std::chrono::steady_clock::time_point snapshot_start;
+  // Written by the capture worker, including on failure; future::get above
+  // synchronizes that write before the result's timing is collected.
+  std::chrono::steady_clock::time_point snapshot_finished;
   std::unique_ptr<ContinuationDiskStore::CaptureReservation> disk_capture;
   std::future<std::unique_ptr<TextRunnerSnapshot>> snapshot_future;
 };
@@ -1285,6 +1317,12 @@ bool TextRunnerPool::Request::SnapshotPending() const {
   return impl_ && impl_->snapshot_future.valid() &&
          impl_->snapshot_future.wait_for(std::chrono::seconds(0)) !=
              std::future_status::ready;
+}
+
+bool TextRunnerPool::Request::AwaitSnapshot(
+    std::chrono::steady_clock::duration timeout) const {
+  return !impl_ || !impl_->snapshot_future.valid() ||
+         impl_->snapshot_future.wait_for(timeout) == std::future_status::ready;
 }
 
 std::optional<TextDecodeSelection>
@@ -1384,7 +1422,9 @@ std::size_t TextRunnerPool::Request::ShareCheckpoint(
     return 0;
   // The complete prompt is retained only after decoding starts; share the
   // last prefill position instead so peers can start sooner.
-  const auto target = std::min(common_tokens, impl_->prompt.size() - 1);
+  auto target = std::min(common_tokens, impl_->prompt.size() - 1);
+  if (impl_->context)
+    target = impl_->context->PrefillStop(target, false);
   const auto offset = impl_->prefill_offset;
   if (target <= offset)
     return 0;
@@ -1436,6 +1476,7 @@ void TextRunnerPool::Request::PrepareBatchExecution() {
 }
 
 TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
+  const std::size_t budget = max_input_tokens;
   if (!*this) {
     throw std::logic_error("text runner request is empty");
   }
@@ -1516,8 +1557,38 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     frontier = std::min(frontier, impl_->checkpoints.front());
   if (!impl_->boundaries.empty())
     frontier = std::min(frontier, impl_->boundaries.front());
+  // Never stop inside an indivisible input; one starting here completes in
+  // this step even beyond the budget. The frontier is itself a stop.
+  if (impl_->context) {
+    const auto offset = impl_->prefill_offset;
+    auto stop = impl_->context->PrefillStop(
+        offset + std::min(max_input_tokens, frontier - offset), false);
+    if (stop <= offset)
+      stop = std::min(impl_->context->PrefillStop(offset + 1, true), frontier);
+    max_input_tokens = stop - offset;
+  }
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
+  // Later steps stop at the snapshot boundary, checkpoints and shared
+  // boundaries past this frontier. A runner may evaluate the tokens after it
+  // alongside, up to this step's budget, which the next step likely shares.
+  const auto lookahead =
+      std::span<const TextRunnerToken>(impl_->prompt)
+          .subspan(frontier)
+          .first(std::min(impl_->prompt.size() - frontier, budget));
+  std::vector<std::size_t> stops;
+  const auto add_stop = [&](std::size_t position) {
+    if (position > frontier && position < frontier + lookahead.size())
+      stops.push_back(position - frontier);
+  };
+  add_stop(snapshot_position);
+  for (const auto position : impl_->checkpoints)
+    add_stop(position);
+  for (const auto position : impl_->boundaries)
+    add_stop(position);
+  std::ranges::sort(stops);
+  stops.erase(std::ranges::unique(stops).begin(), stops.end());
+  impl_->runner->SetPromptLookahead(state, lookahead, stops);
   std::unique_ptr<TextRunnerSnapshot> captured;
   const std::function<std::unique_ptr<TextRunnerSnapshot>()> capture =
       in_pass && impl_->lease.component()
