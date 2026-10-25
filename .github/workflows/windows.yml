@@ -4,6 +4,7 @@ name: Windows
 # builds gufo.exe with its runtime and runs the host contract suite. On a
 # manual dispatch the Windows Strix Halo Devlab runner then checks the device
 # and one small model per family from that bundle (PR runs wait on #789).
+# Toolboxes also calls this workflow to package an exact release tag.
 
 on:
   push:
@@ -13,13 +14,23 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Exact Gufo release tag to build for Toolboxes
+        required: true
+        type: string
+    outputs:
+      artifact-name:
+        description: Artifact containing the Windows release ZIP and checksum
+        value: ${{ jobs.build.outputs.release-artifact-name }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-${{ github.ref }}
-  cancel-in-progress: true
+  group: windows-${{ inputs.release-tag || github.ref }}
+  cancel-in-progress: ${{ !inputs.release-tag }}
 
 jobs:
   build:
@@ -29,6 +40,7 @@ jobs:
     outputs:
       bundle-id: ${{ steps.bundle.outputs.artifact-id }}
       bundle-digest: ${{ steps.bundle.outputs.artifact-digest }}
+      release-artifact-name: ${{ steps.release-package.outputs.artifact-name }}
     defaults:
       run:
         shell: pwsh
@@ -46,6 +58,24 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # A reusable workflow otherwise checks out its caller (Toolboxes).
+          repository: ${{ inputs.release-tag && 'gufo-org/gufo' || github.repository }}
+          ref: ${{ inputs.release-tag && format('refs/tags/{0}', inputs.release-tag) || github.ref }}
+
+      - name: Identify release source
+        if: inputs.release-tag
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "invalid release tag: $env:RELEASE_TAG"
+          }
+          $version = (Get-Content version.txt -Raw).Trim()
+          if ("v$version" -cne $env:RELEASE_TAG) { throw 'tag and version.txt disagree' }
+          $revision = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'cannot identify release revision' }
+          "GUFO_RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          "GUFO_REVISION=$revision" >> $env:GITHUB_ENV
 
       - name: Restore TheRock SDK archive
         id: therock-cache
@@ -143,10 +173,14 @@ jobs:
       - name: Configure
         id: configure
         run: |
+          $identity = @()
+          if ($env:GUFO_RELEASE_VERSION) {
+            $identity = @("-DGUFO_RELEASE_VERSION=$env:GUFO_RELEASE_VERSION", "-DGUFO_REVISION=$env:GUFO_REVISION")
+          }
           # ccache cannot cache objects that write a shared /Zi PDB: embed
           # the debug info in each object instead (/Z7).
           cmake --preset windows-release -DBUILD_TESTING=ON "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$env:SDK_ROOT" `
-            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded @identity
           if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
           "$PWD\build\windows-release\vcpkg_installed\x64-windows-release\bin" >> $env:GITHUB_PATH
           "$PWD\build\windows-release" >> $env:GITHUB_PATH
@@ -207,6 +241,7 @@ jobs:
             Tee-Object -Append $env:GITHUB_STEP_SUMMARY
 
       - name: Upload gufo for the Devlab runner
+        if: ${{ !inputs.release-tag }}
         id: bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -214,6 +249,51 @@ jobs:
           path: ${{ runner.temp }}\windows-gufo
           if-no-files-found: error
           retention-days: 3
+
+      - name: Pack Windows release
+        if: inputs.release-tag
+        id: release-package
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          $dist = "$env:RUNNER_TEMP\gufo-release"
+          $bundle = "$env:RUNNER_TEMP\windows-gufo"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "$bundle\gufo.exe", "$bundle\*.dll", LICENSE, NOTICE, THIRD_PARTY_NOTICES.md $dist
+          Copy-Item licenses "$dist\third-party" -Recurse
+          Copy-Item src\models\deepseek_v4_flash\LICENSE.ds4 "$dist\third-party"
+          foreach ($dir in 'rocblas', 'hipblaslt') {
+            if (Test-Path "$bundle\$dir") { Copy-Item "$bundle\$dir" $dist -Recurse }
+          }
+          # Exercise the distribution with only its bundled DLLs on PATH.
+          $env:PATH = "$dist;$env:SystemRoot\System32;$env:SystemRoot"
+          $expected = "gufo version $env:GUFO_RELEASE_VERSION ($env:GUFO_REVISION)"
+          $actual = & "$dist\gufo.exe" --version
+          if ($LASTEXITCODE -ne 0 -or ($actual -join "`n") -cne $expected) {
+            throw "release reports '$actual', expected '$expected'"
+          }
+          & "$dist\gufo.exe" diagnose --section platform
+          if ($LASTEXITCODE -ne 0) { throw 'bundled platform diagnosis failed' }
+          $archive = "$env:RUNNER_TEMP\gufo-$env:RELEASE_TAG-windows-x86_64.zip"
+          # Windows' libarchive tar supports ZIP64 for the HIP runtime.
+          tar -a -cf $archive -C $dist .
+          if ($LASTEXITCODE -ne 0) { throw 'cannot pack Windows release' }
+          $sha = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$sha  $(Split-Path $archive -Leaf)" | Set-Content "$archive.sha256" -Encoding ascii
+          "artifact-name=windows-release-$env:RELEASE_TAG-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Windows release
+        if: inputs.release-tag
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.release-package.outputs.artifact-name }}
+          path: |
+            ${{ steps.release-package.outputs.archive }}
+            ${{ steps.release-package.outputs.archive }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
       - name: Upload configure logs on failure
         if: failure()
