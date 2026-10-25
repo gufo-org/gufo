@@ -417,6 +417,14 @@
       ]
     },
     {
+      "id": "hosted-checks",
+      "priority": 20,
+      "paths": [
+        "cmake/Checks.cmake"
+      ],
+      "owners": []
+    },
+    {
       "id": "shared-infrastructure",
       "priority": 10,
       "paths": [

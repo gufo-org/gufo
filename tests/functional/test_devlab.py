@@ -64,6 +64,13 @@ class PlanTest(unittest.TestCase):
                          {'flash-next-q4', 'embedding-gemma2', 'qwen3-asr', 'qwen3-tts-base'})
         self.assertEqual(self.models('new-unclassified-file'), self.models('CMakeLists.txt'))
 
+    def test_hosted_check_list_selects_no_model(self):
+        # cmake/Checks.cmake lists the hosted CPU suite, which CI runs itself.
+        self.assertEqual(self.models('cmake/Checks.cmake'), set())
+        self.assertEqual(self.models('cmake/Checks.cmake', 'src/models/embedding_gemma2/hip/ops.hip'),
+                         {'embedding-gemma2'})
+        self.assertEqual(self.models('cmake/toolchains/windows-therock.cmake'), self.models('CMakeLists.txt'))
+
     def test_category_and_fixture_ownership(self):
         for path, expected in [
             ('src/models/embedding_gemma2/hip/ops.hip', {'embedding-gemma2'}),
