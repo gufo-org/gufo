@@ -512,6 +512,17 @@ if (BUILD_TESTING)
     tests/functional/cache_disk_faults.cpp)
   target_link_libraries(cache_disk_faults PRIVATE ${CMAKE_DL_LIBS})
   endif()
+  # The fault libraries are LD_PRELOADed into uninstrumented processes (the
+  # test's Python, a release server); a sanitized library aborts there with
+  # "ASan runtime does not come first".
+  if (GUFO_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(preload device_loss_faults cache_disk_faults)
+      if (TARGET ${preload})
+        target_compile_options(${preload} PRIVATE -fno-sanitize=all)
+        target_link_options(${preload} PRIVATE -fno-sanitize=all)
+      endif()
+    endforeach()
+  endif()
 
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
