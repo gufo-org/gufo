@@ -2,8 +2,6 @@
 // device, and no socket. The test calls the HTTP handler directly.
 #include "src/cli/serve/embeddings_api.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -946,6 +944,15 @@ void TestPromptNames() {
             runner.last_texts ==
                 std::vector<std::string>{"task: search result | query: a"},
         "a request's prompt_name overrides the default");
+  Check(
+      Send(*with_default, R"({"input":"a","prompt_name":""})").status == 200 &&
+          runner.last_texts == std::vector<std::string>{"a"},
+      "an empty prompt_name applies no prompt despite the default");
+  Check(Send(*with_default, R"({"input":"a","prompt_name":null})").status ==
+                200 &&
+            runner.last_texts ==
+                std::vector<std::string>{"title: none | text: a"},
+        "a null prompt_name keeps the default");
   Check(SendTo(*with_default, "/embeddings",
                R"({"content":"a","prompt_name":"query"})")
                     .status == 200 &&
@@ -959,8 +966,11 @@ void TestPromptNames() {
                 std::string::npos,
         "an unknown default prompt fails startup");
 
-  const auto dir = std::filesystem::temp_directory_path() /
-                   ("embedding_prompts_" + std::to_string(::getpid()));
+  const auto dir =
+      std::filesystem::temp_directory_path() /
+      ("embedding_prompts_" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
   std::filesystem::create_directories(dir);
   std::map<std::string, std::string> prompts{{"stale", "x"}};
   std::string error;
