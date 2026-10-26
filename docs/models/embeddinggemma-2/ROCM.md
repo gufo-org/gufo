@@ -10,11 +10,10 @@ Both production builds use PR #768 after merging main `c811b451`, source
 `0fe9c9c3` (tree `293d8b2d`). The control uses HIP Clang 22/GCC 15.3;
 10.1 uses HIP Clang 24/GCC 16.2. This is a whole pinned toolchain comparison,
 including hipBLASLt tuning, rather than an isolated runtime-library swap.
-The [record](artifacts/gfx1151-2026-10-26-rocm10.json) retains binary, model,
-fixture and harness hashes, toolchains, temperatures, every measured request
-latency, all initial results and focused reverse-order repeats. Raw responses,
-logs and the orchestration scripts remain in the ignored
-`artifacts/rocm10-embedding-768/` directory on the measurement host.
+Binary, model, fixture and harness hashes, toolchains, temperatures, every
+measured request latency, all initial results and focused reverse-order repeats
+remain in the ignored `artifacts/rocm10-embedding-768/` directory on the
+measurement host, alongside raw responses, logs and orchestration scripts.
 
 ## Numerical qualification
 
@@ -118,8 +117,9 @@ The hosted build exposed a separate stale-object problem in ccache 4.13.6:
 Clang's bundled HIP preprocessor output produces a cache manifest with zero
 included headers. Adding a host function to an included HIP header still gives
 a direct cache hit; the reused object lacks the new symbol and fails to link.
-The [focused reproduction](artifacts/gfx1151-2026-10-26-hip-cache.json) records
-the source, flags and failing cached/successful uncached link controls.
+The focused reproduction under the ignored
+`artifacts/rocm10-embedding-768/ccache-repro/` directory retains the source,
+flags and failing cached/successful uncached link controls.
 
 The Nix package now leaves HIP compilation uncached, matching the existing
 Linux CMake policy, while retaining C/C++ caching. This prevents reuse of stale
