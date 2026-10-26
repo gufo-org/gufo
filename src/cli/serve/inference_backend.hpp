@@ -150,7 +150,7 @@ public:
                   const TokenCallback& on_token = {},
                   std::string_view client_id = "anonymous",
                   const std::vector<std::string>& stop_sequences = {},
-                  bool cache_prompt = true) override;
+                  bool cache_prompt = true, bool cache_persist = true) override;
 
   /// Framed chat conversation; returns the assistant reply.
   Result chat(const ChatRequest& request, std::size_t max_tokens,
@@ -170,7 +170,8 @@ public:
       const CancellationCheck& is_cancelled = {}, bool stream_output = false,
       bool ignore_eos = false, std::string_view client_id = "anonymous",
       const std::vector<std::string>& stop_sequences = {},
-      bool return_progress = false, bool cache_prompt = true) override;
+      bool return_progress = false, bool cache_prompt = true,
+      bool cache_persist = true) override;
 
   Result chat(const std::vector<tokenization::ChatMessage>& messages,
               std::size_t max_tokens, const sampling::SamplingConfig& sampling,

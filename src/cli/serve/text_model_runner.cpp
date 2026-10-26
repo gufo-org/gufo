@@ -2062,7 +2062,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse_prompt,
-    std::size_t cache_prefix_tokens, bool stop_at_eos) {
+    std::size_t cache_prefix_tokens, bool stop_at_eos, bool persist) {
   sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
@@ -2082,7 +2082,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   if (impl_->component_cache) {
     auto lease = impl_->component_cache->Acquire(
         prompt, is_cancelled, context, reuse_prompt, cache_prefix_tokens,
-        stop_at_eos);
+        stop_at_eos, persist);
     if (!lease)
       return {};
     Request request(std::make_unique<Request::Impl>(
@@ -2159,7 +2159,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
                            prefix.size());
       }
       if (snapshot) {
-        if (impl_->disk_store) {
+        if (impl_->disk_store && persist) {
           try {
             const auto prefix_identity =
                 PrefixInputIdentity(identity, input_prefixes, prefix.size());
@@ -2209,8 +2209,10 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       impl_->validated.runner->SetPromptContext(state, context);
     }
   }
+  // A request that must stay off disk may still restore from it above, but
+  // neither plans nor writes any disk checkpoint of its own.
   std::vector<std::size_t> boundaries;
-  if (reuse_prompt && impl_->disk_store != nullptr &&
+  if (reuse_prompt && persist && impl_->disk_store != nullptr &&
       !(is_cancelled && is_cancelled())) {
     try {
       boundaries = impl_->disk_store->SharedPrefixBoundaries(
@@ -2224,9 +2226,10 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     });
   }
   Request request(std::make_unique<Request::Impl>(
-      impl_->validated.runner, impl_->disk_store, std::move(lease),
-      std::move(prompt), std::move(boundaries), sampling_config,
-      std::move(context), cache_prefix_tokens, impl_->cache->capacity() > 1));
+      impl_->validated.runner, persist ? impl_->disk_store : nullptr,
+      std::move(lease), std::move(prompt), std::move(boundaries),
+      sampling_config, std::move(context), cache_prefix_tokens,
+      impl_->cache->capacity() > 1));
   request.impl_->cancelled = is_cancelled;
   // Prompts that diverge from a retained one after a long common prefix,
   // such as new conversations under one system prompt, publish a checkpoint

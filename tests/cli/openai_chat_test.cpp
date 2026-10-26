@@ -117,7 +117,7 @@ public:
   Result complete(std::string_view, std::size_t,
                   const gufo::sampling::SamplingConfig&,
                   const CancellationCheck&, const TokenCallback&,
-                  std::string_view, const std::vector<std::string>&,
+                  std::string_view, const std::vector<std::string>&, bool,
                   bool) override {
     return {};
   }
@@ -440,6 +440,38 @@ void TestCachePromptOption() {
         Expect(backend.last_request.cache_prompt ==
                    (std::string_view(value) != "false"),
                "cache_prompt reaches both buffered and streaming backends");
+      }
+    }
+  }
+}
+
+void TestCachePersistOption() {
+  for (bool stream : {false, true}) {
+    for (const auto value : {"true", "false", "null", "0", "\"false\""}) {
+      FakeBackend backend;
+      auto response = gufo::server::HandleOpenAiChat(
+          Request(
+              std::string(
+                  R"({"model":"test-model","messages":[{"role":"user","content":"hello"}],"stream":)") +
+              (stream ? "true" : "false") + R"(,"cache_persist":)" + value +
+              "}"),
+          backend);
+      const bool valid = std::string_view(value) == "true" ||
+                         std::string_view(value) == "false" ||
+                         std::string_view(value) == "null";
+      Expect(response.status == (valid ? 200 : 400),
+             "cache_persist accepts only JSON booleans or null");
+      if (valid) {
+        if (response.streaming_body)
+          response.streaming_body([](std::string_view) { return true; });
+        Expect(backend.last_request.cache_persist ==
+                   (std::string_view(value) != "false"),
+               "cache_persist reaches both buffered and streaming backends");
+        Expect(backend.last_request.cache_prompt,
+               "cache_persist leaves prompt reuse enabled");
+      } else {
+        Expect(response.body.find("invalid_cache_persist") != std::string::npos,
+               "a non-boolean cache_persist names its error code");
       }
     }
   }
@@ -6854,6 +6886,7 @@ int main() {
   TestToolMetadataAndFraming();
   TestResponsesLiveAndCancellation();
   TestCachePromptOption();
+  TestCachePersistOption();
   TestToolChoiceEnforcement();
   TestStreamingIsLive();
   TestLessThanProseStreamsBeforeCompletion();

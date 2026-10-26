@@ -77,6 +77,8 @@ public:
     Clock::time_point request_start{Clock::now()};
     std::shared_ptr<const TextPromptContext> prompt_context;
     bool cache_prompt{true};
+    /// False keeps this request's checkpoints out of the disk cache.
+    bool cache_persist{true};
     std::size_t cache_prefix_tokens{0};
     bool stop_at_eos{true};
     std::vector<std::string> stop_sequences;

@@ -1162,6 +1162,61 @@ void TestPersistentSnapshotRestoresAcrossPools() {
   miss.Invalidate();
 }
 
+std::size_t RegularFiles(const std::filesystem::path& directory) {
+  std::size_t files = 0;
+  for (const auto& entry :
+       std::filesystem::recursive_directory_iterator(directory))
+    files += entry.is_regular_file();
+  return files;
+}
+
+void TestUnpersistedRequestStaysOffDisk() {
+  TemporaryDirectory directory("gufo-runner-unpersisted");
+  const TextRunnerDiskCacheOptions disk_cache{
+      .directory = directory.path(),
+      .capacity_bytes = 4096,
+      .staging_capacity_bytes = 4096,
+  };
+  std::size_t empty = 0;
+  {
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<PersistentSnapshotRunner>(
+        stats, "artifact-A", sizeof(FakeSnapshot) - 1);
+    TextRunnerPool pool(runner, 1, disk_cache);
+    empty = RegularFiles(directory.path());
+    auto request = pool.Acquire({1, 2, 3}, {}, {}, {}, true, 0, true,
+                                /*persist=*/false);
+    Expect(request.Prefill(3).decode_ready, "unpersisted request prefills");
+    Expect(request.Commit().disk_queued_bytes == 0,
+           "cache_persist=false queues nothing for disk");
+  }
+  Expect(RegularFiles(directory.path()) == empty,
+         "cache_persist=false leaves no file in the disk cache");
+  {
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(
+        std::make_shared<PersistentSnapshotRunner>(stats, "artifact-A"), 1,
+        disk_cache);
+    auto cold = pool.Acquire({1, 2, 3, 4});
+    Expect(!cold.cache_disk_hit() && stats->snapshot_restores == 0,
+           "a restarted pool finds nothing of an unpersisted request");
+    Expect(cold.Prefill(4).decode_ready, "persisting request prefills");
+    Expect(cold.Commit().disk_queued_bytes > 0,
+           "the default still persists the same prompt");
+  }
+  Expect(RegularFiles(directory.path()) > empty,
+         "a default request writes to the disk cache");
+  auto stats = std::make_shared<FakeStats>();
+  TextRunnerPool pool(
+      std::make_shared<PersistentSnapshotRunner>(stats, "artifact-A"), 1,
+      disk_cache);
+  auto reader = pool.Acquire({1, 2, 3, 4, 5}, {}, {}, {}, true, 0, true,
+                             /*persist=*/false);
+  Expect(reader.cache_disk_hit() && reader.cached_prompt_tokens() == 4,
+         "cache_persist=false still restores existing disk checkpoints");
+  reader.Invalidate();
+}
+
 void TestPromptReuseCanBeDisabledPerRequest() {
   auto stats = std::make_shared<FakeStats>();
   TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
@@ -2636,6 +2691,7 @@ int main() {
   TestCgroupAvailableCountsReclaimableCache();
   TestSnapshotStartupReportsSelectedLimits();
   TestPersistentSnapshotRestoresAcrossPools();
+  TestUnpersistedRequestStaysOffDisk();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
   TestRamLearnsDivergenceBoundaries();
   TestLearnedBoundarySurvivesExactRepublication();

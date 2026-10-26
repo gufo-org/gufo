@@ -103,12 +103,13 @@ public:
       const CancellationCheck& cancellation, bool stream, bool ignore_eos,
       std::string_view client_id,
       const std::vector<std::string>& stop_sequences, bool return_progress,
-      bool cache_prompt) override {
+      bool cache_prompt, bool cache_persist) override {
     last_ignore_eos = ignore_eos;
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_complete(
             prompt, max_tokens, sampling, cancellation, stream, false,
-            client_id, stop_sequences, return_progress, cache_prompt),
+            client_id, stop_sequences, return_progress, cache_prompt,
+            cache_persist),
         progress, admit.load());
   }
   std::shared_ptr<GenerationRequest> start_chat(
@@ -157,9 +158,11 @@ public:
                   const CancellationCheck& cancel, const TokenCallback& token,
                   std::string_view client_id = "anonymous",
                   const std::vector<std::string>& stop_sequences = {},
-                  bool cache_prompt = true) override {
+                  bool cache_prompt = true,
+                  bool cache_persist = true) override {
     ++calls;
     last_cache_prompt = cache_prompt;
+    last_cache_persist = cache_persist;
     if (failure == 1)
       throw std::length_error("context exceeded");
     if (failure == 2)
@@ -252,6 +255,7 @@ public:
   std::atomic<int> calls{0};
   std::atomic<bool> last_ignore_eos{false};
   std::atomic<bool> last_cache_prompt{true};
+  std::atomic<bool> last_cache_persist{true};
   std::vector<PromptProgress> progress;
   // Report a scheduler admission before generation, as the HIP backend does.
   std::atomic<bool> admit{false};

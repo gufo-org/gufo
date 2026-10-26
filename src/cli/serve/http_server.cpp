@@ -902,6 +902,13 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
       return InvalidCompatibilityRequest("'cache_prompt' must be a boolean");
     cache_prompt = value->as_bool();
   }
+  bool cache_persist = true;
+  if (const auto* value = body.find("cache_persist");
+      value != nullptr && !value->is_null()) {
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'cache_persist' must be a boolean");
+    cache_persist = value->as_bool();
+  }
   std::vector<std::string> stop_sequences;
   if (const auto error = ParseStopSequences(
           body.find("stop"), StopSequenceFormat::kOpenAi, &stop_sequences))
@@ -917,9 +924,10 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                "invalid_request_error", "missing_prompt");
   }
 
-  auto generation = b.start_complete(
-      prompt, max_tokens, sampling_config, req.is_cancelled, stream, ignore_eos,
-      req.client_id, stop_sequences, return_progress, cache_prompt);
+  auto generation =
+      b.start_complete(prompt, max_tokens, sampling_config, req.is_cancelled,
+                       stream, ignore_eos, req.client_id, stop_sequences,
+                       return_progress, cache_prompt, cache_persist);
   const std::string id = "cmpl-" + RandomId();
   const long long created = Now();
   const std::string model = RequestedModel(body, b);
@@ -1364,10 +1372,17 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
       return InvalidCompatibilityRequest("'cache_prompt' must be a boolean");
     cache_prompt = value->as_bool();
   }
+  bool cache_persist = true;
+  if (const auto* value = body.find("cache_persist");
+      value != nullptr && !value->is_null()) {
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'cache_persist' must be a boolean");
+    cache_persist = value->as_bool();
+  }
 
   const auto res =
       b.complete(prompt, max_tokens, sampling_config, req.is_cancelled, {},
-                 req.client_id, stop_sequences, cache_prompt);
+                 req.client_id, stop_sequences, cache_prompt, cache_persist);
 
   json::Value resp = json::Value::object();
   resp["content"] = core::Utf8Decoder{}.Push(res.text, true);

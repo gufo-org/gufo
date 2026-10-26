@@ -902,6 +902,14 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     }
     output->chat.cache_prompt = cache_prompt->as_bool();
   }
+  if (const auto* cache_persist = body.find("cache_persist");
+      cache_persist != nullptr && !cache_persist->is_null()) {
+    if (!cache_persist->is_bool()) {
+      return Error(400, "Bad Request", "'cache_persist' must be a boolean",
+                   "invalid_cache_persist");
+    }
+    output->chat.cache_persist = cache_persist->as_bool();
+  }
   if (const auto error =
           ParseStopSequences(body.find("stop"), StopSequenceFormat::kOpenAi,
                              &output->chat.stop_sequences)) {
@@ -3372,6 +3380,13 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
       return Error(400, "Bad Request", "'cache_prompt' must be a boolean",
                    "invalid_cache_prompt");
     chat->cache_prompt = cache->as_bool();
+  }
+  if (const auto* persist = body.find("cache_persist");
+      persist != nullptr && !persist->is_null()) {
+    if (!persist->is_bool())
+      return Error(400, "Bad Request", "'cache_persist' must be a boolean",
+                   "invalid_cache_persist");
+    chat->cache_persist = persist->as_bool();
   }
   if (const auto* reasoning = body.find("reasoning");
       reasoning && !reasoning->is_null()) {

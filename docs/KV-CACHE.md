@@ -573,6 +573,12 @@ versus not, which reuse identically and interoperate within one conversation.
 `/v1/completions` or `/completion` bypasses lookup for a single request. The
 result can still populate the cache. `null` keeps the default, `true`.
 
+`cache_persist: false` on the same endpoints keeps one request's checkpoints
+in RAM only: nothing it captures is written or staged for the disk tier, so
+they are lost on eviction or restart. It still reads disk checkpoints, and it
+does not stop a later request without the flag from persisting the same
+prefix. `null` keeps the default, `true`.
+
 ## Observing it
 
 | Log line | Meaning |
