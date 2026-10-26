@@ -549,7 +549,9 @@ jobs:
                   if not (destination / name).is_file():
                       sys.exit(f"{key}: missing {name}")
               size = sum(p.stat().st_size for p in destination.rglob("*") if p.is_file())
-              print(f"{key}: {size / 2**30:.2f} GiB in {seconds:.0f} s, {size / 2**20 / seconds:.1f} MiB/s", flush=True)
+              # A cached snapshot can finish within one Windows clock tick.
+              rate = f"{size / 2**20 / seconds:.1f} MiB/s" if seconds > 0 else "already cached"
+              print(f"{key}: {size / 2**30:.2f} GiB in {seconds:.0f} s, {rate}", flush=True)
               paths[key] = str(destination)
           (Path(os.environ["RUNNER_TEMP"]) / "functional-assets.json").write_text(json.dumps(paths))
           '@
