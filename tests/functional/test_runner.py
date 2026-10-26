@@ -29,7 +29,6 @@ from messages_count_tokens import assert_count_response, assert_prompt_count
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
-from cache_instructions import check_cache_instructions
 from cache_bridge import check_cache_bridge
 from cache_compaction import check_cache_compaction, ARCHIVE_LINE
 from cache_disk_spacing import check_disk_spacing
@@ -824,52 +823,6 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_shared_prefix_rejects_grid_only_reuse(self):
         with self.assertRaisesRegex(AssertionError, "of the shared system prompt"):
             self.run_cache_shared_prefix(regress=True)
-
-    def run_cache_instructions(self, regress=False):
-        import re
-        requests = []
-
-        def tokens(messages):
-            return sum(len(m["content"]) // 4 + 10 for m in messages)
-
-        def chat_result(client, body):
-            # Model-independent server model: the first request keeps a
-            # checkpoint where the instructions end; a regression restores
-            # only the nearest grid checkpoint.
-            requests.append(json.loads(json.dumps(body)))
-            messages = body["messages"]
-            total = tokens(messages)
-            cached = 0
-            if body.get("extra_body", {}).get("cache_prompt") is not False and len(requests) > 1:
-                cached = tokens(messages[:1])
-                if regress:
-                    cached = cached // 2048 * 2048
-            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
-            return {"text": code[1] if code else "Z", "reasoning": "", "tools": [],
-                    "finish": "stop",
-                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
-                              "completion_tokens": 2,
-                              "gufo": {"prefill_tokens": total - cached}}}
-
-        checks = {}
-        with contextlib.redirect_stderr(io.StringIO()):
-            check_cache_instructions(None, "fixture", checks, chat_result)
-        return requests, checks
-
-    def test_cache_instructions_runs_two_questions_then_cold_controls(self):
-        requests, checks = self.run_cache_instructions()
-        self.assertEqual(list(checks), ["instructions_first", "instructions_second",
-                                        "instructions_stem", "instructions_first_cold",
-                                        "instructions_second_cold"])
-        systems = {body["messages"][0]["content"] for body in requests}
-        self.assertEqual(len(systems), 1)
-        self.assertTrue(systems.pop().startswith("cache_instructions\n"))
-        self.assertEqual([("extra_body" in body) for body in requests],
-                         [False, False, True, True, True])
-
-    def test_cache_instructions_rejects_grid_only_reuse(self):
-        with self.assertRaisesRegex(AssertionError, "of the instructions"):
-            self.run_cache_instructions(regress=True)
 
     def run_cache_compaction(self, regression=None):
         requests, checks, seen = [], {}, set()

@@ -1431,78 +1431,6 @@ void TestHistoryEditsRestoreIntermediateCheckpoints() {
   past_tail.Invalidate();
 }
 
-/// A new question over long instructions diverges from the previous request
-/// right after them. The instructions boundary keeps a RAM checkpoint there,
-/// while the stable boundary still serves an unchanged retry.
-void TestInstructionsCheckpointServesANewQuestion() {
-  class LongSnapshotRunner final : public SnapshotRunner {
-  public:
-    using SnapshotRunner::SnapshotRunner;
-    TextRunnerDescriptor Descriptor() const override {
-      auto descriptor = SnapshotRunner::Descriptor();
-      descriptor.max_context = 32768;
-      return descriptor;
-    }
-  };
-  const auto ask = [](std::size_t instructions, std::size_t question,
-                      TextRunnerToken token) {
-    std::vector<TextRunnerToken> prompt(instructions, 1);
-    prompt.resize(instructions + question, token);
-    return prompt;
-  };
-  const auto run = [](TextRunnerPool& pool,
-                      const std::vector<TextRunnerToken>& prompt,
-                      std::size_t instructions) {
-    auto request = pool.Acquire(prompt, {}, {}, {}, true, prompt.size() - 10,
-                                true, instructions);
-    const auto cached = request.cached_prompt_tokens();
-    while (!request.prefill_complete())
-      (void)request.Prefill(32768);
-    request.Commit();
-    return cached;
-  };
-
-  // A short question too: captures after the instructions hold the question.
-  for (const auto [instructions, question] :
-       {std::pair<bool, std::size_t>{false, 200},
-        {true, 200},
-        {false, 15},
-        {true, 15}}) {
-    auto stats = std::make_shared<FakeStats>();
-    TextRunnerPool pool(
-        std::make_shared<LongSnapshotRunner>(stats, 64, 256, 4096), 1);
-    const auto first = ask(5000, question, 2);
-    (void)run(pool, first, instructions ? 5000 : 0);
-    const auto captures = stats->snapshot_captures;
-    Expect(run(pool, first, instructions ? 5000 : 0) == first.size() &&
-               stats->snapshot_captures == captures,
-           "an unchanged retry still reuses the complete prompt");
-    const auto second = ask(5000, question, 3);
-    Expect(run(pool, second, instructions ? 5000 : 0) ==
-               (instructions ? 5000u : 4096u),
-           instructions
-               ? "a new question restores all of the instructions"
-               : "without the boundary a new question restores a grid point");
-  }
-
-  // Short instructions, or a grid checkpoint just before their end, keep no
-  // extra copy: prefilling the gap costs less.
-  for (const auto [instructions, question] :
-       {std::pair<std::size_t, std::size_t>{1500, 200}, {4100, 200}}) {
-    std::size_t captures[2]{};
-    for (const bool boundary : {false, true}) {
-      auto stats = std::make_shared<FakeStats>();
-      TextRunnerPool pool(
-          std::make_shared<LongSnapshotRunner>(stats, 64, 256, 4096), 1);
-      (void)run(pool, ask(instructions, question, 2),
-                boundary ? instructions : 0);
-      captures[boundary] = stats->snapshot_captures;
-    }
-    Expect(captures[0] == captures[1],
-           "a boundary that saves little adds no checkpoint");
-  }
-}
-
 /// A client that rewrites the assistant turn, as one that drops reasoning
 /// does, diverges after the previous turn's stable boundary. Each warm turn
 /// must therefore checkpoint its own boundary: if only the reused frontier is
@@ -2586,7 +2514,6 @@ int main() {
   TestWarmChatCheckpointsStopAtTheStableBoundary();
   TestWarmHitAdvancesTheStableCheckpoint();
   TestHistoryEditsRestoreIntermediateCheckpoints();
-  TestInstructionsCheckpointServesANewQuestion();
   TestChatFallbackSurvivesSnapshotBudgetPressure();
   TestFullChatCheckpointRestoresWithoutSuffixPrefill();
   TestDiskOnlyCaptureReservesBudgetBeforeCommit();

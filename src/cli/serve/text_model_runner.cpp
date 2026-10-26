@@ -962,39 +962,6 @@ struct TextRunnerPool::Request::Impl {
     prompt_snapshot_attempted = false;
   }
 
-  // Instructions followed by one question are often kept by the next request
-  // while the question changes, so it diverges from this prompt's stable and
-  // complete checkpoints right after them. Plan a RAM checkpoint there, as a
-  // history capture like a grid point: it is never persisted, so it does not
-  // take the disk spacing allowance of the complete turn, and it gives way
-  // first under memory pressure. Like a grid point it must add a whole
-  // interval to the reused prefix. As for a shared checkpoint, a planned
-  // capture just before it makes prefilling the gap cheaper than another
-  // copy of the state. Captures after it hold the question, which the next
-  // request replaces, so they never make it redundant, however short the
-  // question is.
-  void PlanInstructionsCheckpoint(std::size_t position) {
-    constexpr std::size_t interval = 2048;
-    constexpr auto slack = TextRunnerPool::Request::kSharedCheckpointSlack;
-    if (position <= prefill_offset || position - prefill_offset < interval ||
-        position >= prompt.size())
-      return;
-    const auto capabilities = runner->Descriptor().capabilities;
-    if (!capabilities.incremental_prefill || !capabilities.prefix_reuse ||
-        !capabilities.snapshot || !capabilities.fork)
-      return;
-    const auto near = [&](std::size_t planned) {
-      return planned != 0 && planned <= position && position - planned <= slack;
-    };
-    if (near(snapshot_tokens.size()) || near(stable_prefix_position) ||
-        std::ranges::any_of(checkpoints, near) ||
-        lease.HasSnapshotFor(
-            std::span<const TextRunnerToken>(prompt).first(position)))
-      return;
-    checkpoints.insert(std::ranges::upper_bound(checkpoints, position),
-                       position);
-  }
-
   void StartPromptSnapshot(bool wait) noexcept {
     if (prompt_snapshot_attempted || prefill_offset != snapshot_tokens.size()) {
       return;
@@ -2069,8 +2036,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse_prompt,
-    std::size_t cache_prefix_tokens, bool stop_at_eos,
-    std::size_t instructions_tokens) {
+    std::size_t cache_prefix_tokens, bool stop_at_eos) {
   sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
@@ -2098,7 +2064,6 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
         std::move(prompt), std::vector<std::size_t>{}, sampling_config,
         std::move(context), cache_prefix_tokens, capacity() > 1));
     request.impl_->cancelled = is_cancelled;
-    request.impl_->PlanInstructionsCheckpoint(instructions_tokens);
     if (reuse_prompt) {
       const auto common = impl_->component_cache->CachedPrefixTokens(
           request.prompt(), request.impl_->context.get(), true);
@@ -2237,7 +2202,6 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       std::move(prompt), std::move(boundaries), sampling_config,
       std::move(context), cache_prefix_tokens, impl_->cache->capacity() > 1));
   request.impl_->cancelled = is_cancelled;
-  request.impl_->PlanInstructionsCheckpoint(instructions_tokens);
   // Prompts that diverge from a retained one after a long common prefix,
   // such as new conversations under one system prompt, publish a checkpoint
   // at the divergence point. Later prompts sharing it restore it exactly

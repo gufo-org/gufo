@@ -39,7 +39,6 @@ from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_hist
 from cache_edits import check_cache_edits
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
-from cache_instructions import check_cache_instructions
 from cache_bridge import check_cache_bridge
 from cache_compaction import check_cache_compaction
 from cache_workloads import check_cache_transforms, check_cache_pressure
@@ -2758,7 +2757,7 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
 SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
               "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-              "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-instructions",
+              "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
               "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection")
 
 
@@ -2931,8 +2930,6 @@ def main():
             "cache-concurrency": lambda: check_cache_concurrency(
                 client, args.model, checks, chat_result, args.concurrency),
             "cache-shared-prefix": lambda: check_cache_shared_prefix(
-                client, args.model, checks, chat_result),
-            "cache-instructions": lambda: check_cache_instructions(
                 client, args.model, checks, chat_result),
             "cache-bridge": lambda: check_cache_bridge(
                 client, args.model, checks, chat_result, args.snapshot_capacity_bytes),

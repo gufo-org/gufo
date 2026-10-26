@@ -603,13 +603,11 @@ std::optional<std::string> QwenChatTemplate::Render(
     std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
     const ChatTemplateOptions& options, std::string* error_msg,
     std::vector<std::size_t>* image_offsets, std::size_t* stable_prefix_bytes,
-    std::vector<ContentSpan>* content_spans, std::size_t* instructions_bytes) {
+    std::vector<ContentSpan>* content_spans) {
   if (image_offsets != nullptr)
     image_offsets->clear();
   if (content_spans != nullptr)
     content_spans->clear();
-  if (instructions_bytes != nullptr)
-    *instructions_bytes = 0;
   if (messages.empty()) {
     if (error_msg != nullptr) {
       *error_msg = "No messages provided";
@@ -757,20 +755,8 @@ std::optional<std::string> QwenChatTemplate::Render(
       messages.back().images.empty() && messages.size() >= 2 &&
       (messages[messages.size() - 2].role == ChatRole::kTool ||
        messages[messages.size() - 2].role == ChatRole::kUser);
-  // A long system or developer prompt (instructions, a document, a schema)
-  // followed by one question is often kept by the next request while the
-  // question changes. Report where the instructions end so the runner can
-  // keep an extra checkpoint there. The stable boundary stays at the end of
-  // the question: an unchanged retry and the conversation's next turn both
-  // extend it, while the complete prompt ends in assistant framing.
-  const bool after_instructions =
-      last_user_index + 1 == messages.size() &&
-      messages.back().images.empty() && messages.size() >= 2 &&
-      (messages[messages.size() - 2].role == ChatRole::kSystem ||
-       messages[messages.size() - 2].role == ChatRole::kDeveloper);
   bool seen_assistant = false;
   std::optional<std::size_t> final_user_start;
-  std::optional<std::size_t> instructions_end;
   for (; message_index < messages.size(); ++message_index) {
     const auto& msg = messages[message_index];
     const bool tool_result = msg.role == ChatRole::kTool;
@@ -804,8 +790,6 @@ std::optional<std::string> QwenChatTemplate::Render(
     else if (final_user_turn && seen_assistant &&
              message_index == last_user_index)
       final_user_start = output.size();
-    if (after_instructions && message_index == last_user_index)
-      instructions_end = output.size();
     const auto role_name = ToString(msg.role);
     output.append(kImStart);
     output.append(role_name);
@@ -841,8 +825,6 @@ std::optional<std::string> QwenChatTemplate::Render(
   if (stable_prefix_bytes != nullptr)
     *stable_prefix_bytes = std::min(mutable_reasoning.value_or(output.size()),
                                     final_user_start.value_or(output.size()));
-  if (instructions_bytes != nullptr)
-    *instructions_bytes = instructions_end.value_or(0);
   if (options.add_generation_prompt)
     output.append(GenerationPrompt(options.enable_thinking));
 

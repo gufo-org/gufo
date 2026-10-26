@@ -45,9 +45,6 @@ struct TextPreparedPrompt {
   std::shared_ptr<const TextPromptContext> context;
   /// Snapshot before mutable assistant framing. Zero uses the complete prompt.
   std::size_t cache_prefix_tokens{0};
-  /// End of instructions that the next request may keep with a new question;
-  /// the runner may keep an extra RAM checkpoint there. Zero adds none.
-  std::size_t instructions_tokens{0};
 };
 
 struct TextRunnerRamCacheOptions {
@@ -649,7 +646,7 @@ public:
       const CancellationCheck& is_cancelled = {},
       std::shared_ptr<const TextPromptContext> context = {},
       bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
-      bool stop_at_eos = true, std::size_t instructions_tokens = 0);
+      bool stop_at_eos = true);
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
   /// Longest RAM-retained prefix of prompt that Acquire could reuse, without
