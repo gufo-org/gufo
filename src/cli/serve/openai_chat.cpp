@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -468,9 +469,10 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
   return true;
 }
 
-bool ParseTools(const json::Value* tools,
-                std::vector<tokenization::ChatTool>* output, std::string* error,
-                bool allow_non_function = false) {
+bool ParseToolList(const json::Value* tools,
+                   std::vector<tokenization::ChatTool>* output,
+                   std::unordered_set<std::string>* names, std::string* error,
+                   bool allow_non_function) {
   if (tools == nullptr || tools->is_null()) {
     return true;
   }
@@ -493,7 +495,7 @@ bool ParseTools(const json::Value* tools,
         *error = "namespace tools require a tools array";
         return false;
       }
-      if (!ParseTools(nested, output, error, allow_non_function))
+      if (!ParseToolList(nested, output, names, error, allow_non_function))
         return false;
       continue;
     }
@@ -532,9 +534,9 @@ bool ParseTools(const json::Value* tools,
       *error = std::string(kToolNameRule);
       return false;
     }
-    if (std::ranges::any_of(*output, [&](const auto& previous) {
-          return previous.name == tool.name;
-        })) {
+    // A set keeps the check linear: only the request body size bounds the
+    // number of functions.
+    if (!names->insert(tool.name).second) {
       *error = "function names must be unique";
       return false;
     }
@@ -576,15 +578,18 @@ bool ParseTools(const json::Value* tools,
     definition["type"] = "function";
     definition["function"] = std::move(function_obj);
     tool.definition_json = definition.dump();
-    // Counted per flattened function, so namespace recursion cannot exceed
-    // the cap by ordering hosted-adjacent entries around a full namespace.
-    if (output->size() >= 128) {
-      *error = "'tools' supports at most 128 functions";
-      return false;
-    }
     output->push_back(std::move(tool));
   }
   return true;
+}
+
+bool ParseTools(const json::Value* tools,
+                std::vector<tokenization::ChatTool>* output, std::string* error,
+                bool allow_non_function = false) {
+  std::unordered_set<std::string> names;
+  for (const auto& tool : *output)
+    names.insert(tool.name);
+  return ParseToolList(tools, output, &names, error, allow_non_function);
 }
 
 bool ParseToolChoice(const json::Value* value, ParsedChatRequest* request,
