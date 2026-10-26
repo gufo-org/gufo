@@ -60,9 +60,18 @@ if (ENGINE_ENABLE_HIP)
     RUN_SERIAL TRUE)
 endif()
 
+add_executable(embedding_gemma2_batch_scheduler_test batch_scheduler_test.cpp)
+target_link_libraries(embedding_gemma2_batch_scheduler_test PRIVATE
+  gufo_embedding_gemma2)
+add_test(NAME embedding_gemma2_batch_scheduler_test
+  COMMAND embedding_gemma2_batch_scheduler_test)
+set_tests_properties(embedding_gemma2_batch_scheduler_test PROPERTIES
+  LABELS "cpu;models;embedding-gemma2;scheduler"
+  TIMEOUT 120)
+
 add_executable(embedding_gemma2_tokenizer_test tokenizer_test.cpp)
 target_link_libraries(embedding_gemma2_tokenizer_test PRIVATE
-  gufo_embedding_gemma2)
+  gufo_embedding_gemma2 gufo_platform)
 target_compile_definitions(embedding_gemma2_tokenizer_test PRIVATE
   GUFO_EMBEDDING_GEMMA2_TOKENIZER_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/tokenizer_golden.json")
 add_test(NAME embedding_gemma2_tokenizer_test
@@ -78,6 +87,8 @@ add_executable(embedding_gemma2_embeddings_api_test
   ${PROJECT_SOURCE_DIR}/src/cli/serve/embedding_service.cpp)
 target_link_libraries(embedding_gemma2_embeddings_api_test PRIVATE
   gufo_embedding_gemma2 gufo_logging gufo_core)
+target_compile_definitions(embedding_gemma2_embeddings_api_test PRIVATE
+  GUFO_EMBEDDING_GEMMA2_NATIVE_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/llama_cpp_native_embeddings.json")
 add_test(NAME embedding_gemma2_embeddings_api_test
   COMMAND embedding_gemma2_embeddings_api_test)
 set_tests_properties(embedding_gemma2_embeddings_api_test PROPERTIES
@@ -107,3 +118,35 @@ if (ENGINE_ENABLE_HIP)
     SKIP_RETURN_CODE 77
     RUN_SERIAL TRUE)
 endif()
+
+add_executable(embedding_gemma2_audio_processor_test audio_processor_test.cpp)
+target_link_libraries(embedding_gemma2_audio_processor_test PRIVATE
+  gufo_embedding_gemma2)
+target_compile_definitions(embedding_gemma2_audio_processor_test PRIVATE
+  GUFO_EMBEDDING_GEMMA2_AUDIO_FEATURES_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/audio_features_golden.json")
+add_test(NAME embedding_gemma2_audio_processor_test
+  COMMAND embedding_gemma2_audio_processor_test)
+set_tests_properties(embedding_gemma2_audio_processor_test PROPERTIES
+  LABELS "cpu;models;embedding-gemma2;audio;quality")
+
+if (ENGINE_ENABLE_HIP)
+  add_executable(embedding_gemma2_audio_golden_hip_test audio_golden_hip_test.cpp)
+  target_link_libraries(embedding_gemma2_audio_golden_hip_test PRIVATE
+    gufo_embedding_gemma2 hip::host)
+  target_compile_definitions(embedding_gemma2_audio_golden_hip_test PRIVATE
+    GUFO_EMBEDDING_GEMMA2_SPEECH_WAV="${PROJECT_SOURCE_DIR}/tests/functional/fixtures/audio/clear-english-voice.wav"
+    GUFO_EMBEDDING_GEMMA2_AUDIO_EMBEDDING_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/audio_embedding_golden.json")
+  add_test(NAME embedding_gemma2_audio_golden_hip_test
+    COMMAND embedding_gemma2_audio_golden_hip_test)
+  set_tests_properties(embedding_gemma2_audio_golden_hip_test PROPERTIES
+    LABELS "gpu;models;embedding-gemma2;audio;quality;external-model"
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+endif()
+
+add_executable(embedding_gemma2_audio_decoder_test audio_decoder_test.cpp)
+target_link_libraries(embedding_gemma2_audio_decoder_test PRIVATE gufo_embedding_gemma2)
+target_compile_definitions(embedding_gemma2_audio_decoder_test PRIVATE
+  GUFO_EMBEDDING_GEMMA2_AUDIO_DECODER_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/audio_decoder_golden.json")
+add_test(NAME embedding_gemma2_audio_decoder_test COMMAND embedding_gemma2_audio_decoder_test)
+set_tests_properties(embedding_gemma2_audio_decoder_test PROPERTIES
+  LABELS "cpu;models;embedding-gemma2;audio;quality")

@@ -172,7 +172,9 @@ void IdleAndZeroIdle() {
     f.Verify();
     const auto metrics = f.slot.Metrics();
     assert(metrics.reassignments == before.reassignments + 1);
-    assert(metrics.residual_wait_ns > before.residual_wait_ns);
+    // A coarse steady_clock (QueryPerformanceCounter on Windows, typically
+    // 100 ns ticks) can measure a fast reassignment as 0 ns.
+    assert(metrics.residual_wait_ns >= before.residual_wait_ns);
     assert(metrics.idle_bytes == (idle ? sizeof(f.tokens) : 0));
     assert(metrics.foreground_bytes == (idle ? 0 : sizeof(f.tokens)));
     assert(f.acquired == 3);  // Fresh stream lease for every bounded piece.

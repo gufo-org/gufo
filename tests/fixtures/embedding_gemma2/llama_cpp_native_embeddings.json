@@ -1,0 +1,163 @@
+{
+ "description": "llama.cpp's non-OpenAI POST /embeddings (#764). 'llama_cpp' cases were captured from llama-server at the pinned commit with --embeddings on CPU; each response is reduced to its skeleton (array lengths, member names, and float-vector widths). 'frigate' holds the request bodies Frigate's llama.cpp provider builds, copied from its source.",
+ "llama_cpp": {
+  "commit": "9125a2ebe8e5a38f0f4232170c134a29ed730b66",
+  "model": "ggml-org/embeddinggemma-300M-GGUF embeddinggemma-300M-Q8_0.gguf",
+  "cases": [
+   {
+    "path": "/embeddings",
+    "request": {
+     "model": "m",
+     "content": [
+      {
+       "prompt_string": "a red car"
+      },
+      {
+       "prompt_string": "a dog"
+      }
+     ]
+    },
+    "status": 200,
+    "response": {
+     "list": 2,
+     "item": {
+      "index": 0,
+      "embedding": {
+       "list": 1,
+       "item": {
+        "floats": 768
+       }
+      }
+     }
+    }
+   },
+   {
+    "path": "/embeddings",
+    "request": {
+     "input": "hello"
+    },
+    "status": 200,
+    "response": {
+     "list": 1,
+     "item": {
+      "index": 0,
+      "embedding": {
+       "list": 1,
+       "item": {
+        "floats": 768
+       }
+      }
+     }
+    }
+   },
+   {
+    "path": "/embeddings",
+    "request": {
+     "content": "hello"
+    },
+    "status": 200,
+    "response": {
+     "list": 1,
+     "item": {
+      "index": 0,
+      "embedding": {
+       "list": 1,
+       "item": {
+        "floats": 768
+       }
+      }
+     }
+    }
+   },
+   {
+    "path": "/embeddings",
+    "request": {
+     "input": [
+      "hello",
+      "world"
+     ],
+     "content": "ignored"
+    },
+    "status": 200,
+    "response": {
+     "list": 2,
+     "item": {
+      "index": 0,
+      "embedding": {
+       "list": 1,
+       "item": {
+        "floats": 768
+       }
+      }
+     }
+    }
+   },
+   {
+    "path": "/embedding",
+    "request": {
+     "content": "hello"
+    },
+    "status": 200,
+    "response": {
+     "list": 1,
+     "item": {
+      "index": 0,
+      "embedding": {
+       "list": 1,
+       "item": {
+        "floats": 768
+       }
+      }
+     }
+    }
+   },
+   {
+    "path": "/embeddings",
+    "request": {
+     "content": "hello",
+     "encoding_format": "base64"
+    },
+    "status": 200,
+    "response": {
+     "list": 1,
+     "item": {
+      "index": 0,
+      "embedding": {
+       "list": 1,
+       "item": {
+        "floats": 768
+       }
+      }
+     }
+    }
+   }
+  ]
+ },
+ "frigate": {
+  "version": "v0.18.2",
+  "source": "frigate/genai/plugins/llama_cpp.py LlamaCppClient.embed",
+  "path": "/embeddings",
+  "text": {
+   "model": "embeddinggemma-2",
+   "content": [
+    {
+     "prompt_string": "a red car"
+    },
+    {
+     "prompt_string": "a dog"
+    }
+   ]
+  },
+  "image": {
+   "model": "embeddinggemma-2",
+   "content": [
+    {
+     "prompt_string": "<__media__>\n",
+     "multimodal_data": [
+      "/9j/4AAQSkZJRg=="
+     ]
+    }
+   ]
+  }
+ }
+}

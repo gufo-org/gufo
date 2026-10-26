@@ -28,7 +28,7 @@ from metrics import CaseComplete, Recorder
 from tool_reasoning import check_reasoning_separator, check_tool_reasoning, response_result
 from tool_streaming import check_tool_streaming
 from discovery import check_discovery
-from image_inputs import check_image_count, check_image_inputs
+from image_inputs import check_image_count, check_image_detail, check_image_inputs
 from tool_images import check_tool_images
 from tool_choice import check_tool_choice_cache
 from tool_parameter_order import check_tool_parameter_order
@@ -578,7 +578,27 @@ def check_sampling_ranges(client, model, checks):
         ("repeat_penalty", 0), ("repeat_last_n", -1), ("seed", -2),
         ("presence_penalty", 2.1), ("frequency_penalty", -2.1),
         ("presence_penalty", 2.00000001), ("frequency_penalty", -2.00000001),
-        ("draft_temperature", .7), ("typical_p", .9),
+        ("draft_temperature", .7), ("typical_p", .9), ("mirostat", 2),
+        ("dry_sequence_breakers", []),
+    )
+
+    def text_of(response):
+        if "choices" not in response:
+            return [(item.get("type"), [part.get("text") for part in
+                                        (item.get("content") or []) + (item.get("summary") or [])])
+                    for item in response["output"]]
+        choice = response["choices"][0]
+        if "message" not in choice:
+            return choice["text"]
+        return choice["message"].get("content"), choice["message"].get("reasoning_content")
+
+    # Open WebUI 0.12 always sends its Mirostat settings; neutral llama.cpp
+    # sampler fields must leave greedy output unchanged (#720).
+    neutral = (
+        {"mirostat": 0, "mirostat_eta": .1, "mirostat_tau": 5.},
+        {"mirostat": 0, "mirostat_eta": 0, "mirostat_tau": 0},
+        {"typical_p": 1., "tfs_z": .5, "top_n_sigma": -1, "dynatemp_range": 0,
+         "xtc_probability": 0, "dry_multiplier": 0},
     )
     for endpoint, (create, body) in endpoints.items():
         for streaming in (False, True):
@@ -599,6 +619,13 @@ def check_sampling_ranges(client, model, checks):
             checks[f"range_{endpoint}_valid_{top_p}"] = response.to_dict()
         response = create(**body, temperature=.7, top_p=0, extra_body={"seed": 42})
         checks[f"range_{endpoint}_sampled_zero"] = response.to_dict()
+        tokens = {"max_output_tokens" if endpoint == "responses" else
+                  "max_completion_tokens" if endpoint == "chat" else "max_tokens": 16}
+        expected = create(**{**body, **tokens}, temperature=0).to_dict()
+        for index, fields in enumerate(neutral):
+            actual = create(**{**body, **tokens}, temperature=0, extra_body=fields).to_dict()
+            assert text_of(actual) == text_of(expected), (endpoint, fields)
+            checks[f"range_{endpoint}_neutral_{index}"] = {"fields": fields, "text": text_of(actual)}
 
 
 def check_batches(client, model, checks, width, vision=False, speculative="off"):
@@ -2727,7 +2754,7 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
     assert proposed > 0 if speculative != "off" else proposed == 0, final
 
 
-SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
+SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
               "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
@@ -2770,8 +2797,8 @@ def main():
     args = parser.parse_args()
     if args.suite in ("discovery", "messages-image-counts", "all") and args.expected_input_modalities is None:
         parser.error("discovery and messages-image-counts require --expected-input-modalities text or text,image")
-    if args.suite in ("image-inputs", "image-count", "tool-images") and not args.vision:
-        parser.error("image-inputs, image-count and tool-images require --vision and a loaded projector")
+    if args.suite in ("image-inputs", "image-count", "tool-images", "image-detail") and not args.vision:
+        parser.error("image-inputs, image-count, tool-images, and image-detail require --vision and a loaded projector")
     if args.suite in ("all", "sampling-defaults") and not args.sampling_preset:
         parser.error("--sampling-preset is required for all/sampling-defaults")
     if not isinstance(args.sampling_overrides, dict):
@@ -2833,6 +2860,7 @@ def main():
             "tool-images": lambda: check_tool_images(
                 client, args.model, checks, image_content, chat_result, response_result,
                 args.server_log),
+            "image-detail": lambda: check_image_detail(client, args.model, checks, chat_result),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
             "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
@@ -2918,7 +2946,7 @@ def main():
                 client, args.model, checks, chat_result),
         }
         selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
-                     and (name not in ("image-inputs", "image-count", "tool-images") or args.vision)]
+                     and (name not in ("image-inputs", "image-count", "tool-images", "image-detail") or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
         for name in selected:

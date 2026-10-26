@@ -1,0 +1,582 @@
+name: Windows
+
+# Windows x86-64 is a development build target (AGENTS.md). A hosted runner
+# builds gufo.exe with its runtime and runs the host contract suite. On a
+# Windows Strix Halo Devlab runner then checks the device and one small model
+# per family from that bundle on PRs and manual dispatches.
+# Toolboxes also calls this workflow to package an exact release tag.
+
+on:
+  push:
+    # Main runs save the SDK, vcpkg and compiler caches every pull request
+    # restores; a pull request's own caches stay private to it.
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Exact Gufo release tag to build for Toolboxes
+        required: true
+        type: string
+    outputs:
+      artifact-name:
+        description: Artifact containing the Windows release ZIP and checksum
+        value: ${{ jobs.build.outputs.release-artifact-name }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ inputs.release-tag || github.ref }}
+  cancel-in-progress: ${{ !inputs.release-tag }}
+
+jobs:
+  build:
+    name: Windows build
+    runs-on: windows-latest
+    timeout-minutes: 120
+    outputs:
+      bundle-id: ${{ steps.bundle.outputs.artifact-id }}
+      bundle-digest: ${{ steps.bundle.outputs.artifact-digest }}
+      release-artifact-name: ${{ steps.release-package.outputs.artifact-name }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # TheRock 10.0.0, the SDK validated at full speed on gfx1151. AMD's
+      # index no longer serves it: the job restores it from the Actions cache
+      # and downloads the Windows port's mirror only on a miss.
+      SDK_TARBALL: therock-dist-windows-gfx1151-10.0.0.tar.gz
+      SDK_URL: https://github.com/endyjasmi/gufo/releases/download/toolchain/therock-10.0.0/therock-dist-windows-gfx1151-10.0.0.tar.gz
+      SDK_SHA256: 1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38
+      # Forward slashes: CMake reads backslashes in -D values as escapes.
+      SDK_ROOT: C:/TheRock/build
+      GUFO_PACKAGING_ROOT: ${{ github.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # A reusable workflow otherwise checks out its caller (Toolboxes).
+          repository: ${{ inputs.release-tag && 'gufo-org/gufo' || github.repository }}
+          ref: ${{ inputs.release-tag && format('refs/tags/{0}', inputs.release-tag) || github.ref }}
+
+      # The executable stays at the release tag. Packaging tools may be newer
+      # (for example, repairing a missing runtime in an already released ZIP).
+      - name: Checkout current release packaging tools
+        if: inputs.release-tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gufo-org/gufo
+          ref: main
+          path: build/gufo-packaging
+          sparse-checkout: |
+            tools/windows
+            tests/tools
+            licenses
+          persist-credentials: false
+
+      - name: Select release packaging tools
+        if: inputs.release-tag
+        run: '"GUFO_PACKAGING_ROOT=$env:GITHUB_WORKSPACE/build/gufo-packaging" >> $env:GITHUB_ENV'
+
+      - name: Identify release source
+        if: inputs.release-tag
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "invalid release tag: $env:RELEASE_TAG"
+          }
+          $version = (Get-Content version.txt -Raw).Trim()
+          if ("v$version" -cne $env:RELEASE_TAG) { throw 'tag and version.txt disagree' }
+          $revision = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'cannot identify release revision' }
+          "GUFO_RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          "GUFO_REVISION=$revision" >> $env:GITHUB_ENV
+
+      - name: Restore TheRock SDK archive
+        id: therock-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\therock-archive
+          key: gufo-therock-v2-${{ env.SDK_TARBALL }}
+
+      - name: Install the TheRock SDK
+        id: sdk
+        run: |
+          $archive = "$env:RUNNER_TEMP\therock-archive\$env:SDK_TARBALL"
+          New-Item -ItemType Directory -Force -Path (Split-Path $archive), $env:SDK_ROOT | Out-Null
+          if (-not (Test-Path $archive)) {
+            curl.exe --fail --location --retry 3 --no-progress-meter --output "$archive.part" $env:SDK_URL
+            if ($LASTEXITCODE -ne 0) { throw "cannot download $env:SDK_TARBALL" }
+            Move-Item "$archive.part" $archive
+          }
+          $sha = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($sha -ne $env:SDK_SHA256) { throw "$env:SDK_TARBALL has sha256 $sha, expected $env:SDK_SHA256" }
+          "archive=ready" >> $env:GITHUB_OUTPUT
+          tar -xzf $archive -C $env:SDK_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "cannot unpack $env:SDK_TARBALL" }
+          # CMake cannot find HIP by itself in TheRock's layout.
+          "HIP_PATH=$env:SDK_ROOT" >> $env:GITHUB_ENV
+          ($env:SDK_ROOT -replace '/', '\') + '\bin' >> $env:GITHUB_PATH
+
+      # MSVC 14.40+ clashes with clang's HIP math headers; idempotent.
+      - name: Patch the HIP SDK math headers
+        run: python tools/windows/patch_sdk_math.py $env:SDK_ROOT
+
+      # vcvars64 once, exported to later steps, instead of a wrapper per command.
+      - name: Set up the MSVC x64 environment
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'no Visual Studio installation with the x64 VC toolset was found' }
+          $bat = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $before = @{}
+          foreach ($line in (cmd /s /c 'set')) {
+            if ($line -match '^([^=]+)=(.*)$') { $before[$Matches[1]] = $Matches[2] }
+          }
+          foreach ($line in (cmd /s /c "call `"$bat`" >NUL 2>&1 && set")) {
+            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
+            if ($before.ContainsKey($Matches[1]) -and $before[$Matches[1]] -eq $Matches[2]) { continue }
+            "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV
+          }
+
+      - name: Install Ninja and ccache
+        run: |
+          choco install ninja ccache -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install ninja and ccache' }
+
+      # CMakeLists.txt compiles C, CXX and (with clang-cl) HIP through ccache
+      # when it is on PATH. The SDK is unpacked fresh each run, so the
+      # compiler is identified by its pinned tarball rather than by mtime.
+      - name: Restore compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\ccache
+          key: gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-
+
+      - name: Configure ccache
+        run: |
+          "CCACHE_DIR=$env:RUNNER_TEMP\ccache" >> $env:GITHUB_ENV
+          "CCACHE_BASEDIR=$env:GITHUB_WORKSPACE" >> $env:GITHUB_ENV
+          "CCACHE_COMPILERCHECK=string:$env:SDK_TARBALL" >> $env:GITHUB_ENV
+          "CCACHE_MAXSIZE=2G" >> $env:GITHUB_ENV
+          # GITHUB_ENV applies from the next step on.
+          ccache --dir "$env:RUNNER_TEMP\ccache" --zero-stats
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\vcpkg-archives
+          key: gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-
+            gufo-vcpkg-v4-${{ runner.os }}-
+
+      # A full clone: the manifest baseline resolves through vcpkg's history.
+      # vcvars points VCPKG_ROOT at the VS-bundled copy, which is not one.
+      - name: Prepare vcpkg
+        run: |
+          git clone --quiet https://github.com/microsoft/vcpkg.git C:\vcpkg-gufo
+          if ($LASTEXITCODE -ne 0) { throw 'cannot clone vcpkg' }
+          & C:\vcpkg-gufo\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'cannot bootstrap vcpkg' }
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\vcpkg-archives" | Out-Null
+          "VCPKG_ROOT=C:\vcpkg-gufo" >> $env:GITHUB_ENV
+          "VCPKG_DEFAULT_BINARY_CACHE=$env:RUNNER_TEMP\vcpkg-archives" >> $env:GITHUB_ENV
+
+      # Visual Studio's LLVM OpenMP DLL is under debug_nonredist and cannot
+      # be shipped. Build the upstream runtime with the ABI filename imported
+      # by TheRock (including rocalution), rather than renaming another DLL.
+      - name: Checkout LLVM OpenMP 18.1.8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llvm/llvm-project
+          ref: 3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff # llvmorg-18.1.8
+          path: build/llvm-project
+          sparse-checkout: |
+            cmake
+            llvm/cmake
+            openmp
+          persist-credentials: false
+
+      - name: Build redistributable LLVM OpenMP
+        id: openmp
+        run: |
+          $clang = Get-ChildItem "$env:SDK_ROOT/lib/llvm/bin" -Filter '*clang-cl.exe' | Select-Object -First 1
+          if (-not $clang) { throw 'SDK clang-cl not found' }
+          cmake -S build/llvm-project/openmp -B build/openmp -G Ninja `
+            "-DCMAKE_C_COMPILER=$($clang.FullName)" "-DCMAKE_CXX_COMPILER=$($clang.FullName)" `
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_BUILD_TYPE=Release -DOPENMP_MSVC_NAME_SCHEME=ON `
+            -DOPENMP_ENABLE_LIBOMPTARGET=OFF -DLIBOMP_OMPT_SUPPORT=OFF
+          if ($LASTEXITCODE -ne 0) { throw 'OpenMP configure failed' }
+          cmake --build build/openmp --parallel $env:NUMBER_OF_PROCESSORS --target omp ompimp
+          if ($LASTEXITCODE -ne 0) { throw 'OpenMP build failed' }
+          $runtime = 'build/openmp/runtime/src/libomp140.x86_64.dll'
+          if (-not (Test-Path $runtime)) { throw "OpenMP runtime missing: $runtime" }
+          New-Item -ItemType Directory -Force build/windows-release | Out-Null
+          Copy-Item $runtime build/windows-release
+
+      - name: Configure
+        id: configure
+        run: |
+          $identity = @()
+          if ($env:GUFO_RELEASE_VERSION) {
+            $identity = @("-DGUFO_RELEASE_VERSION=$env:GUFO_RELEASE_VERSION", "-DGUFO_REVISION=$env:GUFO_REVISION")
+          }
+          # ccache cannot cache objects that write a shared /Zi PDB: embed
+          # the debug info in each object instead (/Z7).
+          cmake --preset windows-release -DBUILD_TESTING=ON "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$env:SDK_ROOT" `
+            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
+            -DOpenMP_CXX_LIB_NAMES=libomp "-DOpenMP_libomp_LIBRARY=$PWD/build/openmp/runtime/src/libomp.lib" `
+            "-DOpenMP_CXX_INCLUDE_DIR=$PWD/build/openmp/runtime/src" @identity
+          if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
+          "$PWD\build\windows-release\vcpkg_installed\x64-windows-release\bin" >> $env:GITHUB_PATH
+          "$PWD\build\windows-release" >> $env:GITHUB_PATH
+
+      - name: Build
+        run: |
+          cmake --build --preset windows-release --parallel $env:NUMBER_OF_PROCESSORS --target gufo gufo-server component_text_cache_test qwen38_flash_next_ngram_test gpu_queues_test bandwidth_test allocation_benchmark_test
+          if ($LASTEXITCODE -ne 0) { throw 'build failed' }
+          ccache --show-stats
+
+      - name: Run gufo --version, diagnose and the Windows PR contract suite
+        run: |
+          $gufo = 'build\windows-release\gufo.exe'
+          if (-not (Test-Path $gufo)) { throw "$gufo was not built" }
+          & $gufo --version
+          if ($LASTEXITCODE -ne 0) { throw 'gufo --version failed' }
+          # The hosted runner has no GPU: only the platform section can pass
+          # here; the Devlab job runs the full diagnosis on the device.
+          & $gufo diagnose --section platform
+          if ($LASTEXITCODE -ne 0) { throw 'gufo diagnose --section platform failed' }
+          cmake --build --preset windows-release --parallel $env:NUMBER_OF_PROCESSORS --target check-pr
+          if ($LASTEXITCODE -ne 0) { throw 'check-pr failed' }
+          ctest --test-dir build/windows-release --output-on-failure --no-tests=error --timeout 60 -R '^(qwen38_flash_next\.ngram|gpu_queues_test|bandwidth_test|allocation_benchmark_test)$'
+          if ($LASTEXITCODE -ne 0) { throw 'diagnostics and ngram tests failed' }
+
+      # Everything gufo.exe loads, so the Devlab runner downloads one artifact
+      # and nothing else: the staged HIP runtime with its rocBLAS/hipBLASLt
+      # kernel directories, the vcpkg DLLs, the MSVC CRT and LLVM OpenMP, plus
+      # the weight-free GPU tests and the model smoke checks with their
+      # references (Devlab checks out only the download tools).
+      - name: Pack gufo for the Devlab runner
+        run: |
+          $dist = "$env:RUNNER_TEMP\windows-gufo"
+          $build = 'build\windows-release'
+          New-Item -ItemType Directory -Force -Path $dist, "$dist\tests\fixtures", "$dist\tests\functional\fixtures" | Out-Null
+          Copy-Item "$build\gufo.exe", "$build\*.dll", "$env:SDK_ROOT\bin\hipInfo.exe" $dist
+          foreach ($dir in 'rocblas', 'hipblaslt') {
+            if (Test-Path "$build\$dir") { Copy-Item "$build\$dir" $dist -Recurse }
+          }
+          Copy-Item "$build\vcpkg_installed\x64-windows-release\bin\*.dll" $dist -Force
+          Copy-Item "$env:GUFO_PACKAGING_ROOT/licenses/llvm-openmp.txt" "$dist/llvm-openmp-LICENSE.txt"
+          'LLVM OpenMP 18.1.8, source: https://github.com/llvm/llvm-project/tree/3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff/openmp; Apache-2.0 WITH LLVM-exception; built with OPENMP_MSVC_NAME_SCHEME=ON.' |
+            Set-Content "$dist/llvm-openmp-version.txt" -Encoding ascii
+          $redist = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory |
+            Where-Object { $_.Name -like 'Microsoft.VC*.CRT' }
+          foreach ($dir in $redist) { Copy-Item "$($dir.FullName)\*.dll" $dist -Force }
+          foreach ($test in 'gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test') {
+            $exe = Get-ChildItem $build -Recurse -Filter "$test.exe" | Select-Object -First 1
+            if (-not $exe) { throw "$test.exe was not built" }
+            Copy-Item $exe.FullName $dist
+          }
+          # bandwidth_test reads its schema fixture relative to the working directory.
+          Copy-Item tests\fixtures\diagnostics, tests\fixtures\embedding_gemma2 "$dist\tests\fixtures" -Recurse
+          Copy-Item tests\functional\family_smoke.py, tests\functional\devlab.json "$dist\tests\functional"
+          Copy-Item tests\functional\fixtures\audio "$dist\tests\functional\fixtures" -Recurse
+          $files = Get-ChildItem $dist -Recurse -File
+          # The Devlab job checks the download against this list.
+          $files | ForEach-Object { "{0}`t{1}" -f $_.Length, $_.FullName.Substring($dist.Length + 1) } |
+            Set-Content "$dist\bundle-manifest.txt" -Encoding utf8
+          "Bundle: {0} files, {1:N0} MiB" -f $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB) |
+            Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      # Inspect imports rather than trusting PATH: the hosted builder may
+      # already have a dependency in System32. Run this on PR bundles too.
+      - name: Check extracted Windows bundle
+        run: |
+          python -m pip install pefile==2024.8.26
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install PE inspection tool' }
+          python -m unittest discover -s "$env:GUFO_PACKAGING_ROOT/tests/tools" -p windows_bundle_test.py
+          if ($LASTEXITCODE -ne 0) { throw 'bundle checker tests failed' }
+          $archive = "$env:RUNNER_TEMP/windows-bundle-test.zip"
+          $extracted = "$env:RUNNER_TEMP/windows-bundle-test"
+          tar -a -cf $archive -C "$env:RUNNER_TEMP/windows-gufo" .
+          if ($LASTEXITCODE -ne 0) { throw 'cannot archive test bundle' }
+          New-Item -ItemType Directory -Force $extracted | Out-Null
+          tar -xf $archive -C $extracted
+          if ($LASTEXITCODE -ne 0) { throw 'cannot extract test bundle' }
+          python "$env:GUFO_PACKAGING_ROOT/tools/windows/check_bundle.py" $extracted
+          if ($LASTEXITCODE -ne 0) { throw 'bundle has unshipped DLL dependencies' }
+          $env:PATH = "$extracted;$env:SystemRoot/System32;$env:SystemRoot"
+          Push-Location $extracted
+          try {
+            foreach ($argument in '--version', '--help') {
+              $output = & ./gufo.exe $argument
+              if ($LASTEXITCODE -ne 0 -or -not $output) { throw "bundled gufo $argument failed" }
+            }
+            & ./gufo.exe diagnose --section platform
+            if ($LASTEXITCODE -ne 0) { throw 'extracted bundle platform diagnosis failed' }
+          } finally { Pop-Location }
+
+      - name: Upload gufo for the Devlab runner
+        if: ${{ !inputs.release-tag }}
+        id: bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-gufo-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\windows-gufo
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Pack Windows release
+        if: inputs.release-tag
+        id: release-package
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          $dist = "$env:RUNNER_TEMP\gufo-release"
+          $bundle = "$env:RUNNER_TEMP\windows-gufo"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "$bundle\gufo.exe", "$bundle\*.dll", LICENSE, NOTICE, THIRD_PARTY_NOTICES.md $dist
+          Copy-Item "$bundle/llvm-openmp-LICENSE.txt", "$bundle/llvm-openmp-version.txt" $dist
+          Copy-Item licenses "$dist\third-party" -Recurse
+          Copy-Item src\models\deepseek_v4_flash\LICENSE.ds4 "$dist\third-party"
+          foreach ($dir in 'rocblas', 'hipblaslt') {
+            if (Test-Path "$bundle\$dir") { Copy-Item "$bundle\$dir" $dist -Recurse }
+          }
+          $archive = "$env:RUNNER_TEMP\gufo-$env:RELEASE_TAG-windows-x86_64.zip"
+          # Windows' libarchive tar supports ZIP64 for the HIP runtime.
+          tar -a -cf $archive -C $dist .
+          if ($LASTEXITCODE -ne 0) { throw 'cannot pack Windows release' }
+          # Validate the exact release ZIP, not only its staging directory.
+          $extracted = "$env:RUNNER_TEMP/gufo-release-verify"
+          New-Item -ItemType Directory -Force $extracted | Out-Null
+          tar -xf $archive -C $extracted
+          if ($LASTEXITCODE -ne 0) { throw 'cannot extract Windows release' }
+          python "$env:GUFO_PACKAGING_ROOT/tools/windows/check_bundle.py" $extracted
+          if ($LASTEXITCODE -ne 0) { throw 'release ZIP has unshipped DLL dependencies' }
+          $env:PATH = "$extracted;$env:SystemRoot/System32;$env:SystemRoot"
+          Push-Location $extracted
+          try {
+            $expected = "gufo version $env:GUFO_RELEASE_VERSION ($env:GUFO_REVISION)"
+            $actual = & ./gufo.exe --version
+            if ($LASTEXITCODE -ne 0 -or ($actual -join "`n") -cne $expected) {
+              throw "release reports '$actual', expected '$expected'"
+            }
+            $help = & ./gufo.exe --help
+            if ($LASTEXITCODE -ne 0 -or -not $help) { throw 'release help failed' }
+            & ./gufo.exe diagnose --section platform
+            if ($LASTEXITCODE -ne 0) { throw 'release platform diagnosis failed' }
+          } finally { Pop-Location }
+          $sha = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$sha  $(Split-Path $archive -Leaf)" | Set-Content "$archive.sha256" -Encoding ascii
+          "artifact-name=windows-release-$env:RELEASE_TAG-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Windows release
+        if: inputs.release-tag
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.release-package.outputs.artifact-name }}
+          path: |
+            ${{ steps.release-package.outputs.archive }}
+            ${{ steps.release-package.outputs.archive }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload configure logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-build-logs-${{ github.run_attempt }}
+          path: |
+            build/windows-release/CMakeFiles/CMakeConfigureLog.yaml
+            build/windows-release/vcpkg-manifest-install.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Save TheRock SDK archive
+        if: always() && steps.therock-cache.outputs.cache-hit != 'true' && steps.sdk.outputs.archive == 'ready'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\therock-archive
+          key: gufo-therock-v2-${{ env.SDK_TARBALL }}
+
+      # Save both OpenMP and Gufo objects, even if a later stage fails. A fresh
+      # key preserves this run's new entries alongside the restored set.
+      - name: Save compiler cache
+        if: always() && (steps.openmp.outcome == 'success' || steps.configure.outcome == 'success')
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\ccache
+          key: gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save vcpkg binary cache
+        if: always() && steps.configure.outcome != 'skipped'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\vcpkg-archives
+          key: gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  devlab:
+    name: Windows Devlab checks
+    needs: build
+    if: >-
+      github.repository == 'gufo-org/gufo' &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    runs-on: [ windows, strix-halo, devlab-dispatch ]
+    timeout-minutes: 60
+    permissions:
+      actions: read # the bundle artifact
+      contents: read
+    defaults:
+      run:
+        shell: powershell
+    # Ephemeral runner with no SDK or package manager: it downloads the build
+    # job's bundle and the pinned model snapshots; checkout supplies only tools.
+    steps:
+      - name: Checkout download helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/ci
+
+      - name: Download and verify gufo
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_ID: ${{ needs.build.outputs.bundle-id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "$env:RUNNER_TEMP\windows-gufo.zip"
+          python tools/ci/devlab_artifact.py fetch --artifact $env:BUNDLE_ID --output $zip
+          if ($LASTEXITCODE -ne 0) { throw 'verified artifact download failed' }
+          New-Item -ItemType Directory -Force -Path windows-gufo | Out-Null
+          tar -xf $zip -C windows-gufo
+          if ($LASTEXITCODE -ne 0) { throw 'cannot unpack the gufo bundle' }
+          Remove-Item -Force $zip
+
+      - name: Run hipInfo, gufo --version and gufo diagnose
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($line in Get-Content windows-gufo\bundle-manifest.txt) {
+            $size, $path = $line -split "`t", 2
+            $file = Get-Item -LiteralPath "windows-gufo\$path" -ErrorAction SilentlyContinue
+            if (-not $file -or $file.Length -ne [int64]$size) { throw "the gufo bundle is incomplete: $path" }
+          }
+          (Get-CimInstance Win32_VideoController).Name
+          .\windows-gufo\hipInfo.exe
+          if ($LASTEXITCODE -ne 0) { throw 'hipInfo failed' }
+          .\windows-gufo\gufo.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'gufo --version failed' }
+          .\windows-gufo\gufo.exe diagnose
+          if ($LASTEXITCODE -ne 0) { throw 'gufo diagnose failed' }
+
+      # Real HIP kernels and allocations without weights, so a stalled SDK or
+      # a missing runtime piece shows before any model download.
+      - name: Check the device without weights
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gufo = '.\windows-gufo\gufo.exe'
+          foreach ($benchmark in 'bandwidth', 'allocation') {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            & $gufo diagnose --benchmark $benchmark
+            if ($LASTEXITCODE -ne 0) { throw "gufo diagnose --benchmark $benchmark failed" }
+            "{0}: {1:N1} s" -f $benchmark, $watch.Elapsed.TotalSeconds
+          }
+          Push-Location windows-gufo
+          foreach ($test in 'gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test') {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            & ".\$test.exe"
+            if ($LASTEXITCODE -ne 0) { throw "$test failed with exit code $LASTEXITCODE" }
+            "{0}: {1:N1} s" -f $test, $watch.Elapsed.TotalSeconds
+          }
+          Pop-Location
+
+      # The pinned snapshots of tests/functional/devlab.json, as the Linux
+      # Devlab job downloads them.
+      - name: Download the model weights
+        env:
+          # One small model per family. Flash-Next (107 GiB) and DeepSeek V4
+          # (81 GiB) are deferred.
+          GUFO_ASSETS: embedding,asr,tts-base,qwen27
+          HF_HUB_DOWNLOAD_TIMEOUT: '120'
+          HF_HUB_ETAG_TIMEOUT: '60'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Inherit the runner's Hugging Face mirror, transfer settings and persistent cache.
+          $hfHome = if ($env:HF_HOME) { $env:HF_HOME } else { "$env:USERPROFILE\.cache\huggingface" }
+          $env:GUFO_MODEL_CACHE = Join-Path $hfHome 'gufo\models'
+          python -m venv "$env:RUNNER_TEMP\hf-cli"
+          if ($LASTEXITCODE -ne 0) { throw 'cannot create the Hugging Face venv' }
+          & "$env:RUNNER_TEMP\hf-cli\Scripts\python.exe" -m pip install --quiet 'huggingface_hub[hf_xet]==1.26.0'
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install huggingface_hub' }
+          $script = @'
+          import json, os, sys, time
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          registry = json.loads(Path("windows-gufo/tests/functional/devlab.json").read_text())
+          paths = {}
+          for key in os.environ["GUFO_ASSETS"].split(","):
+              asset = registry["assets"][key]
+              destination = Path(os.environ["GUFO_MODEL_CACHE"]) / key / asset["revision"]
+              existing = sum((destination / name).is_file() for name in asset["required"])
+              print(f"{key}: {existing}/{len(asset['required'])} required files already present in {destination}", flush=True)
+              started = time.monotonic()
+              # Retried like devlab_models.py: the xet transfer can drop mid-file
+              # and snapshot_download resumes what is already on disk.
+              for attempt in range(1, 4):
+                  try:
+                      snapshot_download(repo_id=asset["repo"], revision=asset["revision"],
+                                        allow_patterns=asset["patterns"], local_dir=destination)
+                      break
+                  except Exception as error:
+                      print(f"{key}: attempt {attempt} failed after {time.monotonic() - started:.0f} s: {error}", flush=True)
+                      if attempt == 3:
+                          raise
+                      time.sleep(10)
+              seconds = time.monotonic() - started
+              for name in asset["required"]:
+                  if not (destination / name).is_file():
+                      sys.exit(f"{key}: missing {name}")
+              size = sum(p.stat().st_size for p in destination.rglob("*") if p.is_file())
+              print(f"{key}: {size / 2**30:.2f} GiB in {seconds:.0f} s, {size / 2**20 / seconds:.1f} MiB/s", flush=True)
+              paths[key] = str(destination)
+          (Path(os.environ["RUNNER_TEMP"]) / "functional-assets.json").write_text(json.dumps(paths))
+          '@
+          $script | & "$env:RUNNER_TEMP\hf-cli\Scripts\python.exe" -
+          if ($LASTEXITCODE -ne 0) { throw 'model download failed' }
+
+      - name: Run the per-family model smoke checks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = Get-Content "$env:RUNNER_TEMP\functional-assets.json" -Raw | ConvertFrom-Json
+          $smoke = 'windows-gufo\tests\functional\family_smoke.py'
+          $common = @('--binary', 'windows-gufo\gufo.exe', '--log-dir', "$env:RUNNER_TEMP\smoke-logs")
+          $checks = [ordered]@{
+            embedding = @('embedding', '--model', $assets.embedding)
+            asr       = @('asr', '--model', $assets.asr)
+            tts       = @('tts', '--model', $assets.'tts-base', '--asr-model', $assets.asr)
+            qwen27    = @('llm', '--model', (Join-Path $assets.qwen27 'Qwen3.8-27B-UD-Q4_K_XL.gguf'))
+          }
+          $failed = @()
+          foreach ($name in $checks.Keys) {
+            "=== $name"
+            python $smoke @($checks[$name]) @common
+            if ($LASTEXITCODE -ne 0) { $failed += $name }
+          }
+          if ($failed) { throw "smoke checks failed: $($failed -join ', ')" }
+
+      - name: Remove temporary bundle and environments
+        if: always()
+        run: |
+          Remove-Item -Recurse -Force windows-gufo, "$env:RUNNER_TEMP\functional-assets.json", "$env:RUNNER_TEMP\hf-cli", "$env:RUNNER_TEMP\smoke-logs" -ErrorAction SilentlyContinue

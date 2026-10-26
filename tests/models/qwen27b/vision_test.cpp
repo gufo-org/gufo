@@ -1,4 +1,3 @@
-#include <arpa/inet.h>
 #include <webp/encode.h>
 
 #include <algorithm>
@@ -11,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "src/core/platform/net.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 
@@ -87,12 +87,65 @@ void TestPositionLayout() {
 
 void TestPreprocessing() {
   gufo::core::Image input{48, 32, std::vector<std::uint8_t>(48 * 32 * 3, 123)};
-  const auto result = ResizeImage(input);
+  using Detail = gufo::tokenization::ChatMessage::ImageDetail;
+  const auto result = ResizeImage(input, Detail::kAuto);
   assert(result.width == 320 && result.height == 224);
   assert(std::all_of(result.pixels.begin(), result.pixels.end(),
                      [](auto value) { return value == 123; }));
   input = {256, 256, std::vector<std::uint8_t>(256 * 256 * 3, 42)};
-  assert(ResizeImage(input).pixels == input.pixels);
+  assert(ResizeImage(input, Detail::kAuto).pixels == input.pixels);
+  const gufo::core::Image large{2048, 1536,
+                                std::vector<std::uint8_t>(2048 * 1536 * 3, 77)};
+  const auto automatic = ResizeImage(large, Detail::kAuto);
+  assert(automatic.width == 2048 && automatic.height == 1536);
+  const auto low = ResizeImage(large, Detail::kLow);
+  assert(low.width == 512 && low.height == 384);
+  // Rounding near the bound: 600 x 500 rounds to 608 x 512 under auto.
+  const gufo::core::Image near_bound{
+      600, 500, std::vector<std::uint8_t>(600 * 500 * 3, 9)};
+  const auto near_auto = ResizeImage(near_bound, Detail::kAuto);
+  assert(near_auto.width == 608 && near_auto.height == 512);
+  const auto near_low = ResizeImage(near_bound, Detail::kLow);
+  assert(near_low.width == 512 && near_low.height == 416);
+  // The longest side reaches exactly 512 for sizes where a floating-point
+  // scale would round it down to 480.
+  const gufo::core::Image off_scale{
+      561, 400, std::vector<std::uint8_t>(561 * 400 * 3, 5)};
+  const auto off_scale_low = ResizeImage(off_scale, Detail::kLow);
+  assert(off_scale_low.width == 512 && off_scale_low.height == 352);
+  // A very wide image keeps both sides within 512 pixels.
+  const gufo::core::Image wide{4000, 1000,
+                               std::vector<std::uint8_t>(4000 * 1000 * 3, 3)};
+  const auto wide_auto = ResizeImage(wide, Detail::kAuto);
+  assert(wide_auto.width == 4000 && wide_auto.height == 992);
+  const auto wide_low = ResizeImage(wide, Detail::kLow);
+  assert(wide_low.width == 512 && wide_low.height == 128);
+  // For extreme aspect ratios the model minimum overrides the bound.
+  const gufo::core::Image extreme{
+      10000, 1000, std::vector<std::uint8_t>(10000 * 1000 * 3, 1)};
+  const auto extreme_low = ResizeImage(extreme, Detail::kLow);
+  assert(extreme_low.width == 832 && extreme_low.height == 96);
+  // Raising to the minimum would give 576 x 128 and 2048 x 64; 'low' keeps
+  // the smaller 'auto' size instead.
+  for (const auto [width, height, expected_width, expected_height] :
+       {std::array<std::uint32_t, 4>{551, 122, 544, 128},
+        std::array<std::uint32_t, 4>{2032, 32, 2048, 32}}) {
+    const gufo::core::Image banner{
+        width, height, std::vector<std::uint8_t>(width * height * 3, 2)};
+    const auto banner_auto = ResizeImage(banner, Detail::kAuto);
+    const auto banner_low = ResizeImage(banner, Detail::kLow);
+    assert(banner_auto.width == expected_width &&
+           banner_auto.height == expected_height);
+    assert(banner_low.width == expected_width &&
+           banner_low.height == expected_height);
+  }
+  const gufo::core::Image small{320, 240,
+                                std::vector<std::uint8_t>(320 * 240 * 3, 5)};
+  const auto small_auto = ResizeImage(small, Detail::kAuto);
+  const auto small_low = ResizeImage(small, Detail::kLow);
+  assert(small_low.width == small_auto.width &&
+         small_low.height == small_auto.height &&
+         small_low.pixels == small_auto.pixels);
   const std::vector<std::uint8_t> payload{0xff, 0xd8, 0, 1, 2};
   for (const auto* accepted :
        {"data:image/jpeg;base64,/9gAAQI=", "data:image/jpg;base64,/9gAAQI=",
@@ -321,8 +374,9 @@ int main(int argc, char** argv) {
       throw std::invalid_argument(
           "usage: qwen27b_vision_test MMPROJ IMAGE OUTPUT_DIR OUTPUT_WIDTH\n"
           "       qwen27b_vision_test --preprocess IMAGE OUTPUT_DIR");
-    const auto image = ResizeImage(
-        gufo::core::DecodeImage(gufo::core::ReadImageFile(argv[2])));
+    const auto image =
+        ResizeImage(gufo::core::DecodeImage(gufo::core::ReadImageFile(argv[2])),
+                    gufo::tokenization::ChatMessage::ImageDetail::kAuto);
     const std::filesystem::path directory(argv[3]);
     std::filesystem::create_directories(directory);
     {

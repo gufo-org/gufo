@@ -23,6 +23,7 @@
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "tests/models/qwen27b/sampling_cases.hpp"
+#include "tests/support/temporary_directory.hpp"
 
 namespace {
 
@@ -136,35 +137,6 @@ void CheckSamplingStrategies(
   Expect(shared_ar && (speculative_backend == nullptr || shared_speculative),
          "concurrent sampling did not exercise shared target execution");
 }
-
-class TemporaryDirectory {
-public:
-  TemporaryDirectory() {
-    std::string pattern =
-        (std::filesystem::temp_directory_path() / "gufo-qwen-disk-cache-XXXXXX")
-            .string();
-    const char* created = ::mkdtemp(pattern.data());
-    if (created == nullptr) {
-      throw std::runtime_error("failed to create Qwen cache directory");
-    }
-    path_ = created;
-  }
-
-  ~TemporaryDirectory() {
-    std::error_code error;
-    std::filesystem::remove_all(path_, error);
-  }
-
-  TemporaryDirectory(const TemporaryDirectory&) = delete;
-  TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-  [[nodiscard]] const std::filesystem::path& path() const noexcept {
-    return path_;
-  }
-
-private:
-  std::filesystem::path path_;
-};
 
 void RunPromptReuseSmoke(
     const std::shared_ptr<const gufo::hip::QwenGpuModel>& model,
@@ -288,7 +260,7 @@ void CheckGeneratedFrontierReuse(
       // The prompt checkpoint has a published but unconsumed token. Persist
       // both AR and DFlash2 checkpoints, then restore into fresh sessions.
       for (const bool speculative : {false, true}) {
-        TemporaryDirectory directory;
+        TemporaryDirectory directory("gufo-qwen-disk-cache");
         const gufo::server::TextDiskCacheConfig disk{
             .directory = directory.path(),
             .model_artifact_fingerprint = std::string(64, 'a'),
@@ -952,7 +924,7 @@ int main(int argc, const char* const* argv) {
     const auto direct_fork = GenerateDirect(*direct, fork_prompt, 2);
 
     {
-      TemporaryDirectory cache_directory;
+      TemporaryDirectory cache_directory("gufo-qwen-disk-cache");
       const gufo::server::TextDiskCacheConfig disk_cache{
           .directory = cache_directory.path(),
           .capacity_bytes = 1024ULL * 1024ULL * 1024ULL,

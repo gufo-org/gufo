@@ -843,8 +843,8 @@ void TestResponsesClientCompatTolerances() {
            "A namespace without a tools array is rejected");
   }
   {
-    // The shared 128-function cap counts flattened functions at append time,
-    // so both orderings around a full namespace reject the 129th function.
+    // #820: no fixed function count. Claude Code with MCP servers sends
+    // more than 128 tools; the request body size bounds the count.
     std::string nested = R"({"type":"namespace","name":"crm","tools":[)";
     for (int i = 0; i < 128; ++i) {
       if (i != 0)
@@ -853,21 +853,44 @@ void TestResponsesClientCompatTolerances() {
     }
     nested += "]}";
     const std::string outside = R"({"type":"function","name":"outside"})";
-    gufo::server::ChatRequest accepted;
-    Expect(!gufo::server::ParseOpenAiResponseControls(
-               gufo::json::parse(R"({"tools":[)" + nested + "]}"), &accepted) &&
-               accepted.tools.size() == 128,
-           "Exactly 128 functions flattened from a namespace are accepted");
     for (const bool outside_first : {false, true}) {
       const auto body = outside_first
                             ? R"({"tools":[)" + outside + "," + nested + "]}"
                             : R"({"tools":[)" + nested + "," + outside + "]}";
-      gufo::server::ChatRequest overflow;
-      Expect(gufo::server::ParseOpenAiResponseControls(gufo::json::parse(body),
-                                                       &overflow)
-                 .has_value(),
-             "Both boundary orderings reject the 129th flattened function");
+      gufo::server::ChatRequest accepted;
+      Expect(!gufo::server::ParseOpenAiResponseControls(gufo::json::parse(body),
+                                                        &accepted)
+                     .has_value() &&
+                 accepted.tools.size() == 129,
+             "Both orderings accept a 129th flattened function");
     }
+    const std::string duplicate = R"({"type":"function","name":"f127"})";
+    gufo::server::ChatRequest repeated;
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[)" + nested + "," + duplicate +
+                                 "]}"),
+               &repeated)
+               .has_value(),
+           "A name repeated after a namespace is still rejected");
+  }
+  {
+    // The Messages tools of Claude Code with MCP servers (#820).
+    std::string tools = "[";
+    for (int i = 0; i < 200; ++i) {
+      if (i != 0)
+        tools += ",";
+      tools +=
+          R"({"name":"mcp__srv__t)" + std::to_string(i) +
+          R"(","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}})";
+    }
+    tools += "]";
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseAnthropicToolControls(
+                gufo::json::parse(R"({"tools":)" + tools + "}"), &chat)
+                   .has_value() &&
+               chat.tools.size() == 200 &&
+               chat.tools.back().name == "mcp__srv__t199",
+           "Messages accepts 200 custom tools");
   }
   {
     gufo::server::ChatRequest chat;
@@ -1864,18 +1887,11 @@ void TestUnsupportedSamplingControlsAreRejected() {
     Expect(gufo::server::HandleOpenAiChat(request, backend).status == 400,
            "n must be exactly one, without truncation or overflow");
   }
-  for (const auto* field : {"draft_temperature",  "temperature_draft",
-                            "draft_top_k",        "draft_top_p",
-                            "draft_min_p",        "draft_seed",
-                            "draft_policy",       "samplers",
-                            "typical_p",          "tfs_z",
-                            "mirostat",           "mirostat_eta",
-                            "mirostat_tau",       "dynatemp_range",
-                            "dynatemp_exponent",  "xtc_probability",
-                            "xtc_threshold",      "dry_multiplier",
-                            "dry_base",           "dry_allowed_length",
-                            "dry_penalty_last_n", "dry_sequence_breakers",
-                            "top_n_sigma",        "logit_bias"}) {
+  for (const auto* field :
+       {"draft_temperature", "temperature_draft", "draft_top_k", "draft_top_p",
+        "draft_min_p", "draft_seed", "draft_policy", "samplers", "typical_p",
+        "mirostat", "dynatemp_range", "xtc_probability", "dry_multiplier",
+        "top_n_sigma", "logit_bias", "xtc_unknown", "dry_unknown"}) {
     auto request = Request(
         R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
     auto body = gufo::json::parse(request.body);
@@ -1885,6 +1901,106 @@ void TestUnsupportedSamplingControlsAreRejected() {
     Expect(response.status == 400 &&
                response.body.find("unsupported_sampling") != std::string::npos,
            "unsupported sampling must not be silently ignored");
+  }
+}
+
+// llama.cpp sampler fields gufo does not implement are accepted when absent,
+// null or neutral (the llama.cpp chain is unchanged) and rejected when they
+// would activate the sampler (#720).
+void TestNeutralLlamaSamplerFields() {
+  FakeBackend baseline;
+  const auto plain = Request(
+      R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
+  Expect(gufo::server::HandleOpenAiChat(plain, baseline).status == 200,
+         "plain sampling request is accepted");
+  const auto run = [&](std::string_view fields) {
+    FakeBackend backend;
+    auto request = plain;
+    auto body = gufo::json::parse(request.body);
+    const auto extra = gufo::json::parse(std::string(fields));
+    for (const auto& [field, value] : extra.members()) {
+      body[field] = value;
+    }
+    request.body = body.dump();
+    auto response = gufo::server::HandleOpenAiChat(request, backend);
+    if (response.status == 200) {
+      Expect(backend.last_sampling.temperature ==
+                     baseline.last_sampling.temperature &&
+                 backend.last_sampling.top_k == baseline.last_sampling.top_k &&
+                 backend.last_sampling.top_p == baseline.last_sampling.top_p,
+             std::string("neutral fields changed sampling: ") +
+                 std::string(fields));
+    }
+    return response;
+  };
+  for (const auto* fields : {
+           // Open WebUI 0.12 payloads.
+           R"({"mirostat":0,"mirostat_eta":0.1,"mirostat_tau":5.0})",
+           R"({"mirostat":0,"mirostat_eta":0,"mirostat_tau":0})",
+           R"({"mirostat":-1})",
+           R"({"mirostat_tau":5.0})",
+           R"({"typical_p":1.0})",
+           R"({"typical_p":1.5})",
+           R"({"tfs_z":0.5})",
+           R"({"dynatemp_range":0,"dynatemp_exponent":2})",
+           R"({"dynatemp_range":-1})",
+           R"({"top_n_sigma":0})",
+           R"({"top_n_sigma":-1})",
+           R"({"xtc_probability":0,"xtc_threshold":0.1})",
+           R"({"xtc_probability":0.5,"xtc_threshold":0.51})",
+           R"({"xtc_probability":-0.5})",
+           R"({"xtc_threshold":0.3})",
+           R"({"dry_multiplier":0,"dry_base":1.75,"dry_allowed_length":2,)"
+           R"("dry_penalty_last_n":64,"dry_sequence_breakers":["\n"]})",
+           R"({"dry_multiplier":0.8,"dry_penalty_last_n":0})",
+           R"({"dry_base":0.5})",
+           R"({"mirostat":null,"mirostat_tau":null,"mirostat_eta":null,)"
+           R"("typical_p":null,"tfs_z":null,"dynatemp_range":null,)"
+           R"("dynatemp_exponent":null,"top_n_sigma":null,)"
+           R"("xtc_probability":null,"xtc_threshold":null,)"
+           R"("dry_multiplier":null,"dry_base":null,)"
+           R"("dry_allowed_length":null,"dry_penalty_last_n":null,)"
+           R"("dry_sequence_breakers":null})",
+       }) {
+    const auto response = run(fields);
+    Expect(response.status == 200,
+           std::string("neutral llama.cpp sampler fields are accepted: ") +
+               fields);
+  }
+  for (const auto* fields : {
+           R"({"mirostat":1})",
+           R"({"mirostat":2,"mirostat_tau":5.0})",
+           R"({"typical_p":0.99})",
+           R"({"dynatemp_range":0.5})",
+           R"({"top_n_sigma":1})",
+           R"({"xtc_probability":0.5})",
+           R"({"xtc_probability":0.5,"xtc_threshold":0.5})",
+           R"({"xtc_probability":2,"xtc_threshold":-1})",
+           R"({"dry_multiplier":0.8})",
+           R"({"dry_multiplier":0.8,"dry_penalty_last_n":1})",
+           R"({"dry_multiplier":-0.8,"dry_base":0.5})",
+       }) {
+    const auto response = run(fields);
+    Expect(response.status == 400 &&
+               response.body.find("unsupported_sampling") != std::string::npos,
+           std::string("active llama.cpp samplers are rejected: ") + fields);
+  }
+  for (const auto* fields : {
+           R"({"mirostat":"0"})",
+           R"({"tfs_z":true})",
+           R"({"mirostat_eta":[0.1]})",
+           R"({"dry_allowed_length":-1})",
+           R"({"dry_penalty_last_n":2147483648})",
+           R"({"dry_penalty_last_n":1.5})",
+           R"({"dry_sequence_breakers":[]})",
+           R"({"dry_sequence_breakers":[1]})",
+           R"({"dry_sequence_breakers":"\n"})",
+       }) {
+    const auto response = run(fields);
+    Expect(response.status == 400 &&
+               response.body.find("invalid_sampling") != std::string::npos,
+           std::string("malformed llama.cpp sampler fields are rejected: ") +
+               fields);
   }
 }
 
@@ -2336,16 +2452,20 @@ void TestImagePartsRetainOrderAndIdentity() {
     Expect(gufo::server::HandleOpenAiChat(Request(body), backend).status == 400,
            "unsupported image role, policy and URL are rejected");
   }
-  // Codex sends "high" from view_image; every standard value behaves as auto.
+  // Codex sends "high" from view_image. Only low changes the resolution.
+  using Detail = gufo::tokenization::ChatMessage::ImageDetail;
   for (const std::string detail : {"auto", "low", "high", "original"}) {
     const auto accepted = gufo::server::HandleOpenAiChat(
         Request(
             R"({"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":")" +
             detail + R"("}}]}]})"),
         backend);
-    Expect(accepted.status == 200 &&
-               backend.last_request.messages.front().images.size() == 1,
-           "standard image detail values are accepted as auto");
+    const auto& images = backend.last_request.messages.front().images;
+    Expect(accepted.status == 200 && images.size() == 1 &&
+               images[0].detail ==
+                   (detail == "low" ? Detail::kLow : Detail::kAuto),
+           "standard image detail values are accepted, and only low bounds "
+           "the resolution");
   }
 }
 
@@ -2437,6 +2557,33 @@ void TestToolImagesRetainOrderAndIdentity() {
              chat.content == "left  right" && chat.images.size() == 2 &&
              chat.images[0].offset == 5 && chat.images[1].offset == 11,
          "Chat images stay attached to the tool result at their text offsets");
+  {
+    using Detail = gufo::tokenization::ChatMessage::ImageDetail;
+    const auto detailed = gufo::server::HandleOpenAiChat(Request(R"({
+      "model":"test-model",
+      "messages":[{"role":"tool","tool_call_id":"call_picture","content":[
+        {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":"low"}}
+      ]}]
+    })"),
+                                                         backend);
+    Expect(detailed.status == 200 &&
+               backend.last_request.messages.front().images.size() == 1 &&
+               backend.last_request.messages.front().images[0].detail ==
+                   Detail::kLow,
+           "tool images carry their requested detail");
+    auto item =
+        parse(R"({"type":"function_call_output","call_id":"call_picture",
+      "output":[{"type":"input_image","detail":"low",
+                 "image_url":"data:image/png;base64,AQID"}]})");
+    gufo::core::ImageReadBudget budget;
+    gufo::tokenization::ChatMessage message;
+    std::string error;
+    Expect(gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
+                                                    &error) &&
+               message.images.size() == 1 &&
+               message.images[0].detail == Detail::kLow,
+           "Responses input_image.detail reaches the image part: " + error);
+  }
 
   for (const auto* kind : {"function_call_output", "custom_tool_call_output"}) {
     for (const bool text : {false, true}) {
@@ -5047,6 +5194,11 @@ void TestToolClosingFraming() {
       {call + "\n</invoke>\n<|im_end|>", 1, R"({"text":"42"})",
        std::string(kImEnd)},
       {"</invoke>\n" + call, 1, R"({"text":"42"})", "</invoke>\n"},
+      // #786: these are parser fixtures, independent of whether a model obeys
+      // a request to copy a literal closer. Qwen27 Q4 omits it before a call;
+      // Q8 can emit a call when asked for the closer alone.
+      {call, 1, R"({"text":"42"})", ""},
+      {"</invoke>\n\n" + call, 1, R"({"text":"42"})", "</invoke>\n\n"},
       {"</invoke>", 0, "", "</invoke>"},
       {"Text </parameter>", 0, "", "Text </parameter>"},
       {"The token is <|im_end|>", 0, "", "The token is <|im_end|>"},
@@ -6362,6 +6514,7 @@ int main() {
   TestFlatToolFieldsReachTemplate();
   TestAllSamplingControlsReachBackend();
   TestUnsupportedSamplingControlsAreRejected();
+  TestNeutralLlamaSamplerFields();
   TestSamplingRanges();
   TestAssistantReasoningContentReachesBackend();
   TestPiReasoningControlsAndOutputFraming();

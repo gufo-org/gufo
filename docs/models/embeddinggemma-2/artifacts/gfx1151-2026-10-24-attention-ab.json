@@ -1,0 +1,372 @@
+{
+ "date": "2026-10-24",
+ "hardware": {
+  "name": "AMD Radeon 8060S Graphics",
+  "gfx": "gfx1151",
+  "node": "gpuworker01 (Strix Halo)"
+ },
+ "model": "google/embeddinggemma-2 @ 914f7f89142e33e77833254d9c9b90c3cef7303b (BF16 safetensors)",
+ "build": "Nix container image holding production gufo builds of main and this change, with both builds in one image.  The PR head d2a9b84a differs from the measured attention commit ec21a41f only in documentation.  The image and processor tests that ab8 could not run ran in a second image built the same way.",
+ "image": {
+  "embg2-ab8": "gufo-eg2@sha256:d4b75a8e9e615f3018f604101d8745fa349c29a00d9c93cc9a74cd4521923a80",
+  "embg2-ab9": "gufo-eg2@sha256:d14fc2601ca9aecce8920161051107c4af5f263ae8308ebc758c285a111ce664"
+ },
+ "commits": {
+  "base": "479162ed (main, with the hipBLASLt GEMMs from #751 and image inputs from #759)",
+  "attn": "ec21a41f"
+ },
+ "log_sha256": {
+  "embg2-ab8": "cc25bc529d2069a786430b013ad67f3867ad7509404b9b190e56aee1dba4f814",
+  "embg2-ab9": "c3b4c57f4b5cf9887f103d5014584cf8ae7c10dd05da2dd5dd4b5b6712b21b4b"
+ },
+ "pod": "embg2-ab8 on gpuworker01, the only GPU pod on the node, for the tests and HTTP rows, and embg2-ab9 on gpuworker01 for the image processor and image golden tests",
+ "method": "Each build ran its EmbeddingGemma 2 test binaries, then its HTTP rows twice of 60 requests each in the order base, attn, attn, base, and each value is the mean of the two runs' medians or p95s.  The text rows come from tools/models/embedding_gemma2/http_bench.py.  The two image rows are one 320 x 180 PNG followed by a newline in the typed content format, 269 tokens, at concurrency 1 and 4, after one warm-up request.  Speedup is the base median divided by the attn median.  The first server of each build also ran tests/functional/embeddings.py and tests/functional/embedding_images.py, and all passed.  In ab8, embedding_gemma2_image_processor_test and embedding_gemma2_image_golden_hip_test failed for both builds because the pod script did not place their fixture at the compiled-in path, and the other seven test binaries passed.  The ab9 pod ran those two tests for both builds, and all four runs passed.  load_ms lists the two servers' load_completed elapsed_ms in ab8.",
+ "load_ms": {
+  "base": [
+   2195,
+   2197
+  ],
+  "base_mean": 2196,
+  "attn": [
+   1992,
+   1969
+  ],
+  "attn_mean": 1981
+ },
+ "quality": {
+  "base": {
+   "golden_worst_cosine": 0.99998118,
+   "golden_worst_truncated_cosine": 0.9999817,
+   "long_document_cosine": 0.99999353,
+   "cpu_reference_worst_cosine": 0.99999461,
+   "batched_vs_alone_worst_cosine": 0.99999247,
+   "image_worst_cosine": 0.9999613635260548,
+   "image_best_cosine": 0.9999955757483984,
+   "attention_hip_test_worst_error": 0.0153937
+  },
+  "attn": {
+   "golden_worst_cosine": 0.99998484,
+   "golden_worst_truncated_cosine": 0.99998681,
+   "long_document_cosine": 0.99998986,
+   "cpu_reference_worst_cosine": 0.99999234,
+   "batched_vs_alone_worst_cosine": 0.99998681,
+   "image_worst_cosine": 0.9999569516568002,
+   "image_best_cosine": 0.9999950984605085,
+   "attention_hip_test_worst_error": 0.0153937
+  }
+ },
+ "http": [
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 16,
+   "requests_per_run": 60,
+   "tokens_per_request": 40,
+   "base": {
+    "median_ms": 6.74,
+    "p95_ms": 7.48,
+    "tokens_per_s": 5768,
+    "runs_median_ms": [
+     6.72,
+     6.76
+    ]
+   },
+   "attn": {
+    "median_ms": 6.64,
+    "p95_ms": 6.98,
+    "tokens_per_s": 5914,
+    "runs_median_ms": [
+     6.59,
+     6.69
+    ]
+   },
+   "median_speedup": 1.02
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 404,
+   "base": {
+    "median_ms": 19.95,
+    "p95_ms": 21.13,
+    "tokens_per_s": 20028,
+    "runs_median_ms": [
+     19.65,
+     20.24
+    ]
+   },
+   "attn": {
+    "median_ms": 12.94,
+    "p95_ms": 14.24,
+    "tokens_per_s": 30391,
+    "runs_median_ms": [
+     13.03,
+     12.85
+    ]
+   },
+   "median_speedup": 1.54
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 512,
+   "requests_per_run": 60,
+   "tokens_per_request": 1940,
+   "base": {
+    "median_ms": 144.56,
+    "p95_ms": 147.28,
+    "tokens_per_s": 13419,
+    "runs_median_ms": [
+     143.76,
+     145.37
+    ]
+   },
+   "attn": {
+    "median_ms": 61.5,
+    "p95_ms": 62.98,
+    "tokens_per_s": 31477,
+    "runs_median_ms": [
+     61.66,
+     61.35
+    ]
+   },
+   "median_speedup": 2.35
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 2100,
+   "requests_per_run": 60,
+   "tokens_per_request": 8072,
+   "base": {
+    "median_ms": 1650.55,
+    "p95_ms": 1657.01,
+    "tokens_per_s": 4890,
+    "runs_median_ms": [
+     1641.25,
+     1659.84
+    ]
+   },
+   "attn": {
+    "median_ms": 341.7,
+    "p95_ms": 343.91,
+    "tokens_per_s": 23589,
+    "runs_median_ms": [
+     341.54,
+     341.85
+    ]
+   },
+   "median_speedup": 4.83
+  },
+  {
+   "concurrency": 1,
+   "inputs": 8,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 3495,
+   "base": {
+    "median_ms": 148.01,
+    "p95_ms": 149.36,
+    "tokens_per_s": 23537,
+    "runs_median_ms": [
+     147.9,
+     148.13
+    ]
+   },
+   "attn": {
+    "median_ms": 94.27,
+    "p95_ms": 94.94,
+    "tokens_per_s": 36954,
+    "runs_median_ms": [
+     94.6,
+     93.94
+    ]
+   },
+   "median_speedup": 1.57
+  },
+  {
+   "concurrency": 1,
+   "inputs": 32,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 15670,
+   "base": {
+    "median_ms": 701.38,
+    "p95_ms": 704.08,
+    "tokens_per_s": 22313,
+    "runs_median_ms": [
+     697.12,
+     705.63
+    ]
+   },
+   "attn": {
+    "median_ms": 397.0,
+    "p95_ms": 399.31,
+    "tokens_per_s": 39366,
+    "runs_median_ms": [
+     399.26,
+     394.73
+    ]
+   },
+   "median_speedup": 1.77
+  },
+  {
+   "concurrency": 4,
+   "inputs": 1,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 404,
+   "base": {
+    "median_ms": 77.88,
+    "p95_ms": 80.17,
+    "tokens_per_s": 20554,
+    "runs_median_ms": [
+     77.73,
+     78.02
+    ]
+   },
+   "attn": {
+    "median_ms": 48.45,
+    "p95_ms": 49.19,
+    "tokens_per_s": 32919,
+    "runs_median_ms": [
+     48.83,
+     48.06
+    ]
+   },
+   "median_speedup": 1.61
+  },
+  {
+   "concurrency": 16,
+   "inputs": 1,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 404,
+   "base": {
+    "median_ms": 308.69,
+    "p95_ms": 312.88,
+    "tokens_per_s": 20779,
+    "runs_median_ms": [
+     307.38,
+     309.99
+    ]
+   },
+   "attn": {
+    "median_ms": 192.42,
+    "p95_ms": 195.11,
+    "tokens_per_s": 33264,
+    "runs_median_ms": [
+     193.58,
+     191.26
+    ]
+   },
+   "median_speedup": 1.6
+  },
+  {
+   "concurrency": 4,
+   "inputs": 8,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 3495,
+   "base": {
+    "median_ms": 574.09,
+    "p95_ms": 575.45,
+    "tokens_per_s": 24309,
+    "runs_median_ms": [
+     574.32,
+     573.85
+    ]
+   },
+   "attn": {
+    "median_ms": 346.99,
+    "p95_ms": 349.09,
+    "tokens_per_s": 40215,
+    "runs_median_ms": [
+     348.51,
+     345.47
+    ]
+   },
+   "median_speedup": 1.65
+  },
+  {
+   "concurrency": 16,
+   "inputs": 8,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 3495,
+   "base": {
+    "median_ms": 2297.35,
+    "p95_ms": 2304.22,
+    "tokens_per_s": 24297,
+    "runs_median_ms": [
+     2298.56,
+     2296.13
+    ]
+   },
+   "attn": {
+    "median_ms": 1388.06,
+    "p95_ms": 1393.39,
+    "tokens_per_s": 40139,
+    "runs_median_ms": [
+     1394.54,
+     1381.58
+    ]
+   },
+   "median_speedup": 1.66
+  },
+  {
+   "concurrency": 1,
+   "inputs": "image",
+   "words": 0,
+   "requests_per_run": 60,
+   "tokens_per_request": 269,
+   "base": {
+    "median_ms": 585.69,
+    "p95_ms": 587.87,
+    "tokens_per_s": 460,
+    "runs_median_ms": [
+     586.79,
+     584.6
+    ]
+   },
+   "attn": {
+    "median_ms": 581.39,
+    "p95_ms": 583.54,
+    "tokens_per_s": 463,
+    "runs_median_ms": [
+     581.67,
+     581.12
+    ]
+   },
+   "median_speedup": 1.01
+  },
+  {
+   "concurrency": 4,
+   "inputs": "image",
+   "words": 0,
+   "requests_per_run": 60,
+   "tokens_per_request": 269,
+   "base": {
+    "median_ms": 2254.74,
+    "p95_ms": 2258.36,
+    "tokens_per_s": 477,
+    "runs_median_ms": [
+     2259.24,
+     2250.24
+    ]
+   },
+   "attn": {
+    "median_ms": 2234.28,
+    "p95_ms": 2239.15,
+    "tokens_per_s": 481,
+    "runs_median_ms": [
+     2235.7,
+     2232.86
+    ]
+   },
+   "median_speedup": 1.01
+  }
+ ]
+}

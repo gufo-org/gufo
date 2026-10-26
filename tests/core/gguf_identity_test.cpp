@@ -17,6 +17,7 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/core/platform/env.hpp"
 
 namespace {
 
@@ -148,7 +149,7 @@ void TestFileDigestCache() {
   const char* old_cache = std::getenv("XDG_CACHE_HOME");
   const std::string saved_cache = old_cache ? old_cache : "";
   const bool had_cache = old_cache != nullptr;
-  setenv("XDG_CACHE_HOME", temp, 1);
+  gufo::platform::SetEnv("XDG_CACHE_HOME", temp);
   auto bytes = BuildImage("model", "first", 64 * kWindow, 2 * kWindow);
   const auto path = root / "model.gguf";
   auto write = [&] {
@@ -186,9 +187,9 @@ void TestFileDigestCache() {
   }
   Expect(read() == Identity(bytes), "malformed cached digest is recomputed");
   if (had_cache)
-    setenv("XDG_CACHE_HOME", saved_cache.c_str(), 1);
+    gufo::platform::SetEnv("XDG_CACHE_HOME", saved_cache);
   else
-    unsetenv("XDG_CACHE_HOME");
+    gufo::platform::UnsetEnv("XDG_CACHE_HOME");
   std::filesystem::remove_all(root);
 }
 

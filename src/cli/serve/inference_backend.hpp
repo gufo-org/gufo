@@ -183,6 +183,10 @@ public:
   [[nodiscard]] std::optional<std::size_t> count_chat_tokens(
       const ChatRequest& request) const override;
 
+  /// Prompt text of a chat request as generation would render it.
+  [[nodiscard]] std::optional<std::string> render_chat_prompt(
+      const ChatRequest& request) const override;
+
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

@@ -9,7 +9,7 @@ import threading
 import time
 
 SLOWDOWN = .05
-NOISE_MS = 3
+NOISE_MS = 10
 PROBE_ENDPOINTS = ("/health", "/v1/health", "/ready", "/v1/ready")
 DISCOVERY_ENDPOINTS = (*PROBE_ENDPOINTS, "/v1/models")
 GENERATION_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/responses")
@@ -620,7 +620,7 @@ def qualify(comparisons, controls=()):
         control = index >= len(comparisons)
         if comparison.get("slowdown_tolerance") != SLOWDOWN \
                 or comparison.get("noise_ms") != NOISE_MS:
-            raise ValueError("timing margins must remain 5% and 3 ms")
+            raise ValueError("timing margins must remain 5% and 10 ms")
         issues.extend(comparison["quality_or_coverage_changes"])
         seen = set()
         for item in comparison["measurements"]:

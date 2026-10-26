@@ -14,12 +14,11 @@ import hashlib
 import http.client
 import json
 from pathlib import Path
-import signal
 import socket
 import subprocess
 import time
 
-from run import option, provenance, write_json
+from run import SERVER_POPEN, interrupt_server, option, provenance, write_json
 
 LOADING = {"message": "Loading model", "type": "unavailable_error",
            "code": "loading"}
@@ -184,13 +183,14 @@ def main():
     write_json(report_path, report)
     with log_path.open("w") as log:
         observations = []
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                   **SERVER_POPEN)
         try:
             observe(process, port, time.monotonic() + args.startup_timeout,
                     observations)
             report["loading"] = check_loading_phase(observations)
             report["ready"] = check_ready(port, model)
-            process.send_signal(signal.SIGINT)
+            interrupt_server(process)
             report["exit_code"] = process.wait(timeout=60)
             require(report["exit_code"] == 0, f"exit status {report['exit_code']}")
             check_log(log_path)

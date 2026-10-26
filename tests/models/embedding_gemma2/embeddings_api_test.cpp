@@ -11,9 +11,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -28,6 +30,7 @@ namespace {
 using gufo::server::EmbeddingBatch;
 using gufo::server::EmbeddingInput;
 using gufo::server::EmbeddingPart;
+using gufo::server::EmbeddingRequestOptions;
 using gufo::server::EmbeddingService;
 using gufo::server::EmbeddingServiceOptions;
 using gufo::server::EmbeddingStatus;
@@ -35,6 +38,7 @@ using gufo::server::HandleEmbeddingsApiRequest;
 using gufo::server::HttpRequest;
 using gufo::server::HttpResponse;
 using gufo::server::IsEmbeddingsApiPath;
+using gufo::server::TruncateKeepingImages;
 
 constexpr std::size_t kWidth = 768;
 
@@ -75,11 +79,18 @@ std::size_t FakeTokens(const std::string& text) {
 
 struct FakeRunner {
   EmbeddingStatus Run(const std::vector<std::string>& texts,
+                      const EmbeddingRequestOptions& request,
                       EmbeddingBatch* batch, std::string* error) {
     ++calls;
     last_texts = texts;
+    last_truncate = request.truncate;
     for (std::size_t i = 0; i < texts.size(); ++i) {
       if (texts[i].starts_with("TOOLONG")) {
+        if (request.truncate) {
+          batch->embeddings.push_back(FakeEmbedding(texts[i]));
+          batch->token_counts.push_back(EmbeddingService::kMaxInputTokens);
+          continue;
+        }
         batch->failed_index = i;
         return EmbeddingStatus::kInputTooLong;
       }
@@ -99,6 +110,7 @@ struct FakeRunner {
 
   int calls{0};
   std::vector<std::string> last_texts;
+  bool last_truncate{false};
 };
 
 std::unique_ptr<EmbeddingService> MakeService(FakeRunner* runner) {
@@ -108,6 +120,7 @@ std::unique_ptr<EmbeddingService> MakeService(FakeRunner* runner) {
       .model_id = "embeddinggemma-2",
       .runner =
           [runner](const std::vector<EmbeddingInput>& inputs,
+                   const EmbeddingRequestOptions& request,
                    EmbeddingBatch* batch, std::string* error) {
             std::vector<std::string> texts;
             for (const auto& input : inputs) {
@@ -116,7 +129,7 @@ std::unique_ptr<EmbeddingService> MakeService(FakeRunner* runner) {
                 text += part.value;
               texts.push_back(std::move(text));
             }
-            return runner->Run(texts, batch, error);
+            return runner->Run(texts, request, batch, error);
           },
   });
 }
@@ -132,6 +145,20 @@ HttpResponse Send(EmbeddingService& service, std::string body,
           .body = std::move(body),
           .headers = {{"Content-Type", "application/json"}},
           .is_cancelled = std::move(cancelled),
+      },
+      service);
+}
+
+HttpResponse SendTo(EmbeddingService& service, std::string path,
+                    std::string body) {
+  return HandleEmbeddingsApiRequest(
+      HttpRequest{
+          .method = "POST",
+          .path = std::move(path),
+          .query = {},
+          .body = std::move(body),
+          .headers = {{"Content-Type", "application/json"}},
+          .is_cancelled = {},
       },
       service);
 }
@@ -395,7 +422,7 @@ void TestInputValidation() {
               "invalid_parameter_type", "boolean item");
   ExpectError(Send(*service, R"({"input":"x","user":3})"), 400,
               "invalid_parameter_type", "non-string user");
-  ExpectError(Send(*service, R"({"input":"x","truncate":true})"), 400,
+  ExpectError(Send(*service, R"({"input":"x","normalize":true})"), 400,
               "unsupported_field", "unknown member");
 
   std::string many = R"({"input":[)";
@@ -472,8 +499,9 @@ void TestLimitsAndFailures() {
       .validate_model = false,
       .model_id = "embeddinggemma-2",
       .runner =
-          [](const std::vector<EmbeddingInput>&, EmbeddingBatch* batch,
-             std::string*) {
+          [](const std::vector<EmbeddingInput>&,
+             const gufo::server::EmbeddingRequestOptions&,
+             EmbeddingBatch* batch, std::string*) {
             batch->embeddings = {FakeEmbedding("only")};
             batch->token_counts = {3};
             return EmbeddingStatus::kOk;
@@ -490,6 +518,7 @@ void TestTypedInput() {
       .validate_model = false,
       .model_id = "embeddinggemma-2",
       .runner = [&](const std::vector<EmbeddingInput>& inputs,
+                    const gufo::server::EmbeddingRequestOptions&,
                     EmbeddingBatch* batch, std::string*) {
         captured = inputs;
         for (std::size_t i = 0; i < inputs.size(); ++i) {
@@ -528,7 +557,37 @@ void TestTypedInput() {
       Send(
           service,
           R"({"input":[{"content":[{"type":"input_audio","input_audio":{}}]}]})"),
-      400, "unsupported_input", "unsupported modality");
+      400, "invalid_parameter_type", "audio source is required");
+  const auto audio_response = Send(
+      service,
+      R"({"input":["plain",{"content":[{"type":"input_audio","input_audio":{"data":"AAAA","url":"ignored","format":"ignored"}},{"type":"text","text":"middle"},{"type":"input_audio","input_audio":{"url":"https://example.com/test.wav"}},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]})");
+  Check(audio_response.status == 200 && captured.size() == 2 &&
+            captured[1].content.size() == 4,
+        "audio and mixed content are accepted");
+  Check(captured[1].content[0].type == EmbeddingPart::Type::kAudio &&
+            captured[1].content[0].value == "AAAA" &&
+            captured[1].content[1].value == "middle" &&
+            captured[1].content[2].type == EmbeddingPart::Type::kAudio &&
+            captured[1].content[2].value == "https://example.com/test.wav" &&
+            captured[1].content[3].type == EmbeddingPart::Type::kImage,
+        "audio data precedence and part order match the request");
+  for (
+      const auto* body :
+      {R"({"input":[{"content":[{"type":"input_audio","input_audio":null}]}]})",
+       R"({"input":[{"content":[{"type":"input_audio","input_audio":{"data":7}}]}]})",
+       R"({"input":[{"content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":7}}]}]})",
+       R"({"input":[{"content":[{"type":"input_audio","input_audio":{"data":"AAAA","other":"x"}}]}]})"})
+    ExpectError(Send(service, body), 400, "invalid_parameter_type",
+                "malformed audio part");
+  std::string audio_many = R"({"input":[{"content":[)";
+  for (unsigned i = 0; i < 33; ++i) {
+    if (i)
+      audio_many += ',';
+    audio_many += R"({"type":"input_audio","input_audio":{"data":"AAAA"}})";
+  }
+  audio_many += "]}]}";
+  ExpectError(Send(service, audio_many), 400, "too_many_audio",
+              "audio count bounded before decoding");
   std::string many = R"({"input":[{"content":[)";
   for (unsigned i = 0; i < 33; ++i) {
     if (i)
@@ -539,6 +598,281 @@ void TestTypedInput() {
   many += "]}]}";
   ExpectError(Send(service, many), 400, "too_many_images",
               "image count bounded before reading");
+}
+
+// #764: llama.cpp's non-OpenAI `POST /embeddings`, as Frigate 0.18 sends it
+// (frigate/genai/plugins/llama_cpp.py at v0.18.2): `content` items with a
+// `prompt_string` and base64 `multimodal_data`, and a bare-array response.
+void TestNativeEmbeddings() {
+  Check(IsEmbeddingsApiPath("/embeddings") &&
+            IsEmbeddingsApiPath("/embedding") &&
+            !IsEmbeddingsApiPath("/embeddings/") &&
+            !IsEmbeddingsApiPath("/v1/embedding"),
+        "native embeddings paths are recognized exactly");
+  std::vector<EmbeddingInput> captured;
+  int calls = 0;
+  EmbeddingService service(EmbeddingServiceOptions{
+      .model_root = {},
+      .validate_model = false,
+      .model_id = "embeddinggemma-2",
+      .runner = [&](const std::vector<EmbeddingInput>& inputs,
+                    const gufo::server::EmbeddingRequestOptions&,
+                    EmbeddingBatch* batch, std::string*) {
+        ++calls;
+        captured = inputs;
+        for (const auto& input : inputs) {
+          std::string text;
+          for (const auto& part : input.content)
+            text += part.value;
+          batch->embeddings.push_back(FakeEmbedding(text));
+          batch->token_counts.push_back(FakeTokens(text));
+        }
+        return EmbeddingStatus::kOk;
+      }});
+
+  // Frigate's text request.
+  const auto text = SendTo(
+      service, "/embeddings",
+      R"({"model":"embeddinggemma-2","content":[{"prompt_string":"a red car"},{"prompt_string":"a dog"}]})");
+  Check(text.status == 200, "native text request succeeds: " + text.body);
+  const gufo::json::Value body = Parse(text);
+  Check(body.is_array() && body.size() == 2,
+        "native response is a bare array with one item per input");
+  for (std::size_t i = 0; i < 2; ++i) {
+    const auto& item = body.items()[i];
+    Check(item.size() == 2 && item.member_size("index", 99) == i,
+          "native items carry only index and embedding, in order");
+    const auto* nested = item.find("embedding");
+    Check(nested != nullptr && nested->is_array() && nested->size() == 1,
+          "the pooled vector is nested in a one-element list");
+    Check(FloatsOf(nested->items().front()) ==
+              FakeEmbedding(i == 0 ? "a red car" : "a dog"),
+          "native floats round-trip exactly");
+  }
+  Check(captured.size() == 2 && captured[0].content.size() == 1 &&
+            captured[0].content[0].type == EmbeddingPart::Type::kText &&
+            captured[0].content[0].value == "a red car",
+        "a prompt_string without media is one text part");
+
+  // Frigate's image request: the marker, a newline, and one base64 JPEG.
+  const auto image = SendTo(
+      service, "/embeddings",
+      R"({"model":"embeddinggemma-2","content":[{"prompt_string":"<__media__>\n","multimodal_data":["/9j/AAAA"]}]})");
+  Check(image.status == 200, "native image request succeeds: " + image.body);
+  Check(captured.size() == 1 && captured[0].content.size() == 2 &&
+            captured[0].content[0].type == EmbeddingPart::Type::kImage &&
+            captured[0].content[0].value == "data:image/jpeg;base64,/9j/AAAA" &&
+            captured[0].content[1].type == EmbeddingPart::Type::kText &&
+            captured[0].content[1].value == "\n",
+        "the marker becomes the image part, in place, before the newline");
+  const auto around = SendTo(
+      service, "/embedding",
+      R"({"content":{"prompt_string":"before <__media__> mid <__media__>","multimodal_data":["AAAA","BBBB"]}})");
+  Check(around.status == 200, "legacy path and a single prompt object work");
+  Check(captured.size() == 1 && captured[0].content.size() == 4 &&
+            captured[0].content[0].value == "before " &&
+            captured[0].content[1].value == "data:image/jpeg;base64,AAAA" &&
+            captured[0].content[2].value == " mid " &&
+            captured[0].content[3].value == "data:image/jpeg;base64,BBBB",
+        "text around markers keeps its order and whitespace");
+
+  // The same text embeds identically on both routes; `input` wins over
+  // `content`, as in llama.cpp.
+  const auto plain =
+      SendTo(service, "/embeddings", R"({"input":"x","content":"y"})");
+  Check(plain.status == 200, "input and content together succeed");
+  Check(captured.size() == 1 && captured[0].content[0].value == "x",
+        "input takes precedence over content");
+  const auto oai = Send(service, R"({"input":"x"})");
+  const gufo::json::Value native_body = Parse(plain);
+  const gufo::json::Value oai_body = Parse(oai);
+  Check(FloatsOf(native_body.items().front().find("embedding")->items()[0]) ==
+            FloatsOf(*oai_body.find("data")->items().front().find("embedding")),
+        "both routes return the same vector");
+  Check(
+      SendTo(service, "/embeddings",
+             R"({"content":"y","embd_normalize":2,"encoding_format":"float"})")
+              .status == 200,
+      "the default normalization and float encoding are accepted");
+  const auto base64 = SendTo(service, "/embeddings",
+                             R"({"content":"y","encoding_format":"base64"})");
+  Check(base64.status == 200 && Parse(base64)
+                                    .items()
+                                    .front()
+                                    .find("embedding")
+                                    ->items()[0]
+                                    .is_array(),
+        "as in llama.cpp, the native form returns floats for base64 too");
+  Check(SendTo(service, "/embeddings",
+               R"({"content":[{"content":[{"type":"text","text":"typed"}]}]})")
+                .status == 200,
+        "typed content objects work here too");
+
+  const int before = calls;
+  ExpectError(SendTo(service, "/embeddings", R"({"model":"embeddinggemma-2"})"),
+              400, "missing_input", "native request without input or content");
+  ExpectError(
+      SendTo(
+          service, "/embeddings",
+          R"({"content":[{"prompt_string":"<__media__><__media__>","multimodal_data":["AAAA"]}]})"),
+      400, "invalid_multimodal_data", "more markers than files");
+  ExpectError(
+      SendTo(
+          service, "/embeddings",
+          R"({"content":[{"prompt_string":"x","multimodal_data":["AAAA"]}]})"),
+      400, "invalid_multimodal_data", "a file without a marker");
+  for (
+      const auto* bad :
+      {R"({"content":[{"prompt_string":3}]})",
+       R"({"content":[{"prompt_string":"x","extra":1}]})",
+       R"({"content":[{"prompt_string":"x","multimodal_data":"AAAA"}]})",
+       R"({"content":[{"prompt_string":"<__media__>","multimodal_data":[""]}]})",
+       R"({"content":[{"prompt_string":"<__media__>","multimodal_data":[7]}]})"})
+    ExpectError(SendTo(service, "/embeddings", bad), 400,
+                "invalid_parameter_type",
+                std::string("malformed prompt: ") + bad);
+  ExpectError(
+      SendTo(service, "/embeddings", R"({"content":[{"prompt_string":""}]})"),
+      400, "empty_input", "empty prompt_string");
+  ExpectError(SendTo(service, "/embeddings", R"({"content":[1,2,3]})"), 400,
+              "unsupported_input", "token arrays stay unsupported");
+  for (const auto* normalize : {"-1", "0", "1", "3", "\"2\""})
+    ExpectError(SendTo(service, "/embeddings",
+                       std::string(R"({"content":"y","embd_normalize":)") +
+                           normalize + "}"),
+                400, "unsupported_embd_normalize",
+                std::string("embd_normalize ") + normalize);
+  ExpectError(SendTo(service, "/embeddings",
+                     R"({"content":"y","encoding_format":"int8"})"),
+              400, "invalid_encoding_format", "encoding_format is validated");
+  ExpectError(
+      SendTo(service, "/embeddings", R"({"content":"y","pooling":"none"})"),
+      400, "unsupported_field", "unknown native fields are rejected");
+  Check(calls == before, "rejected native requests never reach the runner");
+  // The OpenAI route keeps its own field set.
+  ExpectError(Send(service, R"({"content":"y"})"), 400, "unsupported_field",
+              "/v1/embeddings does not take content");
+  ExpectError(Send(service, R"({"input":"y","embd_normalize":2})"), 400,
+              "unsupported_field",
+              "/v1/embeddings does not take embd_normalize");
+  ExpectError(Send(service, R"({"input":[{"prompt_string":"y"}]})"), 400,
+              "invalid_parameter_type",
+              "/v1/embeddings does not take prompt objects");
+}
+
+/// A response's structure: array lengths, member names and float-vector
+/// widths, in the fixture's form.
+gufo::json::Value Skeleton(const gufo::json::Value& value) {
+  if (value.is_array()) {
+    if (!value.items().empty() &&
+        std::ranges::all_of(
+            value.items(), [](const auto& item) { return item.is_number(); })) {
+      auto floats = gufo::json::Value::object();
+      floats["floats"] = value.size();
+      return floats;
+    }
+    auto list = gufo::json::Value::object();
+    list["list"] = value.size();
+    if (!value.items().empty())
+      list["item"] = Skeleton(value.items().front());
+    return list;
+  }
+  if (value.is_object()) {
+    auto object = gufo::json::Value::object();
+    for (const auto& [name, member] : value.members())
+      object[name] = Skeleton(member);
+    return object;
+  }
+  return value;
+}
+
+// #764: replay llama.cpp's captured responses and Frigate's requests.
+void TestNativeReferenceFixture() {
+  std::ifstream input(GUFO_EMBEDDING_GEMMA2_NATIVE_FIXTURE);
+  std::stringstream text;
+  text << input.rdbuf();
+  const gufo::json::Value fixture = gufo::json::parse(text.str());
+  FakeRunner runner;
+  auto service = MakeService(&runner);
+  const auto& cases = *fixture.find("llama_cpp")->find("cases");
+  Check(cases.size() >= 6, "fixture holds the llama.cpp cases");
+  for (const auto& item : cases.items()) {
+    gufo::json::Value request = *item.find("request");
+    // The capture served another model name.
+    if (request.contains("model"))
+      request["model"] = "embeddinggemma-2";
+    const auto response =
+        SendTo(*service, item.member_str("path"), request.dump());
+    Check(response.status == static_cast<int>(item.member_size("status")),
+          "llama.cpp case status: " + request.dump() + " -> " + response.body);
+    Check(Skeleton(Parse(response)).dump() == item.find("response")->dump(),
+          "llama.cpp response shape for " + request.dump() + ": " +
+              Skeleton(Parse(response)).dump());
+  }
+  const auto& frigate = *fixture.find("frigate");
+  const auto path = frigate.member_str("path");
+  const auto texts = SendTo(*service, path, frigate.find("text")->dump());
+  Check(texts.status == 200 && Parse(texts).size() == 2,
+        "Frigate's text request returns one vector per prompt");
+  const auto image = SendTo(*service, path, frigate.find("image")->dump());
+  Check(image.status == 200 && Parse(image).size() == 1,
+        "Frigate's image request returns one vector");
+}
+
+// #726: `truncate: true` asks the service to cut an over-length input
+// instead of refusing it. The default and `false` keep refusing.
+void TestTruncate() {
+  FakeRunner runner;
+  auto service = MakeService(&runner);
+  const HttpResponse refused =
+      Send(*service, R"({"input":["short","TOOLONG input"]})");
+  ExpectError(refused, 400, "context_length_exceeded", "default refuses");
+  Check(!runner.last_truncate, "truncation is off by default");
+
+  ExpectError(Send(*service, R"({"input":"TOOLONG input","truncate":false})"),
+              400, "context_length_exceeded", "truncate false refuses");
+  Check(!runner.last_truncate, "truncate false reaches the service");
+
+  const HttpResponse cut =
+      Send(*service, R"({"input":["short","TOOLONG input"],"truncate":true})");
+  Check(cut.status == 200, "truncate true embeds an over-length input");
+  Check(runner.last_truncate, "truncate true reaches the service");
+  const auto body = Parse(cut);
+  Check(body.find("data")->items().size() == 2, "both inputs are embedded");
+  Check(body.find("usage")->member_size("prompt_tokens") ==
+            FakeTokens("short") + EmbeddingService::kMaxInputTokens,
+        "usage counts the tokens embedded after truncation");
+
+  ExpectError(Send(*service, R"({"input":"a","truncate":"yes"})"), 400,
+              "invalid_parameter_type", "truncate must be a boolean");
+  const int calls = runner.calls;
+  ExpectError(Send(*service, R"({"input":"a","truncate":1})"), 400,
+              "invalid_parameter_type", "a numeric truncate is refused");
+  Check(runner.calls == calls, "an invalid truncate never reaches the service");
+  Check(Send(*service, R"({"input":"a","truncate":null})").status == 200,
+        "a null truncate is absent");
+}
+
+// The native path's cut for inputs with images: 2 = <bos>, 1 = <eos>,
+// 9 = image placeholder, 8 = end-of-image marker, 5 = text.
+void TestTruncateKeepingImages() {
+  using Tokens = std::vector<std::uint32_t>;
+  Tokens text{2, 5, 5, 5, 5, 5, 1};
+  Check(TruncateKeepingImages(&text, 4, 9) && text == Tokens{2, 5, 5, 1},
+        "a text-only encoding keeps its first tokens and <eos>");
+  Tokens image{2, 5, 9, 9, 8, 5, 5, 5, 1};
+  Check(
+      TruncateKeepingImages(&image, 6, 9) && image == Tokens{2, 5, 9, 9, 8, 1},
+      "a cut right after the end-of-image marker keeps the image");
+  Tokens marker{2, 5, 9, 9, 8, 5, 5, 5, 1};
+  Check(!TruncateKeepingImages(&marker, 5, 9) &&
+            marker == Tokens{2, 5, 9, 9, 8, 5, 5, 5, 1},
+        "a cut that would drop the end-of-image marker refuses unchanged");
+  Tokens inside{2, 9, 9, 9, 8, 5, 1};
+  Check(!TruncateKeepingImages(&inside, 3, 9), "a cut inside an image refuses");
+  Tokens fits{2, 9, 8, 1};
+  Check(TruncateKeepingImages(&fits, 4, 9) && fits == Tokens{2, 9, 8, 1},
+        "an encoding within the limit is unchanged");
 }
 
 void TestCancellation() {
@@ -556,6 +890,7 @@ void TestCancellation() {
       .model_id = "embeddinggemma-2",
       .runner =
           [&cancelled](const std::vector<EmbeddingInput>& texts,
+                       const gufo::server::EmbeddingRequestOptions&,
                        EmbeddingBatch* batch, std::string*) {
             cancelled = true;
             batch->embeddings = {FakeEmbedding(texts[0].content[0].value)};
@@ -579,7 +914,9 @@ void TestServiceLifecycle() {
       .model_root = {},
       .validate_model = false,
       .model_id = {},
-      .runner = [](const std::vector<EmbeddingInput>&, EmbeddingBatch*,
+      .runner = [](const std::vector<EmbeddingInput>&,
+                   const gufo::server::EmbeddingRequestOptions&,
+                   EmbeddingBatch*,
                    std::string*) { return EmbeddingStatus::kOk; },
   });
   Check(defaulted.model_id() == "embeddinggemma-2", "default model id");
@@ -589,7 +926,9 @@ void TestServiceLifecycle() {
       .model_root = "/nonexistent/embeddinggemma",
       .validate_model = true,
       .model_id = {},
-      .runner = [](const std::vector<EmbeddingInput>&, EmbeddingBatch*,
+      .runner = [](const std::vector<EmbeddingInput>&,
+                   const gufo::server::EmbeddingRequestOptions&,
+                   EmbeddingBatch*,
                    std::string*) { return EmbeddingStatus::kOk; },
   });
   Check(!invalid.ready() && !invalid.initialization_error().empty(),
@@ -619,7 +958,8 @@ void TestServiceLifecycle() {
       .validate_model = false,
       .model_id = {},
       .runner =
-          [&](const std::vector<EmbeddingInput>& texts, EmbeddingBatch* out,
+          [&](const std::vector<EmbeddingInput>& texts,
+              const gufo::server::EmbeddingRequestOptions&, EmbeddingBatch* out,
               std::string*) {
             if (active.fetch_add(1) != 0) {
               overlapped.fetch_add(1);
@@ -654,6 +994,10 @@ int main() {
   TestModelAndJson();
   TestLimitsAndFailures();
   TestTypedInput();
+  TestNativeEmbeddings();
+  TestNativeReferenceFixture();
+  TestTruncate();
+  TestTruncateKeepingImages();
   TestCancellation();
   TestServiceLifecycle();
   std::cout << "PASS embedding_gemma2_embeddings_api_test\n";

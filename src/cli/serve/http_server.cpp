@@ -1,14 +1,5 @@
 #include "src/cli/serve/http_server.hpp"
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -89,7 +80,9 @@ private:
 bool ReadUntil(std::string& out, int fd, std::string_view delim) {
   char buf[4096];
   while (out.find(delim) == std::string::npos) {
-    const ssize_t n = ::read(fd, buf, sizeof(buf));
+    const std::intptr_t n = net::Receive(fd, buf, sizeof(buf), 0);
+    if (n < 0 && net::IsSocketInterrupted())
+      continue;
     if (n <= 0)
       return false;
     out.append(buf, static_cast<std::size_t>(n));
@@ -105,7 +98,9 @@ bool ReadN(std::string& out, int fd, std::size_t n) {
   char buf[4096];
   while (got < n) {
     const std::size_t want = std::min(sizeof(buf), n - got);
-    const ssize_t r = ::read(fd, buf, want);
+    const std::intptr_t r = net::Receive(fd, buf, want, 0);
+    if (r < 0 && net::IsSocketInterrupted())
+      continue;
     if (r <= 0)
       return false;
     out.append(buf, static_cast<std::size_t>(r));
@@ -117,8 +112,10 @@ bool ReadN(std::string& out, int fd, std::size_t n) {
 bool SendAll(int fd, std::string_view data) {
   std::size_t sent = 0;
   while (sent < data.size()) {
-    const ssize_t n = static_cast<ssize_t>(
-        net::SendNoSignal(fd, data.data() + sent, data.size() - sent));
+    const std::intptr_t n =
+        net::SendNoSignal(fd, data.data() + sent, data.size() - sent);
+    if (n < 0 && net::IsSocketInterrupted())
+      continue;
     if (n <= 0)
       return false;
     sent += static_cast<std::size_t>(n);
@@ -150,29 +147,7 @@ bool SendChunk(int fd, std::string_view data, std::string_view prefix = {}) {
 }
 
 bool IsPeerDisconnected(int fd) noexcept {
-  pollfd descriptor{
-      .fd = fd,
-      .events = POLLIN | POLLERR | POLLHUP,
-      .revents = 0,
-  };
-#ifdef POLLRDHUP
-  descriptor.events |= POLLRDHUP;
-#endif
-  const int ready = net::PollSocket(&descriptor, 1, 0);
-  if (ready <= 0)
-    return false;
-  if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
-    return true;
-#ifdef POLLRDHUP
-  if ((descriptor.revents & POLLRDHUP) != 0)
-    return true;
-#endif
-  if ((descriptor.revents & POLLIN) == 0)
-    return false;
-  char byte;
-  const auto count = ::recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
-  return count == 0 || (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
-                        errno != EINTR);
+  return net::IsPeerDisconnected(fd);
 }
 
 // ---------------------------------------------------------------------------
@@ -1609,8 +1584,13 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
 // IPv4 is parsed strictly, without inet_aton shorthand such as `127.1`; IPv6
 // goes through getaddrinfo so link-local scopes (`fe80::1%eth0`) resolve.
 bool ParseListenAddress(const std::string& host, int port,
-                        sockaddr_storage* address, socklen_t* length) {
+                        sockaddr_storage* address, net::SocklenT* length) {
   *address = {};
+  // Bracketed literals are a URI convention, not a listen host; Winsock's
+  // getaddrinfo would accept them and glibc would not.
+  if (host.find('[') != std::string::npos ||
+      host.find(']') != std::string::npos)
+    return false;
   const auto network_port = htons(static_cast<std::uint16_t>(port));
   auto* ipv4 = reinterpret_cast<sockaddr_in*>(address);
   if (::inet_pton(AF_INET, host.c_str(), &ipv4->sin_addr) == 1) {
@@ -1624,14 +1604,40 @@ bool ParseListenAddress(const std::string& host, int port,
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_NUMERICHOST;
   addrinfo* result = nullptr;
-  if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0)
-    return false;
+  if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0) {
+    // Another host's interface name in a link-local scope (`fe80::1%eth0` on
+    // a machine without it) still names a well-formed listener; validate the
+    // address part and resolve the zone best effort. An unknown zone fails
+    // at bind() with the usual error instead of here.
+    const auto zone = host.rfind('%');
+    if (zone == std::string::npos)
+      return false;
+    const std::string bare = host.substr(0, zone);
+    const std::string scope = host.substr(zone + 1);
+    auto* ipv6 = reinterpret_cast<sockaddr_in6*>(address);
+    if (scope.empty() ||
+        ::inet_pton(AF_INET6, bare.c_str(), &ipv6->sin6_addr) != 1)
+      return false;
+    ipv6->sin6_family = AF_INET6;
+    ipv6->sin6_port = network_port;
+    ipv6->sin6_scope_id =
+        std::ranges::all_of(
+            scope,
+            [](char character) {
+              return std::isdigit(static_cast<unsigned char>(character));
+            })
+            ? static_cast<std::uint32_t>(
+                  std::strtoul(scope.c_str(), nullptr, 10))
+            : ::if_nametoindex(scope.c_str());
+    *length = sizeof(sockaddr_in6);
+    return true;
+  }
   const bool parsed = result != nullptr && result->ai_family == AF_INET6 &&
                       result->ai_addrlen <= sizeof(sockaddr_storage);
   if (parsed) {
     std::memcpy(address, result->ai_addr, result->ai_addrlen);
     reinterpret_cast<sockaddr_in6*>(address)->sin6_port = network_port;
-    *length = static_cast<socklen_t>(result->ai_addrlen);
+    *length = static_cast<net::SocklenT>(result->ai_addrlen);
   }
   ::freeaddrinfo(result);
   return parsed;
@@ -1642,7 +1648,7 @@ bool ParseListenAddress(const std::string& host, int port,
 // `::ffff:a.b.c.d` and is reported as `a.b.c.d`. Empty when unavailable.
 std::string PeerAddress(int client_fd) {
   sockaddr_storage peer{};
-  socklen_t length = sizeof(peer);
+  net::SocklenT length = sizeof(peer);
   if (::getpeername(client_fd, reinterpret_cast<sockaddr*>(&peer), &length) !=
       0)
     return {};
@@ -1668,24 +1674,24 @@ std::string PeerAddress(int client_fd) {
 }  // namespace
 
 LoadingResponder::LoadingResponder(const std::string& host, int port) {
+  net::EnsureSocketRuntimeStarted();
   sockaddr_storage addr{};
-  socklen_t addr_length = 0;
+  net::SocklenT addr_length = 0;
   if (port <= 0 || port > 65535 ||
       !ParseListenAddress(host, port, &addr, &addr_length))
     return;
-  net::EnsureSocketRuntimeStarted();
-  const int fd = ::socket(addr.ss_family, SOCK_STREAM, 0);
+  const int fd = static_cast<int>(net::CreateStreamSocket(addr.ss_family));
   if (fd < 0)
     return;
   // Match HttpServer::start, which binds the same address after stop().
-  const int yes = 1;
-  const int no = 0;
-  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-  if ((addr.ss_family == AF_INET6 &&
-       ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)) != 0) ||
+  if (!net::SetExclusiveListenerReuse(fd)) {
+    net::CloseSocket(fd);
+    return;
+  }
+  if ((addr.ss_family == AF_INET6 && !net::ClearIpv6Only(fd)) ||
       ::bind(fd, reinterpret_cast<sockaddr*>(&addr), addr_length) < 0 ||
       ::listen(fd, 16) < 0) {
-    const int error = errno;
+    const int error = net::LastSocketError();
     Logger::Debug("server", "event=loading_listener_unavailable host=" + host +
                                 " port=" + std::to_string(port) +
                                 " errno=" + std::to_string(error));
@@ -1716,43 +1722,55 @@ void LoadingResponder::serve() {
   loading.headers.emplace_back("Retry-After", "1");
   const std::string reply = BuildResponse(loading);
   // One connection at a time is enough for probes. Read the request head
-  // before replying so closing does not reset an unread request, but bound
-  // the wait: a client that connects and sends nothing must not delay stop().
+  // before replying, and after replying read what the client still sends (a
+  // request body) until it closes: closing with unread data resets the
+  // connection, and the client can lose the reply. Bound both waits: a client
+  // that connects and sends nothing must not delay stop().
   constexpr auto kRequestWait = std::chrono::milliseconds(500);
   while (!stopped_.load(std::memory_order_acquire)) {
-    pollfd listener{.fd = listen_fd_, .events = POLLIN, .revents = 0};
-    if (net::PollSocket(&listener, 1, 100) <= 0)
+    if (net::PollReadable(listen_fd_, 100) <= 0)
       continue;
-    const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
+    const int client_fd = static_cast<int>(net::AcceptClientSocket(listen_fd_));
     if (client_fd < 0)
       continue;
-    std::string head;
-    const auto deadline = std::chrono::steady_clock::now() + kRequestWait;
-    while (head.find("\r\n\r\n") == std::string::npos && head.size() < 8192 &&
-           !stopped_.load(std::memory_order_acquire)) {
+    // Appends one read to `into` (when set); false once the deadline passes,
+    // the client closes or stop() runs.
+    const auto receive = [&](std::chrono::steady_clock::time_point deadline,
+                             std::string* into) {
       const auto remaining =
           std::chrono::duration_cast<std::chrono::milliseconds>(
               deadline - std::chrono::steady_clock::now())
               .count();
-      pollfd client{.fd = client_fd, .events = POLLIN, .revents = 0};
-      if (remaining <= 0 ||
-          net::PollSocket(&client, 1, static_cast<int>(remaining)) <= 0)
-        break;
-      char buffer[2048];
-      const ssize_t received = ::recv(client_fd, buffer, sizeof(buffer), 0);
+      if (stopped_.load(std::memory_order_acquire) || remaining <= 0 ||
+          net::PollReadable(client_fd, static_cast<int>(remaining)) <= 0)
+        return false;
+      char buffer[4096];
+      const std::intptr_t received =
+          net::Receive(client_fd, buffer, sizeof(buffer), 0);
       if (received <= 0)
-        break;
-      head.append(buffer, static_cast<std::size_t>(received));
+        return false;
+      if (into != nullptr)
+        into->append(buffer, static_cast<std::size_t>(received));
+      return true;
+    };
+    std::string head;
+    const auto head_deadline = std::chrono::steady_clock::now() + kRequestWait;
+    while (head.find("\r\n\r\n") == std::string::npos && head.size() < 8192 &&
+           receive(head_deadline, &head)) {
     }
     (void)SendAll(client_fd, reply);
-    ::shutdown(client_fd, SHUT_WR);
+    (void)net::ShutdownSocket(client_fd, net::ShutdownHow::kWrite);
+    const auto drain_deadline = std::chrono::steady_clock::now() + kRequestWait;
+    while (receive(drain_deadline, nullptr)) {
+    }
     net::CloseSocket(client_fd);
   }
 }
 
 bool IsListenAddress(const std::string& host) {
+  net::EnsureSocketRuntimeStarted();
   sockaddr_storage address{};
-  socklen_t length = 0;
+  net::SocklenT length = 0;
   return ParseListenAddress(host, 0, &address, &length);
 }
 
@@ -1785,6 +1803,10 @@ std::string HttpRequest::query_param(const std::string& key) const {
 
 struct HttpServer::ConnectionWorker {
   int fd{-1};  // Protected by workers_mutex_, including shutdown and close.
+  // Set after the final response is written. The server reads nothing more,
+  // so the connection only logs and closes and no longer counts toward the
+  // limit.
+  std::atomic<bool> response_sent{false};
   std::atomic<bool> done{false};
   std::jthread thread;
 };
@@ -1847,6 +1869,7 @@ void HttpServer::register_routes() {
   add("POST", "/rerank", NotImplemented);
   add("POST", "/infill", NotImplemented);
   add("POST", "/completion", LlamaCompletion);
+  add("POST", "/apply-template", HandleApplyTemplate);
   add("GET", "/props", LlamaProps);
   add("GET", "/slots", LlamaSlots);
   add("GET", "/v1/slots", LlamaSlots);
@@ -1868,7 +1891,7 @@ bool HttpServer::start(std::string* error) {
     return false;
   }
   sockaddr_storage addr{};
-  socklen_t addr_length = 0;
+  net::SocklenT addr_length = 0;
   if (port_ < 0 || port_ > 65535 ||
       !ParseListenAddress(host_, port_, &addr, &addr_length)) {
     if (error != nullptr) {
@@ -1879,20 +1902,16 @@ bool HttpServer::start(std::string* error) {
     return false;
   }
   platform::IgnoreSocketPipeSignal();
-  listen_fd_ = ::socket(addr.ss_family, SOCK_STREAM, 0);
+  listen_fd_ = static_cast<int>(net::CreateStreamSocket(addr.ss_family));
   if (listen_fd_ < 0) {
     if (error != nullptr)
       *error = "socket() failed";
     return false;
   }
-  const int yes = 1;
-  ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+  (void)net::SetReuseAddr(listen_fd_);
   // `::` serves IPv4 clients too. Set it explicitly: the kernel default
   // follows net.ipv6.bindv6only, which differs between hosts.
-  const int no = 0;
-  if (addr.ss_family == AF_INET6 &&
-      ::setsockopt(listen_fd_, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)) !=
-          0) {
+  if (addr.ss_family == AF_INET6 && !net::ClearIpv6Only(listen_fd_)) {
     if (error != nullptr)
       *error = "setsockopt(IPV6_V6ONLY) failed";
     net::CloseSocket(listen_fd_);
@@ -1917,7 +1936,7 @@ bool HttpServer::start(std::string* error) {
   }
   if (port_ == 0) {
     sockaddr_storage bound{};
-    socklen_t length = sizeof(bound);
+    net::SocklenT length = sizeof(bound);
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound),
                       &length) != 0) {
       if (error != nullptr) {
@@ -1943,11 +1962,16 @@ void HttpServer::run(bool handle_signals) {
   // request worker is blocked writing to a slow client. Nonblocking accept
   // also keeps a vanished connection from wedging this observation loop.
   if (!net::SetNonBlocking(listen_fd_))
-    throw std::system_error(errno, std::generic_category(),
+    throw std::system_error(net::LastSocketError(), std::system_category(),
                             "configure HTTP listener");
   Logger::Info(
       "server",
-      "event=listening address=http://" +
+      "event=listening monotonic_us=" +
+          std::to_string(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch())
+                  .count()) +
+          " address=http://" +
           (host_.find(':') == std::string::npos ? host_ : "[" + host_ + "]") +
           ":" + std::to_string(port_) +
           " auth=" + (options_.api_key.empty() ? "off" : "bearer") +
@@ -1965,14 +1989,13 @@ void HttpServer::run(bool handle_signals) {
         break;
       }
     }
-    pollfd descriptor{.fd = listen_fd_, .events = POLLIN, .revents = 0};
-    const int ready = net::PollSocket(&descriptor, 1, 100);
-    if (ready < 0 && errno != EINTR)
-      throw std::system_error(errno, std::generic_category(),
+    const int ready = net::PollReadable(listen_fd_, 100);
+    if (ready < 0 && !net::IsSocketInterrupted())
+      throw std::system_error(net::LastSocketError(), std::system_category(),
                               "poll HTTP listener");
     if (ready <= 0)
       continue;
-    const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
+    const int client_fd = static_cast<int>(net::AcceptClientSocket(listen_fd_));
     if (client_fd < 0) {
       if (stopped_.load(std::memory_order_acquire)) {
         break;
@@ -1990,12 +2013,16 @@ void HttpServer::run(bool handle_signals) {
     bool overloaded = false;
     {
       const std::lock_guard<std::mutex> lock(workers_mutex_);
+      const auto serving = static_cast<std::size_t>(std::ranges::count_if(
+          workers_, [](const std::unique_ptr<ConnectionWorker>& existing) {
+            return !existing->response_sent.load(std::memory_order_acquire);
+          }));
       overloaded = stopped_.load(std::memory_order_acquire) ||
-                   workers_.size() >= options_.max_connections;
+                   serving >= options_.max_connections;
       if (!overloaded) {
         worker_ptr->fd = client_fd;
         worker_ptr->thread = std::jthread([this, worker_ptr, client_fd] {
-          handle_connection(client_fd);
+          handle_connection(client_fd, worker_ptr->response_sent);
           {
             const std::lock_guard<std::mutex> lock(workers_mutex_);
             net::CloseSocket(worker_ptr->fd);
@@ -2023,7 +2050,7 @@ void HttpServer::stop() {
   if (!was_stopped && listen_fd_ >= 0) {
     // Keep the descriptor owned until destruction: run() may still be inside
     // accept(). Closing here allows it to observe a reused descriptor.
-    (void)::shutdown(listen_fd_, SHUT_RDWR);
+    (void)net::ShutdownSocket(listen_fd_, net::ShutdownHow::kReadWrite);
   }
 
   std::vector<std::unique_ptr<ConnectionWorker>> workers;
@@ -2032,7 +2059,7 @@ void HttpServer::stop() {
     workers = std::move(workers_);
     for (const auto& worker : workers) {
       if (worker->fd >= 0) {
-        (void)::shutdown(worker->fd, SHUT_RDWR);
+        (void)net::ShutdownSocket(worker->fd, net::ShutdownHow::kReadWrite);
       }
     }
   }
@@ -2196,7 +2223,8 @@ bool HttpServer::device_lost() {
   return true;
 }
 
-void HttpServer::handle_connection(int client_fd) {
+void HttpServer::handle_connection(int client_fd,
+                                   std::atomic<bool>& response_sent) {
   (void)net::SetSocketTimeouts(client_fd, 120'000);
 
   const auto start_time = std::chrono::steady_clock::now();
@@ -2463,6 +2491,7 @@ void HttpServer::handle_connection(int client_fd) {
       response_started = true;
       connected = SendAll(client_fd, payload);
     }
+    response_sent.store(true, std::memory_order_release);
     std::string outcome = connected ? "completed" : "disconnected";
     if (resp.stream_log) {
       resp.log_details = resp.stream_log->details;
@@ -2514,6 +2543,7 @@ void HttpServer::handle_connection(int client_fd) {
     trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
+    response_sent.store(true, std::memory_order_release);
   } catch (const std::exception& e) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
@@ -2532,6 +2562,7 @@ void HttpServer::handle_connection(int client_fd) {
     trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
+    response_sent.store(true, std::memory_order_release);
   } catch (...) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
@@ -2547,6 +2578,7 @@ void HttpServer::handle_connection(int client_fd) {
     trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
+    response_sent.store(true, std::memory_order_release);
   }
   // Act on a loss found by this request now, not at the next health probe.
   (void)device_lost();

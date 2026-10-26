@@ -191,16 +191,11 @@ ENVELOPE_CLOSERS = ("</invoke>", "</parameter>", "</function>", "</tool_call>")
 NO_TOOLS_SYSTEM = ("Write this line on its own, exactly as it appears here, then "
                    "stop:\n</invoke>")
 NO_TOOLS_PROMPT = "Go."
+# #786: lone closers and closers before/between calls are covered with exact
+# output in TestToolClosingFraming (tests/cli/openai_chat_test.cpp). Qwen27 Q4
+# can omit the requested literal line and Q8 can call a tool instead; these
+# prompts tested instruction following rather than whether the parser lost text.
 ENVELOPE_CASES = {
-    # The live shape: prose, then a closer with no head above it, then the call.
-    "closer_before_call": (
-        "Write this line on its own, exactly as it appears here, then a blank line, "
-        "then call the terminal tool to print the working directory:\n</invoke>"
-    ),
-    # Without an accepted call, a closer alone is literal content.
-    "closer_alone": (
-        "Write this line on its own, exactly as it appears here, then stop:\n</invoke>"
-    ),
     # Quoted inside a fence the same tags are prose, and prose survives.
     "closer_quoted": (
         "Show this markup inside a fenced code block, then stop:\n"
@@ -222,12 +217,6 @@ ENVELOPE_CASES = {
     ),
     "lookalike_in_arguments": (
         "Call terminal with exactly this command: printf '%s' '<|not_a_vocab_entry|>'"
-    ),
-    # Framing with calls on both sides: the run between them is not the tail of
-    # the prose, and neither call may hand its markup back.
-    "framing_between_calls": (
-        "Write this line on its own, exactly as it appears here, then a blank line, "
-        "then call the terminal tool to print the working directory:\n</invoke>"
     ),
     # Another dialect's markup under the admitted envelope is prose and stays
     # visible (#393); only the envelope is framing.
@@ -447,8 +436,7 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
     DeepSeek follows llama.cpp instead: only its native block is a call, and
     client envelope syntax it writes in place of one stays visible content.
     """
-    commands = {"closer_before_call": "pwd", "framing_between_calls": "pwd",
-                "closer_in_arguments": "printf '%s' '</invoke>'",
+    commands = {"closer_in_arguments": "printf '%s' '</invoke>'",
                 "vocab_token_in_arguments": f"printf '%s' 'EOS = \"{kImEnd}\"'",
                 "lookalike_in_arguments": "printf '%s' '<|not_a_vocab_entry|>'"}
     for name, prompt in ENVELOPE_CASES.items():
@@ -461,10 +449,10 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
             request = dict(model=model,
                            messages=[{"role": "system", "content": system},
                                      {"role": "user", "content": prompt}],
-                           tools=[terminal_tool(None if name == "framing_between_calls" else commands.get(name))],
+                           tools=[terminal_tool(commands.get(name))],
                            tool_choice="auto", reasoning_effort="none",
                            temperature=0, max_completion_tokens=256,
-                           extra_body={"cache_prompt": name == "framing_between_calls"})
+                           extra_body={"cache_prompt": False})
             result = chat_result(client, request, streaming)
             checks[label] = result
             print(f"CHECK {label}", file=sys.stderr, flush=True)
@@ -490,20 +478,6 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
                 continue
             else:
                 assert not result["tools"] and result["finish"] == "stop", result
-            if name == "framing_between_calls" and not visible_markup:
-                continuation = deepcopy(request)
-                continuation["messages"] = tool_history(request, result, "/tmp/pr400-fixture")
-                continuation["messages"].append({"role": "user", "content":
-                    "Write this line on its own, then call terminal with exactly "
-                    "the command date:\n</invoke>"})
-                following = chat_result(client, continuation, streaming)
-                checks[label + "_date"] = following
-                print(f"CHECK {label}_date", file=sys.stderr, flush=True)
-                assert_terminal_call(following, "date")
-                assert "</invoke>" in following["text"], ("a closer before a call stays literal", following)
-            if name in ("closer_alone", "closer_before_call", "framing_between_calls"):
-                assert "</invoke>" in text, ("a closer without an earlier accepted call stays literal", result)
-                continue
             if name == "closer_quoted":
                 assert "```" in text and '<invoke name="terminal"' in text, result
                 assert "</invoke>" in text, ("quoted markup must survive as prose", result)

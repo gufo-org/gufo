@@ -2,7 +2,9 @@
 
 import base64
 import re
+import struct
 import sys
+import zlib
 
 
 # Solid red, 128x128. Fixed fixtures keep this suite independent of image tools.
@@ -47,6 +49,25 @@ def invalid_image_cases(image_content):
         ("bad_base64", "data:image/png;base64,A===", "base64"),
         ("corrupt_webp", "data:image/webp;base64," + corrupt, "WebP"),
     )
+
+
+def gradient_png(width, height):
+    """Return an opaque RGB gradient PNG of the given size."""
+    def chunk(kind, payload):
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload)))
+
+    rows = bytearray()
+    for y in range(height):
+        row = bytearray(3 * width)
+        row[0::3] = bytes(x * 255 // width for x in range(width))
+        row[1::3] = bytes([y * 255 // height]) * width
+        row[2::3] = b"\x80" * width
+        rows += b"\0" + row
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows))
+            + chunk(b"IEND", b""))
 
 
 def assert_color(result, color):
@@ -123,6 +144,29 @@ def check_image_inputs(client, model, checks, image_content, chat_result, respon
         assert_color(result, "blue")
         record(f"image_inputs_{endpoint}_recovery", result)
     check_messages_images(client, model, checks, image_content)
+
+
+def check_image_detail(client, model, checks, chat_result):
+    """Check that the server caches a large image separately for `auto` and `low`."""
+    url = "data:image/png;base64," + base64.b64encode(gradient_png(1536, 1024)).decode()
+    results = {}
+    for detail in ("auto", "low"):
+        results[detail] = chat_result(client, dict(
+            model=model, temperature=0, extra_body={"seed": 41},
+            messages=[{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": url, "detail": detail}},
+                {"type": "text", "text": "Describe this image in a few words."}]}],
+            max_completion_tokens=16, reasoning_effort="none"), False)
+        assert results[detail]["finish"] in ("stop", "length"), results[detail]
+        checks[f"image_detail_chat_{detail}"] = results[detail]
+        print(f"CHECK image_detail_chat_{detail}", file=sys.stderr, flush=True)
+    auto, low = results["auto"]["usage"], results["low"]["usage"]
+    # Under low this image is 512 x 320, which is 160 tokens, and under auto it
+    # is 1536 tokens. The requests differ only in the image. A low image has at
+    # least 64 tokens, so fewer than 64 cached tokens means the server reused
+    # only the template text before the image.
+    assert auto["prompt_tokens"] - low["prompt_tokens"] == 1536 - 160, (auto, low)
+    assert low["prompt_tokens_details"]["cached_tokens"] < 64, (auto, low)
 
 
 def check_messages_images(client, model, checks, image_content):

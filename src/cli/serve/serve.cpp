@@ -1,7 +1,5 @@
 #include "src/cli/serve/serve.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -36,6 +34,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
+#include "src/core/platform/shutdown_signal.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
@@ -74,6 +73,10 @@ public:
         << std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - start_)
                .count()
+        << " monotonic_us="
+        << std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+               .count()
         << ' ' << details << ' ' << server::Logger::MemoryStatus();
 #if defined(ENGINE_ENABLE_HIP)
     std::size_t free = 0, total = 0;
@@ -93,50 +96,8 @@ private:
   bool completed_{false};
 };
 
-// Reports a fatal signal on the way out. A driver or runtime failure during a
-// load can abort the process outright, which runs no destructor and no
-// terminate handler, leaving a log that stops at event=load_started. Only
-// async-signal-safe calls are allowed here, so the line is assembled by hand
-// and written straight to the descriptor.
-extern "C" void ReportFatalSignal(int number) {
-  static constexpr char kPrefix[] =
-      "[ERROR] [server] event=fatal_signal signal=";
-  char digits[8];
-  std::size_t length = 0;
-  int value = number;
-  if (value <= 0) {
-    digits[length++] = '0';
-  } else {
-    char reversed[8];
-    std::size_t count = 0;
-    while (value > 0 && count < sizeof(reversed)) {
-      reversed[count++] = static_cast<char>('0' + (value % 10));
-      value /= 10;
-    }
-    while (count > 0) {
-      digits[length++] = reversed[--count];
-    }
-  }
-  (void)::write(STDERR_FILENO, kPrefix, sizeof(kPrefix) - 1);
-  (void)::write(STDERR_FILENO, digits, length);
-  (void)::write(STDERR_FILENO, "\n", 1);
-  // Restore the default action and re-raise, so the exit status and any core
-  // dump still describe the original fault.
-  struct sigaction restore{};
-  restore.sa_handler = SIG_DFL;
-  (void)::sigemptyset(&restore.sa_mask);
-  (void)::sigaction(number, &restore, nullptr);
-  (void)::raise(number);
-}
-
 void InstallFatalSignalReporter() {
-  struct sigaction action{};
-  action.sa_handler = ReportFatalSignal;
-  (void)::sigemptyset(&action.sa_mask);
-  action.sa_flags = SA_RESETHAND;
-  for (const int number : {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE}) {
-    (void)::sigaction(number, &action, nullptr);
-  }
+  platform::InstallFatalSignalReporter();
 }
 
 // Installs a terminate handler that names the reason before the process dies.
@@ -550,8 +511,9 @@ void PrintServeHelp(std::string_view program_name,
   if (subcommand == "embedding") {
     std::filesystem::path model;
     std::string name = "embeddinggemma-2";
-    ArgParser parser(std::string(program_name) + " serve embedding",
-                     "Serve EmbeddingGemma 2 text and image embeddings.");
+    ArgParser parser(
+        std::string(program_name) + " serve embedding",
+        "Serve EmbeddingGemma 2 text, image and audio embeddings.");
     AddEmbeddingOptions(parser, &model, &name);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
@@ -789,7 +751,7 @@ void PrintServeHelp(std::string_view program_name,
       << "  tts       Serve Qwen3-TTS speech synthesis (/v1/audio/speech)\n"
       << "  asr       Serve Qwen3-ASR transcription "
          "(/v1/audio/transcriptions)\n"
-      << "  embedding Serve EmbeddingGemma 2 text and image embeddings "
+      << "  embedding Serve EmbeddingGemma 2 text, image and audio embeddings "
          "(/v1/embeddings)\n\n"
       << "Server:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
@@ -981,8 +943,9 @@ int RunServe(std::span<const char* const> args) {
   if (subcommand == "embedding") {
     std::filesystem::path model;
     std::string name = "embeddinggemma-2";
-    ArgParser parser("gufo serve embedding",
-                     "Serve EmbeddingGemma 2 text and image embeddings.");
+    ArgParser parser(
+        "gufo serve embedding",
+        "Serve EmbeddingGemma 2 text, image and audio embeddings.");
     AddEmbeddingOptions(parser, &model, &name);
     add_server_options(parser, false);
     if (!parser.Parse(sub_args, &parse_err)) {

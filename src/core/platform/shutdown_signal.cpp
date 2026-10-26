@@ -10,6 +10,8 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <unistd.h>
+
 #include <cstring>
 #endif
 
@@ -114,6 +116,59 @@ ShutdownSignalGuard::~ShutdownSignalGuard() {
 void NotifyShutdownHandled() noexcept {
 #if defined(_WIN32)
   g_cleanup_complete.store(true, std::memory_order_release);
+#endif
+}
+
+#if !defined(_WIN32)
+namespace {
+
+extern "C" void ReportFatalSignal(int number) {
+  static constexpr char kPrefix[] =
+      "[ERROR] [server] event=fatal_signal signal=";
+  char digits[8];
+  std::size_t length = 0;
+  int value = number;
+  if (value <= 0) {
+    digits[length++] = '0';
+  } else {
+    char reversed[8];
+    std::size_t count = 0;
+    while (value > 0 && count < sizeof(reversed)) {
+      reversed[count++] = static_cast<char>('0' + (value % 10));
+      value /= 10;
+    }
+    while (count > 0) {
+      digits[length++] = reversed[--count];
+    }
+  }
+  const auto wrote_prefix =
+      ::write(STDERR_FILENO, kPrefix, sizeof(kPrefix) - 1);
+  const auto wrote_digits = ::write(STDERR_FILENO, digits, length);
+  const auto wrote_nl = ::write(STDERR_FILENO, "\n", 1);
+  (void)wrote_prefix;
+  (void)wrote_digits;
+  (void)wrote_nl;
+  // Restore the default action and re-raise, so the exit status and any core
+  // dump still describe the original fault.
+  struct sigaction restore{};
+  restore.sa_handler = SIG_DFL;
+  (void)::sigemptyset(&restore.sa_mask);
+  (void)::sigaction(number, &restore, nullptr);
+  (void)::raise(number);
+}
+
+}  // namespace
+#endif
+
+void InstallFatalSignalReporter() noexcept {
+#if !defined(_WIN32)
+  struct sigaction action{};
+  action.sa_handler = ReportFatalSignal;
+  (void)::sigemptyset(&action.sa_mask);
+  action.sa_flags = SA_RESETHAND;
+  for (const int number : {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE}) {
+    (void)::sigaction(number, &action, nullptr);
+  }
 #endif
 }
 

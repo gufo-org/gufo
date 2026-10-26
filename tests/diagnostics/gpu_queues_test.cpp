@@ -1,7 +1,5 @@
 #include "src/core/diagnostics/gpu_queues.h"
 
-#include <unistd.h>
-
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -9,6 +7,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "src/core/platform/os_info.hpp"
 
 namespace {
 
@@ -25,7 +25,7 @@ class FakeKfd {
 public:
   FakeKfd()
       : root_(std::filesystem::temp_directory_path() /
-              ("gufo-queues-" + std::to_string(::getpid()))) {
+              ("gufo-queues-" + std::to_string(gufo::platform::ProcessId()))) {
     std::filesystem::remove_all(root_);
     std::filesystem::create_directories(proc_root());
   }

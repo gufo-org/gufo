@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "src/core/json.hpp"
+#include "src/core/platform/env.hpp"
 
 namespace {
 
@@ -70,7 +71,7 @@ void TestPartialWriteIsRolledBack() {
 }  // namespace
 
 int main() {
-  ::setenv("NO_COLOR", "1", 1);
+  gufo::platform::SetEnv("NO_COLOR", "1");
   TestPartialWriteIsRolledBack();
   std::cout << "Trace sink checks passed.\n";
 }

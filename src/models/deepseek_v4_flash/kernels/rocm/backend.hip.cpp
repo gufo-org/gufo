@@ -31,14 +31,10 @@ extern "C" int ds4_hip_q8_fold_take_q81(
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
-#include <fcntl.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 #include <algorithm>
 #include <unordered_map>
 #include <vector>

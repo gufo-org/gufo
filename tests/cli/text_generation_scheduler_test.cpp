@@ -30,6 +30,8 @@
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
 #include "src/core/json.hpp"
+#include "src/core/platform/env.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace {
 
@@ -933,9 +935,9 @@ void TestGenerationTraceRecordsPromptAndOutput() {
   Expect(control->decode_calls.load(std::memory_order_relaxed) == 0,
          "an unarmed trace decodes no prompt");
 
-  const auto path =
-      fs::temp_directory_path() /
-      ("gufo-scheduler-trace-" + std::to_string(::getpid()) + ".jsonl");
+  const auto path = fs::temp_directory_path() /
+                    ("gufo-scheduler-trace-" +
+                     std::to_string(gufo::platform::ProcessId()) + ".jsonl");
   fs::remove(path);
   Expect(!Trace::Open(path.string()).has_value(), "trace file opens");
   gufo::sampling::SamplingConfig sampling;
@@ -2979,7 +2981,7 @@ int main() {
   TestPublicationWaitUsesRecentSubstantialPrefill();
   // Log assertions in this binary match the plain "[LEVEL] [component]" text
   // captured from a redirected sink; a TTY stderr would tint the level tag.
-  ::setenv("NO_COLOR", "1", 1);
+  gufo::platform::SetEnv("NO_COLOR", "1");
   TestProgressLoggingIsOptInAndBounded();
   TestStructuredOutputIsPreparedBeforeServing();
   TestAdmissionLoggingIsDebugTierOnly();

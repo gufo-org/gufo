@@ -229,4 +229,28 @@ std::vector<std::uint32_t> Tokenizer::Encode(std::string_view text,
   return ids;
 }
 
+std::vector<std::uint32_t> Tokenizer::EncodeTruncated(
+    std::string_view text, std::size_t max_tokens) const {
+  const std::size_t markers = prefix_ids_.size() + suffix_ids_.size();
+  if (max_tokens < markers) {
+    return Encode(text);
+  }
+  // The kept tokens span at most max_tokens * max_token_bytes() bytes, since
+  // normalization never shortens the text. Encoding twice that keeps the cut,
+  // and any merge it changes, far from them while bounding the work.
+  const std::size_t span = max_tokens * max_token_bytes_;
+  if (max_token_bytes_ != 0 && span / max_token_bytes_ == max_tokens &&
+      text.size() / 2 > span) {
+    text = text.substr(0, 2 * span);
+  }
+  std::vector<std::uint32_t> ids = Encode(text);
+  if (ids.size() <= max_tokens) {
+    return ids;
+  }
+  const auto suffix = static_cast<std::ptrdiff_t>(suffix_ids_.size());
+  ids.erase(ids.begin() + static_cast<std::ptrdiff_t>(max_tokens) - suffix,
+            ids.end() - suffix);
+  return ids;
+}
+
 }  // namespace gufo::models::embedding_gemma2

@@ -1,7 +1,5 @@
 #include "src/cli/video/video.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -10,12 +8,14 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/core/platform/shutdown_signal.hpp"
 #include "src/models/minimax_h3/sha256.hpp"
 
 #ifndef GUFO_H3_SOURCE_MANIFEST
@@ -349,11 +349,11 @@ int RunVideo(std::span<const char* const> args) {
   }
 
   g_cancel_requested = 0;
-  struct sigaction action{};
-  action.sa_handler = HandleInterrupt;
-  sigemptyset(&action.sa_mask);
-  struct sigaction previous{};
-  (void)sigaction(SIGINT, &action, &previous);
+  std::optional<platform::ShutdownSignalGuard> interrupt_guard;
+  try {
+    interrupt_guard.emplace(HandleInterrupt);
+  } catch (const std::system_error&) {
+  }
   minimax_h3::CancellationToken cancellation;
   std::jthread interrupt_watcher([&cancellation](const std::stop_token& stop) {
     while (!stop.stop_requested()) {
@@ -371,7 +371,7 @@ int RunVideo(std::span<const char* const> args) {
       &error);
   interrupt_watcher.request_stop();
   interrupt_watcher.join();
-  (void)sigaction(SIGINT, &previous, nullptr);
+  interrupt_guard.reset();
   if (!generated) {
     std::cerr << "Error: " << error << '\n';
     return cancellation.IsCancelled() ? 130 : 1;

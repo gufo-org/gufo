@@ -1,6 +1,6 @@
 # EmbeddingGemma 2
 
-Native BF16 safetensors text and image embeddings on gfx1151. Gufo runs [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2), a 768-dimensional embedding model for 100+ languages and code, through `POST /v1/embeddings`. Text and images share one vector space. Audio and video inputs remain unsupported. Python runs only in offline reference checks.
+Native safetensors text, image and audio embeddings on gfx1151. Gufo runs [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2), a 768-dimensional embedding model for 100+ languages and code, through `POST /v1/embeddings`. Text, images and audio share one vector space. Video inputs remain unsupported. Python runs only in offline reference checks.
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
@@ -18,7 +18,7 @@ curl -sS http://127.0.0.1:8080/v1/embeddings \
   -d '{"model":"embeddinggemma-2","input":["task: search result | query: What causes the northern lights?"]}'
 ```
 
-The server returns L2-normalized mean-pooled vectors, so cosine similarity and dot product agree.  `input` is a string or an array of up to 2,048 strings or typed content objects, each at most 8,192 tokens including the `<bos>` and `<eos>` the tokenizer adds.  The server rejects token-array input because the vocabulary is the model's own.  `encoding_format` is `float` by default or `base64`.
+The server returns L2-normalized mean-pooled vectors, so cosine similarity and dot product agree.  `input` is a string or an array of up to 2,048 strings or typed content objects, each at most 8,192 tokens including the `<bos>` and `<eos>` the tokenizer adds.  Longer inputs return 400 `context_length_exceeded` unless the request sets `"truncate": true`, which keeps each input's first tokens.  The server rejects token-array input because the vocabulary is the model's own.  `encoding_format` is `float` by default or `base64`.
 
 ## Images
 
@@ -40,8 +40,9 @@ concatenated in order, including whitespace; the server adds no task prefix.
 }
 ```
 
-This is the request form used by Frigate 0.19's development client. The legacy
-`POST /embeddings` endpoint used by Frigate 0.18 is not served.
+This is the request form used by Frigate 0.19's development client. Frigate
+0.18 uses llama.cpp's non-OpenAI `POST /embeddings`, which the same process
+also serves; see [Embeddings](../../SERVER.md#embeddings).
 
 Images may be PNG, JPEG, or WebP, supplied as base64 data URLs or public HTTPS
 URLs. Shared [image read limits](../../SERVER.md#embeddings) apply: at most 20 MiB
@@ -64,6 +65,52 @@ vectors are not interchangeable. [Quality](QUALITY.md) records agreement with
 the official float32 model, rather than a retrieval benchmark or full Frigate
 integration test.
 
+## Audio
+
+Typed `input_audio` parts may appear alone or interleaved with text and images,
+including multiple clips in one input:
+
+```json
+{"input":[{"content":[
+  {"type":"text","text":"a sound: "},
+  {"type":"input_audio","input_audio":{"data":"<base64 WAV>","format":"wav"}}
+]}]}
+```
+
+The contract follows llama.cpp at `68d9053afd4f4d0752ced6187585f862355a40be`:
+`input_audio.data` takes precedence over `input_audio.url`; both are strings.
+`format` is an optional string and is ignored; the bytes determine the format.
+Raw base64, base64 audio data URLs and public HTTPS URLs are supported. Local
+files and private network destinations are refused. Audio data URL media types
+are `audio/wav`, `audio/x-wav`, `audio/mpeg`, `audio/mp3`, `audio/flac`, and
+`audio/ogg`. Supported containers are WAV (PCM or float), FLAC, MP3, and Ogg.
+Audio and images share the request's 20 MiB encoded-byte and 15-second read
+budgets. At most 32 clips are accepted, each at most 30 seconds, 8 channels,
+and 8–192 kHz; decoding also has a 15-second deadline. The HTTP body limit applies.
+
+The decoder pins the official processor's `librosa` backend: libsndfile float32,
+arithmetic channel mean, SOXR HQ resampling to 16 kHz, then zero padding to the
+ceil sample length. There is no waveform amplitude normalization. The model
+frontend uses 320-sample periodic Hann windows and a 160-sample hop, a 512-point
+magnitude FFT, 128 HTK mel filters and `log(mel + 0.001)`. Semicausal left padding,
+128-sample waveform padding, full-frame masks and two stride-2 subsampling masks
+follow the pinned official implementation. Clips shorter than 161 resampled
+samples have no valid feature token and return 400 `invalid_audio_input`.
+
+Each valid soft token is inserted between `<|audio>` and `<audio|>` in the shared
+text backbone. Counts come from the actual subsampled validity mask, rather than
+an estimated duration or the processor's `audio_seq_length` metadata. Expanded
+soft tokens and all boundary tokens count toward the shared 8,192-token context
+and usage. Truncation preserves every image and audio item whole, or refuses the
+input. Literal `<|audio|>` text is refused when clips are supplied.
+
+The 12-layer audio tower and projector load on the first audio request and reuse
+their weights and bounded scratch. Audio computes in float32 using the checkpoint's
+BF16 weights widened once; the shared text backbone retains its existing BF16
+matrix inputs. An audio request runs in its own device batch. Cancellation is
+checked during preprocessing and between audio layers; failures drain queued
+work and use the existing device-loss probe before the next request.
+
 ## Dimensions
 
 `dimensions` selects a Matryoshka size of 128, 256, 512, or 768, and defaults to 768.  Gufo keeps the first components of the full vector and renormalizes.  Quality falls slowly down to 256 and faster at 128, which Google recommends only for text.  Vectors of different sizes, or from different models, are not comparable.  Changing either requires re-embedding an index.
@@ -84,12 +131,39 @@ The model is trained with short prefixes, and Gufo does not add them.  Send the 
 
 Symmetric tasks use the same prefix on every input.  Omitting the prefixes still works but lowers retrieval quality.
 
+## Clients
+
+Clients that speak the OpenAI embeddings API work with two settings to check:
+
+- **Send strings.**  Gufo refuses token-array input (400 `unsupported_input`), because the token IDs come from another model's tokenizer.  LangChain's `OpenAIEmbeddings` tokenizes with tiktoken and sends token arrays by default.  Set `check_embedding_ctx_length=False`, as LangChain itself advises for OpenAI-compatible servers:
+
+  ```python
+  from langchain_openai import OpenAIEmbeddings
+
+  embeddings = OpenAIEmbeddings(
+      model="embeddinggemma-2",
+      base_url="http://127.0.0.1:8080/v1",
+      api_key="unused",
+      check_embedding_ctx_length=False,
+  )
+  ```
+
+- **Match the model ID.**  A request for any other model returns 404 `model_not_found`.  Configure the client with the served ID, or start Gufo with `--served-model-name` set to the name the client sends.  paperless-ngx's OpenAI-compatible backend sends `text-embedding-3-small` unless `PAPERLESS_AI_LLM_EMBEDDING_MODEL` is set:
+
+  ```sh
+  PAPERLESS_AI_LLM_EMBEDDING_BACKEND=openai-like
+  PAPERLESS_AI_LLM_EMBEDDING_ENDPOINT=http://gufo-host:8080/v1
+  PAPERLESS_AI_LLM_EMBEDDING_MODEL=embeddinggemma-2
+  ```
+
+  By default paperless-ngx splits documents into chunks of 1,024 tokens as its own splitter counts them (`PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE`), far below the 8,192-token limit, and adds none of the task prefixes above.
+
 ## Requests
 
 Loading uploads the 540 MB text backbone, unmaps the checkpoint so the weights stay only in device memory, and then runs a short warm-up.  The warm-up times each hipBLASLt algorithm that needs no scratch space for each matrix shape and row bucket the encoder uses and keeps the fastest, so the first request pays no tuning cost.  The choice can differ between loads, which changes float32 accumulation order but not the result beyond rounding.
 
-The first image request uploads the vision tower and projector; subsequent requests reuse them. Audio weights are never uploaded.
+The first image or audio request uploads that modality's tower and projector; subsequent requests reuse them.
 
-Sequences from one request or from concurrent requests run one device batch at a time.  A batch packs up to 8,192 tokens, and a single request may span more than one batch.  Concurrent requests take turns in arrival order, one batch per turn, so a short request waits for at most one batch of a long one.  A device failure that a probe confirms answers 503 `device_lost` and shuts the server down for its supervisor to restart, as the text server does.  Attention is bidirectional, so there is no cache to reuse between requests.  Gufo checks for cancellation once the request reaches the device and between its device batches.  `--served-model-name` sets the public model ID.  Gufo supports only BF16 safetensors, not GGUF or quantized variants.
+One device batch of up to 8,192 tokens runs at a time.  Text requests that wait for the device share a batch, oldest first, and a lone request runs at once.  A request with images or audio runs in a batch of its own, in arrival order, and its soft tokens count toward the batch.  A request that fits in one batch never spans two.  A larger request is split, and after each of its batches the requests that arrived meanwhile go first, so a short request waits for at most one batch of a long one.  A device failure that a probe confirms answers 503 `device_lost` and shuts the server down for its supervisor to restart, as the text server does.  Attention is bidirectional, so there is no cache to reuse between requests.  Gufo checks for cancellation before each batch that would take a request's inputs, so a cancelled request does not use the device again.  `--served-model-name` sets the public model ID.  Gufo supports only BF16 safetensors, not GGUF or quantized variants.
 
 See [server limits](../../SERVER.md) and [quality gaps](QUALITY.md).

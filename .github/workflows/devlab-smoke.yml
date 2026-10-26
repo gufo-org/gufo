@@ -17,11 +17,11 @@ on:
         options: [ full, pr ]
         default: full
       ar:
-        description: Also run the functional suites in AR (speculative off); MTP always runs
+        description: Also run the functional suites in AR (speculative off); selected draft modes always run
         default: false
         type: boolean
       benchmark:
-        description: Also benchmark native AR through 128K on the PR and its merge base
+        description: Also benchmark native AR through 128K on the PR merged into main and on main
         default: false
         type: boolean
 
@@ -42,9 +42,9 @@ jobs:
     timeout-minutes: 5
     outputs:
       head: ${{ steps.revision.outputs.head }}
+      merge: ${{ steps.revision.outputs.merge }}
       pr: ${{ steps.revision.outputs.pr }}
       has_work: ${{ steps.plan.outputs.has_work }}
-      scope: ${{ steps.plan.outputs.scope }}
       base: ${{ steps.plan.outputs.base }}
       tier: ${{ steps.plan.outputs.tier }}
     permissions:
@@ -77,14 +77,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_MERGE: ${{ github.event_name == 'pull_request' && github.sha || '' }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::Invalid PR number"; exit 1; }
           # Test the revision that triggered the event; a later push starts its own run.
           head=${EVENT_HEAD:-$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)}
-          echo "head=$head" >> "$GITHUB_OUTPUT"
-          echo "pr=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          # Like CI, test the PR merged into main: suites from main then always
+          # run against a binary that contains the server changes they expect.
+          merge=${EVENT_MERGE:-$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.merge_commit_sha // empty')}
+          [[ -n "$merge" ]] || { echo "::error::PR does not merge cleanly into main; rebase it."; exit 1; }
+          {
+            echo "head=$head"
+            echo "merge=$merge"
+            echo "pr=$PR_NUMBER"
+          } >> "$GITHUB_OUTPUT"
 
       # Advisory only: devlab/functional is not a required check, so cluster
       # problems never block merging.
@@ -111,12 +119,14 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/functional -p test_impact.py
           python3 -m unittest discover -s tests/functional -p test_report.py
+          python3 -m unittest discover -s tests/functional -p test_devlab.py
 
-      - name: Select affected Flash-Next suites
+      - name: Select affected model representatives and suites
         id: plan
         env:
           PR_NUMBER: ${{ steps.revision.outputs.pr }}
           APPROVED_HEAD: ${{ steps.revision.outputs.head }}
+          APPROVED_MERGE: ${{ steps.revision.outputs.merge }}
           RUN_BENCHMARK: ${{ inputs.benchmark || false }}
           RUN_AR: ${{ inputs.ar || false }}
           DISPATCH_TIER: ${{ inputs.tier }}
@@ -129,34 +139,40 @@ jobs:
           [[ "$HEAD_REF" == release-please--* ]] && tier=full
           [[ -n "$DISPATCH_TIER" ]] && tier="$DISPATCH_TIER"
           echo "tier=$tier" >> "$GITHUB_OUTPUT"
-          # MTP exercises the AR verification path too; AR-only coverage is opt-in.
-          scope=flash-next-q4/mtp
-          [[ "$RUN_AR" == true ]] && scope=flash-next-q4
-          echo "scope=$scope" >> "$GITHUB_OUTPUT"
-          git fetch https://github.com/gufo-org/gufo.git "refs/pull/$PR_NUMBER/head:refs/ci/pr" main:refs/ci/main
+          modes=()
+          [[ "$RUN_AR" == true ]] && modes+=(--ar)
+          [[ "$RUN_BENCHMARK" == true ]] && modes+=(--benchmark)
+          git fetch https://github.com/gufo-org/gufo.git "refs/pull/$PR_NUMBER/head:refs/ci/pr" "$APPROVED_MERGE"
           [[ "$(git rev-parse refs/ci/pr)" == "$APPROVED_HEAD" ]] || {
             echo "::error::PR changed after this run started; the new push starts its own run."
             exit 1
           }
-          base=$(git merge-base refs/ci/main "$APPROVED_HEAD")
+          [[ "$(git rev-parse "$APPROVED_MERGE^2")" == "$APPROVED_HEAD" ]] || {
+            echo "::error::Merge commit $APPROVED_MERGE does not merge the pinned PR head."
+            exit 1
+          }
+          # The merge's main parent is both the timing baseline and the diff base.
+          base=$(git rev-parse "$APPROVED_MERGE^1")
           echo "base=$base" >> "$GITHUB_OUTPUT"
-          python3 tests/functional/impact.py --repo . --base "$base" --head "$APPROVED_HEAD" \
-            --model "$scope" --tier "$tier" --output functional-plan.json
+          python3 tests/functional/devlab_plan.py --repo . --base "$base" --head "$APPROVED_MERGE" \
+            "${modes[@]}" --tier "$tier" --output functional-plan.json
           python3 - <<'PYPLAN'
           import json, os
           plan = json.load(open('functional-plan.json'))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              work = bool(plan['groups']) or os.environ['RUN_BENCHMARK'] == 'true'
+              work = bool(plan['models'])
               print('has_work=' + str(work).lower(), file=output)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('## Changed-file functional plan\n\n')
               summary.write(f"Revisions: `{plan['base']}` → `{plan['head']}`; tier `{plan['tier']}`.\n\n")
               for path in plan['paths']:
                   summary.write(f"- `{path['path']}` → {', '.join(path['rules'])}\n")
+              for model in plan['models']:
+                  summary.write(f"\n**{model['id']}**: " + ', '.join(sorted({reason['rule'] for reason in model['reasons']})) + '\n')
               for group in plan['groups']:
                   summary.write(f"\n**{group['profile']} / {group['configuration']}**: " + ', '.join(group['suites']) + '\n')
               summary.write(f"\nDeferred: {len(plan['deferred'])}; release run only: {len(plan['release_only'])}; outside scope {', '.join(plan['scope'])}: {len(plan['out_of_scope'])}.\n")
-              summary.write('Candidate correctness only. Other-model, numerical, agent replay and timing qualification remain separate obligations.\n')
+              summary.write('Selected candidate correctness and paired server-phase timings against main. Other-model and agent replay obligations remain separate.\n')
           PYPLAN
 
       - name: Retain selection plan
@@ -165,23 +181,45 @@ jobs:
           name: functional-plan-${{ github.run_attempt }}
           path: functional-plan.json
 
+  build:
+    name: Hosted Linux binaries
+    needs: authorize
+    if: needs.authorize.outputs.has_work == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      revision: ${{ needs.authorize.outputs.merge }}
+      baseline: ${{ needs.authorize.outputs.base }}
+      artifact-name: linux-devlab-${{ github.run_attempt }}
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
   smoke:
-    name: Flash-Next functional checks on Strix Halo
+    name: Selected model checks on Strix Halo
+    # Downloads overlap hosted compilation; consume the finalized artifact as
+    # soon as it exists rather than waiting for hosted cache-save post steps.
     needs: authorize
     if: needs.authorize.outputs.has_work == 'true'
     runs-on: [ linux, strix-halo, devlab-dispatch ]
     timeout-minutes: 360
     permissions:
       contents: read
+      actions: read
     steps:
       # Self-hosted workspaces persist between runs; start from a clean tree.
       - name: Clean workspace and check disk space
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf -- candidate baseline functional-results functional-report functional-plan.json phase-logs
-          # The 63 GB home overlay cannot hold the 104 GiB weights.
-          cache_root="${GUFO_CI_CACHE:-$RUNNER_TOOL_CACHE/gufo}"
+          leftovers=(candidate baseline controller linux-artifacts linux-artifacts.tar.gz functional-results functional-report functional-plan.json functional-assets.json phase-logs)
+          # Earlier packages kept the Nix store's read-only directories.
+          for path in "${leftovers[@]}"; do
+            if [[ -d $path && ! -L $path ]]; then chmod -R u+w -- "$path"; fi
+          done
+          rm -rf -- "${leftovers[@]}"
+          # Model files and their local_dir metadata survive runner cleanup.
+          cache_root="${HF_HOME:-$HOME/.cache/huggingface}/gufo"
           mkdir -p "$cache_root"
           printf 'GUFO_CACHE_ROOT=%s\n' "$cache_root" >> "$GITHUB_ENV"
           df -h "$GITHUB_WORKSPACE" "$cache_root"
@@ -290,7 +328,7 @@ jobs:
             verification='KFD topology; ROCm tools are not installed'
           fi
           printf -- '- gfx1151: verified (%s)\n' "$verification" >> "$GITHUB_STEP_SUMMARY"
-          for tool in nix hipcc rocminfo rocm-smi amd-smi python3 git ccache; do
+          for tool in rocminfo rocm-smi amd-smi python3 git tar; do
             if command -v "$tool" >/dev/null 2>&1; then
               echo "$tool: available"
               printf -- '- %s: available\n' "$tool" >> "$GITHUB_STEP_SUMMARY"
@@ -302,159 +340,94 @@ jobs:
           awk '/^MemTotal:/ { printf "Host-visible memory: %.1f GiB\n", $2 / 1048576 }' /proc/meminfo
           printf '\nThis probe verifies runner placement and GPU device access. It does not execute a model or qualify performance.\n' >> "$GITHUB_STEP_SUMMARY"
 
+      # Suites come from the same merge commit as the candidate binary.
       - name: Checkout workflow and test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.authorize.outputs.merge }}
           persist-credentials: false
           path: controller
+          sparse-checkout: |
+            tests/functional
+            tests/fixtures
+            tools
 
-      - name: Recreate selection plan and candidate checkout
-        env:
-          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
-          APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
-          APPROVED_SCOPE: ${{ needs.authorize.outputs.scope }}
-          APPROVED_TIER: ${{ needs.authorize.outputs.tier }}
+      - name: Download authorized selection plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: functional-plan-${{ github.run_attempt }}
+
+      # Fetch assets while the hosted binary bundle builds and downloads. No mounted
+      # weights or voice fixtures are required; the controller includes English audio.
+      - name: Start pinned selected-model downloads
         shell: bash
         run: |
           set -euo pipefail
-          git init candidate
-          git -C candidate fetch https://github.com/gufo-org/gufo.git "$APPROVED_HEAD" "$APPROVED_BASE"
-          git -C candidate checkout --detach "$APPROVED_HEAD"
-          base="$APPROVED_BASE"
-          python3 controller/tests/functional/impact.py --repo candidate --base "$base" --head "$APPROVED_HEAD" \
-            --model "$APPROVED_SCOPE" --tier "$APPROVED_TIER" --output functional-plan.json
-
-      - name: Prepare persistent model cache
-        shell: bash
-        run: |
-          set -euo pipefail
-          model_dir="$GUFO_CACHE_ROOT/models/flash-next/38bb39ee97821de2c9009abb7e93950eec396e66"
-          mkdir -p "$model_dir"
-          printf 'GUFO_MODEL_DIR=%s\n' "$model_dir" >> "$GITHUB_ENV"
-          # Weights total about 104 GiB; require the remainder plus headroom.
-          required_kib=$((110 * 1024 * 1024 - $(du -sk "$model_dir" | cut -f1)))
-          available_kib=$(df --output=avail -k "$model_dir" | tail -1)
-          if (( available_kib < required_kib )); then
-            echo "::error::Model cache needs $((required_kib / 1048576)) GiB more; $((available_kib / 1048576)) GiB free at $model_dir."
-            exit 1
-          fi
-
-      # Weights are network bound and the builds CPU bound: download in the
-      # background and wait for it before the suites need the files.
-      - name: Start pinned Flash-Next Q4 weight download
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > "$RUNNER_TEMP/gufo-weights.sh" <<'SCRIPT'
-          set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/gufo-hf-cli"
-          "$RUNNER_TEMP/gufo-hf-cli/bin/python" -m pip install 'huggingface_hub[hf_xet]'
-          # The cluster mirror times out on HEAD requests for the large shards.
-          export HF_ENDPOINT=https://huggingface.co
-          export HF_HUB_DISABLE_XET=0
-          export HF_XET_HIGH_PERFORMANCE=1
-          export HF_HUB_DOWNLOAD_TIMEOUT=120
-          export HF_HUB_ETAG_TIMEOUT=60
-          printf 'Hugging Face endpoint: %s\n' "${HF_ENDPOINT:-https://huggingface.co}"
-          printf 'Xet disabled by runner: %s\n' "${HF_HUB_DISABLE_XET:-0}"
-          export HF_HOME="$GUFO_CACHE_ROOT/huggingface"
-          df -h "$GUFO_MODEL_DIR"
-          downloaded=false
-          for attempt in 1 2 3; do
-            # Repeat --include: extra values after one flag become explicit
-            # filenames, which makes the CLI ignore the shard pattern.
-            if "$RUNNER_TEMP/gufo-hf-cli/bin/hf" download unsloth/Qwen3.8-Flash-Next-GGUF \
-              --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
-              --include 'UD-Q4_K_XL/*.gguf' \
-              --include 'MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf' \
-              --include 'mmproj-BF16.gguf' \
-              --local-dir "$GUFO_MODEL_DIR"; then
-              downloaded=true
-              break
-            fi
-            echo "::warning::Download attempt $attempt failed; retaining partial files for resume."
-          done
-          [[ "$downloaded" == true ]] || {
-            echo "::error::Flash-Next download failed after three attempts."
-            exit 1
-          }
-          for file in UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-0000{1,2,3,4}-of-00004.gguf \
-                      MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf mmproj-BF16.gguf; do
-            [[ -s "$GUFO_MODEL_DIR/$file" ]] || {
-              echo "::error::Missing weight file after download: $file"
-              exit 1
-            }
-          done
-          du -sh "$GUFO_MODEL_DIR"
-          SCRIPT
           rm -f "$RUNNER_TEMP/gufo-weights.status"
-          # The job outlives this step; the runner reaps the process at job end.
           (
             status=0
-            bash "$RUNNER_TEMP/gufo-weights.sh" || status=$?
+            (
+              set -euo pipefail
+              python3 -m venv "$RUNNER_TEMP/gufo-hf-cli"
+              "$RUNNER_TEMP/gufo-hf-cli/bin/python" -m pip install 'huggingface_hub[hf_xet]==1.26.0'
+              # Inherit the runner's Hugging Face mirror, transfer settings and persistent cache.
+              export HF_HUB_DOWNLOAD_TIMEOUT=120
+              export HF_HUB_ETAG_TIMEOUT=60
+              "$RUNNER_TEMP/gufo-hf-cli/bin/python" controller/tests/functional/devlab_models.py \
+                --plan functional-plan.json --cache "$GUFO_CACHE_ROOT/models" \
+                --output functional-assets.json
+            ) || status=$?
             echo "$status" > "$RUNNER_TEMP/gufo-weights.status"
           ) > "$RUNNER_TEMP/gufo-weights.log" 2>&1 < /dev/null &
           echo $! > "$RUNNER_TEMP/gufo-weights.pid"
 
-      - name: Configure compiler cache
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "::notice::ccache is not installed; builds start from scratch."
-            exit 0
-          fi
-          {
-            printf 'CCACHE_DIR=%s\n' "$GUFO_CACHE_ROOT/ccache"
-            printf 'CCACHE_BASEDIR=%s\n' "$GITHUB_WORKSPACE"
-            printf 'CCACHE_MAXSIZE=20G\n'
-            for language in C CXX HIP; do
-              printf 'CMAKE_%s_COMPILER_LAUNCHER=ccache\n' "$language"
-            done
-          } >> "$GITHUB_ENV"
-          CCACHE_DIR="$GUFO_CACHE_ROOT/ccache" ccache --zero-stats
-
-      - name: Build Gufo from source
-        id: build
-        working-directory: candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf 'Candidate: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
-          cmake --version
-          c++ --version
-          hipcc --version
-          cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-          cmake --build --preset release --parallel 4
-          ./build/release/gufo diagnose
-
-      - name: Build merge base for the phase and benchmark baselines
-        id: build_base
+      - name: Download hosted Linux binaries
+        timeout-minutes: 135
         env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 controller/tools/ci/devlab_artifact.py linux \
+            --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output linux-artifacts.tar.gz
+
+      - name: Unpack, verify and diagnose pinned production binaries
+        id: binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVED_MERGE: ${{ needs.authorize.outputs.merge }}
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
         shell: bash
         run: |
           set -euo pipefail
-          git -C candidate worktree add --detach ../baseline "$APPROVED_BASE"
-          cd baseline
-          printf 'Benchmark baseline: %s\n' "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
-          cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-          cmake --build --preset release --parallel 4
+          tar -xzf linux-artifacts.tar.gz
+          python3 controller/tools/ci/devlab_artifact.py runtime \
+            --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --manifest linux-artifacts/runtime.json --cache "$GUFO_CACHE_ROOT/runtimes" \
+            --output linux-artifacts
+          python3 controller/tools/ci/linux_artifact.py verify \
+            --source linux-artifacts/candidate --revision "$APPROVED_MERGE"
+          python3 controller/tools/ci/linux_artifact.py verify \
+            --source linux-artifacts/baseline --revision "$APPROVED_BASE"
+          linux-artifacts/candidate/gufo diagnose
+          linux-artifacts/baseline/gufo diagnose
 
-      - name: Wait for pinned Flash-Next Q4 weights
+      - name: Wait for pinned selected-model weights
         id: weights
         shell: bash
         run: |
           set -euo pipefail
-          pid=$(cat "$RUNNER_TEMP/gufo-weights.pid")
-          while kill -0 "$pid" 2>/dev/null; do sleep 5; done
+          while [[ ! -f "$RUNNER_TEMP/gufo-weights.status" ]]; do
+            pid=$(cat "$RUNNER_TEMP/gufo-weights.pid")
+            kill -0 "$pid" 2>/dev/null || { echo "::error::Asset downloader exited without a result"; exit 1; }
+            sleep 5
+          done
           # Progress bars redraw with carriage returns; keep their final states.
           tr '\r' '\n' < "$RUNNER_TEMP/gufo-weights.log" | grep -v '^\s*$' | tail -n 60
           status=$(cat "$RUNNER_TEMP/gufo-weights.status" 2>/dev/null || echo 1)
           exit "$status"
 
       - name: Install functional client dependencies
+        id: client
         shell: bash
         run: |
           python3 -m venv "$RUNNER_TEMP/gufo-functional-client"
@@ -464,50 +437,37 @@ jobs:
           # Fail here, not in every suite: metrics.py imports jsonschema lazily.
           cd controller/tests/functional
           "$RUNNER_TEMP/gufo-functional-client/bin/python" -c \
-            'import jsonschema, PIL, run, openai_sdk, metrics, image_inputs, tool_agent, tool_reasoning'
+            'import jsonschema, PIL, numpy, httpx, run, openai_sdk, metrics, devlab_run, service_phases'
 
-      - name: Run selected functional suites
-        shell: bash
-        run: |
-          "$RUNNER_TEMP/gufo-functional-client/bin/python" controller/tests/functional/cluster.py \
-            --plan functional-plan.json --binary candidate/build/release/gufo \
-            --weights "$GUFO_MODEL_DIR" --output functional-results
-
-      # Timing observations only: they never change the advisory verdict, and
-      # suite failures must not hide them.
-      - name: Time inference phases on base and PR
+      - name: Run selected model correctness and paired speed checks
         if: >-
-          !cancelled() && steps.build.outcome == 'success' &&
-          steps.build_base.outcome == 'success' && steps.weights.outcome == 'success'
-        env:
-          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
-          APPROVED_HEAD: ${{ needs.authorize.outputs.head }}
+          !cancelled() && steps.binaries.outcome == 'success' && steps.weights.outcome == 'success' &&
+          steps.client.outcome == 'success'
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p functional-report
-          python3 controller/tests/functional/phases.py \
-            --base-binary baseline/build/release/gufo --head-binary candidate/build/release/gufo \
-            --base-revision "$APPROVED_BASE" --head-revision "$APPROVED_HEAD" \
-            --weights "$GUFO_MODEL_DIR" --output functional-report/phases.json --logs phase-logs
+          "$RUNNER_TEMP/gufo-functional-client/bin/python" controller/tests/functional/devlab_run.py \
+            --plan functional-plan.json --assets functional-assets.json \
+            --binary linux-artifacts/candidate/gufo --base-binary linux-artifacts/baseline/gufo \
+            --output functional-results --report functional-report --logs phase-logs
 
       # Suite failures must not hide benchmark observations.
       - name: Benchmark Flash-Next AR through 128K depth on base and PR
         if: >-
           !cancelled() && inputs.benchmark &&
-          steps.build.outcome == 'success' && steps.build_base.outcome == 'success' &&
+          steps.binaries.outcome == 'success' &&
           steps.weights.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p functional-report
-          # Same runner and weights; the merge base runs first.
+          model_dir=$(python3 -c 'import json; print(json.load(open("functional-assets.json"))["flash-next"])')
+          # Same runner and weights; main runs first.
           for revision in base head; do
-            checkout=candidate
-            [[ "$revision" == base ]] && checkout=baseline
+            binary=linux-artifacts/candidate/gufo
+            [[ "$revision" == base ]] && binary=linux-artifacts/baseline/gufo
             printf '\n### Benchmark: %s\n\n' "$revision" >> "$GITHUB_STEP_SUMMARY"
-            "$checkout/build/release/gufo" bench \
-              --model "$GUFO_MODEL_DIR/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf" \
+            "$binary" bench \
+              --model "$model_dir/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf" \
               --speculative off --n-prompt 2048 --n-gen 128 \
               --n-depth 0,4096,8192,12288,16384,32768,65536,131072 \
               --repetitions 1 \
@@ -537,29 +497,26 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: flash-next-functional-${{ github.run_attempt }}
+          name: model-functional-${{ github.run_attempt }}
           path: |
             functional-plan.json
+            functional-assets.json
             functional-results/
             functional-report/
             phase-logs/
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Report disk and compiler cache, remove temporary environments
+      - name: Report disk and remove temporary environments
         if: always()
         shell: bash
         run: |
           rm -rf -- "$RUNNER_TEMP/gufo-hf-cli" "$RUNNER_TEMP/gufo-functional-client"
-          git -C candidate worktree remove --force ../baseline 2>/dev/null || true
           rm -rf -- functional-results
           fence='~~~'
           {
             printf '\n### Disk after run\n\n%stext\n%s\n%s\n' "$fence" \
               "$(df -h "$GITHUB_WORKSPACE" "${GUFO_CACHE_ROOT:-$GITHUB_WORKSPACE}")" "$fence"
-            if [[ -n "${CCACHE_DIR:-}" ]]; then
-              printf '\n### Compiler cache\n\n%stext\n%s\n%s\n' "$fence" "$(ccache --show-stats)" "$fence"
-            fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   report:

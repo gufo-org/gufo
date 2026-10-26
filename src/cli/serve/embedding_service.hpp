@@ -2,6 +2,7 @@
 #define GUFO_SERVER_EMBEDDING_SERVICE_HPP_
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -17,7 +18,8 @@ namespace gufo::server {
 /// truncation.
 struct EmbeddingBatch {
   std::vector<std::vector<float>> embeddings;
-  /// Tokens per input including the beginning and end markers.
+  /// Tokens per input including the beginning and end markers, after any
+  /// truncation.
   std::vector<std::size_t> token_counts;
   /// Index of the offending input, set only with
   /// `EmbeddingStatus::kInputTooLong`.
@@ -25,7 +27,7 @@ struct EmbeddingBatch {
 };
 
 struct EmbeddingPart {
-  enum class Type { kText, kImage };
+  enum class Type { kText, kImage, kAudio };
   Type type{Type::kText};
   std::string value;
 };
@@ -38,14 +40,24 @@ enum class EmbeddingStatus {
   kCancelled,
   kInputTooLong,
   kInvalidInput,
+  kInvalidAudioInput,
   kFailed,
   /// The device failed a probe after an error. The service stays lost.
   kDeviceLost,
 };
 
+/// Per-request choices that change how inputs are encoded.
+struct EmbeddingRequestOptions {
+  /// Cut an input longer than `EmbeddingService::kMaxInputTokens` to its
+  /// first tokens, keeping the end marker, instead of refusing it. An input
+  /// whose images would not fit whole is still refused.
+  bool truncate{false};
+};
+
 struct EmbeddingServiceOptions {
   using Runner =
       std::function<EmbeddingStatus(const std::vector<EmbeddingInput>& inputs,
+                                    const EmbeddingRequestOptions& request,
                                     EmbeddingBatch* batch, std::string* error)>;
 
   std::filesystem::path model_root;
@@ -55,7 +67,15 @@ struct EmbeddingServiceOptions {
   Runner runner;
 };
 
-/// Native HIP EmbeddingGemma 2 text and image embedding service.
+/// Cuts `tokens` (an encoding that ends in one `<eos>`) to `max_tokens` by
+/// dropping content tokens before the `<eos>`. Returns false, leaving `tokens`
+/// unchanged, when the cut would drop an `image_token` or the end-of-image
+/// marker right after the last one.
+[[nodiscard]] bool TruncateKeepingImages(std::vector<std::uint32_t>* tokens,
+                                         std::size_t max_tokens,
+                                         std::uint32_t image_token);
+
+/// Native HIP EmbeddingGemma 2 text, image and audio embedding service.
 class EmbeddingService {
 public:
   /// Longest accepted input in tokens, including the surrounding markers.
@@ -63,6 +83,7 @@ public:
       models::embedding_gemma2::hip::kMaxSequenceTokens;
 
   static constexpr std::size_t kMaxImages = 32;
+  static constexpr std::size_t kMaxAudio = 32;
 
   explicit EmbeddingService(EmbeddingServiceOptions options);
   ~EmbeddingService();
@@ -79,10 +100,10 @@ public:
   [[nodiscard]] std::string model_id() const;
   [[nodiscard]] std::string backend_name() const;
 
-  /// Embeds `texts` as one request. Concurrent requests take device turns one
-  /// batch at a time, so a long request does not block shorter ones until it
-  /// finishes. Returns `kCancelled` for a request cancelled before one of its
-  /// batches reaches the device.
+  /// Embeds `texts` as one request. Concurrent requests share device batches
+  /// in arrival order, and a long request does not block shorter ones until
+  /// it finishes. Returns `kCancelled` for a request cancelled before one of
+  /// its batches reaches the device.
   [[nodiscard]] EmbeddingStatus Embed(const std::vector<std::string>& texts,
                                       const std::function<bool()>& is_cancelled,
                                       EmbeddingBatch* batch,
@@ -91,7 +112,8 @@ public:
   [[nodiscard]] EmbeddingStatus EmbedInputs(
       const std::vector<EmbeddingInput>& inputs,
       const std::function<bool()>& is_cancelled, EmbeddingBatch* batch,
-      std::string* error = nullptr);
+      std::string* error = nullptr,
+      const EmbeddingRequestOptions& request = {});
 
 private:
   struct Impl;

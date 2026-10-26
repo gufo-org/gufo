@@ -1,7 +1,5 @@
 #include "src/cli/serve/text_model_runner.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -23,8 +21,11 @@
 #include <vector>
 
 #include "src/core/json.hpp"
+#include "src/core/platform/env.hpp"
+#include "src/core/platform/os_info.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
+#include "tests/support/temporary_directory.hpp"
 
 using gufo::tokenization::kImEnd;
 using gufo::tokenization::kImStart;
@@ -770,32 +771,6 @@ private:
   std::size_t max_context_;
 };
 
-class TemporaryDirectory {
-public:
-  TemporaryDirectory() {
-    std::string pattern = (std::filesystem::temp_directory_path() /
-                           "gufo-runner-disk-cache-XXXXXX")
-                              .string();
-    const char* created = ::mkdtemp(pattern.data());
-    if (created == nullptr) {
-      throw std::runtime_error("failed to create runner cache directory");
-    }
-    path_ = created;
-  }
-
-  ~TemporaryDirectory() {
-    std::error_code error;
-    std::filesystem::remove_all(path_, error);
-  }
-
-  [[nodiscard]] const std::filesystem::path& path() const noexcept {
-    return path_;
-  }
-
-private:
-  std::filesystem::path path_;
-};
-
 void TestSnapshotForkAndUnsupportedCapabilities() {
   auto stats = std::make_shared<FakeStats>();
   SnapshotRunner runner(stats);
@@ -970,7 +945,7 @@ void TestGeneratedFrontierForksBeforeMutation() {
 
 void TestGeneratedFrontierPersistsForForks() {
   // Persist every frontier; spacing is checked below and by the disk store.
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-runner-disk-cache");
   const TextRunnerDiskCacheOptions disk{.directory = directory.path(),
                                         .capacity_bytes = 4096,
                                         .staging_capacity_bytes = 4096,
@@ -998,7 +973,7 @@ void TestGeneratedFrontierPersistsForForks() {
 
   // With the default step, the generated frontier one token past the prompt
   // is not written; a restart resumes from the prompt and re-prefills it.
-  TemporaryDirectory spaced_directory;
+  TemporaryDirectory spaced_directory("gufo-runner-disk-cache");
   const TextRunnerDiskCacheOptions spaced{.directory = spaced_directory.path(),
                                           .capacity_bytes = 4096,
                                           .staging_capacity_bytes = 4096};
@@ -1133,7 +1108,7 @@ void TestCancellationRetainsOnlyCompletedWork() {
 }
 
 void TestPersistentSnapshotRestoresAcrossPools() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-runner-disk-cache");
   const TextRunnerDiskCacheOptions disk_cache{
       .directory = directory.path(),
       .capacity_bytes = 4096,
@@ -1212,7 +1187,7 @@ void TestPromptReuseCanBeDisabledPerRequest() {
 }
 
 void TestStableChatPrefixSurvivesInterruptedFraming() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-runner-disk-cache");
   const TextRunnerDiskCacheOptions disk_cache{.directory = directory.path(),
                                               .capacity_bytes = 8192,
                                               .staging_capacity_bytes = 4096};
@@ -1532,7 +1507,7 @@ void TestChatFallbackSurvivesSnapshotBudgetPressure() {
 }
 
 void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-runner-disk-cache");
   const TextRunnerDiskCacheOptions disk_cache{.directory = directory.path(),
                                               .capacity_bytes = 8192,
                                               .staging_capacity_bytes = 4096,
@@ -1568,7 +1543,7 @@ void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
          "the earlier disk fallback survives exact full-prompt restoration");
   changed.Invalidate();
 
-  TemporaryDirectory legacy_directory;
+  TemporaryDirectory legacy_directory("gufo-runner-disk-cache");
   const TextRunnerDiskCacheOptions legacy_disk{
       .directory = legacy_directory.path(),
       .capacity_bytes = 8192,
@@ -1640,7 +1615,7 @@ void TestNewImageGetsAStableCheckpoint() {
 }
 
 void TestSharedPrefixIsLearnedAndRestoredAcrossConversations() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-runner-disk-cache");
   const TextRunnerDiskCacheOptions disk_cache{
       .directory = directory.path(),
       .capacity_bytes = 8192,
@@ -1800,7 +1775,7 @@ void TestLearnedBoundarySurvivesExactRepublication() {
 
 void TestCoincidentCacheBoundariesShareOneCopy() {
   for (const bool stable : {false, true}) {
-    TemporaryDirectory directory;
+    TemporaryDirectory directory("gufo-runner-disk-cache");
     const TextRunnerDiskCacheOptions disk_cache{
         .directory = directory.path(),
         .capacity_bytes = 1024 * 1024,
@@ -1845,7 +1820,7 @@ void TestCoincidentCacheBoundariesShareOneCopy() {
 }
 
 void TestDiskOnlyCaptureReservesBudgetBeforeCommit() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-runner-disk-cache");
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<PersistentSnapshotRunner>(
       stats, "artifact-A", sizeof(FakeSnapshot) - 1);
@@ -1877,7 +1852,7 @@ void TestDiskOnlyCaptureReservesBudgetBeforeCommit() {
 }
 
 void TestDiskPreflightAvoidsUnusableCapture() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-runner-disk-cache");
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<PersistentSnapshotRunner>(
       stats, "artifact-A", sizeof(FakeSnapshot) - 1);
@@ -2080,8 +2055,9 @@ void TestCgroupAvailableCountsReclaimableCache() {
   namespace fs = std::filesystem;
   using gufo::server::CgroupAvailableBytes;
   constexpr std::uint64_t gib = std::uint64_t{1} << 30;
-  const auto root = fs::temp_directory_path() /
-                    ("gufo_cgroup_test_" + std::to_string(::getpid()));
+  const auto root =
+      fs::temp_directory_path() /
+      ("gufo_cgroup_test_" + std::to_string(gufo::platform::ProcessId()));
   fs::remove_all(root);
   const auto write = [&](const fs::path& dir, const char* name,
                          const std::string& text) {
@@ -2524,7 +2500,7 @@ int main() {
   TestPreparedConstraintVocabularyKeepsGrammarBehavior();
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.
-  ::setenv("NO_COLOR", "1", 1);
+  gufo::platform::SetEnv("NO_COLOR", "1");
   TestInPassStableCheckpoint();
   TestInPassFailureRetainsOnlyCompletedCheckpoints();
   TestNewImageGetsAStableCheckpoint();

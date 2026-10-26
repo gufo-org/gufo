@@ -1,5 +1,3 @@
-#include <unistd.h>
-
 #include <array>
 #include <cctype>
 #include <cmath>
@@ -14,6 +12,7 @@
 #include "src/core/image.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "tests/support/temporary_directory.hpp"
 
 namespace {
 using namespace gufo;
@@ -546,19 +545,9 @@ int main(int argc, char** argv) {
     if (flash)
       CheckFlashIncrementalOracle(qfn, continuation, continued);
 
-    std::array<char, 64> pattern{};
-    const std::string temporary = "/tmp/gufo-vision-cache-XXXXXX";
-    std::copy(temporary.begin(), temporary.end(), pattern.begin());
-    Require(::mkdtemp(pattern.data()) != nullptr, "cannot create test cache");
-    struct Cleanup {
-      std::filesystem::path path;
-      ~Cleanup() {
-        std::error_code ignored;
-        std::filesystem::remove_all(path, ignored);
-      }
-    } cleanup{pattern.data()};
+    TemporaryDirectory cache_root("gufo-vision-cache");
     server::TextDiskCacheConfig cache{
-        .directory = cleanup.path,
+        .directory = cache_root.path(),
         .capacity_bytes = std::size_t{2} << 30,
         .staging_capacity_bytes = std::size_t{512} << 20,
         .model_artifact_fingerprint = core::GgufIdentityHex(*reader)};
@@ -596,7 +585,7 @@ int main(int argc, char** argv) {
     for (const bool use_spec : {false, true}) {
       if (use_spec && draft.empty())
         continue;
-      cache.directory = cleanup.path / (use_spec ? "spec" : "ar");
+      cache.directory = cache_root.path() / (use_spec ? "spec" : "ar");
       auto first = load(use_spec, cache);
       const auto red = first->chat(requests[0], 16, greedy);
       const auto sampled_red = first->chat(requests[0], 16, sampled);

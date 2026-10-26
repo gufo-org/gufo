@@ -182,120 +182,240 @@ __global__ void QkvNormRopeKernel(
 }
 
 using Vec16 = __attribute__((__vector_size__(16))) unsigned int;
+using Fragment = __attribute__((ext_vector_type(16))) unsigned short;
+using Accumulator = __attribute__((ext_vector_type(8))) float;
 
-// One wave per (token, head). A lane owns HD / 32 elements held as 8-element
-// chunks, so a row is read with coalesced 16-byte loads. Keys are consumed
-// four at a time so their wave reductions overlap.
+// Loads 16 contiguous BF16 values. `source` must be 16-byte aligned.
+__device__ __forceinline__ Fragment LoadFragment(const std::uint16_t* source) {
+  union {
+    Fragment fragment;
+    Vec16 words[2];
+  } value;
+  value.words[0] = *reinterpret_cast<const Vec16*>(source);
+  value.words[1] = *reinterpret_cast<const Vec16*>(source + 8);
+  return value.fragment;
+}
+
+// Returns the value held by the lane 16 positions away, in the other
+// half-wave.
+__device__ __forceinline__ float SwapHalves(float value) {
+  return __uint_as_float(__builtin_amdgcn_permlanex16(
+      __float_as_uint(value), __float_as_uint(value), 0x76543210U, 0xfedcba98U,
+      false, false));
+}
+
+constexpr float kLog2e = 1.4426950408889634F;
+
+// Transposes values from [token][column] to [column][token] through LDS so
+// both the reads and the writes are coalesced. Tokens at or beyond `tokens`
+// up to `ValueStride(tokens)` are written as zero.
+__global__ void TransposeValuesKernel(const std::uint16_t* value,
+                                      std::uint16_t* value_t,
+                                      std::uint32_t tokens,
+                                      std::uint32_t columns,
+                                      std::uint32_t value_stride) {
+  __shared__ std::uint16_t tile[32][33];
+  const std::uint32_t token0 = blockIdx.x * 32U;
+  const std::uint32_t column0 = blockIdx.y * 32U;
+  for (std::uint32_t row = threadIdx.y; row < 32U; row += blockDim.y) {
+    const std::uint32_t token = token0 + row;
+    tile[row][threadIdx.x] =
+        token < tokens ? value[static_cast<std::size_t>(token) * columns +
+                               column0 + threadIdx.x]
+                       : static_cast<std::uint16_t>(0);
+  }
+  __syncthreads();
+  for (std::uint32_t row = threadIdx.y; row < 32U; row += blockDim.y) {
+    value_t[static_cast<std::size_t>(column0 + row) * value_stride + token0 +
+            threadIdx.x] = tile[threadIdx.x][row];
+  }
+}
+
+// Bidirectional (windowed) attention with matrix cores.
+//
+// A block of four waves owns 16 consecutive query tokens of one head and
+// walks the keys in tiles of 32. Scores are held transposed, as keys by
+// queries, so a lane owns one query and the softmax needs no transposes. The
+// four waves split the head width. Each wave computes the partial scores over
+// its quarter of the dot product, and the partials are summed through LDS.
+// Each wave then accumulates the output for its own quarter of the columns,
+// which keeps the accumulators at 32 to 64 registers per lane.
+//
+// Values arrive transposed ([kv head][column][token]) so a lane reads sixteen
+// consecutive keys of one column. Scores use the attention scale of 1. The
+// softmax is the online base-two form, with FP32 statistics and accumulators.
 template<int HD>
-__global__ __launch_bounds__(128) void AttentionKernel(
+__global__ __launch_bounds__(128) void WmmaAttentionKernel(
     const std::uint16_t* query, const std::uint16_t* key,
-    const std::uint16_t* value, std::uint16_t* context,
+    const std::uint16_t* value_t, std::uint16_t* context,
     const std::uint32_t* sequence_begin, const std::uint32_t* sequence_end,
-    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
-    std::uint32_t window) {
-  constexpr int kChunks = HD / 256;
-  constexpr int kPerLane = HD / kWaveSize;
-  constexpr int kKeysPerStep = 4;
+    std::uint32_t tokens, std::uint32_t value_stride, std::uint32_t num_heads,
+    std::uint32_t num_key_value_heads, std::uint32_t window) {
+  constexpr int kQuarter = HD / 4;
+  constexpr int kChunks = kQuarter / 16;
+  constexpr int kPartialStride = 20;  // 16 floats per lane plus padding
 
-  const std::uint32_t lane = threadIdx.x;
-  const std::uint32_t head = blockIdx.y * blockDim.y + threadIdx.y;
-  if (head >= num_heads) {
-    return;
-  }
-  const std::size_t token = blockIdx.x;
+  __shared__ __align__(16) float partial[2][4][32][kPartialStride];
+
+  const int lane = threadIdx.x & 31;
+  const int wave = threadIdx.x >> 5;
+  const int column = lane & 15;
+  const std::uint32_t head = blockIdx.y;
   const std::uint32_t kv_head = head / (num_heads / num_key_value_heads);
-  const std::int64_t begin = sequence_begin[token];
-  const std::int64_t end = sequence_end[token];
-  std::int64_t low = begin;
-  std::int64_t high = end - 1;
-  if (window != 0U) {
-    low = max(begin, static_cast<std::int64_t>(token) - window);
-    high = min(high, static_cast<std::int64_t>(token) + window);
-  }
+  const std::uint32_t first_query = blockIdx.x * 16U;
+  const std::uint32_t query_token = first_query + column;
+  const bool query_valid = query_token < tokens;
 
-  float q[kPerLane];
-  const Vec16* query_row =
-      reinterpret_cast<const Vec16*>(query + (token * num_heads + head) * HD);
-  for (int j = 0; j < kChunks; ++j) {
-    const Vec16 packed = query_row[lane + kWaveSize * j];
-    const std::uint16_t* bits = reinterpret_cast<const std::uint16_t*>(&packed);
-    for (int e = 0; e < 8; ++e) {
-      q[j * 8 + e] = Bf16ToFloat(bits[e]);
+  // Key range of this lane's query. Bounds only grow with the token index, so
+  // the tile's range runs from its first query's low to its last query's high.
+  const auto low_of = [&](std::uint32_t token) {
+    const std::int64_t begin = sequence_begin[token];
+    return window == 0U ? begin
+                        : max(begin, static_cast<std::int64_t>(token) - window);
+  };
+  const auto high_of = [&](std::uint32_t token) {
+    const std::int64_t last =
+        static_cast<std::int64_t>(sequence_end[token]) - 1;
+    return window == 0U ? last
+                        : min(last, static_cast<std::int64_t>(token) + window);
+  };
+  const std::int64_t low = query_valid ? low_of(query_token) : 1;
+  const std::int64_t high = query_valid ? high_of(query_token) : 0;
+  const std::int64_t tile_low = low_of(first_query);
+  const std::int64_t tile_high = high_of(min(first_query + 15U, tokens - 1U));
+
+  Fragment q[kChunks];
+  for (int c = 0; c < kChunks; ++c) {
+    if (query_valid) {
+      q[c] = LoadFragment(
+          query +
+          (static_cast<std::size_t>(query_token) * num_heads + head) * HD +
+          wave * kQuarter + c * 16);
+    } else {
+      q[c] = Fragment{};
     }
   }
 
-  float accumulator[kPerLane];
-  for (int e = 0; e < kPerLane; ++e) {
-    accumulator[e] = 0.0F;
+  Accumulator result[kChunks];
+  for (int t = 0; t < kChunks; ++t) {
+    result[t] = Accumulator{};
   }
   float maximum = -INFINITY;
-  float denominator = 0.0F;
+  float sum = 0.0F;
 
-  for (std::int64_t first = low; first <= high; first += kKeysPerStep) {
-    float score[kKeysPerStep];
-    for (int u = 0; u < kKeysPerStep; ++u) {
-      float partial = 0.0F;
-      if (first + u <= high) {
-        const Vec16* key_row = reinterpret_cast<const Vec16*>(
-            key + ((first + u) * num_key_value_heads + kv_head) * HD);
-        for (int j = 0; j < kChunks; ++j) {
-          const Vec16 packed = key_row[lane + kWaveSize * j];
-          const std::uint16_t* bits =
-              reinterpret_cast<const std::uint16_t*>(&packed);
-          for (int e = 0; e < 8; ++e) {
-            partial += q[j * 8 + e] * Bf16ToFloat(bits[e]);
-          }
+  int parity = 0;
+  for (std::int64_t base = tile_low & ~std::int64_t{31}; base <= tile_high;
+       base += 32) {
+    Accumulator scores[2] = {Accumulator{}, Accumulator{}};
+    for (int c = 0; c < kChunks; ++c) {
+      for (int h = 0; h < 2; ++h) {
+        std::int64_t row = base + h * 16 + column;
+        row = min(row, static_cast<std::int64_t>(tokens) - 1);
+        const Fragment k = LoadFragment(
+            key +
+            (static_cast<std::size_t>(row) * num_key_value_heads + kv_head) *
+                HD +
+            wave * kQuarter + c * 16);
+        scores[h] =
+            __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(k, q[c], scores[h]);
+      }
+    }
+
+    // Sum the four waves' partial scores in a fixed order, so every wave sees
+    // identical values and keeps identical softmax statistics. The two buffers
+    // alternate, so one barrier per tile separates the reads of one tile from
+    // the writes of the next.
+    float* mine = partial[parity][wave][lane];
+    for (int h = 0; h < 2; ++h) {
+      for (int i = 0; i < 8; i += 4) {
+        *reinterpret_cast<float4*>(mine + h * 8 + i) = make_float4(
+            scores[h][i], scores[h][i + 1], scores[h][i + 2], scores[h][i + 3]);
+      }
+    }
+    __syncthreads();
+    float total[16];
+    for (int v = 0; v < 16; v += 4) {
+      float4 sum4 =
+          *reinterpret_cast<const float4*>(&partial[parity][0][lane][v]);
+      for (int w = 1; w < 4; ++w) {
+        const float4 other =
+            *reinterpret_cast<const float4*>(&partial[parity][w][lane][v]);
+        sum4.x += other.x;
+        sum4.y += other.y;
+        sum4.z += other.z;
+        sum4.w += other.w;
+      }
+      total[v] = sum4.x;
+      total[v + 1] = sum4.y;
+      total[v + 2] = sum4.z;
+      total[v + 3] = sum4.w;
+    }
+    parity ^= 1;
+
+    // Mask to this query's key range and move to the base-two domain. Register
+    // i of half h holds the key at offset 2 * i + (lane / 16) of that half.
+    float next = maximum;
+    for (int h = 0; h < 2; ++h) {
+      for (int i = 0; i < 8; ++i) {
+        const std::int64_t position = base + h * 16 + 2 * i + (lane >> 4);
+        float score = total[h * 8 + i] * kLog2e;
+        if (position < low || position > high) {
+          score = -INFINITY;
         }
-      }
-      score[u] = partial;
-    }
-    for (int offset = kWaveSize / 2; offset > 0; offset >>= 1) {
-      for (int u = 0; u < kKeysPerStep; ++u) {
-        score[u] += __shfl_xor(score[u], offset, kWaveSize);
+        total[h * 8 + i] = score;
+        next = fmaxf(next, score);
       }
     }
-    float step_maximum = maximum;
-    for (int u = 0; u < kKeysPerStep; ++u) {
-      if (first + u > high) {
-        score[u] = -INFINITY;
+    next = fmaxf(next, SwapHalves(next));
+    // Until a query has seen a key, its maximum is -INFINITY. Shift by zero
+    // then, so the exponentials below stay finite.
+    const float shifted = next == -INFINITY ? 0.0F : next;
+    const float correction = __builtin_amdgcn_exp2f(maximum - shifted);
+
+    float subtotal = 0.0F;
+    Fragment probabilities[2];
+    for (int h = 0; h < 2; ++h) {
+      for (int i = 0; i < 8; ++i) {
+        const float p = __builtin_amdgcn_exp2f(total[h * 8 + i] - shifted);
+        // The denominator sums the rounded weights the value product uses.
+        const unsigned own = FloatToBf16(p);
+        subtotal += Bf16ToFloat(static_cast<std::uint16_t>(own));
+        const unsigned peer = __builtin_amdgcn_permlanex16(
+            own, own, 0x76543210U, 0xfedcba98U, false, false);
+        probabilities[h][2 * i] = lane < 16 ? own : peer;
+        probabilities[h][2 * i + 1] = lane < 16 ? peer : own;
       }
-      step_maximum = fmaxf(step_maximum, score[u]);
     }
-    const float correction = expf(maximum - step_maximum);
-    maximum = step_maximum;
-    denominator *= correction;
-    for (int e = 0; e < kPerLane; ++e) {
-      accumulator[e] *= correction;
+    subtotal += SwapHalves(subtotal);
+    sum = sum * correction + subtotal;
+    maximum = next;
+    for (int t = 0; t < kChunks; ++t) {
+      result[t] *= correction;
     }
-    for (int u = 0; u < kKeysPerStep; ++u) {
-      if (first + u > high) {
-        break;
-      }
-      const float weight = expf(score[u] - maximum);
-      denominator += weight;
-      const Vec16* value_row = reinterpret_cast<const Vec16*>(
-          value + ((first + u) * num_key_value_heads + kv_head) * HD);
-      for (int j = 0; j < kChunks; ++j) {
-        const Vec16 packed = value_row[lane + kWaveSize * j];
-        const std::uint16_t* bits =
-            reinterpret_cast<const std::uint16_t*>(&packed);
-        for (int e = 0; e < 8; ++e) {
-          accumulator[j * 8 + e] += weight * Bf16ToFloat(bits[e]);
-        }
+
+    for (int t = 0; t < kChunks; ++t) {
+      const std::size_t column_row = static_cast<std::size_t>(kv_head) * HD +
+                                     wave * kQuarter + t * 16 + column;
+      for (int h = 0; h < 2; ++h) {
+        const Fragment v =
+            LoadFragment(value_t + column_row * value_stride + base + h * 16);
+        result[t] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(
+            v, probabilities[h], result[t]);
       }
     }
   }
 
-  const float inverse = 1.0F / denominator;
-  Vec16* out_row =
-      reinterpret_cast<Vec16*>(context + (token * num_heads + head) * HD);
-  for (int j = 0; j < kChunks; ++j) {
-    Vec16 packed;
-    std::uint16_t* bits = reinterpret_cast<std::uint16_t*>(&packed);
-    for (int e = 0; e < 8; ++e) {
-      bits[e] = FloatToBf16(accumulator[j * 8 + e] * inverse);
+  if (query_valid) {
+    const float inverse = 1.0F / sum;
+    std::uint16_t* out =
+        context +
+        (static_cast<std::size_t>(query_token) * num_heads + head) * HD;
+    for (int t = 0; t < kChunks; ++t) {
+      for (int i = 0; i < 8; ++i) {
+        out[wave * kQuarter + t * 16 + 2 * i + (lane >> 4)] =
+            FloatToBf16(result[t][i] * inverse);
+      }
     }
-    out_row[lane + kWaveSize * j] = packed;
   }
 }
 
@@ -435,8 +555,20 @@ void LaunchQkvNormRope(const float* qkv, const void* query_norm_bf16,
       layout.num_key_value_heads, layout.head_dim, rope_cos, rope_sin, epsilon);
 }
 
+void LaunchTransposeValues(const void* value_bf16, void* value_t_bf16,
+                           std::size_t tokens, std::uint32_t columns,
+                           hipStream_t stream) {
+  const dim3 grid(static_cast<unsigned int>((tokens + 31U) / 32U),
+                  columns / 32U);
+  TransposeValuesKernel<<<grid, dim3(32, 8), 0, stream>>>(
+      static_cast<const std::uint16_t*>(value_bf16),
+      static_cast<std::uint16_t*>(value_t_bf16),
+      static_cast<std::uint32_t>(tokens), columns,
+      static_cast<std::uint32_t>(ValueStride(tokens)));
+}
+
 bool LaunchAttention(const void* query_bf16, const void* key_bf16,
-                     const void* value_bf16, void* context_bf16,
+                     const void* value_t_bf16, void* context_bf16,
                      const std::uint32_t* sequence_begin,
                      const std::uint32_t* sequence_end, std::size_t tokens,
                      const QkvLayout& layout, std::uint32_t window,
@@ -445,22 +577,22 @@ bool LaunchAttention(const void* query_bf16, const void* key_bf16,
       layout.num_heads % layout.num_key_value_heads != 0 || tokens == 0) {
     return false;
   }
-  constexpr unsigned int kHeadsPerBlock = 4;
-  const dim3 grid(static_cast<unsigned int>(tokens),
-                  (layout.num_heads + kHeadsPerBlock - 1) / kHeadsPerBlock);
-  const dim3 block(kWaveSize, kHeadsPerBlock);
+  const dim3 grid(static_cast<unsigned int>((tokens + 15U) / 16U),
+                  layout.num_heads);
   const auto* query = static_cast<const std::uint16_t*>(query_bf16);
   const auto* key = static_cast<const std::uint16_t*>(key_bf16);
-  const auto* value = static_cast<const std::uint16_t*>(value_bf16);
+  const auto* value_t = static_cast<const std::uint16_t*>(value_t_bf16);
   auto* context = static_cast<std::uint16_t*>(context_bf16);
+  const auto token_count = static_cast<std::uint32_t>(tokens);
+  const auto value_stride = static_cast<std::uint32_t>(ValueStride(tokens));
   if (layout.head_dim == 256) {
-    AttentionKernel<256><<<grid, block, 0, stream>>>(
-        query, key, value, context, sequence_begin, sequence_end,
-        layout.num_heads, layout.num_key_value_heads, window);
+    WmmaAttentionKernel<256><<<grid, 128, 0, stream>>>(
+        query, key, value_t, context, sequence_begin, sequence_end, token_count,
+        value_stride, layout.num_heads, layout.num_key_value_heads, window);
   } else if (layout.head_dim == 512) {
-    AttentionKernel<512><<<grid, block, 0, stream>>>(
-        query, key, value, context, sequence_begin, sequence_end,
-        layout.num_heads, layout.num_key_value_heads, window);
+    WmmaAttentionKernel<512><<<grid, 128, 0, stream>>>(
+        query, key, value_t, context, sequence_begin, sequence_end, token_count,
+        value_stride, layout.num_heads, layout.num_key_value_heads, window);
   } else {
     return false;
   }

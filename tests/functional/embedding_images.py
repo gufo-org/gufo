@@ -54,7 +54,8 @@ def main():
         except urllib.error.HTTPError as error:
             status, body = error.code, json.load(error)
         results.append({"status": status, "elapsed_ms": (time.perf_counter()-start)*1000,
-                        "usage": body.get("usage"), "error": body.get("error")})
+                        "usage": body.get("usage"), "error": body.get("error"),
+                        "request": {"input": inputs, **options}, "response": body})
         return status, body
 
     inputs = []

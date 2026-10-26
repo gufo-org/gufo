@@ -111,11 +111,15 @@ class ReportTest(unittest.TestCase):
         self.assertIn("| `tg128 @ d0` | 20.00 | 20.00 | +0.0% |", comment)
 
     def test_phase_verdicts_need_every_repeat(self):
-        self.assertEqual(phases.verdict([(100, 110), (100, 120)]), "slower")
-        self.assertEqual(phases.verdict([(100, 110), (100, 101)]), "noisy")
-        self.assertEqual(phases.verdict([(100, 90), (100, 80)]), "faster")
-        # Above 5% but within 3 ms is noise, not a regression.
-        self.assertEqual(phases.verdict([(20, 22), (20, 22.5)]), "same")
+        self.assertEqual(phases.verdict([(100, 111), (100, 120)]), "slower")
+        self.assertEqual(phases.verdict([(100, 111), (100, 101)]), "noisy")
+        self.assertEqual(phases.verdict([(100, 89), (100, 80)]), "faster")
+        self.assertEqual(phases.verdict([(100, 111), (100, 89)]), "noisy")
+        # A slow base repeat alone is not a regression (#788 follow-up cache restore).
+        self.assertEqual(phases.verdict([(7.86, 2.63), (2.54, 2.60)]), "same")
+        # Above 5% but within 10 ms is noise, not a regression.
+        self.assertEqual(phases.verdict([(20, 29), (20, 30)]), "same")
+        self.assertEqual(phases.verdict([(1000, 1049), (1000, 1050)]), "same")
         self.assertEqual(phases.verdict([]), "missing")
 
     def test_phase_pipeline_is_drawn_with_verdict_colors(self):
@@ -136,7 +140,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(verdicts["startup.weights"], "same")
         self.assertEqual(verdicts["startup.structured"], "missing")
         self.assertEqual(diverged, ["long", "resume", "short"])
-        data = {"settings": {"repeats": 2, "slowdown": .05, "noise_ms": 3,
+        data = {"settings": {"repeats": 2, "slowdown": .05, "noise_ms": 10,
                              "requests": {"short": "Short prompt", "long": "Long prompt",
                                           "resume": "Follow-up"}},
                 "wall_s": 600, "arms": arms, "phases": found, "diverged": diverged}

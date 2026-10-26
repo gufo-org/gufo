@@ -1,12 +1,12 @@
 #include "src/cli/banner.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <span>
 #include <string_view>
+
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::cli {
 
@@ -45,7 +45,7 @@ void PrintStartupBanner(std::string_view version,
     return;
   printed = true;
 
-  if (::isatty(STDERR_FILENO) == 0 || SuppressesBanner(options))
+  if (!platform::StderrIsTerminal() || SuppressesBanner(options))
     return;
 
   const bool color = std::getenv("NO_COLOR") == nullptr;

@@ -7,6 +7,7 @@
       "package-name": "gufo",
       "include-component-in-tag": false,
       "include-v-in-tag": true,
+      "include-commit-authors": true,
       "bump-minor-pre-major": true,
       "changelog-sections": [
         {

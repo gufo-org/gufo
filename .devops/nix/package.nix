@@ -10,6 +10,8 @@
   libpng,
   libjpeg,
   libwebp,
+  libsndfile,
+  soxr,
   openssl,
   ffmpeg-headless,
   ccache,
@@ -80,6 +82,8 @@ stdenv.mkDerivation {
     libpng
     libjpeg
     libwebp
+    libsndfile
+    soxr
     openssl
     ffmpeg-headless
     rocmPackages.clr

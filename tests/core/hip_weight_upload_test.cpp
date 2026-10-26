@@ -1,6 +1,4 @@
-#include <fcntl.h>
 #include <hip/hip_runtime.h>
-#include <unistd.h>
 
 #include <array>
 #include <cstdint>
@@ -13,6 +11,8 @@
 #include <vector>
 
 #include "src/core/hip/weight_upload.hpp"
+#include "src/core/platform/mapped_file.hpp"
+#include "tests/support/temporary_directory.hpp"
 
 using gufo::hip::WeightUpload;
 
@@ -25,17 +25,6 @@ void Require(bool ok, const std::string& message) {
   }
 }
 
-struct Files {
-  std::filesystem::path directory;
-  Files() {
-    char path[] = "/tmp/gufo-weight-upload-XXXXXX";
-    const char* result = ::mkdtemp(path);
-    Require(result != nullptr, "mkdtemp");
-    directory = result;
-  }
-  ~Files() { std::filesystem::remove_all(directory); }
-};
-
 struct Device {
   void* data{nullptr};
   explicit Device(std::size_t size) {
@@ -47,9 +36,9 @@ struct Device {
 }  // namespace
 
 int main() {
-  Files files;
-  std::array<std::filesystem::path, 2> paths{files.directory / "first",
-                                             files.directory / "second"};
+  TemporaryDirectory files("gufo-weight-upload");
+  std::array<std::filesystem::path, 2> paths{files.path() / "first",
+                                             files.path() / "second"};
   std::array<std::vector<std::uint8_t>, 2> source;
   source[0].resize((35U << 20) + 4079);
   source[1].resize((2U << 20) + 39);
@@ -67,8 +56,9 @@ int main() {
   std::array<gufo::core::GgufMappedRegion, 2> regions;
   for (std::size_t i = 0; i < paths.size(); ++i) {
     regions[i] = {nullptr, source[i].size(),
-                  ::open(paths[i].c_str(), O_RDONLY | O_CLOEXEC)};
-    Require(regions[i].file_descriptor >= 0, "open original shard");
+                  gufo::platform::OpenReadFile(paths[i])};
+    Require(gufo::platform::FileValid(regions[i].file_descriptor),
+            "open original shard");
     std::filesystem::rename(paths[i], paths[i].string() + ".old");
     std::ofstream replacement(paths[i], std::ios::binary);
     replacement << "replacement must never supply model bytes";
@@ -99,6 +89,9 @@ int main() {
   Device device(expected.size());
   Require(hipMemset(device.data, 0xa5, expected.size()) == hipSuccess,
           "initialize guards");
+  // The uploads run on non-blocking streams, which do not wait for the null
+  // stream; a late guard fill would overwrite them.
+  Require(hipDeviceSynchronize() == hipSuccess, "wait for guards");
   std::string error;
   auto upload = WeightUpload::Create(regions, &error);
   Require(upload != nullptr, error);
@@ -139,5 +132,5 @@ int main() {
       "PASS: byte-exact upload, EOF, guards, bounds and failed-read drain");
   upload.reset();
   for (const auto& region : regions)
-    ::close(region.file_descriptor);
+    gufo::platform::CloseFile(region.file_descriptor);
 }

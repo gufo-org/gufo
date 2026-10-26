@@ -56,12 +56,29 @@ void LaunchQkvNormRope(const float* qkv, const void* query_norm_bf16,
                        const float* rope_sin, float epsilon,
                        hipStream_t stream);
 
+/// Tokens per column of the transposed value buffer: `tokens` rounded up to a
+/// multiple of 32.
+inline constexpr std::size_t ValueStride(std::size_t tokens) {
+  return (tokens + 31U) / 32U * 32U;
+}
+
+/// Transposes values from [token][column] to [column][token] with
+/// `ValueStride(tokens)` tokens per column, zero-filling the tokens past
+/// `tokens`. `columns` is a multiple of 32. This is the layout
+/// `LaunchAttention` reads.
+void LaunchTransposeValues(const void* value_bf16, void* value_t_bf16,
+                           std::size_t tokens, std::uint32_t columns,
+                           hipStream_t stream);
+
 /// Bidirectional attention with scale 1. A token attends to the keys of its
 /// own sequence within `window` positions on either side; `window` equal to
-/// zero means the whole sequence. Query, key and value are
-/// [token][head][column]. Returns false for an unsupported geometry.
+/// zero means the whole sequence. Query and key are [token][head][column];
+/// the value is transposed, [kv head][column][token], with
+/// `ValueStride(tokens)` entries per column, as `LaunchTransposeValues`
+/// writes it. Value reads run up to that stride, so the padding must be
+/// finite. Returns false for an unsupported geometry.
 [[nodiscard]] bool LaunchAttention(const void* query_bf16, const void* key_bf16,
-                                   const void* value_bf16, void* context_bf16,
+                                   const void* value_t_bf16, void* context_bf16,
                                    const std::uint32_t* sequence_begin,
                                    const std::uint32_t* sequence_end,
                                    std::size_t tokens, const QkvLayout& layout,

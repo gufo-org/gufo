@@ -31,14 +31,31 @@ public:
 
   static FileLock Acquire(const std::string& path);
 
+  /// Attempts a non-blocking single-instance lock on `path`, recording the
+  /// current PID on success. If another process holds the lock, sets
+  /// `*contended = true` and populates `*holder_pid` (when available). If the
+  /// lock file cannot be opened at all, sets `*contended = false` and returns
+  /// an invalid FileLock.
+  static FileLock TryAcquireProcessLock(
+      const std::filesystem::path& path, bool* contended,
+      std::string* holder_pid = nullptr) noexcept;
+
+  bool valid() const noexcept {
+    return handle_ != detail::kInvalidPublicationHandle;
+  }
+
+  void Release() noexcept;
+
 private:
   explicit FileLock(detail::PublicationHandle handle) noexcept
       : handle_(handle) {}
 
-  void Release() noexcept;
-
   detail::PublicationHandle handle_ = detail::kInvalidPublicationHandle;
 };
+
+/// Returns `/tmp/<filename>` on POSIX and `<temp_directory_path>/<filename>`
+/// on Windows.
+std::filesystem::path DefaultProcessLockPath(std::string_view filename);
 
 /// A temporary file created next to its final destination, published by
 /// Commit() with flush-then-rename semantics: fsync, rename over the

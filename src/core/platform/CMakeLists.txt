@@ -1,6 +1,7 @@
 # The OS leaves. The Linux build and the Windows platform-only build
 # (GUFO_PLATFORM_ONLY) share this list.
 add_library(gufo_platform STATIC
+  env.cpp
   mapped_file.cpp
   net.cpp
   shutdown_signal.cpp

@@ -8,27 +8,19 @@
 #include <string>
 #include <vector>
 
+#include "src/models/embedding_gemma2/batch_scheduler.hpp"
 #include "src/models/embedding_gemma2/config.hpp"
-#include "src/models/embedding_gemma2/image_processor.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
 
 /// The model's context window. Longer sequences are refused, not truncated.
 inline constexpr std::size_t kMaxSequenceTokens = 8192;
 
-struct SequenceImage {
-  std::size_t offset{0};
-  ImagePatches patches;
-};
-struct EncoderSequence {
-  std::vector<std::uint32_t> tokens;
-  std::vector<SequenceImage> images;
-};
-
-/// GPU text and image encoder. One instance owns the weights and the scratch
-/// buffers and runs one device batch at a time. `Embed` is thread-safe:
-/// concurrent calls take turns in arrival order, one device batch per turn, so
-/// a long request does not hold the device until it finishes.
+/// GPU text, image and audio encoder. One instance owns the weights and the
+/// scratch buffers and runs one device batch at a time. `Embed` is thread-safe:
+/// text calls that wait for the device share batches in arrival order, as
+/// `BatchScheduler` describes, so a long call does not hold the device until
+/// it finishes.
 class EncoderRuntime {
 public:
   ~EncoderRuntime();
@@ -38,22 +30,30 @@ public:
   EncoderRuntime(EncoderRuntime&&) = delete;
   EncoderRuntime& operator=(EncoderRuntime&&) = delete;
 
-  /// Uploads the text backbone. Vision weights load on the first image.
+  /// Uploads the text backbone. Vision and audio weights load on the first
+  /// request for each.
   [[nodiscard]] static std::unique_ptr<EncoderRuntime> Create(
       const std::string& model_dir, std::string* error = nullptr);
 
   /// Returns one mean-pooled, L2-normalized embedding of
   /// `config().text.embedding_dim` floats for each sequence. Sequences are
-  /// packed into as few device batches of `kMaxSequenceTokens` as fit.
-  /// The call polls `is_cancelled` before each device batch. A cancelled call
-  /// returns false with `kCancelledMessage` in `error`. After a device
-  /// failure that a probe confirms, `device_lost()` turns true and every later
-  /// call fails with `kDeviceLostMessage`.
+  /// packed into device batches of up to `kMaxSequenceTokens`, together with
+  /// those of concurrent calls. `is_cancelled` is polled before each device
+  /// batch that would take this call's sequences. The poll may run on another
+  /// call's thread with the scheduler's lock held, so it must not block or
+  /// throw. A cancelled call returns false with `kCancelledMessage` in
+  /// `error`. A failed batch fails every call with sequences in it. After a
+  /// device failure that a probe confirms, `device_lost()` turns true and
+  /// every later call fails with `kDeviceLostMessage`.
   [[nodiscard]] bool Embed(
       const std::vector<std::vector<std::uint32_t>>& sequences,
       std::vector<std::vector<float>>* embeddings, std::string* error = nullptr,
       const std::function<bool()>& is_cancelled = {});
 
+  /// Like `Embed`, for sequences that may hold images or audio. A call with an
+  /// image or audio runs in a batch of its own, in arrival order. The first
+  /// such call loads the vision tower in that batch, so a failed load fails
+  /// only that call.
   [[nodiscard]] bool EmbedMultimodal(
       const std::vector<EncoderSequence>& sequences,
       std::vector<std::vector<float>>* embeddings, std::string* error = nullptr,

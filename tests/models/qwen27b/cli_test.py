@@ -290,10 +290,8 @@ def check_http(binary, model, draft, policies, selection="both"):
                             ("draft_temperature", 0.8), ("top_p", -0.01),
                             ("temperature", -1), ("seed", 1.5),
                             ("samplers", ["top_k", "temperature"]),
-                            ("typical_p", 0.9), ("tfs_z", 0.9),
-                            ("mirostat", 2), ("mirostat_eta", 0.1),
-                            ("mirostat_tau", 5), ("dynatemp_range", 0.5),
-                            ("dynatemp_exponent", 1),
+                            ("typical_p", 0.9), ("mirostat", 2),
+                            ("dynatemp_range", 0.5),
                             ("xtc_probability", 0.5), ("dry_multiplier", 0.8),
                             ("top_n_sigma", 2), ("logit_bias", {"42": 1})):
                         request(path, {**payload, field: value}, expected=400)

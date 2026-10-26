@@ -5,3 +5,4 @@ httpx==0.28.1
 pydantic==2.13.4
 jsonschema==4.26.0
 pillow==12.3.0
+numpy==2.5.1

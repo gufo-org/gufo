@@ -5,7 +5,14 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstdint>
+#include <cstring>
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <system_error>
 #include <thread>
+#include <vector>
 
 #include "src/core/platform/pages.hpp"
 
@@ -87,7 +94,170 @@ void* CommitZeroedPages(std::size_t bytes) noexcept {
 }
 
 void ReleaseCommittedPages(void* base, std::size_t bytes) noexcept {
-  munmap(base, bytes);
+  if (base != nullptr && bytes > 0) {
+    munmap(base, bytes);
+  }
+}
+
+void* CloneMappedWeightsToAnonymousPages(const void* source_data,
+                                         std::size_t bytes) {
+  if (source_data == nullptr || bytes == 0) {
+    return nullptr;
+  }
+  void* host_copy = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (host_copy == MAP_FAILED) {
+    return nullptr;
+  }
+  (void)madvise(host_copy, bytes, MADV_HUGEPAGE);
+
+  constexpr std::size_t kChunkBytes = 16ULL << 20;
+  const auto chunks = bytes / kChunkBytes + (bytes % kChunkBytes != 0);
+  std::atomic<std::size_t> next{0};
+  std::atomic<int> failure{0};
+  auto copy_chunk = [&] {
+    while (failure.load(std::memory_order_relaxed) == 0) {
+      const auto index = next.fetch_add(1, std::memory_order_relaxed);
+      if (index >= chunks)
+        break;
+      const auto offset = index * kChunkBytes;
+      const auto chunk_bytes = std::min(kChunkBytes, bytes - offset);
+      auto* input = const_cast<std::uint8_t*>(
+                        static_cast<const std::uint8_t*>(source_data)) +
+                    offset;
+      if (madvise(input, chunk_bytes, MADV_POPULATE_READ) != 0) {
+        failure.store(errno, std::memory_order_relaxed);
+        break;
+      }
+      std::memcpy(static_cast<std::uint8_t*>(host_copy) + offset, input,
+                  chunk_bytes);
+      // The immutable copy now owns these resident bytes. Keep the original
+      // mapping valid for the reader without retaining its populated PTEs.
+      (void)madvise(input, chunk_bytes, MADV_DONTNEED);
+    }
+  };
+  {
+    std::vector<std::jthread> workers;
+    for (std::size_t i = 1; i < std::min<std::size_t>(16, chunks); ++i)
+      workers.emplace_back(copy_chunk);
+    copy_chunk();
+  }
+  if (const auto error = failure.load(); error != 0) {
+    munmap(host_copy, bytes);
+    throw std::system_error(error, std::generic_category(),
+                            "cannot read mapped Qwen weights");
+  }
+  return host_copy;
+}
+
+void PopulateWritablePages(void* raw_data, std::size_t bytes,
+                           std::size_t worker_limit) noexcept {
+  auto* data = static_cast<std::uint8_t*>(raw_data);
+  if (data == nullptr || bytes == 0)
+    return;
+  const long page = sysconf(_SC_PAGESIZE);
+  if (page <= 0)
+    return;
+  const auto address = reinterpret_cast<std::uintptr_t>(data);
+  const auto skip = (page - address % page) % page;
+  if (bytes <= skip)
+    return;
+  const auto length = (bytes - skip) / page * page;
+  if (length == 0)
+    return;
+  // Populate before huge-page advice to avoid synchronous UMA compaction on
+  // first touch. Borrowed checkpoints prepare host pages only when exported.
+  const auto workers = std::max<std::size_t>(
+      1, std::min<std::size_t>(worker_limit, length / (32ULL << 20)));
+  const auto pages = length / page;
+  {
+    std::vector<std::jthread> faults;
+    for (std::size_t worker = 1; worker < workers; ++worker) {
+      const auto begin = pages * worker / workers * page;
+      const auto end = pages * (worker + 1) / workers * page;
+      faults.emplace_back([=] {
+        (void)madvise(data + skip + begin, end - begin, MADV_POPULATE_WRITE);
+      });
+    }
+    (void)madvise(data + skip, pages / workers * page, MADV_POPULATE_WRITE);
+  }
+  (void)madvise(data + skip, length, MADV_HUGEPAGE);
+}
+
+std::string DescribeResidentPages(void* pointer, std::size_t size) {
+  if (pointer == nullptr || size == 0) {
+    return "mincore unavailable: no host mapping";
+  }
+  const long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) {
+    return "mincore unavailable: page size query failed";
+  }
+  const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+  const auto page = static_cast<std::uintptr_t>(page_size);
+  const auto aligned = address & ~(page - 1U);
+  const std::size_t prefix = address - aligned;
+  if (size > std::numeric_limits<std::size_t>::max() - prefix) {
+    return "mincore unavailable: range overflow";
+  }
+  const std::size_t page_count = (prefix + size + page - 1U) / page;
+  constexpr std::size_t kChunkPages = 1ULL << 20U;
+  std::vector<unsigned char> states(std::min(page_count, kChunkPages), 0U);
+  std::size_t resident = 0;
+  std::size_t completed = 0;
+  while (completed < page_count) {
+    const std::size_t pages = std::min(states.size(), page_count - completed);
+    void* chunk = reinterpret_cast<void*>(aligned + completed * page);
+    if (mincore(chunk, pages * page, states.data()) != 0) {
+      return "mincore unavailable for this allocation";
+    }
+    resident += static_cast<std::size_t>(
+        std::count_if(states.begin(), states.begin() + pages,
+                      [](unsigned char value) { return (value & 1U) != 0U; }));
+    completed += pages;
+  }
+  return std::to_string(resident) + "/" + std::to_string(page_count) +
+         " pages resident";
+}
+
+SharedTempMapping CreateSharedTempMapping(std::size_t bytes) noexcept {
+  const int fd = memfd_create("gufo-probe", MFD_CLOEXEC);
+  if (fd < 0) {
+    return {
+        .unavailable_reason =
+            std::string("memfd_create failed: ") + std::strerror(errno),
+    };
+  }
+  if (ftruncate(fd, static_cast<off_t>(bytes)) != 0) {
+    const int err = errno;
+    close(fd);
+    return {
+        .unavailable_reason =
+            std::string("ftruncate failed: ") + std::strerror(err),
+    };
+  }
+  void* ptr = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (ptr == MAP_FAILED) {
+    const int err = errno;
+    close(fd);
+    return {
+        .unavailable_reason = std::string("mmap failed: ") + std::strerror(err),
+    };
+  }
+  return {
+      .data = ptr,
+      .size = bytes,
+      .handle = fd,
+  };
+}
+
+void ReleaseSharedTempMapping(SharedTempMapping& mapping) noexcept {
+  if (mapping.data != nullptr && mapping.size > 0) {
+    munmap(mapping.data, mapping.size);
+  }
+  if (mapping.handle >= 0) {
+    close(static_cast<int>(mapping.handle));
+  }
+  mapping = {};
 }
 
 }  // namespace gufo::platform

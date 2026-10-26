@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Time Flash-Next startup and request phases on the merge base and the PR.
+"""Time Flash-Next startup and request phases on main and the PR merged into it.
 
 Each arm starts one server, records its startup phases, sends a fixed three
 request history and stops it. Arms alternate base/PR on the same runner after
 the GPU cools, and every phase gets a paired verdict: a change counts only when
-each repeat moves by more than 5% and 3 ms in the same direction.
+each repeat moves by more than 5% and 10 ms in the same direction.
 """
 
 import argparse
@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -93,26 +94,33 @@ def cool_down(target):
 class Server:
     """One serve process whose loader lines are stamped on arrival."""
 
-    def __init__(self, binary, weights, log_path):
+    def __init__(self, binary, weights, log_path, command=None):
         with socket.socket() as reserve:
             reserve.bind(("127.0.0.1", 0))
             self.port = reserve.getsockname()[1]
-        self.command = [
-            str(binary), "serve", "--host", "127.0.0.1", "--port", str(self.port), "llm",
-            "--model", str(weights / "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"),
-            "--mmproj", str(weights / "mmproj-BF16.gguf"),
-            "--mtp-model", str(weights / "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"),
-            "--speculative", "mtp", "--context", str(CONTEXT), "--sessions", "1",
-            "--served-model-name", "phases"]
+        if command is None:
+            self.command = [
+                str(binary), "serve", "--host", "127.0.0.1", "--port", str(self.port), "llm",
+                "--model", str(weights / "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"),
+                "--mmproj", str(weights / "mmproj-BF16.gguf"),
+                "--mtp-model", str(weights / "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"),
+                "--speculative", "mtp", "--context", str(CONTEXT), "--sessions", "1",
+                "--served-model-name", "phases"]
+        if command is not None:
+            self.command = list(command) + ['--host', '127.0.0.1', '--port', str(self.port)]
         self.log_path = log_path
         self.events = []
+        self.listener_recorded = threading.Event()
 
     def _read(self, stream, log):
         for line in stream:
             stamp = time.monotonic()
             log.write(line)
-            if "[loader]" in line:
+            if "[loader]" in line or "event=listening " in line:
                 self.events.append((stamp, line))
+                if "event=listening " in line and any("event=load_completed " in event
+                                                         for _, event in self.events):
+                    self.listener_recorded.set()
 
     def start(self, timeout):
         self.log = self.log_path.open("w")
@@ -130,6 +138,9 @@ class Server:
                 connection.request("GET", "/health")
                 if connection.getresponse().status == 200:
                     self.ready = time.monotonic()
+                    # Let the log reader retain readiness even if the health response wins the race.
+                    if not self.listener_recorded.wait(1):
+                        raise RuntimeError("listener marker missing; see " + str(self.log_path))
                     return
             except (OSError, http.client.HTTPException):
                 pass
@@ -151,12 +162,18 @@ class Server:
 
     def startup(self):
         """Split spawn-to-ready time at the loader's own markers."""
-        fields, stamps = {}, {}
+        fields, stamps, server_stamps = {}, {}, {}
         for stamp, line in self.events:
             event = re.search(r"event=(\S+)", line)
             if not event:
                 continue
+            # The temporary loading listener precedes completion; measure the final listener.
+            if event.group(1) == "listening" and "load_completed" not in stamps:
+                continue
             stamps.setdefault(event.group(1), stamp)
+            monotonic = re.search(r"monotonic_us=([0-9]+)", line)
+            if monotonic:
+                server_stamps.setdefault(event.group(1), int(monotonic.group(1)))
             for key, value in re.findall(r"(\w+_ms)=([0-9.]+)", line):
                 fields[event.group(1) + "." + key] = float(value)
         if "load_started" not in stamps or "load_completed" not in stamps:
@@ -165,12 +182,18 @@ class Server:
                   + fields.get("vision_prepared.upload_ms", 0))
         structured = fields.get("structured_output_prepared.prepare_ms", 0)
         load = fields["load_completed.elapsed_ms"]
+        precise = all(key in server_stamps for key in ("load_completed", "listening"))
+        listen = ((server_stamps["listening"] - server_stamps["load_completed"]) / 1000
+                  if precise else (self.ready - stamps["load_completed"]) * 1000)
+        if listen < 0:
+            raise ValueError("listener precedes model load completion")
         return {
+            "listen_source": "server" if precise else "health_poll",
             "init": (stamps["load_started"] - self.spawned) * 1000,
             "weights": load - vision - structured,
             "vision": vision if "vision_prepared.upload_ms" in fields else None,
             "structured": structured if "structured_output_prepared.prepare_ms" in fields else None,
-            "listen": (self.ready - stamps["load_completed"]) * 1000,
+            "listen": listen,
         }
 
     def complete(self, text):
@@ -188,6 +211,10 @@ class Server:
         if response.status != 200:
             raise RuntimeError(f"/v1/completions returned {response.status}: {payload}")
         timings, usage = payload["timings"], payload["usage"]
+        for key, _ in REQUEST_PHASES:
+            value = timings[key]
+            if type(value) not in (int, float) or value < 0 or not math.isfinite(value):
+                raise ValueError('Missing/invalid server phase: ' + key)
         ttft = re.search(r"ttft;dur=([0-9.]+)", server_timing)
         result = {key: timings.get(key) for key, _ in REQUEST_PHASES}
         result.update(ttft_ms=float(ttft.group(1)) if ttft else None,
@@ -201,10 +228,14 @@ class Server:
         return result
 
 
-def run_arm(revision, binary, weights, output, repeat, startup_timeout):
-    server = Server(binary, weights, output / f"{revision}-{repeat}.log")
-    server.start(startup_timeout)
+def run_arm(revision, binary, weights, output, repeat, startup_timeout, model_id=None, assets=None):
+    command = None
+    if model_id is not None:
+        from devlab_models import llm_command
+        command = llm_command(model_id, binary, assets) + ['--served-model-name', 'phases']
+    server = Server(binary, weights, output / f"{revision}-{repeat}.log", command)
     try:
+        server.start(startup_timeout)
         requests = {}
         for key, _, *parts in REQUESTS:
             requests[key] = server.complete(prompt(*parts))
@@ -214,7 +245,11 @@ def run_arm(revision, binary, weights, output, repeat, startup_timeout):
 
 
 def verdict(pairs):
-    """Paired 5% and 3 ms rule; a direction must hold in every repeat."""
+    """Paired 5% and 10 ms rule; a direction must hold in every repeat.
+
+    Only a slower repeat makes the comparison noisy: a repeat that is faster on
+    one side and unchanged on the other is no evidence of a regression.
+    """
     flags = []
     for base, head in pairs:
         delta = head - base
@@ -226,7 +261,7 @@ def verdict(pairs):
         return "slower"
     if all(flag == -1 for flag in flags):
         return "faster"
-    return "noisy" if any(flags) else "same"
+    return "noisy" if any(flag == 1 for flag in flags) else "same"
 
 
 def summarize(arms):
@@ -243,6 +278,10 @@ def summarize(arms):
 
     for key, label in STARTUP:
         add("startup", "startup." + key, label, lambda arm, key=key: arm["startup"][key])
+        if key == "listen":
+            phases[-1]['checked'] = all(arm['startup'].get('listen_source') == 'server' for arm in arms)
+            if not phases[-1]['checked']:
+                phases[-1]['advisory_reason'] = 'server readiness timestamps unavailable'
     for request, _, *_ in REQUESTS:
         for key, label in REQUEST_PHASES:
             add(request, f"{request}.{key}", label,
@@ -259,14 +298,23 @@ def main():
     parser.add_argument("--head-binary", type=Path, required=True)
     parser.add_argument("--base-revision", required=True)
     parser.add_argument("--head-revision", required=True)
-    parser.add_argument("--weights", type=Path, required=True)
+    parser.add_argument("--weights", type=Path)
+    parser.add_argument("--model-id")
+    parser.add_argument("--assets", type=Path)
     parser.add_argument("--output", type=Path, required=True, help="phases.json path")
     parser.add_argument("--logs", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--startup-timeout", type=float, default=600)
     args = parser.parse_args()
+    if args.repeats < 2:
+        parser.error('at least two paired repeats are required')
+    if args.model_id and not args.assets:
+        parser.error('--model-id requires --assets')
+    if not args.model_id and not args.weights:
+        parser.error('provide --weights or --model-id with --assets')
     args.logs.mkdir(parents=True, exist_ok=True)
-    weights = args.weights.resolve()
+    weights = args.weights.resolve() if args.weights else None
+    assets = json.loads(args.assets.read_text()) if args.assets else None
     binaries = {"base": args.base_binary.resolve(), "head": args.head_binary.resolve()}
 
     # Let the GPU settle after the functional suites; later arms return near it.
@@ -283,15 +331,34 @@ def main():
             print(f"Arm {revision} #{repeat + 1}: GPU {temperature} °C", flush=True)
             arm_started = time.monotonic()
             arm = run_arm(revision, binaries[revision], weights, args.logs, repeat,
-                          args.startup_timeout)
+                          args.startup_timeout, args.model_id, assets)
             arms.append({"revision": revision, "repeat": repeat, "gpu_temp_c": temperature,
                          "wall_s": time.monotonic() - arm_started, **arm})
     phases, diverged = summarize(arms)
+    from devlab_models import registry
+    mode = registry()['models'][args.model_id]['mode'] if args.model_id else 'mtp'
+    for arm in arms:
+        for request in arm['requests'].values():
+            if request['completion_tokens'] != GENERATED_TOKENS or request['prompt_tokens'] <= 0:
+                raise ValueError('phase workload did not perform the expected token work')
+            if mode != 'off' and request['draft_tokens'] <= 0:
+                raise ValueError('phase workload did not execute actual drafts')
+    mismatched_work = set()
+    for label, *_ in REQUESTS:
+        work = {(arm['requests'][label]['prompt_tokens'], arm['requests'][label]['cached_tokens'],
+                 arm['requests'][label]['completion_tokens']) for arm in arms}
+        if len(work) != 1:
+            mismatched_work.add(label)
+    diverged = sorted(set(diverged) | mismatched_work)
+    for phase in phases:
+        if phase['group'] in mismatched_work or (
+                phase['group'] in diverged and phase['key'].endswith('predicted_ms')):
+            phase['verdict'] = 'noisy'
     result = {
         "schema": 1,
         "revisions": {"base": args.base_revision, "head": args.head_revision},
         "settings": {"repeats": args.repeats, "context": CONTEXT, "sessions": 1,
-                     "speculative": "mtp", "generated_tokens": GENERATED_TOKENS,
+                     "speculative": mode, "generated_tokens": GENERATED_TOKENS,
                      "slowdown": SLOWDOWN, "noise_ms": NOISE_MS,
                      "idle_temp_c": idle, "requests": {key: label for key, label, *_ in REQUESTS}},
         "wall_s": time.monotonic() - started,

@@ -24,6 +24,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/functional -p test_impact.py
           python3 -m unittest discover -s tests/functional -p test_report.py
+          python3 -m unittest discover -s tests/functional -p test_devlab.py
 
       - name: Compute CMake compiler cache key
         id: ccache-key
@@ -175,46 +176,11 @@ jobs:
           Write-Host "Passed $($tests.Count) Windows test binaries."
 
   cache-package:
-    name: Push nix build to Cachix
+    name: Linux production package
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # A new revision is a new derivation, so Nix rebuilds gufo in full; the
-      # compiler cache keeps that rebuild to the changed sources. Each run
-      # saves a fresh entry and restores the newest one for the same lock.
-      - name: Restore package compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /tmp/gufo-ccache
-          key: gufo-package-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            gufo-package-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
-
-      - name: Prepare package compiler cache
-        run: |
-          mkdir -p /tmp/gufo-ccache
-          chmod -R a+rwX /tmp/gufo-ccache
-          chmod 1777 /tmp/gufo-ccache
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-        with:
-          determinate: false
-          extra-conf: |
-            extra-sandbox-paths = /tmp/gufo-ccache
-
-      # Pushes what this job builds and cache.nixos.org lacks: the patched
-      # ROCr runtime and the gufo package.
-      - name: Enable Cachix
-        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
-        with:
-          name: gufo
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          pushFilter: '(-source$|\.tar\.gz$)'
-
-      - name: Build production package
-        run: nix build .#default --print-build-logs --cores 4 --max-jobs 1
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      revision: ${{ github.sha }}
+      artifact-name: linux-${{ github.sha }}
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
