@@ -1,4 +1,4 @@
-# EmbeddingGemma 2 text and image embeddings: model-private BF16 safetensors runtime.
+# EmbeddingGemma 2 text, image and audio embeddings: model-private BF16 safetensors runtime.
 
 add_library(gufo_embedding_gemma2 STATIC
   audio_processor.cpp

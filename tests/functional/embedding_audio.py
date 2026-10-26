@@ -137,6 +137,15 @@ def main():
             status, result = post([{"content": [{"type": "text", "text": " word" * 8190},
                                                  audio(cases[2])]}], truncate=truncate)
             assert status == 400 and result.get("error"), result
+        # Truncation keeps complete audio features and discards trailing text.
+        # An unrelated literal image token beyond the cut is ordinary text in
+        # an audio-only input and must not prevent this valid truncation.
+        prefix = [audio(cases[2]), {"type": "text", "text": " word" * 8190}]
+        status, truncated = post([{"content": prefix}], truncate=True)
+        assert status == 200 and truncated["usage"]["prompt_tokens"] == 8192, truncated
+        status, extended = post([{"content": prefix + [{"type": "text", "text": "<|image|>"}]}], truncate=True)
+        assert status == 200 and extended["usage"] == truncated["usage"], extended
+        assert extended["data"] == truncated["data"], "discarded text cannot change the retained audio vector"
         # A literal placeholder split across adjacent text parts must not steal
         # any of the following clip's projected features.
         status, result = post([{"content": [{"type": "text", "text": "<|au"},

@@ -232,7 +232,8 @@ struct EmbeddingService::Impl {
           return EmbeddingStatus::kInputTooLong;
         }
         (void)TruncateKeepingImages(
-            &sequence.tokens, EmbeddingService::kMaxInputTokens, kImageTokenId);
+            &sequence.tokens, EmbeddingService::kMaxInputTokens,
+            sequence.images.empty() ? kAudioTokenId : kImageTokenId);
       }
       if (sequence.tokens.size() > EmbeddingService::kMaxInputTokens) {
         batch->failed_index = index;

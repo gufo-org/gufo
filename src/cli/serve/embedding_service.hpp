@@ -75,7 +75,7 @@ struct EmbeddingServiceOptions {
                                          std::size_t max_tokens,
                                          std::uint32_t image_token);
 
-/// Native HIP EmbeddingGemma 2 text and image embedding service.
+/// Native HIP EmbeddingGemma 2 text, image and audio embedding service.
 class EmbeddingService {
 public:
   /// Longest accepted input in tokens, including the surrounding markers.

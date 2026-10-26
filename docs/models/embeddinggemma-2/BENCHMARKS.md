@@ -118,7 +118,7 @@ PNG reading, preprocessing, vision/text inference and response transport.
 
 This is a new workload with no supported main image path to compare. The first
 image request additionally loads **335.5 MB** of vision/projector weights; text
-startup still loads only the text backbone. Audio weights are never uploaded.
+startup still loads only the text backbone. Audio weights load lazily on the first audio request; see the audio measurements below.
 
 The affected text controls retain every request. Main and candidate alternate
 per workload, with 60 requests each and no per-request failures at the 5% and

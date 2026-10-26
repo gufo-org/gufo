@@ -36,7 +36,7 @@ struct LayerGeometry {
   float rope_theta{10000.0F};
 };
 
-/// The text backbone shared by text and image inputs.
+/// The text backbone shared by text, image and audio inputs.
 struct TextConfig {
   std::uint32_t vocab_size{262144};
   std::uint32_t hidden_size{512};
