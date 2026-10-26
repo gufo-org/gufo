@@ -145,9 +145,12 @@ public:
   std::optional<std::string> render_chat_prompt(
       const gufo::server::ChatRequest& request) const override {
     rendered_chat = request;
+    if (render_error)
+      throw std::invalid_argument(*render_error);
     return rendered_prompt;
   }
   std::optional<std::string> rendered_prompt;
+  std::optional<std::string> render_error;
   mutable gufo::server::ChatRequest rendered_chat;
   Result complete(std::string_view prompt, std::size_t limit,
                   const gufo::sampling::SamplingConfig& sampling,

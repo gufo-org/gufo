@@ -87,15 +87,20 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
 }
 
 // The text before tokenization. An image renders as its one placeholder, not
-// the visual tokens Prepare expands it into.
+// the visual tokens Prepare expands it into. Template errors are request
+// errors, as in Prepare.
 std::optional<std::string> RenderQwenPrompt(const ChatRequest& request,
                                             std::uint32_t max_context) {
-  return tokenization::QwenChatTemplate::Render(
+  std::string error;
+  auto rendered = tokenization::QwenChatTemplate::Render(
       request.messages,
       request.tool_choice == ChatRequest::ToolChoice::kNone
           ? std::span<const tokenization::ChatTool>{}
           : std::span<const tokenization::ChatTool>{request.tools},
-      QwenChatOptions(request, max_context));
+      QwenChatOptions(request, max_context), &error);
+  if (!rendered)
+    throw std::invalid_argument(error);
+  return rendered;
 }
 
 std::optional<std::size_t> CountQwenPromptTokens(

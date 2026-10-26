@@ -1272,8 +1272,8 @@ what a request becomes. `model` is optional. The server's `--think` and
 shows what such requests run at; tool and response-format constraints add the
 same text they add before generation. Nothing is tokenized, prefilled or
 cached. An image renders as its single placeholder, not its expanded visual
-tokens. `stream: true` is rejected; backends that cannot render a template as
-text return 501.
+tokens. `stream` is ignored, as in llama-server; template errors return 400
+as in Chat, and backends that cannot render a template as text return 501.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed

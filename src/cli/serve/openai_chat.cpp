@@ -3938,10 +3938,7 @@ HttpResponse HandleApplyTemplate(const HttpRequest& request,
       error.has_value()) {
     return std::move(*error);
   }
-  if (parsed.stream) {
-    return Error(400, "Bad Request", "'stream' must be false",
-                 "invalid_stream");
-  }
+  // As in llama-server, `stream` is ignored: the prompt is one JSON response.
   try {
     auto prompt = backend.render_chat_prompt(parsed.chat);
     if (!prompt) {

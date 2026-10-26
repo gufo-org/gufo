@@ -608,15 +608,22 @@ void TestApplyTemplate() {
          gufo::ReasoningEffort::kLow);
 
   ExpectStatus(server.Post("/apply-template", R"({"messages":[]})"), 400);
+  // A forwarded streaming Chat body renders like any other.
   ExpectStatus(
       server.Post(
           "/apply-template",
           R"({"stream":true,"messages":[{"role":"user","content":"hi"}]})"),
-      400);
+      200);
   ExpectStatus(server.Post("/apply-template",
                            R"({"model":"other",
                                "messages":[{"role":"user","content":"hi"}]})"),
                404);
+  // A template error is the request's, as in Chat.
+  server.backend->render_error = "No user query found in messages.";
+  const auto invalid = server.Post("/apply-template", chat);
+  ExpectStatus(invalid, 400);
+  assert(invalid.find("No user query found") != std::string::npos);
+  server.backend->render_error.reset();
   // Rendering never generates.
   assert(server.backend->calls == calls);
   server.backend->rendered_prompt.reset();
