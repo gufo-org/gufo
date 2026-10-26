@@ -135,7 +135,8 @@ bool LaunchQ4KTarget(const void* w, const float* x, float* y, std::size_t batch,
       case 6:
         return Launch<T, 6, 4, 4, 1, 6, 8, 16>(w, x, y, m, k, stream);
       case 7:
-        return Launch<T, 7, 4, 4, 1, 7, 8, 16>(w, x, y, m, k, stream);
+        // Eight-wave occupancy spills Q4_K at seven rows; four waves do not.
+        return Launch<T, 7, 4, 4, 1, 7, 4, 16>(w, x, y, m, k, stream);
       case 8:
         return Launch<T, 8, 4, 4, 1, 8, 8, 16>(w, x, y, m, k, stream);
       default:
@@ -357,7 +358,7 @@ bool LaunchQ4K(const void* w, const float* x, float* y, std::size_t batch,
     if (batch == 6)
       return Launch<T, 6, 4, 4, 1, 6, 8, 16>(w, x, y, m, k, stream);
     if (batch == 7)
-      return Launch<T, 7, 4, 4, 1, 7, 8, 16>(w, x, y, m, k, stream);
+      return Launch<T, 7, 4, 4, 1, 7, 4, 16>(w, x, y, m, k, stream);
     return Launch<T, 8, 4, 4, 1, 8, 8, 16>(w, x, y, m, k, stream);
   }
   if (attn_kv || conv) {
@@ -390,7 +391,11 @@ bool LaunchFfnShape(const void* w, const float* x, float* y, std::size_t batch,
       case 6:
         return Launch<T, 6, 4, 4, 1, 6, 8, 16>(w, x, y, m, k, stream);
       case 7:
-        return Launch<T, 7, 4, 4, 1, 7, 8, 16>(w, x, y, m, k, stream);
+        // Q4_K spills at seven rows under the eight-wave occupancy hint.
+        if constexpr (T == GgmlType::kQ4_K)
+          return Launch<T, 7, 4, 4, 1, 7, 4, 16>(w, x, y, m, k, stream);
+        else
+          return Launch<T, 7, 4, 4, 1, 7, 8, 16>(w, x, y, m, k, stream);
       default:
         return Launch<T, 8, 4, 4, 1, 8, 8, 16>(w, x, y, m, k, stream);
     }
@@ -457,7 +462,7 @@ bool LaunchFfnShape(const void* w, const float* x, float* y, std::size_t batch,
       }
     }
     if (batch == 7)
-      return Launch<T, 7, 8, 4, 1, 7, 8, 16>(w, x, y, m, k, stream);
+      return Launch<T, 7, 8, 4, 1, 7, 4, 16>(w, x, y, m, k, stream);
     return batch >= 6 && wide();  // down
   }
   if constexpr (T == GgmlType::kQ5_K) {
