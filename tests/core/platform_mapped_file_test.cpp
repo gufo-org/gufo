@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/platform/fs.hpp"
 #include "src/core/platform/mapped_file.hpp"
 
 namespace {
@@ -53,8 +54,14 @@ int main() {
   const std::size_t page = platform::SystemPageSize();
   CHECK(page > 0);
   std::vector<std::uint8_t> bytes(3 * page + 123);
-  for (std::size_t i = 0; i < bytes.size(); ++i)
-    bytes[i] = static_cast<std::uint8_t>(i * 31 + 7);
+  // Distinct page contents expose positional reads that use the wrong offset.
+  std::uint32_t state = 0x12345678;
+  for (auto& byte : bytes) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    byte = static_cast<std::uint8_t>(state);
+  }
   const auto file = WriteFile(dir / "data.bin", bytes);
   const auto empty = WriteFile(dir / "empty.bin", {});
 
@@ -162,6 +169,10 @@ int main() {
               ((worker * 37 + i * 19) % (2 * page / stride)) * stride;
           if (platform::ReadFileAt(handle, buffer, page, offset) != page ||
               std::memcmp(buffer, bytes.data() + offset, page) != 0)
+            correct = false;
+          std::error_code ec;
+          if (platform::ReadAt(handle, offset, buffer, page, ec) != page ||
+              ec || std::memcmp(buffer, bytes.data() + offset, page) != 0)
             correct = false;
         }
       });
