@@ -381,6 +381,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
   }
 
   std::string prompt_name = service.default_prompt_name();
+  bool requested_prompt = false;
   if (const json::Value* value = Optional(root, "prompt_name");
       value != nullptr) {
     if (!value->is_string()) {
@@ -388,6 +389,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
                         "invalid_parameter_type");
     }
     prompt_name = value->str();
+    requested_prompt = true;
   }
   if (!prompt_name.empty()) {
     const std::string* prefix = service.prompt(prompt_name);
@@ -396,10 +398,20 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
                         "invalid_prompt_name");
     }
     // A leading text part: the service joins adjacent text before
-    // tokenizing, so this equals a client-side prefix.
+    // tokenizing, so this equals a client-side prefix. A requested prompt
+    // applies to every input, as in sentence-transformers. The model card
+    // passes images and audio without a prefix, so the server default skips
+    // inputs without text.
     for (EmbeddingInput& input : inputs) {
-      input.content.insert(input.content.begin(),
-                           {EmbeddingPart::Type::kText, *prefix});
+      const bool has_text =
+          std::ranges::any_of(input.content, [](const EmbeddingPart& part) {
+            return part.type == EmbeddingPart::Type::kText &&
+                   !part.value.empty();
+          });
+      if (requested_prompt || has_text) {
+        input.content.insert(input.content.begin(),
+                             {EmbeddingPart::Type::kText, *prefix});
+      }
     }
   }
 

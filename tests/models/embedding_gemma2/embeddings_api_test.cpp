@@ -960,6 +960,42 @@ void TestPromptNames() {
                 std::vector<std::string>{"task: search result | query: a"},
         "llama.cpp's /embeddings applies prompt_name too");
 
+  // The model card passes images and audio without a prefix: the default
+  // skips inputs without text, but a requested prompt applies to all.
+  const std::string image =
+      R"({"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}})";
+  const std::string audio =
+      R"({"type":"input_audio","input_audio":{"data":"AAAA"}})";
+  const std::string caption = R"({"type":"text","text":"cap"})";
+  const std::string media_inputs =
+      R"({"input":[{"content":[)" + image + R"(]},{"content":[)" + audio +
+      R"(]},{"content":[)" + image + "," + caption + R"(]},"a"]})";
+  Check(Send(*with_default, media_inputs).status == 200 &&
+            runner.last_texts.size() == 4,
+        "default prompt with media inputs");
+  Check(runner.last_texts[0] == "data:image/png;base64,AAAA",
+        "the default prompt skips an image-only input");
+  Check(!runner.last_texts[1].starts_with("title: none | text: "),
+        "the default prompt skips an audio-only input");
+  Check(runner.last_texts[2] ==
+            "title: none | text: data:image/png;base64,AAAAcap",
+        "the default prompt prefixes an input with text and an image");
+  Check(runner.last_texts[3] == "title: none | text: a",
+        "the default prompt prefixes text beside media inputs");
+  Check(SendTo(*with_default, "/embeddings",
+               R"({"content":{"prompt_string":"<__media__>",)"
+               R"("multimodal_data":["AAAA"]}})")
+                    .status == 200 &&
+            !runner.last_texts[0].starts_with("title: none | text: "),
+        "the default prompt skips llama.cpp media without text");
+  Check(Send(*with_default, R"({"input":[{"content":[)" + image +
+                                R"(]}],"prompt_name":"query"})")
+                    .status == 200 &&
+            runner.last_texts ==
+                std::vector<std::string>{
+                    "task: search result | query: data:image/png;base64,AAAA"},
+        "a requested prompt_name prefixes an image-only input");
+
   auto unknown_default = MakePromptService(&runner, "missing");
   Check(!unknown_default->ready() &&
             unknown_default->initialization_error().find("missing") !=

@@ -158,7 +158,7 @@ Clients that speak the OpenAI embeddings API work with two settings to check:
 
   By default paperless-ngx splits documents into chunks of 1,024 tokens as its own splitter counts them (`PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE`), far below the 8,192-token limit, and adds none of the task prefixes above.
 
-Clients that cannot change their input can let the server add a prefix from the checkpoint's `config_sentence_transformers.json` `prompts` instead: a request field `"prompt_name": "query"` (or `"document"`, `"Retrieval-query"`, ...) prefixes every input of that request, and `--default-prompt-name NAME` applies one to requests that name none.  Gufo adds no prefix unless asked.  Changing the prefix changes every vector, so an existing index needs a rebuild.
+Clients that cannot change their input can let the server add a prefix from the checkpoint's `config_sentence_transformers.json` `prompts` instead: a request field `"prompt_name": "query"` (or `"document"`, `"Retrieval-query"`, ...) prefixes every input of that request, and `--default-prompt-name NAME` applies one to the text inputs of requests that name none.  The default skips image-only and audio-only inputs, which the model card embeds without a prefix.  Gufo adds no prefix unless asked.  Changing the prefix changes every vector, so an existing index needs a rebuild.
 
 ## Requests
 

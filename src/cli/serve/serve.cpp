@@ -490,7 +490,7 @@ void AddEmbeddingOptions(ArgParser& parser, std::filesystem::path* model,
                    "Public API model ID (default: embeddinggemma-2)", "Model",
                    served_model_name);
   parser.AddOption("", "--default-prompt-name", "NAME",
-                   "Checkpoint prompt for requests without prompt_name "
+                   "Checkpoint prompt for text inputs without prompt_name "
                    "(default: none)",
                    "Model", default_prompt_name);
 }
