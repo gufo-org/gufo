@@ -59,8 +59,9 @@ struct ChatMessage {
   std::string name;     ///< Optional function/tool name
   std::string thought;  ///< Optional thinking/reasoning prefix
   std::string tool_call_id;
-  /// `kLow` bounds the resized image to 512 pixels per side; the other OpenAI
-  /// `image_url.detail` values behave as `kAuto`.
+  /// `kLow` fits the resized image within 512 pixels per side unless the
+  /// model's minimum size is larger; the other OpenAI `image_url.detail`
+  /// values behave as `kAuto`.
   enum class ImageDetail : std::uint8_t { kAuto, kLow };
   struct ImagePart {
     /// Insert an image before this byte of content. Equal offsets preserve

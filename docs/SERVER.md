@@ -723,13 +723,11 @@ model-owned: `detail` accepts `auto`, `low`, `high` and `original`. For Qwen
 models, `low` scales the image down to fit within 512 × 512 pixels and keeps its
 aspect ratio, so it uses at most 256 merged image tokens. The model's
 65,536-pixel minimum still applies, so a very small or very narrow image can be
-enlarged. The other values behave as `auto` and use the model's full resolution
-range. When either side of the image, rounded to a multiple of 32 pixels,
-exceeds 512, a `low` request and an `auto` request get different resized images
-and share only the prompt text before the image. The exception is an image whose
-size the 65,536-pixel minimum sets under both values. Otherwise both resize the
-same way, and the two requests share the cached prefix. File IDs and
-`input_file` parts remain unsupported.
+enlarged, but `low` never uses more pixels than `auto`. The other values behave
+as `auto` and use the model's full resolution range. A `low` request and an
+`auto` request for the same image share the cached prefix when both resize it to
+the same size. Otherwise they share only the prompt text before the image. File
+IDs and `input_file` parts remain unsupported.
 
 Responses report `incomplete` with reason `max_output_tokens` when generation
 hits its limit. Otherwise they report `completed`. `stream: true` sends typed
