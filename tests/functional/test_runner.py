@@ -32,6 +32,7 @@ from cache_shared_prefix import check_cache_shared_prefix
 from cache_bridge import check_cache_bridge
 from cache_compaction import check_cache_compaction, ARCHIVE_LINE
 from cache_disk_spacing import check_disk_spacing
+import cache_persist
 from cache_growth import check_cache_growth
 from cache_depth import check_cache_depth
 from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
@@ -417,6 +418,59 @@ class FunctionalRunnerTest(unittest.TestCase):
         ):
             with self.subTest(output=output), self.assertRaises(ValueError):
                 check_snapshot_budget(output, available, requested, 1)
+
+    def test_cache_persist_flags_only_its_prompt(self):
+        def reply(text, total, cached, disk=False, persist=True):
+            return {"choices": [{"message": {"role": "assistant", "content": text}}],
+                    "cache_persist": persist,
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached, "gufo": {
+                        "prefill_tokens": total - cached, "cache_disk_hit": disk}}}
+
+        sent = []
+
+        def script(*replies):
+            queue = list(replies)
+
+            def call(url, body):
+                sent.append(body)
+                return queue.pop(0)
+            return patch("continuation.call", side_effect=call)
+
+        with script(reply("BETA", 2500, 0, persist=False),
+                    reply("GAMMA", 2520, 2498, persist=False),
+                    reply("BETA", 2500, 3)):
+            previous = cache_persist.send("http://x", "m")
+        self.assertEqual([body.get("cache_persist") for body in sent], [False, False, None])
+        self.assertNotIn("cache_persist", sent[2])
+        previous = json.loads(json.dumps(previous))
+        cases = [
+            ((reply("BETA", 2500, 2496, True), reply("BETA", 2500, 3)), None),
+            ((reply("BETA", 2500, 2496, False), reply("BETA", 2500, 3)), "'disk': False"),
+            ((reply("BETA", 2500, 2496, True), reply("BETA", 2500, 2496, True)), "'cached': 2496"),
+            ((reply("BETA", 2500, 2496, True), reply("ALPHA", 2500, 3)), "ALPHA"),
+        ]
+        for replies, error in cases:
+            with self.subTest(error=error), script(*replies):
+                sent.clear()
+                if error is None:
+                    result = cache_persist.restore("http://x", "m", previous)
+                    self.assertTrue(result["control"]["disk"])
+                else:
+                    with self.assertRaisesRegex(AssertionError, error):
+                        cache_persist.restore("http://x", "m", previous)
+                self.assertNotIn("cache_persist", sent[0])
+        with script(reply("BETA", 2500, 0, persist=False),
+                    reply("GAMMA", 2520, 3, persist=False)), \
+                self.assertRaisesRegex(AssertionError, "'cached': 3"):
+            cache_persist.send("http://x", "m")
+        # A server that ignores the flag (no echo, or true) fails at once.
+        for echo in (None, True):
+            response = reply("BETA", 2500, 0, persist=echo)
+            if echo is None:
+                del response["cache_persist"]
+            with script(response), \
+                    self.assertRaisesRegex(AssertionError, "cache_persist"):
+                cache_persist.send("http://x", "m")
 
     def test_disk_spacing_checks_drained_logs(self):
         def event(tokens, reason="saved"):
@@ -1794,7 +1848,8 @@ output.with_suffix(".requests.json").write_text(json.dumps({{"version": 1, "requ
     "request_sha256": "fixture"}}]}}))
 sys.exit({exit_code})
 '''
-                for script in ("continuation.py", "cache_disk_spacing.py"):
+                for script in ("continuation.py", "cache_disk_spacing.py",
+                               "cache_persist.py"):
                     (root / script).write_text(child)
 
                 def server(command, log, timeout):
@@ -1819,6 +1874,8 @@ sys.exit({exit_code})
                 self.assertEqual(report["suites"]["text-cancel"]["status"],
                                  "passed" if continuation_passed else "failed")
                 self.assertEqual(report["suites"]["disk-spacing"]["status"],
+                                 "passed" if not exit_code and spacing_exact else "failed")
+                self.assertEqual(report["suites"]["cache-persist"]["status"],
                                  "passed" if not exit_code and spacing_exact else "failed")
                 self.assertIn("--cache-disk", report["command"])
                 self.assertFalse((root / "report/disk").exists())

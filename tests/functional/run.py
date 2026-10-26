@@ -52,7 +52,8 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
 HARNESS_ROOTS = ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
                  "tool_reasoning.py", "tool_streaming.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
                  "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py", "cache_stalls.py",
-                 "cache_disk_spacing.py", "tool_images.py", "reasoning_budget.py")
+                 "cache_disk_spacing.py", "cache_persist.py", "tool_images.py",
+                 "reasoning_budget.py")
 
 
 def harness_files():
@@ -425,6 +426,7 @@ def main():
         ]
     ready_to_restore = []
     spacing = False
+    persist = False
     try:
         if "cache-rotation" in selected:
             from cache_rotation import check_snapshot_budget, host_available_bytes
@@ -483,7 +485,10 @@ def main():
                 spacing = run("disk-spacing", "cache_disk_spacing.py", [
                     "--url", base_url, "--model", model,
                     "--output", str(output / "disk-spacing.json")])
-        if ready_to_restore or spacing:
+                persist = run("cache-persist", "cache_persist.py", [
+                    "--url", base_url, "--model", model,
+                    "--output", str(output / "cache-persist.json")])
+        if ready_to_restore or spacing or persist:
             startup_started = time.monotonic()
             with server(command, output / "server-restarted.log", args.startup_timeout):
                 report["restart_ms"] = (time.monotonic() - startup_started) * 1000
@@ -492,6 +497,11 @@ def main():
                         "--url", base_url, "--model", model,
                         "--restore", str(output / (label + ".json")),
                         "--output", str(output / (label + "-disk.json"))])
+                if persist:
+                    run("cache-persist-disk", "cache_persist.py", [
+                        "--url", base_url, "--model", model,
+                        "--restore", str(output / "cache-persist.json"),
+                        "--output", str(output / "cache-persist-disk.json")])
                 if spacing:
                     spacing = run("disk-spacing-disk", "cache_disk_spacing.py", [
                         "--url", base_url, "--model", model,
