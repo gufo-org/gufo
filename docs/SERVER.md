@@ -264,6 +264,11 @@ checkpoints off [`--cache-disk`](KV-CACHE.md#the-disk-tier): they stay in RAM
 and leave with RAM eviction or a restart. The request can still restore disk
 checkpoints that other requests wrote, and a later request without the flag
 that sends the same prefix can write its own. `null` keeps the default, `true`.
+Each response echoes the value it applied as a top-level `cache_persist`
+boolean, `true` by default, so a client can confirm that the server honoured
+the flag. Streams carry it on the finishing chunk and the usage chunk (Chat and
+text completions) or on the final `response` object (Responses), never on a
+content delta.
 
 Qwen image identity is checked only for images consumed before each checkpoint.
 Appending an image reuses the preceding text/image state in RAM or on disk;

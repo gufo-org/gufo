@@ -577,7 +577,8 @@ result can still populate the cache. `null` keeps the default, `true`.
 in RAM only: nothing it captures is written or staged for the disk tier, so
 they are lost on eviction or restart. It still reads disk checkpoints, and it
 does not stop a later request without the flag from persisting the same
-prefix. `null` keeps the default, `true`.
+prefix. `null` keeps the default, `true`. Responses echo the applied value as
+a top-level `cache_persist`; see [the server guide](SERVER.md).
 
 ## Observing it
 
