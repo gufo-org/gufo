@@ -557,7 +557,37 @@ void TestTypedInput() {
       Send(
           service,
           R"({"input":[{"content":[{"type":"input_audio","input_audio":{}}]}]})"),
-      400, "unsupported_input", "unsupported modality");
+      400, "invalid_parameter_type", "audio source is required");
+  const auto audio_response = Send(
+      service,
+      R"({"input":["plain",{"content":[{"type":"input_audio","input_audio":{"data":"AAAA","url":"ignored","format":"ignored"}},{"type":"text","text":"middle"},{"type":"input_audio","input_audio":{"url":"https://example.com/test.wav"}},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]})");
+  Check(audio_response.status == 200 && captured.size() == 2 &&
+            captured[1].content.size() == 4,
+        "audio and mixed content are accepted");
+  Check(captured[1].content[0].type == EmbeddingPart::Type::kAudio &&
+            captured[1].content[0].value == "AAAA" &&
+            captured[1].content[1].value == "middle" &&
+            captured[1].content[2].type == EmbeddingPart::Type::kAudio &&
+            captured[1].content[2].value == "https://example.com/test.wav" &&
+            captured[1].content[3].type == EmbeddingPart::Type::kImage,
+        "audio data precedence and part order match the request");
+  for (
+      const auto* body :
+      {R"({"input":[{"content":[{"type":"input_audio","input_audio":null}]}]})",
+       R"({"input":[{"content":[{"type":"input_audio","input_audio":{"data":7}}]}]})",
+       R"({"input":[{"content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":7}}]}]})",
+       R"({"input":[{"content":[{"type":"input_audio","input_audio":{"data":"AAAA","other":"x"}}]}]})"})
+    ExpectError(Send(service, body), 400, "invalid_parameter_type",
+                "malformed audio part");
+  std::string audio_many = R"({"input":[{"content":[)";
+  for (unsigned i = 0; i < 33; ++i) {
+    if (i)
+      audio_many += ',';
+    audio_many += R"({"type":"input_audio","input_audio":{"data":"AAAA"}})";
+  }
+  audio_many += "]}]}";
+  ExpectError(Send(service, audio_many), 400, "too_many_audio",
+              "audio count bounded before decoding");
   std::string many = R"({"input":[{"content":[)";
   for (unsigned i = 0; i < 33; ++i) {
     if (i)

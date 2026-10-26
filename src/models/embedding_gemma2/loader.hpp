@@ -12,7 +12,7 @@
 namespace gufo::models::embedding_gemma2 {
 
 /// Tensor name prefix of the text backbone in model.safetensors. The vision
-/// and audio towers share the file; audio is never uploaded.
+/// and audio towers share the file; unused towers are not uploaded.
 inline constexpr const char* kTextTensorPrefix = "language_model.";
 
 struct LoadResult {
@@ -25,9 +25,10 @@ struct LoadResult {
 };
 
 /// Maps and validates the text backbone and, when requested, the vision
-/// tower and its projection. Audio tensors are skipped.
+/// and audio towers and their projections. Unrequested towers are skipped.
 [[nodiscard]] LoadResult LoadModelDirectory(const std::string& model_dir,
-                                            bool include_vision = false);
+                                            bool include_vision = false,
+                                            bool include_audio = false);
 [[nodiscard]] bool LooksLikeEmbeddingGemma2(const std::string& model_dir);
 
 struct ExpectedTensor {
@@ -40,6 +41,7 @@ struct ExpectedTensor {
     const TextConfig& config);
 
 [[nodiscard]] std::vector<ExpectedTensor> ExpectedVisionTensors();
+[[nodiscard]] std::vector<ExpectedTensor> ExpectedAudioTensors();
 
 }  // namespace gufo::models::embedding_gemma2
 

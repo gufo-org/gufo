@@ -15,6 +15,7 @@ the quality gate.
 """
 
 import argparse
+import base64
 import io
 import json
 import math
@@ -122,12 +123,35 @@ def server(binary, service, model, extra, log_path, timeout):
 def check_embedding(args):
     golden = json.loads((FIXTURES / "embedding_gemma2" / "embedding_golden.json")
                         .read_text(encoding="utf-8"))
-    cases = golden["cases"]
+    cases = list(golden["cases"])
     with server(args.binary, "embedding", args.model, ["--served-model-name", "embeddinggemma-2"],
                 args.log_dir / "embedding-server.log", args.startup_timeout) as url:
         result = request(url + "/v1/embeddings", {
             "model": "embeddinggemma-2", "input": [case["text"] for case in cases],
             "encoding_format": "float"})
+        audio_golden = json.loads((FIXTURES / "embedding_gemma2" / "audio_embedding_golden.json")
+                                  .read_text(encoding="utf-8"))
+        clip = next(case for case in audio_golden["cases"] if case["name"] == "triangle_16000")
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(16000)
+            output.writeframes(b"".join(struct.pack("<h", (min(i % 80, 80 - i % 80) - 20) * 512)
+                                       for i in range(16000)))
+        audio_result = request(url + "/v1/embeddings", {
+            "model": "embeddinggemma-2",
+            "input": [{"content": [{"type": "input_audio", "input_audio": {
+                "data": base64.b64encode(buffer.getvalue()).decode(), "format": "wav"}}]}],
+            "encoding_format": "float"})
+        assert audio_result["usage"]["prompt_tokens"] == len(clip["token_ids"]), audio_result["usage"]
+        assert len(audio_result["data"]) == 1, audio_result
+        item = audio_result["data"][0]
+        assert all(math.isfinite(value) for value in item["embedding"]), item
+        assert abs(sum(value * value for value in item["embedding"]) - 1) < 1e-4, item
+        item["index"] = len(cases)
+        result["data"].append(item)
+        cases.append(clip)
     items = sorted(result["data"], key=lambda item: item["index"])
     assert len(items) == len(cases), f"{len(items)} embeddings for {len(cases)} inputs"
     worst = 1.0
@@ -138,7 +162,7 @@ def check_embedding(args):
         print(f"  {case['name']}: cosine {similarity:.6f}")
         worst = min(worst, similarity)
     assert worst >= MINIMUM_EMBEDDING_COSINE, f"worst cosine {worst:.6f} < {MINIMUM_EMBEDDING_COSINE}"
-    return f"{len(cases)} golden texts, worst cosine {worst:.6f}"
+    return f"{len(cases) - 1} golden texts and one audio clip, worst cosine {worst:.6f}"
 
 
 def check_asr(args):

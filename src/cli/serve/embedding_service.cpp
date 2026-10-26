@@ -12,6 +12,8 @@
 
 #include "src/cli/serve/logging.hpp"
 #include "src/core/image.hpp"
+#include "src/models/embedding_gemma2/audio_decoder.hpp"
+#include "src/models/embedding_gemma2/audio_processor.hpp"
 #include "src/models/embedding_gemma2/image_processor.hpp"
 #include "src/models/embedding_gemma2/loader.hpp"
 #include "src/models/embedding_gemma2/tokenizer.hpp"
@@ -53,6 +55,8 @@ struct EmbeddingService::Impl {
     tokenizer.emplace(std::move(*loaded));
     (void)models::embedding_gemma2::ValidateImageProcessor(
         options.model_root.string(), &image_processor_error);
+    (void)models::embedding_gemma2::ValidateAudioProcessor(
+        options.model_root.string(), &audio_processor_error);
     encoder = models::embedding_gemma2::hip::EncoderRuntime::Create(
         options.model_root.string(), &error);
     if (encoder == nullptr) {
@@ -79,10 +83,12 @@ struct EmbeddingService::Impl {
     const std::size_t byte_limit =
         EmbeddingService::kMaxInputTokens * tokenizer->max_token_bytes();
     std::size_t image_count = 0;
+    std::size_t audio_count = 0;
     for (std::size_t index = 0; index < inputs.size(); ++index) {
       if (is_cancelled && is_cancelled())
         return EmbeddingStatus::kCancelled;
       EncoderSequence sequence;
+      sequence.is_cancelled = is_cancelled;
       std::string text;
       // Use the tokenizer once for the complete input, preserving BPE merges
       // across adjacent text parts and the reference BOS/EOS framing.
@@ -91,6 +97,41 @@ struct EmbeddingService::Impl {
           return EmbeddingStatus::kCancelled;
         if (part.type == EmbeddingPart::Type::kText) {
           text += part.value;
+        } else if (part.type == EmbeddingPart::Type::kAudio) {
+          if (!encoder->config().supported_audio ||
+              !audio_processor_error.empty()) {
+            if (error)
+              *error = audio_processor_error.empty()
+                           ? "unsupported embedding audio configuration"
+                           : audio_processor_error;
+            return EmbeddingStatus::kInvalidAudioInput;
+          }
+          if (++audio_count > EmbeddingService::kMaxAudio) {
+            if (error)
+              *error = "embedding requests accept at most 32 audio clips";
+            return EmbeddingStatus::kInvalidAudioInput;
+          }
+          try {
+            const auto bytes = core::ReadAudioUrl(part.value, budget);
+            const auto waveform = DecodeAudio(bytes, is_cancelled);
+            auto features = ProcessAudio(waveform, 0, is_cancelled);
+            if (!features.soft_tokens()) {
+              if (error)
+                *error = "embedding audio needs at least 161 samples at 16 kHz";
+              return EmbeddingStatus::kInvalidAudioInput;
+            }
+            text += kBeginAudioToken;
+            for (std::size_t j = 0; j < features.soft_tokens(); ++j)
+              text += kAudioToken;
+            text += kEndAudioToken;
+            sequence.audio.push_back({0, std::move(features)});
+          } catch (const std::exception& failure) {
+            if (is_cancelled && is_cancelled())
+              return EmbeddingStatus::kCancelled;
+            if (error)
+              *error = failure.what();
+            return EmbeddingStatus::kInvalidAudioInput;
+          }
         } else {
           if (!encoder->config().supported_vision) {
             if (error)
@@ -130,9 +171,15 @@ struct EmbeddingService::Impl {
       // input with images keeps every placeholder: one ending past the bytes
       // the kept tokens can span cannot fit, and text after the last image
       // is bounded like a text-only input.
-      if (request.truncate && !sequence.images.empty() &&
+      if (request.truncate &&
+          (!sequence.images.empty() || !sequence.audio.empty()) &&
           text.size() / 2 > byte_limit) {
-        const std::size_t end = text.rfind(kEndImageToken);
+        const auto image_end = text.rfind(kEndImageToken);
+        const auto audio_end = text.rfind(kEndAudioToken);
+        const std::size_t end = image_end == std::string::npos ? audio_end
+                                : audio_end == std::string::npos
+                                    ? image_end
+                                    : std::max(image_end, audio_end);
         if (end == std::string::npos ||
             end + std::string_view(kEndImageToken).size() > byte_limit) {
           batch->failed_index = index;
@@ -140,10 +187,11 @@ struct EmbeddingService::Impl {
         }
         text.resize(2 * byte_limit);
       }
-      sequence.tokens = request.truncate && sequence.images.empty()
-                            ? tokenizer->EncodeTruncated(
-                                  text, EmbeddingService::kMaxInputTokens)
-                            : tokenizer->Encode(text);
+      sequence.tokens =
+          request.truncate && sequence.images.empty() && sequence.audio.empty()
+              ? tokenizer->EncodeTruncated(text,
+                                           EmbeddingService::kMaxInputTokens)
+              : tokenizer->Encode(text);
       if (!sequence.images.empty()) {
         std::size_t expected = 0;
         for (const auto& image : sequence.images)
@@ -160,8 +208,29 @@ struct EmbeddingService::Impl {
           return EmbeddingStatus::kInvalidInput;
         }
       }
+      if (!sequence.audio.empty()) {
+        std::size_t expected = 0;
+        for (const auto& clip : sequence.audio)
+          expected += clip.features.soft_tokens();
+        if (static_cast<std::size_t>(std::ranges::count(
+                sequence.tokens, kAudioTokenId)) != expected) {
+          if (error)
+            *error =
+                "text must not contain audio placeholders when audio is "
+                "supplied";
+          return EmbeddingStatus::kInvalidAudioInput;
+        }
+      }
       if (request.truncate &&
           sequence.tokens.size() > EmbeddingService::kMaxInputTokens) {
+        const auto last = std::ranges::find(
+            sequence.tokens.rbegin(), sequence.tokens.rend(), kAudioTokenId);
+        if (!sequence.audio.empty() && last != sequence.tokens.rend() &&
+            static_cast<std::size_t>(sequence.tokens.rend() - last) + 1 >
+                EmbeddingService::kMaxInputTokens - 1) {
+          batch->failed_index = index;
+          return EmbeddingStatus::kInputTooLong;
+        }
         (void)TruncateKeepingImages(
             &sequence.tokens, EmbeddingService::kMaxInputTokens, kImageTokenId);
       }
@@ -176,6 +245,14 @@ struct EmbeddingService::Impl {
           ++cursor;
         image.offset = cursor;
         cursor += image.patches.soft_tokens();
+      }
+      cursor = 0;
+      for (auto& clip : sequence.audio) {
+        while (cursor < sequence.tokens.size() &&
+               sequence.tokens[cursor] != kAudioTokenId)
+          ++cursor;
+        clip.offset = cursor;
+        cursor += clip.features.soft_tokens();
       }
       batch->token_counts.push_back(sequence.tokens.size());
       sequences.push_back(std::move(sequence));
@@ -204,6 +281,7 @@ struct EmbeddingService::Impl {
 #endif
   std::string initialization_error;
   std::string image_processor_error;
+  std::string audio_processor_error;
   // Serializes the injected runner, which has no device turns of its own.
   std::mutex runner_mutex;
   std::atomic<bool> device_lost{false};

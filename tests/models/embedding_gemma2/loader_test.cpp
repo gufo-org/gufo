@@ -61,6 +61,18 @@ int main(int argc, char** argv) {
   Check(multimodal.store->Find(
             "vision_tower.patch_embedder.input_proj.weight") != nullptr,
         "vision weights are indexed on demand");
+  Check(loaded.store->Find("audio_tower.output_proj.weight") == nullptr,
+        "text loading must not index audio weights");
+  const auto audio =
+      embedding_gemma2::LoadModelDirectory(model_root.string(), false, true);
+  Check(audio.ok, audio.error);
+  Check(audio.config.supported_audio,
+        "released audio configuration is supported");
+  Check(audio.store->size() ==
+            expected.size() + embedding_gemma2::ExpectedAudioTensors().size(),
+        "audio load indexes exactly text and audio tensors");
+  Check(audio.store->Find("audio_tower.output_proj.weight") != nullptr,
+        "audio tensors are indexed on demand");
   std::cout << "PASS embedding_gemma2_loader_test\n";
   return 0;
 }

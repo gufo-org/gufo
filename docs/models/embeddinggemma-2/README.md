@@ -1,6 +1,6 @@
 # EmbeddingGemma 2
 
-Native BF16 safetensors text and image embeddings on gfx1151. Gufo runs [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2), a 768-dimensional embedding model for 100+ languages and code, through `POST /v1/embeddings`. Text and images share one vector space. Audio and video inputs remain unsupported. Python runs only in offline reference checks.
+Native safetensors text, image and audio embeddings on gfx1151. Gufo runs [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2), a 768-dimensional embedding model for 100+ languages and code, through `POST /v1/embeddings`. Text, images and audio share one vector space. Video inputs remain unsupported. Python runs only in offline reference checks.
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
@@ -64,6 +64,52 @@ Re-embed an existing llama.cpp image index before switching servers; the
 vectors are not interchangeable. [Quality](QUALITY.md) records agreement with
 the official float32 model, rather than a retrieval benchmark or full Frigate
 integration test.
+
+## Audio
+
+Typed `input_audio` parts may appear alone or interleaved with text and images,
+including multiple clips in one input:
+
+```json
+{"input":[{"content":[
+  {"type":"text","text":"a sound: "},
+  {"type":"input_audio","input_audio":{"data":"<base64 WAV>","format":"wav"}}
+]}]}
+```
+
+The contract follows llama.cpp at `68d9053afd4f4d0752ced6187585f862355a40be`:
+`input_audio.data` takes precedence over `input_audio.url`; both are strings.
+`format` is an optional string and is ignored; the bytes determine the format.
+Raw base64, base64 audio data URLs and public HTTPS URLs are supported. Local
+files and private network destinations are refused. Audio data URL media types
+are `audio/wav`, `audio/x-wav`, `audio/mpeg`, `audio/mp3`, `audio/flac`, and
+`audio/ogg`. Supported containers are WAV (PCM or float), FLAC, MP3, and Ogg.
+Audio and images share the request's 20 MiB encoded-byte and 15-second read
+budgets. At most 32 clips are accepted, each at most 30 seconds, 8 channels,
+and 8–192 kHz; decoding also has a 15-second deadline. The HTTP body limit applies.
+
+The decoder pins the official processor's `librosa` backend: libsndfile float32,
+arithmetic channel mean, SOXR HQ resampling to 16 kHz, then zero padding to the
+ceil sample length. There is no waveform amplitude normalization. The model
+frontend uses 320-sample periodic Hann windows and a 160-sample hop, a 512-point
+magnitude FFT, 128 HTK mel filters and `log(mel + 0.001)`. Semicausal left padding,
+128-sample waveform padding, full-frame masks and two stride-2 subsampling masks
+follow the pinned official implementation. Clips shorter than 161 resampled
+samples have no valid feature token and return 400 `invalid_audio_input`.
+
+Each valid soft token is inserted between `<|audio>` and `<audio|>` in the shared
+text backbone. Counts come from the actual subsampled validity mask, rather than
+an estimated duration or the processor's `audio_seq_length` metadata. Expanded
+soft tokens and all boundary tokens count toward the shared 8,192-token context
+and usage. Truncation preserves every image and audio item whole, or refuses the
+input. Literal `<|audio|>` text is refused when clips are supplied.
+
+The 12-layer audio tower and projector load on the first audio request and reuse
+their weights and bounded scratch. Audio computes in float32 using the checkpoint's
+BF16 weights widened once; the shared text backbone retains its existing BF16
+matrix inputs. An audio request runs in its own device batch. Cancellation is
+checked during preprocessing and between audio layers; failures drain queued
+work and use the existing device-loss probe before the next request.
 
 ## Dimensions
 

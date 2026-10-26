@@ -44,6 +44,10 @@ struct ImageReadBudget {
 [[nodiscard]] std::vector<std::uint8_t> ReadImageUrl(std::string_view url,
                                                      ImageReadBudget& budget);
 [[nodiscard]] std::vector<std::uint8_t> ReadImageUrl(std::string_view url);
+/// Audio uses the same bounded reader and destination checks. Supports raw
+/// base64, audio data URLs and public HTTPS. The decoder checks the bytes.
+[[nodiscard]] std::vector<std::uint8_t> ReadAudioUrl(std::string_view url,
+                                                     ImageReadBudget& budget);
 
 }  // namespace gufo::core
 #endif

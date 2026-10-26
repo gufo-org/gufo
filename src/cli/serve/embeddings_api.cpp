@@ -188,6 +188,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
   }
   std::vector<EmbeddingInput> inputs;
   std::size_t image_count = 0;
+  std::size_t audio_count = 0;
   const auto parse_item = [&](const json::Value& item) -> HttpResponse {
     EmbeddingInput parsed;
     if (item.is_string()) {
@@ -274,6 +275,32 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
             return BadRequest("embedding requests accept at most 32 images",
                               "too_many_images");
           parsed.content.push_back({EmbeddingPart::Type::kImage, url->str()});
+        } else if (type == "input_audio") {
+          const auto* audio = part.find("input_audio");
+          if (part.size() != 2 || !audio || !audio->is_object())
+            return BadRequest("audio parts require an 'input_audio' object",
+                              "invalid_parameter_type");
+          for (const auto& [key, value] : audio->members()) {
+            if ((key != "data" && key != "url" && key != "format") ||
+                !value.is_string())
+              return BadRequest(
+                  "input_audio accepts string data, url and format fields",
+                  "invalid_parameter_type");
+          }
+          // Match llama.cpp: data takes precedence; format is ignored and the
+          // actual container is detected from its bytes.
+          const auto* source = audio->find("data");
+          if (!source)
+            source = audio->find("url");
+          if (!source || source->str().empty())
+            return BadRequest("input_audio requires nonempty data or url",
+                              "invalid_parameter_type");
+          if (++audio_count > EmbeddingService::kMaxAudio)
+            return BadRequest(
+                "embedding requests accept at most 32 audio clips",
+                "too_many_audio");
+          parsed.content.push_back(
+              {EmbeddingPart::Type::kAudio, source->str()});
         } else {
           return BadRequest("unsupported embedding content type: " + type,
                             "unsupported_input");
@@ -376,6 +403,8 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
                             std::to_string(EmbeddingService::kMaxInputTokens) +
                             "-token context window",
                         "context_length_exceeded");
+    case EmbeddingStatus::kInvalidAudioInput:
+      return BadRequest(error, "invalid_audio_input");
     case EmbeddingStatus::kInvalidInput:
       return BadRequest(
           error.empty() ? "invalid embedding input" : std::move(error),

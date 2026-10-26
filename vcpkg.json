@@ -9,6 +9,8 @@
     "libpng",
     "libjpeg-turbo",
     "libwebp",
+    "libsndfile",
+    "soxr",
     "pkgconf"
   ]
 }

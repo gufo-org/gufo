@@ -29,6 +29,8 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "libpng",
     "libjpeg-turbo",
     "libwebp",
+    "libsndfile",
+    "libsoxr",
     "DS4",
     "h3.c",
     "ccv TensorOps ancestry",
