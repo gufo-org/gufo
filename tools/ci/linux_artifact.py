@@ -43,6 +43,15 @@ def copy_runtime(source, root):
         destination.chmod(source.stat().st_mode & 0o777)
 
 
+def copy_share(source, destination):
+    shutil.copytree(source, destination, symlinks=False)
+    # Nix store directories are read-only. Persistent self-hosted workspaces
+    # must be able to delete the unpacked copy before the next run.
+    for directory in [destination, *destination.rglob('*')]:
+        if directory.is_dir():
+            directory.chmod(directory.stat().st_mode | 0o700)
+
+
 def launcher(directory, name, loader, libraries, environment):
     script = directory / name
     # Use shell builtins only before invoking the bundled ELF loader. The
@@ -75,7 +84,7 @@ def pack(package, revision, destination):
     if executable.read_bytes()[:4] != b'\x7fELF':
         raise ValueError('Production package does not contain an ELF executable')
     shutil.copy2(executable, destination / 'libexec/gufo')
-    shutil.copytree(package / 'share', destination / 'share', symlinks=False)
+    copy_share(package / 'share', destination / 'share')
     for dependency in closure:
         if dependency == package:
             continue

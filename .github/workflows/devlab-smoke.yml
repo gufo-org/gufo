@@ -212,7 +212,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf -- candidate baseline controller linux-artifacts linux-artifacts.tar.gz functional-results functional-report functional-plan.json functional-assets.json phase-logs
+          leftovers=(candidate baseline controller linux-artifacts linux-artifacts.tar.gz functional-results functional-report functional-plan.json functional-assets.json phase-logs)
+          # Earlier packages kept the Nix store's read-only directories.
+          for path in "${leftovers[@]}"; do
+            if [[ -d $path && ! -L $path ]]; then chmod -R u+w -- "$path"; fi
+          done
+          rm -rf -- "${leftovers[@]}"
           # Model files and their local_dir metadata survive runner cleanup.
           cache_root="${HF_HOME:-$HOME/.cache/huggingface}/gufo"
           mkdir -p "$cache_root"

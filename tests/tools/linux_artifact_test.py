@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -62,6 +63,25 @@ class ArtifactTest(unittest.TestCase):
                     'libhsa-runtime64.so.1 => not found']):
                 with self.assertRaisesRegex(ValueError, 'unbundled runtime'):
                     artifact.verify(root, 'a' * 40)
+
+    def test_share_copy_is_removable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'store/share'
+            (source / 'licenses/gufo').mkdir(parents=True)
+            (source / 'licenses/gufo/LICENSE').write_text('license')
+            for path in [source / 'licenses/gufo/LICENSE', source / 'licenses/gufo',
+                         source / 'licenses', source]:
+                path.chmod(0o444 if path.is_file() else 0o555)
+            try:
+                destination = Path(directory) / 'candidate/share'
+                artifact.copy_share(source, destination)
+                self.assertEqual((destination / 'licenses/gufo/LICENSE').read_text(), 'license')
+                shutil.rmtree(destination)
+                self.assertFalse(destination.exists())
+            finally:
+                for path in [source, *source.rglob('*')]:
+                    if path.is_dir():
+                        path.chmod(0o755)
 
 
 if __name__ == '__main__':
