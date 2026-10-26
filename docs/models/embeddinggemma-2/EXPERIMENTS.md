@@ -19,3 +19,9 @@
 
 | Reference image preprocessing | Retained. Uint8 antialiased bicubic resize rounds and saturates after each separable pass, with the same adaptive signed coefficient precision as Torch 2.12.0. Every resized patch byte matches the independent official processor fixtures, including extreme aspect ratios. |
 | Vision padding removal | Retained. Only real patches run through the bidirectional vision encoder; reference padding keys are masked and pooled padding is discarded. Seven image/mixed-input probes retain cosine ≥0.9999 against official float32 outputs. |
+
+| Audio implementation | Decision / evidence |
+| --- | --- |
+| Independent Gemma4 frontend | Retained. Semicausal periodic-Hann magnitude/HTK features match the pinned official extractor within 4.77e-7, with exact masks and counts. Whisper/ASR preprocessing is not substituted. |
+| Lazy float32 audio tower and projector | Retained. BF16 checkpoint weights widen once; audio owns reusable bounded scratch and loads only when requested. Independent encoder/projector fixtures and ten final-vector probes pass. Isolated load allocation delta is 1.31 GiB; a one-second clip takes 146.9 ms including first load, then 28.3 and 27.8 ms. |
+| Strict audio attention horizon | Retained from pinned code. Its mask uses distance < 12 despite a 13-position left-context configuration; including distance 12 failed the longer independent fixture and was corrected. |

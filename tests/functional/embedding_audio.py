@@ -117,6 +117,13 @@ def main():
         for i, case in enumerate(selected):
             assert batch["data"][i]["index"] == i
             check_vector(batch["data"][i]["embedding"], case["embedding"])
+        text_fixture = json.loads((Path(__file__).resolve().parents[1] / "fixtures/embedding_gemma2/embedding_golden.json").read_text())
+        text_case = next(case for case in text_fixture["cases"] if case["name"] == "plain")
+        status, mixed = post([text_case["text"], content(cases[2]), content(cases[0])])
+        assert status == 200 and len(mixed["data"]) == 3, mixed
+        for index, expected in enumerate((text_case["embedding"], cases[2]["embedding"], cases[0]["embedding"])):
+            assert mixed["data"][index]["index"] == index
+            check_vector(mixed["data"][index]["embedding"], expected)
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             responses = list(pool.map(lambda _: post([content(cases[2])]), range(3)))
         for status, result in responses:

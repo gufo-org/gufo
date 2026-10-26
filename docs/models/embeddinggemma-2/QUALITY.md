@@ -70,3 +70,41 @@ or weights. `embedding_gemma2_image_golden_hip_test` additionally runs the nativ
 vision/text encoders. [`embedding_images.py`](../../../tests/functional/embedding_images.py)
 checks the HTTP path. Raw request evidence is retained with the
 [review qualification record](artifacts/gfx1151-pr759-review.json).
+
+## Audio and interleaved input parity
+
+Qualified October 26, 2026, on gfx1151. The checkpoint SHA256 is
+`197a32965d4b1105faf060417baa899e193fb73cd401f42ec9295234d5553d79`,
+matching its pinned Hugging Face download metadata. The independent oracle is
+[`reference_audio.py`](../../../tools/models/embedding_gemma2/reference_audio.py),
+using transformers `50e35cc0ca18ec19b80653690de553e6decf74f5`, Torch 2.12.0,
+and the official float32 model. Its decoder explicitly selects the official
+`librosa` backend, rather than relying on optional backend discovery.
+
+| Check | Result |
+| --- | --- |
+| Eight WAV/FLAC/MP3/Ogg decoder probes, mono/stereo and 8/16/24/44.1/48 kHz | Exact decoded/resampled float32 waveforms |
+| Fifteen frontend probes, including 1/160/161 samples, odd lengths, partial frames and longer batch padding | Maximum absolute feature error 4.77e-7; every frame mask and valid-token count exact |
+| Audio encoder and projector versus independent float32 states | Pass relative L2 < 5e-4; projector maximum observed relative L2 3.75e-6 |
+| Ten final-vector probes: short clips, tone, silence, synthetic music/environmental bursts, packaged English speech, audio/text, two clips and audio/image/text | Worst cosine 0.9999687, above the retained 0.999 threshold |
+| Native cancellation between audio layers and valid inference afterward | Pass |
+| Real HTTP audio suite | 39 requests pass, including mixed text/audio batching, ordering, concurrency, dimensions/base64, expanded context, whole-media truncation, malformed data, refused destinations, server-observed cancellation and recovery |
+| Existing text/image HTTP suites and generated-audio family smoke | Pass |
+| Focused native tests and Nix hosted PR contracts | Five focused tests pass without skips; PR contracts pass |
+
+Float32 stage fixtures retain all encoder/projector values for the four isolated
+audio probes; all ten probes retain full final vectors and framing token IDs.
+Feature and decoder fixtures are independent of the production C++ implementation.
+These establish reference agreement, rather than speech recognition, audio
+classification or retrieval benchmark accuracy. The environmental and music
+probes are synthetic; the speech recording is the existing reviewed functional
+fixture. Video remains unsupported.
+
+The [retained evidence](artifacts/gfx1151-2026-10-26-audio.json) records revision,
+binary/harness/fixture hashes, every reference cosine, memory observations,
+per-request latency and matched affected text/image controls. The first timing
+pass overlapped CPU contract work and remains visibly inconclusive. Subsequent
+idle main/candidate controls preserve byte-identical vectors and work counts;
+every request and phase is within the 5% and 10 ms margins. No overall speedup
+is claimed. Native Windows compilation is checked by CI; local numerical and
+HTTP evidence here is Linux gfx1151 only.
