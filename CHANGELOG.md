@@ -4,6 +4,29 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.25.0](https://github.com/gufo-org/gufo/compare/v0.24.0...v0.25.0) (2026-10-26)
+
+
+### Features
+
+* **server:** bound Qwen resolution for image_url.detail low ([#774](https://github.com/gufo-org/gufo/issues/774)) ([d8138a0](https://github.com/gufo-org/gufo/commit/d8138a01becd4a1e14bea546d113075c8f087ed2))
+* **serve:** truncate over-length embedding inputs on request ([#765](https://github.com/gufo-org/gufo/issues/765)) ([d25b550](https://github.com/gufo-org/gufo/commit/d25b550b28372ba203fea040221d6cd7c2962fec))
+
+
+### Bug Fixes
+
+* **gcc16:** force-include &lt;format&gt; before HIP headers ([#782](https://github.com/gufo-org/gufo/issues/782)) ([fe9498d](https://github.com/gufo-org/gufo/commit/fe9498d10113201ef0e03fe04425922ca4e15cf6))
+* **qwen:** fill device-resident weights from the shard file, not the mapping ([#794](https://github.com/gufo-org/gufo/issues/794)) ([2765d65](https://github.com/gufo-org/gufo/commit/2765d65e192e6db8bd51ee4f24c403d989f1ba5f))
+* **windows:** bundle the LLVM OpenMP runtime ([#802](https://github.com/gufo-org/gufo/issues/802)) ([5eedd09](https://github.com/gufo-org/gufo/commit/5eedd09903be374596e630f686bb63aa030f12c4))
+* **windows:** preserve concurrent cached PLE reads ([#805](https://github.com/gufo-org/gufo/issues/805)) ([f465f15](https://github.com/gufo-org/gufo/commit/f465f15f324cfba5ea3213667f472ecd06fc3157))
+
+
+### Performance
+
+* **embedding:** batch concurrent requests on the device ([#778](https://github.com/gufo-org/gufo/issues/778)) ([43deb1e](https://github.com/gufo-org/gufo/commit/43deb1ec1d37cb670f62a9a52fbac64ec281d0ce))
+* **qwen:** keep a stable cache boundary after system instructions ([#773](https://github.com/gufo-org/gufo/issues/773)) ([1b8ad79](https://github.com/gufo-org/gufo/commit/1b8ad798a4bc443393754b6676ae6654a624dd0a))
+* **qwen:** keep a stable cache boundary after system instructions REVERT ([#815](https://github.com/gufo-org/gufo/issues/815)) ([2479613](https://github.com/gufo-org/gufo/commit/2479613924ced6aab9b1411d0ba84fd00a87b9c7))
+
 ## [0.24.0](https://github.com/gufo-org/gufo/compare/v0.23.0...v0.24.0) (2026-10-25)
 
 
