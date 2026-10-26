@@ -544,7 +544,9 @@ jobs:
                       if attempt == 3:
                           raise
                       time.sleep(10)
-              seconds = time.monotonic() - started
+              # Windows' monotonic clock ticks about every 16 ms, so a fully
+              # cached snapshot can measure zero seconds.
+              seconds = max(time.monotonic() - started, 1e-3)
               for name in asset["required"]:
                   if not (destination / name).is_file():
                       sys.exit(f"{key}: missing {name}")
