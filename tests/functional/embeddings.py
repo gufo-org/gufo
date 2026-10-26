@@ -11,7 +11,8 @@ It checks cosine agreement with the reference, input order in a batched
 request, Matryoshka truncation, concurrent identical requests, and the error
 shapes. The SDK requests base64 by default, so the agreement check covers that
 encoding. With `"truncate": true` an over-length input must embed exactly like
-its longest prefix that fits the 8192-token limit unchanged.
+its longest prefix that fits the 8192-token limit unchanged. A
+`prompt_name` must embed like the same prompt written by the client.
 """
 
 import argparse
@@ -106,6 +107,38 @@ def check_truncate(openai, client, model):
     check("truncate: a non-boolean value is refused")
     expect_error(openai, lambda: embed("hello", truncate="yes"), 400,
                  "invalid_parameter_type", "string truncate")
+
+
+def check_prompt_names(openai, client, model):
+    """#723: `prompt_name` adds a prompt from the checkpoint's
+    config_sentence_transformers.json, which embeds exactly like the same
+    prefix written by the client."""
+    text = "what causes the northern lights"
+
+    def embed(value, **body):
+        return client.embeddings.create(model=model, input=value,
+                                        encoding_format="float",
+                                        extra_body=body)
+
+    for name, prefix in (("query", "task: search result | query: "),
+                         ("document", "title: none | text: ")):
+        check(f"prompt_name: {name} equals the client-written prefix")
+        named = embed(text, prompt_name=name)
+        written = embed(prefix + text)
+        assert named.usage.prompt_tokens == written.usage.prompt_tokens, (
+            named.usage, written.usage)
+        assert cosine(named.data[0].embedding,
+                      written.data[0].embedding) > 0.99999
+
+    check("prompt_name: an empty name applies no prompt")
+    plain = embed(text)
+    empty = embed(text, prompt_name="")
+    assert empty.usage.prompt_tokens == plain.usage.prompt_tokens
+    assert cosine(empty.data[0].embedding, plain.data[0].embedding) > 0.99999
+
+    check("prompt_name: an unknown name is refused")
+    expect_error(openai, lambda: embed(text, prompt_name="no-such-prompt"), 400,
+                 "invalid_prompt_name", "unknown prompt_name")
 
 
 def main():
@@ -216,6 +249,7 @@ def main():
                      status, code, name)
 
     check_truncate(openai, client, args.model)
+    check_prompt_names(openai, client, args.model)
 
     print("PASS embeddings")
 
