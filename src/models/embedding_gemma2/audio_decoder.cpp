@@ -74,13 +74,19 @@ std::vector<float> DecodeAudio(std::span<const std::uint8_t> bytes,
       type != SF_FORMAT_FLAC && type != SF_FORMAT_OGG && type != SF_FORMAT_MPEG)
     throw std::invalid_argument(
         "embedding audio supports WAV, FLAC, Ogg and MP3");
+  // Without a Xing/Info header, libsndfile estimates an MP3's length from its
+  // size and bitrate, and it does not say whether a length is exact. Like
+  // soundfile under librosa, keep the samples that actually decode for every
+  // MP3. The 30-second bound then applies while decoding.
+  const bool estimated = type == SF_FORMAT_MPEG;
+  const auto max_frames = static_cast<sf_count_t>(info.samplerate) * 30;
   if (info.channels < 1 || info.channels > 8 || info.samplerate < 8000 ||
       info.samplerate > 192000 || info.frames < 1 ||
-      info.frames > static_cast<sf_count_t>(info.samplerate) * 30)
+      (!estimated && info.frames > max_frames))
     throw std::invalid_argument(
         "embedding audio exceeds 30 seconds, 8 channels or 8–192 kHz bounds");
   std::vector<float> mono;
-  mono.reserve(static_cast<std::size_t>(info.frames));
+  mono.reserve(static_cast<std::size_t>(std::min(info.frames, max_frames)));
   std::array<float, 4096 * 8> block{};
   for (;;) {
     if (reader.Stop())
@@ -102,8 +108,8 @@ std::vector<float> DecodeAudio(std::span<const std::uint8_t> bytes,
       mono.push_back(sum / info.channels);
     }
   }
-  if (reader.stopped || sf_error(file.get()) ||
-      mono.size() != static_cast<std::size_t>(info.frames))
+  if (reader.stopped || sf_error(file.get()) || mono.empty() ||
+      (!estimated && mono.size() != static_cast<std::size_t>(info.frames)))
     throw std::invalid_argument(
         "embedding audio is truncated or decoding failed");
   if (info.samplerate == static_cast<int>(kAudioSampleRate))
