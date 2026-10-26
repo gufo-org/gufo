@@ -137,6 +137,7 @@ bool TruncateAndNormalize(std::span<const float> full, std::size_t dimensions,
 bool IsKnownField(std::string_view name, bool native) {
   return name == "input" || name == "model" || name == "encoding_format" ||
          name == "dimensions" || name == "user" || name == "truncate" ||
+         name == "prompt_name" ||
          (native && (name == "content" || name == "embd_normalize"));
 }
 
@@ -377,6 +378,29 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
   if (const json::Value* user = Optional(root, "user");
       user != nullptr && !user->is_string()) {
     return BadRequest("'user' must be a string", "invalid_parameter_type");
+  }
+
+  std::string prompt_name = service.default_prompt_name();
+  if (const json::Value* value = Optional(root, "prompt_name");
+      value != nullptr) {
+    if (!value->is_string()) {
+      return BadRequest("'prompt_name' must be a string",
+                        "invalid_parameter_type");
+    }
+    prompt_name = value->str();
+  }
+  if (!prompt_name.empty()) {
+    const std::string* prefix = service.prompt(prompt_name);
+    if (prefix == nullptr) {
+      return BadRequest("unknown prompt_name '" + prompt_name + "'",
+                        "invalid_prompt_name");
+    }
+    // A leading text part: the service joins adjacent text before
+    // tokenizing, so this equals a client-side prefix.
+    for (EmbeddingInput& input : inputs) {
+      input.content.insert(input.content.begin(),
+                           {EmbeddingPart::Type::kText, *prefix});
+    }
   }
 
   EmbeddingRequestOptions options;

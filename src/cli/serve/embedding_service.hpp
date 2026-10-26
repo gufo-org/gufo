@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -63,6 +64,12 @@ struct EmbeddingServiceOptions {
   std::filesystem::path model_root;
   bool validate_model{true};
   std::string model_id;
+  /// Named input prefixes, as in a checkpoint's
+  /// config_sentence_transformers.json `prompts`.
+  std::map<std::string, std::string> prompts;
+  /// Prompt applied when a request names none; empty applies none. Must name
+  /// an entry of `prompts`.
+  std::string default_prompt_name;
   /// Replaces the HIP encoder. The service serializes calls to it.
   Runner runner;
 };
@@ -74,6 +81,12 @@ struct EmbeddingServiceOptions {
 [[nodiscard]] bool TruncateKeepingImages(std::vector<std::uint32_t>* tokens,
                                          std::size_t max_tokens,
                                          std::uint32_t image_token);
+
+/// Reads the `prompts` of `model_root`/config_sentence_transformers.json.
+/// A missing file yields no prompts; a malformed one fails with `error`.
+[[nodiscard]] bool LoadSentenceTransformerPrompts(
+    const std::filesystem::path& model_root,
+    std::map<std::string, std::string>* prompts, std::string* error);
 
 /// Native HIP EmbeddingGemma 2 text, image and audio embedding service.
 class EmbeddingService {
@@ -99,6 +112,9 @@ public:
   [[nodiscard]] std::string initialization_error() const;
   [[nodiscard]] std::string model_id() const;
   [[nodiscard]] std::string backend_name() const;
+  /// The prefix registered under `name`, or nullptr.
+  [[nodiscard]] const std::string* prompt(const std::string& name) const;
+  [[nodiscard]] const std::string& default_prompt_name() const;
 
   /// Embeds `texts` as one request. Concurrent requests share device batches
   /// in arrival order, and a long request does not block shorter ones until

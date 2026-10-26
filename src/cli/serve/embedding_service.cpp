@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <exception>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -12,6 +15,7 @@
 
 #include "src/cli/serve/logging.hpp"
 #include "src/core/image.hpp"
+#include "src/core/json.hpp"
 #include "src/models/embedding_gemma2/audio_decoder.hpp"
 #include "src/models/embedding_gemma2/audio_processor.hpp"
 #include "src/models/embedding_gemma2/image_processor.hpp"
@@ -314,8 +318,60 @@ bool TruncateKeepingImages(std::vector<std::uint32_t>* tokens,
   return true;
 }
 
+bool LoadSentenceTransformerPrompts(const std::filesystem::path& model_root,
+                                    std::map<std::string, std::string>* prompts,
+                                    std::string* error) {
+  prompts->clear();
+  const auto path = model_root / "config_sentence_transformers.json";
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    return true;
+  }
+  const std::string text((std::istreambuf_iterator<char>(input)),
+                         std::istreambuf_iterator<char>());
+  try {
+    const json::Value root = json::parse(text);
+    const json::Value* table =
+        root.is_object() ? root.find("prompts") : nullptr;
+    if (table == nullptr || table->is_null()) {
+      return true;
+    }
+    if (!table->is_object()) {
+      *error = path.string() + ": 'prompts' must be an object";
+      return false;
+    }
+    for (const auto& [name, value] : table->members()) {
+      if (!value.is_string()) {
+        *error = path.string() + ": prompt '" + name + "' must be a string";
+        return false;
+      }
+      prompts->emplace(name, value.str());
+    }
+  } catch (const std::exception& parse_error) {
+    *error = path.string() + ": " + parse_error.what();
+    return false;
+  }
+  return true;
+}
+
 EmbeddingService::EmbeddingService(EmbeddingServiceOptions options)
-    : impl_(std::make_unique<Impl>(std::move(options))) {}
+    : impl_(std::make_unique<Impl>(std::move(options))) {
+  const auto& name = impl_->options.default_prompt_name;
+  if (impl_->ready && !name.empty() && !impl_->options.prompts.contains(name)) {
+    impl_->ready = false;
+    impl_->initialization_error =
+        "--default-prompt-name '" + name + "' is not a prompt of this model";
+  }
+}
+
+const std::string* EmbeddingService::prompt(const std::string& name) const {
+  const auto it = impl_->options.prompts.find(name);
+  return it == impl_->options.prompts.end() ? nullptr : &it->second;
+}
+
+const std::string& EmbeddingService::default_prompt_name() const {
+  return impl_->options.default_prompt_name;
+}
 
 EmbeddingService::~EmbeddingService() = default;
 

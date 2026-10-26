@@ -117,7 +117,7 @@ work and use the existing device-loss probe before the next request.
 
 ## Task prefixes
 
-The model is trained with short prefixes, and Gufo does not add them.  Send the prefix as part of the input:
+The model is trained with short prefixes, and Gufo does not add them by default.  Send the prefix as part of the input:
 
 | Use | Query | Document |
 | --- | --- | --- |
@@ -157,6 +157,8 @@ Clients that speak the OpenAI embeddings API work with two settings to check:
   ```
 
   By default paperless-ngx splits documents into chunks of 1,024 tokens as its own splitter counts them (`PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE`), far below the 8,192-token limit, and adds none of the task prefixes above.
+
+Clients that cannot change their input can let the server add a prefix from the checkpoint's `config_sentence_transformers.json` `prompts` instead: a request field `"prompt_name": "query"` (or `"document"`, `"Retrieval-query"`, ...) prefixes every input of that request, and `--default-prompt-name NAME` applies one to requests that name none.  Gufo adds no prefix unless asked.  Changing the prefix changes every vector, so an existing index needs a rebuild.
 
 ## Requests
 
