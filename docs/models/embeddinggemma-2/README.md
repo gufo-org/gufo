@@ -40,8 +40,9 @@ concatenated in order, including whitespace; the server adds no task prefix.
 }
 ```
 
-This is the request form used by Frigate 0.19's development client. The legacy
-`POST /embeddings` endpoint used by Frigate 0.18 is not served.
+This is the request form used by Frigate 0.19's development client. Frigate
+0.18 uses llama.cpp's non-OpenAI `POST /embeddings`, which the same process
+also serves; see [Embeddings](../../SERVER.md#embeddings).
 
 Images may be PNG, JPEG, or WebP, supplied as base64 data URLs or public HTTPS
 URLs. Shared [image read limits](../../SERVER.md#embeddings) apply: at most 20 MiB

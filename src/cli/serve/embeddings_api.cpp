@@ -19,6 +19,13 @@ namespace gufo::server {
 namespace {
 
 constexpr std::string_view kEmbeddingsPath = "/v1/embeddings";
+// llama.cpp's non-OpenAI routes. Both share one handler there.
+constexpr std::string_view kNativeEmbeddingsPath = "/embeddings";
+constexpr std::string_view kLegacyEmbeddingPath = "/embedding";
+// llama.cpp's default multimodal marker in a `prompt_string`. Its server can
+// randomize the marker and report it in /props; clients that cannot read
+// /props, as here, fall back to this one.
+constexpr std::string_view kMediaMarker = "<__media__>";
 constexpr std::size_t kMaximumInputs = 2048;
 constexpr std::array<std::size_t, 4> kDimensions = {128, 256, 512, 768};
 
@@ -127,9 +134,10 @@ bool TruncateAndNormalize(std::span<const float> full, std::size_t dimensions,
   return true;
 }
 
-bool IsKnownField(std::string_view name) {
+bool IsKnownField(std::string_view name, bool native) {
   return name == "input" || name == "model" || name == "encoding_format" ||
-         name == "dimensions" || name == "user" || name == "truncate";
+         name == "dimensions" || name == "user" || name == "truncate" ||
+         (native && (name == "content" || name == "embd_normalize"));
 }
 
 /// The member's value, or nullptr when it is absent or null.
@@ -138,7 +146,9 @@ const json::Value* Optional(const json::Value& root, const std::string& name) {
   return value == nullptr || value->is_null() ? nullptr : value;
 }
 
-HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
+/// `native` selects llama.cpp's `POST /embeddings` request and response form.
+HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
+                   bool native) {
   json::Value root;
   try {
     root = json::parse(request.body);
@@ -151,7 +161,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
   }
   for (const auto& [name, unused] : root.members()) {
     (void)unused;
-    if (!IsKnownField(name)) {
+    if (!IsKnownField(name, native)) {
       return BadRequest("unsupported embeddings parameter: " + name,
                         "unsupported_field");
     }
@@ -168,8 +178,13 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
   }
 
   const json::Value* input = Optional(root, "input");
+  // As in llama.cpp, `input` takes precedence over the legacy `content`.
+  if (input == nullptr && native)
+    input = Optional(root, "content");
   if (input == nullptr) {
-    return BadRequest("'input' is required", "missing_input");
+    return BadRequest(
+        native ? "'input' or 'content' is required" : "'input' is required",
+        "missing_input");
   }
   std::vector<EmbeddingInput> inputs;
   std::size_t image_count = 0;
@@ -180,6 +195,55 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
         return BadRequest("'input' must not contain empty strings",
                           "empty_input");
       parsed.content.push_back({EmbeddingPart::Type::kText, item.str()});
+    } else if (native && item.is_object() && item.contains("prompt_string")) {
+      // llama.cpp's multimodal prompt: each marker in the string stands for
+      // the next base64 file in `multimodal_data`.
+      const auto* prompt = item.find("prompt_string");
+      const auto* data = item.find("multimodal_data");
+      if (!prompt->is_string() || item.size() != (data != nullptr ? 2U : 1U) ||
+          (data != nullptr && !data->is_array()))
+        return BadRequest(
+            "prompt objects take a 'prompt_string' string and an optional "
+            "'multimodal_data' array",
+            "invalid_parameter_type");
+      const std::string_view text = prompt->str();
+      const std::size_t files = data != nullptr ? data->size() : 0;
+      std::size_t markers = 0;
+      for (std::size_t at = text.find(kMediaMarker);
+           at != std::string_view::npos;
+           at = text.find(kMediaMarker, at + kMediaMarker.size()))
+        ++markers;
+      if (markers != files)
+        return BadRequest("'prompt_string' has " + std::to_string(markers) +
+                              " media markers (" + std::string(kMediaMarker) +
+                              ") but 'multimodal_data' has " +
+                              std::to_string(files) + " items",
+                          "invalid_multimodal_data");
+      std::size_t begin = 0;
+      for (std::size_t i = 0; i <= files; ++i) {
+        const std::size_t end =
+            i == files ? text.size() : text.find(kMediaMarker, begin);
+        if (end > begin)
+          parsed.content.push_back(
+              {EmbeddingPart::Type::kText,
+               std::string(text.substr(begin, end - begin))});
+        if (i == files)
+          break;
+        const auto& file = data->items()[i];
+        if (!file.is_string() || file.str().empty())
+          return BadRequest("'multimodal_data' items must be base64 strings",
+                            "invalid_parameter_type");
+        if (++image_count > EmbeddingService::kMaxImages)
+          return BadRequest("embedding requests accept at most 32 images",
+                            "too_many_images");
+        // The image reader identifies PNG, JPEG and WebP by their bytes.
+        parsed.content.push_back(
+            {EmbeddingPart::Type::kImage,
+             "data:image/jpeg;base64," + std::string(file.str())});
+        begin = end + kMediaMarker.size();
+      }
+      if (parsed.content.empty())
+        return BadRequest("'prompt_string' must not be empty", "empty_input");
     } else if (item.is_object()) {
       const auto* content = item.find("content");
       if (item.size() != 1 || !content || !content->is_array())
@@ -231,7 +295,8 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
     ok.status = 200;
     return ok;
   };
-  if (input->is_string()) {
+  // llama.cpp also takes one bare prompt or content object.
+  if (input->is_string() || (native && input->is_object())) {
     auto result = parse_item(*input);
     if (result.status != 200)
       return result;
@@ -261,7 +326,16 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
       return BadRequest("'encoding_format' must be \"float\" or \"base64\"",
                         "invalid_encoding_format");
     }
-    base64 = format->str() == "base64";
+    // As in llama.cpp, the native form validates it but returns floats.
+    base64 = !native && format->str() == "base64";
+  }
+  // llama.cpp's per-request normalization. EmbeddingGemma 2 vectors are
+  // always L2-normalized, so only its default, 2 (Euclidean), is accepted.
+  if (const json::Value* normalize = Optional(root, "embd_normalize");
+      normalize != nullptr) {
+    if (!normalize->is_number() || normalize->as_double() != 2.0)
+      return BadRequest("'embd_normalize' supports only 2 (Euclidean)",
+                        "unsupported_embd_normalize");
   }
 
   std::size_t dimensions = 0;  // 0 means the model's full width.
@@ -326,7 +400,9 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
     prompt_tokens += count;
   }
 
-  std::string body = R"({"object":"list","data":[)";
+  // llama.cpp's native form is a bare array whose items nest the pooled
+  // vector in a one-element list, without model or usage.
+  std::string body = native ? "[" : R"({"object":"list","data":[)";
   std::vector<float> truncated;
   for (std::size_t index = 0; index < batch.embeddings.size(); ++index) {
     std::span<const float> values = batch.embeddings[index];
@@ -350,6 +426,12 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
     if (index != 0) {
       body += ',';
     }
+    if (native) {
+      body += R"({"index":)" + std::to_string(index) + R"(,"embedding":[)";
+      AppendFloats(&body, values);
+      body += "]}";
+      continue;
+    }
     body += R"({"object":"embedding","index":)" + std::to_string(index) +
             R"(,"embedding":)";
     if (base64) {
@@ -359,9 +441,12 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
     }
     body += '}';
   }
-  body += R"(],"model":)" + json::Value(service.model_id()).dump() +
-          R"(,"usage":{"prompt_tokens":)" + std::to_string(prompt_tokens) +
-          R"(,"total_tokens":)" + std::to_string(prompt_tokens) + "}}";
+  if (native)
+    body += ']';
+  else
+    body += R"(],"model":)" + json::Value(service.model_id()).dump() +
+            R"(,"usage":{"prompt_tokens":)" + std::to_string(prompt_tokens) +
+            R"(,"total_tokens":)" + std::to_string(prompt_tokens) + "}}";
 
   HttpResponse response;
   response.status = 200;
@@ -378,20 +463,22 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service) {
       " prompt_tokens=" + std::to_string(prompt_tokens) + " dimensions=" +
       std::to_string(dimensions != 0 ? dimensions
                                      : batch.embeddings.front().size()) +
-      " encoding_format=" + (base64 ? "base64" : "float");
+      " encoding_format=" + (base64 ? "base64" : "float") +
+      (native ? " shape=llama.cpp" : "");
   return response;
 }
 
 }  // namespace
 
 bool IsEmbeddingsApiPath(std::string_view path) noexcept {
-  return path == kEmbeddingsPath;
+  return path == kEmbeddingsPath || path == kNativeEmbeddingsPath ||
+         path == kLegacyEmbeddingPath;
 }
 
 HttpResponse HandleEmbeddingsApiRequest(const HttpRequest& request,
                                         EmbeddingService& service) {
-  if (request.path == kEmbeddingsPath && request.method == "POST") {
-    return Embed(request, service);
+  if (IsEmbeddingsApiPath(request.path) && request.method == "POST") {
+    return Embed(request, service, request.path != kEmbeddingsPath);
   }
   return Error(405, "HTTP method is not supported for this embeddings endpoint",
                "method_not_allowed");

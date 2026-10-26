@@ -2888,12 +2888,13 @@ std::shared_ptr<gufo::server::EmbeddingService> MakeEmbeddingService(
 }
 
 std::string EmbeddingPost(int port, std::string_view body,
-                          std::string_view extra_headers = {}) {
-  return SendParts(
-      "127.0.0.1", port,
-      {"POST /v1/embeddings HTTP/1.1\r\n" + std::string(extra_headers) +
-       "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" +
-       std::string(body)});
+                          std::string_view extra_headers = {},
+                          std::string_view path = "/v1/embeddings") {
+  return SendParts("127.0.0.1", port,
+                   {"POST " + std::string(path) + " HTTP/1.1\r\n" +
+                    std::string(extra_headers) +
+                    "Content-Length: " + std::to_string(body.size()) +
+                    "\r\n\r\n" + std::string(body)});
 }
 
 void TestEmbeddingService() {
@@ -2921,6 +2922,16 @@ void TestEmbeddingService() {
     assert(response.find("\"embedding\":[1,0]") != std::string::npos);
     assert(response.find("\"prompt_tokens\":4") != std::string::npos);
     assert(response.find("\"model\":\"embedding-test\"") != std::string::npos);
+    // llama.cpp's native route shares the service and the API key (#764).
+    const std::string native_request =
+        R"({"model":"embedding-test","content":[{"prompt_string":"hi"}]})";
+    ExpectStatus(EmbeddingPost(port, native_request, {}, "/embeddings"), 401);
+    const auto native =
+        EmbeddingPost(port, native_request,
+                      "Authorization: Bearer test-secret\r\n", "/embeddings");
+    ExpectStatus(native, 200);
+    assert(native.find("\r\n\r\n[{\"index\":0,\"embedding\":[[1,0]]}]") !=
+           std::string::npos);
     const auto missing_model =
         EmbeddingPost(port, R"({"model":"other","input":"hi"})",
                       "Authorization: Bearer test-secret\r\n");
@@ -2977,6 +2988,7 @@ void TestEmbeddingService() {
     assert(server.start(&error));
     std::jthread worker([&] { server.run(false); });
     ExpectStatus(EmbeddingPost(server.port(), request), 404);
+    ExpectStatus(EmbeddingPost(server.port(), request, {}, "/embeddings"), 404);
     server.stop();
     worker.join();
   }

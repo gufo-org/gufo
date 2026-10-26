@@ -41,7 +41,8 @@ These are reference-parity probes using deterministic RGB patterns, rather than
 a retrieval benchmark or a full Frigate installation. Matching the official
 text, image, and mixed-input outputs preserves their shared vector space.
 Existing llama.cpp image indexes must be re-embedded because its preprocessing
-differs. The legacy `/embeddings` route is not served.
+differs. llama.cpp's non-OpenAI `/embeddings` route is served too, with the
+same preprocessing; see [Embeddings](../../SERVER.md#embeddings).
 
 The oracle is [`reference_images.py`](../../../tools/models/embedding_gemma2/reference_images.py),
 using official transformers commit `50e35cc0ca18ec19b80653690de553e6decf74f5`

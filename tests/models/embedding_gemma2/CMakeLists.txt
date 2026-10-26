@@ -87,6 +87,8 @@ add_executable(embedding_gemma2_embeddings_api_test
   ${PROJECT_SOURCE_DIR}/src/cli/serve/embedding_service.cpp)
 target_link_libraries(embedding_gemma2_embeddings_api_test PRIVATE
   gufo_embedding_gemma2 gufo_logging gufo_core)
+target_compile_definitions(embedding_gemma2_embeddings_api_test PRIVATE
+  GUFO_EMBEDDING_GEMMA2_NATIVE_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/llama_cpp_native_embeddings.json")
 add_test(NAME embedding_gemma2_embeddings_api_test
   COMMAND embedding_gemma2_embeddings_api_test)
 set_tests_properties(embedding_gemma2_embeddings_api_test PROPERTIES
