@@ -134,6 +134,36 @@ bool TruncateAndNormalize(std::span<const float> full, std::size_t dimensions,
   return true;
 }
 
+/// Whether a base64 `multimodal_data` file looks like audio, as llama.cpp's
+/// mtmd helper decides (`is_audio_file`): WAV, MP3 (an ID3 tag or an MPEG
+/// sync word) or FLAC. Ogg, which Gufo's audio decoder also reads, is sniffed
+/// too. Anything else, including undecodable base64, goes to the image reader.
+bool LooksLikeAudio(std::string_view base64) {
+  constexpr std::string_view kDigits =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  if (base64.size() < 16)
+    return false;
+  std::array<unsigned char, 12> head{};
+  for (std::size_t i = 0; i < 16; i += 4) {
+    std::uint32_t bits = 0;
+    for (std::size_t j = 0; j < 4; ++j) {
+      const auto digit = kDigits.find(base64[i + j]);
+      if (digit == std::string_view::npos)
+        return false;
+      bits = (bits << 6) | static_cast<std::uint32_t>(digit);
+    }
+    head[i / 4 * 3] = static_cast<unsigned char>(bits >> 16);
+    head[i / 4 * 3 + 1] = static_cast<unsigned char>(bits >> 8);
+    head[i / 4 * 3 + 2] = static_cast<unsigned char>(bits);
+  }
+  const auto starts = [&](std::size_t offset, std::string_view magic) {
+    return std::equal(magic.begin(), magic.end(), head.begin() + offset);
+  };
+  return (starts(0, "RIFF") && starts(8, "WAVE")) || starts(0, "ID3") ||
+         (head[0] == 0xFF && (head[1] & 0xE0) == 0xE0) || starts(0, "fLaC") ||
+         starts(0, "OggS");
+}
+
 bool IsKnownField(std::string_view name, bool native) {
   return name == "input" || name == "model" || name == "encoding_format" ||
          name == "dimensions" || name == "user" || name == "truncate" ||
@@ -234,13 +264,23 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
         if (!file.is_string() || file.str().empty())
           return BadRequest("'multimodal_data' items must be base64 strings",
                             "invalid_parameter_type");
-        if (++image_count > EmbeddingService::kMaxImages)
-          return BadRequest("embedding requests accept at most 32 images",
-                            "too_many_images");
-        // The image reader identifies PNG, JPEG and WebP by their bytes.
-        parsed.content.push_back(
-            {EmbeddingPart::Type::kImage,
-             "data:image/jpeg;base64," + std::string(file.str())});
+        if (LooksLikeAudio(file.str())) {
+          if (++audio_count > EmbeddingService::kMaxAudio)
+            return BadRequest(
+                "embedding requests accept at most 32 audio clips",
+                "too_many_audio");
+          // The audio reader takes raw base64; the decoder checks the bytes.
+          parsed.content.push_back(
+              {EmbeddingPart::Type::kAudio, std::string(file.str())});
+        } else {
+          if (++image_count > EmbeddingService::kMaxImages)
+            return BadRequest("embedding requests accept at most 32 images",
+                              "too_many_images");
+          // The image reader identifies PNG, JPEG and WebP by their bytes.
+          parsed.content.push_back(
+              {EmbeddingPart::Type::kImage,
+               "data:image/jpeg;base64," + std::string(file.str())});
+        }
         begin = end + kMediaMarker.size();
       }
       if (parsed.content.empty())

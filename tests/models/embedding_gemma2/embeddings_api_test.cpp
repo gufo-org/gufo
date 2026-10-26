@@ -676,6 +676,24 @@ void TestNativeEmbeddings() {
             captured[0].content[3].value == "data:image/jpeg;base64,BBBB",
         "text around markers keeps its order and whitespace");
 
+  // Like llama.cpp's mtmd helper, files that look like WAV, MP3 or FLAC
+  // (and Ogg, which the audio decoder reads) become audio parts; WebP's RIFF
+  // container and PNG stay images.
+  const auto media = SendTo(
+      service, "/embeddings",
+      R"({"content":{"prompt_string":"<__media__><__media__><__media__><__media__><__media__><__media__><__media__>","multimodal_data":["UklGRiQAAABXQVZFZm10IA==","SUQzBAAAAAAAAAAA","//uQAAAAAAAAAAAA","ZkxhQwAAACIAAAAA","T2dnUwACAAAAAAAA","UklGRiQAAABXRUJQVlA4IA==","iVBORw0KGgoAAAANSUhEUg=="]}})");
+  Check(media.status == 200, "native audio files succeed: " + media.body);
+  using Type = EmbeddingPart::Type;
+  const std::vector<Type> media_types{Type::kAudio, Type::kAudio, Type::kAudio,
+                                      Type::kAudio, Type::kAudio, Type::kImage,
+                                      Type::kImage};
+  bool sniffed =
+      captured.size() == 1 && captured[0].content.size() == media_types.size();
+  for (std::size_t i = 0; sniffed && i < media_types.size(); ++i)
+    sniffed = captured[0].content[i].type == media_types[i];
+  Check(sniffed && captured[0].content[0].value == "UklGRiQAAABXQVZFZm10IA==",
+        "multimodal_data audio is sniffed by its bytes and kept as raw base64");
+
   // The same text embeds identically on both routes; `input` wins over
   // `content`, as in llama.cpp.
   const auto plain =
