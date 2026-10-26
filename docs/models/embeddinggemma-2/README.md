@@ -2,7 +2,7 @@
 
 Native safetensors text, image and audio embeddings on gfx1151. Gufo runs [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2), a 768-dimensional embedding model for 100+ languages and code, through `POST /v1/embeddings`. Text, images and audio share one vector space. Video inputs remain unsupported. Python runs only in offline reference checks.
 
-[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) · [ROCm 10.1](ROCM.md)
 
 ```sh
 nix develop -c hf download google/embeddinggemma-2 \

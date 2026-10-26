@@ -18,6 +18,10 @@ Google published the retrieval accuracy of this checkpoint on MTEB, code, and mu
 
 ## Reproduce
 
+The [ROCm 10.1 migration check](ROCM.md) requalifies text, image and audio
+against these independent fixtures on both pinned flake toolchains, with
+unchanged bounds and qualified resident HTTP timing controls.
+
 The [reference model](https://huggingface.co/google/embeddinggemma-2/tree/914f7f89142e33e77833254d9c9b90c3cef7303b) is pinned to the qualified revision.  The probes and their reference vectors are in [`tests/fixtures/embedding_gemma2`](../../../tests/fixtures/embedding_gemma2).  The fixture stores each reference value with five significant digits, which moves a cosine by less than 1e-6.  [`tools/models/embedding_gemma2/reference_embeddings.py`](../../../tools/models/embedding_gemma2/reference_embeddings.py) regenerates them with transformers that include `embedding_gemma2` and sentence-transformers 6.1.  Tests are in [`tests/models/embedding_gemma2`](../../../tests/models/embedding_gemma2), and the model package is [`src/models/embedding_gemma2`](../../../src/models/embedding_gemma2).
 
 ## Image and mixed-input parity
